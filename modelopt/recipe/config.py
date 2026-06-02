@@ -178,7 +178,11 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
 
     @model_validator(mode="after")
     def _derive_dflash_offline(self) -> ModelOptDFlashRecipe:
-        self.dflash.dflash_offline = self.data.offline_data_path is not None
+        # offline (dumped .pt) and streaming (hidden states over HTTP from a vLLM
+        # serve) both feed pre-computed base hidden states to the DFlash module, so
+        # both set dflash_offline. Only fully-online training runs the base model.
+        # Mirrors ModelOptEagleRecipe._derive_eagle_offline.
+        self.dflash.dflash_offline = self.data.mode != "online"
         return self
 
 

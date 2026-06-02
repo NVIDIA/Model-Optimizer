@@ -30,12 +30,14 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 CONFIG_FILE=""
 NUM_NODES=1
 HEAD_NODE_IP=""
+MACHINE_RANK=""
 EXTRA_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --config*)     if [[ "$1" != *=* ]]; then shift; fi; CONFIG_FILE="${1#*=}" ;;
     --num_nodes*)  if [[ "$1" != *=* ]]; then shift; fi; NUM_NODES="${1#*=}" ;;
     --head_node_ip*) if [[ "$1" != *=* ]]; then shift; fi; HEAD_NODE_IP="${1#*=}" ;;
+    --machine_rank*) if [[ "$1" != *=* ]]; then shift; fi; MACHINE_RANK="${1#*=}" ;;
     *) EXTRA_ARGS+=("$1") ;;
   esac
   shift
@@ -59,9 +61,13 @@ fi
 # Multi-node routing args (accelerate only; training config comes from the YAML)
 MULTI_NODE_ARGS=""
 if [[ "$NUM_NODES" != "1" ]]; then
+  # machine_rank: caller may pass --machine_rank explicitly (needed when the
+  # SLURM allocation reserves node 0 for something else, e.g. the streaming
+  # vllm serve, so SLURM_PROCID is offset from accelerate's 0-based rank).
+  # Default to $SLURM_PROCID for the all-nodes-are-trainers case.
   MULTI_NODE_ARGS="--num_processes $TOTAL_GPU \
                    --num_machines $NUM_NODES \
-                   --machine_rank $SLURM_PROCID \
+                   --machine_rank ${MACHINE_RANK:-$SLURM_PROCID} \
                    --rdzv_backend c10d \
                    --main_process_ip $HEAD_NODE_IP \
                    --main_process_port 29500"

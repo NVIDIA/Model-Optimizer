@@ -68,8 +68,10 @@ class DFlashConfig(ModeloptBaseConfig):
     dflash_offline: bool = ModeloptField(
         default=False,
         description=(
-            "Whether to use detached DFlash (offline training from pre-computed hidden states). "
-            "Derived by ModelOptDFlashRecipe from data.offline_data_path; not user-configurable."
+            "Whether the DFlash module consumes pre-computed hidden states (offline from "
+            "dumped .pt files, or streaming over HTTP from a vLLM serve) instead of running "
+            "the base model. Derived by ModelOptDFlashRecipe from data.mode (True unless "
+            "online); not user-configurable."
         ),
     )
 

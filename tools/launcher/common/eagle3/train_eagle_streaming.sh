@@ -24,12 +24,19 @@
 # $SLURM_NODEID:
 #   nodes == 1  -> co-located: vllm serve on $SERVE_GPU, trainer on the rest of
 #                  the local GPUs (original single-node behavior).
-#   nodes >= 2  -> split across nodes: node 0 runs vllm serve on all its GPUs,
-#                  node 1 runs the trainer on all its GPUs. The two roles
-#                  rendezvous through the shared /scratchspace mount (node 0
-#                  publishes its address; node 1 signals completion). For large
-#                  models whose serve needs a whole node (e.g. Kimi-K2.5 TP=8),
-#                  allocate exactly 2 nodes.
+#   nodes == 2  -> split: node 0 runs vllm serve on all its GPUs, node 1 runs
+#                  the trainer on all its GPUs. Roles rendezvous through the
+#                  shared /scratchspace mount (node 0 publishes its serve
+#                  address; the trainer signals completion).
+#   nodes >= 3  -> 1 serve node (node 0) + N trainer nodes (nodes 1..NNODES-1)
+#                  doing multi-node DDP. The head trainer (node 1, accelerate
+#                  machine_rank 0) publishes its IP for accelerate's c10d
+#                  rendezvous; all trainer nodes read both the serve address and
+#                  the head-trainer address from /scratchspace. NOTE: only global
+#                  rank 0 fetches hidden states from the single serve and
+#                  broadcasts to the rest (DataLoaderDispatcher), so the single
+#                  serve is the throughput ceiling — adding trainer nodes scales
+#                  effective batch / compute, not data-production throughput.
 #
 # Env vars (required):
 #   HF_MODEL_CKPT       Target model path. Used by both vllm serve (as the
@@ -56,7 +63,8 @@
 #   TRAIN_GPUS          single-node only: CUDA_VISIBLE_DEVICES for the trainer.
 #                       default = all local GPUs except SERVE_GPU.
 #   SERVE_ADVERTISE_IP  multi-node only: address node 1 should dial. default is
-#                       node 0's first `hostname -I` IP.
+#                       node 0's routable IP (its resolved Slurm node name, else
+#                       its first non-loopback / non-link-local IP).
 #
 # All script args are forwarded to launch_train.sh (typically: --config <yaml>
 # plus OmegaConf dotlist overrides).
@@ -112,7 +120,7 @@ export PATH=$PATH:/workspace/.local/bin
 
 ###################################################################################################
 
-trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
+trap 'error_handler $0 $LINENO' ERR
 
 if [ -z "$HF_MODEL_CKPT" ]; then
     echo "ERROR: HF_MODEL_CKPT must be set." >&2; exit 1
@@ -154,11 +162,9 @@ launch_vllm() {
     # would expose *zero* GPUs (not all), so leave it unset to use the whole node.
     local -a gpu_env=()
     [ -n "$cvd" ] && gpu_env=(env "CUDA_VISIBLE_DEVICES=$cvd")
-    # Optional single-value memory knobs (each a space-free env value, so they
-    # survive nemo_run's unquoted `export FOO=value`; assembled into --flag value
-    # pairs here). --cpu-offload-gb spills N GB of weights/GPU to host RAM, the
-    # key lever for fitting a large model on too-few GPUs (slower, prefill-only
-    # use tolerates it). --max-model-len / --max-num-seqs trim KV/activation.
+    # Optional single-value memory knobs (see header), assembled into --flag
+    # value pairs. Each is a space-free env value so it survives nemo_run's
+    # unquoted `export FOO=value`.
     local -a opt_args=()
     [ -n "${SERVE_CPU_OFFLOAD_GB:-}" ] && opt_args+=(--cpu-offload-gb "$SERVE_CPU_OFFLOAD_GB")
     [ -n "${SERVE_MAX_MODEL_LEN:-}" ]  && opt_args+=(--max-model-len "$SERVE_MAX_MODEL_LEN")
@@ -222,28 +228,52 @@ wait_vllm_ready() {
 # per process; multiple workers would duplicate requests against the server.
 run_trainer_and_export() {
     local url="$1" cvd="$2"
-    echo "Launching trainer (server=${url}, CUDA_VISIBLE_DEVICES=${cvd:-all})..."
+    # Optional multi-node trainer routing (see dispatch section). Defaults keep
+    # the original single-trainer-node behavior: no --num_nodes, export on rank 0.
+    local num_tnodes="${3:-1}" head_ip="${4:-}" mrank="${5:-0}"
+    echo "Launching trainer (server=${url}, CUDA_VISIBLE_DEVICES=${cvd:-all}, trainer_nodes=${num_tnodes}, machine_rank=${mrank})..."
     # Empty cvd -> use all GPUs on the node (don't set the var; "" would hide all).
     local -a gpu_env=()
     [ -n "$cvd" ] && gpu_env=(env "CUDA_VISIBLE_DEVICES=$cvd")
+    # Engage accelerate multi-node routing only when >1 trainer node; a single
+    # trainer node keeps the original invocation (no --num_nodes) verbatim.
+    local -a mn_args=()
+    if [ "${num_tnodes}" -gt 1 ]; then
+        mn_args=(--num_nodes "$num_tnodes" --head_node_ip "$head_ip" --machine_rank "$mrank")
+    fi
     "${gpu_env[@]}" bash modules/Model-Optimizer/examples/speculative_decoding/launch_train.sh \
         "${SCRIPT_ARGS[@]}" \
+        "${mn_args[@]}" \
         data.streaming_server_url="$url" \
         data.streaming_model_name="$HF_MODEL_CKPT" \
         data.streaming_shared_storage_path="$SERVE_SCRATCH" \
         training.dataloader_num_workers=0 || { echo "ERROR: trainer failed." >&2; return 1; }
 
+    # Export only on the head trainer (machine_rank 0); non-head trainer nodes
+    # would race writing the same export dir. The export reads the saved
+    # checkpoint (training.output_dir), not the serve, so it is serve-independent.
+    if [ "${mrank}" -ne 0 ]; then
+        echo "machine_rank=${mrank}: training done, skipping export (head trainer handles it)."
+        return 0
+    fi
+
+    # Export the trained draft to HF format. Derive the checkpoint dir from the
+    # forwarded `training.output_dir=` dotlist (defaulting to the EAGLE
+    # convention) so EAGLE and DFlash runs each export their own output_dir.
+    # EXPORT_EXTRA_ARGS lets DFlash on a custom-modeling base (e.g. Kimi) pass
+    # --trust_remote_code; empty by default so EAGLE behavior is unchanged.
+    local out_dir
+    out_dir=$(printf '%s\n' "${SCRIPT_ARGS[@]}" | sed -n 's/^training\.output_dir=//p' | tail -1)
+    out_dir="${out_dir:-/scratchspace/eagle3}"
     python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
-        --model_path /scratchspace/eagle3 \
-        --export_path /scratchspace/export
+        --model_path "$out_dir" \
+        --export_path "${EXPORT_PATH:-/scratchspace/export}" \
+        ${EXPORT_EXTRA_ARGS:-}
 }
 
 # ---------------------------------------------------------------------------
-# Topology dispatch (driven by the Slurm allocation, i.e. the yaml `nodes:`):
-#   SLURM_NNODES == 1  -> co-located: vllm on $SERVE_GPU, trainer on the rest.
-#   SLURM_NNODES >= 2  -> split: node 0 serves on all its GPUs, node 1 trains on
-#                         all its GPUs; they rendezvous via /scratchspace.
-# nemo_run runs this script once per node, so we branch on $SLURM_NODEID.
+# Topology dispatch (see header): nemo_run runs this script once per node, so
+# branch on $SLURM_NNODES / $SLURM_NODEID. Per-branch detail in section heads.
 # ---------------------------------------------------------------------------
 NNODES="${SLURM_NNODES:-1}"
 NODEID="${SLURM_NODEID:-0}"
@@ -299,27 +329,55 @@ elif [ "$NODEID" -eq 0 ]; then
     while [ ! -f "$DONE_FILE" ]; do sleep 10; done
     echo "Training-done sentinel seen; serve node exiting (EXIT trap stops vllm)."
 
-elif [ "$NODEID" -eq 1 ]; then
-    # ---------------------- multi-node: trainer node -----------------------
-    # Release the serve node on any exit (success or failure) so it doesn't hang.
-    trap 'touch "$DONE_FILE" 2>/dev/null || true' EXIT
+elif [ "$NODEID" -ge 1 ]; then
+    # -------------------- multi-node: trainer node(s) ----------------------
+    # Node 0 is the vllm serve; trainer nodes are SLURM nodes 1..NNODES-1, which
+    # map to 0-based accelerate machine ranks (head trainer = SLURM node 1).
+    NUM_TRAINER_NODES=$(( NNODES - 1 ))
+    TRAINER_RANK=$(( NODEID - 1 ))
+    TRAINER_ADDR_FILE="/scratchspace/.trainer_addr"
 
-    echo "Trainer node waiting (up to ${SERVE_READY_TIMEOUT}s) for the serve address..."
+    # Only the head trainer (rank 0) signals the serve node to release on exit;
+    # a non-head node exiting first must NOT tear the serve down early.
+    if [ "$TRAINER_RANK" -eq 0 ]; then
+        trap 'touch "$DONE_FILE" 2>/dev/null || true' EXIT
+        rm -f "$TRAINER_ADDR_FILE"                 # clear stale rendezvous state
+    fi
+
+    echo "Trainer node (rank ${TRAINER_RANK}/${NUM_TRAINER_NODES}) waiting for the serve address..."
     for ((i = 0; i < SERVE_READY_TIMEOUT; i++)); do
         [ -f "$SERVE_ADDR_FILE" ] && break
         sleep 1
     done
     [ -f "$SERVE_ADDR_FILE" ] || { echo "ERROR: serve node never published its address." >&2; exit 1; }
     URL="http://$(cat "$SERVE_ADDR_FILE"):${SERVE_PORT}"
-
     wait_vllm_ready "$URL" || exit 1
-    run_trainer_and_export "$URL" "" || exit 1
 
-else
-    # ------------- multi-node: extra nodes (unused by default) -------------
-    echo "Node rank ${NODEID} idle: the default split uses node 0 = vllm serve, node 1 = trainer."
-    echo "Multi-node *training* (>1 trainer node) is not wired up yet; allocate exactly 2 nodes."
-    while [ ! -f "$DONE_FILE" ]; do sleep 10; done
+    if [ "$NUM_TRAINER_NODES" -le 1 ]; then
+        # Original 1-serve + 1-trainer topology: single-node DDP, unchanged.
+        run_trainer_and_export "$URL" "" || exit 1
+    else
+        # >1 trainer node: head (rank 0) publishes its routable IP for accelerate's
+        # c10d rendezvous (port 29500); all trainer nodes read it and join. Reuse
+        # the serve node's IP-resolution logic (avoid link-local / loopback).
+        if [ "$TRAINER_RANK" -eq 0 ]; then
+            head_addr="${TRAINER_ADVERTISE_IP:-}"
+            [ -z "$head_addr" ] && head_addr=$(getent hosts "${SLURMD_NODENAME:-$(hostname)}" 2>/dev/null | awk '{print $1}' | head -1)
+            [ -z "$head_addr" ] && head_addr=$(hostname -I | tr ' ' '\n' | grep -vE '^(127\.|169\.254\.|fe80:|::1)' | head -1)
+            [ -z "$head_addr" ] && head_addr=$(hostname -I | awk '{print $1}')
+            echo "$head_addr" > "$TRAINER_ADDR_FILE"
+            echo "Head trainer (rank 0) published ${head_addr} for c10d rendezvous."
+        else
+            echo "Trainer rank ${TRAINER_RANK} waiting for head-trainer address..."
+            for ((i = 0; i < SERVE_READY_TIMEOUT; i++)); do
+                [ -f "$TRAINER_ADDR_FILE" ] && break
+                sleep 1
+            done
+            [ -f "$TRAINER_ADDR_FILE" ] || { echo "ERROR: head trainer never published its address." >&2; exit 1; }
+        fi
+        HEAD_IP=$(cat "$TRAINER_ADDR_FILE")
+        run_trainer_and_export "$URL" "" "$NUM_TRAINER_NODES" "$HEAD_IP" "$TRAINER_RANK" || exit 1
+    fi
 fi
 
 ###################################################################################################

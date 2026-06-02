@@ -1,0 +1,81 @@
+# DFLASH speculative-decoding benchmark for Kimi-K2.5-NVFP4 via vLLM.
+#
+# Serves Kimi-K2.5-NVFP4 in-process (no HTTP server — specdec_bench drives an
+# AsyncLLM) at TP=4 with expert parallelism, attaches a trained/exported DFLASH
+# draft, and benchmarks speculative decoding on MT-Bench. Writes timing.json +
+# aa_timing.json + acceptance_rate.json + mtbench.json + specbench_responses.jsonl
+# to /scratchspace/specdec_bench/.
+#
+# Hardware = GB200/Blackwell (HSG), same reasoning as hf_streaming_eagle3.yaml:
+# Kimi-K2.5-NVFP4 (~551 GB) needs native NVFP4 + the 192 GB/GPU of GB200; it fits
+# at TP=4 on ONE 4-GPU node with no cpu-offload. On CW H100 it has no native FP4
+# and falls back to offload, so the working path is GB200.
+#
+# DFLASH specifics:
+#   - draft tokens default to 8 in specdec_bench (matches DFlash block_size=8);
+#     --draft_length does NOT apply to DFLASH. To override sampling / engine args
+#     (e.g. speculative_num_draft_tokens, temperature), write a runtime-params
+#     yaml and add `- --runtime_params <path>` below — see
+#     examples/specdec_bench/README.md (runtime_args_long_context.yaml pattern).
+#   - --draft_model_dir must point at a trained+exported HF-format DFLASH draft
+#     (e.g. produced by hf_offline_dflash.yaml / a real DFlash run). Edit the path
+#     below, or override on the CLI: pipeline.task_0.args[0]="--draft_model_dir /hf-local/<draft>"
+#   - Kimi needs --trust_remote_code for both tokenizer and model.
+#
+# NOTE on dataset: uses MT-Bench (the question.jsonl staged under /hf-local), so
+# it runs without any data-prep step. To benchmark on SPEED-Bench instead, first
+# generate + stage a split:
+#     python3 examples/specdec_bench/prepare_data.py --dataset speed --config all
+# (splits: qualitative, throughput_1k, throughput_16k, ...) then swap the
+# `--mtbench` arg for:
+#     - --dataset speed
+#     - --dataset_path modules/Model-Optimizer/examples/specdec_bench/data/speed/throughput_16k
+#
+# NOTE on container: vllm/vllm-openai:latest is x86 and may lack DFLASH support;
+# on GB200/aarch64 use an aarch64 vLLM image new enough for DFLASH (validated on
+# a 0511 nightly). Override with: pipeline.task_0.slurm_config.container=<image>
+#
+# Run ON the HSG login node (paramiko can't reach HSG through the sss proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=coreai_dlalgo_modelopt \
+#          SLURM_PARTITION=batch \
+#          SLURM_HF_LOCAL=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local \
+#          SLURM_JOB_DIR=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/haoguo/experiments \
+#          NEMORUN_HOME=$PWD
+#   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/specdec_bench.yaml \
+#          identity=$HOME/.ssh/id_ecdsa detach=True --yes
+
+job_name: Kimi-K2.5-NVFP4_DFLASH_specdec_bench
+
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4
+
+  task_0:
+    script: common/specdec_bench/run.sh
+    args:
+      # TODO: point at your trained + exported HF-format DFLASH draft checkpoint.
+      - --draft_model_dir /hf-local/nvidia/Kimi-K2.5-DFlash
+      - --speculative_algorithm DFLASH
+      - --engine VLLM
+      - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+      - --tp_size 4
+      - --ep_size 4
+      - --concurrency 32
+      - --output_length 1024
+      - --trust_remote_code
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/specdec_bench
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      container: vllm/vllm-openai:latest

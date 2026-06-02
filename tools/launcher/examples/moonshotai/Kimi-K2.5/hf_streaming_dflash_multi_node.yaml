@@ -1,0 +1,133 @@
+# DFlash streaming speculative-decoding training for Kimi-K2.5-NVFP4 on
+# GB200/Blackwell (HSG). Sibling of hf_streaming_eagle3.yaml — same vLLM-serve +
+# trainer split, same hardware reasoning — but trains a DFlash drafter instead of
+# EAGLE3 by pointing the (shared, algorithm-agnostic) streaming script at the
+# dflash recipe.
+#
+# Why GB200: nodes have only 4 GPUs each (vs CW's 8), but 192 GB/GPU and native
+# NVFP4. Kimi-K2.5-NVFP4 (~551 GB) fits at TP=4 on ONE node (4 x 192 = 768 GB,
+# ~138 GB/GPU of weights) with NO cpu-offload. So: node 0 = vllm serve (TP=4,
+# whole node), node 1 = DFlash trainer (fake base), 4 GPUs each, 2 nodes.
+#
+# How streaming feeds DFlash (vs EAGLE3): the trainer's streaming path was wired
+# up for DFlash by deriving dflash_offline from data.mode (modelopt/recipe/config.py
+# ModelOptDFlashRecipe._derive_dflash_offline), so data.mode=streaming sets
+# dflash_offline=True and the DFlash module consumes the streamed hidden states
+# (base_model_outputs) instead of running the fake base. The vLLM connector,
+# streaming dataset, and offline collator are all algorithm-agnostic: vLLM dumps
+# captured layers as [seq, n_captured, hidden]; the dataset splits the LAST
+# captured layer into base_model_hidden_states (used for DFlash self-logit
+# distillation) and the REST into aux_hidden_states (DFlash's concatenated
+# target-layer features). So n_captured must be (num DFlash target layers + 1).
+#
+# Capture ids (kimi_k25 / deepseek_v3 arch, 61 layers, capture id space 0..60;
+# the true final layer is NOT capturable so we use 60 as the base, same as EAGLE3):
+#   DFlash target layers come from build_target_layer_ids(num_orig=61, num_draft=5)
+#   = [1,15,30,44,58] (0-based) -> vLLM ids (+1 for the embedding layer) =
+#   [2,16,31,45,59]. Append base 60. captured = [2,16,31,45,59,60] = 6, so the
+#   dataset yields 5 aux layers, matching the 5-layer DFlash draft block.
+#
+# answer_only_loss: forced false here. DFlash's recipe default is true, which
+# requires the tokenizer chat template to carry {% generation %} tags so the
+# streaming dataset can derive an assistant-token mask; Kimi's template does not,
+# and the streaming path (unlike online) does not inject data.chat_template. To
+# train assistant-only later, supply a generation-tagged template and flip this on.
+#
+# Run ON the HSG login node (paramiko can't reach HSG through the sss proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=coreai_dlalgo_modelopt \
+#          SLURM_PARTITION=batch \
+#          SLURM_HF_LOCAL=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local \
+#          SLURM_JOB_DIR=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/haoguo/experiments \
+#          NEMORUN_HOME=$PWD
+#   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_streaming_dflash.yaml \
+#          identity=$HOME/.ssh/id_ecdsa detach=True --yes
+#
+# The export lands in /scratchspace/export. To benchmark it, point
+# specdec_bench.yaml's --draft_model_dir there (or copy it under /hf-local).
+
+job_name: Kimi-K2.5-NVFP4_DFlash_streaming_multi_node
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4
+
+  # Step 1: Build input conversations (model-agnostic)
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      # HSG QOS (QOSMinGRES) requires whole-node GPU allocation (4 on GB200),
+      # so request 4 even though make_dataset is CPU-only.
+      gpus_per_node: 4
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  # Step 2: Streaming DFlash training (node0 serve TP=4 / node1 train), 4 GPU/node.
+  # Reuses the shared streaming orchestrator (common/eagle3/train_eagle_streaming.sh):
+  # only the --config recipe (dflash vs eagle3) and EAGLE_CAPTURE_IDS differ.
+  task_1:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - model.trust_remote_code=true
+      - data.mode=streaming
+      - data.data_path=/scratchspace/data/train.jsonl
+      # Keep concurrent in-flight requests low: a 64-wide flood made cold NVFP4
+      # MoE kernels/flashinfer autotune stall a worker past vLLM's engine<->worker
+      # timeout, killing EngineCore (TimeoutError) mid-serve -> 500s -> trainer abort.
+      - data.streaming_prefetch=8
+      - training.output_dir=/scratchspace/dflash
+      # Must be divisible by dflash_block_size (8). DFlash trains on fixed-length blocks.
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.num_train_epochs=1
+      - training.ar_validate_steps=500000
+      - training.max_steps=500
+      # See header: Kimi's template lacks {% generation %} tags; train on all tokens.
+      - training.answer_only_loss=false
+      # dflash.yaml sets report_to=tensorboard, but the vLLM container has no
+      # tensorboard -> TensorBoardCallback RuntimeError at trainer init. Disable
+      # reporting (loss still prints to stdout via logging_steps).
+      - training.report_to=none
+      # Kimi-K2.5 has no dedicated mask token ([EOS]=163585, [PAD]=163839); 163838
+      # is a reserved slot used as the DFlash mask (matches the real Kimi DFlash run).
+      - dflash.dflash_mask_token_id=163838
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # No spaces in values: nemo_run emits `export FOO=value` unquoted.
+      # DFlash target layers (vLLM-indexed) + base 60; see header for derivation.
+      - EAGLE_CAPTURE_IDS: "[2,16,31,45,59,60]"
+      - SERVE_TP: "4"
+      # DFlash on a custom-modeling base (Kimi) needs --trust_remote_code at export.
+      - EXPORT_EXTRA_ARGS: "--trust_remote_code"
+      # Kimi-K2.5-NVFP4 ~138 GB weights/GPU at TP=4; GB200 has 184 GB. The model's
+      # native max_seq_len is 262144, whose KV cache OOMs. Cap context to the
+      # training seq len and leave headroom for activation spikes.
+      - SERVE_MAX_MODEL_LEN: "4096"
+      # Small batches: smaller per-step MoE compute stays under the engine timeout.
+      - SERVE_MAX_NUM_SEQS: "4"
+      - SERVE_GPU_MEM_UTIL: "0.8"
+      - SERVE_READY_TIMEOUT: "2400"
+      - SERVE_EXTRA_ARGS: "--trust-remote-code"
+      # The killer was "RPC call to sample_tokens timed out" — a worker stalls on
+      # the first real serving step (cold NVFP4 MoE kernels) past vLLM's default
+      # execute-model timeout, so EngineCore dies. Extend the timeouts that govern
+      # that path (seconds). VLLM_RPC_TIMEOUT (ms) is a different RPC and didn't help.
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 3
+      segment: 3
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      container: vllm/vllm-openai:latest

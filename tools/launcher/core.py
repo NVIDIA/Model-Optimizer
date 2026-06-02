@@ -286,6 +286,9 @@ def build_slurm_executor(
         retries=0,
         packager=packager,
         srun_args=slurm_config.srun_args,
+        # --segment=<N>: pin all nodes into one topology block (one NVL72 / NVLink
+        # domain). None -> omitted, scheduler places freely (default behavior).
+        segment=slurm_config.segment,
     )
     return executor
 
