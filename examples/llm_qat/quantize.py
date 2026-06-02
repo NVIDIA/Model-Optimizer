@@ -21,10 +21,10 @@ with train.py or exported with export.py.
 
 Usage:
     python quantize.py \
-        --model_name_or_path meta-llama/Meta-Llama-3-8B \
+        --model_name_or_path Qwen/Qwen3-8B \
         --dataset_config configs/dataset/blend.yaml \
         --recipe general/ptq/nvfp4_default-kv_fp8 \
-        --output_dir llama3-quantized
+        --output_dir qwen3-8b-quantized
 """
 
 import os

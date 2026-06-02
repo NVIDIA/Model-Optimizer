@@ -88,6 +88,10 @@ class QuantizationArguments(ModelOptHFArguments):
     )
 
 
+# Backwards-compat alias for the pre-refactor public name; remove in a future release.
+QuantizationArgumentsWithConfig = QuantizationArguments
+
+
 def resolve_quant_cfg_from_args(
     quant_args: QuantizationArguments | None,
     *,
