@@ -153,9 +153,14 @@ def create_decode_calibration_forward_loop(
 ) -> Callable:
     """Create forward loop for decode phase calibration.
 
-    Uses SDPA for fast prefill, then switches to eager attention for decode
-    token generation with softmax hook measurement. (Previously used
-    ``flash_attention_2`` for prefill, but transformers>=5.0's FA2 path
+    Uses SDPA for fast prefill (no measurement), then switches to the model's
+    configured sparse-attention backend for the decode steps so measurement
+    happens there: ``eager`` for the pytorch backend (F.softmax hook) or
+    ``modelopt_triton`` for the triton backend (Triton calibration kernel).
+    The backend is read from ``model.config._attn_implementation``, which
+    ``sparsify`` already set for the chosen backend.
+
+    (SDPA is used for prefill because transformers>=5.0's FA2 path
     unconditionally calls ``s_aux.to(query.dtype)`` on the attention-sinks
     tensor and crashes for models without sinks. SDPA is just as fast for
     prefill, has no softmax hook, and is version-stable.)
@@ -179,7 +184,8 @@ def create_decode_calibration_forward_loop(
             )
             input_ids = inputs["input_ids"].to(device)
 
-            # Save original attention implementation
+            # Save original attention implementation (the sparse-attention backend
+            # set by sparsify: "eager" for pytorch, "modelopt_triton" for triton).
             original_attn_impl = getattr(model.config, "_attn_implementation", "eager")
 
             with torch.no_grad():
@@ -191,8 +197,10 @@ def create_decode_calibration_forward_loop(
                     next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
                     del outputs  # Free large prefill logits [B, seqlen, vocab] before decode loop
 
-                    # Step 2: Switch to eager for decode (enables softmax hook)
-                    model.config._attn_implementation = "eager"
+                    # Step 2: Switch to the sparse backend for decode so measurement
+                    # happens there (eager -> F.softmax hook; modelopt_triton ->
+                    # Triton calibration kernel).
+                    model.config._attn_implementation = original_attn_impl
 
                     # Step 3: Manual decode loop for explicit control over token generation
                     # model.generate() method is not used here because it doesn't allow explicit control over KV cache

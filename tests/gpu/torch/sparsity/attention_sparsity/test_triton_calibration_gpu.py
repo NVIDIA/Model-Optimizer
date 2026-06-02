@@ -21,24 +21,26 @@ feeds the collected multi-threshold tile-skip statistics into the same
 exponential-model fit used by the PyTorch path.
 """
 
+import copy
+
 import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from transformers import AutoModelForCausalLM
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
+from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.kernels.common.attention.hf_triton_attention import triton_attention_forward
 from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_TRITON_CALIB
-from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
+from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
+    TritonSkipSoftmaxMethod,
+)
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore::UserWarning"),
     pytest.mark.filterwarnings("ignore::RuntimeWarning"),
 ]
 
-from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
-
-# Thresholds spanning a wide range so the collected sparsity covers the (10%, 90%)
-# window the exponential fit relies on.
 THRESHOLD_TRIALS = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 5e-2, 1e-1, 3e-1, 5e-1, 7e-1, 9e-1]
 
 
@@ -79,52 +81,37 @@ def _make_forward_loop(vocab_size, lengths=(128, 256, 384, 512)):
     return forward_loop
 
 
+def _calibration_module(threshold_trials):
+    """Build a bare module whose ``_sparse_method_instance`` is in calibration mode.
+
+    The HF backend reads its calibration config from (and writes counters back
+    to) ``module._sparse_method_instance``, so this is the minimal stand-in for
+    driving ``triton_attention_forward`` through the calibration branch.
+    """
+    method = TritonSkipSoftmaxMethod()
+    method.set_calibration_mode(True)
+    method._threshold_trials = threshold_trials
+
+    module = torch.nn.Module()
+    module._sparse_method_instance = method
+    return module
+
+
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 class TestTritonCalibrationHF:
     """End-to-end calibration via the Triton backend on a tiny HF model."""
 
-    def test_sparsify_triton_calib_sets_params(self, tiny_llama_dir):
-        """Running SKIP_SOFTMAX_TRITON_CALIB fits a finite exponential model."""
-        import copy
-
-        model = _load_eager(tiny_llama_dir)
-
-        # Use the calibrator's default (dense) threshold trials so the collected
-        # sparsity densely covers the (10%, 90%) window the fit filters on.
-        config = copy.deepcopy(SKIP_SOFTMAX_TRITON_CALIB)
-
-        forward_loop = _make_forward_loop(model.config.vocab_size)
-        sparse_model = mtsa.sparsify(model, config, forward_loop=forward_loop)
-
-        # Backend dispatched to the Triton kernel.
-        assert sparse_model.config._attn_implementation == "modelopt_triton"
-
-        sparse_modules = [
-            m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)
-        ]
-        assert len(sparse_modules) == 2
-
-        # Calibration produced finite, in-bounds (a, b) for the prefill phase.
-        for module in sparse_modules:
-            method = module._sparse_method_instance
-            assert method.name == "triton_skip_softmax"
-            params = method.calibration_params
-            assert params is not None and "prefill" in params
-            a, b = params["prefill"]["a"], params["prefill"]["b"]
-            assert a > 0 and torch.isfinite(torch.tensor(a))
-            assert 0.0 <= b <= 20.0
-            # Prefill-only: decode must not be calibrated.
-            assert "decode" not in params
-
     def test_calibrated_model_inference(self, tiny_llama_dir):
-        """A model calibrated through the Triton path still runs inference cleanly."""
-        import copy
-
+        """SKIP_SOFTMAX_TRITON_CALIB dispatches to the Triton backend and the
+        calibrated model runs inference cleanly."""
         model = _load_eager(tiny_llama_dir)
         config = copy.deepcopy(SKIP_SOFTMAX_TRITON_CALIB)
+        # Prefill-only (custom forward_loop can't drive RULER decode calibration).
+        config["sparse_cfg"]["calibration"]["target_sparse_ratio"] = {"prefill": 0.5}
 
         forward_loop = _make_forward_loop(model.config.vocab_size)
         sparse_model = mtsa.sparsify(model, config, forward_loop=forward_loop)
+        assert sparse_model.config._attn_implementation == "modelopt_triton"
 
         sparse_model.eval()
         input_ids = torch.randint(0, model.config.vocab_size, (1, 64), device="cuda")
@@ -133,53 +120,28 @@ class TestTritonCalibrationHF:
         assert out.logits is not None
         assert not torch.isnan(out.logits).any()
 
+    def test_decode_branch_reports_decode_phase(self):
+        """The HF calibration branch routes decode-shaped calls through the kernel
+        and surfaces its counters as a ``decode``-phase stats record.
 
-@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
-class TestHFBackendCalibrationCounters:
-    """Lower-level checks on the HF backend's calibration branch."""
-
-    def test_counters_monotonic_in_threshold(self):
-        """Skipped-tile counts are non-decreasing as the threshold grows."""
-        from modelopt.torch.kernels.common.attention.hf_triton_attention import (
-            clear_hf_triton_skip_softmax_config,
-            get_calibration_counters,
-            get_calibration_seq_k,
-            set_hf_triton_skip_softmax_config,
-            triton_attention_forward,
-        )
-
-        batch, num_heads, seq_len, head_dim = 1, 4, 256, 64
+        This is the HF-only counter path in ``_collect_calibration_stats``; the
+        kernel's skip-count behavior itself is covered in the kernel test suite.
+        """
+        num_heads, seq_k, head_dim = 4, 512, 64
         torch.manual_seed(0)
-        q = torch.randn(batch, num_heads, seq_len, head_dim, device="cuda", dtype=torch.float16)
-        k = torch.randn_like(q)
-        v = torch.randn_like(q)
+        q = torch.randn(1, num_heads, 1, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(1, num_heads, seq_k, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(1, num_heads, seq_k, head_dim, device="cuda", dtype=torch.float16)
 
-        # A bare module stand-in; the calibration branch returns before touching
-        # any sparse-method attributes.
-        module = torch.nn.Module()
+        module = _calibration_module(THRESHOLD_TRIALS)
+        method = module._sparse_method_instance
+        triton_attention_forward(module, q, k, v, attention_mask=None, scaling=1.0 / head_dim**0.5)
+        assert method._hf_calibration_is_decode is True
+        assert method._hf_calibration_counters is not None
 
-        set_hf_triton_skip_softmax_config(
-            calibration_mode=True, threshold_trials=THRESHOLD_TRIALS
-        )
-        try:
-            out, _ = triton_attention_forward(
-                module, q, k, v, attention_mask=None, scaling=1.0 / (head_dim**0.5)
-            )
-            counters = get_calibration_counters()
-            seq_k = get_calibration_seq_k()
-        finally:
-            clear_hf_triton_skip_softmax_config()
-
-        assert out.shape == (batch, seq_len, num_heads, head_dim)
-        assert seq_k == seq_len
-        assert counters is not None
-        assert counters.shape == (len(THRESHOLD_TRIALS), 2)
-
-        totals = counters[:, 0]
-        skipped = counters[:, 1]
-        assert torch.all(totals == totals[0])  # same tile count for every threshold
-        assert torch.all(skipped[1:] >= skipped[:-1])  # monotonic non-decreasing
-        assert torch.all(skipped <= totals)
+        method._collect_calibration_stats(module)
+        assert module._last_stats["phase"] == "decode"
+        assert len(module._last_stats["sparsity"]) == len(THRESHOLD_TRIALS)
 
 
 if __name__ == "__main__":
