@@ -129,12 +129,16 @@ class SharedQuantState(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def _has_calibratable_weight_quantizer(child: nn.Module, wq_attr: str) -> bool:
-    """A child is eligible if its weight quantizer is enabled and has ``_amax`` set."""
+def _has_enabled_weight_quantizer(child: nn.Module, wq_attr: str) -> bool:
+    """A child is eligible if it has an enabled weight quantizer.
+
+    Group membership is structural (a pattern over the module tree), independent of
+    calibration — so this does NOT require ``_amax``. That lets attach run before
+    ``weight_only_quantize``; per-member ``_amax`` is aggregated later in
+    :func:`populate_shared_state`.
+    """
     wq = getattr(child, wq_attr, None)
-    if wq is None or not hasattr(wq, "_disabled") or wq._disabled:
-        return False
-    return getattr(wq, "_amax", None) is not None
+    return wq is not None and hasattr(wq, "_disabled") and not wq._disabled
 
 
 def _build_parent_map(model: nn.Module) -> dict[nn.Module, nn.Module]:
@@ -233,7 +237,7 @@ def find_shared_input_groups(
     buckets: dict[tuple, list[nn.Module]] = {}
     order: list[tuple] = []
     for name, module in model.named_modules():
-        if not _has_calibratable_weight_quantizer(module, wq_attr):
+        if not _has_enabled_weight_quantizer(module, wq_attr):
             continue
         for pattern_idx, regex in enumerate(compiled):
             match = regex.fullmatch(name)

@@ -217,6 +217,20 @@ def max_calibrate(
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
     """
+    # Discover fusible sibling groups by name regex and attach the (initially empty) shared
+    # state up front, so the SharedQuantState container exists for the whole calibration —
+    # forward-time fields can accumulate into it. Discovery is structural (a pattern over the
+    # module tree), so it needs no ``_amax``; per-member values are aggregated later by
+    # populate_shared_state, after the forward and any cross-rank ``_amax`` sync. Default to
+    # q/k/v + gate/up when no "weight" key is given; an explicit (possibly empty) list
+    # overrides it — key presence, not truthiness, so {"weight": []} disables grouping.
+    # Only "weight" is consumed today; "input" is reserved.
+    if shared_patterns is not None and "weight" in shared_patterns:
+        weight_patterns = list(shared_patterns["weight"])
+    else:
+        weight_patterns = DEFAULT_WEIGHT_SHARED_PATTERNS
+    attach_shared_quant_states(model, patterns=weight_patterns)
+
     # Always run weight calibration on the weight tensor directly so every weight
     # quantizer gets ``_amax``, regardless of MoE routing. Downstream algorithms
     # (MSE, AWQ, export) then no longer need to patch in a missing ``_amax``.
@@ -233,16 +247,6 @@ def max_calibrate(
 
     # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
     _check_nvfp4_static_tp_supported(model)
-
-    # Discover fusible sibling groups by name regex and attach shared state; populated
-    # below, after any cross-rank _amax sync. Default to q/k/v + gate/up when no "weight"
-    # key is given; an explicit (possibly empty) list overrides it — key presence, not
-    # truthiness, so {"weight": []} disables grouping. Only "weight" is consumed today.
-    if shared_patterns is not None and "weight" in shared_patterns:
-        weight_patterns = list(shared_patterns["weight"])
-    else:
-        weight_patterns = DEFAULT_WEIGHT_SHARED_PATTERNS
-    attach_shared_quant_states(model, patterns=weight_patterns)
 
     if not distributed_sync:
         # Single-process: _amax is final — aggregate shared global_amax, then promote.
