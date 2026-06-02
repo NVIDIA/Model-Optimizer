@@ -887,20 +887,14 @@ def export_quantized(
                 export_hf_vllm_fq_checkpoint(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
-            elif args.use_fsdp2:
-                export_hf_checkpoint(
-                    full_model,
-                    torch.bfloat16,
-                    export_dir=export_path,
-                    architectures_override=getattr(full_model, "_original_architectures", None),
-                )
             else:
-                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
-                    full_model, args.pyt_ckpt_path
-                )
-
-                if mtp_layer_prefixes:
-                    full_model._mtp_layer_prefixes = mtp_layer_prefixes
+                mtp_state_dict = None
+                if not args.use_fsdp2:
+                    mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
+                        full_model, args.pyt_ckpt_path
+                    )
+                    if mtp_layer_prefixes:
+                        full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
                 export_hf_checkpoint(
                     full_model,
