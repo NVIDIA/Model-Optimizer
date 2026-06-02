@@ -562,6 +562,7 @@ def train(
                 if optimizer is not None:
                     grad_clip = cfg.bypass.training.grad_clip
                     if grad_clip is not None:
+                        grad_scaler.unscale_(optimizer)
                         cfg.bypass.training.clipping_count += _clip_stitched_module_grads(
                             stitched_module=stitched_module,
                             grad_clip=grad_clip,
