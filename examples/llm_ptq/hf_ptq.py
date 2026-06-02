@@ -66,6 +66,7 @@ from modelopt.torch.export import (
     save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
+from modelopt.torch.quantization._auto_quantize_cost import EXCLUDED_MODULE_NAME_PATTERNS_KEY
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -138,6 +139,35 @@ KV_QUANT_CFG_CHOICES = {
 _KV_CAST_FORMATS = {"fp8_cast", "nvfp4_cast"}
 
 mto.enable_huggingface_checkpointing()
+
+
+# TODO: To be refacored into config system.
+_QWEN36_AUTOQ_DISABLED_LAYERS = (
+    "*shared_expert_gate*",
+    "*linear_attn.in_proj_a*",
+    "*linear_attn.in_proj_b*",
+)
+_VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
+
+
+def get_auto_quantize_disabled_layers(model) -> list[str]:
+    """Return layer patterns that should be excluded from AutoQuantize search."""
+    disabled_layers = [
+        entry["quantizer_name"]
+        for entry in _default_disabled_quantizer_cfg
+        if "parent_class" not in entry and entry["quantizer_name"] != "*lm_head*"
+    ]
+    disabled_layers.extend(p for p in _QWEN36_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    if is_multimodal_model(model):
+        disabled_layers.extend(p for p in _VLM_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    return disabled_layers
+
+
+def get_auto_quantize_cost_excluded_patterns(model) -> list[str]:
+    """Return layer patterns excluded only from AutoQuantize cost accounting."""
+    if is_multimodal_model(model):
+        return list(_VLM_AUTOQ_DISABLED_LAYERS)
+    return []
 
 
 def extract_and_prepare_language_model_from_vl(full_model):
@@ -323,6 +353,7 @@ def auto_quantize(
             "nvfp4_awq",
             "nvfp4_mse",
             "w4a8_awq",
+            "w4a16_nvfp4",
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
             "nvfp4_mlp_only",
@@ -386,10 +417,14 @@ def auto_quantize(
         "effective_bits": args.auto_quantize_bits,
         "cost_model": args.auto_quantize_cost_model,
     }
+    auto_quantize_cost = {}
     if args.auto_quantize_active_moe_expert_ratio is not None:
-        auto_quantize_constraints["cost"] = {
-            "active_moe_expert_ratio": args.auto_quantize_active_moe_expert_ratio
-        }
+        auto_quantize_cost["active_moe_expert_ratio"] = args.auto_quantize_active_moe_expert_ratio
+    cost_excluded_patterns = get_auto_quantize_cost_excluded_patterns(language_model)
+    if cost_excluded_patterns:
+        auto_quantize_cost[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = cost_excluded_patterns
+    if auto_quantize_cost:
+        auto_quantize_constraints["cost"] = auto_quantize_cost
 
     language_model, _ = mtq.auto_quantize(
         language_model,
@@ -405,12 +440,7 @@ def auto_quantize(
             len(calib_dataloader), max(auto_quantize_score_size // args.batch_size, 1)
         ),
         verbose=True,
-        # Disable all default disabled layers such as lm_head, mlp.gate, router etc.
-        disabled_layers=[
-            entry["quantizer_name"]
-            for entry in _default_disabled_quantizer_cfg
-            if "parent_class" not in entry
-        ],
+        disabled_layers=get_auto_quantize_disabled_layers(language_model),
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
     )
@@ -550,12 +580,10 @@ def load_model(args: argparse.Namespace):
                 : len(args.dataset)
             ]
 
-            # We only quantize the language model for VLMs other than the type supported above.
-            # Recipe mode is the exception: in Qwen3.5/3.6-MoE VLMs, lm_head sits
-            # on the outer CausalLM, not the inner language backbone. A recipe that targets
-            # lm_head must therefore quantize against the full model and explicitly keep visual
-            # and MTP siblings disabled.
-            if args.recipe is None:
+            # Plain PTQ quantizes only the extracted language model. Recipe and
+            # AutoQuantize paths keep the outer CausalLM so recipes/search can see
+            # Qwen3.5/3.6-MoE VLM lm_head.
+            if args.recipe is None and args.auto_quantize_bits is None:
                 extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
                     full_model
                 )
@@ -1081,9 +1109,16 @@ def quantize_main(
             "Auto quantization needs multiple quantization format."
         )
 
+        # For VL models, autoquant must walk submodules of the OUTER CausalLM
+        # (which carries lm_head and the LM-head forward path) — otherwise
+        # lm_head and any sibling-of-language_model modules are silently
+        # invisible to the search. ``forward_step`` also needs the outer model
+        # to produce ``CausalLMOutputWithPast`` (for ``.loss`` / ``.logits``).
+        # Visual tower and MTP siblings are auto-excluded inside
+        # ``auto_quantize()`` via *visual* / *mtp* / *vision_tower* patterns.
         auto_quantize(
             args,
-            language_model,
+            full_model,
             calib_dataloader,
             auto_quantize_method=args.auto_quantize_method,
             auto_quantize_score_size=args.auto_quantize_score_size,
