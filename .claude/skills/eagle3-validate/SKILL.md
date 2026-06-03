@@ -20,15 +20,15 @@ Find the most recent experiment directory (or ask the user for the path):
 ls -td experiments/cicd/cicd_* | head -5
 ```
 
-Each experiment directory has one subdirectory per task (numbered 0–3), each containing
-a `sbatch_*.out` log file.
+Each experiment directory has one subdirectory per task (numbered 0–3), each containing a
+log file whose name varies by launch mode (Slurm: `sbatch_*.out`, local Docker: `*.log`).
 
 ## Step 1 — Check task outcomes
 
-Read the last 50 lines of each task's log file:
+Match the log files generally and read the tail of each:
 
 ```bash
-find experiments/<exp_id>/ -name "sbatch_*.out" | sort | while read f; do
+find experiments/<exp_id>/ -type f \( -name '*.out' -o -name '*.log' \) | sort | while read -r f; do
   echo "=== $f ==="; tail -50 "$f"; echo
 done
 ```
@@ -108,8 +108,8 @@ In the task_2 log look for:
 ## Step 6 — Suggest next steps
 
 **If PASS:**
-- The model's row in `tools/launcher/examples/EAGLE3_TRIAGE.md` can be updated to ✅
-- Note the checkpoint path for downstream use
+- Record the verified result (and checkpoint path) in the team's internal triage tracker
+- This model is now a candidate to add as a launcher example in a dedicated PR
 
 **If FAIL:**
 - Identify which step or metric failed

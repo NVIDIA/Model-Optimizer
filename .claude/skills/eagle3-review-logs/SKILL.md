@@ -80,8 +80,8 @@ Based on results:
       --yes
   ```
 
-- If the failure pattern is new (not in `tools/launcher/examples/EAGLE3_TRIAGE.md`),
-  suggest adding it to the triage chart using `/eagle3-triage` guidance.
+- If the failure pattern looks new, suggest capturing it in the team's internal triage
+  tracker, and use `/eagle3-triage` for a deeper diagnosis.
 
 - If all tasks passed, suggest running `/eagle3-validate` to confirm AR meets threshold.
 

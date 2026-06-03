@@ -13,7 +13,8 @@ user_invocable: true
 
 Create `tools/launcher/examples/<Org>/<Model>/hf_offline_eagle3.yaml` by **copying the
 closest existing example and adapting it**. Pick a reference with the same shape as the
-target (dense vs MoE, similar size), e.g. `tools/launcher/examples/Qwen/Qwen3.5-35B-A3B/`.
+target (dense vs MoE, similar size) from `tools/launcher/examples/` — e.g. the Qwen3-8B
+config for a dense model.
 
 The pipeline is a 4-task config (`task_0` data synthesis → `task_1` hidden-state dump →
 `task_2` train → `task_3` benchmark). The task structure, args, containers, and GPU/node
@@ -39,8 +40,6 @@ These are the non-obvious knobs that vary per model:
 | Situation | What to change |
 |---|---|
 | Requires `--trust-remote-code` | Add to `task_0` vLLM args (before the `--` separator) and to `task_3` benchmark args |
-| VLM / multimodal | Use `dump_offline_data_hf.sh` for `task_1` |
-| Sliding window attention | Use `dump_offline_data_hf.sh` or `_vllm.sh` for `task_1` |
 | MoE with large expert hidden dim | Increase `intermediate_size` in `eagle_config.json` to match `moe_intermediate_size` |
 | Custom tokenizer (e.g. tiktoken) | Set `TIKTOKEN_RS_CACHE_DIR` env var in `task_0` and `task_1` |
 

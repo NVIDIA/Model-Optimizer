@@ -36,20 +36,17 @@ ls -td experiments/cicd/cicd_* | head -10
 ```
 
 Each experiment directory contains one subdirectory per task (task_0 through task_3),
-each with a `sbatch_*.out` log file.
+each with a log file whose name varies by launch mode (Slurm: `sbatch_*.out`, local
+Docker: `*.log`).
 
 ## Step 1 — Fetch logs for the failed task
 
-Locate and read the Slurm output file for the failed task:
+Match the log files generally and read the tail of each — errors appear at the end:
 
 ```bash
-find experiments/ -name "sbatch_*.out" | sort
-```
-
-Read the last 200 lines — errors appear at the end:
-
-```bash
-tail -200 experiments/<exp_id>/<task_dir>/sbatch_<name>_<slurm_id>.out
+find experiments/<exp_id>/ -type f \( -name '*.out' -o -name '*.log' \) | sort | while read -r f; do
+  echo "=== $f ==="; tail -200 "$f"; echo
+done
 ```
 
 Look for the first task with a non-zero exit code or error message.
@@ -64,7 +61,7 @@ Output goes to `/scratchspace/data/`.
 
 | Error pattern | Root cause | Fix |
 |---|---|---|
-| Server never becomes healthy (hangs at health check) | Model too large for allocated GPUs, or vLLM startup crash | Check BF16 weight size vs GPU memory. GB200: 192 GB/GPU × 4 GPUs/node = 768 GB. Increase TP. |
+| Server never becomes healthy (hangs at health check) | Model too large for allocated GPUs, or vLLM startup crash | Check BF16 weight size vs total allocated GPU memory; increase TP and/or nodes. |
 | `CUDA out of memory` during model load | Insufficient GPU memory | Reduce `--max-model-len` or increase `--tensor-parallel-size` |
 | `trust_remote_code` error | Model requires custom code but flag not set | Add `--trust-remote-code` before the `--` separator in task_0 args |
 | Vocab / tokenizer error | Missing tokenizer cache (e.g., GPT-OSS-20B needs `TIKTOKEN_RS_CACHE_DIR`) | Set `TIKTOKEN_RS_CACHE_DIR` to a pre-populated cache path in the environment |
@@ -81,7 +78,7 @@ Three backends are available:
 
 | Backend | Script | When to use |
 |---------|--------|-------------|
-| vLLM | `dump_offline_data_vllm.sh` | Broad model coverage; uses `speculators.VllmHiddenStatesGenerator` |
+| vLLM | `dump_offline_data_vllm.sh` | Broad model coverage; uses vLLM's native hidden-state extractor |
 | HF | `dump_offline_data_hf.sh` | VLMs, custom-code models, SWA attention; uses `device_map="auto"` |
 | TRT-LLM | `dump_offline_data.sh` | Pure-text models with TRT-LLM support; needs `--tp`/`--moe-ep` args |
 
@@ -103,12 +100,9 @@ config from `modelopt_recipes/general/speculative_decoding/eagle3.yaml`, then ex
 
 | Error pattern | Root cause | Fix |
 |---|---|---|
-| `pip install` failure | Network issue or incompatible dependency | Check container has network access |
-| `ImportError: modelopt` | ModelOpt not installed or path issue | Check container version |
 | `FileNotFoundError: /scratchspace/offline_hidden_states` | task_1 failed or produced no output | Re-run task_1 first |
 | `CUDA out of memory` during training | Batch size too large | Reduce `training.train_bs` or `training.training_seq_len` |
-| `KeyError` / `AttributeError` in model loading | Model architecture not recognized by EAGLE3 | Check `eagle_decoder_type` in config. Model may need code changes in modelopt. |
-| `HFValidationError: Repo id must be in the form...` | Old `offline_training.sh` trying to upload to HF Hub | Use `train_eagle.sh` which does local export only |
+| `KeyError` / `AttributeError` in model loading | Model architecture not recognized by EAGLE3 | Model may need code changes in modelopt for this architecture |
 | Loss is NaN or diverges | LR too high or data quality issue | Reduce `training.lr`. Check hidden state data. |
 | `export_hf_checkpoint.py` fails | Training produced incomplete checkpoint | Check `/scratchspace/eagle3/` for `model.safetensors` |
 
@@ -124,7 +118,7 @@ throughput benchmarks. Output: JSON files.
 | Server fails with draft model | Draft model config incompatible with engine | Check `eagle_config.json` and engine version |
 | AR below threshold / exit code 1 | Draft model quality too low | More epochs, data, or hyperparameter tuning |
 | `CUDA out of memory` | Target + draft exceeds GPU memory | Increase TP |
-| vLLM EAGLE3 not supported | vLLM version too old | Use `vllm/vllm-openai:latest` (≥ v0.15.0 for NVFP4) |
+| vLLM EAGLE3 not supported | vLLM version too old | Use a newer vLLM container |
 
 ## Step 3 — Check for new-model-specific issues
 
@@ -134,7 +128,7 @@ If the user is adding support for a new model, also check:
 2. **Does the model use sliding window attention (SWA)?** → TRT-LLM backend won't work; use HF or vLLM
 3. **Does the model need `trust_remote_code`?** → Add to task_0 args AND task_3 args
 4. **Is the model MoE?** → Check `eagle_config.json` `intermediate_size` matches model's `moe_intermediate_size`
-5. **Is the model architecture recognized by EAGLE3 training?** → Check `modelopt/torch/speculative/` for the model type
+5. **Is the model architecture recognized by EAGLE3 training?** → may need code changes in `modelopt/torch/speculative/`
 6. **Custom tokenizer?** → May need additional environment vars (e.g., `TIKTOKEN_RS_CACHE_DIR`)
 
 ## Step 4 — Suggest fix and next steps
@@ -164,16 +158,11 @@ uv run launch.py --yaml examples/<Org>/<Model>/hf_offline_eagle3.yaml \
     --yes
 ```
 
-If the fix requires code changes in ModelOpt (e.g., adding a new `eagle_decoder_type`),
+If the fix requires code changes in ModelOpt (e.g., supporting a new model architecture),
 note that a separate PR in the modelopt repo is needed.
 
-## Step 5 — Update triage chart
+## Step 5 — Record the failure pattern
 
-If you encounter a failure pattern not in the triage chart at
-`tools/launcher/examples/EAGLE3_TRIAGE.md`, add it:
-
-1. Add a new branch in the Mermaid flowchart under the relevant step node
-2. Add a new issue entry in the "Known Issues" section
-3. Update the model's row in the test matrix
-
-This keeps the chart current for the next engineer debugging the same issue.
+If you encounter a failure pattern not seen before, capture it in the team's internal
+triage tracker — the symptom, root cause, and fix — so the next engineer debugging the
+same issue benefits.
