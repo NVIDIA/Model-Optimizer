@@ -39,7 +39,8 @@ def test_sdxl_cachify():
     prompt = "A random person with a head that is made of flowers, photo by James C. Leyendecker, \
             Afrofuturism, studio portrait, dynamic pose, national geographic photo, retrofuturism, biomorphicy"
     generator = torch.Generator(device="cuda").manual_seed(2946901)
-    pipe(prompt=prompt, generator=generator, num_inference_steps=30).images[0]
+    # 8 steps still exercises the step-modulo cache pattern; this is a runs-without-error smoke test.
+    pipe(prompt=prompt, generator=generator, num_inference_steps=8).images[0]
     # Clear cuda memory as pytest doesnt clear it between tests
     del pipe
     torch.cuda.empty_cache()
@@ -55,7 +56,8 @@ def test_pixart_cachify():
 
     prompt = "a small cactus with a happy face in the Sahara desert"
     generator = torch.Generator(device="cuda").manual_seed(2946901)
-    pipe(prompt=prompt, generator=generator, num_inference_steps=30).images[0]
+    # 8 steps still exercises the step-modulo cache pattern; this is a runs-without-error smoke test.
+    pipe(prompt=prompt, generator=generator, num_inference_steps=8).images[0]
     # Clear cuda memory as pytest doesnt clear it between tests
     del pipe
     torch.cuda.empty_cache()

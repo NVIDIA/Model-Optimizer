@@ -20,36 +20,13 @@ import time
 
 import numpy as np
 import torch
-from datasets import load_dataset
-from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
+from modelopt.torch.utils import get_dataset_dataloader
 
 DEFAULT_PAD_TOKEN = "[PAD]"
-
-
-def get_calib_dataloader(
-    data="cnn_dailymail", tokenizer=None, batch_size=1, calib_size=512, block_size=512, device=None
-):
-    print("Loading calibration dataset")
-    if data == "cnn_dailymail":
-        dataset = load_dataset("abisee/cnn_dailymail", name="3.0.0", split="train")
-        dataset = dataset["article"][:calib_size]
-    else:
-        raise NotImplementedError
-
-    batch_encoded = tokenizer(
-        dataset, return_tensors="pt", padding=True, truncation=True, max_length=block_size
-    )
-    if device:
-        batch_encoded = batch_encoded.to(device)
-    batch_encoded = batch_encoded["input_ids"]
-
-    calib_dataloader = DataLoader(batch_encoded, batch_size=batch_size, shuffle=False)
-
-    return calib_dataloader
 
 
 def smart_tokenizer_and_embedding_resize(
@@ -126,13 +103,13 @@ def main(args):
             model=model,
         )
 
-    calib_size = args.calib_size
-
     # Get calibration dataloader
-    calib_dataloader = get_calib_dataloader(
+    calib_dataloader = get_dataset_dataloader(
+        dataset_name=args.dataset,
         tokenizer=tokenizer,
         batch_size=args.batch_size,
-        calib_size=calib_size,
+        num_samples=args.calib_size,
+        max_sample_length=512,
         device=args.device,
     )
 
@@ -160,6 +137,12 @@ if __name__ == "__main__":
         "--model_name_or_path", help="Specify where the PyTorch checkpoint path is", required=True
     )
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--dataset",
+        default="cnn_dailymail",
+        help="Calibration dataset: a ModelOpt-registered name (see get_supported_datasets()), "
+        "a HuggingFace dataset id, or a local .jsonl path.",
+    )
     parser.add_argument("--dtype", help="Model data type.", default="fp16")
     parser.add_argument(
         "--model_max_length",

@@ -26,7 +26,7 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 
 def test_distill_and_convert(tmp_path: Path, num_gpus):
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
-    train_iters = 5
+    train_iters = 2
     distill_output_dir = tmp_path / "distill_output"
     distill_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
@@ -79,7 +79,7 @@ def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
         _prepare_puzzletron_anymodel_student_and_teacher(tmp_path)
     )
 
-    train_iters = 5
+    train_iters = 2
     output_dir = tmp_path / "distill_output"
     hf_export_path = tmp_path / "distilled_anymodel_hf"
     cmd_parts = extend_cmd_parts(

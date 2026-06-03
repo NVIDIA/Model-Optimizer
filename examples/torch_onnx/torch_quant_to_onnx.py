@@ -507,6 +507,13 @@ def main():
         help="Build a TensorRT engine from the exported ONNX model using trtexec.",
     )
     parser.add_argument(
+        "--trt_builder_optimization_level",
+        type=int,
+        default=4,
+        help="trtexec --builderOptimizationLevel (0-5). Lower is much faster to build "
+        "(useful for tests that only verify the engine builds); higher tunes harder.",
+    )
+    parser.add_argument(
         "--no_pretrained",
         action="store_true",
         help="Don't load pretrained weights (useful for testing with random weights).",
@@ -628,16 +635,16 @@ def main():
     print(f"Quantized ONNX model is saved to {args.onnx_save_path}")
 
     if args.trt_build:
-        build_trt_engine(args.onnx_save_path)
+        build_trt_engine(args.onnx_save_path, args.trt_builder_optimization_level)
 
 
-def build_trt_engine(onnx_path):
+def build_trt_engine(onnx_path, builder_optimization_level=4):
     """Build a TensorRT engine from the exported ONNX model using trtexec."""
     cmd = [
         "trtexec",
         f"--onnx={onnx_path}",
         "--stronglyTyped",
-        "--builderOptimizationLevel=4",
+        f"--builderOptimizationLevel={builder_optimization_level}",
     ]
     print(f"\nBuilding TensorRT engine: {' '.join(cmd)}")
     try:

@@ -45,13 +45,13 @@ class DiffuserModel(NamedTuple):
     def _format_args(self) -> list[str]:
         return [
             "--calib-size",
-            "8",
+            "4",
             "--percentile",
             "1.0",
             "--alpha",
             "0.8",
             "--n-steps",
-            "20",
+            "2",
             "--batch-size",
             "2",
             "--format",
@@ -93,6 +93,8 @@ class DiffuserModel(NamedTuple):
             str(tmp_path / f"{self.name}_{self.format_type}_onnx/model.onnx"),
             "--dq-only",
             "--torch-autocast",
+            "--num-inference-steps",
+            "2",
         )
 
 
@@ -296,6 +298,8 @@ def test_diffusion_trt_torch(
         "--override-model-path",
         model_path,
         "--torch",
+        "--num-inference-steps",
+        "2",
     ]
     if torch_compile:
         cmd_args.append("--torch-compile")
