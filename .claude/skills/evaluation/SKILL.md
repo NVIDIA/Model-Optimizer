@@ -268,7 +268,7 @@ For models > ~120B or higher throughput needs, read `references/multi-node.md` f
 
 ### Step 7 — Interceptors
 
-Direct user to <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html>. Do not provide generic interceptor info — read the specific interceptor's page if asked, then configure via `evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config` (NOT under `target.api_endpoint.adapter_config`). Use the per-field syntax from the CLI Configuration section, not a full `interceptors:` list (that overrides the default chain).
+Direct user to <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html>. Do not provide generic interceptor info — read the specific interceptor's page if asked, then configure via `evaluation.nemo_evaluator_config.target.api_endpoint.adapter_config` (`target` is a sibling of `config`, not nested under it). Use the per-field syntax from the CLI Configuration section, not a full `interceptors:` list (that overrides the default chain).
 
 **Errata:** Logging field names are `max_logged_requests` / `max_logged_responses` (NOT `max_saved_*` / `max_*` as some docs show).
 
