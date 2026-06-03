@@ -81,10 +81,6 @@ pipeline:
       - model.trust_remote_code=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
-      # Keep concurrent in-flight requests low: a 64-wide flood made cold NVFP4
-      # MoE kernels/flashinfer autotune stall a worker past vLLM's engine<->worker
-      # timeout, killing EngineCore (TimeoutError) mid-serve -> 500s -> trainer abort.
-      - data.streaming_prefetch=8
       - training.output_dir=/scratchspace/dflash
       # Must be divisible by dflash_block_size (8). DFlash trains on fixed-length blocks.
       - training.training_seq_len=4096
@@ -106,6 +102,12 @@ pipeline:
       # DFlash target layers (vLLM-indexed) + base 60; see header for derivation.
       - EAGLE_CAPTURE_IDS: "[2,16,31,45,59,60]"
       - SERVE_TP: "4"
+      # DataLoader workers per trainer rank = in-flight requests per rank. The
+      # streaming dataset is map-style: ALL trainer ranks fetch (not just rank 0),
+      # so per-serve in-flight = trainer_world_size(4) x STREAMING_NUM_WORKERS.
+      # Keep at 1 -> 4 = SERVE_MAX_NUM_SEQS; a wider flood stalls a cold NVFP4-MoE
+      # worker past vLLM's engine<->worker timeout, killing EngineCore -> trainer abort.
+      - STREAMING_NUM_WORKERS: "1"
       # DFlash on a custom-modeling base (Kimi) needs --trust_remote_code at export.
       - EXPORT_EXTRA_ARGS: "--trust_remote_code"
       # Kimi-K2.5-NVFP4 ~138 GB weights/GPU at TP=4; GB200 has 184 GB. The model's
@@ -126,6 +128,11 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 2
+      # Pin the serve node + trainer node into one NVL72 block. Inter-node here is
+      # HTTP hidden-state fetch + shared /scratchspace (lustre), not NCCL, so this
+      # is a latency/locality nicety rather than a correctness requirement (cf. the
+      # multi_node examples, where cross-node trainer DDP makes segment essential).
+      segment: 2
       ntasks_per_node: 1
       gpus_per_node: 4
       container: vllm/vllm-openai:latest

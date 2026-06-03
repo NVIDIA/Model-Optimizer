@@ -1,25 +1,35 @@
 # DFlash streaming speculative-decoding training for Kimi-K2.5-NVFP4 on
-# GB200/Blackwell (HSG). Multi-node sibling of hf_streaming_dflash.yaml — same
-# vLLM-serve + trainer split and same hardware reasoning, but scales the trainer
-# across MULTIPLE nodes (1 serve node + N trainer nodes doing multi-node DDP)
-# instead of the single trainer node in hf_streaming_dflash.yaml.
+# GB200/Blackwell (HSG) — MULTI-NODE (multi-serve). Multi-node sibling of
+# hf_streaming_dflash.yaml: BOTH sides scale out. SERVE_NODES (=2) run independent
+# vllm serve replicas (TP=4 each, whole node); the remaining nodes run multi-node-DDP
+# trainers (4 GPUs each). This file allocates 4 nodes = 2 serve + 2 trainer
+# (world_size=8). Tune the split via slurm_config.nodes/segment + SERVE_NODES:
+#   nodes=N, SERVE_NODES=K  ->  K serve replicas + (N-K) trainer nodes.
 #
 # Why GB200: nodes have only 4 GPUs each (vs CW's 8), but 192 GB/GPU and native
 # NVFP4. Kimi-K2.5-NVFP4 (~551 GB) fits at TP=4 on ONE node (4 x 192 = 768 GB,
-# ~138 GB/GPU of weights) with NO cpu-offload. So: node 0 = vllm serve (TP=4,
-# whole node), nodes 1..N = DFlash trainers (fake base), 4 GPUs each. This file
-# allocates 3 nodes (1 serve + 2 trainers); bump slurm_config.nodes/segment to
-# add more trainer nodes.
+# ~138 GB/GPU of weights) with NO cpu-offload. So each serve replica owns a whole
+# node at TP=4, and each trainer node uses all 4 GPUs for the draft (fake base).
 #
-# Topology (see common/eagle3/train_eagle_streaming.sh header for the full
-# dispatch): node 0 serves; the head trainer (Slurm node 1, accelerate
-# machine_rank 0) publishes its IP via /scratchspace for accelerate's c10d
-# rendezvous, and every trainer node reads both the serve address and the
-# head-trainer address from /scratchspace. segment=<nodes> pins all nodes into
-# one NVL72 block so inter-node DDP traffic rides NVLink. NOTE: only global rank
-# 0 fetches hidden states from the single serve and broadcasts them to the rest
-# (DataLoaderDispatcher), so the single serve is the throughput ceiling — extra
-# trainer nodes scale effective batch / compute, not data-production throughput.
+# Topology (see common/eagle3/train_eagle_streaming.sh header for the dispatch):
+# Slurm nodes 0..K-1 each serve and publish their address via /scratchspace; nodes
+# K..N-1 are trainers. The head trainer publishes its IP for accelerate's c10d
+# rendezvous; every trainer reads all K serve addresses and joins the DDP group.
+# segment=<nodes> pins all nodes into one NVL72 block so inter-node DDP traffic
+# rides NVLink.
+#
+# How it scales (map-style dataset, NOT the old rank-0-fetch+broadcast): HF
+# Trainer's DistributedSampler shards the corpus across ALL trainer ranks and each
+# rank fetches ONLY its own shard, round-robin across the K serve replicas
+# (data.streaming_server_url is the comma-joined list the script assembles). So
+# trainer nodes scale effective batch / compute and distribute the lustre reads;
+# serve nodes scale data-production throughput (~K x), lifting the single-serve
+# ceiling that bounded the old single-serve multi-node path.
+#
+# Concurrency (must stay low for cold NVFP4 MoE — see SERVE_MAX_NUM_SEQS below):
+# per-serve in-flight requests = world_size x STREAMING_NUM_WORKERS / SERVE_NODES
+# = 8 x 1 / 2 = 4, matching SERVE_MAX_NUM_SEQS=4. Flooding a cold NVFP4-MoE server
+# stalls a worker past vLLM's execute-model timeout and kills EngineCore.
 #
 # How streaming feeds DFlash (vs EAGLE3): the trainer's streaming path was wired
 # up for DFlash by deriving dflash_offline from data.mode (modelopt/recipe/config.py
@@ -81,9 +91,9 @@ pipeline:
       gpus_per_node: 4
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
-  # Step 2: Streaming DFlash training (node0 serve TP=4 / node1 train), 4 GPU/node.
-  # Reuses the shared streaming orchestrator (common/eagle3/train_eagle_streaming.sh):
-  # only the --config recipe (dflash vs eagle3) and EAGLE_CAPTURE_IDS differ.
+  # Step 2: Streaming DFlash training — 2 serve replicas (TP=4) + 2 trainer nodes (4 GPU each).
+  # Reuses the shared streaming orchestrator (common/eagle3/train_eagle_streaming.sh);
+  # SERVE_NODES + nodes select the K-serve + (N-K)-trainer multi-node topology.
   task_1:
     script: common/eagle3/train_eagle_streaming.sh
     args:
@@ -93,16 +103,12 @@ pipeline:
       - model.trust_remote_code=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
-      # Keep concurrent in-flight requests low: a 64-wide flood made cold NVFP4
-      # MoE kernels/flashinfer autotune stall a worker past vLLM's engine<->worker
-      # timeout, killing EngineCore (TimeoutError) mid-serve -> 500s -> trainer abort.
-      - data.streaming_prefetch=8
       - training.output_dir=/scratchspace/dflash
       # Must be divisible by dflash_block_size (8). DFlash trains on fixed-length blocks.
       - training.training_seq_len=4096
       - training.disable_tqdm=true
-      - training.num_train_epochs=1
       - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
       - training.max_steps=500
       # See header: Kimi's template lacks {% generation %} tags; train on all tokens.
       - training.answer_only_loss=false
@@ -118,7 +124,15 @@ pipeline:
       # No spaces in values: nemo_run emits `export FOO=value` unquoted.
       # DFlash target layers (vLLM-indexed) + base 60; see header for derivation.
       - EAGLE_CAPTURE_IDS: "[2,16,31,45,59,60]"
+      # K serve replica nodes (Slurm nodes 0..K-1); the rest are trainers.
+      - SERVE_NODES: "2"
+      # Each serve node has 4 GB200 GPUs -> TP=4 (whole node, the only fit for Kimi).
       - SERVE_TP: "4"
+      # DataLoader workers per trainer rank = in-flight requests per rank. Keep at 1:
+      # per-serve in-flight = world_size(8) x 1 / SERVE_NODES(2) = 4 = SERVE_MAX_NUM_SEQS.
+      # A wider flood stalls a cold NVFP4-MoE worker past vLLM's engine<->worker
+      # timeout, killing EngineCore (TimeoutError) mid-serve -> 500s -> trainer abort.
+      - STREAMING_NUM_WORKERS: "1"
       # DFlash on a custom-modeling base (Kimi) needs --trust_remote_code at export.
       - EXPORT_EXTRA_ARGS: "--trust_remote_code"
       # Kimi-K2.5-NVFP4 ~138 GB weights/GPU at TP=4; GB200 has 184 GB. The model's
@@ -138,8 +152,8 @@ pipeline:
       - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
     slurm_config:
       _factory_: "slurm_factory"
-      nodes: 3
-      segment: 3
+      nodes: 4
+      segment: 4
       ntasks_per_node: 1
       gpus_per_node: 4
       container: vllm/vllm-openai:latest
