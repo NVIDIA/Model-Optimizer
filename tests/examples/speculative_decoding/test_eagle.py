@@ -153,7 +153,9 @@ def test_llama_eagle3(tiny_llama_path,
 
 def test_resume_training(tiny_daring_anteater_path, eagle_output_dir):
     """Test resume training of Eagle3."""
-    checkpoint_dir = str(eagle_output_dir / "eagle-tinyllama-cp1-mixFalse")
+    # Resume the compile-free checkpoint (mixTrue) so this test doesn't pay torch.compile;
+    # the compiled path is smoke-tested once by test_llama_eagle3[1-False].
+    checkpoint_dir = str(eagle_output_dir / "eagle-tinyllama-cp1-mixTrue")
     overrides = [
         f"model.model_name_or_path={checkpoint_dir}",
         f"data.data_path={tiny_daring_anteater_path}",
@@ -162,6 +164,7 @@ def test_resume_training(tiny_daring_anteater_path, eagle_output_dir):
         "training.num_train_epochs=0.5",
         "training.learning_rate=1e-5",
         "training.training_seq_len=128",
+        "eagle.eagle_use_torch_compile=false",
     ]
     run_example_command(
         ["./launch_train.sh", "--config", EAGLE3_YAML, *overrides],
@@ -174,7 +177,8 @@ def test_ar_validate(eagle_output_dir):
     run_example_command(
         [
             "python", "./scripts/ar_validate.py",
-            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1-mixFalse",
+            # Validate the compile-free checkpoint so AR generation doesn't trigger torch.compile.
+            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1-mixTrue",
             "--osl", "10",
             "--num_samples", "5",
             "--steps", "3"
@@ -188,7 +192,7 @@ def test_export_hf_checkpoint(eagle_output_dir):
     run_example_command(
         [
             "python", "./scripts/export_hf_checkpoint.py",
-            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1-mixFalse",
+            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1-mixTrue",
             "--export_path", eagle_output_dir / "eagle-tinyllama-export",
         ],
         "speculative_decoding",
@@ -217,13 +221,7 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
     ("model_source", "use_fake_base"),
     [
         (None, False),  # tiny_llama (from fixture), no FakeBase
-        pytest.param(  # remote HF repo, FakeBaseModel
-            "moonshotai/Kimi-K2.5",
-            True,
-            # Kimi's large vocab/hidden_size make the offline data + draft head heavy; this one
-            # sometimes runs a bit over the 300s default timeout.
-            marks=pytest.mark.timeout(360),
-        ),
+        pytest.param("moonshotai/Kimi-K2.5", True),  # remote HF repo, FakeBaseModel
         pytest.param(  # remote HF repo, no FakeBaseModel
             "moonshotai/Kimi-K2-Thinking",
             True,
@@ -271,6 +269,9 @@ def test_offline_eagle3_training(
         "training.num_train_epochs=0.1",
         "training.learning_rate=1e-5",
         "training.training_seq_len=64",
+        # torch.compile is smoke-tested once by test_llama_eagle3[1-False]; skip its ~2min
+        # warmup here (the recipe default is true).
+        "eagle.eagle_use_torch_compile=false",
         *_TINY_EAGLE_ARCH,
     ]
     run_example_command(
@@ -351,6 +352,7 @@ def test_offline_resume_training_kimi(tiny_daring_anteater_path, tmp_path, eagle
         "training.num_train_epochs=0.2",
         "training.learning_rate=1e-5",
         "training.training_seq_len=64",
+        "eagle.eagle_use_torch_compile=false",
     ]
     run_example_command(
         ["./launch_train.sh", "--config", EAGLE3_YAML, *overrides],

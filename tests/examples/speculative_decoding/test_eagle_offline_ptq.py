@@ -99,6 +99,8 @@ def test_offline_eagle_training(tiny_llama_path, tiny_daring_anteater_path, offl
         "training.learning_rate=1e-5",
         "training.training_seq_len=64",
         "training.save_steps=1",
+        # torch.compile is smoke-tested once by test_llama_eagle3[1-False]; skip its warmup here.
+        "eagle.eagle_use_torch_compile=false",
         *_TINY_EAGLE_ARCH,
     ]
 

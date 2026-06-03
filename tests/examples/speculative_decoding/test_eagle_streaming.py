@@ -125,6 +125,8 @@ def test_streaming_eagle_training(
         "training.training_seq_len=32",
         "training.save_steps=1",
         "training.dataloader_num_workers=0",  # enforced by StreamingDataset
+        # torch.compile is smoke-tested once by test_llama_eagle3[1-False]; skip its warmup here.
+        "eagle.eagle_use_torch_compile=false",
         *_TINY_EAGLE_ARCH,
     ]
 
