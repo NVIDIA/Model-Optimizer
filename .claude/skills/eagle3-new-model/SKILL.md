@@ -6,6 +6,7 @@ description: >
   backend (TRT-LLM / HF / vLLM) and GPU configuration.
   Use when user wants to run EAGLE3 on a model that does not yet have a YAML in
   tools/launcher/examples/ or asks how to configure the pipeline for a new checkpoint.
+user_invocable: true
 ---
 
 # EAGLE3 New Model Configuration
@@ -31,24 +32,27 @@ Determine these values from the HuggingFace model card, `config.json`, and vLLM 
 OCI-HSG nodes: **4 GPUs × 192 GB HBM3e = 768 GB per node**
 
 ```text
-BF16 weight size  = total_params × 2 bytes
-GPUs needed       = ceil(weight_size_GB / 192)
-nodes             = ceil(gpus_needed / 4)
-tp                = min(gpus_needed, 4)
+weight_size_GB = total_params × 2 bytes        # BF16
+gpus_to_fit    = ceil(weight_size_GB / 192)     # min GPUs to hold weights (192 GB each)
+nodes          = ceil(gpus_to_fit / 4)          # 4 GPUs per node
+tp             = 4                              # shard across all 4 GPUs on each node
 ```
 
-| Model | Weights (BF16) | GPUs | nodes | tp |
+`tp` is fixed at 4: jobs allocate whole nodes and shard across the node's 4 GPUs, with
+data parallelism across nodes (SLURM array tasks). `gpus_to_fit` is only used to size `nodes`.
+
+| Model | Weights (BF16) | GPUs to fit | nodes | tp |
 |---|---|---|---|---|
 | 8B dense | ~16 GB | 1 | 1 | 4 |
 | 70B dense | ~140 GB | 1 | 1 | 4 |
-| 685B MoE | ~340 GB | 2 | 1 | 4 |
-| 1T MoE | ~595 GB | 4 | 1 | 4 |
+| 405B dense | ~810 GB | 5 | 2 | 4 |
+| 671B MoE | ~1.3 TB | 7 | 2 | 4 |
 
 ## Step 3 — Choose the hidden state dump backend
 
 | Backend | Script | When to use |
 |---------|--------|-------------|
-| vLLM | `common/eagle3/dump_offline_data_vllm.sh` | Default; broad coverage via vLLM + speculators |
+| vLLM | `common/eagle3/dump_offline_data_vllm.sh` | Default; broad coverage via vLLM's native hidden-state extractor |
 | HF | `common/eagle3/dump_offline_data_hf.sh` | VLMs, custom-code models, SWA attention |
 | TRT-LLM | `common/eagle3/dump_offline_data.sh` | Pure-text models with TRT-LLM support (needs `--tp`/`--moe-ep`) |
 

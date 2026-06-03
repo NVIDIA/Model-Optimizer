@@ -31,7 +31,7 @@ Do this in a single Bash call. If no experiments exist, ask the user for the dir
 
 ## Step 1 — Read all task logs
 
-Read the last 200 lines of each log in parallel. Errors appear at the end:
+Read the last 200 lines of each log in a single Bash call. Errors appear at the end:
 
 ```bash
 for f in $(find experiments/<exp_id>/ -name "sbatch_*.out" | sort); do
