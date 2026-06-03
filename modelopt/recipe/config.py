@@ -149,7 +149,7 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
 
     @model_validator(mode="after")
     def _derive_eagle_offline(self) -> ModelOptEagleRecipe:
-        self.eagle.eagle_offline = self.data.offline_data_path is not None
+        self.eagle.eagle_offline = self.data.mode != "online"
         return self
 
     @model_validator(mode="after")

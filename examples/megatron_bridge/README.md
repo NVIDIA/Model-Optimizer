@@ -1,15 +1,15 @@
 # Megatron Bridge
 
-This directory contains examples of using Model Optimizer with [NeMo Megatron-Bridge](https://github.com/NVIDIA-Nemo/Megatron-Bridge) framework for pruning, distillation, quantization, etc.
+This directory contains examples of using Model Optimizer with [NeMo Megatron-Bridge](https://github.com/NVIDIA-Nemo/Megatron-Bridge) framework for quantization, distillation, pruning, etc.
 
 <div align="center">
 
 | **Section** | **Description** | **Link** |
 | :------------: | :------------: | :------------: |
 | Pre-Requisites | Development environment setup | \[[Link](#pre-requisites)\] |
-| Pruning | Examples of pruning a model using Minitron algorithm | \[[Link](#pruning)\] |
-| Distillation | Examples of distillation a pruned or quantized model | \[[Link](#distillation)\] |
-| Post-Training Quantization | Examples of quantizing a model | \[[Link](#post-training-quantization)\] |
+| Post-Training Quantization | Quantizing a model | \[[Link](#post-training-quantization)\] |
+| Distillation | Distilling a pruned or quantized model | \[[Link](#distillation)\] |
+| Pruning | Pruning a model using Minitron algorithm | \[[Link](#pruning)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
 
 </div>
@@ -56,77 +56,40 @@ Note that the default dataset for pruning and quantization is [`nemotron-post-tr
 hf auth login --token <your token>
 ```
 
-## Pruning
+## Post-Training Quantization
 
-This section shows how to prune a HuggingFace model using Minitron algorithm in Megatron-Bridge framework. Checkout other available pruning algorithms, supported frameworks and models, and general pruning getting-started in the [pruning README](../pruning/README.md).
+This section shows how to quantize a HuggingFace model using ModelOpt in the Megatron-Bridge framework. Quantization is a two-step flow:
 
-The script supports three NAS-based pruning targets and one manual export mode:
+1. [quantize.py](quantize.py) applies post-training quantization (PTQ) with calibration and saves a **Megatron checkpoint** (with ModelOpt state). Tensor / pipeline / expert parallelism are all supported, and the checkpoint can be reloaded for further training (Quantization Aware Training / Quantization Aware Distillation).
+2. [export.py](export.py) converts that Megatron checkpoint to a **HuggingFace (unified) checkpoint** that deploys directly with TensorRT-LLM, vLLM, or SGLang.
 
-| Mode | Flag | Description |
-| :---: | :---: | :--- |
-| NAS | `--prune_target_params` | Prune to a target total parameter count |
-| NAS | `--prune_target_active_params` | Prune to a target active parameter count (useful for MoE models). For non-MoE models, this is equivalent to `--prune_target_params`. |
-| NAS | `--prune_target_memory_mb` | Prune to a target memory footprint in MB (weights + KV-cache) for a given batch size and sequence length assuming BF16 precision |
-| Manual | `--prune_export_config` | Prune directly to a specified architecture config (no NAS). Useful if you want to take top K candidates and do a short knowledge distillation before selecting the best model. |
+`quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `FP8_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/fp8_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
 
-Multiple NAS targets can be combined — e.g. `--prune_target_params 6e9 --prune_target_memory_mb 12288` finds the best model with under 6B params and under 12GB memory footprint at (default) batch size 1 and sequence length 4096 assuming BF16 precision.
-
-**Prune by total parameter count** — prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while skipping pruning of `num_attention_heads` using following defaults:
-    1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration,
-    at-most 20% depth (`num_layers`) and 40% width is pruned per prunable hparam (`hidden_size`, `ffn_hidden_size`, ...),
-    top-10 candidates are evaluated for MMLU score (5% sampled data) to select the best model.
+**Step 1 — quantize** Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration:
 
 ```bash
-torchrun --nproc_per_node 2 prune_minitron.py \
-    --pp_size 2 \
+torchrun --nproc_per_node 2 quantize.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
-    --prune_target_params 6e9 \
-    --hparams_to_skip num_attention_heads \
-    --output_hf_path /tmp/Qwen3-8B-Pruned-6B
+    --quant_cfg fp8 \
+    --tp_size 2 \
+    --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
 ```
 
-**Prune by active parameter count** — useful for MoE models where most experts are inactive per token (e.g. prune Nemotron-3-Nano-30B-A3B-BF16 (3.6B active params) to 3B active params):
+**Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
 
 ```bash
-torchrun --nproc_per_node 2 prune_minitron.py \
-    --pp_size 2 \
-    --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-    --prune_target_active_params 3e9 \
-    --output_hf_path /tmp/Nemotron-3-Nano-30B-A3B-BF16-Pruned-3B-Active
-```
-
-**Prune by memory footprint** — prune to fit a target GPU memory budget (weights + KV-cache at the given sequence length and batch size, assuming BF16):
-
-```bash
-torchrun --nproc_per_node 2 prune_minitron.py \
-    --pp_size 2 \
+torchrun --nproc_per_node 1 export.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
-    --prune_target_memory_mb 12288 \
-    --seq_length 4096 \
-    --calib_batch_size 1 \
-    --output_hf_path /tmp/Qwen3-8B-Pruned-12GB
+    --megatron_path /tmp/Qwen3-8B-FP8-megatron \
+    --export_unified_hf_path /tmp/Qwen3-8B-FP8-hf
 ```
 
-**Manual pruning** — prune directly to a specified architecture (no NAS, no score evaluation):
+> [!NOTE]
+> The HuggingFace unified exporter does not gather tensor-parallel-sharded weights. Use `--pp_size` on `export.py` to shard a large model with pipeline parallelism across GPUs for export.
 
-```bash
-torchrun --nproc_per_node 2 prune_minitron.py \
-    --pp_size 2 \
-    --hf_model_name_or_path Qwen/Qwen3-8B \
-    --prune_export_config '{"hidden_size": 3584, "ffn_hidden_size": 9216}' \
-    --output_hf_path /tmp/Qwen3-8B-Pruned-6B-manual
-```
+To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export.py --help`).
 
-To see the full usage for advanced configurations, run:
-
-```bash
-torchrun --nproc_per_node 1 prune_minitron.py --help
-```
-
-> [!TIP]
-> If number of layers in the model is not divisible by number of GPUs i.e. pipeline parallel (PP) size, you can configure
-> uneven PP by setting `--num_layers_in_first_pipeline_stage` and `--num_layers_in_last_pipeline_stage`.
-> E.g. for Qwen3-8B with 36 layers and 8 GPUs, you can set both to 3 to get 3-5-5-5-5-5-5-3 layers per GPU.
+For Quantization scripts covering VLMs, QAT, and resuming quantized checkpoints, see the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
 
 ## Distillation
 
@@ -230,9 +193,77 @@ For more details, see the [Megatron-Bridge conversion README](https://github.com
 
 See [examples/pruning/](../pruning/README.md#tutorials--results) for distillation experiment results covering Minitron and Puzzletron pruning algorithms.
 
-## Post-Training Quantization
+## Pruning
 
-Checkout Quantization scripts for LLMs and VLMs in the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
+This section shows how to prune a HuggingFace model using Minitron algorithm in Megatron-Bridge framework. Checkout other available pruning algorithms, supported frameworks and models, and general pruning getting-started in the [pruning README](../pruning/README.md).
+
+The script supports three NAS-based pruning targets and one manual export mode:
+
+| Mode | Flag | Description |
+| :---: | :---: | :--- |
+| NAS | `--prune_target_params` | Prune to a target total parameter count |
+| NAS | `--prune_target_active_params` | Prune to a target active parameter count (useful for MoE models). For non-MoE models, this is equivalent to `--prune_target_params`. |
+| NAS | `--prune_target_memory_mb` | Prune to a target memory footprint in MB (weights + KV-cache) for a given batch size and sequence length assuming BF16 precision |
+| Manual | `--prune_export_config` | Prune directly to a specified architecture config (no NAS). Useful if you want to take top K candidates and do a short knowledge distillation before selecting the best model. |
+
+Multiple NAS targets can be combined — e.g. `--prune_target_params 6e9 --prune_target_memory_mb 12288` finds the best model with under 6B params and under 12GB memory footprint at (default) batch size 1 and sequence length 4096 assuming BF16 precision.
+
+**Prune by total parameter count** — prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while skipping pruning of `num_attention_heads` using following defaults:
+    1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration,
+    at-most 20% depth (`num_layers`) and 40% width is pruned per prunable hparam (`hidden_size`, `ffn_hidden_size`, ...),
+    top-10 candidates are evaluated for MMLU score (5% sampled data) to select the best model.
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --prune_target_params 6e9 \
+    --hparams_to_skip num_attention_heads \
+    --output_hf_path /tmp/Qwen3-8B-Pruned-6B
+```
+
+**Prune by active parameter count** — useful for MoE models where most experts are inactive per token (e.g. prune Nemotron-3-Nano-30B-A3B-BF16 (3.6B active params) to 3B active params):
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --prune_target_active_params 3e9 \
+    --output_hf_path /tmp/Nemotron-3-Nano-30B-A3B-BF16-Pruned-3B-Active
+```
+
+**Prune by memory footprint** — prune to fit a target GPU memory budget (weights + KV-cache at the given sequence length and batch size, assuming BF16):
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --prune_target_memory_mb 12288 \
+    --seq_length 4096 \
+    --calib_batch_size 1 \
+    --output_hf_path /tmp/Qwen3-8B-Pruned-12GB
+```
+
+**Manual pruning** — prune directly to a specified architecture (no NAS, no score evaluation):
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --prune_export_config '{"hidden_size": 3584, "ffn_hidden_size": 9216}' \
+    --output_hf_path /tmp/Qwen3-8B-Pruned-6B-manual
+```
+
+To see the full usage for advanced configurations, run:
+
+```bash
+torchrun --nproc_per_node 1 prune_minitron.py --help
+```
+
+> [!TIP]
+> If number of layers in the model is not divisible by number of GPUs i.e. pipeline parallel (PP) size, you can configure
+> uneven PP by setting `--num_layers_in_first_pipeline_stage` and `--num_layers_in_last_pipeline_stage`.
+> E.g. for Qwen3-8B with 36 layers and 8 GPUs, you can set both to 3 to get 3-5-5-5-5-5-5-3 layers per GPU.
 
 ## Resources
 
