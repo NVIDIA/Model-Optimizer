@@ -98,10 +98,18 @@ evaluation:
           log_failed_requests: true
           params_to_add:
             # Forces thinking on for hybrid models that can run both modes.
-            # Drop this block for pure-instruct models.
+            # Drop this block for pure-instruct models. The thinking-toggle key
+            # is family-specific — keep only the one your model uses:
+            #   enable_thinking -> Qwen3.5/3.6, GLM 5.1
+            #   thinking        -> Kimi K2.6, DeepSeek V3.2/V4
+            # (DeepSeek models use a Python encoder, not Jinja, so an unused key
+            # can error rather than be ignored — don't emit both.)
             chat_template_kwargs:
               thinking: true
               enable_thinking: true
+              # DeepSeek V4 only: reasoning-effort axis (high|max). "max" needs
+              # --max-model-len >= 393216. Drop for non-DeepSeek-V4 models.
+              reasoning_effort: max
   tasks:
   # Reasoning (chat endpoint, 8 repeats, short)
     - name: gpqa_diamond_aa_v3

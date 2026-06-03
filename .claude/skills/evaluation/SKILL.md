@@ -205,9 +205,22 @@ Set it per model type:
    when the deployment command sets a `--reasoning-parser` (vLLM emits a separate
    reasoning channel that must be stripped before scoring).
 3. **Hybrid models (can run with reasoning on *or* off) → always turn reasoning
-   ON** by forcing the thinking flags inside `params_to_add.chat_template_kwargs`
-   (`thinking: true` / `enable_thinking: true`), and keep `use_reasoning: true`.
-   Reasoning mode yields the highest scores, so default hybrids to it.
+   ON** by forcing the thinking flag inside `params_to_add.chat_template_kwargs`,
+   and keep `use_reasoning: true`. Reasoning mode yields the highest scores, so
+   default hybrids to it. The toggle key is **family-specific** — set only the
+   one your model uses; do not emit both:
+
+   | Family | `chat_template_kwargs` to force thinking |
+   | --- | --- |
+   | Qwen3.5 / 3.6, GLM 5.1 | `enable_thinking: true` |
+   | Kimi K2.6, DeepSeek V3.2 | `thinking: true` |
+   | DeepSeek V4 (Pro/Flash) | `thinking: true` + `reasoning_effort: high\|max` (Think Max needs `--max-model-len >= 393216`) |
+
+   Verify the key against the model's `chat_template.jinja` rather than
+   extrapolating from a prior generation — names drift (GLM-4.x `thinking` +
+   `/nothink` → GLM 5.1 `enable_thinking`; Kimi K2.5 `enable_thinking` → K2.6
+   `thinking`). DeepSeek V3.2/V4 use a Python encoder, not Jinja, so an unused
+   kwarg can raise an error instead of being silently ignored.
 
 ---
 
