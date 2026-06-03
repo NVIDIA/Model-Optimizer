@@ -120,6 +120,14 @@ def main():
     )
     parser.add_argument("--dtype", type=str, default=None, help="Model dtype, e.g. bfloat16")
     parser.add_argument(
+        "--attention_backend",
+        type=str,
+        default=None,
+        help="Force the vLLM attention backend, e.g. FLASH_ATTN or FLASHINFER. "
+        "Default: let vLLM choose (the worker supports whichever of FlashAttention "
+        "/ FlashInfer is selected). FlashInfer needs a supported head_size (64/128/...).",
+    )
+    parser.add_argument(
         "--fit_logspace",
         action="store_true",
         help="Fit the exponential model in log space (wide scale_factor ranges)",
@@ -159,14 +167,29 @@ def main():
         llm_kwargs["trust_remote_code"] = True
     if args.dtype is not None:
         llm_kwargs["dtype"] = args.dtype
-    # NOTE: no attention_backend override — the calib worker auto-detects the
-    # layer backend (FlashAttention / FlashInfer) and swaps in the matching
-    # sparse impl. NemotronH uses FlashInfer by default, which the worker
-    # supports via patch_flashinfer_metadata_builder().
+    # The calib worker auto-detects the per-layer backend (FlashAttention /
+    # FlashInfer) and swaps in the matching sparse impl. Pass --attention_backend
+    # only to force a choice: models that default to FlashInfer (e.g. NemotronH)
+    # need no override; others (e.g. Llama, which defaults to FlashAttention)
+    # need ``--attention_backend FLASHINFER`` to calibrate under FlashInfer.
+    # NOTE: this vLLM version takes the backend via this engine arg, not the
+    # (removed) VLLM_ATTENTION_BACKEND env var.
+    if args.attention_backend is not None:
+        llm_kwargs["attention_backend"] = args.attention_backend
     llm = LLM(**llm_kwargs)
 
     n_layers = llm.collective_rpc("sparse_calib_enable")[0]
     print(f"[ModelOpt] Calibration enabled on {n_layers} attention layers")
+    # Surface which sparse impl is active so the backend in use is verifiable
+    # (e.g. {'ModelOptSparseFlashInferImpl': N} confirms the FlashInfer path).
+    status = llm.collective_rpc("sparse_calib_status")[0]
+    print(f"[ModelOpt] Active sparse impls: {status['impl_types']}")
+    if n_layers == 0:
+        print(
+            "[ModelOpt] No layers were swapped — the model's attention backend is "
+            "unsupported. Try --attention_backend FLASH_ATTN or FLASHINFER."
+        )
+        return
 
     # generate() drives prefill (prefill-phase stats) then decode_tokens decode
     # steps (decode-phase stats). The calibration kernel computes full attention,

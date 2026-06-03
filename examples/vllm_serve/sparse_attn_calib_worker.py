@@ -146,6 +146,25 @@ class SparseAttnCalibWorker(BaseWorker):
 
     # -- RPC methods (invoked via LLM.collective_rpc) ----------------------
 
+    def sparse_calib_status(self) -> dict[str, Any]:
+        """Report which sparse impls are active and how many records each holds.
+
+        Lets the driver confirm calibration actually routes through the expected
+        backend (e.g. ``ModelOptSparseFlashInferImpl``) rather than a fallback.
+        """
+        impls = list(iter_sparse_impls(self.model_runner.model))
+        impl_types: dict[str, int] = {}
+        total_records = 0
+        for impl in impls:
+            impl_types[type(impl).__name__] = impl_types.get(type(impl).__name__, 0) + 1
+            total_records += len(getattr(impl, "_calib_records", []))
+        return {
+            "num_sparse_layers": len(impls),
+            "impl_types": impl_types,
+            "calibrating": any(getattr(i, "_calibrate", False) for i in impls),
+            "total_records": total_records,
+        }
+
     def sparse_calib_enable(self, threshold_trials: list[float] | None = None) -> int:
         """Enter calibration mode on all sparse impls; returns layer count."""
         trials = threshold_trials or DEFAULT_THRESHOLD_TRIALS

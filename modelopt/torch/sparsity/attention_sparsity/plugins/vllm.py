@@ -27,6 +27,8 @@ Vllm-free config helpers (``match_sparse_config`` / ``load_from_checkpoint_metad
 live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 """
 
+import functools
+import inspect
 import math
 import warnings
 
@@ -465,13 +467,21 @@ def patch_flashinfer_metadata_builder() -> bool:
         return False
 
     orig_build = FlashInferMetadataBuilder.build
+    # Locate ``common_attn_metadata`` by parameter name so the wrapper is robust
+    # to the builder's positional signature (this vLLM build is
+    # ``build(self, common_prefix_len, common_attn_metadata, fast_build=False)``).
+    # Pass ``*args``/``**kwargs`` straight through to avoid re-binding positional
+    # args (re-passing common_attn_metadata first collided with common_prefix_len).
+    build_sig = inspect.signature(orig_build)
 
-    def build(self, common_attn_metadata, *args, **kwargs):
-        metadata = orig_build(self, common_attn_metadata, *args, **kwargs)
-        metadata._modelopt_block_table = common_attn_metadata.block_table_tensor
-        metadata._modelopt_seq_lens = common_attn_metadata.seq_lens
-        metadata._modelopt_query_start_loc = common_attn_metadata.query_start_loc
-        metadata._modelopt_num_actual_tokens = common_attn_metadata.num_actual_tokens
+    @functools.wraps(orig_build)
+    def build(*args, **kwargs):
+        metadata = orig_build(*args, **kwargs)
+        common = build_sig.bind(*args, **kwargs).arguments["common_attn_metadata"]
+        metadata._modelopt_block_table = common.block_table_tensor
+        metadata._modelopt_seq_lens = common.seq_lens
+        metadata._modelopt_query_start_loc = common.query_start_loc
+        metadata._modelopt_num_actual_tokens = common.num_actual_tokens
         return metadata
 
     FlashInferMetadataBuilder.build = build
