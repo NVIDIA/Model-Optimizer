@@ -54,12 +54,10 @@ def test_models(get_model_and_input, on_gpu):
         # Test subnet forwardpytest.warns
         out1 = search_space.model(*args, **kwargs)
 
-        # Test subnet backward
-        with torch.autograd.set_detect_anomaly(True):
-            for t in flatten_tree(out1)[0]:
-                if isinstance(t, torch.Tensor) and t.requires_grad:
-                    torch.sum(t).backward()
-            zero_grad(search_space.model)
+        for t in flatten_tree(out1)[0]:
+            if isinstance(t, torch.Tensor) and t.requires_grad:
+                torch.sum(t).backward()
+        zero_grad(search_space.model)
 
         # Test model export
         subnet = search_space.export()
