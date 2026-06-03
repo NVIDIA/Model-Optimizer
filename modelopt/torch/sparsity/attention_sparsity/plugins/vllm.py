@@ -611,17 +611,51 @@ def disable_calibration(impls) -> None:
 
 
 def collect_calibration_stats(impls) -> dict[str, list[dict]]:
-    """Group every impl's per-request records by phase.
+    """Aggregate per-request records into per-sample stats, matching the HF path.
 
-    Returns a dict ``{"prefill": [...], "decode": [...]}`` where each entry is a
+    Mirrors :meth:`DynamicThresholdCalibrator._extract_calibration_stats`: the
+    per-threshold sparsity is **averaged across layers** for each sample, yielding
+    one record per sample (not per ``(layer, sample)``). During calibration every
+    attention layer processes the same launches in the same order, so each layer's
+    ``_calib_records`` are aligned by index — the k-th record of every layer is the
+    same ``(launch, request)`` sample. Records are grouped by phase first, so
+    prefill and decode samples aggregate separately; chunked prefill is supported
+    (each chunk launch is its own sample, exactly as in HF chunked calibration).
+
+    Returns ``{"prefill": [...], "decode": [...]}`` where each entry is a
     ``{"sample_length", "sparsity"}`` record ready for
     :meth:`DynamicThresholdCalibrator.calibrate_from_stats`.
     """
-    per_phase: dict[str, list[dict]] = {"prefill": [], "decode": []}
+    # Per phase, gather each layer's ordered record list.
+    per_phase_layers: dict[str, list[list[dict]]] = {"prefill": [], "decode": []}
     for impl in impls:
+        split: dict[str, list[dict]] = {"prefill": [], "decode": []}
         for record in getattr(impl, "_calib_records", []):
-            per_phase.setdefault(record["phase"], []).append(record)
-    return per_phase
+            split.setdefault(record["phase"], []).append(record)
+        for phase, records in split.items():
+            if records:
+                per_phase_layers.setdefault(phase, []).append(records)
+
+    out: dict[str, list[dict]] = {"prefill": [], "decode": []}
+    for phase, layer_lists in per_phase_layers.items():
+        if not layer_lists:
+            continue
+        # Align by sample index across layers; guard against ragged layers.
+        num_samples = min(len(records) for records in layer_lists)
+        for i in range(num_samples):
+            per_layer_sparsity = [records[i]["sparsity"] for records in layer_lists]
+            num_thresholds = len(per_layer_sparsity[0])
+            avg_sparsity = [
+                sum(s[t] for s in per_layer_sparsity) / len(per_layer_sparsity)
+                for t in range(num_thresholds)
+            ]
+            out.setdefault(phase, []).append(
+                {
+                    "sparsity": avg_sparsity,
+                    "sample_length": layer_lists[0][i]["sample_length"],
+                }
+            )
+    return out
 
 
 def fit_calibration(

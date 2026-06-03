@@ -49,6 +49,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix the PyTorch ``flash_skip_softmax`` skip-softmax calibration to exclude padded query rows when the sequence length is not a multiple of the block size. ``_reshape_to_blocks`` pads the last query-block-row with ``dtype.min``, so a fully-padded row had ``block_diff == 0`` and always voted "keep" in the block reduction — the last partial block-row was never skipped, under-counting sparsity by up to one block-row (~0.1 absolute for long prompts) and skewing the fitted ``(a, b)``. This made HF (PyTorch) calibration disagree with the Triton/vLLM kernel on real models; the two now match to <0.01 at any sequence length. The cross-validation tests now run at non-multiple-of-128 lengths to guard the regression.
+- vLLM skip-softmax calibration now averages per-threshold sparsity across layers per sample (matching the HF ``DynamicThresholdCalibrator`` aggregation) instead of pooling each ``(layer, sample)`` independently, so vLLM- and HF-calibrated ``(a, b)`` agree.
 - In Megatron-Core only do EP amax sync for routed expert weights if ``sync_expert_weight_amax=True``. Previously EP amax sync would sync routed expert weights across EP ranks even when ``sync_expert_weight_amax`` was False.
 - Fix Megatron-Core HF importer to load fused ``TELayerNormColumnParallelLinear.layer_norm_weight`` from HF for GPT-family models (Qwen3 etc.) under ``--export-default-te-spec``. Importer now prefers per-context keys ``fused_input_layernorm`` / ``fused_pre_mlp_layernorm`` (fallback ``fused_norm`` for Nemotron-H backward compatibility); ``mcore_qwen.py`` provides the new rules. Without this fix, post-prune MMLU sat at chance.
 

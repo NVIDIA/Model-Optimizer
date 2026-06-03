@@ -791,7 +791,9 @@ class TestModelOptSparseFlashInferCalibration:
         enable_calibration([impl], self._FIT_TRIALS)
 
         pt_stats, fi_stats = [], []
-        for seed, seq in enumerate((512, 1024, 2048)):
+        # Non-128-multiple lengths exercise the partial last block-row (padding
+        # rows), where flash_skip_softmax previously diverged from the kernel.
+        for seed, seq in enumerate((500, 1000, 2000)):
             torch.manual_seed(seed)
             # Localized-decay attention -> graded sparsity spanning the fit window.
             q4 = torch.randn(1, num_heads, seq, head_dim, device="cuda", dtype=torch.float16)
@@ -826,3 +828,45 @@ class TestModelOptSparseFlashInferCalibration:
         # absorbs the occasional boundary block flipping across hardware.
         assert pt_fit["a"] == pytest.approx(fi_fit["a"], rel=5e-3)
         assert pt_fit["b"] == pytest.approx(fi_fit["b"], rel=5e-3)
+
+
+def test_collect_calibration_stats_averages_across_layers():
+    """Aggregation averages sparsity across layers per sample, like the HF path.
+
+    This is the alignment that makes vLLM calibration produce the same fitted
+    (a, b) as ``DynamicThresholdCalibrator._extract_calibration_stats``: one
+    record per sample with the cross-layer mean, not one record per (layer,
+    sample). Layers are aligned by record index (every layer sees the same
+    launches in the same order during calibration).
+    """
+    from types import SimpleNamespace
+
+    layer0 = SimpleNamespace(
+        _calib_records=[
+            {"phase": "prefill", "sample_length": 100, "sparsity": [0.2, 0.4]},
+            {"phase": "prefill", "sample_length": 200, "sparsity": [0.6, 0.8]},
+            {"phase": "decode", "sample_length": 512, "sparsity": [0.5, 0.9]},
+        ]
+    )
+    layer1 = SimpleNamespace(
+        _calib_records=[
+            {"phase": "prefill", "sample_length": 100, "sparsity": [0.4, 0.6]},
+            {"phase": "prefill", "sample_length": 200, "sparsity": [0.8, 1.0]},
+            {"phase": "decode", "sample_length": 512, "sparsity": [0.7, 0.5]},
+        ]
+    )
+
+    stats = collect_calibration_stats([layer0, layer1])
+
+    # One record per sample (not per layer-sample): 2 prefill, 1 decode.
+    assert len(stats["prefill"]) == 2
+    assert len(stats["decode"]) == 1
+    # Sparsity is the per-threshold mean across the two layers.
+    assert stats["prefill"][0]["sparsity"] == pytest.approx([0.3, 0.5])
+    assert stats["prefill"][0]["sample_length"] == 100
+    assert stats["prefill"][1]["sparsity"] == pytest.approx([0.7, 0.9])
+    assert stats["decode"][0]["sparsity"] == pytest.approx([0.6, 0.7])
+    # A single layer is the identity (averaging over one layer).
+    assert collect_calibration_stats([layer0])["prefill"][0]["sparsity"] == pytest.approx(
+        [0.2, 0.4]
+    )

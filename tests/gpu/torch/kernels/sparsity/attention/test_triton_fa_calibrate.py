@@ -478,7 +478,9 @@ class TestCalibrateVsPytorchReference:
         trials = [1e-3, 3e-3, 1e-2, 3e-2, 5e-2, 1e-1, 2e-1, 3e-1, 5e-1, 7e-1, 9e-1]
 
         pt_stats, triton_stats = [], []
-        for seed, seq in enumerate([512, 768, 1024, 1536, 2048]):
+        # Non-128-multiple lengths so the partial last block-row exercises the
+        # padding-row handling (where flash previously diverged from the kernel).
+        for seed, seq in enumerate([500, 776, 1000, 1500, 2000]):
             q4, k4, v4 = self._graded_qkv(seq, num_heads, head_dim, seed)
             pt_stats.append(
                 {
@@ -514,8 +516,13 @@ class TestCalibrateVsPytorchReference:
         Compares PyTorch flash_skip_softmax, contiguous ``attention_calibrate``,
         and the paged (vLLM) ``attention_calibrate`` — the graded sweep makes this
         a discriminating test rather than a trivially-0% / 100% one.
+
+        ``seq`` is deliberately *not* a multiple of the 128 block size: the last
+        query-block-row is partial, exercising the padding-row handling where the
+        flash block method previously diverged from the kernel (it counted
+        dtype-min-padded rows as "keep" and never skipped the last block row).
         """
-        num_heads, head_dim, seq, page_size = 4, 64, 1024, 16
+        num_heads, head_dim, seq, page_size = 4, 64, 1000, 16
         scale = 1.0 / (head_dim**0.5)
 
         torch.manual_seed(2)
