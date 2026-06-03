@@ -112,6 +112,29 @@ def _unique_arg_types(*arg_type_groups):
     return tuple(dict.fromkeys(arg_type for group in arg_type_groups for arg_type in group))
 
 
+def _build_usage_header():
+    columns = {"quantize.py": QUANTIZE_ARG_TYPES, "train.py": TRAINING_ARG_TYPES}
+    rows = _unique_arg_types(TRAINING_ARG_TYPES, QUANTIZE_ARG_TYPES)
+    script_names = list(columns)
+
+    lines = [
+        "## Arguments by Script",
+        "",
+        "| Argument group | " + " | ".join(f"`{name}`" for name in script_names) + " |",
+        "|---|" + ":---:|" * len(script_names),
+    ]
+    for dc in rows:
+        cells = ["✅" if dc in columns[name] else "-" for name in script_names]
+        lines.append(f"| {dc.__name__} | " + " | ".join(cells) + " |")
+
+    lines += [
+        "",
+        "**Note:** Each script accepts only the arguments in its supported groups ✅. Arguments from other "
+        "groups are ignored (if set in a `--config` YAML) or error out (if passed as a CLI flag).",
+    ]
+    return "\n".join(lines)
+
+
 def get_training_arg_parser():
     return ModelOptArgParser(TRAINING_ARG_TYPES)
 
@@ -124,6 +147,7 @@ def get_docs_arg_parser():
     return ModelOptArgParser(
         _unique_arg_types(TRAINING_ARG_TYPES, QUANTIZE_ARG_TYPES),
         conflict_handler="resolve",
+        docs_header_extra=_build_usage_header(),
     )
 
 

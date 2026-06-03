@@ -180,6 +180,11 @@ class ModelOptHFArguments:
 class ModelOptArgParser(HfArgumentParser):
     """HfArgumentParser with ``--config`` YAML support and ``--generate_docs`` for ARGUMENTS.md."""
 
+    def __init__(self, *args, docs_header_extra: str | None = None, **kwargs):
+        """Store an optional verbatim markdown block to inject into generated docs."""
+        super().__init__(*args, **kwargs)
+        self._docs_header_extra = docs_header_extra
+
     def parse_args_into_dataclasses(self, args=None, **kwargs):
         """Parse args with optional YAML config defaults and doc generation."""
         if args is None:
@@ -244,6 +249,10 @@ class ModelOptArgParser(HfArgumentParser):
             f"<!-- Auto-generated — do not edit by hand. Regenerate with: {regen_cmd} -->",
             "",
         ]
+
+        if self._docs_header_extra:
+            lines.append(self._docs_header_extra)
+            lines.append("")
 
         # Sort: modelopt library classes first, then example-specific
         def _sort_key(dc):

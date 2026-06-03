@@ -10,6 +10,7 @@ For background on how QAT enables low-precision accuracy recovery, see the [QAT/
 | :---: | :---: | :---: | :---: |
 | Quick Start | Prerequisites and setup | \[[Link](#quick-start)\] | |
 | End-to-End Example | Run QAT/QAD in 3 steps: quantize, train, export | \[[Link](#run-end-to-end-qatqad-example)\] | |
+| Arguments | Full CLI/YAML argument reference | \[[Link](ARGUMENTS.md)\] | |
 | Background | How QAT/QAD work and when to use each | \[[Link](#background)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Support Matrix | Supported models, quantization formats, and backends | \[[Link](#support-matrix)\] | |
 | QLoRA | Model training with reduced GPU memory | \[[Link](#qlora-real-quantization)\] | |
@@ -29,7 +30,7 @@ The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 
 ## Run End-to-End QAT/QAD Example
 
-All arguments can be specified via YAML config, CLI flags, or both (CLI overrides YAML). See [Advanced Topics](#advanced-topics).
+All arguments can be specified via YAML config, CLI flags, or both (CLI overrides YAML). See [ARGUMENTS.md](ARGUMENTS.md) for the full per-script argument reference, or run any script with `--help`.
 
 ### QAT
 

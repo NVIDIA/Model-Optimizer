@@ -2,6 +2,18 @@
 
 <!-- Auto-generated — do not edit by hand. Regenerate with: python examples/llm_qat/arguments.py --generate_docs examples/llm_qat/ARGUMENTS.md -->
 
+## Arguments by Script
+
+| Argument group | `quantize.py` | `train.py` |
+|---|:---:|:---:|
+| ModelArguments | ✅ | ✅ |
+| TrainingArguments | - | ✅ |
+| DataArguments | ✅ | ✅ |
+| DistillArguments | - | ✅ |
+| QuantizeArguments | ✅ | - |
+
+**Note:** Each script accepts only the arguments in its supported groups ✅. Arguments from other groups are ignored (if set in a `--config` YAML) or error out (if passed as a CLI flag).
+
 ## DistillArguments
 
 | Argument | Type | Default | Description |
