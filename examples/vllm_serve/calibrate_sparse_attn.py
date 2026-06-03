@@ -105,6 +105,21 @@ def main():
         "--max_model_len", type=int, default=None, help="vLLM max_model_len override"
     )
     parser.add_argument(
+        "--tensor_parallel_size", type=int, default=1, help="vLLM tensor-parallel size"
+    )
+    parser.add_argument(
+        "--gpu_memory_utilization",
+        type=float,
+        default=None,
+        help="vLLM GPU memory utilization fraction",
+    )
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Trust remote code for custom model classes (e.g. NemotronH)",
+    )
+    parser.add_argument("--dtype", type=str, default=None, help="Model dtype, e.g. bfloat16")
+    parser.add_argument(
         "--fit_logspace",
         action="store_true",
         help="Fit the exponential model in log space (wide scale_factor ranges)",
@@ -136,6 +151,18 @@ def main():
     }
     if args.max_model_len is not None:
         llm_kwargs["max_model_len"] = args.max_model_len
+    if args.tensor_parallel_size and args.tensor_parallel_size > 1:
+        llm_kwargs["tensor_parallel_size"] = args.tensor_parallel_size
+    if args.gpu_memory_utilization is not None:
+        llm_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
+    if args.trust_remote_code:
+        llm_kwargs["trust_remote_code"] = True
+    if args.dtype is not None:
+        llm_kwargs["dtype"] = args.dtype
+    # NOTE: no attention_backend override — the calib worker auto-detects the
+    # layer backend (FlashAttention / FlashInfer) and swaps in the matching
+    # sparse impl. NemotronH uses FlashInfer by default, which the worker
+    # supports via patch_flashinfer_metadata_builder().
     llm = LLM(**llm_kwargs)
 
     n_layers = llm.collective_rpc("sparse_calib_enable")[0]

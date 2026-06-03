@@ -718,3 +718,111 @@ class TestModelOptSparseFlashInferCalibration:
         """patch_flashinfer_metadata_builder is safe to call repeatedly."""
         assert patch_flashinfer_metadata_builder() is True
         assert patch_flashinfer_metadata_builder() is True
+
+    _FIT_TRIALS = [1e-3, 3e-3, 1e-2, 3e-2, 5e-2, 1e-1, 2e-1, 3e-1, 5e-1, 7e-1, 9e-1]
+
+    def _pytorch_sparsity(self, q4, k4, trials, scale):
+        """Per-threshold skipped-block fraction from PyTorch flash_skip_softmax."""
+        from modelopt.torch.sparsity.attention_sparsity.methods.flash_skip_softmax import (
+            FlashSkipSoftmax,
+        )
+
+        seq_q, seq_k = q4.shape[2], k4.shape[2]
+        scores = torch.matmul(q4, k4.transpose(-2, -1)) * scale
+        scores = scores.masked_fill(
+            torch.triu(torch.ones(seq_q, seq_k, device="cuda"), 1).bool()[None, None],
+            float("-inf"),
+        )
+        method = FlashSkipSoftmax(
+            method_config={
+                "thresholds": {"prefill": trials, "decode": trials},
+                "br": 128,
+                "bc": 128,
+                "backend": "pytorch",
+                "is_causal": True,
+            }
+        )
+        method._calibration_mode = True
+        method.thresholds = trials
+        return method.calc_correction_factor_and_p(scores, "prefill")[1]["sparsity"]
+
+    def _flashinfer_sparsity(self, impl, q4, k4, v4, page_size):
+        """Per-threshold sparsity from ModelOptSparseFlashInferImpl.forward."""
+        seq, num_heads, head_dim = q4.shape[2], q4.shape[1], q4.shape[3]
+        qf = q4.permute(0, 2, 1, 3).reshape(seq, num_heads, head_dim).contiguous()
+        kf = k4.permute(0, 2, 1, 3).reshape(seq, num_heads, head_dim).contiguous()
+        vf = v4.permute(0, 2, 1, 3).reshape(seq, num_heads, head_dim).contiguous()
+        locs = torch.zeros(1, device="cuda", dtype=torch.int32)
+        lens = torch.tensor([seq], device="cuda", dtype=torch.int32)
+        fa_kv, block_table = _make_paged_cache(kf, vf, locs, lens, num_heads, head_dim, page_size)
+        impl._calib_records = []
+        impl.forward(
+            layer=None,
+            query=qf,
+            key=qf,
+            value=qf,
+            kv_cache=self._to_flashinfer_cache(fa_kv),
+            attn_metadata=SimpleNamespace(
+                use_cascade=False,
+                _modelopt_block_table=block_table,
+                _modelopt_seq_lens=lens,
+                _modelopt_query_start_loc=torch.tensor([0, seq], device="cuda", dtype=torch.int32),
+                _modelopt_num_actual_tokens=seq,
+            ),
+            output=torch.empty_like(qf),
+        )
+        return impl._calib_records[-1]["sparsity"]
+
+    def test_matches_pytorch_calibration(self):
+        """FlashInfer-layout calibration == PyTorch flash_skip_softmax, incl. fitted (a, b).
+
+        Direct (not transitive) check: per-threshold sparsity measured through
+        ``ModelOptSparseFlashInferImpl.forward`` over a FlashInfer-layout cache,
+        and the exponential ``(a, b)`` fit, match the PyTorch path on identical
+        graded-attention inputs.
+        """
+        from modelopt.torch.sparsity.attention_sparsity.calibration.calibrator import (
+            DynamicThresholdCalibrator,
+        )
+
+        num_heads, head_dim, page_size = 4, 64, 16  # MHA (num_kv_heads == num_heads)
+        scale = 1.0 / (head_dim**0.5)
+        impl = _make_flashinfer_impl(num_heads, head_dim, num_heads)
+        enable_calibration([impl], self._FIT_TRIALS)
+
+        pt_stats, fi_stats = [], []
+        for seed, seq in enumerate((512, 1024, 2048)):
+            torch.manual_seed(seed)
+            # Localized-decay attention -> graded sparsity spanning the fit window.
+            q4 = torch.randn(1, num_heads, seq, head_dim, device="cuda", dtype=torch.float16)
+            pos = torch.arange(seq, device="cuda").float()
+            decay = torch.exp(-pos / (seq * 0.15))[None, None, :, None]
+            k4 = (torch.randn(1, num_heads, seq, head_dim, device="cuda") * decay).to(torch.float16)
+            k4[:, :, 0] = 8.0  # sink
+            v4 = torch.randn(1, num_heads, seq, head_dim, device="cuda", dtype=torch.float16)
+
+            pt = self._pytorch_sparsity(q4, k4, self._FIT_TRIALS, scale)
+            fi = self._flashinfer_sparsity(impl, q4, k4, v4, page_size)
+            # Same 128x128 block skip logic. Differences are at most ~1 block out
+            # of hundreds, where an fp16 (Triton) vs fp64 (PyTorch) score lands on
+            # a threshold boundary — far below a real divergence. (Same tolerance
+            # as the kernel-level cross-check test_graded_prefill_matches_pytorch.)
+            for s_pt, s_fi in zip(pt, fi):
+                assert abs(s_pt - s_fi) <= 0.02, (seq, pt, fi)
+            pt_stats.append({"sparsity": pt, "sample_length": seq})
+            fi_stats.append({"sparsity": fi, "sample_length": seq})
+
+        # The sweep must actually reach the fit-relevant (10%, 90%) window.
+        assert any(0.1 < s < 0.9 for record in pt_stats for s in record["sparsity"])
+
+        pt_fit = DynamicThresholdCalibrator(threshold_trials=self._FIT_TRIALS).calibrate_from_stats(
+            pt_stats, "prefill"
+        )
+        fi_fit = DynamicThresholdCalibrator(threshold_trials=self._FIT_TRIALS).calibrate_from_stats(
+            fi_stats, "prefill"
+        )
+        assert pt_fit and fi_fit, (pt_fit, fi_fit)
+        # Fitted (a, b) agree to well under 1% (measured ~6e-4); the loose bound
+        # absorbs the occasional boundary block flipping across hardware.
+        assert pt_fit["a"] == pytest.approx(fi_fit["a"], rel=5e-3)
+        assert pt_fit["b"] == pytest.approx(fi_fit["b"], rel=5e-3)
