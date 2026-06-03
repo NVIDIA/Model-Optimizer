@@ -101,9 +101,9 @@ QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fa
 
 ## Serve a model with sparse attention in vLLM
 
-Apply ModelOpt sparse attention at serve time. The launcher replaces vLLM's `FlashAttentionImpl` with `ModelOptSparseAttentionImpl` (Triton kernel with paged KV cache support) on every attention layer right after model load.
+Apply ModelOpt sparse attention at serve time. The launcher swaps the ModelOpt sparse impl (Triton kernel with paged KV cache support) onto every attention layer right after model load — `ModelOptSparseAttentionImpl` for the **FlashAttention** backend and `ModelOptSparseFlashInferImpl` for the **FlashInfer** backend (auto-selected per layer; pass `--attention-backend FLASHINFER` to force FlashInfer, which needs a supported `head_size`).
 
-The configuration is read from the checkpoint's `config.json` `sparse_attention_config` block, written by ModelOpt's HF export. The launcher restores calibrated skip-softmax metadata and N:M sparse-softmax metadata (`sparsity_n`, `sparsity_m`, `dense_sink_tokens`, `dense_recent_tokens`). Checkpoints exported with both metadata entries use ModelOpt Triton for sparse prefill launches; decode-only launches and launches without active sparse work delegate back to vLLM FlashAttention.
+The configuration is read from the checkpoint's `config.json` `sparse_attention_config` block, written by ModelOpt's HF export. The launcher restores calibrated skip-softmax metadata and N:M sparse-softmax metadata (`sparsity_n`, `sparsity_m`, `dense_sink_tokens`, `dense_recent_tokens`). Checkpoints exported with both metadata entries use ModelOpt Triton for sparse prefill launches; decode-only launches and launches without active sparse work delegate back to the native backend.
 
 Workflow:
 

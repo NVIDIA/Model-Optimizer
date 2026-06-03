@@ -49,14 +49,12 @@ from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 import modelopt
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
-    ModelOptSparseAttentionImpl,
     _clone_sparse_impl,
     disable_calibration,
     enable_calibration,
     fit_calibration,
-    get_flashinfer_sparse_impl_cls,
     iter_sparse_impls,
-    patch_flashinfer_metadata_builder,
+    select_sparse_impl_cls,
 )
 
 # Default threshold sweep — should span sparsities from ~10% to ~95%.
@@ -74,25 +72,6 @@ DEFAULT_THRESHOLD_TRIALS = [
     7e-1,
     9e-1,
 ]
-
-
-def _sparse_impl_cls_for(impl):
-    """Pick the ModelOpt sparse impl class matching the layer's vLLM backend.
-
-    Returns ``None`` for already-swapped or unsupported backends. The FlashInfer
-    path also installs the metadata-builder patch that exposes the dense paged
-    metadata the calibration kernel needs.
-    """
-    name = type(impl).__name__
-    if name.startswith("ModelOptSparse"):
-        return None  # already swapped (idempotent across reloads)
-    if name == "FlashAttentionImpl":
-        return ModelOptSparseAttentionImpl
-    if name == "FlashInferImpl":
-        if not patch_flashinfer_metadata_builder():
-            return None
-        return get_flashinfer_sparse_impl_cls()
-    return None
 
 
 def _force_replace_attention_impls(worker) -> int:
@@ -113,9 +92,12 @@ def _force_replace_attention_impls(worker) -> int:
         if not isinstance(module, VLLMAttention):
             continue
         impl = module.impl
-        new_cls = _sparse_impl_cls_for(impl)
+        new_cls = select_sparse_impl_cls(impl)
         if new_cls is None:
-            if not type(impl).__name__.startswith("ModelOptSparse"):
+            if type(impl).__name__ not in (
+                "ModelOptSparseAttentionImpl",
+                "ModelOptSparseFlashInferImpl",
+            ):
                 skipped_backends.add(type(impl).__name__)
             continue
         try:

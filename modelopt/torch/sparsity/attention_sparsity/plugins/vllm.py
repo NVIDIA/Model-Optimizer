@@ -135,6 +135,8 @@ class _SparseCalibrationMixin:
     scale: float
     num_kv_heads: int
     head_size: int
+    # Per-layer sparse kwargs set by the worker (empty during calibration).
+    sparse_kw: dict
     # Attached by enable_calibration().
     _calib_threshold_trials: list[float] | None
     _calib_records: list[dict]
@@ -208,6 +210,77 @@ class _SparseCalibrationMixin:
                 {"phase": phase, "sample_length": seq_k, "sparsity": sparsity}
             )
 
+        return output
+
+    def _forward_sparse(
+        self,
+        *,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        page_size: int,
+        b_start_loc: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        num_actual_tokens: int,
+        max_query_len: int,
+        max_seq_len: int,
+        is_decode_only: bool,
+        is_causal: bool,
+        output: torch.Tensor,
+        dense_fallback,
+    ) -> torch.Tensor:
+        """Run the ModelOpt sparse Triton kernel over the paged cache, or delegate.
+
+        Shared inference path across backends. The backend impl extracts the
+        per-request query offsets/lengths, KV lengths, and block table from its
+        own metadata and the K/V caches from its own layout, then calls this.
+        ``dense_fallback`` is a zero-arg callable that runs the backend's native
+        (dense) attention; it is used when no sparse feature applies to the
+        launch (decode-only skip-softmax, or a launch where dynamic calibration
+        disabled sparsity).
+        """
+        sparse_kw = dict(getattr(self, "sparse_kw", {}))
+        _resolve_skip_softmax_calibration(
+            sparse_kw, is_prefill=not is_decode_only, max_seq_len=max_seq_len
+        )
+        if is_decode_only:
+            # N:M sparse softmax is prefill-only.
+            for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
+                sparse_kw.pop(name, None)
+            if set(sparse_kw) <= {"skip_softmax_threshold"}:
+                # Decode-only skip-softmax is not validated on the paged kernel
+                # yet; keep decode on the backend's native attention.
+                return dense_fallback()
+        if not sparse_kw:
+            # Dynamic calibration can disable sparse work for a launch (e.g. a
+            # short-prefill threshold outside the valid lambda range).
+            return dense_fallback()
+
+        q = query[:num_actual_tokens].contiguous()
+        # Dummy K/V: paged mode reads KV from the cache via block_table; only
+        # shape[1] (num_kv_heads) is consulted, for the GQA ratio.
+        k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
+        triton_out = triton_attention(
+            q,
+            k=k_dummy,
+            v=k_dummy,
+            b_start_loc=b_start_loc,
+            b_seq_len=b_seq_len,
+            max_input_len=max_query_len,
+            is_causal=is_causal,
+            softmax_scale=self.scale,
+            b_start_loc_k=None,  # paged mode: KV offsets not needed
+            b_seq_len_k=seq_lens,
+            max_input_len_k=max_seq_len,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            block_table=block_table,
+            page_size=page_size,
+            **sparse_kw,
+        )
+        output[:num_actual_tokens] = triton_out
         return output
 
 
@@ -314,38 +387,24 @@ class ModelOptSparseAttentionImpl(_SparseCalibrationMixin, FlashAttentionImpl):
                 output=output,
             )
 
-        # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
-        sparse_kw = dict(getattr(self, "sparse_kw", {}))
-        _resolve_skip_softmax_calibration(
-            sparse_kw,
-            is_prefill=not is_decode_only,
+        # Sparse prefill via the ModelOpt Triton kernel; delegate non-sparse and
+        # decode-only-skip-softmax launches back to vLLM FlashAttention.
+        return self._forward_sparse(
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            page_size=page_size,
+            b_start_loc=b_start_loc,
+            b_seq_len=b_seq_len,
+            seq_lens=seq_lens,
+            block_table=attn_metadata.block_table,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=attn_metadata.max_query_len,
             max_seq_len=attn_metadata.max_seq_len,
-        )
-        if is_decode_only:
-            # N:M sparse softmax is prefill-only.
-            for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
-                sparse_kw.pop(name, None)
-            if set(sparse_kw) <= {"skip_softmax_threshold"}:
-                # The current ModelOpt paged kernel is only validated for
-                # sparse prefill in vLLM. Decode-only skip-softmax would route
-                # through the dense Triton path for every non-skipped tile, so
-                # keep decode on vLLM FlashAttention until that path is covered.
-                return self._forward_vllm_flash_attn(
-                    layer,
-                    query,
-                    key,
-                    value,
-                    kv_cache,
-                    attn_metadata,
-                    output,
-                    output_scale,
-                    output_block_scale,
-                )
-        if not sparse_kw:
-            # Dynamic calibration can disable sparse work for a launch, e.g.
-            # short-prefill thresholds outside the valid lambda range. Avoid
-            # swapping in the ModelOpt dense kernel when no sparse feature is active.
-            return self._forward_vllm_flash_attn(
+            is_decode_only=is_decode_only,
+            is_causal=is_causal,
+            output=output,
+            dense_fallback=lambda: self._forward_vllm_flash_attn(
                 layer,
                 query,
                 key,
@@ -355,43 +414,8 @@ class ModelOptSparseAttentionImpl(_SparseCalibrationMixin, FlashAttentionImpl):
                 output,
                 output_scale,
                 output_block_scale,
-            )
-
-        # Prepare metadata for our kernel
-        q = query[:num_actual_tokens].contiguous()
-        # Dummy K/V for paged mode: not used by the kernel (KV are read from
-        # k_cache/v_cache via block_table), but shape[1] must be num_kv_heads
-        # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).
-        k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
-
-        # Call ModelOpt Triton kernel with paged KV.
-        # b_seq_len is the query length (e.g., 6 for prefill, 1 for decode).
-        # b_seq_len_k is the total KV length including cache (e.g., 6 for first
-        # prefill, 7/8/... for subsequent decode steps).
-        triton_out = triton_attention(
-            q,
-            k=k_dummy,
-            v=k_dummy,
-            # Query metadata
-            b_start_loc=b_start_loc,
-            b_seq_len=b_seq_len,
-            max_input_len=attn_metadata.max_query_len,
-            is_causal=is_causal,
-            softmax_scale=self.scale,
-            # KV metadata
-            b_start_loc_k=None,  # paged mode: KV offsets not needed
-            b_seq_len_k=seq_lens,  # total KV length per sequence
-            max_input_len_k=attn_metadata.max_seq_len,
-            # Paged KV cache
-            k_cache=key_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
-            v_cache=value_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
-            block_table=attn_metadata.block_table,  # [batch, max_blocks]
-            page_size=page_size,  # tokens per page in the KV cache
-            **sparse_kw,
+            ),
         )
-
-        output[:num_actual_tokens] = triton_out
-        return output
 
 
 class ModelOptSparseAttentionBackend(FlashAttentionBackend):
@@ -482,6 +506,8 @@ def patch_flashinfer_metadata_builder() -> bool:
         metadata._modelopt_seq_lens = common.seq_lens
         metadata._modelopt_query_start_loc = common.query_start_loc
         metadata._modelopt_num_actual_tokens = common.num_actual_tokens
+        metadata._modelopt_max_query_len = common.max_query_len
+        metadata._modelopt_max_seq_len = common.max_seq_len
         return metadata
 
     FlashInferMetadataBuilder.build = build
@@ -502,12 +528,21 @@ def get_flashinfer_sparse_impl_cls() -> type:
     from vllm.v1.attention.backends.flashinfer import FlashInferImpl
 
     class ModelOptSparseFlashInferImpl(_SparseCalibrationMixin, FlashInferImpl):
-        """FlashInfer attention impl with ModelOpt skip-softmax calibration.
+        """FlashInfer attention impl with ModelOpt skip-softmax calibration + serving.
 
-        Outside calibration it is a plain ``FlashInferImpl`` (delegates to
-        ``super().forward``). In calibration mode it measures multi-threshold
-        tile-skip stats over the paged cache with the Triton calibration kernel,
-        using the dense metadata stashed by ``patch_flashinfer_metadata_builder``.
+        With the dense paged metadata stashed by
+        ``patch_flashinfer_metadata_builder`` available, it either:
+
+        - **calibration mode** (``enable_calibration``): measures multi-threshold
+          tile-skip stats over the paged cache via the Triton calibration kernel
+          (dense output), or
+        - **inference**: runs the ModelOpt sparse Triton kernel for sparse prefill
+          launches, reading FlashInfer's ``[num_blocks, 2, page, ...]`` cache
+          (``[:, 0]`` = K, ``[:, 1]`` = V).
+
+        Profiling (``attn_metadata is None``), cascade, an unpatched builder, or a
+        launch with no active sparse feature fall back to native FlashInfer
+        (``super().forward``) — mirroring ``ModelOptSparseAttentionImpl``.
         """
 
         def forward(
@@ -522,19 +557,11 @@ def get_flashinfer_sparse_impl_cls() -> type:
             output_scale=None,
             output_block_scale=None,
         ):
-            """Calibrate when enabled, otherwise run native FlashInfer."""
-            calibrating = getattr(self, "_calibrate", False) and getattr(
-                self, "_calib_threshold_trials", None
-            )
-            # Fall back to native FlashInfer for: inference, profiling
-            # (attn_metadata is None), cascade, or an unpatched builder.
-            if (
-                not calibrating
-                or attn_metadata is None
-                or getattr(attn_metadata, "use_cascade", False)
-                or not hasattr(attn_metadata, "_modelopt_block_table")
-            ):
-                return super().forward(
+            """Calibrate / sparse-serve via the Triton kernel; delegate otherwise."""
+
+            def dense():
+                return FlashInferImpl.forward(
+                    self,
                     layer,
                     query,
                     key,
@@ -546,27 +573,83 @@ def get_flashinfer_sparse_impl_cls() -> type:
                     output_block_scale,
                 )
 
+            # Native FlashInfer for profiling, cascade, or an unpatched builder
+            # (the dense paged metadata the Triton kernel needs is unavailable).
+            if (
+                attn_metadata is None
+                or getattr(attn_metadata, "use_cascade", False)
+                or not hasattr(attn_metadata, "_modelopt_block_table")
+            ):
+                return dense()
+
             assert output is not None, "Output tensor must be provided."
             key_cache = kv_cache[:, 0]
             value_cache = kv_cache[:, 1]
+            page_size = key_cache.shape[1]
             seq_lens = attn_metadata._modelopt_seq_lens
             cu_seqlens_q = attn_metadata._modelopt_query_start_loc
             batch = seq_lens.shape[0]
-            return self._forward_calibrate(
+            b_start_loc = cu_seqlens_q[:batch]
+            b_seq_len = cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]
+            block_table = attn_metadata._modelopt_block_table
+            num_actual_tokens = attn_metadata._modelopt_num_actual_tokens
+
+            if getattr(self, "_calibrate", False) and getattr(
+                self, "_calib_threshold_trials", None
+            ):
+                return self._forward_calibrate(
+                    query=query,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    page_size=page_size,
+                    b_start_loc=b_start_loc,
+                    b_seq_len=b_seq_len,
+                    seq_lens=seq_lens,
+                    block_table=block_table,
+                    num_actual_tokens=num_actual_tokens,
+                    output=output,
+                )
+
+            max_query_len = attn_metadata._modelopt_max_query_len
+            is_decode_only = max_query_len <= 1
+            return self._forward_sparse(
                 query=query,
                 key_cache=key_cache,
                 value_cache=value_cache,
-                page_size=key_cache.shape[1],
-                b_start_loc=cu_seqlens_q[:batch],
-                b_seq_len=cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch],
+                page_size=page_size,
+                b_start_loc=b_start_loc,
+                b_seq_len=b_seq_len,
                 seq_lens=seq_lens,
-                block_table=attn_metadata._modelopt_block_table,
-                num_actual_tokens=attn_metadata._modelopt_num_actual_tokens,
+                block_table=block_table,
+                num_actual_tokens=num_actual_tokens,
+                max_query_len=max_query_len,
+                max_seq_len=attn_metadata._modelopt_max_seq_len,
+                is_decode_only=is_decode_only,
+                is_causal=not is_decode_only,
                 output=output,
+                dense_fallback=dense,
             )
 
     _FLASHINFER_IMPL_CLS = ModelOptSparseFlashInferImpl
     return _FLASHINFER_IMPL_CLS
+
+
+def select_sparse_impl_cls(impl) -> type | None:
+    """Return the ModelOpt sparse impl class for a vLLM attention impl's backend.
+
+    ``None`` if ``impl`` is already a ModelOpt sparse impl or its backend is
+    unsupported. For FlashInfer it also installs the metadata-builder patch that
+    exposes the dense paged metadata the Triton kernel needs. Used by both the
+    serving and calibration workers to swap the right impl per attention layer.
+    """
+    if isinstance(impl, _SparseCalibrationMixin):
+        return None  # already swapped (idempotent across reloads)
+    name = type(impl).__name__
+    if name == "FlashAttentionImpl":
+        return ModelOptSparseAttentionImpl
+    if name == "FlashInferImpl":
+        return get_flashinfer_sparse_impl_cls() if patch_flashinfer_metadata_builder() else None
+    return None
 
 
 # ---------------------------------------------------------------------------

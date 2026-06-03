@@ -653,6 +653,74 @@ class TestModelOptSparseFlashInferCalibration:
         torch.testing.assert_close(out_fi, out_fa, rtol=5e-3, atol=5e-3)
         assert collect_calibration_stats([fi_impl]) == collect_calibration_stats([fa_impl])
 
+    def test_sparse_inference_matches_flashattention(self):
+        """FlashInfer sparse *serving* output equals the FlashAttention path.
+
+        Not calibrating: with ``sparse_kw`` set, the FlashInfer impl runs the
+        ModelOpt sparse Triton kernel over its ``[num_blocks, 2, page, ...]``
+        cache and must produce the same output as ``ModelOptSparseAttentionImpl``
+        on the same logical K/V.
+        """
+        batch, seq_len = 2, 64
+        num_heads, num_kv_heads, head_dim, page_size = 4, 2, 64, 16
+        total = batch * seq_len
+        dtype = torch.float16
+
+        torch.manual_seed(0)
+        q = torch.randn(total, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        seq_lens = torch.tensor([seq_len, seq_len], device="cuda", dtype=torch.int32)
+        qsl = torch.tensor([0, seq_len, total], device="cuda", dtype=torch.int32)
+        fa_kv, block_table = _make_paged_cache(
+            k, v, qsl[:batch], seq_lens, num_kv_heads, head_dim, page_size
+        )
+
+        # FlashAttention sparse inference (reference, already == contiguous Triton).
+        fa = _make_impl(num_heads, head_dim, num_kv_heads)
+        fa.sparse_kw = _ACTIVE_PREFILL_SPARSE_KW
+        out_fa = torch.empty_like(q)
+        fa.forward(
+            layer=None,
+            query=q,
+            key=k,
+            value=v,
+            kv_cache=fa_kv,
+            attn_metadata=SimpleNamespace(
+                num_actual_tokens=total,
+                max_query_len=seq_len,
+                max_seq_len=seq_len,
+                query_start_loc=qsl,
+                seq_lens=seq_lens,
+                block_table=block_table,
+            ),
+            output=out_fa,
+        )
+
+        # FlashInfer sparse inference (not calibrating; sparse_kw active).
+        fi = _make_flashinfer_impl(num_heads, head_dim, num_kv_heads)
+        fi.sparse_kw = _ACTIVE_PREFILL_SPARSE_KW
+        out_fi = torch.empty_like(q)
+        fi.forward(
+            layer=None,
+            query=q,
+            key=k,
+            value=v,
+            kv_cache=self._to_flashinfer_cache(fa_kv),
+            attn_metadata=SimpleNamespace(
+                use_cascade=False,
+                _modelopt_block_table=block_table,
+                _modelopt_seq_lens=seq_lens,
+                _modelopt_query_start_loc=qsl,
+                _modelopt_num_actual_tokens=total,
+                _modelopt_max_query_len=seq_len,
+                _modelopt_max_seq_len=seq_len,
+            ),
+            output=out_fi,
+        )
+
+        torch.testing.assert_close(out_fi, out_fa, rtol=5e-3, atol=5e-3)
+
     def test_decode_records_decode_phase(self):
         """FlashInfer decode (seq_q=1, long cache) yields a decode record."""
         seq_k = 2048
