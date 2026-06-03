@@ -41,6 +41,7 @@ from .config import (
     LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
+    NVFP4ActMaxCalibConfig,
     QuantizeAlgoCfgType,
     QuantizeAlgorithmConfig,
     QuantizeConfig,
@@ -64,6 +65,7 @@ from .model_calib import (
     local_hessian_calibrate,
     max_calibrate,
     mse_calibrate,
+    nvfp4_act_max_calibrate,
     smoothquant,
     svdquant,
 )
@@ -418,6 +420,23 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MaxCalibConfig
 
     _calib_func = max_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class NVFP4ActMaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for the ``nvfp4_act_max`` calibration algorithm.
+
+    Max calibration for weights; the B_min-anchored global-scale recipe for NVFP4
+    activation quantizers (see
+    :class:`NVFP4ActMaxCalibConfig <modelopt.torch.quantization.config.NVFP4ActMaxCalibConfig>`).
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return NVFP4ActMaxCalibConfig
+
+    _calib_func = nvfp4_act_max_calibrate
 
 
 @CalibrateModeRegistry.register_mode

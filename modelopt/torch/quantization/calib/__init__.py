@@ -24,3 +24,4 @@ from .calibrator import *
 from .histogram import *
 from .max import *
 from .mse import *
+from .nvfp4_act_max import *
