@@ -63,6 +63,12 @@ class VLLMModel(Model):
                 "method": "mtp",
                 "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
             }
+        elif kwargs.get("speculative_algorithm") == "DFLASH":
+            specdec = {
+                "method": "dflash",
+                "model": kwargs.get("draft_model_dir"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
+            }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
 
@@ -83,6 +89,7 @@ class VLLMModel(Model):
             async_scheduling=kwargs.get("async_scheduling", True),
             enforce_eager=False,
         )
+        self.engine_args = engine_args
         self.model = AsyncLLM.from_engine_args(engine_args)
         self.sampling_kwargs = sampling_kwargs
         # https://github.com/vllm-project/vllm/blob/main/vllm/sampling_params.py
@@ -144,6 +151,25 @@ class VLLMModel(Model):
             if output.finished:
                 break
         return outputs, timing, full_tokens
+
+    def get_serving_config(self):
+        """Dump the AsyncEngineArgs dataclass plus the runtime vllm_config when available."""
+        try:
+            import dataclasses
+
+            cfg = dataclasses.asdict(self.engine_args)
+        except Exception:
+            cfg = {}
+        # vllm exposes the resolved engine config on the AsyncLLM instance once
+        # initialized — capture max_model_len / kv cache / dtype defaults that
+        # don't appear in AsyncEngineArgs.
+        try:
+            vllm_config = getattr(self.model, "vllm_config", None)
+            if vllm_config is not None and hasattr(vllm_config, "to_dict"):
+                cfg["vllm_config"] = vllm_config.to_dict()
+        except Exception:
+            pass
+        return cfg
 
     def stop(self):
         try:

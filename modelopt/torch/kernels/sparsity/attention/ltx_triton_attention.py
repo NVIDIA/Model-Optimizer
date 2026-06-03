@@ -41,7 +41,6 @@ def set_ltx_triton_context(
     calibration_mode: bool = False,
     threshold_trials: list[float] | None = None,
     scale_factor: float | None = None,
-    raw_threshold: float | None = None,
     **kwargs,
 ) -> None:
     """Set thread-local Triton config for LTX-2 attention."""
@@ -50,7 +49,6 @@ def set_ltx_triton_context(
     _thread_local.calibration_mode = calibration_mode
     _thread_local.threshold_trials = threshold_trials
     _thread_local.scale_factor = scale_factor
-    _thread_local.raw_threshold = raw_threshold
     if not calibration_mode:
         _thread_local.calibration_counters = None
     _thread_local.calibration_seq_k = None
@@ -63,7 +61,6 @@ def clear_ltx_triton_context() -> None:
     _thread_local.calibration_mode = False
     _thread_local.threshold_trials = None
     _thread_local.scale_factor = None
-    _thread_local.raw_threshold = None
     _thread_local.calibration_counters = None
     _thread_local.calibration_seq_k = None
 
@@ -145,12 +142,9 @@ def _ltx_triton_attention(
 
             return o.view(b, seq_q, heads * dim_head)
 
-    # --- Inference mode: raw, dynamic, or static threshold ---
-    raw_thresh = getattr(_thread_local, "raw_threshold", None)
+    # --- Inference mode: dynamic or static threshold ---
     scale_factor = getattr(_thread_local, "scale_factor", None)
-    if raw_thresh is not None:
-        kw["skip_softmax_raw_threshold"] = raw_thresh
-    elif scale_factor is not None and scale_factor > 0.0:
+    if scale_factor is not None and scale_factor > 0.0:
         kw["skip_softmax_threshold"] = scale_factor / seq_k
     elif threshold is not None and threshold > 0.0:
         kw["skip_softmax_threshold"] = threshold

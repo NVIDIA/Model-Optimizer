@@ -23,5 +23,5 @@ with import_plugin("megatron"):
     from .megatron import *
     from .megatron_model_stats import *
 
-with import_plugin("transformers"):
-    from .transformers import *
+with import_plugin("megatron.bridge"):
+    from .mbridge import *

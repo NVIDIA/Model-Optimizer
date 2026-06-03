@@ -100,32 +100,48 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         default=2,
         title="N in N:M sparsity.",
         description=(
-            "Keep top-N of every M attention scores. Only used by triton_sparse_softmax. "
-            "Set to 0 to disable sparsity."
+            "Keep top-N of every M attention scores. Used by triton_sparse_softmax, "
+            "or exported for vLLM restore when export_sparse_softmax is True. Set to 0 "
+            "to disable sparsity."
         ),
     )
 
     sparsity_m: int = ModeloptField(
         default=4,
         title="M in N:M sparsity.",
-        description="Group size for N:M sparsity (4 or 8). Only used by triton_sparse_softmax.",
-    )
-
-    num_sink_tokens: int = ModeloptField(
-        default=0,
-        title="Number of sink tokens.",
         description=(
-            "KV positions before this index are kept dense (attention sinks). "
-            "Absolute token count. Only used by triton_sparse_softmax."
+            "Group size for N:M sparsity (4 or 8). Used by triton_sparse_softmax, "
+            "or exported for vLLM restore when export_sparse_softmax is True."
         ),
     )
 
-    dense_window_size: int = ModeloptField(
-        default=64,
-        title="Dense window size in tokens.",
+    dense_sink_tokens: int = ModeloptField(
+        default=0,
+        title="Dense sink tokens.",
         description=(
-            "Tokens near the query diagonal kept dense (local attention window). "
-            "Absolute token count. Default 64. Only used by triton_sparse_softmax."
+            "Number of leading KV tokens excluded from N:M sparsity and kept dense "
+            "(attention sinks). Used by triton_sparse_softmax, or exported for vLLM "
+            "restore when export_sparse_softmax is True."
+        ),
+    )
+
+    dense_recent_tokens: int = ModeloptField(
+        default=64,
+        title="Dense recent tokens.",
+        description=(
+            "Number of recent KV tokens excluded from N:M sparsity and kept dense. "
+            "Default 64. Used by triton_sparse_softmax, or exported for vLLM restore "
+            "when export_sparse_softmax is True."
+        ),
+    )
+
+    export_sparse_softmax: bool = ModeloptField(
+        default=False,
+        title="Export N:M sparse-softmax metadata.",
+        description=(
+            "If True, HF export records sparsity_n/sparsity_m metadata even when "
+            "the active sparse attention method is skip-softmax. This is used by "
+            "vLLM to restore combined skip-softmax plus N:M sparse softmax."
         ),
     )
 
@@ -136,17 +152,6 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
             "Tiles contributing less than this fraction are skipped entirely. "
             "Only used by triton_skip_softmax. Typical values: 1e-3 to 1e-1. "
             "Set to 0 to disable."
-        ),
-    )
-
-    skip_softmax_raw_threshold: float | None = ModeloptField(
-        default=None,
-        title="Raw skip-softmax threshold (skip_threshold_log2).",
-        description=(
-            "Raw value passed directly to the Triton kernel as skip_threshold_log2. "
-            "The kernel skips tiles where tile_row_max < row_max + raw_threshold. "
-            "Typical values are negative (e.g., -5.0). Takes precedence over "
-            "skip_softmax_threshold and calibration when set."
         ),
     )
 
@@ -186,20 +191,20 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
             raise ValueError(f"sparsity_n must be >= 0, got {v}")
         return v
 
-    @field_validator("num_sink_tokens")
+    @field_validator("dense_sink_tokens")
     @classmethod
-    def validate_num_sink_tokens(cls, v):
-        """Validate num_sink_tokens is non-negative."""
+    def validate_dense_sink_tokens(cls, v):
+        """Validate dense_sink_tokens is non-negative."""
         if v < 0:
-            raise ValueError(f"num_sink_tokens must be >= 0, got {v}")
+            raise ValueError(f"dense_sink_tokens must be >= 0, got {v}")
         return v
 
-    @field_validator("dense_window_size")
+    @field_validator("dense_recent_tokens")
     @classmethod
-    def validate_dense_window_size(cls, v):
-        """Validate dense_window_size is non-negative."""
+    def validate_dense_recent_tokens(cls, v):
+        """Validate dense_recent_tokens is non-negative."""
         if v < 0:
-            raise ValueError(f"dense_window_size must be >= 0, got {v}")
+            raise ValueError(f"dense_recent_tokens must be >= 0, got {v}")
         return v
 
     @field_validator("br", "bc")
@@ -678,9 +683,36 @@ SPARSE_SOFTMAX_DEFAULT = {
             "method": "triton_sparse_softmax",
             "sparsity_n": 2,
             "sparsity_m": 4,
-            "num_sink_tokens": 0,
-            "dense_window_size": 64,
+            "dense_sink_tokens": 0,
+            "dense_recent_tokens": 64,
             "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
+# Calibrated skip-softmax with 2:4 sparse-softmax metadata for vLLM restore.
+SKIP_SOFTMAX_CALIB_SPARSE24 = {
+    "sparse_cfg": {
+        "calibration": {
+            "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
+            "samples": 64,
+            "max_seqlen": 16384,
+            "chunk_size": 4096,
+        },
+        "*attn*": {
+            "method": "flash_skip_softmax",
+            "br": 128,
+            "bc": 128,
+            "backend": "pytorch",
+            "collect_stats": True,
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "dense_sink_tokens": 0,
+            "dense_recent_tokens": 64,
+            "export_sparse_softmax": True,
             "enable": True,
         },
         "default": {"enable": False},
@@ -704,6 +736,7 @@ SKIP_SOFTMAX_TRITON_DEFAULT = {
 
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
+    "SKIP_SOFTMAX_CALIB_SPARSE24",
     "SKIP_SOFTMAX_DEFAULT",
     "SKIP_SOFTMAX_TRITON_DEFAULT",
     "SPARSE_SOFTMAX_DEFAULT",

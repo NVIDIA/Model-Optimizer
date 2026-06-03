@@ -1,0 +1,60 @@
+# EAGLE3 dry-run smoke test for Kimi-K2.5 (NVFP4).
+#
+# Single-task pipeline that exercises the full convert→save→export path WITHOUT
+# actually training. The launcher's `common/eagle3/train_eagle.sh` is unchanged —
+# all dry-run behaviour is expressed as dotlist overrides on `main.py`:
+#
+#   --dry_run                              → main.py skips trainer.train(), saves
+#                                            the (untrained) ModelOpt checkpoint
+#                                            right after mtsp.convert
+#   model.use_fake_base_for_offline=true   → load only embed_tokens + lm_head from
+#                                            the base model (FakeBaseModel); the
+#                                            ~1T MoE base weights are never read, so
+#                                            this fits on a single GPU
+#   model.trust_remote_code=true           → Kimi-K2.5 (deepseek_v3 arch) ships a
+#                                            custom modeling file
+#   data.offline_data_path=<placeholder>   → required to route into the
+#                                            FakeBaseModel path; contents are never
+#                                            read in --dry_run mode
+#
+# Useful for:
+#   - End-to-end smoke tests of the launcher / Docker / Slurm plumbing
+#   - Validating downstream stacks (vLLM, TRT-LLM) can load ModelOpt-exported
+#     EAGLE3 checkpoints without paying for a real training run
+#   - Fast local iteration when only the export structure matters, not draft
+#     accuracy
+#
+# The exported checkpoint at /scratchspace/export has the correct EAGLE3
+# architecture (layer shapes, lm_head, config.json) but untrained draft-head
+# weights — its acceptance rate will be ~0%, by design.
+#
+# Usage:
+#   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_eagle3_dryrun.yaml --yes
+
+job_name: Kimi-K2.5_EAGLE3_dryrun
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4
+
+  # Convert → save → export (no training).
+  task_0:
+    script: common/eagle3/train_eagle.sh
+    args:
+      - --dry_run
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - model.trust_remote_code=true
+      - data.offline_data_path=/tmp/dryrun-placeholder
+      - training.output_dir=/scratchspace/eagle3
+      - training.disable_tqdm=true
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10

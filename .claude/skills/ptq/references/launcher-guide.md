@@ -31,6 +31,20 @@ pipeline:
       gpus_per_node: <num_gpus>
 ```
 
+> **Match `gpus_per_node` to the cluster's node GPU count / QOS minimum.** If it
+> is below what the QOS requires (many clusters mandate a full node), `sbatch`
+> rejects the job with `QOSMinGRES` or `Requested node configuration is not
+> available`. e.g. GB300 nodes have 4 GPUs and require the full node → set
+> `gpus_per_node: 4`; B300/B200 nodes have 8. Check with `sinfo -o '%P %G'`.
+
+> **`EXTRA_PIP_DEPS` must avoid shell metacharacters.** It is written into an
+> unquoted `export` in the generated sbatch script, so a value like
+> `transformers>=4.57,<4.58` is mangled by shell redirection (`>`/`<`) and
+> silently dropped — the deps never install. Use exact `==` pins (no `>`/`<`).
+> The right version is **model-specific** — a brand-new architecture may need a
+> newer transformers than the repo's library pin (e.g. Qwen3.5's `qwen3_5` needs
+> `EXTRA_PIP_DEPS: "transformers==5.5.0"`); pick what the target model requires.
+
 Extra `hf_ptq.py` flags can be passed via `args`:
 
 ```yaml

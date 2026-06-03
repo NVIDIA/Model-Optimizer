@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Composed PTQ recipe for expert-only dynamic NVFP4 quantization with FP8 KV-cache quantization.
+
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -21,7 +23,9 @@ imports:
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 static weight and dynamic activation for expert layers only (W4A4), FP8 KV cache, max layerwise calibration.
+  description: >-
+    Applies dynamic NVFP4 only to expert-layer weight and input quantizers, plus FP8 KV-cache
+    quantization; uses max calibration.
 quantize:
   algorithm:
     method: max

@@ -43,7 +43,7 @@ logger = logging.get_logger(__name__)
 
 @dataclass
 class QuantizationArguments:
-    quant_cfg: str | None = None
+    recipe: str | None = None
     calib_size: int = 512
     compress: bool = False
 
@@ -192,8 +192,8 @@ def create_patch_module(quant_args=None, distill_args=None):
     into LLaMA-Factory's training pipeline without modifying the original code.
 
     Args:
-        quant_args: SimpleNamespace containing quantization parameters
-        distill_args: SimpleNamespace containing distillation parameters
+        quant_args: QuantizationArguments containing quantization parameters
+        distill_args: DistillationArguments containing distillation parameters
 
     Returns:
         function: Patch function that modifies the trainer class

@@ -67,6 +67,7 @@ def _make_data_args(sample_size, tmp_path, n_files=5):
     for i in range(n_files):
         torch.save({}, tmp_path / f"sample_{i}.pt")
     return argparse.Namespace(
+        mode="offline",
         vlm_processor=None,
         vlm_img_dir=None,
         offline_data_path=str(tmp_path),
@@ -110,6 +111,7 @@ def test_sample_size_larger_than_dataset_uses_all(tmp_path):
 def test_sample_size_no_pt_files_raises(tmp_path):
     """Empty directory should raise ValueError."""
     data_args = argparse.Namespace(
+        mode="offline",
         vlm_processor=None,
         vlm_img_dir=None,
         offline_data_path=str(tmp_path),

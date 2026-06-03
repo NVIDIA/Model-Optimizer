@@ -72,7 +72,7 @@ def test_rule_based_config():
         assert config[lin_name] == lin_expected_value
         assert config[lin_alias] == lin_expected_value
         assert getattr(config, lin_name) == lin_expected_value
-        with nullcontext() if is_new_registered else pytest.raises(AttributeError):
+        with nullcontext() if is_new_registered else pytest.raises(KeyError):
             config[new_name]
 
         # get

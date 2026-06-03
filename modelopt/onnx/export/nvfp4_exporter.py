@@ -39,6 +39,10 @@ def _cast_fp4(array: np.ndarray) -> np.ndarray:
 
     Note: The first dimension of the array must be divisible by 2
     as two FP4 values are packed into a single byte.
+
+    Also reused by the deprecated ``modelopt.onnx.quantization.qdq_utils.fp4qdq_to_2dq``
+    compatibility shim. Do not rename or change the signature without updating that
+    shim (it is a load-bearing re-export for TensorRT-Edge-LLM 0.6.1).
     """
     array_f32_t = torch.from_numpy(array)
     array_f32_t_shape = array_f32_t.shape
@@ -75,6 +79,10 @@ def _replace_fp4qdq_with_2dq(
     block_size: int,
 ):
     """Replaces the given node in the ONNX graph with a subgraph consisting of two DequantizeLinear nodes.
+
+    Also reused by the deprecated ``modelopt.onnx.quantization.qdq_utils.fp4qdq_to_2dq``
+    compatibility shim. Do not rename or change the signature without updating that
+    shim (it is a load-bearing re-export for TensorRT-Edge-LLM 0.6.1).
 
     Args:
         graph: The ONNX graph containing the node to replace.

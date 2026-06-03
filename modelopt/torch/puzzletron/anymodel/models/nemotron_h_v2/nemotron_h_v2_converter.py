@@ -66,6 +66,7 @@ class NemotronHV2Converter(Converter):
                             num_local_experts=config.n_routed_experts,
                             expert_intermediate_dim=config.moe_intermediate_size,
                             num_experts_per_tok=config.num_experts_per_tok,
+                            shared_expert_intermediate_dim=config.moe_shared_expert_intermediate_size,
                         )
                     ),
                 )

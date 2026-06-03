@@ -18,6 +18,7 @@
 import copy
 import json
 import os
+import random
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -31,6 +32,11 @@ from tqdm import tqdm
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
+
+
+def _join_messages_content(sample: dict) -> str:
+    return "\n".join(turn["content"] for turn in sample["messages"])
+
 
 # Use dict to store the config for each dataset.
 # If we want to export more options to user like target languages, we need more standardized approach like dataclass.
@@ -61,7 +67,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Post-Training-Dataset-v2",
             "split": ["stem", "chat", "math", "code"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "nemotron-post-training-dataset-v1": {
@@ -69,7 +75,93 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-Post-Training-Dataset-v1",
             "split": ["stem", "chat", "math", "code", "tool_calling"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-instruction-following-chat-v2": {
+        # Skips ``reasoning_on`` split: heterogeneous messages schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Instruction-Following-Chat-v2",
+            "split": ["reasoning_off"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-science-v1": {
+        "config": {
+            "path": "nvidia/Nemotron-Science-v1",
+            "split": ["MCQ", "RQA"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-competitive-programming-v1": {
+        # Skips ``infinibyte_part0[0|1]``: heterogeneous schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-Competitive-Programming-v1",
+            "split": [
+                "competitive_coding_cpp_part00",
+                "competitive_coding_cpp_part01",
+                "competitive_coding_python_part00",
+                "competitive_coding_python_part01",
+            ],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-agentic-v2": {
+        # Only ``search`` streams cleanly: ``interactive_agent`` has a heterogeneous
+        # tools schema (string vs list) that breaks pyarrow JSON inference, and
+        # ``tool_calling`` contains at least one malformed JSON row in a later shard.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Agentic-v2",
+            "split": ["search"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-math-v2": {
+        "config": {
+            "path": "nvidia/Nemotron-Math-v2",
+            "split": ["high_part00", "high_part01", "high_part02", "medium", "low"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-swe-v2": {
+        # Skips ``openhands_swe`` split: heterogeneous schema fails streaming cast.
+        "config": {
+            "path": "nvidia/Nemotron-SFT-SWE-v2",
+            "split": ["agentless"],
+        },
+        "preprocess": _join_messages_content,
+        "chat_key": "messages",
+    },
+    "nemotron-sft-multilingual-v1": {
+        "config": {
+            "path": "nvidia/Nemotron-SFT-Multilingual-v1",
+            "split": [
+                "code_de",
+                "code_es",
+                "code_fr",
+                "code_it",
+                "code_ja",
+                "code_zh",
+                "math_de",
+                "math_es",
+                "math_fr",
+                "math_it",
+                "math_ja",
+                "math_zh",
+                "stem_de",
+                "stem_es",
+                "stem_fr",
+                "stem_it",
+                "stem_ja",
+                "stem_zh",
+            ],
+        },
+        "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
     "magpie": {
@@ -105,6 +197,42 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "preprocess": lambda sample: sample["text"],
     },
 }
+
+# Named groups of registered datasets, expanded in ``get_dataset_dataloader``.
+# Useful when callers want a single ``--dataset`` token that fans out to several
+# entries; per-dataset ``num_samples`` is split evenly across the members.
+DATASET_COMBOS: dict[str, list[str]] = {
+    "cnn_nemotron_v2_mix": ["cnn_dailymail", "nemotron-post-training-dataset-v2"],
+    "nemotron-post-training-v3": [
+        "nemotron-sft-instruction-following-chat-v2",
+        "nemotron-science-v1",
+        "nemotron-competitive-programming-v1",
+        "nemotron-sft-agentic-v2",
+        "nemotron-math-v2",
+        "nemotron-sft-swe-v2",
+        "nemotron-sft-multilingual-v1",
+    ],
+}
+
+
+def _validate_dataset_combos() -> None:
+    """Validate DATASET_COMBOS at import time: fail loud on typos / collisions."""
+    overlap = set(DATASET_COMBOS) & set(SUPPORTED_DATASET_CONFIG)
+    if overlap:
+        raise ValueError(
+            f"DATASET_COMBOS keys collide with SUPPORTED_DATASET_CONFIG: {sorted(overlap)}"
+        )
+    for combo_name, members in DATASET_COMBOS.items():
+        if not members:
+            raise ValueError(f"DATASET_COMBOS['{combo_name}'] must contain at least one dataset.")
+        unknown = [m for m in members if m not in SUPPORTED_DATASET_CONFIG]
+        if unknown:
+            raise ValueError(
+                f"DATASET_COMBOS['{combo_name}'] references unknown datasets: {unknown}"
+            )
+
+
+_validate_dataset_combos()
 
 __all__ = [
     "create_forward_loop",
@@ -178,7 +306,11 @@ def _auto_preprocess_sample(
         ValueError: If the tokenizer is missing/incompatible for chat-format datasets,
             or if no recognized column is found.
     """
-    chat_key = next((k for k in ("messages", "conversations") if sample.get(k)), None)
+
+    def _has_non_null_value(key: str) -> bool:
+        return sample.get(key) is not None
+
+    chat_key = next((k for k in ("messages", "conversations") if _has_non_null_value(k)), None)
     if chat_key is not None:
         if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
             raise ValueError(
@@ -187,21 +319,23 @@ def _auto_preprocess_sample(
             )
         kwargs: dict[str, Any] = {}
         tools = sample.get("tools")
-        if tools:
+        if tools is not None:
             kwargs["tools"] = tools
         return tokenizer.apply_chat_template(sample[chat_key], tokenize=False, **kwargs)
 
-    if "prompt" in sample:
+    if _has_non_null_value("prompt"):
         parts = [sample["prompt"]]
-        parts.extend(sample[k] for k in ("completion", "response", "output") if sample.get(k))
+        parts.extend(
+            sample[k] for k in ("completion", "response", "output") if _has_non_null_value(k)
+        )
         return "\n".join(parts)
 
-    if "text" in sample:
+    if _has_non_null_value("text"):
         return sample["text"]
 
-    if "input" in sample:
+    if _has_non_null_value("input"):
         parts = [sample["input"]]
-        if sample.get("output"):
+        if _has_non_null_value("output"):
             parts.append(sample["output"])
         return "\n".join(parts)
 
@@ -231,6 +365,15 @@ def get_dataset_samples(
             or a path to a ``.jsonl`` file.  For local directory paths, the
             predefined config from ``SUPPORTED_DATASET_CONFIG`` is matched if the base folder name
             matches a registered key (e.g. ``/hf-local/abisee/cnn_dailymail`` matches ``cnn_dailymail`` key).
+            For ``.jsonl`` paths, the file is first loaded via HuggingFace's ``json``
+            builder and routed through the same auto-preprocess path as unregistered HF
+            datasets so chat / prompt / text columns are handled consistently with live
+            HF datasets.  If that path fails on JSON parsing or PyArrow schema
+            unification, it falls back to a line-by-line reader that extracts the
+            legacy ``text`` field for backward compatibility.  The fallback is also
+            used when the optional ``datasets`` package isn't installed, preserving
+            legacy plain-``.jsonl`` workflows in base installations.  Local JSONL
+            files only expose the ``train`` split; passing any other ``split`` raises.
         num_samples: Number of samples to load from the dataset.
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).  For unregistered datasets with a
@@ -245,25 +388,60 @@ def get_dataset_samples(
     Returns:
         Samples: The list of samples.
     """
-    # Local JSONL file path support (each line is a JSON object with a `text` field).
-    if dataset_name.endswith(".jsonl"):
-        return get_jsonl_text_samples(dataset_name, num_samples, key="text")
+    if dataset_name in DATASET_COMBOS:
+        raise ValueError(
+            f"'{dataset_name}' is a DATASET_COMBOS entry, not a single dataset. "
+            "Use ``get_dataset_dataloader`` to expand combos, or pass one of "
+            f"its members: {DATASET_COMBOS[dataset_name]}"
+        )
 
-    from datasets import load_dataset
+    # Local JSONL: load via HF's ``json`` builder and route through the same
+    # auto-preprocess path as unregistered HF datasets so chat / prompt / text
+    # columns are handled consistently with a downloaded HF dataset.  Never
+    # matches ``SUPPORTED_DATASET_CONFIG``.
+    is_jsonl = dataset_name.endswith(".jsonl") and os.path.isfile(dataset_name)
+    requested_splits = _normalize_splits(split) if split is not None else None
+    if requested_splits is not None and not requested_splits:
+        raise ValueError("``split`` must contain at least one split name.")
+
+    # HF's file-based builders only expose ``train`` for the ``data_files`` form
+    # we use, so any other split is a caller error.  Surface it up front rather
+    # than letting ``load_dataset`` fail and silently dropping into the
+    # text-field fallback (which would ignore the requested split).
+    if is_jsonl and requested_splits is not None:
+        invalid = [s for s in requested_splits if s != "train"]
+        if invalid:
+            raise ValueError(
+                f"Local JSONL files only expose the 'train' split, got {invalid}. "
+                "Either omit ``split`` or pass ``split='train'``."
+            )
+
+    # Lazy ``datasets`` import: legacy ``.jsonl`` workflows historically didn't
+    # require the optional ``datasets`` extra, so keep them working with just
+    # the stdlib reader when the package isn't installed.
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        if is_jsonl:
+            return get_jsonl_text_samples(dataset_name, num_samples, key="text")
+        raise
 
     local_dataset_path = None
     if os.path.exists(dataset_name):  # Local path
         local_dataset_path = dataset_name
-        dataset_name = os.path.basename(os.path.normpath(local_dataset_path))
+        if not is_jsonl:
+            # Directory paths may match a registered key via their basename
+            # (e.g. /hf-local/abisee/cnn_dailymail -> cnn_dailymail).
+            dataset_name = os.path.basename(os.path.normpath(local_dataset_path))
 
-    is_registered = dataset_name in SUPPORTED_DATASET_CONFIG
+    is_registered = not is_jsonl and dataset_name in SUPPORTED_DATASET_CONFIG
 
     if is_registered:
         dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
         config = dataset_config["config"].copy()
         if local_dataset_path:
             config["path"] = local_dataset_path
-        splits = _normalize_splits(split) if split is not None else config.pop("split", [None])
+        splits = requested_splits if requested_splits is not None else config.pop("split", [None])
         if split is not None:
             config.pop("split", None)
 
@@ -280,7 +458,7 @@ def get_dataset_samples(
             if apply_chat_template and "chat_key" in dataset_config:
                 kwargs: dict[str, Any] = {}
                 tools = sample.get("tools")
-                if tools:
+                if tools is not None:
                     kwargs["tools"] = tools
                 return tokenizer.apply_chat_template(  # type: ignore[union-attr]
                     sample[dataset_config["chat_key"]], tokenize=False, **kwargs
@@ -292,29 +470,77 @@ def get_dataset_samples(
             f"Dataset '{dataset_name}' is not in SUPPORTED_DATASET_CONFIG. "
             "Auto-detecting format from column names."
         )
-        config = {"path": local_dataset_path or dataset_name}
-        splits = _normalize_splits(split) if split is not None else ["train"]
+        if is_jsonl:
+            config = {"path": "json", "data_files": local_dataset_path}
+        else:
+            config = {"path": local_dataset_path or dataset_name}
+        # HF's file-based builders (incl. ``json``) label a string/list ``data_files``
+        # as the ``train`` split unconditionally — the filename on disk is ignored.
+        # Named splits require a dict ``data_files={"train": ..., "test": ...}``,
+        # which we don't expose here.
+        splits = requested_splits if requested_splits is not None else ["train"]
 
         def _preprocess(sample: dict) -> str:
             return _auto_preprocess_sample(sample, dataset_name, tokenizer)
 
+    if not splits:
+        raise ValueError("``split`` must contain at least one split name.")
+
+    # Narrow the legacy fallback to JSON-parsing / Arrow schema failures.  Any
+    # other error (split-not-found, IO, OOM, ...) should surface to the caller
+    # rather than be hidden by the text-field reader.  Imported lazily because
+    # the exact module paths vary across versions; an empty tuple is a valid
+    # ``except`` target that catches nothing if neither is importable.
+    fallback_types: tuple[type[BaseException], ...] = ()
+    try:
+        from datasets.exceptions import DatasetGenerationError
+
+        fallback_types += (DatasetGenerationError,)
+    except ImportError:
+        pass
+    try:
+        from pyarrow.lib import ArrowInvalid
+
+        fallback_types += (ArrowInvalid,)
+    except ImportError:
+        pass
+
     # load_dataset does not support a list of splits while streaming, so load each separately.
     print(f"Loading dataset with {config=} and {splits=}")
-    dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
+    try:
+        dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
 
-    num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
-    num_per_split[-1] += num_samples - sum(num_per_split)
+        num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+        num_per_split[-1] += num_samples - sum(num_per_split)
 
-    samples: list[str] = []
-    for dataset, n in zip(dataset_splits, num_per_split):
-        for i, sample in enumerate(dataset):
-            if i >= n:
-                break
-            text = _preprocess(sample)
-            if text:
-                samples.append(text)
+        samples: list[str] = []
+        for dataset, n in zip(dataset_splits, num_per_split):
+            for i, sample in enumerate(dataset):
+                if i >= n:
+                    break
+                text = _preprocess(sample)
+                if text:
+                    samples.append(text)
 
-    return samples
+        return samples
+    except fallback_types as e:
+        # Backward-compat fallback: legacy callers passed JSONL files whose only usable
+        # field is ``text``.  If the HF ``json`` builder fails on schema inference or
+        # JSON parsing, fall back to a line-by-line reader that pulls ``text`` directly.
+        if not is_jsonl:
+            raise
+        assert local_dataset_path is not None  # is_jsonl implies the path exists
+        try:
+            fallback_samples = get_jsonl_text_samples(local_dataset_path, num_samples, key="text")
+        except Exception:
+            # Fallback can't help either — surface the original HF error.
+            raise e from None
+        safe_name = Path(local_dataset_path).name
+        warn(
+            f"Failed to load JSONL file '{safe_name}' via the HF 'json' builder "
+            f"({type(e).__name__}); fell back to legacy text-field reader."
+        )
+        return fallback_samples
 
 
 class _CustomDataset(torch.utils.data.Dataset):
@@ -332,29 +558,106 @@ class _CustomDataset(torch.utils.data.Dataset):
         return len(next(iter(self.encodings.values())))
 
 
+def _pack_documents_into_rows(
+    samples: list[str], tokenizer: "PreTrainedTokenizerBase", seq_length: int, num_rows: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Global-stream document packing (Megatron-LM pretraining style).
+
+    Concatenate all raw samples into one EOS-separated token stream, then slice
+    the stream into uniform-length rows. Rows can (and usually do) start mid-doc —
+    this matches the distribution Megatron's blended-dataset pretraining uses with
+    ``.bin``/``.idx`` files, so the trained model has seen this pattern extensively.
+
+    Returns ``(input_ids, attention_mask)`` tensors of shape ``(num_rows, seq_length)``.
+    Non-final rows are fully real tokens (mask=1 throughout). The final partial row
+    (when the stream runs out before reaching ``num_rows``) has mask=1 over the real
+    tail and mask=0 over trailing pad.
+    """
+    eos_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id
+    has_eos_sep = eos_id is not None
+    token_stream: list[int] = []
+    for s in samples:
+        token_stream.extend(tokenizer.encode(s, add_special_tokens=False))
+        if has_eos_sep:
+            token_stream.append(eos_id)
+        if len(token_stream) >= num_rows * seq_length:
+            break
+
+    n_full = min(num_rows, len(token_stream) // seq_length)
+    rows_ids: list[list[int]] = [
+        token_stream[i * seq_length : (i + 1) * seq_length] for i in range(n_full)
+    ]
+    rows_masks: list[list[int]] = [[1] * seq_length for _ in range(n_full)]
+    # Trailing partial row (if any remain in the num_rows budget).
+    if n_full < num_rows and len(token_stream) > n_full * seq_length:
+        tail = token_stream[n_full * seq_length :]
+        real_len = len(tail)
+        tail.extend([pad_id] * (seq_length - real_len))
+        rows_ids.append(tail)
+        rows_masks.append([1] * real_len + [0] * (seq_length - real_len))
+
+    return (
+        torch.tensor(rows_ids, dtype=torch.long),
+        torch.tensor(rows_masks, dtype=torch.long),
+    )
+
+
+def get_dataloader_from_dataset(
+    dataset,
+    batch_size: int = 1,
+    distributed: bool = False,
+    sampler_kwargs: dict | None = None,
+    shuffle: bool = False,
+) -> DataLoader:
+    """Wrap a pre-tokenized torch Dataset in a DataLoader, with optional DistributedSampler."""
+    if distributed:
+        from torch.utils.data.distributed import DistributedSampler
+
+        sampler = DistributedSampler(dataset, **(sampler_kwargs or {}))
+        return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
 def get_dataset_dataloader(
     dataset_name: str | list[str] = "cnn_dailymail",
     tokenizer: "PreTrainedTokenizerBase | None" = None,
     batch_size: int = 1,
     num_samples: int | list[int] = 512,
     max_sample_length: int = 512,
-    device: torch.device | None = None,
+    device: torch.device | str | None = None,
     include_labels: bool = False,
     apply_chat_template: bool = False,
+    pack: bool = False,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
     Args:
-        dataset_name: Name of the dataset to load, or a path to a ``.jsonl`` file.
-            If a ``.jsonl`` file is provided, each line must be a JSON object with a ``text`` field.
+        dataset_name: Name of the dataset to load, a path to a ``.jsonl`` file, or a list
+            mixing the two. Each entry is loaded via :func:`get_dataset_samples` and the
+            resulting samples are concatenated before tokenization. ``num_samples`` may be
+            an ``int`` (applied to a single source) or a list aligned with ``dataset_name``.
         tokenizer: Instance of HuggingFace tokenizer.
         batch_size: Batch size of the returned dataloader.
-        num_samples: Number of samples from the dataset.
-        max_sample_length: Maximum length of a sample.
+        num_samples: Number of samples from the dataset (interpreted as number of *output
+            rows* in both ``pack=False`` and ``pack=True`` modes — in packed mode the
+            loader oversamples raw text 4x to ensure enough docs to fill all rows).
+        max_sample_length: Maximum length of a sample (or per-row length under ``pack=True``).
         device: Target device for the returned dataloader.
-        include_labels: Whether to include labels in the dataloader.
+        include_labels: Whether to include labels in the dataloader (ignored when
+            ``pack=True``).
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).
+        pack: If True, use global-stream document packing (Megatron-LM pretraining
+            style): all raw samples are concatenated into one EOS-separated token
+            stream and sliced into uniform-length rows. Rows can (and usually do)
+            start mid-document — this matches the distribution Megatron's blended
+            ``.bin``/``.idx`` pretraining uses, so the trained model has seen this
+            pattern extensively. Non-final rows are fully real tokens (no pad); only
+            the trailing partial row (when the stream runs out before reaching
+            ``num_samples`` rows) is padded. Default ``False`` for backwards-compatibility
+            with the prior one-doc-per-row tokenize-and-pad behavior; calibration
+            callers should pass ``True``.
 
     Returns:
         An instance of dataloader.
@@ -378,12 +681,73 @@ def get_dataset_dataloader(
         "dataset_name and num_samples must be the same length"
     )
 
+    # Reject inputs that include both a combo and one of its member datasets
+    # (e.g. ``["cnn_dailymail", "cnn_nemotron_v2_mix"]``), since the combo would sample the
+    # plain entry a second time with a smaller per-member quota.
+    plain_inputs = {n for n in dataset_name if n not in DATASET_COMBOS}
+    for ds_name in dataset_name:
+        if ds_name in DATASET_COMBOS:
+            overlap = plain_inputs & set(DATASET_COMBOS[ds_name])
+            if overlap:
+                raise ValueError(
+                    f"--dataset includes both combo '{ds_name}' and its "
+                    f"member(s) {sorted(overlap)}; remove one to avoid "
+                    "double-sampling."
+                )
+
+    expanded_names: list[str] = []
+    expanded_num_samples: list[int] = []
+    for ds_name, n in zip(dataset_name, num_samples):
+        if ds_name in DATASET_COMBOS:
+            members = DATASET_COMBOS[ds_name]
+            base, remainder = divmod(n, len(members))
+            for i, member in enumerate(members):
+                expanded_names.append(member)
+                expanded_num_samples.append(base + (1 if i < remainder else 0))
+        else:
+            expanded_names.append(ds_name)
+            expanded_num_samples.append(n)
+    dataset_name, num_samples = expanded_names, expanded_num_samples
+
+    # Sample count semantics:
+    # - pack=False: gather exactly `num_sample` raw docs per source, one per output row.
+    # - pack=True:  oversample 8x per source to ensure enough raw docs to fill all rows,
+    #               since each row greedily packs multiple docs.
+    sample_multiplier = 8 if pack else 1
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
         samples = get_dataset_samples(
-            ds_name, num_sample, apply_chat_template=apply_chat_template, tokenizer=tokenizer
+            ds_name,
+            num_sample * sample_multiplier,
+            apply_chat_template=apply_chat_template,
+            tokenizer=tokenizer,
         )
         all_samples.extend(samples)
+
+    # Multi-source pack=True without shuffling would consume all of oversampled source 1's docs
+    # before any of oversampled source 2 are reached
+    if pack and len(dataset_name) > 1:
+        random.Random(0).shuffle(all_samples)
+
+    if pack:
+        total_rows = sum(num_samples)
+        input_ids, attention_mask = _pack_documents_into_rows(
+            all_samples, tokenizer, max_sample_length, total_rows
+        )
+        if input_ids.shape[0] < total_rows:
+            warn(
+                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} "
+                f"requested — raw text exhausted before filling all rows (8x oversample "
+                f"of num_samples was insufficient). Increase `num_samples` or shorten "
+                f"`max_sample_length`."
+            )
+        if device:
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+        tokenized_dataset = _CustomDataset(
+            {"input_ids": input_ids, "attention_mask": attention_mask}
+        )
+        return DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
 
     batch_encoded = tokenizer(
         all_samples,
@@ -435,7 +799,7 @@ def get_supported_datasets() -> list[str]:
 
             print("Supported datasets:", get_supported_datasets())
     """
-    return list(SUPPORTED_DATASET_CONFIG.keys())
+    return list(SUPPORTED_DATASET_CONFIG.keys()) + list(DATASET_COMBOS.keys())
 
 
 @contextmanager

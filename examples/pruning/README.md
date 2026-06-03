@@ -9,7 +9,6 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 1. [Minitron](https://arxiv.org/pdf/2408.11796): A pruning method developed by NVIDIA Research for pruning GPT (and later extended to Mamba, MoE, and Hybrid Transformer Mamba) models in NVIDIA Megatron-LM (M-LM) or Megatron-Bridge (M-Bridge) framework. It uses the activation magnitudes to prune the embedding hidden size; mlp ffn hidden size; transformer attention heads; mamba heads and head dimension; MoE number of experts, ffn hidden size, and shared expert intermediate size; and number of layers of the model.
 1. [Puzzletron](../puzzletron/README.md): An advanced pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.
 1. FastNAS: A pruning method recommended for Computer Vision models. Given a pretrained model, FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
-1. GradNAS: A light-weight pruning method recommended for language models like Hugging Face BERT, GPT-J. It uses the gradient information to prune the model's linear layers and attention heads to meet the given constraints.
 
 <div align="center">
 
@@ -31,13 +30,11 @@ For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo cont
 
 For FastNAS pruning for PyTorch Computer Vision models, no additional dependencies are required.
 
-For GradNAS pruning for Hugging Face BERT / GPT-J, no additional dependencies are required.
-
 ## Getting Started
 
-As part of the pruning process, you will need to set up the training and/or validation data loaders, and optionally define a validation score function (Minitron, FastNAS) or loss function (GradNAS) and specify the desired pruning constraints (See [Support Matrix](#support-matrix) for available pruning constraints).
+As part of the pruning process, you will need to set up the training and/or validation data loaders, and optionally define a validation score function (Minitron, FastNAS) and specify the desired pruning constraints (See [Support Matrix](#support-matrix) for available pruning constraints).
 
-To prune your model, you can simply call the `mtp.prune` API and save the pruned model. If the model is pruned using Minitron, you can use your standard saving and loading functions since it is a homogeneous pruning; while for FastNAS or GradNAS, you need to use `mto.save` and `mto.restore` to save and restore the heterogeneous pruned model.
+To prune your model, you can simply call the `mtp.prune` API and save the pruned model. If the model is pruned using Minitron, you can use your standard saving and loading functions since it is a homogeneous pruning; while for FastNAS, you need to use `mto.save` and `mto.restore` to save and restore the heterogeneous pruned model.
 
 ### Minitron
 
@@ -53,9 +50,9 @@ Please see example snippets of both modes for Minitron pruning on Megatron-Bridg
 ```python
 import torch
 import modelopt.torch.prune as mtp
-from modelopt.torch.utils.plugins.mbridge import (
-    get_hf_mbridge_calibration_loop,
-    load_mbridge_model_from_hf,
+from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.megatron_calibration import (
+    get_megatron_calibration_forward_loop,
 )
 
 # Import the Megatron-Bridge Qwen3-8B model from Hugging Face checkpoint
@@ -70,13 +67,11 @@ bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf
 )
 
 # Set up the forward loop to run on 1024 train samples
-forward_loop = get_hf_mbridge_calibration_loop(
-    model=model,
-    provider=provider,
-    tokenizer=tokenizer,
-    hf_model_name_or_path="Qwen/Qwen3-8B",
+forward_loop = get_megatron_calibration_forward_loop(
+    tokenizer,
     dataset_name="nemotron-post-training-dataset-v2",
     num_samples=1024,
+    seq_length=4096,
 )
 
 # Run pruning on the unwrapped model
@@ -181,7 +176,6 @@ If your model parameters are already sorted and you just want to prune the weigh
 | :---: | :---: | :---: |
 | Minitron | Megatron-core (M-LM, M-Bridge) based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | **Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values<br>**Auto:** one or more of `params`, `active_params`, `memory_mb` (requires `score_func` in config) |
 | FastNAS | Computer Vision models | `flops`, `params` |
-| GradNAS | HuggingFace BERT, GPT-J | `flops`, `params` |
 
 > *<sup>1.</sup>Only models in Pipeline Parallelism (PP) are supported. Hugging Face models can be imported into M-Bridge/M-LM format as long as they are [supported](https://docs.nvidia.com/nemo/megatron-bridge/latest/index.html#supported-models) by the framework.*
 
@@ -217,12 +211,6 @@ You can also take a look at FastNAS pruning interactive notebook [cifar_resnet](
 which showcases the usage of FastNAS for pruning a ResNet 20 model for the CIFAR-10 dataset. The notebook
 also shows how to profile the model to understand the search space of possible pruning options and demonstrates
 how to save and restore pruned models.
-
-### GradNAS Pruning for HuggingFace Language Models (e.g. BERT)
-
-Checkout the BERT pruning example in [chained_optimizations](../chained_optimizations/README.md) directory
-which showcases the usage of GradNAS for pruning BERT model for Question Answering followed by fine-tuning
-with distillation and quantization. The example also demonstrates how to save and restore pruned models.
 
 ## Pruning Guidelines
 
@@ -306,7 +294,8 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 
 End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletron pruning:
 
-- **[Minitron — Nemotron-Nano-9B-v2](minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: End-to-end tutorial of structured pruning for Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Achieves near-parity with the official 9B model across popular pretraining and reasoning benchmarks.
+- **[Minitron — Nemotron-3-Nano-30B-A3B-BF16](minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md)** ⭐ *recommended — newer and most comprehensive*: End-to-end tutorial of structured pruning for Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B) to 22B/A3.0B active parameters followed by two-phase knowledge distillation (80B tokens @ 8K seq length + 20B tokens @ 32K seq length = 100B tokens total), quantization, and vLLM deployment. Covers MoE + Mamba-Transformer hybrid, tool-calling data, and a long-context fine-tuning phase. Achieves near-parity with the official 30B model across popular pretraining and reasoning benchmarks while delivering up to 1.64× throughput speedup and 2.6× memory reduction when combined with FP8 quantization.
+- **[Minitron — Nemotron-Nano-9B-v2](minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: Earlier end-to-end tutorial covering structured pruning of the dense Mamba-Transformer Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Simpler architecture, single-phase 8K seq length distillation, no tool-calling or long-context phase.
 - **[Puzzletron — Qwen3-8B and Llama-3.1-8B-Instruct](puzzletron/Llama-3.1-8B-Instruct.md)**: MIP-based compression followed by short distillation runs on WikiText-103. Shows MMLU recovery and illustrates the importance of using larger datasets to avoid overfitting.
 
 ## Resources

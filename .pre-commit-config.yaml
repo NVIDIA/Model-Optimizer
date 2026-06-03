@@ -103,14 +103,13 @@ repos:
               modelopt/torch/speculative/eagle/utils.py|
               modelopt/torch/speculative/plugins/hf_medusa.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
-              examples/chained_optimizations/bert_prune_distill_quantize.py|
               examples/deepseek/quantize_to_nvfp4.py|
               examples/deepseek/ptq.py|
               examples/diffusers/quantization/onnx_utils/export.py|
               examples/llm_eval/lm_eval_hf.py|
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
-              examples/llm_qat/main.py|
+              examples/llm_qat/train.py|
               examples/llm_sparsity/weight_sparsity/finetune.py|
               examples/specdec_bench/specdec_bench/models/specbench_medusa.py|
               examples/speculative_decoding/main.py|
@@ -137,6 +136,21 @@ repos:
       - id: bandit
         args: ["-c", "pyproject.toml", "-q"]
         additional_dependencies: ["bandit[toml]"]
+
+  - repo: local
+    hooks:
+      - id: generate-arguments-md
+        name: Regenerate examples/llm_qat/ARGUMENTS.md
+        entry: bash -c 'python examples/llm_qat/arguments.py --generate_docs examples/llm_qat/ARGUMENTS.md'
+        language: system
+        files: >-
+          (?x)^(
+            examples/llm_qat/arguments\.py|
+            modelopt/torch/distill/plugins/huggingface\.py|
+            modelopt/torch/opt/plugins/transformers\.py|
+            modelopt/torch/quantization/plugins/transformers_trainer\.py
+          )$
+        pass_filenames: false
 
   - repo: https://github.com/DavidAnson/markdownlint-cli2
     rev: v0.18.1

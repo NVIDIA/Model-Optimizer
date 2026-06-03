@@ -28,7 +28,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.export import export_hf_checkpoint
-from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_CALIB
+from modelopt.torch.sparsity.attention_sparsity.config import (
+    SKIP_SOFTMAX_CALIB,
+    SKIP_SOFTMAX_CALIB_SPARSE24,
+    SPARSE_SOFTMAX_DEFAULT,
+)
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
 RAND_SEED = 1234
@@ -39,6 +43,8 @@ mto.enable_huggingface_checkpointing()
 # Sparse attention configuration choices
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
+    "skip_softmax_calib_sparse24": SKIP_SOFTMAX_CALIB_SPARSE24,
+    "sparse_softmax": SPARSE_SOFTMAX_DEFAULT,
 }
 
 
@@ -172,6 +178,14 @@ def main(args):
             "prefill": args.target_sparse_ratio,
             "decode": args.target_sparse_ratio,
         }
+    calib = sparse_cfg.get("calibration")
+    if isinstance(calib, dict):
+        if args.calib_samples is not None:
+            calib["samples"] = args.calib_samples
+        if args.calib_max_seqlen is not None:
+            calib["max_seqlen"] = args.calib_max_seqlen
+        if args.calib_chunk_size is not None:
+            calib["chunk_size"] = args.calib_chunk_size
 
     model = mtsa.sparsify(model, config=sparse_config)
     print("Sparse attention applied successfully!")
@@ -269,6 +283,24 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Target sparsity ratio for calibration (0.0 to 1.0). Overrides config value.",
+    )
+    parser.add_argument(
+        "--calib_samples",
+        type=int,
+        default=None,
+        help="Number of RULER samples for calibration. Overrides config value.",
+    )
+    parser.add_argument(
+        "--calib_max_seqlen",
+        type=int,
+        default=None,
+        help="Maximum sequence length for calibration. Overrides config value.",
+    )
+    parser.add_argument(
+        "--calib_chunk_size",
+        type=int,
+        default=None,
+        help="Chunk size for calibration prefill. Overrides config value.",
     )
 
     args = parser.parse_args()

@@ -256,27 +256,51 @@ class TestQuantFusedExperts:
 # Tests for export
 # ---------------------------------------------------------------------------
 class TestExportFusedExperts:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
     def test_export_creates_per_expert_submodules(self):
         """_export_fused_experts should create per-expert submodules with standard naming."""
+        import modelopt.torch.quantization as mtq
         from modelopt.torch.export.moe_utils import _export_fused_experts
 
-        experts = _SyntheticFusedExperts()
-        expert_type = type(experts)
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
 
-        # Manually register and convert
-        if QuantModuleRegistry.get(expert_type) is None:
-            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
-                _QuantFusedExperts
-            )
-        converted = QuantModuleRegistry.convert(experts)
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
 
-        # Run a forward pass to calibrate (set amaxes)
-        seq_len = 16
-        hidden_states = torch.randn(seq_len, HIDDEN_DIM)
-        top_k_index = torch.randint(0, NUM_EXPERTS, (seq_len, TOP_K))
-        top_k_weights = torch.softmax(torch.randn(seq_len, TOP_K), dim=-1)
-        with torch.no_grad():
-            converted(hidden_states, top_k_index, top_k_weights)
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                x = torch.randn(1, 4, HIDDEN_DIM)
+                m(x)
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+        converted = model.moe.experts
 
         _export_fused_experts(converted, torch.float16)
 
@@ -297,8 +321,199 @@ class TestExportFusedExperts:
         assert not hasattr(converted, "down_proj")
         assert not hasattr(converted, "gate_up_proj_weight_quantizers")
 
-        if QuantModuleRegistry.get(expert_type) is not None:
-            QuantModuleRegistry.unregister(expert_type)
+        self._cleanup_registry(expert_type)
+
+    def test_uncalibrated_expert_gate_up_share_amax(self, monkeypatch):
+        """gate_proj and up_proj must share weight_scale_2 even when an expert
+        was never routed during calibration.
+
+        Regression for the bug where ``_export_fused_experts``'s per-projection
+        fallback computed amax independently from the gate and up halves of the
+        fused tensor — producing mismatched ``weight_scale_2`` values for any
+        uncalibrated expert. vLLM fuses W1 (gate) and W3 (up) at load time and
+        asserts a single shared scale; mismatched scales corrupted MoE output.
+        The fix derives the fallback amax once from the fused ``gate_up[idx]``
+        tensor before the deepcopies, so gate's clone and up's clone start with
+        the same amax.
+        """
+        from modelopt.torch.export.moe_utils import _export_fused_experts
+
+        # Build experts where gate and up have very different magnitudes —
+        # any per-half fallback would clearly produce different amaxes.
+        experts = _SyntheticFusedExperts()
+        gate = torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+        up = torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.20
+        with torch.no_grad():
+            experts.gate_up_proj.copy_(torch.cat([gate, up], dim=1))
+
+        expert_type = type(experts)
+        if QuantModuleRegistry.get(expert_type) is None:
+            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
+                _QuantFusedExperts
+            )
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+
+            # Leave every expert weight quantizer uncalibrated (no _amax).
+            # Mark them enabled to exercise the export-time fallback path.
+            for q in converted.gate_up_proj_weight_quantizers:
+                q._disabled = False
+            for q in converted.down_proj_weight_quantizers:
+                q._disabled = False
+
+            # Capture the amax each per-projection wrapper carries into the
+            # FP4 quantization step. Patching here avoids needing CUDA / FP4.
+            seen = {}  # (expert_idx, proj_name) -> amax tensor
+
+            def _spy_export(wrapper, dtype):
+                # Identify which expert/projection this wrapper belongs to by
+                # matching the weight tensor against the fused parameters.
+                w = wrapper.weight.data
+                # gate_up_proj is (N, 2*INTER, HIDDEN); split halves are
+                # contiguous .data views or .contiguous() copies — we can match
+                # by shape and value identity for this synthetic case.
+                amax = wrapper.weight_quantizer._amax.detach().clone()
+                # Identify by matching against gate vs. up slices of each expert.
+                for idx in range(NUM_EXPERTS):
+                    g_slice = converted.gate_up_proj.data[idx, :INTERMEDIATE_DIM, :]
+                    u_slice = converted.gate_up_proj.data[idx, INTERMEDIATE_DIM:, :]
+                    d_slice = converted.down_proj.data[idx]
+                    if w.shape == g_slice.shape and torch.equal(w, g_slice):
+                        seen[(idx, "gate_proj")] = amax
+                        return
+                    if w.shape == u_slice.shape and torch.equal(w, u_slice):
+                        seen[(idx, "up_proj")] = amax
+                        return
+                    if w.shape == d_slice.shape and torch.equal(w, d_slice):
+                        seen[(idx, "down_proj")] = amax
+                        return
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                _spy_export,
+            )
+
+            _export_fused_experts(converted, torch.float16)
+
+            # Assert: for every expert, gate's amax matches up's amax.
+            for idx in range(NUM_EXPERTS):
+                g_amax = seen.get((idx, "gate_proj"))
+                u_amax = seen.get((idx, "up_proj"))
+                assert g_amax is not None and u_amax is not None, (
+                    f"Expert {idx}: missing recorded amax (gate={g_amax}, up={u_amax})"
+                )
+                assert torch.allclose(g_amax, u_amax), (
+                    f"Expert {idx}: gate amax {g_amax.item()} != up amax {u_amax.item()}. "
+                    f"Uncalibrated fused experts must share gate/up amax so that "
+                    f"weight_scale_2 stays consistent across the fusion."
+                )
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
+    def test_per_block_amax_reshape_for_fused_export(self, monkeypatch):
+        """Per-block ``_amax`` (NVFP4 static, row axis collapsed) must be reshaped
+        before dim-0 slicing so gate's blocks and up's blocks are split correctly.
+
+        Regression for the bug where a flat per-block ``_amax`` of shape
+        ``(fused_total * blocks_per_row,)`` was sliced naively, producing wrong
+        per-projection scales. The fix reshapes to ``(fused_total, blocks_per_row)``
+        before slicing on dim-0 when ``amax.numel() % fused_total == 0``.
+        """
+        from modelopt.torch.export.moe_utils import _export_fused_experts
+
+        experts = _SyntheticFusedExperts()
+        expert_type = type(experts)
+        if QuantModuleRegistry.get(expert_type) is None:
+            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
+                _QuantFusedExperts
+            )
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+
+            # Per-block amax: 4 blocks per row. Distinct values per row so we can
+            # detect whether the reshape correctly preserves the row→block layout.
+            blocks_per_row = 4
+            fused_total = 2 * INTERMEDIATE_DIM  # gate_up rows
+            for idx in range(NUM_EXPERTS):
+                # Gate rows take values 1..INTERMEDIATE_DIM, up rows 101..101+INTERMEDIATE_DIM.
+                gate_amax = (
+                    torch.arange(1, INTERMEDIATE_DIM + 1).float().repeat_interleave(blocks_per_row)
+                )
+                up_amax = (
+                    torch.arange(101, 101 + INTERMEDIATE_DIM)
+                    .float()
+                    .repeat_interleave(blocks_per_row)
+                )
+                # Flat shape (fused_total * blocks_per_row,) — row axis collapsed.
+                flat = torch.cat([gate_amax, up_amax])
+                assert flat.numel() == fused_total * blocks_per_row
+
+                wq = converted.gate_up_proj_weight_quantizers[idx]
+                wq._disabled = False
+                wq.amax = flat
+
+                # down_proj quantizers also need to look calibrated (otherwise
+                # the export-time fallback would compute amax from each weight
+                # slice and we'd skip the new reshape branch). Set a 1-D per-row
+                # amax that matches dim-0 of down_proj (so amax.numel() == fused_total
+                # for down). That intentionally does NOT exercise the new branch
+                # for down — we only want to exercise it for gate_up.
+                dwq = converted.down_proj_weight_quantizers[idx]
+                dwq._disabled = False
+                dwq.amax = torch.ones(HIDDEN_DIM)
+
+            seen = {}
+
+            def _spy_export(wrapper, dtype):
+                w = wrapper.weight.data
+                wq = wrapper.weight_quantizer
+                amax = wq._amax.detach().clone() if hasattr(wq, "_amax") else None
+                for idx in range(NUM_EXPERTS):
+                    g_slice = converted.gate_up_proj.data[idx, :INTERMEDIATE_DIM, :]
+                    u_slice = converted.gate_up_proj.data[idx, INTERMEDIATE_DIM:, :]
+                    if w.shape == g_slice.shape and torch.equal(w, g_slice):
+                        seen[(idx, "gate_proj")] = amax
+                        return
+                    if w.shape == u_slice.shape and torch.equal(w, u_slice):
+                        seen[(idx, "up_proj")] = amax
+                        return
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                _spy_export,
+            )
+
+            _export_fused_experts(converted, torch.float16)
+
+            # gate's amax should contain values 1..INTERMEDIATE_DIM repeated
+            # blocks_per_row times, reshaped to (INTERMEDIATE_DIM, blocks_per_row);
+            # up's amax should contain 101..101+INTERMEDIATE_DIM same shape.
+            for idx in range(NUM_EXPERTS):
+                g_amax = seen.get((idx, "gate_proj"))
+                u_amax = seen.get((idx, "up_proj"))
+                assert g_amax is not None and u_amax is not None, (
+                    f"Expert {idx}: missing recorded amax"
+                )
+                assert g_amax.shape[0] == INTERMEDIATE_DIM, (
+                    f"Expert {idx} gate amax dim-0 should be {INTERMEDIATE_DIM} "
+                    f"after reshape+slice, got {g_amax.shape}"
+                )
+                assert u_amax.shape[0] == INTERMEDIATE_DIM, (
+                    f"Expert {idx} up amax dim-0 should be {INTERMEDIATE_DIM}, got {u_amax.shape}"
+                )
+                # First block of first row carries the marker value.
+                assert g_amax.flatten()[0].item() == 1.0, (
+                    f"Expert {idx} gate amax[0,0] should be 1.0 (gate row 0 marker), "
+                    f"got {g_amax.flatten()[0].item()} — reshape probably didn't restore row axis"
+                )
+                assert u_amax.flatten()[0].item() == 101.0, (
+                    f"Expert {idx} up amax[0,0] should be 101.0 (up row 0 marker), "
+                    f"got {u_amax.flatten()[0].item()} — slice probably didn't separate gate from up"
+                )
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +652,86 @@ class TestFusedExpertsCalibration:
             )
             assert experts.down_proj_weight_quantizers[idx].amax is not None, (
                 f"down_proj_weight_quantizers[{idx}].amax is None."
+            )
+
+        self._cleanup_registry(expert_type)
+
+    def test_max_calibrate_populates_dead_static_nvfp4_expert_quantizers(self):
+        """max calibration fills static NVFP4 ``_amax`` on experts the forward never routed to.
+
+        Regression for the dead-expert MSE skip: with partial routing during max
+        calibration, never-routed experts' weight quantizers stay with
+        ``_amax=None`` unless static NVFP4 finalization bootstraps them from the
+        per-expert weight slice.
+        """
+        import modelopt.torch.quantization as mtq
+
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    },
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    },
+                },
+            ],
+            "algorithm": "max",
+        }
+
+        # Forward loop that routes only to experts 0 and 1 (deterministic).
+        # Bypasses the router and calls experts directly with crafted indices.
+        live = {0, 1}
+        dead = {idx for idx in range(NUM_EXPERTS) if idx not in live}
+        assert dead, "Test requires at least one dead expert"
+
+        def partial_forward(m):
+            torch.manual_seed(0)
+            seq_len = 8
+            hidden = torch.randn(seq_len, HIDDEN_DIM)
+            top_k_index = torch.zeros(seq_len, TOP_K, dtype=torch.long)
+            top_k_index[:, 0] = 0
+            top_k_index[:, 1] = 1
+            top_k_weights = torch.ones(seq_len, TOP_K) / TOP_K
+            with torch.no_grad():
+                m.moe.experts(hidden, top_k_index, top_k_weights)
+
+        mtq.quantize(model, quant_cfg, forward_loop=partial_forward)
+
+        experts = model.moe.experts
+
+        # Static NVFP4 finalization in max_calibrate bootstraps every expert.
+        for idx in range(NUM_EXPERTS):
+            gu_q = experts.gate_up_proj_weight_quantizers[idx]
+            d_q = experts.down_proj_weight_quantizers[idx]
+            assert gu_q._amax is not None and not torch.all(gu_q._amax == 0), (
+                f"Expert {idx} gate_up_proj _amax not populated after max_calibrate"
+            )
+            assert d_q._amax is not None and not torch.all(d_q._amax == 0), (
+                f"Expert {idx} down_proj _amax not populated after max_calibrate"
+            )
+
+        # For dead experts, bootstrap reads blockwise max(|weight|). Sanity-check it
+        # matches the actual weight tensor's per-block max over hidden_dim.
+        for idx in dead:
+            expected = experts.gate_up_proj.data[idx].reshape(2 * INTERMEDIATE_DIM, 2, 16)
+            expected = expected.abs().amax(dim=2).flatten()
+            got = experts.gate_up_proj_weight_quantizers[idx]._amax.flatten()
+            assert torch.allclose(got, expected, atol=1e-4), (
+                f"Expert {idx} amax should equal blockwise max(|weight|); "
+                f"max diff {(got - expected).abs().max().item()}"
             )
 
         self._cleanup_registry(expert_type)

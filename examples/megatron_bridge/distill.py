@@ -51,12 +51,10 @@ from megatron.core.distributed import DistributedDataParallelConfig
 from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_args, print_rank_0
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
-
-SEED = 1234
 
 
 def _patched_to_cfg_dict(self):
@@ -114,9 +112,14 @@ def get_args():
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
-    parser.add_argument("--etp_size", type=int, default=1, help="Expert tensor parallel size")
 
     # Dataset arguments
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1234,
+        help="Random seed for data shuffling and RNG state",
+    )
     parser.add_argument(
         "--data_paths",
         nargs="+",
@@ -153,6 +156,34 @@ def get_args():
     parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
     parser.add_argument("--lr_warmup_iters", type=int, default=50, help="Number of LR warmup steps")
+    parser.add_argument(
+        "--recompute_granularity",
+        type=str,
+        default=None,
+        choices=["selective", "full"],
+        help="Activation recomputation: omit (off), 'selective' (attn only), 'full' (whole layers)",
+    )
+    parser.add_argument(
+        "--recompute_method",
+        type=str,
+        default=None,
+        choices=["uniform", "block"],
+        help="Activation recomputation method (only used when --recompute_granularity=full)",
+    )
+    parser.add_argument(
+        "--recompute_num_layers",
+        type=int,
+        default=None,
+        help="Number of layers per recomputation chunk (only used when --recompute_granularity=full)",
+    )
+    parser.add_argument(
+        "--recompute_modules",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Modules to recompute with --recompute_granularity=selective. Defaults to ['core_attn']. "
+        "Allowed: core_attn, mlp, moe, moe_act, layernorm, mla_up_proj, shared_experts.",
+    )
     parser.add_argument(
         "--eval_interval", type=int, default=100, help="Validate + checkpoint every <N> steps"
     )
@@ -193,10 +224,7 @@ def get_args():
     if args.hf_export_path and not args.student_hf_model:
         raise ValueError("Must provide --student_hf_model if --hf_export_path is provided.")
 
-    print_rank_0("\n==================== Arguments ====================")
-    for k, v in args.__dict__.items():
-        print_rank_0(f"{k:<35} {v}")
-    print_rank_0("===================================================\n")
+    print_args(args)
 
     return args
 
@@ -217,8 +245,14 @@ def main(args: argparse.Namespace):
         provider.pipeline_dtype = torch.bfloat16
         provider.context_parallel_size = args.cp_size
         provider.expert_model_parallel_size = args.ep_size
-        provider.expert_tensor_parallel_size = args.etp_size
+        provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
+        if args.recompute_granularity is not None:
+            provider.recompute_granularity = args.recompute_granularity
+            provider.recompute_method = args.recompute_method
+            provider.recompute_num_layers = args.recompute_num_layers
+            if args.recompute_modules is not None:
+                provider.recompute_modules = args.recompute_modules
         return provider
 
     # TODO: Support megatron-ckpt as an alternative to HF checkpoints (e.g. /path/to/ckpt/iter_0000000)
@@ -246,7 +280,7 @@ def main(args: argparse.Namespace):
     dataset_kwargs = {
         "seq_length": args.seq_length,
         "path_to_cache": args.data_path_to_cache,
-        "random_seed": SEED,
+        "random_seed": args.seed,
         "reset_attention_mask": False,
         "reset_position_ids": False,
         "eod_mask_loss": False,
@@ -305,10 +339,10 @@ def main(args: argparse.Namespace):
             load=checkpoint_dir,  # Resume from this directory (if exists)
             most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
-            async_save=True,
+            async_save=False,
             fully_parallel_save=True,
         ),
-        rng=RNGConfig(seed=SEED),
+        rng=RNGConfig(seed=args.seed),
         mixed_precision="bf16_mixed",
     )
 

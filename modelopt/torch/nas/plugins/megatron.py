@@ -79,6 +79,20 @@ try:
 except ImportError:
     HAS_MAMBA = False
 
+# Newer Megatron-LM instantiates Nemotron-H et al. as plain HybridModel (MambaModel split
+# out as a subclass). Register HybridModel so the dynamic-space converter sees them.
+# DMRegistry._get_registered_nn_class filters by `nn_cls.forward is nn_cls_.forward` and
+# returns the first match in insertion order: MambaModel is registered first, so
+# MambaModel instances dispatch to MambaModel whether or not MambaModel overrides forward.
+try:
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
+
+    SUPPORTED_MODELS[HybridModel] = "megatron.core.models.hybrid.HybridModel"
+
+    HAS_HYBRID = True
+except ImportError:
+    HAS_HYBRID = False
+
 __all__ = ["get_te_mamba_stack_spec"]
 
 
@@ -394,6 +408,9 @@ class _DynamicTEQKVLayerNormColumnParallelLinear(DynamicModule, TELayerNormColum
             lambda mod, val: (num_attention_heads.active + 2 * mod.config.num_query_groups)
             * mod.config.kv_channels,
         )
+        # in_features must track input_size so TE's forward-time inp_shape[-1] == in_features
+        # assertion holds when hidden_size is pruned.
+        self._register_dynamic_attribute("in_features", lambda mod, val: mod.input_size)
         self._register_dynamic_attribute("weight", self._get_weight)
         # TE stores a zero-length tensor (not None) when bias=False; only register if non-empty
         if hasattr(self, "bias") and self.bias is not None and self.bias.numel() > 0:
@@ -551,9 +568,11 @@ class _DynamicSelfAttention(DynamicModule):
 
         # Convert the TEDotProductAttention to dynamic module
         assert isinstance(self.core_attention, TEDotProductAttention)
+        # Use type(self.core_attention) (not TEDotProductAttention) so model-specific subclasses
+        # (e.g. Gemma3's Gemma3TEDotProductAttention) keep their overridden behavior post-conversion.
         _DynamicTEDotProductAttention: DynamicModule = type(  # noqa: N806
             "_DynamicTEDotProductAttention",
-            (DynamicModule, TEDotProductAttention),
+            (DynamicModule, type(self.core_attention)),
             {"_setup": lambda self: None},
         )
         _DynamicTEDotProductAttention.convert(self.core_attention)
@@ -567,6 +586,16 @@ class _DynamicSelfAttention(DynamicModule):
             num_attention_heads=num_attention_heads,
             hidden_size=hidden_size,
         )
+        self._convert_linear_proj(num_attention_heads=num_attention_heads, hidden_size=hidden_size)
+
+    def _convert_linear_proj(
+        self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp
+    ) -> None:
+        """Convert linear_proj to a dynamic module.
+
+        Overridable so model-specific output projections (e.g. Gemma3's post-LN
+        ``TERowParallelLinearLayerNorm``) can register their extra dynamic state.
+        """
         _DynamicTEProjRowParallelLinear.convert(
             self.linear_proj,
             num_attention_heads=num_attention_heads,

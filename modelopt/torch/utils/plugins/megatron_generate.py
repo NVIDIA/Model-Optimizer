@@ -34,12 +34,12 @@ __all__ = ["megatron_generate", "megatron_prefill"]
 def get_current_memory_info():
     """Get current memory usage."""
     remaining_mem, total_mem = torch.cuda.mem_get_info()
-    info = "rank {:3}/{:3}  memory remaining {:03}% ({:d}/{:d} MB) ".format(
-        torch.distributed.get_rank(),
-        torch.distributed.get_world_size(),
-        int(remaining_mem * 100 / total_mem),
-        remaining_mem // 1048576,
-        total_mem // 1048576,
+    rank = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
+    remaining_pct = int(remaining_mem * 100 / total_mem)
+    info = (
+        f"rank {rank:3}/{world_size:3}  memory remaining "
+        f"{remaining_pct:03}% ({remaining_mem // 1048576:d}/{total_mem // 1048576:d} MB) "
     )
     return info
 
@@ -150,7 +150,9 @@ def megatron_prefill(
         )
         send_to_next_pipeline_rank(output.to(dtype=pp_dtype))
 
-    logits = output[:, :seq_length, :].detach() if pp_last else None
+    # .contiguous() is required because the slice is a view with the padded stride; the broadcast
+    # below asserts contiguity when SP pads seq_length up to a multiple of TP.
+    logits = output[:, :seq_length, :].detach().contiguous() if pp_last else None
 
     if model.config.bf16:
         logits_dtype = torch.bfloat16

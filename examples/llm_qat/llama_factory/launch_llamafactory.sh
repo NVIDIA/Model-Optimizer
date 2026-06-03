@@ -140,8 +140,8 @@ if [[ $1 == "help" ]] || [[ $1 == "-h" ]]; then
     echo "Arguments:"
     echo "  <config_file.yaml>    YAML config file for llama_factory"
     echo "  --accelerate_config   Accelerate config file (optional)"
-    echo "  --use_fsdp2           Use FSDP2 instead of FSDP1 (default: false)"
-    echo "  $0 llama_config.yaml --accelerate_config ../accelerate_config/fsdp2.yaml"
+    echo "  --use_fsdp2           Use FSDP2 (default: true)"
+    echo "  $0 llama_config.yaml --accelerate_config ../configs/accelerate/fsdp2.yaml"
     echo ""
     echo "or"
     echo ""
@@ -184,7 +184,7 @@ else
     # Move to next argument
     shift
     ACCELERATE_CONFIG=""
-    USE_FSDP2="false"
+    USE_FSDP2="true"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -238,20 +238,14 @@ else
     # Set default accelerate config if not provided
     if [[ -z "$ACCELERATE_CONFIG" ]]; then
         if check_compress_enabled "$CONFIG_FILE"; then
-            ACCELERATE_CONFIG="$SCRIPT_DIR/../accelerate_config/ddp.yaml"
-        elif [[ "${USE_FSDP2,,}" == "true" ]]; then
-            ACCELERATE_CONFIG="$SCRIPT_DIR/../accelerate_config/fsdp2.yaml"
+            ACCELERATE_CONFIG="$SCRIPT_DIR/../configs/accelerate/ddp.yaml"
         else
-            ACCELERATE_CONFIG="$SCRIPT_DIR/../accelerate_config/fsdp1.yaml"
+            ACCELERATE_CONFIG="$SCRIPT_DIR/../configs/accelerate/fsdp2.yaml"
         fi
     fi
 
     # Add teacher model specific FSDP args if needed
     if [[ "${HAS_TEACHER_MODEL,,}" == "true" ]]; then
-        if [[ "${USE_FSDP2,,}" != "true" ]]; then
-            echo "Error: Quantization aware distillation is only supported with FSDP2."
-            exit 1
-        fi
         FSDP_ARGS="$FSDP_ARGS --fsdp_cpu_ram_efficient_loading False"
     fi
 

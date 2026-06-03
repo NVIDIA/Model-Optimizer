@@ -17,6 +17,7 @@
 
 import contextlib
 import copy
+import os
 from typing import Any
 
 import torch
@@ -24,6 +25,8 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from transformers import Cache, DynamicCache, PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.utils import ModelOutput
+
+from modelopt.torch.utils import print_rank_0
 
 from ...export.plugins.hf_spec_export import EagleExporter, SpeculativeDecodingExporter
 from ..eagle.conversion import EagleDMRegistry
@@ -88,7 +91,7 @@ class HFEagleModel(EagleModel):
 
             return nvtx.range(name)
         except Exception as e:
-            print(f"Failed to create NVTX range {name}: {e}")
+            print_rank_0(f"Failed to create NVTX range {name}: {e}")
             return contextlib.nullcontext()
 
     def _find_base_model_parts(self):
@@ -105,7 +108,7 @@ class HFEagleModel(EagleModel):
                 try:
                     submodule = self.get_submodule(path)
                     assert isinstance(submodule, torch.nn.Module)
-                    print(f"Found {name} at {path}")
+                    print_rank_0(f"Found {name} at {path}")
                     found_submodule = True
                     setattr(self, name, path)
                     break
@@ -128,7 +131,7 @@ class HFEagleModel(EagleModel):
             try:
                 setattr(self, name, torch.compile(getattr(self, name), dynamic=False, **kwargs))
             except Exception:  # noqa: PERF203
-                print(f"Disabling torch.compile for {name} due to compilation error.")
+                print_rank_0(f"Disabling torch.compile for {name} due to compilation error.")
 
     def get_dummy_inputs(self) -> dict:
         """Construct dummy inputs for export forward pass."""
@@ -213,10 +216,36 @@ class HFEagleModel(EagleModel):
 
     def _inject_base_lora(self):
         """Inject HF PEFT LoRA adapters into the base model in-place and unfreeze them."""
+        import re
+
         from peft import LoraConfig
         from peft.mapping import inject_adapter_in_model
 
         target_modules = self.eagle_base_lora_target_modules or None
+
+        # If start_layer is set, enumerate matching modules explicitly so only
+        # the desired layers get LoRA adapters.
+        if self.eagle_base_lora_start_layer is not None:
+            if target_modules is None:
+                raise ValueError(
+                    "eagle_base_lora_start_layer requires eagle_base_lora_target_modules "
+                    "to be set explicitly (the start-layer filter matches module-name "
+                    "suffixes, so it cannot be combined with PEFT's default/regex targeting)."
+                )
+            explicit_targets = []
+            for name, _ in self._base_model.named_modules():
+                m = re.search(r"layers\.(\d+)\.", name)
+                if m and int(m.group(1)) >= self.eagle_base_lora_start_layer:
+                    if any(name.endswith(mod) for mod in target_modules):
+                        explicit_targets.append(name)
+            if not explicit_targets:
+                raise ValueError(
+                    f"No base model modules matched eagle_base_lora_target_modules="
+                    f"{target_modules} at or beyond layer {self.eagle_base_lora_start_layer}. "
+                    "Check the start layer index and target module names."
+                )
+            target_modules = explicit_targets
+
         lora_config = LoraConfig(
             r=self.eagle_base_lora_rank,
             lora_alpha=self.eagle_base_lora_alpha,
@@ -224,11 +253,16 @@ class HFEagleModel(EagleModel):
             bias="none",
         )
         inject_adapter_in_model(lora_config, self._base_model, adapter_name="default")
-        # Unfreeze LoRA parameters unless we have a warmup phase
-        freeze_lora = self.eagle_base_lora_warmup_steps > 0
+
+        # Always mark LoRA params as trainable so they are included in the
+        # optimizer from the start.  During warmup, _lora_cotraining_active
+        # stays False which prevents any gradient from flowing to LoRA via the
+        # forward path (hidden states detached, logits detached, preservation
+        # loss skipped).  This keeps the optimizer param-group count constant
+        # across checkpoints, avoiding the mismatch on resume.
         for name, param in self._base_model.named_parameters():
             if "lora_" in name:
-                param.requires_grad = not freeze_lora
+                param.requires_grad = True
 
     def _set_base_lora_enabled(self, enabled: bool) -> None:
         """Enable or disable LoRA adapters in the base model."""
@@ -249,6 +283,29 @@ class HFEagleModel(EagleModel):
             lora_logits
         )
         return -loss.sum(dim=-1).mean() * self.eagle_base_lora_preservation_loss_weight
+
+    @staticmethod
+    def load_draft_vocab_cache(model, d2t_path: str | None) -> None:
+        """Load the draft-to-target token-id mapping; required iff the draft vocab is compressed."""
+        if model.eagle_config.draft_vocab_size >= model.eagle_config.vocab_size:
+            return
+        if d2t_path is None or not os.path.isfile(d2t_path):
+            raise FileNotFoundError(
+                f"Draft vocab cache is required when draft_vocab_size "
+                f"({model.eagle_config.draft_vocab_size}) < vocab_size "
+                f"({model.eagle_config.vocab_size}); got d2t_path={d2t_path!r}. "
+                f"Set data.draft_vocab_cache in the recipe YAML."
+            )
+        d2t = model.eagle_module.d2t
+        loaded = torch.load(d2t_path, map_location=d2t.device, weights_only=True)
+        if loaded.shape != d2t.shape or loaded.dtype != d2t.dtype:
+            raise ValueError(
+                f"Draft vocab cache mismatch at {d2t_path}: "
+                f"got shape={tuple(loaded.shape)} dtype={loaded.dtype}, "
+                f"expected shape={tuple(d2t.shape)} dtype={d2t.dtype}."
+            )
+        d2t.copy_(loaded)
+        print_rank_0(f"Loaded draft vocab cache from {d2t_path}.")
 
     def modify(
         self,

@@ -15,7 +15,7 @@
 
 ______________________________________________________________________
 
-**NVIDIA Model Optimizer** (referred to as **Model Optimizer**, or **ModelOpt**) is a library comprising state-of-the-art model optimization [techniques](#techniques) including quantization, distillation, pruning, speculative decoding and sparsity to accelerate models.
+**NVIDIA Model Optimizer** (referred to as **Model Optimizer**, or **ModelOpt**) is a library comprising state-of-the-art model optimization [techniques](#techniques) including quantization, pruning, Neural Architecture Search (NAS), distillation, speculative decoding and sparsity to accelerate models.
 
 **[Input]** Model Optimizer currently supports inputs of a [Hugging Face](https://huggingface.co/), [PyTorch](https://github.com/pytorch/pytorch) or [ONNX](https://github.com/onnx/onnx) model.
 
@@ -26,6 +26,10 @@ Model Optimizer is also integrated with [NVIDIA Megatron-Bridge](https://github.
 
 ## Latest News
 
+- [2026/05/27] [**End-to-end Minitron workflow for Nemotron-3-Nano-30B-A3B**](./examples/pruning/minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16): Pruning + two-phase distillation + FP8 quantization achieving 1.64× vLLM throughput and 2.6× memory reduction.
+- [2026/05/13] [**Puzzletron**](./examples/puzzletron): A new algorithm for heterogeneous pruning & NAS of LLM and VLM models.
+- [2026/04/15] Customer story: [Domyn compresses Colosseum-355B → 260B using ModelOpt's Minitron pruning + distillation](https://www.domyn.com/blog/domyn-large-the-journey-of-a-european-sovereign-ai-model-for-regulated-industries)
+- [2026/03/17] Customer story: [Bielik.AI builds Bielik Minitron 7B (33% smaller, 50% faster, 90% quality retained) using ModelOpt's Minitron pruning + distillation](https://bielik.ai/en/nvidia-gtc-bielik-minitron-premiere/)
 - [2026/03/11] Model Optimizer quantized Nemotron-3-Super checkpoints are available on Hugging Face for download: [FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8), [NVFP4](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4). Learn more in the [Nemotron 3 Super release blog](https://blogs.nvidia.com/blog/nemotron-3-super-agentic-ai/). Check out how to quantize Nemotron 3 models for deployment acceleration [here](./examples/llm_ptq/README.md)
 - [2026/03/11] [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) now supports Nemotron-3-Super quantization (PTQ and QAT) and export workflows using the Model Optimizer library. See the [Quantization (PTQ and QAT) guide](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/super-v3/docs/models/llm/nemotron3-super.md#quantization-ptq-and-qat) for FP8/NVFP4 quantization and HF export instructions.
 - [2025/12/11] [BLOG: Top 5 AI Model Optimization Techniques for Faster, Smarter Inference](https://developer.nvidia.com/blog/top-5-ai-model-optimization-techniques-for-faster-smarter-inference/)
@@ -86,7 +90,6 @@ You can also directly use NVIDIA container images, which have Model Optimizer pr
 - `nvcr.io/nvidia/pytorch:<version>-py3`
 - `nvcr.io/nvidia/nemo:<version>`
 - `nvcr.io/nvidia/tensorrt-llm/release:<version>`
-- `nvcr.io/nvidia/tensorrt:<version>-py3`
 
 Before pulling and using the container images, please review their respective license terms.
 Make sure to upgrade Model Optimizer to the latest version as described above.
@@ -137,10 +140,23 @@ more fine-grained control on installed dependencies or for alternative docker im
 | Distillation | [View Support Matrix](./examples/llm_distill/README.md#support-matrix) |
 | Speculative Decoding | [View Support Matrix](./examples/speculative_decoding/README.md#support-matrix) |
 
+## Deprecation Policy
+
+Model Optimizer follows a structured approach to managing deprecated features:
+
+- **Communication:** Deprecation notices are documented in the [Changelog](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html). Deprecated items include source code statements indicating deprecation timing, with runtime warnings issued upon use.
+- **Migration Period:** Since Model Optimizer is still pre-1.0, we provide a 1-release (~1-month) migration period after deprecation. During this window, deprecated features continue functioning while issuing warnings.
+- **Scope:** The policy addresses both complete deprecations (entire APIs removed) and partial ones (specific parameters removed while methods remain).
+- **Removal:** Following the migration period, deprecated elements are removed in alignment with semantic versioning standards, potentially including breaking changes in minor version updates while Model Optimizer remains in 0.x.
+
 ## Contributing
 
 Model Optimizer is now open source! We welcome any feedback, feature requests and PRs.
 Please read our [Contributing](./CONTRIBUTING.md) guidelines for details on how to contribute to this project.
+
+## AI Agents
+
+For AI-assisted development setup, see the [agent tooling notes](./.agents/TOOLING.md).
 
 ### Top Contributors
 
