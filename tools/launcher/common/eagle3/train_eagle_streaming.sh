@@ -20,23 +20,24 @@
 # dumping to disk. Sibling of train_eagle.sh.
 #
 # Topology is chosen automatically from the Slurm allocation (the launcher yaml's
-# `nodes:` field); nemo_run runs this script once per node, so it branches on
-# $SLURM_NODEID:
-#   nodes == 1  -> co-located: vllm serve on $SERVE_GPU, trainer on the rest of
-#                  the local GPUs (original single-node behavior).
-#   nodes == 2  -> split: node 0 runs vllm serve on all its GPUs, node 1 runs
-#                  the trainer on all its GPUs. Roles rendezvous through the
-#                  shared /scratchspace mount (node 0 publishes its serve
-#                  address; the trainer signals completion).
-#   nodes >= 3  -> 1 serve node (node 0) + N trainer nodes (nodes 1..NNODES-1)
-#                  doing multi-node DDP. The head trainer (node 1, accelerate
-#                  machine_rank 0) publishes its IP for accelerate's c10d
-#                  rendezvous; all trainer nodes read both the serve address and
-#                  the head-trainer address from /scratchspace. NOTE: only global
-#                  rank 0 fetches hidden states from the single serve and
-#                  broadcasts to the rest (DataLoaderDispatcher), so the single
-#                  serve is the throughput ceiling — adding trainer nodes scales
-#                  effective batch / compute, not data-production throughput.
+# `nodes:` field) and $SERVE_NODES; nemo_run runs this script once per node, so it
+# branches on $SLURM_NODEID:
+#   nodes == 1       -> co-located: vllm serve on $SERVE_GPU, trainer on the rest
+#                       of the local GPUs (original single-node behavior).
+#   nodes >= 2       -> split: Slurm nodes 0..SERVE_NODES-1 each run an independent
+#                       vllm serve replica (whole node); nodes SERVE_NODES..NNODES-1
+#                       are trainers doing multi-node DDP. SERVE_NODES defaults to 1
+#                       (1 serve + N trainers). Rendezvous over the shared
+#                       /scratchspace mount: each serve i publishes its address to
+#                       .serve_addr.i; the head trainer (first trainer node,
+#                       accelerate machine_rank 0) publishes its IP for accelerate's
+#                       rendezvous; trainers collect every serve address.
+#
+# The streaming dataset is map-style: HF Trainer's DistributedSampler shards the
+# corpus across all trainer ranks and each rank fetches ONLY its own shard,
+# round-robin across the SERVE_NODES replicas (data.streaming_server_url is the
+# comma-joined list). So trainer nodes scale effective batch / compute and
+# distribute the reads; serve nodes scale data-production throughput (~K x).
 #
 # Env vars (required):
 #   HF_MODEL_CKPT       Target model path. Used by both vllm serve (as the
@@ -48,6 +49,8 @@
 #                       default = [1,17,32] -> capture = [2,18,33,36].
 #
 # Env vars (optional):
+#   SERVE_NODES         multi-node only: number of dedicated serve replica nodes
+#                       (Slurm nodes 0..SERVE_NODES-1). default 1.
 #   SERVE_PORT          default 8765
 #   SERVE_GPU_MEM_UTIL  default 0.4 (single-node) / 0.9 (multi-node serve node)
 #   SERVE_READY_TIMEOUT seconds to wait for the server to come up. default 900
@@ -135,10 +138,15 @@ SCRIPT_ARGS=("$@")
 
 SERVE_PORT="${SERVE_PORT:-8765}"
 SERVE_READY_TIMEOUT="${SERVE_READY_TIMEOUT:-900}"
+# Number of dedicated serve replica nodes (multi-node only). Default 1.
+SERVE_NODES="${SERVE_NODES:-1}"
+# All serve replicas share one scratch dir; per-request safetensors files are keyed
+# by a unique vllm request id, so they don't collide across servers.
 SERVE_SCRATCH="/scratchspace/streaming_serve_scratch"
-SERVE_LOG="/scratchspace/vllm_serve.log"
-# Multi-node rendezvous over the shared /scratchspace mount (lustre, visible on
-# every node): node 0 publishes its address here, node 1 signals completion here.
+SERVE_LOG="/scratchspace/vllm_serve.log"   # serve nodes override with a per-node path
+# Rendezvous over the shared /scratchspace mount (lustre, visible on every node):
+# each serve node i publishes its address to ${SERVE_ADDR_FILE}.i; the head trainer
+# signals completion via DONE_FILE; trainers collect all serve addresses.
 SERVE_ADDR_FILE="/scratchspace/.serve_addr"
 DONE_FILE="/scratchspace/.training_done"
 SERVE_PID=""
@@ -152,6 +160,18 @@ cleanup() {
 }
 
 gpus_on_node() { nvidia-smi --query-gpu=count --format=csv,noheader,nounits | head -n1; }
+
+# Resolve a *routable* IP for this node (other nodes must be able to dial it).
+# `hostname -I` can list a link-local (169.254.x) or loopback address first, so
+# prefer the resolved Slurm node name, then the first non-loopback/non-link-local IP.
+#   $1 = optional override (e.g. SERVE_ADVERTISE_IP / TRAINER_ADVERTISE_IP)
+resolve_routable_ip() {
+    local ip="$1"
+    [ -z "$ip" ] && ip=$(getent hosts "${SLURMD_NODENAME:-$(hostname)}" 2>/dev/null | awk '{print $1}' | head -1)
+    [ -z "$ip" ] && ip=$(hostname -I | tr ' ' '\n' | grep -vE '^(127\.|169\.254\.|fe80:|::1)' | head -1)
+    [ -z "$ip" ] && ip=$(hostname -I | awk '{print $1}')
+    echo "$ip"
+}
 
 # Start vllm serve in the background. Sets SERVE_PID.
 #   $1 = bind host   $2 = tensor-parallel size   $3 = CUDA_VISIBLE_DEVICES ("" -> all)
@@ -306,71 +326,68 @@ PY
     wait_vllm_ready "http://${SERVE_HOST}:${SERVE_PORT}" || exit 1
     run_trainer_and_export "http://${SERVE_HOST}:${SERVE_PORT}" "$TRAIN_GPUS" || exit 1
 
-elif [ "$NODEID" -eq 0 ]; then
-    # ----------------------- multi-node: serve node ------------------------
-    SERVE_GPU_MEM_UTIL="${SERVE_GPU_MEM_UTIL:-0.9}"   # dedicated node -> use most of it
-    SERVE_TP="${SERVE_TP:-$(gpus_on_node)}"            # default: all GPUs on this node
-    rm -f "$SERVE_ADDR_FILE" "$DONE_FILE"              # clear stale rendezvous state
+elif [ "$NODEID" -lt "$SERVE_NODES" ]; then
+    # ---------------------- multi-node: serve node(s) ----------------------
+    # Slurm nodes 0..SERVE_NODES-1 each run an independent vllm serve replica on
+    # their whole node and publish their address to ${SERVE_ADDR_FILE}.${NODEID}.
+    SERVE_GPU_MEM_UTIL="${SERVE_GPU_MEM_UTIL:-0.9}"     # dedicated node -> use most of it
+    SERVE_TP="${SERVE_TP:-$(gpus_on_node)}"              # default: all GPUs on this node
+    SERVE_LOG="/scratchspace/vllm_serve.${NODEID}.log"  # per-node log (avoid collision)
+    rm -f "${SERVE_ADDR_FILE}.${NODEID}"                 # clear own stale address
+    [ "$NODEID" -eq 0 ] && rm -f "$DONE_FILE"            # node 0 clears the shared sentinel once
 
     trap cleanup INT TERM EXIT
     launch_vllm "0.0.0.0" "$SERVE_TP" ""
     wait_vllm_ready "http://127.0.0.1:${SERVE_PORT}" || exit 1
 
-    # Publish a *routable* address for the trainer node. `hostname -I` can list a
-    # link-local (169.254.x) or loopback address first, which is unreachable from
-    # the other node, so resolve the Slurm node name and fall back to the first
-    # non-link-local / non-loopback IP.
-    serve_addr="${SERVE_ADVERTISE_IP:-}"
-    if [ -z "$serve_addr" ]; then
-        serve_addr=$(getent hosts "${SLURMD_NODENAME:-$(hostname)}" 2>/dev/null | awk '{print $1}' | head -1)
-    fi
-    if [ -z "$serve_addr" ]; then
-        serve_addr=$(hostname -I | tr ' ' '\n' | grep -vE '^(127\.|169\.254\.|fe80:|::1)' | head -1)
-    fi
-    [ -z "$serve_addr" ] && serve_addr=$(hostname -I | awk '{print $1}')
-    echo "$serve_addr" > "$SERVE_ADDR_FILE"
-    echo "Serve node published ${serve_addr}; holding the server up until the trainer signals done..."
+    serve_addr=$(resolve_routable_ip "${SERVE_ADVERTISE_IP:-}")
+    echo "$serve_addr" > "${SERVE_ADDR_FILE}.${NODEID}"
+    echo "Serve node ${NODEID}/${SERVE_NODES} published ${serve_addr}; holding up until training signals done..."
     while [ ! -f "$DONE_FILE" ]; do sleep 10; done
-    echo "Training-done sentinel seen; serve node exiting (EXIT trap stops vllm)."
+    echo "Training-done sentinel seen; serve node ${NODEID} exiting (EXIT trap stops vllm)."
 
-elif [ "$NODEID" -ge 1 ]; then
+else
     # -------------------- multi-node: trainer node(s) ----------------------
-    # Node 0 is the vllm serve; trainer nodes are SLURM nodes 1..NNODES-1, which
-    # map to 0-based accelerate machine ranks (head trainer = SLURM node 1).
-    NUM_TRAINER_NODES=$(( NNODES - 1 ))
-    TRAINER_RANK=$(( NODEID - 1 ))
+    # Serve nodes are 0..SERVE_NODES-1; trainer nodes are SERVE_NODES..NNODES-1,
+    # mapping to 0-based accelerate machine ranks (head trainer = first trainer node).
+    NUM_TRAINER_NODES=$(( NNODES - SERVE_NODES ))
+    TRAINER_RANK=$(( NODEID - SERVE_NODES ))
     TRAINER_ADDR_FILE="/scratchspace/.trainer_addr"
 
-    # Only the head trainer (rank 0) signals the serve node to release on exit;
-    # a non-head node exiting first must NOT tear the serve down early.
+    # Only the head trainer (rank 0) signals the serve nodes to release on exit;
+    # a non-head node exiting first must NOT tear the serves down early.
     if [ "$TRAINER_RANK" -eq 0 ]; then
         trap 'touch "$DONE_FILE" 2>/dev/null || true' EXIT
         rm -f "$TRAINER_ADDR_FILE"                 # clear stale rendezvous state
     fi
 
-    echo "Trainer node (rank ${TRAINER_RANK}/${NUM_TRAINER_NODES}) waiting for the serve address..."
-    for ((i = 0; i < SERVE_READY_TIMEOUT; i++)); do
-        [ -f "$SERVE_ADDR_FILE" ] && break
-        sleep 1
+    # Collect every serve replica's address and build the comma-joined URL list the
+    # streaming dataset round-robins across (one fetch per worker, spread over serves).
+    echo "Trainer node (rank ${TRAINER_RANK}/${NUM_TRAINER_NODES}) waiting for ${SERVE_NODES} serve address(es)..."
+    URLS=""
+    for ((s = 0; s < SERVE_NODES; s++)); do
+        af="${SERVE_ADDR_FILE}.${s}"
+        for ((i = 0; i < SERVE_READY_TIMEOUT; i++)); do
+            [ -f "$af" ] && break
+            sleep 1
+        done
+        [ -f "$af" ] || { echo "ERROR: serve node ${s} never published its address." >&2; exit 1; }
+        surl="http://$(cat "$af"):${SERVE_PORT}"
+        wait_vllm_ready "$surl" || exit 1
+        URLS="${URLS:+$URLS,}$surl"
     done
-    [ -f "$SERVE_ADDR_FILE" ] || { echo "ERROR: serve node never published its address." >&2; exit 1; }
-    URL="http://$(cat "$SERVE_ADDR_FILE"):${SERVE_PORT}"
-    wait_vllm_ready "$URL" || exit 1
+    echo "Trainer rank ${TRAINER_RANK} using serve URLs: ${URLS}"
 
     if [ "$NUM_TRAINER_NODES" -le 1 ]; then
-        # Original 1-serve + 1-trainer topology: single-node DDP, unchanged.
-        run_trainer_and_export "$URL" "" || exit 1
+        # 1 trainer node: single-node DDP (no accelerate multi-node routing).
+        run_trainer_and_export "$URLS" "" || exit 1
     else
         # >1 trainer node: head (rank 0) publishes its routable IP for accelerate's
-        # c10d rendezvous (port 29500); all trainer nodes read it and join. Reuse
-        # the serve node's IP-resolution logic (avoid link-local / loopback).
+        # rendezvous (port 29500); all trainer nodes read it and join.
         if [ "$TRAINER_RANK" -eq 0 ]; then
-            head_addr="${TRAINER_ADVERTISE_IP:-}"
-            [ -z "$head_addr" ] && head_addr=$(getent hosts "${SLURMD_NODENAME:-$(hostname)}" 2>/dev/null | awk '{print $1}' | head -1)
-            [ -z "$head_addr" ] && head_addr=$(hostname -I | tr ' ' '\n' | grep -vE '^(127\.|169\.254\.|fe80:|::1)' | head -1)
-            [ -z "$head_addr" ] && head_addr=$(hostname -I | awk '{print $1}')
+            head_addr=$(resolve_routable_ip "${TRAINER_ADVERTISE_IP:-}")
             echo "$head_addr" > "$TRAINER_ADDR_FILE"
-            echo "Head trainer (rank 0) published ${head_addr} for c10d rendezvous."
+            echo "Head trainer (rank 0) published ${head_addr} for accelerate rendezvous."
         else
             echo "Trainer rank ${TRAINER_RANK} waiting for head-trainer address..."
             for ((i = 0; i < SERVE_READY_TIMEOUT; i++)); do
@@ -380,7 +397,7 @@ elif [ "$NODEID" -ge 1 ]; then
             [ -f "$TRAINER_ADDR_FILE" ] || { echo "ERROR: head trainer never published its address." >&2; exit 1; }
         fi
         HEAD_IP=$(cat "$TRAINER_ADDR_FILE")
-        run_trainer_and_export "$URL" "" "$NUM_TRAINER_NODES" "$HEAD_IP" "$TRAINER_RANK" || exit 1
+        run_trainer_and_export "$URLS" "" "$NUM_TRAINER_NODES" "$HEAD_IP" "$TRAINER_RANK" || exit 1
     fi
 fi
 
