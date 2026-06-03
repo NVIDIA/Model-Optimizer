@@ -16,7 +16,7 @@
 import copy
 import json
 import os
-import shutil
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -31,7 +31,24 @@ from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
     is_quantized_linear,
 )
-from modelopt.torch.quantization.utils.layerwise_calib import _layer_dir
+from modelopt.torch.quantization.utils.layerwise_calib import _CheckpointState
+
+
+def _crash_after_layer(crash_at: int):
+    """Return a replacement ``_CheckpointState.save`` that raises before *crash_at* commits.
+
+    Simulates a process kill in the middle of a layerwise calibration run:
+    layers ``0..crash_at-1`` are saved normally, then the next call raises
+    before the manifest is updated for ``crash_at``.
+    """
+    orig_save = _CheckpointState.save
+
+    def _save(self, layer_idx, *args, **kwargs):
+        if layer_idx >= crash_at:
+            raise RuntimeError(f"simulated crash before layer {crash_at} commits")
+        return orig_save(self, layer_idx, *args, **kwargs)
+
+    return _save
 
 NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": [
@@ -244,45 +261,39 @@ def test_sequential_checkpoint_resume_cpu_offloaded(tmp_path):
     config = AutoConfig.from_pretrained(tiny_llama_dir)
     inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
 
-    ckpt_dir = str(tmp_path / "seq_ckpt")
-    seq_ckpt_cfg = _make_layerwise_checkpoint_cfg(quant_cfg, ckpt_dir)
+    def _make_model():
+        with init_empty_weights():
+            m = AutoModelForCausalLM.from_config(config)
+        dmap = {
+            n: 0
+            for n, _ in m.named_modules()
+            if "layers" not in n or n.split("layers.")[-1].isdigit()
+        }
+        dmap["model.layers.0"] = "cpu"
+        return load_checkpoint_and_dispatch(m, tiny_llama_dir, device_map=dmap)
 
-    # Full reference run with checkpointing
-    with init_empty_weights():
-        model_ref = AutoModelForCausalLM.from_config(config)
-    device_map = {
-        n: 0
-        for n, m in model_ref.named_modules()
-        if "layers" not in n or n.split("layers.")[-1].isdigit()
-    }
-    device_map["model.layers.0"] = "cpu"
-    model_ref = load_checkpoint_and_dispatch(model_ref, tiny_llama_dir, device_map=device_map)
-    mtq.quantize(model_ref, seq_ckpt_cfg, lambda model: model(inputs))
+    # Reference: full run in its own checkpoint dir.
+    ref_dir = str(tmp_path / "ref_ckpt")
+    ref_cfg = _make_layerwise_checkpoint_cfg(quant_cfg, ref_dir)
+    model_ref = _make_model()
+    mtq.quantize(model_ref, ref_cfg, lambda model: model(inputs))
     output_ref = model_ref(inputs)
 
-    # Simulate crash after layer 0 by truncating the manifest and removing later layers
-    last_completed_layer = 0
-    manifest_path = os.path.join(ckpt_dir, "manifest.json")
-    with open(manifest_path, "w") as f:
-        json.dump({"last_completed_layer": last_completed_layer, "num_layers": num_layers}, f)
-    for i in range(last_completed_layer + 1, num_layers):
-        d = _layer_dir(ckpt_dir, i)
-        if os.path.isdir(d):
-            shutil.rmtree(d)
+    # Crash run: raise inside _CheckpointState.save before layer 1 commits.
+    # This naturally leaves manifest at layer 0 and the top-level next_inputs.pt
+    # holding inputs for layer 1.
+    crash_dir = str(tmp_path / "crash_ckpt")
+    crash_cfg = _make_layerwise_checkpoint_cfg(quant_cfg, crash_dir)
+    crash_model = _make_model()
+    with (
+        patch.object(_CheckpointState, "save", _crash_after_layer(1)),
+        pytest.raises(RuntimeError, match="simulated crash"),
+    ):
+        mtq.quantize(crash_model, crash_cfg, lambda model: model(inputs))
 
-    # Resume from a fresh CPU-offloaded model
-    with init_empty_weights():
-        model_resumed = AutoModelForCausalLM.from_config(config)
-    device_map = {
-        n: 0
-        for n, m in model_resumed.named_modules()
-        if "layers" not in n or n.split("layers.")[-1].isdigit()
-    }
-    device_map["model.layers.0"] = "cpu"
-    model_resumed = load_checkpoint_and_dispatch(
-        model_resumed, tiny_llama_dir, device_map=device_map
-    )
-    mtq.quantize(model_resumed, seq_ckpt_cfg, lambda model: model(inputs))
+    # Resume on a fresh model in the same crash dir.
+    model_resumed = _make_model()
+    mtq.quantize(model_resumed, crash_cfg, lambda model: model(inputs))
     output_resumed = model_resumed(inputs)
 
     assert torch.allclose(output_ref.logits, output_resumed.logits), (
@@ -297,39 +308,38 @@ def test_sequential_checkpoint_resume_multi_offload(tmp_path):
     config = AutoConfig.from_pretrained(tiny_llama_dir)
     inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
 
-    ckpt_dir = str(tmp_path / "seq_ckpt")
-    seq_ckpt_cfg = _make_layerwise_checkpoint_cfg(mtq.INT4_AWQ_CFG, ckpt_dir)
-
     def _make_multi_offload_model():
         with init_empty_weights():
             m = AutoModelForCausalLM.from_config(config)
         dmap = {
             n: 0
-            for n, mod in m.named_modules()
+            for n, _ in m.named_modules()
             if "layers" not in n or n.split("layers.")[-1].isdigit()
         }
         dmap["model.layers.0"] = "cpu"
         dmap["model.layers.1"] = "cpu"
         return load_checkpoint_and_dispatch(m, tiny_llama_dir, device_map=dmap)
 
-    # Full reference run
+    # Reference: full run in its own checkpoint dir.
+    ref_dir = str(tmp_path / "ref_ckpt")
+    ref_cfg = _make_layerwise_checkpoint_cfg(mtq.INT4_AWQ_CFG, ref_dir)
     model_ref = _make_multi_offload_model()
-    mtq.quantize(model_ref, seq_ckpt_cfg, lambda model: model(inputs))
+    mtq.quantize(model_ref, ref_cfg, lambda model: model(inputs))
     output_ref = model_ref(inputs)
 
-    # Simulate crash after layer 0
-    last_completed_layer = 0
-    manifest_path = os.path.join(ckpt_dir, "manifest.json")
-    with open(manifest_path, "w") as f:
-        json.dump({"last_completed_layer": last_completed_layer, "num_layers": num_layers}, f)
-    for i in range(last_completed_layer + 1, num_layers):
-        d = _layer_dir(ckpt_dir, i)
-        if os.path.isdir(d):
-            shutil.rmtree(d)
+    # Crash run: raise before layer 1 commits.
+    crash_dir = str(tmp_path / "crash_ckpt")
+    crash_cfg = _make_layerwise_checkpoint_cfg(mtq.INT4_AWQ_CFG, crash_dir)
+    crash_model = _make_multi_offload_model()
+    with (
+        patch.object(_CheckpointState, "save", _crash_after_layer(1)),
+        pytest.raises(RuntimeError, match="simulated crash"),
+    ):
+        mtq.quantize(crash_model, crash_cfg, lambda model: model(inputs))
 
-    # Resume from fresh model with same offload layout
+    # Resume from fresh model with same offload layout.
     model_resumed = _make_multi_offload_model()
-    mtq.quantize(model_resumed, seq_ckpt_cfg, lambda model: model(inputs))
+    mtq.quantize(model_resumed, crash_cfg, lambda model: model(inputs))
     output_resumed = model_resumed(inputs)
 
     assert torch.allclose(output_ref.logits, output_resumed.logits), (
@@ -395,45 +405,37 @@ def test_sequential_gptq_checkpoint_resume_cpu_offloaded(tmp_path):
     config = AutoConfig.from_pretrained(tiny_llama_dir)
     inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
 
-    ckpt_dir = str(tmp_path / "gptq_ckpt")
-    seq_ckpt_cfg = _make_gptq_sequential_checkpoint_cfg(mtq.NVFP4_AWQ_LITE_CFG, ckpt_dir)
+    def _make_model():
+        with init_empty_weights():
+            m = AutoModelForCausalLM.from_config(config)
+        dmap = {
+            n: 0
+            for n, _ in m.named_modules()
+            if "layers" not in n or n.split("layers.")[-1].isdigit()
+        }
+        dmap["model.layers.0"] = "cpu"
+        return load_checkpoint_and_dispatch(m, tiny_llama_dir, device_map=dmap)
 
-    # Full reference run with checkpointing
-    with init_empty_weights():
-        model_ref = AutoModelForCausalLM.from_config(config)
-    device_map = {
-        n: 0
-        for n, m in model_ref.named_modules()
-        if "layers" not in n or n.split("layers.")[-1].isdigit()
-    }
-    device_map["model.layers.0"] = "cpu"
-    model_ref = load_checkpoint_and_dispatch(model_ref, tiny_llama_dir, device_map=device_map)
-    mtq.quantize(model_ref, seq_ckpt_cfg, lambda model: model(inputs))
+    # Reference: full run in its own checkpoint dir.
+    ref_dir = str(tmp_path / "ref_gptq_ckpt")
+    ref_cfg = _make_gptq_sequential_checkpoint_cfg(mtq.NVFP4_AWQ_LITE_CFG, ref_dir)
+    model_ref = _make_model()
+    mtq.quantize(model_ref, ref_cfg, lambda model: model(inputs))
     output_ref = model_ref(inputs)
 
-    # Simulate crash after layer 0
-    last_completed_layer = 0
-    manifest_path = os.path.join(ckpt_dir, "manifest.json")
-    with open(manifest_path, "w") as f:
-        json.dump({"last_completed_layer": last_completed_layer, "num_layers": num_layers}, f)
-    for i in range(last_completed_layer + 1, num_layers):
-        d = _layer_dir(ckpt_dir, i)
-        if os.path.isdir(d):
-            shutil.rmtree(d)
+    # Crash run: raise before layer 1 commits.
+    crash_dir = str(tmp_path / "crash_gptq_ckpt")
+    crash_cfg = _make_gptq_sequential_checkpoint_cfg(mtq.NVFP4_AWQ_LITE_CFG, crash_dir)
+    crash_model = _make_model()
+    with (
+        patch.object(_CheckpointState, "save", _crash_after_layer(1)),
+        pytest.raises(RuntimeError, match="simulated crash"),
+    ):
+        mtq.quantize(crash_model, crash_cfg, lambda model: model(inputs))
 
-    # Resume from fresh CPU-offloaded model
-    with init_empty_weights():
-        model_resumed = AutoModelForCausalLM.from_config(config)
-    device_map = {
-        n: 0
-        for n, m in model_resumed.named_modules()
-        if "layers" not in n or n.split("layers.")[-1].isdigit()
-    }
-    device_map["model.layers.0"] = "cpu"
-    model_resumed = load_checkpoint_and_dispatch(
-        model_resumed, tiny_llama_dir, device_map=device_map
-    )
-    mtq.quantize(model_resumed, seq_ckpt_cfg, lambda model: model(inputs))
+    # Resume from fresh CPU-offloaded model.
+    model_resumed = _make_model()
+    mtq.quantize(model_resumed, crash_cfg, lambda model: model(inputs))
     output_resumed = model_resumed(inputs)
 
     assert torch.allclose(output_ref.logits, output_resumed.logits), (
