@@ -207,20 +207,21 @@ Set it per model type:
 3. **Hybrid models (can run with reasoning on *or* off) → always turn reasoning
    ON** by forcing the thinking flag inside `params_to_add.chat_template_kwargs`,
    and keep `use_reasoning: true`. Reasoning mode yields the highest scores, so
-   default hybrids to it. The toggle key is **family-specific** — set only the
-   one your model uses; do not emit both:
+   default hybrids to it.
 
-   | Family | `chat_template_kwargs` to force thinking |
-   | --- | --- |
-   | Qwen3.5 / 3.6, GLM 5.1 | `enable_thinking: true` |
-   | Kimi K2.6, DeepSeek V3.2 | `thinking: true` |
-   | DeepSeek V4 (Pro/Flash) | `thinking: true` + `reasoning_effort: high\|max` (Think Max needs `--max-model-len >= 393216`) |
+   **Read the model card (and `chat_template.jinja`) for the exact reasoning-on
+   toggle** — do not extrapolate from a prior generation, the key name drifts
+   (GLM-4.x `thinking` + `/nothink` → GLM 5.1 `enable_thinking`; Kimi K2.5
+   `enable_thinking` → K2.6 `thinking`). Set only the one key your model uses;
+   do not emit several. Known examples: `enable_thinking: true` (Qwen3.5/3.6,
+   GLM 5.1); `thinking: true` (Kimi K2.6, DeepSeek V3.2/V4). DeepSeek V3.2/V4
+   use a Python encoder, not Jinja, so an unused kwarg can raise an error
+   instead of being silently ignored.
 
-   Verify the key against the model's `chat_template.jinja` rather than
-   extrapolating from a prior generation — names drift (GLM-4.x `thinking` +
-   `/nothink` → GLM 5.1 `enable_thinking`; Kimi K2.5 `enable_thinking` → K2.6
-   `thinking`). DeepSeek V3.2/V4 use a Python encoder, not Jinja, so an unused
-   kwarg can raise an error instead of being silently ignored.
+   **If the model supports a reasoning-effort setting** (e.g. DeepSeek V4's
+   `reasoning_effort`), default to the **highest** level the card documents
+   (usually `max`). Note any deployment requirement the card ties to it (e.g.
+   DeepSeek V4 Think Max needs `--max-model-len >= 393216`).
 
 ---
 
