@@ -144,7 +144,7 @@ For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipelin
 
 **Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
 
-> **NVFP4 on Blackwell needs a CUDA-13 vLLM build.** On B200/B300/GB200/GB300 (sm_100/sm_103) the pinned `v0.19.1` and all `cu129` builds lack sm_103 FP4 kernels — engine init dies with `CUDA error: no kernel image is available for execution on the device`. Use `vllm/vllm-openai:v0.19.1-cu130` (pinned, matches the default image), and bump to `cu130-nightly-<arch>` only if it lacks the model's arch (Qwen3.5-9B's `qwen3_5` needed the nightly). Multimodal on sm_103 also needs `--mm-encoder-attn-backend TRITON_ATTN` (ViT flash-attn workaround). Full note + the `recipes.vllm.ai ?hardware=b300` lookup are in `recipes/examples/example_eval.yaml`.
+> **NVFP4 on Blackwell B300/GB300 (sm_103): append `-cu130` to the image tag** (e.g. `vllm/vllm-openai:v0.19.1-cu130` — release tags are multi-arch). The default cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. If a pinned release predates the model's arch, use `cu130-nightly-<arch>` (Qwen3.5-9B's `qwen3_5` needed it, vLLM 0.19.2rc1.dev134). Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 
@@ -200,7 +200,7 @@ Reasoning models: prefer reasoning mode (highest scores). For lower variance / c
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
-- **`execution.gres`** — NEL defaults to `gpu:8`. Set it to the cluster's per-node GPU count (and what the QOS permits), and match `--data-parallel-size`/`--tensor-parallel-size` to it. A mismatch makes `sbatch` reject the job with *"Requested node configuration is not available"* (e.g. `gpu:8` on 4-GPU GB300 nodes → set `gres: gpu:4`). Confirm the node GPU count with `sinfo -o '%P %G'` on the target cluster.
+- **`execution.gres`** — if your NEL install ships an `internal/slurm/<cluster>` execution config, prefer it (it pre-fills `gres`/hostname/partition/node-exclusivity). Otherwise NEL defaults to `gpu:8`; set it to the node's GPU count (and match `--data-parallel-size`/`--tensor-parallel-size`), or `sbatch` rejects the job with *"Requested node configuration is not available"* (e.g. `gpu:8` on 4-GPU GB300 nodes → `gres: gpu:4`; check with `sinfo -o '%P %G'`).
 
 **Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.
 

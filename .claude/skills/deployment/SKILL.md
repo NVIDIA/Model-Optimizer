@@ -125,17 +125,18 @@ python -m vllm.entrypoints.openai.api_server \
 
 For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
 
-> **NVFP4 on Blackwell needs the CUDA-13 vLLM build.** On B200/B300/GB200/GB300
-> (compute capability sm_100/sm_103), use `vllm/vllm-openai:cu130-nightly-<arch>`
-> (`-x86_64`, or `-aarch64` on Grace). The common `v0.19.1` / any `cu129`
-> (CUDA 12.9) build has **no sm_103 FP4 kernels** — vLLM loads the checkpoint
+> **NVFP4 on Blackwell B300/GB300 (sm_103): append `-cu130` to the image tag**
+> (e.g. `vllm/vllm-openai:v0.19.1-cu130` — release tags are multi-arch). The
+> default cu12 build has **no sm_103 FP4 kernel**, so vLLM loads the checkpoint
 > then dies at engine init with `CUDA error: no kernel image is available for
 > execution on the device` (affects the `flashinfer` and `cutlass` NVFP4
-> backends; `marlin` separately fails on non-64-divisible layer dims). Verify the
-> image via `recipes.vllm.ai/<org>/<model>?hardware=b300` (JS-rendered — fetch the
-> raw markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`).
-> For multimodal models on sm_103, also pass `--mm-encoder-attn-backend
-> TRITON_ATTN` (the default CuTe ViT flash-attn asserts "Only SM 10.x and 11.x").
+> backends; `marlin` separately fails on non-64-divisible layer dims). If a
+> pinned release predates the model's arch, use `cu130-nightly-<arch>` instead
+> (Qwen3.5-9B's `qwen3_5` needed it). Cross-check via
+> `recipes.vllm.ai/<org>/<model>?hardware=b300` (JS-rendered — fetch the raw
+> markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`). For
+> multimodal models on sm_103, also pass `--mm-encoder-attn-backend TRITON_ATTN`
+> (the default CuTe ViT flash-attn asserts "Only SM 10.x and 11.x").
 
 #### SGLang
 

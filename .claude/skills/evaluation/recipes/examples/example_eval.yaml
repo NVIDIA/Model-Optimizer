@@ -50,9 +50,10 @@ execution:
   account: ???
   output_dir: ???
   walltime: "04:00:00"
-  # gres defaults to gpu:8. Set it to the cluster's per-node GPU count (and what
-  # the QOS allows) or sbatch fails "Requested node configuration is not available".
-  # gres: gpu:4   # e.g. GB300 (4 GPUs); match --tensor-parallel-size/--data-parallel-size to it (see references/parallelism.md)
+  # gres defaults to gpu:8. If your NEL install ships an internal/slurm/<cluster>
+  # execution config, prefer it (it pre-fills gres/hostname/partition). Otherwise
+  # set gres to the node's GPU count or sbatch fails "Requested node configuration
+  # is not available"; match --tensor/--data-parallel-size to it (references/parallelism.md).
   mounts:
     mount_home: false
   auto_export:          # REQUIRED trigger for auto-export. Without this, the
@@ -65,18 +66,14 @@ deployment:
   hf_model_handle:
   served_model_name: ???
   image: vllm/vllm-openai:v0.19.1
-  # NVFP4 on Blackwell (B200/B300/GB200/GB300, sm_100/sm_103): the v0.19.1 and
-  # any cu129 builds have NO sm_103 FP4 kernels (deploy dies with CUDA
-  # "no kernel image is available"). Use a CUDA-13 build — prefer the pinned
-  # release matching this image, bump to nightly only if it lacks the arch:
-  #   image: vllm/vllm-openai:v0.19.1-cu130          # reproducible; verify arch support
-  #   image: vllm/vllm-openai:cu130-nightly-x86_64   # newest (-aarch64 on Grace)
-  # (Qwen3.5-9B's qwen3_5 arch needed the nightly = vLLM 0.19.2rc1.dev134; the
-  # pinned v0.19.1-cu130 is untested for it.) Confirm via recipes.vllm.ai
-  # ?hardware=b300 (JS-rendered; fetch raw markdown at
-  # github.com/vllm-project/recipes/blob/main/<org>/<model>.md).
-  # Multimodal on sm_103: the ViT CuTe flash-attn asserts "Only SM 10.x/11.x";
-  # workaround `--mm-encoder-attn-backend TRITON_ATTN` (may be unneeded on newer builds).
+  # NVFP4 on Blackwell B300/GB300 (sm_103): append `-cu130` to the (multi-arch)
+  # image tag — the default cu12 build has no sm_103 FP4 kernel, so the deploy
+  # dies at engine init with CUDA "no kernel image is available". e.g.:
+  #   image: vllm/vllm-openai:v0.19.1-cu130
+  # If a pinned release predates your model's arch, use the nightly instead
+  # (Qwen3.5-9B's qwen3_5 needed vllm/vllm-openai:cu130-nightly-x86_64, 0.19.2rc1.dev134).
+  # Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`
+  # (ViT flash-attn workaround; drop if the encoder loads without it).
   #
   # `--served-model-name ${deployment.served_model_name}` (in command below) is
   # REQUIRED: without it vLLM registers the model as `/checkpoint` and every eval
