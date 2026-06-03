@@ -225,13 +225,25 @@ class HFEagleModel(EagleModel):
 
         # If start_layer is set, enumerate matching modules explicitly so only
         # the desired layers get LoRA adapters.
-        if self.eagle_base_lora_start_layer is not None and target_modules is not None:
+        if self.eagle_base_lora_start_layer is not None:
+            if target_modules is None:
+                raise ValueError(
+                    "eagle_base_lora_start_layer requires eagle_base_lora_target_modules "
+                    "to be set explicitly (the start-layer filter matches module-name "
+                    "suffixes, so it cannot be combined with PEFT's default/regex targeting)."
+                )
             explicit_targets = []
             for name, _ in self._base_model.named_modules():
                 m = re.search(r"layers\.(\d+)\.", name)
                 if m and int(m.group(1)) >= self.eagle_base_lora_start_layer:
                     if any(name.endswith(mod) for mod in target_modules):
                         explicit_targets.append(name)
+            if not explicit_targets:
+                raise ValueError(
+                    f"No base model modules matched eagle_base_lora_target_modules="
+                    f"{target_modules} at or beyond layer {self.eagle_base_lora_start_layer}. "
+                    "Check the start layer index and target module names."
+                )
             target_modules = explicit_targets
 
         lora_config = LoraConfig(

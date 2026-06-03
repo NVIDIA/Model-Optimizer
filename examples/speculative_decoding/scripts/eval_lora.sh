@@ -21,6 +21,7 @@
 #   EAGLE_CKPT:     Path to the EAGLE3 training checkpoint directory
 #   OUTPUT_DIR:     Output directory (default: /scratchspace)
 #   RUN_BASELINE:   If "true", also evaluate the original base model
+#   TRUST_REMOTE_CODE: If "true", opt in to remote-code execution during eval (default: false)
 #
 # Outputs to $OUTPUT_DIR/:
 #   export/          - Exported eagle draft model + LoRA adapter
@@ -32,6 +33,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 OUTPUT_DIR="${OUTPUT_DIR:-/scratchspace}"
+TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-False}"
+
+: "${HF_MODEL_CKPT:?Set HF_MODEL_CKPT to the base model checkpoint path}"
+: "${EAGLE_CKPT:?Set EAGLE_CKPT to the EAGLE training checkpoint path}"
 
 pip install --no-deps lm_eval==0.4.11
 pip install langdetect pytablewriter word2number sacrebleu rouge_score immutabledict
@@ -63,16 +68,21 @@ for f in "${OUTPUT_DIR}/export"/*.json; do
 done
 
 echo "=== Step 2: Merge LoRA into base model ==="
-python "${SCRIPT_DIR}/merge_lora.py" \
-    --base_model_path "${HF_MODEL_CKPT}" \
-    --exported_lora_dir "${OUTPUT_DIR}/export" \
+MERGE_ARGS=(
+    --base_model_path "${HF_MODEL_CKPT}"
+    --exported_lora_dir "${OUTPUT_DIR}/export"
     --output_path "${OUTPUT_DIR}/merged_base"
+)
+if [[ "${TRUST_REMOTE_CODE,,}" == "true" ]]; then
+    MERGE_ARGS+=(--trust_remote_code)
+fi
+python "${SCRIPT_DIR}/merge_lora.py" "${MERGE_ARGS[@]}"
 
 echo "=== Step 3: Run lm_eval ==="
 mkdir -p "${OUTPUT_DIR}/lm_eval"
 
 python -m lm_eval --model hf \
-    --model_args "pretrained=${OUTPUT_DIR}/merged_base,trust_remote_code=True" \
+    --model_args "pretrained=${OUTPUT_DIR}/merged_base,trust_remote_code=${TRUST_REMOTE_CODE}" \
     --tasks ifeval,arc_challenge,winogrande \
     --batch_size auto \
     --output_path "${OUTPUT_DIR}/lm_eval" \
@@ -83,7 +93,7 @@ if [[ "${RUN_BASELINE:-false}" == "true" ]]; then
     mkdir -p "${OUTPUT_DIR}/lm_eval_baseline"
 
     python -m lm_eval --model hf \
-        --model_args "pretrained=${HF_MODEL_CKPT},trust_remote_code=True" \
+        --model_args "pretrained=${HF_MODEL_CKPT},trust_remote_code=${TRUST_REMOTE_CODE}" \
         --tasks ifeval,arc_challenge,winogrande \
         --batch_size auto \
         --output_path "${OUTPUT_DIR}/lm_eval_baseline" \
