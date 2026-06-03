@@ -145,10 +145,13 @@ def triton_attention_forward(
         kw["dense_sink_tokens"] = method.dense_sink_tokens
         kw["dense_recent_tokens"] = method.dense_recent_tokens
 
-    # Skip-softmax: applies to both prefill and decode
+    # Skip-softmax: applies to both prefill and decode. Prefer the method's
+    # per-phase calibrated dynamic threshold (scale_factor / seq_k); fall back
+    # to the static threshold when uncalibrated.
     if method is not None and getattr(module, "_apply_skip_softmax", False):
-        if method.skip_softmax_threshold:
-            kw["skip_softmax_threshold"] = method.skip_softmax_threshold
+        threshold = method.get_inference_threshold(seq_len, seq_k)
+        if threshold:
+            kw["skip_softmax_threshold"] = threshold
 
     o = attention(q, k, v, **kw)
 
