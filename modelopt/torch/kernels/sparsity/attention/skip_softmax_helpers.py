@@ -142,6 +142,8 @@ def _apply_sparse_nm_to_qk_tile(
 def _skip_softmax_decision(
     scores,
     row_max,
+    q_pos,
+    seq_len_q,
     SKIP_THRESHOLD_LOG2: tl.constexpr,
     Sparsity_total,
     Sparsity_skipped,
@@ -159,16 +161,25 @@ def _skip_softmax_decision(
     The threshold is converted to the kernel's scaled log2 score space by the
     Python wrapper so it can be compared directly against ``scores``.
 
+    ``q_pos`` (``[BLOCK_M]`` absolute query positions) and the scalar
+    ``seq_len_q`` identify padding rows. When a tile has fewer than ``BLOCK_M``
+    valid queries — decode has one valid query plus ``BLOCK_M - 1`` padding
+    rows, and the last prefill tile is partial when ``seq_q`` is not a multiple
+    of ``BLOCK_M`` — the padding rows carry zero scores that are never
+    negligible versus their own running max and would otherwise veto every
+    skip. They are forced skippable so the decision reflects only valid rows.
+
     Returns:
-        True when *all* Q rows in the tile satisfy the skip criterion.
+        True when *all valid* Q rows in the tile satisfy the skip criterion.
 
     When ``MEASURE_SPARSITY`` is set, also records total/skipped tile counts
     via atomic adds on ``Sparsity_total`` / ``Sparsity_skipped``.
     """
     tile_row_max = tl.max(scores, 1)  # [BLOCK_M] — ~m_i^(j) (scaled)
-    # Per-row: True if row's tile max is negligible vs running max
-    can_skip = tile_row_max < (row_max + SKIP_THRESHOLD_LOG2)
-    # Per-tile: skip entire tile only if ALL rows are negligible
+    # Per-row: True if the row's tile max is negligible vs running max, OR the
+    # row is padding (q_pos >= seq_len_q) so it must not veto the tile decision.
+    can_skip = (tile_row_max < (row_max + SKIP_THRESHOLD_LOG2)) | (q_pos >= seq_len_q)
+    # Per-tile: skip entire tile only if ALL valid rows are negligible
     skip_tile = tl.min(can_skip.to(tl.int32)) == 1
 
     if MEASURE_SPARSITY:
