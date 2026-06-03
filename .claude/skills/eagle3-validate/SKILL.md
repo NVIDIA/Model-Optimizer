@@ -114,8 +114,6 @@ In the task_2 log look for:
 **If FAIL:**
 - Identify which step or metric failed
 - Suggest running `/eagle3-triage` for diagnosis
-- If AR is close but below threshold, suggest:
-  - More training epochs (`training.num_epochs` override)
-  - More training data (re-run task_0 with larger dataset)
-  - Larger draft head (`num_hidden_layers` in `eagle_config.json`)
-  - Hyperparameter tuning (`training.lr`, `training.train_bs`)
+- For a low AR, diagnose the specific cause from the run (training loss curve, data
+  volume/quality, draft-head capacity, hyperparameters) and suggest fixes targeted to that
+  scenario — low AR can have many causes, so avoid a generic checklist.
