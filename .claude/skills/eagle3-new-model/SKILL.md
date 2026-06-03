@@ -42,7 +42,6 @@ These are the non-obvious knobs that vary per model:
 | VLM / multimodal | Use `dump_offline_data_hf.sh` for `task_1` |
 | Sliding window attention | Use `dump_offline_data_hf.sh` or `_vllm.sh` for `task_1` |
 | MoE with large expert hidden dim | Increase `intermediate_size` in `eagle_config.json` to match `moe_intermediate_size` |
-| Non-standard attention (MLA) | Verify `eagle_decoder_type` in the eagle3 recipe YAML |
 | Custom tokenizer (e.g. tiktoken) | Set `TIKTOKEN_RS_CACHE_DIR` env var in `task_0` and `task_1` |
 | NVFP4 quant model | `task_0`/`task_3` use the quant container; `task_1`/`task_2` train against the BF16 base — add an `hf_model_bf16` global_var |
 
