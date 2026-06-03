@@ -60,65 +60,37 @@ def _make_cfg(
     )
 
 
-@pytest.mark.parametrize(
-    ("warmup_steps", "lr_decay_steps", "learning_rate"),
-    [
-        (10, 10, 0.5),
-        (20, 10, 0.7),
-    ],
-)
-def test_degenerate_budget_returns_base_lr(warmup_steps, lr_decay_steps, learning_rate):
+def test_degenerate_budget_returns_base_lr():
     """When ``lr_decay_steps <= warmup_steps`` (tiny test budgets), the scheduler
     must short-circuit to ``learning_rate`` rather than divide by zero."""
-    cfg = _make_cfg(
-        warmup_steps=warmup_steps,
-        lr_decay_steps=lr_decay_steps,
-        learning_rate=learning_rate,
-    )
-    assert _get_lr(cfg, step=0) == learning_rate
-    assert _get_lr(cfg, step=99) == learning_rate
+    for warmup_steps, lr_decay_steps, learning_rate in [(10, 10, 0.5), (20, 10, 0.7)]:
+        cfg = _make_cfg(
+            warmup_steps=warmup_steps,
+            lr_decay_steps=lr_decay_steps,
+            learning_rate=learning_rate,
+        )
+        assert _get_lr(cfg, step=0) == learning_rate
+        assert _get_lr(cfg, step=99) == learning_rate
 
 
-def test_warmup_linear_ramp():
+def test_lr_schedule_matches_key_points():
     cfg = _make_cfg(warmup_steps=10, lr_decay_steps=100, learning_rate=1.0)
-    assert _get_lr(cfg, step=0) == pytest.approx(0.0)
-    assert _get_lr(cfg, step=5) == pytest.approx(0.5)
-    assert _get_lr(cfg, step=10) == pytest.approx(1.0)
+    for step, expected, name in [
+        (0, 0.0, "warmup start"),
+        (5, 0.5, "warmup midpoint"),
+        (10, 1.0, "warmup end"),
+    ]:
+        assert _get_lr(cfg, step=step) == pytest.approx(expected), name
 
-
-def test_cosine_starts_decaying_immediately_after_warmup():
-    """At ``step == warmup_steps + 1`` the cosine branch is entered with
-    ``decay_ratio = 1/(D-W)`` — already a small step below base LR, not a
-    duplicate plateau at base LR. This is the boundary the previous formula
-    got wrong (it used ``step - W - 1`` and gave ``decay_ratio == 0`` here)."""
     cfg = _make_cfg(warmup_steps=10, lr_decay_steps=20, learning_rate=1.0, min_lr=0.0)
-    # decay_ratio = (11 - 10) / 10 = 0.1
-    expected = 0.5 * (1.0 + math.cos(math.pi * 0.1))
-    assert _get_lr(cfg, step=11) == pytest.approx(expected)
-    # Strictly below base LR — the cosine has begun.
+    cosine_start = 0.5 * (1.0 + math.cos(math.pi * 0.1))
+    cosine_midpoint = 0.5 * (1.0 + math.cos(math.pi * 0.5))
+    for step, expected, name in [
+        (11, cosine_start, "cosine starts immediately after warmup"),
+        (15, cosine_midpoint, "cosine midpoint"),
+        (20, 0.0, "cosine endpoint"),
+        (21, 0.0, "post-decay clamp"),
+        (1000, 0.0, "long post-decay clamp"),
+    ]:
+        assert _get_lr(cfg, step=step) == pytest.approx(expected), name
     assert _get_lr(cfg, step=11) < 1.0
-
-
-def test_cosine_endpoint_returns_min_lr():
-    """At ``step == lr_decay_steps`` the cosine branch reaches its endpoint:
-    ``decay_ratio == 1`` → ``coeff == 0`` → returns ``min_lr`` exactly. The
-    post-decay clamp at ``step == lr_decay_steps + 1`` is then a no-op
-    continuation, not a correction for an off-by-one."""
-    cfg = _make_cfg(warmup_steps=10, lr_decay_steps=20, learning_rate=1.0, min_lr=0.1)
-    assert _get_lr(cfg, step=20) == pytest.approx(0.1)
-
-
-def test_cosine_midpoint_is_halfway():
-    """At the cosine midpoint, ``coeff == 0.5`` → returns ``(lr + min_lr) / 2``."""
-    cfg = _make_cfg(warmup_steps=10, lr_decay_steps=20, learning_rate=1.0, min_lr=0.0)
-    # Midpoint of the post-warmup window: step such that decay_ratio == 0.5.
-    # decay_ratio = (step - 10) / (20 - 10) → step = 15 gives ratio 0.5.
-    expected_coeff = 0.5 * (1.0 + math.cos(math.pi * 0.5))
-    assert _get_lr(cfg, step=15) == pytest.approx(expected_coeff)
-
-
-def test_post_decay_clamps_to_min_lr():
-    """``step > lr_decay_steps`` always returns ``min_lr`` exactly."""
-    cfg = _make_cfg(warmup_steps=10, lr_decay_steps=20, learning_rate=1.0, min_lr=0.1)
-    assert _get_lr(cfg, step=21) == 0.1
-    assert _get_lr(cfg, step=1000) == 0.1

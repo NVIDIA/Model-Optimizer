@@ -30,33 +30,16 @@ from modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory import
 )
 
 
-def test_persistent_buffer_excluded_non_persistent_included():
-    m = nn.Module()
-    m.register_buffer("p", torch.zeros(1), persistent=True)
-    m.register_buffer("np", torch.zeros(1), persistent=False)
-    out = _get_all_non_persistent_buffers_set(m)
-    assert out == {"np"}
-
-
-def test_nested_submodule_paths_are_fully_qualified():
-    """Sub-module non-persistent buffers must surface as ``submodule_name.buffer_name``
-    so the matching key in ``state_dict()`` and the bypass save/restore code agree."""
+def test_non_persistent_buffers_are_reported_with_qualified_paths():
+    """Only non-persistent buffers should appear, including nested names."""
     outer = nn.Module()
-    inner = nn.Module()
-    inner.register_buffer("nb", torch.zeros(1), persistent=False)
-    outer.add_module("inner", inner)
-    out = _get_all_non_persistent_buffers_set(outer)
-    assert out == {"inner.nb"}
+    outer.register_buffer("global_keep", torch.zeros(1), persistent=True)
+    outer.register_buffer("scratch", torch.zeros(1), persistent=False)
 
-
-def test_mix_of_persistent_and_non_persistent_in_nested_module():
-    """The full discrimination: only the nested non-persistent buffer should
-    appear, with its fully-qualified path."""
-    outer = nn.Module()
     inner = nn.Module()
-    inner.register_buffer("keep", torch.zeros(1), persistent=True)  # persistent → excluded
+    inner.register_buffer("keep", torch.zeros(1), persistent=True)
     inner.register_buffer("rope_cache", torch.zeros(1), persistent=False)
     outer.add_module("attn", inner)
-    outer.register_buffer("global_keep", torch.zeros(1), persistent=True)  # → excluded
+
     out = _get_all_non_persistent_buffers_set(outer)
-    assert out == {"attn.rope_cache"}
+    assert out == {"scratch", "attn.rope_cache"}

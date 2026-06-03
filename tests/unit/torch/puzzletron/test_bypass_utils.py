@@ -26,47 +26,54 @@ from modelopt.torch.puzzletron.bypass_distillation.bypass_utils import (
 )
 
 
-@pytest.mark.parametrize(
-    ("module_count", "world_size", "expected_ownership"),
-    [
+def test_distributed_modules_ownership():
+    for module_count, world_size, expected_ownership in [
         (4, 1, [0, 0, 0, 0]),
         (4, 2, [0, 0, 1, 1]),
         (3, 2, [0, 0, 1]),
         (7, 3, [0, 0, 0, 1, 1, 2, 2]),
         (1, 2, [0]),
-    ],
-)
-def test_distributed_modules_ownership(module_count, world_size, expected_ownership):
-    assert (
-        get_distributed_modules_ownership(module_count=module_count, world_size=world_size)
-        == expected_ownership
-    )
+    ]:
+        assert (
+            get_distributed_modules_ownership(module_count=module_count, world_size=world_size)
+            == expected_ownership
+        )
 
 
-def test_pipeline_ownership_context_returns_neighbors():
+def test_pipeline_ownership_context_returns_neighbors_and_rejects_idle_rank():
     ownership = [0, 0, 1, 1, 2]
 
-    assert get_pipeline_ownership_context(ownership, rank=0) == {
-        "owned_indices": [0, 1],
-        "owned_index_set": {0, 1},
-        "prev_rank": None,
-        "next_rank": 1,
-    }
-    assert get_pipeline_ownership_context(ownership, rank=1) == {
-        "owned_indices": [2, 3],
-        "owned_index_set": {2, 3},
-        "prev_rank": 0,
-        "next_rank": 2,
-    }
-    assert get_pipeline_ownership_context(ownership, rank=2) == {
-        "owned_indices": [4],
-        "owned_index_set": {4},
-        "prev_rank": 1,
-        "next_rank": None,
-    }
+    for rank, expected_context in [
+        (
+            0,
+            {
+                "owned_indices": [0, 1],
+                "owned_index_set": {0, 1},
+                "prev_rank": None,
+                "next_rank": 1,
+            },
+        ),
+        (
+            1,
+            {
+                "owned_indices": [2, 3],
+                "owned_index_set": {2, 3},
+                "prev_rank": 0,
+                "next_rank": 2,
+            },
+        ),
+        (
+            2,
+            {
+                "owned_indices": [4],
+                "owned_index_set": {4},
+                "prev_rank": 1,
+                "next_rank": None,
+            },
+        ),
+    ]:
+        assert get_pipeline_ownership_context(ownership, rank=rank) == expected_context
 
-
-def test_pipeline_ownership_context_rejects_idle_rank():
     with pytest.raises(RuntimeError, match="owns no modules"):
         get_pipeline_ownership_context([0, 0, 1], rank=2)
 
@@ -155,49 +162,37 @@ def test_experiment_id_falls_back_when_no_architecture_parts_exist():
     assert cfg.bypass.experiment_id != "bypass_None"
 
 
-def test_config_fingerprint_changes_with_dataset_path():
-    cfg = _experiment_cfg("subblock_attention")
-    original = get_bypass_config_fingerprint(cfg)
-    cfg.dataset_path = "/tmp/dataset_b"
-    assert get_bypass_config_fingerprint(cfg) != original
+def test_config_fingerprint_changes_with_identity_inputs():
+    for name, mutate_cfg in [
+        ("dataset path", lambda cfg: setattr(cfg, "dataset_path", "/tmp/dataset_b")),
+        (
+            "shuffle seed",
+            lambda cfg: setattr(cfg.bypass.data, "shuffle_train_data_seed", 456),
+        ),
+        ("teacher dir", lambda cfg: setattr(cfg, "teacher_dir", "/tmp/teacher_b")),
+        ("descriptor", lambda cfg: setattr(cfg, "descriptor", "other_descriptor")),
+    ]:
+        cfg = _experiment_cfg("subblock_attention")
+        original = get_bypass_config_fingerprint(cfg)
+        mutate_cfg(cfg)
+        assert get_bypass_config_fingerprint(cfg) != original, name
 
 
-def test_config_fingerprint_changes_with_shuffle_seed():
-    cfg = _experiment_cfg("subblock_attention")
-    original = get_bypass_config_fingerprint(cfg)
-    cfg.bypass.data.shuffle_train_data_seed = 456
-    assert get_bypass_config_fingerprint(cfg) != original
+def test_config_fingerprint_and_experiment_id_canonicalize_keys_to_learn():
+    for keys_a, keys_b in [
+        ("entire_block", ["entire_block"]),
+        (["subblock_ffn", "subblock_attention"], ["subblock_attention", "subblock_ffn"]),
+    ]:
+        cfg_a = _experiment_cfg(keys_a)
+        cfg_b = _experiment_cfg(keys_b)
+        assert get_bypass_config_fingerprint(cfg_a) == get_bypass_config_fingerprint(cfg_b)
+
+        set_experiment_id(cfg_a)
+        set_experiment_id(cfg_b)
+        assert cfg_a.bypass.experiment_id == cfg_b.bypass.experiment_id
 
 
-def test_config_fingerprint_changes_with_teacher_dir():
-    cfg = _experiment_cfg("subblock_attention")
-    original = get_bypass_config_fingerprint(cfg)
-    cfg.teacher_dir = "/tmp/teacher_b"
-    assert get_bypass_config_fingerprint(cfg) != original
-
-
-def test_config_fingerprint_changes_with_descriptor():
-    cfg = _experiment_cfg("subblock_attention")
-    original = get_bypass_config_fingerprint(cfg)
-    cfg.descriptor = "other_descriptor"
-    assert get_bypass_config_fingerprint(cfg) != original
-
-
-def test_config_fingerprint_canonicalizes_single_keys_to_learn():
-    cfg_a = _experiment_cfg("entire_block")
-    cfg_b = _experiment_cfg(["entire_block"])
-
-    assert get_bypass_config_fingerprint(cfg_a) == get_bypass_config_fingerprint(cfg_b)
-
-
-def test_config_fingerprint_canonicalizes_keys_to_learn_order():
-    cfg_a = _experiment_cfg(["subblock_ffn", "subblock_attention"])
-    cfg_b = _experiment_cfg(["subblock_attention", "subblock_ffn"])
-
-    assert get_bypass_config_fingerprint(cfg_a) == get_bypass_config_fingerprint(cfg_b)
-
-
-def test_experiment_id_does_not_change_with_dataset_path():
+def test_experiment_id_uses_teacher_source_not_dataset_path():
     cfg_a = _experiment_cfg("subblock_attention")
     cfg_b = _experiment_cfg("subblock_attention")
     cfg_b.dataset_path = "/tmp/dataset_b"
@@ -205,19 +200,7 @@ def test_experiment_id_does_not_change_with_dataset_path():
     set_experiment_id(cfg_b)
     assert cfg_a.bypass.experiment_id == cfg_b.bypass.experiment_id
 
-
-def test_experiment_id_changes_with_teacher_source():
-    cfg_a = _experiment_cfg("subblock_attention")
-    cfg_b = _experiment_cfg("subblock_attention")
-    cfg_b.teacher_dir = "/tmp/teacher_b"
-    set_experiment_id(cfg_a)
-    set_experiment_id(cfg_b)
-    assert cfg_a.bypass.experiment_id != cfg_b.bypass.experiment_id
-
-
-def test_experiment_id_canonicalizes_keys_to_learn_order():
-    cfg_a = _experiment_cfg(["subblock_ffn", "subblock_attention"])
-    cfg_b = _experiment_cfg(["subblock_attention", "subblock_ffn"])
-    set_experiment_id(cfg_a)
-    set_experiment_id(cfg_b)
-    assert cfg_a.bypass.experiment_id == cfg_b.bypass.experiment_id
+    cfg_c = _experiment_cfg("subblock_attention")
+    cfg_c.teacher_dir = "/tmp/teacher_b"
+    set_experiment_id(cfg_c)
+    assert cfg_a.bypass.experiment_id != cfg_c.bypass.experiment_id

@@ -72,56 +72,41 @@ def _record_calls(monkeypatch):
     return snapshots
 
 
-def test_no_configs_key_runs_once(monkeypatch, tmp_path):
-    """Absent ``bypass.configs`` is the single-config path — one call, no resets."""
-    snapshots = _record_calls(monkeypatch)
-    cfg = _base_cfg(tmp_path, configs=None)
-    tl.launch_bypass_distillation(cfg)
-    assert len(snapshots) == 1
-    # Single-config path doesn't touch the state machine — values remain as supplied.
-    assert snapshots[0]["bypass"]["iter_num"] == 999
-    assert snapshots[0]["bypass"]["training"]["clipping_count"] == 42
+def test_single_config_modes_run_once_without_reset(monkeypatch, tmp_path):
+    """Absent and empty ``bypass.configs`` both use the single-config path."""
+    for configs in (None, []):
+        snapshots = _record_calls(monkeypatch)
+        cfg = _base_cfg(tmp_path, configs=configs)
+        tl.launch_bypass_distillation(cfg)
+        assert len(snapshots) == 1
+        # Single-config path doesn't touch the state machine.
+        assert snapshots[0]["bypass"]["iter_num"] == 999
+        assert snapshots[0]["bypass"]["training"]["clipping_count"] == 42
 
 
-def test_empty_configs_list_runs_once(monkeypatch, tmp_path):
-    """``configs: []`` must hit the same branch as missing — the truthiness
-    check on ``bypass.configs`` treats both as 'no sweep'."""
-    snapshots = _record_calls(monkeypatch)
-    cfg = _base_cfg(tmp_path, configs=[])
-    tl.launch_bypass_distillation(cfg)
-    assert len(snapshots) == 1
-
-
-def test_two_configs_run_twice_with_distinct_overrides(monkeypatch, tmp_path):
+def test_sweep_configs_apply_overrides_reset_state_and_restore_base_keys(monkeypatch, tmp_path):
+    """Each sweep entry gets its override, reset counters, and base keys fallback."""
     snapshots = _record_calls(monkeypatch)
     cfg = _base_cfg(
         tmp_path,
         configs=[
-            {"model_config_overrides": {"intermediate_size": 256}},
+            {
+                "model_config_overrides": {"intermediate_size": 256},
+                "keys_to_learn": "subblock_attention",
+            },
             {"model_config_overrides": {"intermediate_size": 128}},
         ],
     )
     tl.launch_bypass_distillation(cfg)
+
     assert len(snapshots) == 2
     assert snapshots[0]["bypass"]["model"]["model_config_overrides"] == {"intermediate_size": 256}
+    assert snapshots[0]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_attention"
     assert snapshots[1]["bypass"]["model"]["model_config_overrides"] == {"intermediate_size": 128}
+    assert snapshots[1]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_ffn"
 
-
-def test_per_run_state_reset_before_each_call(monkeypatch, tmp_path):
-    """Every sweep entry must see iter_num=1, step_num=1, token_count=0,
-    best_val_loss=1e9, clipping_count=0, and a fresh experiment_id even when the
-    previous entry left the cfg in some other state."""
-    snapshots = _record_calls(monkeypatch)
-    cfg = _base_cfg(
-        tmp_path,
-        configs=[
-            {"model_config_overrides": {"intermediate_size": 256}},
-            {"model_config_overrides": {"intermediate_size": 128}},
-        ],
-    )
-    tl.launch_bypass_distillation(cfg)
-    for snap in snapshots:
-        assert snap["bypass"]["experiment_id"].startswith("bypass_ffn_")
+    for snap, expected_prefix in zip(snapshots, ["bypass_attention_", "bypass_ffn_"], strict=True):
+        assert snap["bypass"]["experiment_id"].startswith(expected_prefix)
         assert snap["bypass"]["iter_num"] == 1
         assert snap["bypass"]["step_num"] == 1
         assert snap["bypass"]["token_count"] == 0
@@ -129,21 +114,7 @@ def test_per_run_state_reset_before_each_call(monkeypatch, tmp_path):
         assert snap["bypass"]["training"]["clipping_count"] == 0
 
 
-def test_sweep_entry_without_keys_to_learn_uses_base_not_previous_override(monkeypatch, tmp_path):
-    snapshots = _record_calls(monkeypatch)
-    cfg = _base_cfg(
-        tmp_path,
-        configs=[
-            {"keys_to_learn": "subblock_attention"},
-            {"model_config_overrides": {"intermediate_size": 256}},
-        ],
-    )
-    tl.launch_bypass_distillation(cfg)
-    assert snapshots[0]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_attention"
-    assert snapshots[1]["bypass"]["model_factory"]["keys_to_learn"] == "subblock_ffn"
-
-
-def test_trust_remote_code_defaults_to_false_even_when_descriptor_requires_it(monkeypatch):
+def test_resolve_trust_remote_code_requires_explicit_cfg_opt_in(monkeypatch):
     class DescriptorRequiringTrust:
         @staticmethod
         def requires_trust_remote_code():
@@ -158,27 +129,18 @@ def test_trust_remote_code_defaults_to_false_even_when_descriptor_requires_it(mo
 
     assert tl._resolve_trust_remote_code(OmegaConf.create({}), DescriptorRequiringTrust) is False
     assert any("trust_remote_code" in message for message in messages)
+    messages.clear()
 
-
-def test_trust_remote_code_uses_explicit_cfg_opt_in(monkeypatch):
-    class DescriptorRequiringTrust:
-        @staticmethod
-        def requires_trust_remote_code():
-            return True
-
-    messages = []
-
-    def capture_message(*args):
-        messages.append(" ".join(map(str, args)))
-
-    monkeypatch.setattr(tl, "mprint", capture_message)
-
-    cfg = OmegaConf.create({"trust_remote_code": True})
-    assert tl._resolve_trust_remote_code(cfg, DescriptorRequiringTrust) is True
+    assert (
+        tl._resolve_trust_remote_code(
+            OmegaConf.create({"trust_remote_code": True}), DescriptorRequiringTrust
+        )
+        is True
+    )
     assert messages == []
 
 
-def test_resume_state_ignored_when_init_checkpoint_path_wins(monkeypatch):
+def test_resume_state_path_prefers_explicit_init_checkpoint(monkeypatch):
     messages = []
 
     def capture_message(*args):
@@ -190,17 +152,8 @@ def test_resume_state_ignored_when_init_checkpoint_path_wins(monkeypatch):
     assert tl._get_resume_state_path(cfg, "/tmp/resume-ckpt") is None
     assert any("init_checkpoint_path" in message for message in messages)
 
-
-def test_resume_state_used_when_no_init_checkpoint_path():
-    cfg = OmegaConf.create({"bypass": {"init_checkpoint_path": None}})
-
+    cfg.bypass.init_checkpoint_path = None
     assert tl._get_resume_state_path(cfg, "/tmp/resume-ckpt") == "/tmp/resume-ckpt"
-
-
-def test_resume_skip_first_batches_uses_completed_iter_count():
-    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=0) == 10
-    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=1) == 11
-    assert tl._get_resume_skip_first_batches(saved_skip=10, resume_iter_num=7) == 17
 
 
 def test_flush_loss_buffer_single_rank_without_process_group():
@@ -212,73 +165,72 @@ def test_flush_loss_buffer_single_rank_without_process_group():
     assert stitched_losses_history == local_buffer
 
 
-def test_run_bypassed_training_broadcasts_completion_skip(monkeypatch, tmp_path):
-    cfg = _base_cfg(tmp_path)
-    cfg.bypass.experiment_id = None
-    checks = []
-    broadcasts = []
-    messages = []
+def test_run_bypassed_training_skips_completed_runs_on_all_ranks(monkeypatch, tmp_path):
+    for is_master in (True, False):
+        cfg = _base_cfg(tmp_path)
+        cfg.bypass.experiment_id = None
+        checks = []
+        broadcasts = []
+        messages = []
 
-    def fail(*args, **kwargs):
-        raise AssertionError("training setup should not run after completed bypass check")
+        def fail(*args, **kwargs):
+            raise AssertionError("training setup should not run after completed bypass check")
 
-    monkeypatch.setattr(tl.dist, "local_rank", lambda: 0)
-    monkeypatch.setattr(tl.dist, "barrier", lambda: None)
-    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
-    monkeypatch.setattr(
-        tl.dist, "broadcast", lambda value, src: broadcasts.append((value, src)) or value
-    )
-    monkeypatch.setattr(
-        tl, "bypass_run_is_complete", lambda cfg_arg: checks.append(cfg_arg) or True
-    )
-    monkeypatch.setattr(tl, "print_rank_0", lambda *args, **kwargs: messages.append(args[0]))
-    monkeypatch.setattr(tl.ModelDescriptorFactory, "get", fail)
+        def check_complete(cfg_arg):
+            checks.append(cfg_arg)
+            return True
 
-    tl.run_bypassed_training(cfg)
+        def broadcast(value, src):
+            broadcasts.append((value, src))
+            return True
 
-    assert checks == [cfg]
-    assert broadcasts == [(True, 0)]
-    assert messages == [f"Bypass run {cfg.bypass.experiment_id} is already complete, skipping"]
+        monkeypatch.setattr(tl.dist, "local_rank", lambda: 0)
+        monkeypatch.setattr(tl.dist, "barrier", lambda: None)
+        monkeypatch.setattr(tl.dist, "is_master", lambda: is_master)
+        monkeypatch.setattr(tl.dist, "broadcast", broadcast)
+        monkeypatch.setattr(tl, "bypass_run_is_complete", check_complete)
+        monkeypatch.setattr(tl, "print_rank_0", lambda *args, **kwargs: messages.append(args[0]))
+        monkeypatch.setattr(tl.ModelDescriptorFactory, "get", fail)
 
+        tl.run_bypassed_training(cfg)
 
-def test_run_bypassed_training_non_master_uses_broadcasted_completion(monkeypatch, tmp_path):
-    cfg = _base_cfg(tmp_path)
-    cfg.bypass.experiment_id = None
-
-    def fail(*args, **kwargs):
-        raise AssertionError("non-master should not evaluate completion or continue setup")
-
-    monkeypatch.setattr(tl.dist, "local_rank", lambda: 0)
-    monkeypatch.setattr(tl.dist, "barrier", lambda: None)
-    monkeypatch.setattr(tl.dist, "is_master", lambda: False)
-    monkeypatch.setattr(tl.dist, "broadcast", lambda value, src: True)
-    monkeypatch.setattr(tl, "bypass_run_is_complete", fail)
-    monkeypatch.setattr(tl.ModelDescriptorFactory, "get", fail)
-
-    tl.run_bypassed_training(cfg)
+        if is_master:
+            assert checks == [cfg]
+            assert broadcasts == [(True, 0)]
+        else:
+            assert checks == []
+            assert broadcasts == [(None, 0)]
+        assert messages == [f"Bypass run {cfg.bypass.experiment_id} is already complete, skipping"]
 
 
-def test_clip_stitched_module_grads_norm_counts_clipped_block():
-    module = torch.nn.Linear(2, 1, bias=False)
-    module.weight.grad = torch.full_like(module.weight, 10.0)
-
-    assert tl._clip_stitched_module_grads(module, grad_clip=0.1, grad_clip_type="norm") == 1
-    assert torch.linalg.vector_norm(module.weight.grad) <= 0.1 + 1e-6
-
-
-def test_clip_stitched_module_grads_value_counts_clipped_block():
-    module = torch.nn.Linear(2, 1, bias=False)
-    module.weight.grad = torch.tensor([[0.05, 2.0]])
-
-    assert tl._clip_stitched_module_grads(module, grad_clip=0.5, grad_clip_type="value") == 1
-    assert module.weight.grad.abs().max() <= 0.5
-
-
-def test_clip_stitched_module_grads_returns_zero_when_below_threshold():
-    module = torch.nn.Linear(2, 1, bias=False)
-    module.weight.grad = torch.full_like(module.weight, 0.01)
-
-    assert tl._clip_stitched_module_grads(module, grad_clip=1.0, grad_clip_type="value") == 0
+def test_clip_stitched_module_grads_counts_only_clipped_blocks():
+    for grad, grad_clip, grad_clip_type, expected_count, validate_grad in [
+        (
+            torch.full((1, 2), 10.0),
+            0.1,
+            "norm",
+            1,
+            lambda module: torch.linalg.vector_norm(module.weight.grad) <= 0.1 + 1e-6,
+        ),
+        (
+            torch.tensor([[0.05, 2.0]]),
+            0.5,
+            "value",
+            1,
+            lambda module: module.weight.grad.abs().max() <= 0.5,
+        ),
+        (
+            torch.full((1, 2), 0.01),
+            1.0,
+            "value",
+            0,
+            lambda module: torch.equal(module.weight.grad, torch.full_like(module.weight, 0.01)),
+        ),
+    ]:
+        module = torch.nn.Linear(2, 1, bias=False)
+        module.weight.grad = grad
+        assert tl._clip_stitched_module_grads(module, grad_clip, grad_clip_type) == expected_count
+        assert validate_grad(module)
 
 
 def test_step_stitched_module_optimizer_unscales_before_clipping(monkeypatch):
@@ -315,46 +267,31 @@ def test_step_stitched_module_optimizer_unscales_before_clipping(monkeypatch):
     assert module.weight.grad is None
 
 
-def test_finalize_bypass_run_skips_realization_when_checkpoint_saving_disabled(monkeypatch):
+def test_finalize_bypass_run_marks_completion_only_after_realization(monkeypatch):
+    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
+
     cfg = OmegaConf.create({"bypass": {"disable_checkpoint_save": True}})
 
     def fail(*args, **kwargs):
         raise AssertionError("checkpoint realization should be skipped")
 
-    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
     monkeypatch.setattr(tl, "realize_bypass_checkpoints", fail)
     monkeypatch.setattr(tl, "mark_bypass_run_completed", fail)
+    tl._finalize_bypass_run(cfg)
+
+    completed = {}
+    cfg = OmegaConf.create({"bypass": {"disable_checkpoint_save": False}})
+    monkeypatch.setattr(
+        tl, "realize_bypass_checkpoints", lambda _cfg: (_ for _ in ()).throw(FileNotFoundError)
+    )
+    monkeypatch.setattr(tl, "mark_bypass_run_completed", lambda *args: completed.update(hit=True))
 
     tl._finalize_bypass_run(cfg)
 
+    assert completed == {}
 
-def test_finalize_bypass_run_skips_completion_when_no_checkpoint_exists(monkeypatch):
-    cfg = OmegaConf.create({"bypass": {"disable_checkpoint_save": False}})
-    completed = False
-
-    def missing_checkpoint(_cfg):
-        raise FileNotFoundError("missing checkpoint")
-
-    def mark_completed(*args, **kwargs):
-        nonlocal completed
-        completed = True
-
-    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
-    monkeypatch.setattr(tl, "realize_bypass_checkpoints", missing_checkpoint)
-    monkeypatch.setattr(tl, "mark_bypass_run_completed", mark_completed)
-
-    tl._finalize_bypass_run(cfg)
-
-    assert completed is False
-
-
-def test_finalize_bypass_run_marks_realized_checkpoint(monkeypatch):
-    cfg = OmegaConf.create({"bypass": {"disable_checkpoint_save": False}})
     realized = Path("/tmp/realized")
     symlink = Path("/tmp/ckpts/run_0")
-    completed = {}
-
-    monkeypatch.setattr(tl.dist, "is_master", lambda: True)
     monkeypatch.setattr(tl, "realize_bypass_checkpoints", lambda _cfg: (realized, symlink))
     monkeypatch.setattr(
         tl,

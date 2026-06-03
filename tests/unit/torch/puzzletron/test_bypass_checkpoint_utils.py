@@ -74,105 +74,58 @@ def _make_descriptor(*, with_optimizer: bool = True, with_scaler: bool = True):
     )
 
 
+def _make_checkpoint_dir(parent: Path, name: str, *, completed: bool = True) -> Path:
+    checkpoint_dir = parent / name
+    checkpoint_dir.mkdir(parents=True)
+    if completed:
+        (checkpoint_dir / "saving_completed").touch()
+    return checkpoint_dir
+
+
 # ---------------------------------------------------------------------------
 # find_latest_run_dir
 # ---------------------------------------------------------------------------
 
 
-def test_find_latest_run_dir_picks_only_step_with_marker(tmp_path: Path):
-    step_dir = tmp_path / "step-000010-ckpt"
-    step_dir.mkdir()
-    (step_dir / "saving_completed").touch()
-    assert bcu.find_latest_run_dir(tmp_path) == str(step_dir)
-
-
-def test_find_latest_run_dir_picks_highest_step_number(tmp_path: Path):
-    """When several plain step checkpoints have completed markers, the highest
-    integer wins — not lexicographic order, not insertion order."""
-    for i in (5, 10, 20):
-        d = tmp_path / f"step-{i:06d}-ckpt"
-        d.mkdir()
-        (d / "saving_completed").touch()
-    assert bcu.find_latest_run_dir(tmp_path) == str(tmp_path / "step-000020-ckpt")
-
-
-def test_find_latest_run_dir_skips_step_without_marker(tmp_path: Path):
-    """A partially-written checkpoint (no ``saving_completed``) must be skipped
-    even when it has a higher step number — otherwise resume would crash on a
-    truncated state dict."""
-    high = tmp_path / "step-000099-ckpt"
-    high.mkdir()
-    # No saving_completed → must be ignored.
-    low = tmp_path / "step-000050-ckpt"
-    low.mkdir()
-    (low / "saving_completed").touch()
-    assert bcu.find_latest_run_dir(tmp_path) == str(low)
-
-
-def test_find_latest_run_dir_returns_none_when_no_step_has_marker(tmp_path: Path):
-    (tmp_path / "step-000010-ckpt").mkdir()
-    (tmp_path / "step-000020-ckpt").mkdir()
-    # No saving_completed anywhere.
-    assert bcu.find_latest_run_dir(tmp_path) is None
-
-
-def test_find_latest_run_dir_excludes_non_plain_step_names(tmp_path: Path):
-    """``best-step-*`` / ``start-step-*`` / ``final-step-*`` aren't valid resume
-    targets — pinned by the docstring on lines 39-42."""
+def test_find_latest_run_dir_scans_highest_completed_plain_step(tmp_path: Path):
+    """The scan branch picks the highest completed plain step checkpoint only."""
+    scan_dir = tmp_path / "scan"
+    _make_checkpoint_dir(scan_dir, "step-000005-ckpt")
+    expected = _make_checkpoint_dir(scan_dir, "step-000020-ckpt")
+    _make_checkpoint_dir(scan_dir, "step-000099-ckpt", completed=False)
     for name in ("best-step-000099-ckpt", "start-step-000001-ckpt", "final-step-000050-ckpt"):
-        d = tmp_path / name
-        d.mkdir()
-        (d / "saving_completed").touch()
-    # No plain step-*-ckpt at all.
-    assert bcu.find_latest_run_dir(tmp_path) is None
+        _make_checkpoint_dir(scan_dir, name)
+
+    assert bcu.find_latest_run_dir(scan_dir) == str(expected)
+
+    no_completed_plain_steps = tmp_path / "no_completed_plain_steps"
+    _make_checkpoint_dir(no_completed_plain_steps, "step-000010-ckpt", completed=False)
+    _make_checkpoint_dir(no_completed_plain_steps, "best-step-000020-ckpt")
+    assert bcu.find_latest_run_dir(no_completed_plain_steps) is None
 
 
-def test_find_latest_run_dir_uses_latest_symlink_fast_path(tmp_path: Path):
+def test_find_latest_run_dir_handles_latest_symlink_fast_path_and_fallbacks(tmp_path: Path):
     """The ``latest`` symlink, when present and complete, short-circuits the
     scan — even when a numerically higher step dir also has a marker. This
     matters because the scan branch can be slow on filesystems with many
     step dirs (NFS, lustre)."""
-    target = tmp_path / "step-000010-ckpt"
-    target.mkdir()
-    (target / "saving_completed").touch()
-    (tmp_path / "latest").symlink_to(target.name)
+    complete_latest = tmp_path / "complete_latest"
+    target = _make_checkpoint_dir(complete_latest, "step-000010-ckpt")
+    _make_checkpoint_dir(complete_latest, "step-000020-ckpt")
+    (complete_latest / "latest").symlink_to(target.name)
+    assert bcu.find_latest_run_dir(complete_latest) == str(target.resolve())
 
-    higher = tmp_path / "step-000020-ckpt"
-    higher.mkdir()
-    (higher / "saving_completed").touch()
+    incomplete_latest = tmp_path / "incomplete_latest"
+    incomplete = _make_checkpoint_dir(incomplete_latest, "step-000020-ckpt", completed=False)
+    completed = _make_checkpoint_dir(incomplete_latest, "step-000010-ckpt")
+    (incomplete_latest / "latest").symlink_to(incomplete.name)
+    assert bcu.find_latest_run_dir(incomplete_latest) == str(completed)
 
-    # Symlink wins despite higher step existing, but returns the resolved target
-    # so callers open the same checkpoint that was validated.
-    assert bcu.find_latest_run_dir(tmp_path) == str(target.resolve())
-
-
-def test_find_latest_run_dir_falls_through_when_latest_lacks_marker(tmp_path: Path):
-    """A ``latest`` symlink whose target lacks ``saving_completed`` (interrupted
-    save) must be ignored, falling through to the highest completed step."""
-    incomplete = tmp_path / "step-000020-ckpt"
-    incomplete.mkdir()
-    # No saving_completed.
-    (tmp_path / "latest").symlink_to(incomplete.name)
-
-    completed = tmp_path / "step-000010-ckpt"
-    completed.mkdir()
-    (completed / "saving_completed").touch()
-
-    assert bcu.find_latest_run_dir(tmp_path) == str(completed)
-
-
-def test_find_latest_run_dir_ignores_latest_to_best_checkpoint(tmp_path: Path):
-    """`latest` is a resume pointer, so old symlinks to best checkpoints are ignored."""
-    best = tmp_path / "best-step-000020-ckpt"
-    best.mkdir()
-    (best / "saving_completed").touch()
-    (tmp_path / "latest").symlink_to(best.name)
-
-    completed = tmp_path / "step-000010-ckpt"
-    completed.mkdir()
-    (completed / "saving_completed").touch()
-
-    assert bcu.find_latest_run_dir(tmp_path) == str(completed)
+    latest_to_best = tmp_path / "latest_to_best"
+    best = _make_checkpoint_dir(latest_to_best, "best-step-000020-ckpt")
+    completed = _make_checkpoint_dir(latest_to_best, "step-000010-ckpt")
+    (latest_to_best / "latest").symlink_to(best.name)
+    assert bcu.find_latest_run_dir(latest_to_best) == str(completed)
 
 
 # ---------------------------------------------------------------------------
@@ -183,18 +136,14 @@ def test_find_latest_run_dir_ignores_latest_to_best_checkpoint(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_save_local_state_writes_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
+def test_save_local_state_writes_only_optimizer_and_grad_scaler_state(tmp_path: Path, bcu_no_dist):
     descriptors = OrderedDict([("block_0", _make_descriptor())])
     bcu_no_dist._save_local_state(descriptors, tmp_path)
     stitched = tmp_path / "stitched"
     assert (stitched / "block_0.optimizer_state.pth").exists()
     assert (stitched / "block_0.grad_scaler.pth").exists()
+    assert not (stitched / "block_0.state_dict.pth").exists()
 
-
-def test_save_local_state_overwrites_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
-    descriptors = OrderedDict([("block_0", _make_descriptor())])
-    bcu_no_dist._save_local_state(descriptors, tmp_path)
-    stitched = tmp_path / "stitched"
     stale_optimizer_state = {"stale": torch.tensor([1])}
     stale_scaler_state = {"stale": torch.tensor([1])}
     torch.save(stale_optimizer_state, stitched / "block_0.optimizer_state.pth")
@@ -208,29 +157,21 @@ def test_save_local_state_overwrites_optimizer_and_grad_scaler(tmp_path: Path, b
     assert "stale" not in grad_scaler_state
 
 
-def test_save_local_state_does_not_write_weights_state_dict(tmp_path: Path, bcu_no_dist):
-    """Pin the de-duplication: weights live in the HF checkpoint, not here."""
-    descriptors = OrderedDict([("block_0", _make_descriptor())])
-    bcu_no_dist._save_local_state(descriptors, tmp_path)
-    assert not (tmp_path / "stitched" / "block_0.state_dict.pth").exists()
-
-
-def test_save_local_state_skips_grad_scaler_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
-    descriptors = OrderedDict([("block_0", _make_descriptor(with_scaler=False))])
-    bcu_no_dist._save_local_state(descriptors, tmp_path)
-    stitched = tmp_path / "stitched"
-    assert (stitched / "block_0.optimizer_state.pth").exists()
-    assert not (stitched / "block_0.grad_scaler.pth").exists()
-
-
-def test_save_local_state_skips_optimizer_when_descriptor_has_none(tmp_path: Path, bcu_no_dist):
-    descriptors = OrderedDict(
-        [("block_0", _make_descriptor(with_optimizer=False, with_scaler=False))]
-    )
-    bcu_no_dist._save_local_state(descriptors, tmp_path)
-    stitched = tmp_path / "stitched"
-    assert not (stitched / "block_0.optimizer_state.pth").exists()
-    assert not (stitched / "block_0.grad_scaler.pth").exists()
+def test_save_local_state_respects_optional_optimizer_and_grad_scaler(tmp_path: Path, bcu_no_dist):
+    for name, descriptor, expected_files in [
+        ("full", _make_descriptor(), {"block_0.optimizer_state.pth", "block_0.grad_scaler.pth"}),
+        (
+            "no_scaler",
+            _make_descriptor(with_scaler=False),
+            {"block_0.optimizer_state.pth"},
+        ),
+        ("no_optimizer", _make_descriptor(with_optimizer=False, with_scaler=False), set()),
+    ]:
+        checkpoint_dir = tmp_path / name
+        descriptors = OrderedDict([("block_0", descriptor)])
+        bcu_no_dist._save_local_state(descriptors, checkpoint_dir)
+        stitched = checkpoint_dir / "stitched"
+        assert {path.name for path in stitched.glob("*")} == expected_files
 
 
 # ---------------------------------------------------------------------------
@@ -264,11 +205,14 @@ def patched_save(monkeypatch, bcu_no_dist):
     return bcu_no_dist
 
 
-def test_save_bypass_checkpoint_creates_latest_symlink_and_marker(tmp_path: Path, patched_save):
+def test_save_bypass_checkpoint_updates_latest_symlink_and_marker(tmp_path: Path, patched_save):
     experiment_dir = tmp_path / "exp"
     experiment_dir.mkdir()
+    old_target = experiment_dir / "step-000003-ckpt"
+    old_target.mkdir()
     checkpoint_dir = experiment_dir / "step-000007-ckpt"
     checkpoint_dir.mkdir()
+    (experiment_dir / "latest").symlink_to(old_target.name)
 
     cfg = _make_save_cfg(experiment_dir)
     patched_save.save_bypass_checkpoint(
@@ -286,30 +230,6 @@ def test_save_bypass_checkpoint_creates_latest_symlink_and_marker(tmp_path: Path
     assert latest.resolve() == checkpoint_dir.resolve()
     assert (checkpoint_dir / "args.json").exists()
     assert (checkpoint_dir / "saving_completed").exists()
-
-
-def test_save_bypass_checkpoint_replaces_existing_latest_symlink(tmp_path: Path, patched_save):
-    """A stale ``latest`` from a prior save must be replaced, not appended to.
-    Without ``unlink(missing_ok=True)`` the symlink_to() call would raise
-    FileExistsError mid-save and leave the run unable to checkpoint."""
-    experiment_dir = tmp_path / "exp"
-    experiment_dir.mkdir()
-    old_target = experiment_dir / "step-000003-ckpt"
-    old_target.mkdir()
-    new_target = experiment_dir / "step-000007-ckpt"
-    new_target.mkdir()
-    (experiment_dir / "latest").symlink_to(old_target.name)
-
-    cfg = _make_save_cfg(experiment_dir)
-    patched_save.save_bypass_checkpoint(
-        cfg=cfg,
-        descriptor=None,
-        model=None,
-        stitched_module_descriptors=OrderedDict(),
-        checkpoint_dir=new_target,
-    )
-
-    assert os.readlink(experiment_dir / "latest") == "step-000007-ckpt"
 
 
 def test_save_bypass_checkpoint_best_does_not_replace_latest(tmp_path: Path, patched_save):

@@ -49,7 +49,7 @@ def test_save_checkpoint_uses_descriptor_language_model_config(tmp_path, monkeyp
     assert calls["num_hidden_layers"] == 7
 
 
-def test_copy_auto_map_code_files_ignores_non_string_entries(tmp_path, monkeypatch):
+def test_copy_auto_map_code_files_copies_valid_local_code_references(tmp_path, monkeypatch):
     source_dir = tmp_path / "source"
     checkpoint_dir = tmp_path / "checkpoint"
     source_dir.mkdir()
@@ -62,7 +62,7 @@ def test_copy_auto_map_code_files_ignores_non_string_entries(tmp_path, monkeypat
     cfg = SimpleNamespace(
         auto_map={
             "AutoConfig": "configuration_custom.CustomConfig",
-            "AutoModelForCausalLM": "modeling_custom.CustomModel",
+            "AutoModelForCausalLM": "org/repo--modeling_custom.CustomModel",
             "AutoTokenizer": [None, "tokenization_custom.CustomTokenizer"],
         }
     )
@@ -71,21 +71,3 @@ def test_copy_auto_map_code_files_ignores_non_string_entries(tmp_path, monkeypat
 
     assert (checkpoint_dir / "modeling_custom.py").exists()
     assert (checkpoint_dir / "tokenization_custom.py").exists()
-
-
-def test_copy_auto_map_code_files_strips_repo_id_prefix(tmp_path, monkeypatch):
-    source_dir = tmp_path / "source"
-    checkpoint_dir = tmp_path / "checkpoint"
-    source_dir.mkdir()
-    checkpoint_dir.mkdir()
-    (source_dir / "modeling_custom.py").write_text("# modeling\n")
-
-    monkeypatch.setattr(cuhf.inspect, "getfile", lambda _cls: source_dir / "configuration.py")
-
-    cfg = SimpleNamespace(
-        auto_map={"AutoModelForCausalLM": "org/repo--modeling_custom.CustomModel"}
-    )
-
-    cuhf._copy_auto_map_code_files(cfg, checkpoint_dir)
-
-    assert (checkpoint_dir / "modeling_custom.py").exists()

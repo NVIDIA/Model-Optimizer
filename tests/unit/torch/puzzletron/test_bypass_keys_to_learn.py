@@ -106,69 +106,28 @@ def _trainable_names(model: nn.Module) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Single-string subblock keys (dense model)
+# Dense-model key semantics
 # ---------------------------------------------------------------------------
 
 
-def test_subblock_ffn_trains_only_mlp():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
-    _set_keys_to_learn(model, descriptor, "subblock_ffn")
-    trainable = _trainable_names(model)
-    assert all(".mlp." in n for n in trainable), trainable
-    assert not any(".self_attn." in n for n in trainable), trainable
-    # Both layers' mlp params must be trainable, not just one.
-    assert any("model.layers.0.mlp." in n for n in trainable)
-    assert any("model.layers.1.mlp." in n for n in trainable)
+def test_dense_subblock_keys_select_expected_parameters():
+    for keys_to_learn, include_fragments, exclude_fragments, trains_every_param in [
+        ("subblock_ffn", [".mlp."], [".self_attn."], False),
+        ("subblock_attention", [".self_attn."], [".mlp."], False),
+        ("entire_block", [".self_attn.", ".mlp."], [], True),
+        (["subblock_attention", "subblock_ffn"], [".self_attn.", ".mlp."], [], True),
+    ]:
+        model = _make_dense_model(num_layers=2)
+        descriptor = _make_descriptor(num_layers=2)
+        _set_keys_to_learn(model, descriptor, keys_to_learn)
+        trainable = _trainable_names(model)
 
-
-def test_subblock_attention_trains_only_self_attn():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
-    _set_keys_to_learn(model, descriptor, "subblock_attention")
-    trainable = _trainable_names(model)
-    assert all(".self_attn." in n for n in trainable), trainable
-    assert not any(".mlp." in n for n in trainable), trainable
-
-
-def test_subblock_mamba_without_block_configs_is_rejected():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
-    with pytest.raises(ValueError, match="subblock_mamba.*block_configs"):
-        _set_keys_to_learn(model, descriptor, "subblock_mamba")
-
-
-def test_entire_block_trains_attention_and_mlp():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
-    _set_keys_to_learn(model, descriptor, "entire_block")
-    trainable = _trainable_names(model)
-    # Both groups present.
-    assert any(".self_attn." in n for n in trainable), trainable
-    assert any(".mlp." in n for n in trainable), trainable
-    # Equal to the union of every model parameter.
-    assert trainable == {n for n, _ in model.named_parameters()}
-
-
-def test_subblock_key_list_trains_union_of_subblocks():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
-    _set_keys_to_learn(model, descriptor, ["subblock_attention", "subblock_ffn"])
-    trainable = _trainable_names(model)
-    assert any(".self_attn." in n for n in trainable), trainable
-    assert any(".mlp." in n for n in trainable), trainable
-    assert trainable == {n for n, _ in model.named_parameters()}
-
-
-def test_mixed_subblock_and_exact_name_list_is_rejected():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
-    with pytest.raises(ValueError, match="supports only subblock keys"):
-        _set_keys_to_learn(
-            model,
-            descriptor,
-            ["subblock_attention", "model.layers.0.self_attn.q_proj.weight"],
-        )
+        for fragment in include_fragments:
+            assert any(fragment in n for n in trainable), (keys_to_learn, trainable)
+        for fragment in exclude_fragments:
+            assert not any(fragment in n for n in trainable), (keys_to_learn, trainable)
+        if trains_every_param:
+            assert trainable == {n for n, _ in model.named_parameters()}
 
 
 # ---------------------------------------------------------------------------
@@ -186,27 +145,21 @@ def _hybrid_block_configs():
     ]
 
 
-def test_subblock_mamba_on_hybrid_trains_only_mamba_block():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2, block_configs=_hybrid_block_configs())
-    _set_keys_to_learn(model, descriptor, "subblock_mamba")
-    trainable = _trainable_names(model)
-    # Block 0 (Mamba) attention-group params should be trainable; block 1 (GQA) must not.
-    assert any("model.layers.0.self_attn." in n for n in trainable), trainable
-    assert not any("model.layers.1.self_attn." in n for n in trainable), trainable
-    # FFN params are never trainable under subblock_mamba.
-    assert not any(".mlp." in n for n in trainable), trainable
+def test_hybrid_subblock_keys_partition_attention_by_block_type():
+    for keys_to_learn, included_block, excluded_block in [
+        ("subblock_mamba", 0, 1),
+        ("subblock_attention", 1, 0),
+    ]:
+        model = _make_dense_model(num_layers=2)
+        descriptor = _make_descriptor(num_layers=2, block_configs=_hybrid_block_configs())
+        _set_keys_to_learn(model, descriptor, keys_to_learn)
+        trainable = _trainable_names(model)
 
-
-def test_subblock_attention_on_hybrid_trains_only_gqa_block():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2, block_configs=_hybrid_block_configs())
-    _set_keys_to_learn(model, descriptor, "subblock_attention")
-    trainable = _trainable_names(model)
-    # Block 1 (GQA) attention-group params are trainable; block 0 (Mamba) must not.
-    assert any("model.layers.1.self_attn." in n for n in trainable), trainable
-    assert not any("model.layers.0.self_attn." in n for n in trainable), trainable
-    assert not any(".mlp." in n for n in trainable), trainable
+        assert any(f"model.layers.{included_block}.self_attn." in n for n in trainable), trainable
+        assert not any(f"model.layers.{excluded_block}.self_attn." in n for n in trainable), (
+            trainable
+        )
+        assert not any(".mlp." in n for n in trainable), trainable
 
 
 # ---------------------------------------------------------------------------
@@ -214,26 +167,19 @@ def test_subblock_attention_on_hybrid_trains_only_gqa_block():
 # ---------------------------------------------------------------------------
 
 
-def test_explicit_param_name_list_is_rejected():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
+def test_unsupported_keys_to_learn_are_rejected():
     target = "model.layers.0.self_attn.q_proj.weight"
-    with pytest.raises(ValueError, match="subblock keys"):
-        _set_keys_to_learn(model, descriptor, [target])
-
-
-def test_regex_string_is_rejected():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
-    with pytest.raises(ValueError, match="keys_to_learn must be one of"):
-        _set_keys_to_learn(model, descriptor, r"q_proj")
-
-
-def test_empty_key_list_is_rejected():
-    model = _make_dense_model(num_layers=2)
-    descriptor = _make_descriptor(num_layers=2)
-    with pytest.raises(ValueError, match="cannot be empty"):
-        _set_keys_to_learn(model, descriptor, [])
+    for keys_to_learn, match in [
+        ("subblock_mamba", "subblock_mamba.*block_configs"),
+        (["subblock_attention", target], "supports only subblock keys"),
+        ([target], "subblock keys"),
+        (r"q_proj", "keys_to_learn must be one of"),
+        ([], "cannot be empty"),
+    ]:
+        model = _make_dense_model(num_layers=2)
+        descriptor = _make_descriptor(num_layers=2)
+        with pytest.raises(ValueError, match=match):
+            _set_keys_to_learn(model, descriptor, keys_to_learn)
 
 
 # ---------------------------------------------------------------------------
@@ -241,11 +187,7 @@ def test_empty_key_list_is_rejected():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "keys_to_learn",
-    ["subblock_attention", "entire_block"],
-)
-def test_subblock_keys_skip_non_floating_point_params(keys_to_learn):
+def test_subblock_keys_skip_non_floating_point_params():
     """Integer / non-floating buffers exposed as parameters must stay frozen.
 
     The function explicitly guards on ``torch.is_floating_point(param)``; this
@@ -258,6 +200,6 @@ def test_subblock_keys_skip_non_floating_point_params(keys_to_learn):
     model.model.layers[0].self_attn.register_parameter("int_counter", int_param)
     descriptor = _make_descriptor(num_layers=2)
     # Should not raise even though the int param's name matches the attention group.
-    _set_keys_to_learn(model, descriptor, keys_to_learn)
+    _set_keys_to_learn(model, descriptor, "subblock_attention")
     # The int counter must remain frozen regardless.
     assert not model.model.layers[0].self_attn.int_counter.requires_grad
