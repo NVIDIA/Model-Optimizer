@@ -21,15 +21,6 @@ from modelopt.torch.opt.mode import _ModeRegistryCls
 
 
 @pytest.fixture
-def tiny_tokenizer():
-    # Lazy import: transformers_models.py runs ``pytest.importorskip("transformers")``
-    # at module load, which we don't want to trigger at conftest import time.
-    from _test_utils.torch.transformers_models import get_tiny_tokenizer
-
-    return get_tiny_tokenizer()
-
-
-@pytest.fixture
 def use_channel_div_4():
     """To use channel_divisor=4 in any test, just add this fixture as an argument to the test.
 

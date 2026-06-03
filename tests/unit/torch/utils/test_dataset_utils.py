@@ -561,22 +561,10 @@ def test_pack_documents_into_rows():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def pad_tokenizer():
-    """Real tiny HF tokenizer (vocab=128) shared with other test modules.
-
-    Skips the test if ``transformers`` isn't installed.
-    """
-    pytest.importorskip("transformers")
-    from _test_utils.torch.transformers_models import get_tiny_tokenizer
-
-    return get_tiny_tokenizer()
-
-
 class TestGetDatasetDataloaderBlending:
     """``get_dataset_dataloader`` accepts a list of sources and concatenates them."""
 
-    def test_single_jsonl(self, tmp_path, pad_tokenizer):
+    def test_single_jsonl(self, tmp_path, tiny_tokenizer):
         pytest.importorskip("datasets")
         path = _write_jsonl(
             tmp_path / "single.jsonl",
@@ -584,7 +572,7 @@ class TestGetDatasetDataloaderBlending:
         )
         loader = get_dataset_dataloader(
             dataset_name=path,
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             batch_size=2,
             num_samples=4,
             max_sample_length=16,
@@ -594,7 +582,7 @@ class TestGetDatasetDataloaderBlending:
         assert batches[0]["input_ids"].shape[0] == 2
         assert "attention_mask" in batches[0]
 
-    def test_list_of_jsonl_blends(self, tmp_path, pad_tokenizer):
+    def test_list_of_jsonl_blends(self, tmp_path, tiny_tokenizer):
         """Two local JSONL files concatenated into a single dataloader."""
         pytest.importorskip("datasets")
         a = _write_jsonl(tmp_path / "a.jsonl", [{"text": f"a{i}"} for i in range(3)])
@@ -602,7 +590,7 @@ class TestGetDatasetDataloaderBlending:
 
         loader = get_dataset_dataloader(
             dataset_name=[a, b],
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             batch_size=5,
             num_samples=[3, 2],
             max_sample_length=16,
@@ -611,7 +599,7 @@ class TestGetDatasetDataloaderBlending:
         assert len(batches) == 1
         assert batches[0]["input_ids"].shape[0] == 5
 
-    def test_mixed_formats_blended(self, tmp_path, pad_tokenizer):
+    def test_mixed_formats_blended(self, tmp_path, tiny_tokenizer):
         """Mixing a text-column JSONL with a prompt/completion JSONL — both should flow."""
         pytest.importorskip("datasets")
         plain = _write_jsonl(tmp_path / "plain.jsonl", [{"text": "hello"}])
@@ -619,7 +607,7 @@ class TestGetDatasetDataloaderBlending:
 
         loader = get_dataset_dataloader(
             dataset_name=[plain, pc],
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             batch_size=2,
             num_samples=[1, 1],
             max_sample_length=16,
@@ -628,7 +616,7 @@ class TestGetDatasetDataloaderBlending:
         assert len(batches) == 1
         assert batches[0]["input_ids"].shape[0] == 2
 
-    def test_length_mismatch_raises(self, tmp_path, pad_tokenizer):
+    def test_length_mismatch_raises(self, tmp_path, tiny_tokenizer):
         """``dataset_name`` and ``num_samples`` lists must align."""
         pytest.importorskip("datasets")
         a = _write_jsonl(tmp_path / "a.jsonl", [{"text": "x"}])
@@ -636,13 +624,13 @@ class TestGetDatasetDataloaderBlending:
         with pytest.raises(AssertionError, match="same length"):
             get_dataset_dataloader(
                 dataset_name=[a, b],
-                tokenizer=pad_tokenizer,
+                tokenizer=tiny_tokenizer,
                 num_samples=[1],
                 max_sample_length=16,
             )
 
 
-def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, pad_tokenizer):
+def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, tiny_tokenizer):
     """With ``pack=True`` and 2+ sources, samples are shuffled so a long-doc source
     can't silently exhaust the row budget and drop the other sources.
 
@@ -661,7 +649,7 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, pad_tokenize
 
     loader = get_dataset_dataloader(
         dataset_name=["src_a", "src_b"],
-        tokenizer=pad_tokenizer,
+        tokenizer=tiny_tokenizer,
         batch_size=4,
         num_samples=[4, 4],
         max_sample_length=64,
@@ -672,8 +660,8 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, pad_tokenize
     all_ids = torch.cat([b["input_ids"] for b in batches], dim=0)
     assert all_ids.shape[1] == 64
     # Tokenize the source tags so we can check both sources appear in the packed rows
-    src_a_id = pad_tokenizer("src_a", add_special_tokens=False).input_ids[0]
-    src_b_id = pad_tokenizer("src_b", add_special_tokens=False).input_ids[0]
+    src_a_id = tiny_tokenizer("src_a", add_special_tokens=False).input_ids[0]
+    src_b_id = tiny_tokenizer("src_b", add_special_tokens=False).input_ids[0]
     flat = all_ids.flatten().tolist()
     assert src_a_id in flat, "source A tokens missing from packed rows"
     assert src_b_id in flat, (
@@ -700,11 +688,11 @@ class TestDatasetCombosExpansion:
         monkeypatch.setattr(dataset_utils, "get_dataset_samples", _fake)
         return calls
 
-    def test_combo_expands_evenly(self, monkeypatch, pad_tokenizer):
+    def test_combo_expands_evenly(self, monkeypatch, tiny_tokenizer):
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name="cnn_nemotron_v2_mix",
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             num_samples=8,
             batch_size=1,
             max_sample_length=16,
@@ -712,11 +700,11 @@ class TestDatasetCombosExpansion:
         members = DATASET_COMBOS["cnn_nemotron_v2_mix"]
         assert calls == [(members[0], 4), (members[1], 4)]
 
-    def test_combo_remainder_distributed_to_earlier_members(self, monkeypatch, pad_tokenizer):
+    def test_combo_remainder_distributed_to_earlier_members(self, monkeypatch, tiny_tokenizer):
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name="nemotron-post-training-v3",
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             num_samples=10,
             batch_size=1,
             max_sample_length=16,
@@ -726,11 +714,11 @@ class TestDatasetCombosExpansion:
         expected_counts = [2, 2, 2, 1, 1, 1, 1]
         assert calls == list(zip(members, expected_counts))
 
-    def test_plain_and_combo_compose(self, monkeypatch, pad_tokenizer):
+    def test_plain_and_combo_compose(self, monkeypatch, tiny_tokenizer):
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name=["cnn_dailymail", "nemotron-post-training-v3"],
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             num_samples=[3, 7],
             batch_size=1,
             max_sample_length=16,
@@ -738,12 +726,12 @@ class TestDatasetCombosExpansion:
         members = DATASET_COMBOS["nemotron-post-training-v3"]
         assert calls == [("cnn_dailymail", 3)] + [(m, 1) for m in members]
 
-    def test_combo_overlapping_with_member_raises(self, monkeypatch, pad_tokenizer):
+    def test_combo_overlapping_with_member_raises(self, monkeypatch, tiny_tokenizer):
         self._record_calls(monkeypatch)
         with pytest.raises(ValueError, match="combo 'cnn_nemotron_v2_mix'"):
             get_dataset_dataloader(
                 dataset_name=["cnn_dailymail", "cnn_nemotron_v2_mix"],
-                tokenizer=pad_tokenizer,
+                tokenizer=tiny_tokenizer,
                 num_samples=[2, 4],
                 batch_size=1,
                 max_sample_length=16,
@@ -824,11 +812,11 @@ class TestLocalDatasetDirRoundTrips:
         from_dir = get_dataset_samples(dataset, num_samples=10, split="train")
         assert from_jsonl == from_dir
 
-    def test_dataloader_blending_two_datasets(self, pad_tokenizer, make_toy_hf_dataset):
+    def test_dataloader_blending_two_datasets(self, tiny_tokenizer, make_toy_hf_dataset):
         """Two datasets concatenated via ``get_dataset_dataloader``."""
         loader = get_dataset_dataloader(
             dataset_name=[make_toy_hf_dataset("a"), make_toy_hf_dataset("b")],
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             batch_size=4,
             num_samples=[3, 1],
             max_sample_length=16,
@@ -837,13 +825,13 @@ class TestLocalDatasetDirRoundTrips:
         assert sum(b["input_ids"].shape[0] for b in batches) == 4
 
     def test_dataloader_mixing_dir_and_local_jsonl(
-        self, tmp_path, pad_tokenizer, make_toy_hf_dataset
+        self, tmp_path, tiny_tokenizer, make_toy_hf_dataset
     ):
         """Dataset directory blended with a local synthetic JSONL file."""
         local = _write_jsonl(tmp_path / "local.jsonl", [{"text": f"local {i}"} for i in range(2)])
         loader = get_dataset_dataloader(
             dataset_name=[make_toy_hf_dataset(), local],
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             batch_size=5,
             num_samples=[3, 2],
             max_sample_length=16,

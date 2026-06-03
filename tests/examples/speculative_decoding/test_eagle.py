@@ -216,7 +216,12 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
     ("model_source", "use_fake_base"),
     [
         (None, False),                       # tiny_llama (from fixture), no FakeBase
-        ("moonshotai/Kimi-K2.5", True),      # remote HF repo, FakeBaseModel
+        pytest.param(
+            "moonshotai/Kimi-K2.5", True,    # remote HF repo, FakeBaseModel
+            # Kimi's large vocab/hidden_size make the offline data + draft head heavy; this one
+            # sometimes runs a bit over the 300s default timeout.
+            marks=pytest.mark.timeout(360),
+        ),
         pytest.param(
             "moonshotai/Kimi-K2-Thinking", True,   # remote HF repo, no FakeBaseModel
             marks=pytest.mark.manual(reason="skip redundand test, too slow"),

@@ -91,6 +91,16 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture
+def tiny_tokenizer():
+    """Real tiny HF tokenizer (vocab=128) shared across unit and gpu test lanes."""
+    # Lazy import: transformers_models.py runs ``pytest.importorskip("transformers")``
+    # at module load, which we don't want to trigger at conftest import time.
+    from _test_utils.torch.transformers_models import get_tiny_tokenizer
+
+    return get_tiny_tokenizer()
+
+
+@pytest.fixture
 def skip_on_windows():
     if platform.system() == "Windows":
         pytest.skip("Skipping on Windows")

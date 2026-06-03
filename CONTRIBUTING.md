@@ -174,6 +174,9 @@ nox -s "unit-3.12(torch_211, tf_latest)"
   `snapshot_download(...)`, etc. with Hub IDs. Instead build dummy models, tokenizers, configs, and datasets locally —
   e.g. the `create_tiny_*` helpers and `get_tiny_tokenizer()` in `tests/_test_utils/`, or a small on-disk dataset
   directory written with `datasets.Dataset.from_dict(...).to_parquet(...)`.
+- **Respect the per-test timeout.** `tests/conftest.py` applies a default per-test call timeout by directory; override a
+  single slow test with `@pytest.mark.timeout(<seconds>)`, and register any new top-level `tests/<group>/` in that
+  mapping (collection errors until you do).
 
 ## ✍️ Signing your work
 

@@ -1,23 +1,21 @@
-{# Minimal ChatML chat template with {% generation %} tags for answer_only_loss
-   training. Used by the tiny test tokenizer so unit tests can exercise
-   generation-tag masking without downloading a real model from the HF Hub. #}
-{%- if messages[0].role == 'system' -%}
-    {{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' -}}
-{%- endif -%}
+{# Terse generation-tagged chat template for the tiny test tokenizer.
+
+   Uses plain-text "Q:/A:" role prefixes rather than ChatML special tokens
+   (<|im_start|> etc.): the 128-vocab tiny tokenizer has no such tokens, so it
+   byte-encodes them into ~70 extra tokens, which blows past tight max-seq-len
+   limits in example tests (e.g. compute_hidden_states with max-seq-len=32 on a
+   32-position tiny model). The {% generation %} blocks still let unit tests
+   exercise answer-only-loss assistant masking via return_assistant_tokens_mask. #}
+{{- bos_token -}}
 {%- for message in messages -%}
-    {%- if message.role == 'user' -%}
-        {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' -}}
-    {%- elif message.role == 'assistant' -%}
-        {{- '<|im_start|>assistant\n' -}}
+    {%- if message['role'] == 'user' -%}
+        {{- 'Q: ' + message['content'] + '\n' -}}
+    {%- elif message['role'] == 'assistant' -%}
+        {{- 'A: ' -}}
         {%- generation -%}
-            {%- if loop.last and not message.content.startswith('<think>') -%}
-                {{- '<think>\n\n</think>\n\n' -}}
-            {%- endif -%}
-            {{- message.content -}}
+            {{- message['content'] -}}
         {%- endgeneration -%}
-        {{- '<|im_end|>\n' -}}
+        {{- '\n' -}}
     {%- endif -%}
 {%- endfor -%}
-{%- if add_generation_prompt -%}
-    {{- '<|im_start|>assistant\n' -}}
-{%- endif -%}
+{{- eos_token -}}

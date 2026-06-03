@@ -25,7 +25,7 @@ import pytest
 pytestmark = pytest.mark.timeout(180)
 
 
-def test_conv3d_implicit_gemm_compiles():
+def test_conv3d_implicit_gemm():
     """Compile the conv3d implicit-GEMM CUDA extension."""
     from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import _get_cuda_module
 

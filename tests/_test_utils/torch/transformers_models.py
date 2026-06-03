@@ -45,8 +45,16 @@ SEED = 1234
 TINY_TOKENIZER_PATH = Path(__file__).parent / "tokenizer"
 
 
-def get_tiny_tokenizer() -> "transformers.PreTrainedTokenizerBase":
-    return AutoTokenizer.from_pretrained(TINY_TOKENIZER_PATH)
+def get_tiny_tokenizer(*, pad_side: str = "left") -> "transformers.PreTrainedTokenizerBase":
+    """Returns a tiny tokenizer for tests.
+
+    Default to left padding, which is what decoder-LM calibration/generation expects and what
+    ``get_dataset_dataloader`` warns about otherwise. Callers needing right padding can override
+    with ``pad_side="right"``.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(TINY_TOKENIZER_PATH)
+    tokenizer.padding_side = pad_side
+    return tokenizer
 
 
 ##### Qwen3 #####
