@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,23 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Pre-compile ModelOpt torch CUDA kernels so the one-time JIT build cost is paid here
+rather than landing on the first functional test that uses them (e.g. the conv3d
+implicit-GEMM tests). ``tests/gpu/_extensions`` is collected before ``tests/gpu/torch``, so
+the module-level kernel cache is warm by the time those tests run in the same process.
+"""
 
 import pytest
-
-import modelopt.torch.quantization.extensions as ext
 
 # Override default timeout as these tests JIT-compile the CUDA extensions, which is slow
 pytestmark = pytest.mark.timeout(180)
 
 
-# Compile extensions first so it does not count towards time used to run a test that needs it
-def test_cuda_ext():
-    assert ext.get_cuda_ext() is not None
+def test_conv3d_implicit_gemm_compiles():
+    """Compile the conv3d implicit-GEMM CUDA extension."""
+    from modelopt.torch.kernels.quantization.conv.implicit_gemm_cuda import _get_cuda_module
 
-
-def test_cuda_ext_fp8():
-    assert ext.get_cuda_ext_fp8() is not None
-
-
-def test_cuda_ext_mx():
-    assert ext.get_cuda_ext_mx() is not None
+    assert _get_cuda_module() is not None

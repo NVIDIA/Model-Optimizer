@@ -18,7 +18,7 @@ import sys
 
 import pytest
 import torch
-from _test_utils.examples.models import PIXART_PATH, SXDL_PATH
+from _test_utils.examples.models import PIXART_PATH, SDXL_PATH
 from _test_utils.examples.run_command import MODELOPT_ROOT
 from diffusers import DiffusionPipeline, PixArtAlphaPipeline
 
@@ -29,9 +29,8 @@ from cache_diffusion.utils import PIXART_DEFAULT_CONFIG, SDXL_DEFAULT_CONFIG
 
 def test_sdxl_cachify():
     pipe = DiffusionPipeline.from_pretrained(
-        SXDL_PATH,
+        SDXL_PATH,
         torch_dtype=torch.float16,
-        variant="fp16",
         use_safetensors=True,
     ).to("cuda")
     cachify.prepare(pipe, SDXL_DEFAULT_CONFIG)

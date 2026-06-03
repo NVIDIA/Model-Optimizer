@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_1_0_PATH
+from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
 
@@ -120,7 +120,7 @@ class DiffuserModel(NamedTuple):
         pytest.param(
             DiffuserModel(
                 name="sdxl-1.0",
-                path=SDXL_1_0_PATH,
+                path=SDXL_PATH,
                 dtype="Half",
                 format_type="fp8",
                 quant_algo="max",
@@ -130,7 +130,7 @@ class DiffuserModel(NamedTuple):
         ),
         DiffuserModel(
             name="sdxl-1.0",
-            path=SDXL_1_0_PATH,
+            path=SDXL_PATH,
             dtype="Half",
             format_type="int8",
             quant_algo="smoothquant",
@@ -273,8 +273,8 @@ def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_pat
         ("flux-schnell", FLUX_SCHNELL_PATH, True),
         ("sd3-medium", SD3_PATH, False),
         ("sd3-medium", SD3_PATH, True),
-        ("sdxl-1.0", SDXL_1_0_PATH, False),
-        ("sdxl-1.0", SDXL_1_0_PATH, True),
+        ("sdxl-1.0", SDXL_PATH, False),
+        ("sdxl-1.0", SDXL_PATH, True),
     ],
     ids=[
         "flux_schnell_torch",

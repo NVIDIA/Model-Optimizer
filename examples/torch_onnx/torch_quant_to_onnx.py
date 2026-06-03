@@ -510,6 +510,7 @@ def main():
         "--trt_builder_optimization_level",
         type=int,
         default=4,
+        choices=range(6),
         help="trtexec --builderOptimizationLevel (0-5). Lower is much faster to build "
         "(useful for tests that only verify the engine builds); higher tunes harder.",
     )

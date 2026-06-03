@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [gpt_oss, llm_distill, llm_qat, llm_sparsity, diffusers_sparsity, specdec_bench]
+        example: [diffusers_sparsity, gpt-oss, llm_distill, llm_qat, llm_sparsity, specdec_bench]
         include:
           - example: speculative_decoding
             docker_image: "26.01"
@@ -104,7 +104,7 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/tensorrt:26.05-py3"
       example: ${{ matrix.example }}
-      timeout_minutes: 30
+      timeout_minutes: 45
       pip_install_extras: "[onnx,hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
 

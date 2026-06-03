@@ -58,7 +58,7 @@ jobs:
   linux:
     needs: [check-dco]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
@@ -78,7 +78,7 @@ jobs:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -90,7 +90,7 @@ jobs:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -115,7 +115,7 @@ jobs:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

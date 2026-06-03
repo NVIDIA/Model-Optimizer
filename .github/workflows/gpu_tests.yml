@@ -39,7 +39,7 @@ jobs:
       matrix:
         include:
           - example: gpu
-            timeout: 75
+            timeout: 60
             container_image: nvcr.io/nvidia/pytorch:26.05-py3
           - example: gpu_megatron
             timeout: 60

@@ -57,7 +57,8 @@ def get_tokenizer(ckpt_path: str, model_max_length: int, trust_remote_code: bool
     tokenizer = AutoTokenizer.from_pretrained(
         ckpt_path,
         model_max_length=model_max_length,
-        padding_side="right",
+        # Left padding is recommended for calibration (get_dataset_dataloader warns otherwise).
+        padding_side="left",
         use_fast=False,
         trust_remote_code=trust_remote_code,
     )
@@ -109,7 +110,7 @@ def main(args):
         tokenizer=tokenizer,
         batch_size=args.batch_size,
         num_samples=args.calib_size,
-        max_sample_length=512,
+        max_sample_length=args.model_max_length,
         device=args.device,
     )
 
@@ -146,8 +147,9 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", help="Model data type.", default="fp16")
     parser.add_argument(
         "--model_max_length",
+        type=int,
         default=2048,
-        help="Maximum sequence length. Sequences will be right padded (and possibly truncated).",
+        help="Maximum sequence length used for both the tokenizer and calibration sequences.",
     )
     parser.add_argument("--batch_size", help="Batch size for calibration.", type=int, default=1)
     parser.add_argument(
