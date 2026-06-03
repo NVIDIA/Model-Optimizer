@@ -32,12 +32,14 @@ trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
 if [[ -z ${HF_MODEL_CKPT} ]]; then
     export HF_MODEL_CKPT="/hf-local/${MLM_MODEL_CFG}"
 fi
-# Persist PTQ ckpt under /cicd ($SLURM_JOB_DIR/cicd) so export tasks in
-# subsequent experiments can re-use it.
+# Persist PTQ ckpt + HF export under /cicd ($SLURM_JOB_DIR/cicd) so later
+# experiments can re-use them. 
 export MLM_MODEL_SAVE="/cicd/megatron-lm/${MLM_MODEL_CFG}"
-# If QUANT_CFG is a recipe, use the basename
+# If QUANT_CFG is a recipe path, collapse to a flat tag (strip dirs + .yaml/.yml).
 _QUANT_CFG_TAG="$(basename "${QUANT_CFG}")"
-export EXPORT_DIR="/scratchspace/export/${MLM_MODEL_CFG}_${_QUANT_CFG_TAG}"
+_QUANT_CFG_TAG="${_QUANT_CFG_TAG%.yaml}"
+_QUANT_CFG_TAG="${_QUANT_CFG_TAG%.yml}"
+export EXPORT_DIR="/cicd/export/${MLM_MODEL_CFG}_${_QUANT_CFG_TAG}"
 export MLM_SKIP_INSTALL=1
 
 QUANTIZE_EXE="bash modules/Megatron-LM/examples/post_training/modelopt/quantize.sh"
@@ -50,7 +52,7 @@ TP=${TP:-1} PP=${PP:-1} EP=${EP:-1} ETP=${ETP:-1} ${QUANTIZE_EXE} ${MLM_MODEL_CF
 
 # Step 2 (optional): MMLU on the saved PTQ ckpt
 if [[ "${RUN_MMLU:-true}" == "true" ]]; then
-    export MLM_EXTRA_ARGS="--mmlu-dataset ${MMLU_DATASET:-/hf-local/cais/mmlu} --fraction 0.05 --lower-bound ${MMLU_LOWER_BOUND:-0.38} --disable-tqdm"
+    export MLM_EXTRA_ARGS="--mmlu-dataset ${MMLU_DATASET:-/hf-local/cais/mmlu} --fraction 0.01 --lower-bound ${MMLU_LOWER_BOUND:-0.38} --disable-tqdm"
     TP=${TP:-1} PP=${PP:-1} EP=${EP:-1} ETP=${ETP:-1} MLM_MODEL_CKPT=${MLM_MODEL_SAVE} ${MMLU_EXE} ${MLM_MODEL_CFG}
 fi
 

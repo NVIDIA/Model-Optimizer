@@ -69,7 +69,7 @@ pipeline:
       time: "02:00:00"
 
   # vLLM generation test: serve the exported HF NVFP4 ckpt and answer 8
-  # GPQA-style questions. Inspect responses at /cicd/vllm/<model>.jsonl.
+  # GPQA-style questions. Inspect responses under /cicd/vllm/<model>/.
   task_2:
     script: common/vllm/query.sh
     args:
@@ -80,7 +80,7 @@ pipeline:
       - --data common/vllm/gpqa_smoke.jsonl
       - --max-tokens 256
       - --num-shards 1
-      - --save /cicd/vllm/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_super-nvfp4.jsonl
+      - --save /cicd/vllm/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_super-nvfp4
     slurm_config:
       _factory_: "slurm_factory"
       container: vllm/vllm-openai:v0.21.0

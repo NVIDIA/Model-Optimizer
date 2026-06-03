@@ -27,8 +27,9 @@ trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
 #
 # Required env: MLM_MODEL_CFG, QUANT_CFG.
 # Optional env:
-#   MLM_MODEL_CKPT  Saved PTQ MCore ckpt path (default: /scratchspace/megatron-lm/${MLM_MODEL_CFG})
-#   EXPORT_DIR      HF output dir            (default: /scratchspace/export/${MLM_MODEL_CFG}_${QUANT_CFG})
+#   MLM_MODEL_CKPT  Saved PTQ MCore ckpt path (default: /cicd/megatron-lm/${MLM_MODEL_CFG})
+#   EXPORT_DIR      HF output dir            (default: /cicd/export/${MLM_MODEL_CFG}_${QUANT_CFG basename})
+#   HF_MODEL_CKPT   HF source ckpt for tokenizer/config (default: /hf-local/${MLM_MODEL_CFG})
 #   TP, PP, EP, ETP Parallelism (defaults: 1, 1, 1, 1)
 
 if [[ -z ${MLM_MODEL_CKPT} ]]; then
