@@ -36,7 +36,13 @@ pytest.importorskip("vllm")
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    ModelOptSparseAttentionImpl,
+    collect_calibration_stats,
+    disable_calibration,
+    enable_calibration,
+    fit_calibration,
+)
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention as triton_attention
@@ -374,3 +380,174 @@ class TestModelOptSparseAttentionImpl:
             output=output,
         )
         torch.testing.assert_close(out_paged, out_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+class TestModelOptSparseAttentionCalibration:
+    """Calibration mode: ``forward`` measures tile-skip stats via the paged kernel.
+
+    Output must stay dense (calibration computes full attention) while per-request
+    records accumulate, ready to fit the exponential ``(a, b)`` model.
+    """
+
+    _TRIALS = [1e-4, 1e-3, 1e-2, 1e-1, 5e-1, 9e-1]
+
+    def test_prefill_calibration_records_and_dense_output(self):
+        """Prefill: output equals dense attention; one record per request."""
+        lengths = [128, 256]
+        total = sum(lengths)
+        num_heads, num_kv_heads, head_dim, page_size = 4, 2, 64, 16
+        dtype = torch.float16
+
+        torch.manual_seed(0)
+        q = torch.randn(total, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+
+        seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+        query_start_loc = torch.tensor([0, lengths[0], total], device="cuda", dtype=torch.int32)
+        kv_cache, block_table = _make_paged_cache(
+            k, v, query_start_loc[:2], seq_lens, num_kv_heads, head_dim, page_size
+        )
+        attn_metadata = SimpleNamespace(
+            num_actual_tokens=total,
+            max_query_len=max(lengths),
+            max_seq_len=max(lengths),
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            block_table=block_table,
+        )
+
+        impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = {}
+        enable_calibration([impl], self._TRIALS)
+        output = torch.empty_like(q)
+        out = impl.forward(
+            layer=None,
+            query=q,
+            key=k,
+            value=v,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=output,
+        )
+
+        # Output is dense per-request causal attention (full attention, no skip).
+        for i, length in enumerate(lengths):
+            start = int(query_start_loc[i].item())
+            locs = torch.zeros(1, device="cuda", dtype=torch.int32)
+            lens = torch.tensor([length], device="cuda", dtype=torch.int32)
+            ref = triton_attention(
+                q[start : start + length],
+                k[start : start + length],
+                v[start : start + length],
+                locs,
+                lens,
+                length,
+                softmax_scale=1.0 / (head_dim**0.5),
+                is_causal=True,
+            )
+            torch.testing.assert_close(out[start : start + length], ref, rtol=5e-3, atol=5e-3)
+
+        stats = collect_calibration_stats([impl])
+        assert len(stats["prefill"]) == len(lengths)
+        assert [r["sample_length"] for r in stats["prefill"]] == lengths
+        assert all(len(r["sparsity"]) == len(self._TRIALS) for r in stats["prefill"])
+        assert not stats["decode"]
+
+    def test_decode_calibration_records_decode_phase(self):
+        """Decode (seq_q=1, long cache): a decode record with real sparsity."""
+        seq_k = 2048
+        num_heads, num_kv_heads, head_dim, page_size = 4, 2, 64, 16
+        dtype = torch.float16
+
+        # A dominant sink at position 0 makes the distant cache skippable.
+        q = torch.ones(1, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.zeros(seq_k, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        k[0] = 20.0
+        v = torch.randn(seq_k, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        kv_start = torch.zeros(1, device="cuda", dtype=torch.int32)
+        kv_len = torch.tensor([seq_k], device="cuda", dtype=torch.int32)
+        kv_cache, block_table = _make_paged_cache(
+            k, v, kv_start, kv_len, num_kv_heads, head_dim, page_size
+        )
+        attn_metadata = SimpleNamespace(
+            num_actual_tokens=1,
+            max_query_len=1,
+            max_seq_len=seq_k,
+            query_start_loc=torch.tensor([0, 1], device="cuda", dtype=torch.int32),
+            seq_lens=kv_len,
+            block_table=block_table,
+        )
+
+        impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = {}
+        enable_calibration([impl], self._TRIALS)
+        impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=torch.empty_like(q),
+        )
+
+        stats = collect_calibration_stats([impl])
+        assert not stats["prefill"]
+        assert len(stats["decode"]) == 1
+        record = stats["decode"][0]
+        assert record["sample_length"] == seq_k
+        assert max(record["sparsity"]) > 0.8  # sink => most tiles skippable
+
+    _FIT_TRIALS = [1e-4, 1e-3, 1e-2, 1e-1, 3e-1, 5e-1, 7e-1, 9e-1]
+
+    def test_fit_calibration_produces_exponential_params(self):
+        """Multiple lengths feed fit_calibration into a usable (a, b) per phase."""
+        num_heads, num_kv_heads, head_dim, page_size = 4, 2, 64, 16
+        dtype = torch.float16
+        impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = {}
+        enable_calibration([impl], self._FIT_TRIALS)
+
+        torch.manual_seed(0)
+        for length in (512, 1024, 2048):
+            # Localized attention (key norm decays with distance + a sink at 0)
+            # gives a graded skip sweep across thresholds, so the exponential
+            # fit's (10%, 90%) window has enough data points — unlike uniform
+            # random keys, which skip all-or-nothing.
+            q = torch.randn(length, num_heads, head_dim, device="cuda", dtype=dtype)
+            pos = torch.arange(length, device="cuda").float()
+            decay = torch.exp(-pos / (length * 0.15))[:, None, None]
+            k = (torch.randn(length, num_kv_heads, head_dim, device="cuda") * decay).to(dtype)
+            k[0] = 8.0  # sink
+            v = torch.randn(length, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+            locs = torch.zeros(1, device="cuda", dtype=torch.int32)
+            lens = torch.tensor([length], device="cuda", dtype=torch.int32)
+            qsl = torch.tensor([0, length], device="cuda", dtype=torch.int32)
+            kv_cache, block_table = _make_paged_cache(
+                k, v, locs, lens, num_kv_heads, head_dim, page_size
+            )
+            attn_metadata = SimpleNamespace(
+                num_actual_tokens=length,
+                max_query_len=length,
+                max_seq_len=length,
+                query_start_loc=qsl,
+                seq_lens=lens,
+                block_table=block_table,
+            )
+            impl.forward(
+                layer=None,
+                query=q,
+                key=k,
+                value=v,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=torch.empty_like(q),
+            )
+
+        disable_calibration([impl])
+        params = fit_calibration([impl], self._FIT_TRIALS)
+        assert "prefill" in params
+        assert params["prefill"]["a"] > 0.0
+        assert params["prefill"]["b"] > 0.0

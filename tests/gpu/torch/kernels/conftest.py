@@ -36,6 +36,39 @@ def make_varlen_meta(seq_lens, device="cuda"):
     return b_start_loc, b_seq_len
 
 
+def scatter_to_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size):
+    """Scatter contiguous K/V into a paged KV cache + block table.
+
+    Returns ``(k_cache, v_cache, block_table)`` where the caches are shaped
+    ``[num_blocks, page_size, num_kv_heads, head_dim]`` and ``block_table`` is
+    ``[batch, max_blocks_per_seq]`` — the layout the paged Triton kernels read.
+    """
+    batch = b_seq_len.shape[0]
+    device, dtype = k.device, k.dtype
+
+    blocks_per_seq = [(int(b_seq_len[b].item()) + page_size - 1) // page_size for b in range(batch)]
+    num_blocks = sum(blocks_per_seq)
+    max_blocks = max(blocks_per_seq)
+
+    k_cache = torch.zeros(num_blocks, page_size, num_kv_heads, head_dim, device=device, dtype=dtype)
+    v_cache = torch.zeros_like(k_cache)
+    block_table = torch.zeros(batch, max_blocks, device=device, dtype=torch.int32)
+
+    g = 0
+    for b in range(batch):
+        start = int(b_start_loc[b].item())
+        slen = int(b_seq_len[b].item())
+        for blk in range(blocks_per_seq[b]):
+            block_table[b, blk] = g
+            ts = blk * page_size
+            te = min(ts + page_size, slen)
+            n = te - ts
+            k_cache[g, :n] = k[start + ts : start + te]
+            v_cache[g, :n] = v[start + ts : start + te]
+            g += 1
+    return k_cache, v_cache, block_table
+
+
 def sdpa_reference(q, k, v, b_start_loc, b_seq_len, is_causal=True):
     """SDPA reference. Supports GQA. Returns [total_tokens, num_heads, dim]."""
     batch = b_seq_len.shape[0]

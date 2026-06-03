@@ -25,7 +25,7 @@ import sys
 
 import pytest
 import torch
-from conftest import make_qkv, make_varlen_meta
+from conftest import make_qkv, make_varlen_meta, scatter_to_paged_cache
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore::UserWarning"),
@@ -243,6 +243,136 @@ class TestAttentionCalibrate:
 
         assert counters[0, 0].item() == out._sparsity_total
         assert counters[0, 1].item() == out._sparsity_skipped
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+class TestAttentionCalibratePaged:
+    """Paged KV cache calibration must match the contiguous reference exactly.
+
+    This is the path the vLLM integration calibrates through: KV lives in a
+    paged cache addressed by a block table rather than in contiguous tensors.
+    """
+
+    def test_prefill_paged_matches_contiguous(self):
+        """Causal prefill: paged counters and output equal the contiguous run."""
+        seq, num_heads, num_kv_heads, head_dim, page_size = 384, 4, 2, 64, 16
+        scale = 1.0 / (head_dim**0.5)
+        trials = [1e-4, 1e-3, 1e-2, 1e-1, 5e-1, 9e-1]
+
+        torch.manual_seed(0)
+        # A dominant sink at position 0 (q·k[0] huge, all other scores ~0) makes
+        # later KV tiles negligible, so later query tiles skip them — gives nonzero
+        # counters to compare, beyond the trivially-equal all-dense case.
+        q = torch.ones(seq, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.zeros(seq, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        k[0] = 20.0
+        v = torch.randn(seq, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        locs, lens = make_varlen_meta([seq])
+
+        out_ref, c_ref = attention_calibrate(
+            q, k, v, locs, lens, seq, softmax_scale=scale, is_causal=True, threshold_trials=trials
+        )
+
+        k_cache, v_cache, block_table = scatter_to_paged_cache(
+            k, v, locs, lens, num_kv_heads, head_dim, page_size
+        )
+        k_dummy = torch.empty(0, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        out_pg, c_pg = attention_calibrate(
+            q,
+            k_dummy,
+            k_dummy,
+            locs,
+            lens,
+            seq,
+            softmax_scale=scale,
+            is_causal=True,
+            b_seq_len_k=lens,
+            max_input_len_k=seq,
+            threshold_trials=trials,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            block_table=block_table,
+            page_size=page_size,
+        )
+        assert torch.equal(c_ref, c_pg), (c_ref.tolist(), c_pg.tolist())
+        assert c_pg[-1, 1] > 0  # the sink makes some tiles skippable
+        torch.testing.assert_close(out_pg, out_ref, rtol=5e-3, atol=5e-3)
+
+    def test_decode_paged_matches_contiguous(self):
+        """Decode (seq_q=1) against a long paged cache equals the contiguous run."""
+        seq_k, num_heads, num_kv_heads, head_dim, page_size = 2048, 4, 2, 64, 16
+        scale = 1.0 / (head_dim**0.5)
+        trials = [1e-3, 1e-2, 1e-1, 5e-1, 9e-1]
+
+        torch.manual_seed(1)
+        q = torch.randn(1, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(seq_k, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(seq_k, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        locs_q = torch.zeros(1, device="cuda", dtype=torch.int32)
+        len_q = torch.ones(1, device="cuda", dtype=torch.int32)
+        locs_k = torch.zeros(1, device="cuda", dtype=torch.int32)
+        len_k = torch.full((1,), seq_k, device="cuda", dtype=torch.int32)
+
+        out_ref, c_ref = attention_calibrate(
+            q,
+            k,
+            v,
+            locs_q,
+            len_q,
+            1,
+            softmax_scale=scale,
+            is_causal=False,
+            b_start_loc_k=locs_k,
+            b_seq_len_k=len_k,
+            max_input_len_k=seq_k,
+            threshold_trials=trials,
+        )
+
+        k_cache, v_cache, block_table = scatter_to_paged_cache(
+            k, v, locs_k, len_k, num_kv_heads, head_dim, page_size
+        )
+        k_dummy = torch.empty(0, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        out_pg, c_pg = attention_calibrate(
+            q,
+            k_dummy,
+            k_dummy,
+            locs_q,
+            len_q,
+            1,
+            softmax_scale=scale,
+            is_causal=False,
+            b_seq_len_k=len_k,
+            max_input_len_k=seq_k,
+            threshold_trials=trials,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            block_table=block_table,
+            page_size=page_size,
+        )
+        assert torch.equal(c_ref, c_pg), (c_ref.tolist(), c_pg.tolist())
+        # Full cache scanned: total == num_heads * ceil(seq_k / 128).
+        assert int(c_pg[0, 0]) == num_heads * (seq_k // 128)
+        torch.testing.assert_close(out_pg, out_ref, rtol=5e-3, atol=5e-3)
+
+    def test_paged_requires_block_table(self):
+        """Passing a cache without a block table is a hard error, not a silent run."""
+        q, k, v = make_qkv(256, 4, 4, 64, dtype=torch.float16)
+        locs, lens = make_varlen_meta([256])
+        k_cache, v_cache, _ = scatter_to_paged_cache(k, v, locs, lens, 4, 64, 16)
+        with pytest.raises(ValueError, match="block_table"):
+            attention_calibrate(
+                q,
+                k,
+                v,
+                locs,
+                lens,
+                256,
+                softmax_scale=1.0 / (64**0.5),
+                is_causal=False,
+                threshold_trials=[1e-2],
+                k_cache=k_cache,
+                v_cache=v_cache,
+            )
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")

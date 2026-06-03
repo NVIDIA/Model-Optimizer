@@ -130,14 +130,35 @@ class DynamicThresholdCalibrator:
         # with one entry per threshold, eliminating the need for repeated forward passes.
         print(f"\nStage 1: Collecting {phase} sparsity data for all thresholds in one pass...")
 
-        all_data_points = []  # List of {"threshold", "length", "scale_factor", "sparsity"}
-
         self._set_thresholds(attention_modules, self.threshold_trials)
         self._enable_calibration_mode(attention_modules)
         with torch.no_grad():
             forward_loop(model)
         per_sample_stats = self._extract_calibration_stats(attention_modules, phase=phase)
         self._disable_calibration_mode(attention_modules)
+
+        return self.calibrate_from_stats(per_sample_stats, phase)
+
+    def calibrate_from_stats(self, per_sample_stats: list[dict], phase: str) -> dict[str, Any]:
+        """Fit the exponential model from already-collected per-sample stats.
+
+        This is the backend-agnostic Stage 2/3 of :meth:`calibrate`. The HF and
+        diffusion paths reach it through :meth:`calibrate` (which runs a
+        ``forward_loop`` to collect the stats first); the vLLM path collects the
+        stats itself — one record per scheduled request — and calls this directly
+        so both paths share the same exponential fit.
+
+        Args:
+            per_sample_stats: List of ``{"sparsity": [s_0, ..., s_n], "sample_length": L}``
+                records, one per calibration sample. ``sparsity`` holds the
+                skipped-tile fraction at each threshold in ``threshold_trials``
+                (same order, same length).
+            phase: Phase being calibrated ('prefill' or 'decode').
+
+        Returns:
+            Dict with calibration results including a, b, r_squared, and num_data_points.
+        """
+        all_data_points = []  # List of {"threshold", "length", "scale_factor", "sparsity"}
 
         for sample_stat in per_sample_stats:
             length = sample_stat["sample_length"]

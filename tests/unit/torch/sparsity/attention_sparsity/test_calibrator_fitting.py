@@ -155,6 +155,52 @@ class TestExponentialFitting:
         assert result == {}
 
 
+class TestCalibrateFromStats:
+    """Backend-agnostic stats->fit path shared by HF and vLLM calibration."""
+
+    @staticmethod
+    def _synthetic_stats(trials, lengths, a_true, b_true):
+        """Build per-sample stats consistent with scale_factor = a * exp(b * S)."""
+        stats = []
+        for length in lengths:
+            sparsity = []
+            for t in trials:
+                sf = t * length
+                s = np.log(sf / a_true) / b_true if sf > 0 else 0.0
+                sparsity.append(max(0.0, min(1.0, s)))
+            stats.append({"sparsity": sparsity, "sample_length": length})
+        return stats
+
+    def test_recovers_known_parameters(self):
+        """calibrate_from_stats must recover the (a, b) used to synthesize stats."""
+        trials = [1e-4, 1e-3, 1e-2, 1e-1, 5e-1, 9e-1]
+        a_true, b_true = 2.0, 8.0
+        stats = self._synthetic_stats(trials, [256, 512, 1024, 2048, 4096], a_true, b_true)
+
+        cal = DynamicThresholdCalibrator(threshold_trials=trials)
+        result = cal.calibrate_from_stats(stats, phase="decode")
+
+        assert result["phase"] == "decode"
+        assert result["a"] == pytest.approx(a_true, rel=0.1)
+        assert result["b"] == pytest.approx(b_true, rel=0.1)
+        assert result["r_squared"] > 0.99
+
+    def test_matches_calibrate_forward_loop(self):
+        """calibrate() and calibrate_from_stats() agree given the same stats."""
+        trials = [1e-3, 1e-2, 1e-1, 5e-1, 9e-1]
+        stats = self._synthetic_stats(trials, [2048, 4096, 8192], a_true=0.1, b_true=5.0)
+        cal = DynamicThresholdCalibrator(threshold_trials=trials)
+        result = cal.calibrate_from_stats(stats, phase="prefill")
+        assert result["a"] == pytest.approx(0.1, rel=0.1)
+        assert result["b"] == pytest.approx(5.0, rel=0.1)
+
+    def test_too_few_points_returns_empty(self):
+        """Fewer than 10 (scale_factor, sparsity) pairs yields an empty fit."""
+        cal = DynamicThresholdCalibrator(threshold_trials=[0.1])
+        result = cal.calibrate_from_stats([{"sparsity": [0.5], "sample_length": 1024}], "prefill")
+        assert result == {}
+
+
 class TestSetThresholds:
     """Test _set_thresholds for both method types."""
 

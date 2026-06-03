@@ -121,6 +121,20 @@ Limitations:
 - vLLM V1 chunked prefill and prefix-cache suffix attention are supported by offsetting query positions into the longer KV span.
 - CUDA graph capture is not validated yet — use `--enforce-eager`.
 
+### Calibrate skip-softmax thresholds in vLLM
+
+Step 1 above (calibrating with `hf_sa.py`) runs in HuggingFace. You can also calibrate the skip-softmax threshold **directly through vLLM**, using the same Triton calibration kernel over vLLM's paged KV cache. `calibrate_sparse_attn.py` force-swaps `ModelOptSparseAttentionImpl` (in calibration mode) onto every attention layer, runs your prompts through `LLM.generate`, fits the exponential model `scale_factor = a * exp(b * sparsity)` for both prefill and decode, and writes the resulting `sparse_attention_config` — the same block `hf_sa.py` produces:
+
+```bash
+python calibrate_sparse_attn.py <CKPT> \
+    --prompts_file prompts.txt \
+    --target_sparse_ratio 0.5 \
+    --decode_tokens 32 \
+    --update_checkpoint_config
+```
+
+`--prompts_file` is one prompt per line (longer, varied-length prompts give a better fit). `--update_checkpoint_config` merges the fitted config into `<CKPT>/config.json` in place; without it, the config is only dumped to `sparse_attention_config.json` for inspection. The calibration kernel computes full (dense) attention while it measures, so generated tokens are unaffected — only tile-skip statistics are recorded. Afterward, serve the checkpoint with `vllm_serve_sparse_attn.py` as above.
+
 ## Known Problems
 
 1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
