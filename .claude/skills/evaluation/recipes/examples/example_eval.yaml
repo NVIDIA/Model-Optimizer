@@ -74,9 +74,8 @@ deployment:
   # Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`
   # (ViT flash-attn workaround; drop if the encoder loads without it).
   #
-  # `--served-model-name ${deployment.served_model_name}` (in command below) is
-  # REQUIRED: without it vLLM registers the model as `/checkpoint` and every eval
-  # request 404s ("The model `<served_model_name>` does not exist.").
+  # `--served-model-name` (in command below) is REQUIRED — else vLLM serves the
+  # model as `/checkpoint` and eval requests 404 ("model does not exist").
   # For MoE models, add `--enable-expert-parallel` to the command.
   # For models with custom code, add `--trust-remote-code` to the command.
   # After filling in evaluation `parallelism` values (top-level + per-task),

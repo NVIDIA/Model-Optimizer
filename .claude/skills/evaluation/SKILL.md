@@ -138,7 +138,7 @@ deployment:
     <... rest of cross-checked flags ...>
 ```
 
-Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--served-model-name ${deployment.served_model_name}` (**required** — without it vLLM registers the model under the path `/checkpoint`, and every eval request 404s with "The model `<served_model_name>` does not exist."); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
+Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--served-model-name ${deployment.served_model_name}` (**required**; see `example_eval.yaml` for why); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
 
 For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
 
