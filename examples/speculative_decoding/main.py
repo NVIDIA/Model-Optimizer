@@ -36,6 +36,7 @@ import os
 import torch
 import transformers
 from eagle_utils import (
+    DFlashExportCallback,
     EagleTrainerWithAccLog,
     EagleTrainingPlot,
     LoRAWarmupCallback,
@@ -194,6 +195,7 @@ def train():
     )
 
     if checkpoint_is_hf:
+        assert checkpoint is not None  # guaranteed by checkpoint_is_hf
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
                 checkpoint, dtype="auto", trust_remote_code=recipe.model.trust_remote_code
@@ -293,6 +295,12 @@ def train():
 
         training_args.ignore_data_skip = True
         callbacks.append(StreamingResumeCallback())
+    # DFlash: export the draft submodule after every checkpoint save. Under
+    # FSDP2 SHARDED_STATE_DICT, checkpoint-* dirs hold only distributed shards;
+    # this callback gathers just the small draft module and writes a deployable
+    # exported-checkpoint-{step}/ that vLLM (and the AL tests) can load.
+    if isinstance(recipe, ModelOptDFlashRecipe):
+        callbacks.append(DFlashExportCallback())
 
     trainer = EagleTrainerWithAccLog(
         model=model,

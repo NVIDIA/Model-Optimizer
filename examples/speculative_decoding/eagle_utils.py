@@ -228,6 +228,89 @@ class LoRAWarmupCallback(TrainerCallback):
         return control
 
 
+class DFlashExportCallback(TrainerCallback):
+    """Export DFlash draft module after each checkpoint save.
+
+    Under FSDP2 SHARDED_STATE_DICT, checkpoints only contain distributed shards
+    (pytorch_model_fsdp_0/), not model.safetensors. This callback extracts the
+    small draft module weights and saves them in deployment format after each save.
+    """
+
+    def on_save(self, args, state, control, **kwargs):
+        """Export DFlash draft module weights + config after checkpoint save."""
+        import json
+        import os
+
+        from safetensors.torch import save_file
+
+        model = kwargs["model"]
+        if not hasattr(model, "dflash_module"):
+            return control
+
+        step = state.global_step
+        export_dir = os.path.join(args.output_dir, f"exported-checkpoint-{step}")
+
+        # All ranks participate in state_dict gather (FSDP2 collective op).
+        # Use get_model_state_dict to get the full (ungathered) weights regardless
+        # of fsdp_state_dict_type setting.  Only the dflash_module submodule is
+        # gathered (~328 MB for MiniMax-M2.7), not the full 229B base model.
+        try:
+            from torch.distributed.checkpoint.state_dict import (
+                StateDictOptions,
+                get_model_state_dict,
+            )
+
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+            try:
+                raw_sd = get_model_state_dict(
+                    model, submodules={model.dflash_module}, options=options
+                )
+            except TypeError:
+                # Older PyTorch without submodules parameter — gather full model
+                raw_sd = get_model_state_dict(model, options=options)
+        except ImportError:
+            # Non-distributed / single-GPU fallback
+            raw_sd = model.state_dict()
+
+        # Extract dflash_module keys and strip prefix
+        drafter_sd = {}
+        for key, value in raw_sd.items():
+            if "dflash_module." in key:
+                export_key = key.split("dflash_module.", 1)[1]
+                if "rotary_emb" not in export_key:
+                    drafter_sd[export_key] = value.cpu() if value.device.type != "cpu" else value
+            elif not any(prefix in key for prefix in ("model.", "lm_head.", "embed_tokens.")):
+                # Keys already without prefix (from submodule state_dict)
+                if "rotary_emb" not in key:
+                    drafter_sd[key] = value.cpu() if value.device.type != "cpu" else value
+        del raw_sd
+
+        if not drafter_sd:
+            print_rank_0(f"Warning: No dflash_module weights found at step {step}, skipping export")
+            return control
+
+        # Only rank 0 writes files
+        if is_master():
+            try:
+                os.makedirs(export_dir, exist_ok=True)
+                save_file(drafter_sd, os.path.join(export_dir, "model.safetensors"))
+
+                exporter = model.get_exporter()
+                config = exporter._export_config()
+                with open(os.path.join(export_dir, "config.json"), "w") as f:
+                    json.dump(config, f, indent=2)
+
+                total_mb = sum(v.nbytes for v in drafter_sd.values()) / 1024 / 1024
+                print_rank_0(
+                    f"Exported DFlash draft ({len(drafter_sd)} tensors, {total_mb:.0f}MB) "
+                    f"to {export_dir}"
+                )
+            except Exception as e:
+                print_rank_0(f"Warning: DFlash export failed at step {step}: {e}")
+
+        return control
+
+
 class EagleTrainingPlot(TrainerCallback):
     """Callback that plot training acc and AR during training."""
 
