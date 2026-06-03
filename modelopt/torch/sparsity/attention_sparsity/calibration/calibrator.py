@@ -174,6 +174,12 @@ class DynamicThresholdCalibrator:
                     }
                 )
 
+        # Per-sample measured sparsity (one row per calibration sample: its
+        # skipped-tile fraction at every threshold). Printed before the fit-
+        # validity guard so the raw per-sample data is visible even when the fit
+        # bails (e.g. degenerate near-zero sparsity).
+        self._print_per_sample_sparsity(per_sample_stats, phase)
+
         if len(all_data_points) < 10:
             warnings.warn(
                 f"Not enough data points for {phase} calibration. "
@@ -306,7 +312,28 @@ class DynamicThresholdCalibrator:
             "calibration_type": "exponential",
             "min_observed_sparsity": min_observed_sparsity,
             "max_observed_sparsity": max_observed_sparsity,
+            # Raw per-sample measured sparsity, so callers can audit the spread
+            # across samples (not just the fitted average).
+            "per_sample_sparsity": [
+                {
+                    "sample_length": s.get("sample_length", 0),
+                    "sparsity": list(s.get("sparsity", [])),
+                }
+                for s in per_sample_stats
+            ],
         }
+
+    def _print_per_sample_sparsity(self, per_sample_stats: list[dict], phase: str) -> None:
+        """Print each sample's measured skipped-tile fraction at every threshold."""
+        if not per_sample_stats:
+            return
+        print(f"\nPer-sample {phase} sparsity (skipped-tile fraction per threshold):")
+        header = " ".join(f"{t:>7.0e}" for t in self.threshold_trials)
+        print(f"  {'sample':>6} {'length':>8}  {header}")
+        for idx, stat in enumerate(per_sample_stats):
+            sparsity = stat.get("sparsity", [])
+            row = " ".join(f"{s:>7.2%}" for s in sparsity)
+            print(f"  {idx:>6} {stat.get('sample_length', 0):>8}  {row}")
 
     def _enable_calibration_mode(self, modules: list[nn.Module]):
         """Enable calibration mode on sparse attention modules."""

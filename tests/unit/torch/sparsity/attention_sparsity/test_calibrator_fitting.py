@@ -200,6 +200,25 @@ class TestCalibrateFromStats:
         result = cal.calibrate_from_stats([{"sparsity": [0.5], "sample_length": 1024}], "prefill")
         assert result == {}
 
+    def test_reports_per_sample_sparsity(self, capsys):
+        """The result exposes (and prints) each sample's measured sparsity."""
+        trials = [1e-4, 1e-3, 1e-2, 1e-1, 5e-1, 9e-1]
+        lengths = [256, 512, 1024, 2048, 4096]
+        stats = self._synthetic_stats(trials, lengths, a_true=2.0, b_true=8.0)
+
+        result = DynamicThresholdCalibrator(threshold_trials=trials).calibrate_from_stats(
+            stats, "prefill"
+        )
+
+        per_sample = result["per_sample_sparsity"]
+        assert len(per_sample) == len(lengths)
+        assert [s["sample_length"] for s in per_sample] == lengths
+        assert all(len(s["sparsity"]) == len(trials) for s in per_sample)
+        # Values match the input measurements (not the fitted average).
+        assert per_sample[0]["sparsity"] == pytest.approx(stats[0]["sparsity"])
+        # And a per-sample table is printed.
+        assert "Per-sample prefill sparsity" in capsys.readouterr().out
+
 
 class TestSetThresholds:
     """Test _set_thresholds for both method types."""
