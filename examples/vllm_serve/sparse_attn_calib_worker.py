@@ -49,11 +49,14 @@ from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 import modelopt
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    ModelOptSparseAttentionImpl,
     _clone_sparse_impl,
     disable_calibration,
     enable_calibration,
     fit_calibration,
+    get_flashinfer_sparse_impl_cls,
     iter_sparse_impls,
+    patch_flashinfer_metadata_builder,
 )
 
 # Default threshold sweep — should span sparsities from ~10% to ~95%.
@@ -73,34 +76,63 @@ DEFAULT_THRESHOLD_TRIALS = [
 ]
 
 
+def _sparse_impl_cls_for(impl):
+    """Pick the ModelOpt sparse impl class matching the layer's vLLM backend.
+
+    Returns ``None`` for already-swapped or unsupported backends. The FlashInfer
+    path also installs the metadata-builder patch that exposes the dense paged
+    metadata the calibration kernel needs.
+    """
+    name = type(impl).__name__
+    if name.startswith("ModelOptSparse"):
+        return None  # already swapped (idempotent across reloads)
+    if name == "FlashAttentionImpl":
+        return ModelOptSparseAttentionImpl
+    if name == "FlashInferImpl":
+        if not patch_flashinfer_metadata_builder():
+            return None
+        return get_flashinfer_sparse_impl_cls()
+    return None
+
+
 def _force_replace_attention_impls(worker) -> int:
-    """Swap ModelOptSparseAttentionImpl onto every attention layer.
+    """Swap the ModelOpt sparse impl onto every supported attention layer.
 
     Calibration has no checkpoint metadata to match against, so every attention
     layer is converted unconditionally (with empty ``sparse_kw``; calibration
-    mode is toggled separately by ``sparse_calib_enable``).
+    mode is toggled separately by ``sparse_calib_enable``). Supports the
+    FlashAttention and FlashInfer backends; other backends are left untouched.
     """
     model = worker.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
 
     patched = 0
+    skipped_backends: set[str] = set()
     for _, module in model.named_modules():
         if not isinstance(module, VLLMAttention):
             continue
         impl = module.impl
-        # Skip layers that already use our impl (idempotent across reloads).
-        if type(impl).__name__ == "ModelOptSparseAttentionImpl":
+        new_cls = _sparse_impl_cls_for(impl)
+        if new_cls is None:
+            if not type(impl).__name__.startswith("ModelOptSparse"):
+                skipped_backends.add(type(impl).__name__)
             continue
         try:
-            new_impl = _clone_sparse_impl(impl)
+            new_impl = _clone_sparse_impl(impl, new_cls)
         except NotImplementedError:
             # e.g. FlashAttention sinks — leave those layers on vLLM's impl.
+            skipped_backends.add(type(impl).__name__)
             continue
         new_impl.sparse_kw = {}
         module.impl = new_impl
         patched += 1
     print(f"[ModelOpt] Calibration: swapped impl on {patched} attention layers")
+    if skipped_backends:
+        print(
+            f"[ModelOpt] Calibration: left {sorted(skipped_backends)} layers unchanged "
+            "(unsupported backend — calibrate under FLASH_ATTN or FLASHINFER)."
+        )
     return patched
 
 

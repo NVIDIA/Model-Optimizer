@@ -42,6 +42,8 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     disable_calibration,
     enable_calibration,
     fit_calibration,
+    get_flashinfer_sparse_impl_cls,
+    patch_flashinfer_metadata_builder,
 )
 
 if TRITON_KERNEL_AVAILABLE:
@@ -551,3 +553,168 @@ class TestModelOptSparseAttentionCalibration:
         assert "prefill" in params
         assert params["prefill"]["a"] > 0.0
         assert params["prefill"]["b"] > 0.0
+
+
+# FlashInfer backend import requires the `flashinfer` package; skip if absent.
+flashinfer_backend = pytest.importorskip("vllm.v1.attention.backends.flashinfer")
+FlashInferImpl = flashinfer_backend.FlashInferImpl
+
+
+def _make_flashinfer_impl(num_heads, head_dim, num_kv_heads):
+    """Build a bare ModelOptSparseFlashInferImpl with the attrs forward() reads.
+
+    Bypasses FlashInferImpl.__init__ (which needs a full vLLM config); the
+    calibration path only consults scale / num_kv_heads / head_size.
+    """
+    cls = get_flashinfer_sparse_impl_cls()
+    impl = cls.__new__(cls)
+    impl.scale = 1.0 / (head_dim**0.5)
+    impl.num_kv_heads = num_kv_heads
+    impl.head_size = head_dim
+    return impl
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+class TestModelOptSparseFlashInferCalibration:
+    """FlashInfer-backend calibration must match the FlashAttention path.
+
+    Same logical K/V, different cache layout: FlashAttention is ``[2, ...]``;
+    FlashInfer is ``[num_blocks, 2, page_size, ...]`` with the dense paged
+    metadata stashed on the metadata object (not a `block_table` field). The
+    per-request measurement is shared, so the records must be identical.
+    """
+
+    _TRIALS = [1e-4, 1e-3, 1e-2, 1e-1, 5e-1, 9e-1]
+
+    @staticmethod
+    def _to_flashinfer_cache(fa_kv_cache):
+        """[2, num_blocks, page, H, D] -> FlashInfer [num_blocks, 2, page, H, D]."""
+        return fa_kv_cache.transpose(0, 1).contiguous()
+
+    def test_matches_flashattention_prefill(self):
+        """FlashInfer and FlashAttention calibration give identical records + output."""
+        lengths = [128, 256]
+        total = sum(lengths)
+        num_heads, num_kv_heads, head_dim, page_size = 4, 2, 64, 16
+        dtype = torch.float16
+
+        torch.manual_seed(0)
+        q = torch.randn(total, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+        qsl = torch.tensor([0, lengths[0], total], device="cuda", dtype=torch.int32)
+        fa_kv, block_table = _make_paged_cache(
+            k, v, qsl[:2], seq_lens, num_kv_heads, head_dim, page_size
+        )
+
+        # FlashAttention reference.
+        fa_impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        fa_impl.sparse_kw = {}
+        enable_calibration([fa_impl], self._TRIALS)
+        out_fa = torch.empty_like(q)
+        fa_impl.forward(
+            layer=None,
+            query=q,
+            key=k,
+            value=v,
+            kv_cache=fa_kv,
+            attn_metadata=SimpleNamespace(
+                num_actual_tokens=total,
+                max_query_len=max(lengths),
+                max_seq_len=max(lengths),
+                query_start_loc=qsl,
+                seq_lens=seq_lens,
+                block_table=block_table,
+            ),
+            output=out_fa,
+        )
+
+        # FlashInfer: [num_blocks, 2, page, H, D] cache + stashed dense metadata.
+        fi_impl = _make_flashinfer_impl(num_heads, head_dim, num_kv_heads)
+        enable_calibration([fi_impl], self._TRIALS)
+        out_fi = torch.empty_like(q)
+        fi_impl.forward(
+            layer=None,
+            query=q,
+            key=k,
+            value=v,
+            kv_cache=self._to_flashinfer_cache(fa_kv),
+            attn_metadata=SimpleNamespace(
+                use_cascade=False,
+                _modelopt_block_table=block_table,
+                _modelopt_seq_lens=seq_lens,
+                _modelopt_query_start_loc=qsl,
+                _modelopt_num_actual_tokens=total,
+            ),
+            output=out_fi,
+        )
+
+        torch.testing.assert_close(out_fi, out_fa, rtol=5e-3, atol=5e-3)
+        assert collect_calibration_stats([fi_impl]) == collect_calibration_stats([fa_impl])
+
+    def test_decode_records_decode_phase(self):
+        """FlashInfer decode (seq_q=1, long cache) yields a decode record."""
+        seq_k = 2048
+        num_heads, num_kv_heads, head_dim, page_size = 4, 2, 64, 16
+        dtype = torch.float16
+
+        q = torch.ones(1, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.zeros(seq_k, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        k[0] = 20.0
+        v = torch.randn(seq_k, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        kv_start = torch.zeros(1, device="cuda", dtype=torch.int32)
+        kv_len = torch.tensor([seq_k], device="cuda", dtype=torch.int32)
+        fa_kv, block_table = _make_paged_cache(
+            k, v, kv_start, kv_len, num_kv_heads, head_dim, page_size
+        )
+
+        fi_impl = _make_flashinfer_impl(num_heads, head_dim, num_kv_heads)
+        enable_calibration([fi_impl], self._TRIALS)
+        fi_impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=self._to_flashinfer_cache(fa_kv),
+            attn_metadata=SimpleNamespace(
+                use_cascade=False,
+                _modelopt_block_table=block_table,
+                _modelopt_seq_lens=kv_len,
+                _modelopt_query_start_loc=torch.tensor([0, 1], device="cuda", dtype=torch.int32),
+                _modelopt_num_actual_tokens=1,
+            ),
+            output=torch.empty_like(q),
+        )
+
+        stats = collect_calibration_stats([fi_impl])
+        assert not stats["prefill"]
+        assert len(stats["decode"]) == 1
+        assert stats["decode"][0]["sample_length"] == seq_k
+        assert max(stats["decode"][0]["sparsity"]) > 0.8
+
+    def test_delegates_to_flashinfer_when_not_calibrating(self, monkeypatch):
+        """Outside calibration (and for cascade), forward defers to native FlashInfer."""
+        called = {}
+
+        def fake_forward(self, layer, query, key, value, kv_cache, attn_metadata, *a, **k):
+            called["n"] = called.get("n", 0) + 1
+            return query
+
+        monkeypatch.setattr(FlashInferImpl, "forward", fake_forward)
+        impl = _make_flashinfer_impl(2, 64, 2)
+        q = torch.zeros(1, 2, 64, device="cuda", dtype=torch.float16)
+
+        # (a) not calibrating -> delegate
+        impl.forward(None, q, q, q, torch.empty(0), SimpleNamespace(use_cascade=False))
+        # (b) calibrating but cascade -> delegate
+        enable_calibration([impl], self._TRIALS)
+        impl.forward(None, q, q, q, torch.empty(0), SimpleNamespace(use_cascade=True))
+        # (c) calibrating but builder not patched (no stashed metadata) -> delegate
+        impl.forward(None, q, q, q, torch.empty(0), SimpleNamespace(use_cascade=False))
+        assert called["n"] == 3
+
+    def test_metadata_builder_patch_is_idempotent(self):
+        """patch_flashinfer_metadata_builder is safe to call repeatedly."""
+        assert patch_flashinfer_metadata_builder() is True
+        assert patch_flashinfer_metadata_builder() is True

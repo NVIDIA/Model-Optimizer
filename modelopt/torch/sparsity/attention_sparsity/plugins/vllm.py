@@ -114,7 +114,102 @@ def _build_sparse_kw(layer_cfg: dict) -> dict:
     return sparse_kw
 
 
-class ModelOptSparseAttentionImpl(FlashAttentionImpl):
+class _SparseCalibrationMixin:
+    """Backend-agnostic skip-softmax calibration shared by the sparse impls.
+
+    A backend-specific impl extracts the dense paged metadata (per-request query
+    offsets/lengths, KV lengths, block table) and the K/V caches from its own
+    attention-metadata and cache layout, then calls :meth:`_forward_calibrate`.
+    The per-request measurement, dense-output write, and stats recording are
+    identical across backends (FlashAttention, FlashInfer, ...), so only the
+    extraction differs. ``iter_sparse_impls`` recognizes any impl that mixes
+    this in.
+
+    Calibration state (``_calibrate``, ``_calib_threshold_trials``,
+    ``_calib_records``) is attached by :func:`enable_calibration`.
+    """
+
+    # Provided at runtime by the vLLM AttentionImpl base class.
+    scale: float
+    num_kv_heads: int
+    head_size: int
+    # Attached by enable_calibration().
+    _calib_threshold_trials: list[float] | None
+    _calib_records: list[dict]
+
+    def _forward_calibrate(
+        self,
+        *,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        page_size: int,
+        b_start_loc: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        num_actual_tokens: int,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Measure per-request tile-skip stats via the paged Triton calibration kernel.
+
+        Each scheduled request is calibrated independently (batch=1) so its KV
+        length is the per-sample length the exponential fit needs, and so the
+        kernel keeps the uniform-length contract it was validated against. The
+        kernel computes full attention, so ``output`` is written densely and the
+        forward pass is numerically unchanged.
+
+        Phase and causality are decided per request: ``q_len == 1`` is a decode
+        step (full-cache, non-causal); ``q_len > 1`` is (chunked) prefill (causal
+        — the kernel offsets the query into the KV span). A mixed prefill/decode
+        batch therefore contributes correctly to both phase fits.
+        """
+        trials = self._calib_threshold_trials
+        batch = seq_lens.shape[0]
+
+        q = query[:num_actual_tokens].contiguous()
+        # Dummy K/V: in paged mode KV is read from the cache via block_table.
+        # Only shape[1] (num_kv_heads) is consulted, to compute the GQA ratio.
+        k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
+
+        for i in range(batch):
+            q_len = int(b_seq_len[i].item())
+            if q_len <= 0:
+                continue
+            q_start = int(b_start_loc[i].item())
+            seq_k = int(seq_lens[i].item())
+            phase = "decode" if q_len <= 1 else "prefill"
+
+            oi, counters = attention_calibrate(
+                q[q_start : q_start + q_len],
+                k_dummy,
+                k_dummy,
+                b_start_loc=torch.zeros(1, device=q.device, dtype=torch.int32),
+                b_seq_len=b_seq_len[i : i + 1].to(torch.int32),
+                max_input_len=q_len,
+                is_causal=q_len > 1,
+                softmax_scale=self.scale,
+                b_seq_len_k=seq_lens[i : i + 1].to(torch.int32),
+                max_input_len_k=seq_k,
+                threshold_trials=trials,
+                k_cache=key_cache,
+                v_cache=value_cache,
+                block_table=block_table[i : i + 1],
+                page_size=page_size,
+            )
+            output[q_start : q_start + q_len] = oi
+
+            total = counters[:, 0].float()
+            skipped = counters[:, 1].float()
+            sparsity = (skipped / total.clamp(min=1)).tolist()
+            self._calib_records.append(
+                {"phase": phase, "sample_length": seq_k, "sparsity": sparsity}
+            )
+
+        return output
+
+
+class ModelOptSparseAttentionImpl(_SparseCalibrationMixin, FlashAttentionImpl):
     """Attention implementation that uses the ModelOpt Triton kernel.
 
     Inherits from FlashAttentionImpl to reuse:
@@ -209,11 +304,12 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 key_cache=key_cache,
                 value_cache=value_cache,
                 page_size=page_size,
-                attn_metadata=attn_metadata,
                 b_start_loc=b_start_loc,
                 b_seq_len=b_seq_len,
+                seq_lens=seq_lens,
+                block_table=attn_metadata.block_table,
+                num_actual_tokens=num_actual_tokens,
                 output=output,
-                is_causal=is_causal,
             )
 
         # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
@@ -295,81 +391,6 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         output[:num_actual_tokens] = triton_out
         return output
 
-    def _forward_calibrate(
-        self,
-        *,
-        query: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        page_size: int,
-        attn_metadata: FlashAttentionMetadata,
-        b_start_loc: torch.Tensor,
-        b_seq_len: torch.Tensor,
-        output: torch.Tensor,
-        is_causal: bool,
-    ) -> torch.Tensor:
-        """Run the paged Triton calibration kernel and record per-request stats.
-
-        Each scheduled request is calibrated independently (batch=1) so its KV
-        length is the per-sample length the exponential fit needs, and so the
-        kernel keeps the uniform-length contract it was validated against. The
-        kernel computes full attention, so ``output`` is written densely and the
-        forward pass is numerically unchanged.
-
-        The phase is decided per request (``q_len == 1`` is a decode step), so a
-        mixed prefill/decode batch contributes correctly to both phase fits.
-        """
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        seq_lens = attn_metadata.seq_lens
-        batch = seq_lens.shape[0]
-        trials = self._calib_threshold_trials
-
-        q = query[:num_actual_tokens].contiguous()
-        # Dummy K/V: in paged mode KV is read from the cache via block_table.
-        # Only shape[1] (num_kv_heads) is consulted, to compute the GQA ratio.
-        k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
-
-        for i in range(batch):
-            q_len = int(b_seq_len[i].item())
-            if q_len <= 0:
-                continue
-            q_start = int(b_start_loc[i].item())
-            seq_k = int(seq_lens[i].item())
-            phase = "decode" if q_len <= 1 else "prefill"
-
-            qi = q[q_start : q_start + q_len]
-            single_start = torch.zeros(1, device=q.device, dtype=torch.int32)
-            single_q_len = b_seq_len[i : i + 1].to(torch.int32)
-            single_k_len = seq_lens[i : i + 1].to(torch.int32)
-
-            oi, counters = attention_calibrate(
-                qi,
-                k_dummy,
-                k_dummy,
-                b_start_loc=single_start,
-                b_seq_len=single_q_len,
-                max_input_len=q_len,
-                is_causal=is_causal,
-                softmax_scale=self.scale,
-                b_seq_len_k=single_k_len,
-                max_input_len_k=seq_k,
-                threshold_trials=trials,
-                k_cache=key_cache,
-                v_cache=value_cache,
-                block_table=attn_metadata.block_table[i : i + 1],
-                page_size=page_size,
-            )
-            output[q_start : q_start + q_len] = oi
-
-            total = counters[:, 0].float()
-            skipped = counters[:, 1].float()
-            sparsity = (skipped / total.clamp(min=1)).tolist()
-            self._calib_records.append(
-                {"phase": phase, "sample_length": seq_k, "sparsity": sparsity}
-            )
-
-        return output
-
 
 class ModelOptSparseAttentionBackend(FlashAttentionBackend):
     """Attention backend that uses ModelOpt's sparse Triton kernel.
@@ -388,12 +409,18 @@ class ModelOptSparseAttentionBackend(FlashAttentionBackend):
         return ModelOptSparseAttentionImpl
 
 
-def _clone_sparse_impl(old_impl):
-    """Create a sparse impl while preserving vLLM's initialized runtime state."""
+def _clone_sparse_impl(old_impl, new_cls: type = ModelOptSparseAttentionImpl):
+    """Re-class a vLLM attention impl into ``new_cls``, preserving its state.
+
+    The new impl shares the backend impl's initialized runtime state (config,
+    scales, kv-cache dtype) so ``do_kv_cache_update`` and the dense-fallback
+    ``super().forward()`` keep working. ``new_cls`` selects the backend-specific
+    sparse impl (FlashAttention vs FlashInfer).
+    """
     if getattr(old_impl, "sinks", None) is not None:
         # vLLM passes sinks to FlashAttention as s_aux; our Triton path does not support sinks yet.
         raise NotImplementedError(
-            "ModelOptSparseAttentionImpl does not support vLLM FlashAttention sinks yet."
+            f"{new_cls.__name__} does not support vLLM FlashAttention sinks yet."
         )
 
     try:
@@ -403,9 +430,133 @@ def _clone_sparse_impl(old_impl):
             "Cannot clone vLLM attention impl state: old impl does not expose __dict__."
         ) from err
 
-    new_impl = ModelOptSparseAttentionImpl.__new__(ModelOptSparseAttentionImpl)
+    new_impl = object.__new__(new_cls)
     new_impl.__dict__.update(old_state)
     return new_impl
+
+
+# ---------------------------------------------------------------------------
+# FlashInfer backend support
+# ---------------------------------------------------------------------------
+# FlashInfer's per-step metadata only retains planned wrappers, not the dense
+# block_table / seq_lens / query_start_loc the calibration kernel needs. Those
+# live on the CommonAttentionMetadata the builder consumes, so we stash them onto
+# the produced FlashInferMetadata (``_modelopt_*``) and read them back in
+# forward. The KV cache is ``[num_blocks, 2, page_size, num_kv_heads, head_dim]``
+# (``[:, 0]`` = K, ``[:, 1]`` = V); strides are passed through, so this is correct
+# for both NHD and HND physical layouts.
+
+_FLASHINFER_PATCHED = False
+_FLASHINFER_IMPL_CLS: type | None = None
+
+
+def patch_flashinfer_metadata_builder() -> bool:
+    """Stash the dense common metadata onto ``FlashInferMetadata`` at build time.
+
+    Idempotent. Returns ``True`` if the FlashInfer builder is now patched,
+    ``False`` if the FlashInfer backend is unavailable.
+    """
+    global _FLASHINFER_PATCHED
+    if _FLASHINFER_PATCHED:
+        return True
+    try:
+        from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+    except ImportError:
+        return False
+
+    orig_build = FlashInferMetadataBuilder.build
+
+    def build(self, common_attn_metadata, *args, **kwargs):
+        metadata = orig_build(self, common_attn_metadata, *args, **kwargs)
+        metadata._modelopt_block_table = common_attn_metadata.block_table_tensor
+        metadata._modelopt_seq_lens = common_attn_metadata.seq_lens
+        metadata._modelopt_query_start_loc = common_attn_metadata.query_start_loc
+        metadata._modelopt_num_actual_tokens = common_attn_metadata.num_actual_tokens
+        return metadata
+
+    FlashInferMetadataBuilder.build = build
+    _FLASHINFER_PATCHED = True
+    return True
+
+
+def get_flashinfer_sparse_impl_cls() -> type:
+    """Build (once) and return ``ModelOptSparseFlashInferImpl``.
+
+    Defined lazily so importing this module does not require the FlashInfer
+    backend (and its ``flashinfer`` dependency) to be installed.
+    """
+    global _FLASHINFER_IMPL_CLS
+    if _FLASHINFER_IMPL_CLS is not None:
+        return _FLASHINFER_IMPL_CLS
+
+    from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+
+    class ModelOptSparseFlashInferImpl(_SparseCalibrationMixin, FlashInferImpl):
+        """FlashInfer attention impl with ModelOpt skip-softmax calibration.
+
+        Outside calibration it is a plain ``FlashInferImpl`` (delegates to
+        ``super().forward``). In calibration mode it measures multi-threshold
+        tile-skip stats over the paged cache with the Triton calibration kernel,
+        using the dense metadata stashed by ``patch_flashinfer_metadata_builder``.
+        """
+
+        def forward(
+            self,
+            layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=None,
+            output_scale=None,
+            output_block_scale=None,
+        ):
+            """Calibrate when enabled, otherwise run native FlashInfer."""
+            calibrating = getattr(self, "_calibrate", False) and getattr(
+                self, "_calib_threshold_trials", None
+            )
+            # Fall back to native FlashInfer for: inference, profiling
+            # (attn_metadata is None), cascade, or an unpatched builder.
+            if (
+                not calibrating
+                or attn_metadata is None
+                or getattr(attn_metadata, "use_cascade", False)
+                or not hasattr(attn_metadata, "_modelopt_block_table")
+            ):
+                return super().forward(
+                    layer,
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    output,
+                    output_scale,
+                    output_block_scale,
+                )
+
+            assert output is not None, "Output tensor must be provided."
+            key_cache = kv_cache[:, 0]
+            value_cache = kv_cache[:, 1]
+            seq_lens = attn_metadata._modelopt_seq_lens
+            cu_seqlens_q = attn_metadata._modelopt_query_start_loc
+            batch = seq_lens.shape[0]
+            return self._forward_calibrate(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                page_size=key_cache.shape[1],
+                b_start_loc=cu_seqlens_q[:batch],
+                b_seq_len=cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch],
+                seq_lens=seq_lens,
+                block_table=attn_metadata._modelopt_block_table,
+                num_actual_tokens=attn_metadata._modelopt_num_actual_tokens,
+                output=output,
+            )
+
+    _FLASHINFER_IMPL_CLS = ModelOptSparseFlashInferImpl
+    return _FLASHINFER_IMPL_CLS
 
 
 # ---------------------------------------------------------------------------
@@ -420,15 +571,16 @@ def _clone_sparse_impl(old_impl):
 
 
 def iter_sparse_impls(model):
-    """Yield every ``ModelOptSparseAttentionImpl`` reachable from a vLLM model.
+    """Yield every ModelOpt sparse attention impl reachable from a vLLM model.
 
     Walks ``model.named_modules()`` and returns the swapped ``impl`` of each
-    attention layer. Used by the calibration driver to toggle calibration mode
-    and harvest stats without the caller needing to know vLLM's module layout.
+    attention layer (any backend — FlashAttention, FlashInfer — that mixes in
+    ``_SparseCalibrationMixin``). Used by the calibration driver to toggle
+    calibration mode and harvest stats without knowing vLLM's module layout.
     """
     for _, module in model.named_modules():
         impl = getattr(module, "impl", None)
-        if isinstance(impl, ModelOptSparseAttentionImpl):
+        if isinstance(impl, _SparseCalibrationMixin):
             yield impl
 
 

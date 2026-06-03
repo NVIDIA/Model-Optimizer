@@ -135,6 +135,8 @@ python calibrate_sparse_attn.py <CKPT> \
 
 `--prompts_file` is one prompt per line (longer, varied-length prompts give a better fit). `--update_checkpoint_config` merges the fitted config into `<CKPT>/config.json` in place; without it, the config is only dumped to `sparse_attention_config.json` for inspection. The calibration kernel computes full (dense) attention while it measures, so generated tokens are unaffected — only tile-skip statistics are recorded. Afterward, serve the checkpoint with `vllm_serve_sparse_attn.py` as above.
 
+Both the **FlashAttention** and **FlashInfer** backends are supported; the worker auto-selects the matching impl per attention layer. Pin the backend explicitly if needed, e.g. `VLLM_ATTENTION_BACKEND=FLASHINFER python calibrate_sparse_attn.py ...`. The fitted `(a, b)` are backend-independent (they measure attention scores at a fixed 128×128 tile granularity), so a checkpoint calibrated under one backend serves correctly under the other.
+
 ## Known Problems
 
 1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
