@@ -20,8 +20,10 @@ import shutil
 
 import pytest
 import torch
+import torch.nn as nn
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
@@ -30,8 +32,13 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
     is_quantized_linear,
+    persistent_materialization,
 )
-from modelopt.torch.quantization.utils.layerwise_calib import _layer_dir
+from modelopt.torch.quantization.utils.layerwise_calib import (
+    LayerActivationCollector,
+    _layer_dir,
+    _SkipLayer,
+)
 
 NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": [
@@ -467,13 +474,6 @@ class _TupleUnpackingModel(torch.nn.Module):
 
 def test_skip_dummy_has_no_hf_hook(monkeypatch):
     """Dummies must not carry _hf_hook from the original layer."""
-    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
-
-    from modelopt.torch.quantization.utils.layerwise_calib import (
-        LayerActivationCollector,
-        _SkipLayer,
-    )
-
     monkeypatch.setattr(
         LayerActivationCollector,
         "_decoder_layer_support",
@@ -507,11 +507,6 @@ def test_skip_dummy_has_no_hf_hook(monkeypatch):
 
 def test_persistent_materialization_cpu_offloaded(tmp_path):
     """persistent_materialization keeps CPU-offloaded weights on GPU and writes back modifications."""
-    import torch.nn as nn
-    from accelerate.hooks import AlignDevicesHook
-
-    from modelopt.torch.quantization.utils import persistent_materialization
-
     model, config, _, inputs = _make_cpu_offloaded_model(tmp_path)
     offloaded_layer = model.model.layers[0]
 
@@ -625,11 +620,6 @@ def test_disk_offloaded_tinyllama(tmp_path):
 
 def test_persistent_materialization_disk_offloaded(tmp_path):
     """persistent_materialization keeps disk-offloaded weights on GPU and writes back modifications."""
-    import torch.nn as nn
-    from accelerate.hooks import AlignDevicesHook
-
-    from modelopt.torch.quantization.utils import persistent_materialization
-
     model, config, _, inputs = _make_disk_offloaded_model(tmp_path)
     offloaded_layer = model.model.layers[0]
 

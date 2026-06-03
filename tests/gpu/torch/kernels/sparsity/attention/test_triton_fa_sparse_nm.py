@@ -20,13 +20,9 @@
 import pytest
 import torch
 from conftest import make_qkv, make_varlen_meta
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::UserWarning"),
-    pytest.mark.filterwarnings("ignore::RuntimeWarning"),
-    pytest.mark.filterwarnings("ignore::DeprecationWarning"),
-]
-
+import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
@@ -422,11 +418,6 @@ class TestSparseNMIntegration:
 
     def test_sparse_nm_via_sparsify(self, tiny_llama_dir):
         """mtsa.sparsify() with N:M sparse softmax produces finite logits that differ from dense."""
-        pytest.importorskip("transformers")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        import modelopt.torch.sparsity.attention_sparsity as mtsa
-
         tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
         if tok.pad_token_id is None:
             tok.pad_token_id = tok.eos_token_id

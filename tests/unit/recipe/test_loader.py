@@ -15,11 +15,16 @@
 
 """Unit tests for modelopt.recipe.loader and modelopt.recipe.loader.load_config."""
 
+import json
+import os
 import re
+import sys
+import types
 from importlib.resources import files
 
 import pytest
 
+import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
@@ -27,6 +32,8 @@ from modelopt.recipe.config import (
     RecipeType,
 )
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
+from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
+from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -476,11 +483,6 @@ def test_load_recipe_dflash_field_validation_raises(tmp_path):
 )
 def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg_name):
     """Each general/ptq YAML's quant_cfg list matches the merged Python config dicts."""
-    import json
-
-    import modelopt.torch.quantization.config as qcfg
-    from modelopt.torch.quantization.config import normalize_quant_cfg_list
-
     model_cfg = getattr(qcfg, model_cfg_name)
     kv_cfg = getattr(qcfg, kv_cfg_name)
     recipe = load_recipe(yaml_path)
@@ -1277,8 +1279,6 @@ def test_import_circular_via_path_aliases_raises(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg: []\n"
     )
-    import os
-
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
@@ -1369,8 +1369,6 @@ def test_builtin_config_snippets_with_modelopt_schema(config_path):
 
 def test_modelopt_schema_comment_returns_instance(tmp_path):
     """A ``modelopt-schema`` comment makes load_config return an instance of that schema."""
-    from modelopt.torch.quantization.config import QuantizerAttributeConfig
-
     config_file = tmp_path / "fp8.yaml"
     config_file.write_text(
         "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
@@ -1396,11 +1394,6 @@ def test_modelopt_schema_comment_validation_error(tmp_path):
 
 def test_modelopt_schema_reports_circular_resolution(monkeypatch):
     """A schema missing from an initializing module reports the likely circular import."""
-    import sys
-    import types
-
-    from modelopt.torch.opt.config_loader import _schema_type
-
     module_name = "modelopt._schema_cycle_test"
     module = types.ModuleType(module_name)
     module.__spec__ = types.SimpleNamespace(_initializing=True)
@@ -1537,8 +1530,6 @@ def test_load_config_multi_doc_dict_dict(tmp_path):
     """Multi-document YAML with two dicts merges them."""
     cfg_file = tmp_path / "multi.yaml"
     cfg_file.write_text("imports:\n  fp8: some/path\n---\nalgorithm: max\n")
-    from modelopt.torch.opt.config_loader import _load_raw_config
-
     data = _load_raw_config(cfg_file)
     assert data["imports"] == {"fp8": "some/path"}
     assert data["algorithm"] == "max"
@@ -1548,8 +1539,6 @@ def test_load_config_multi_doc_null_content(tmp_path):
     """Multi-document YAML where second doc is null treats content as empty dict."""
     cfg_file = tmp_path / "multi_null.yaml"
     cfg_file.write_text("key: value\n---\n")
-    from modelopt.torch.opt.config_loader import _load_raw_config
-
     data = _load_raw_config(cfg_file)
     assert data == {"key": "value"}
 

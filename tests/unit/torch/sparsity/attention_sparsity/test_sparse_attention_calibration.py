@@ -472,8 +472,6 @@ class TestCalibrateFunction:
 
     def test_calibrate_with_user_forward_loop(self):
         """User-provided forward_loop skips RULER dataset building."""
-        import numpy as np
-
         model = SimpleAttentionModel(hidden_size=64, num_heads=4)
         # Sparsify first WITHOUT calibration, so we can call calibrate_sparse_attention
         # ourselves with a user-supplied forward_loop.

@@ -30,6 +30,8 @@ import safetensors.torch
 import torch
 from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
 
+from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
+
 EAGLE3_YAML = str(
     MODELOPT_ROOT / "modelopt_recipes" / "general" / "speculative_decoding" / "eagle3.yaml"
 )
@@ -135,8 +137,6 @@ def test_offline_ptq(offline_ptq_dirs):
     export_dir = offline_ptq_dirs["ptq_export"]
     assert (export_dir / "model.safetensors").exists(), "PTQ export missing model.safetensors"
     assert (export_dir / "config.json").exists(), "PTQ export missing config.json"
-
-    from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
 
     state_dict = safetensors.torch.load_file(export_dir / "model.safetensors")
     for key in LLAMA_EAGLE_SINGLE_LAYER["required"] - {"fc", "layers.0.hidden_norm"}:

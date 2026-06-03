@@ -18,6 +18,7 @@
 GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 """
 
+import json
 import os
 from copy import deepcopy
 from types import SimpleNamespace
@@ -34,10 +35,13 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import (
+    DFlashAttention,
     DFlashModule,
     HFDFlashModel,
     build_target_layer_ids,
 )
+from modelopt.torch.speculative.utils import AcceptanceRateValidation
+from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
@@ -188,8 +192,6 @@ class TestDFlashSlidingWindow:
         """Test DFlashAttention reads sliding_window from config.layer_types."""
         from transformers import PretrainedConfig
 
-        from modelopt.torch.speculative.plugins.hf_dflash import DFlashAttention
-
         config = PretrainedConfig(
             hidden_size=64,
             num_attention_heads=4,
@@ -211,8 +213,6 @@ class TestDFlashSlidingWindow:
         """Test DFlashAttention defaults to no sliding window."""
         from transformers import PretrainedConfig
 
-        from modelopt.torch.speculative.plugins.hf_dflash import DFlashAttention
-
         config = PretrainedConfig(
             hidden_size=64,
             num_attention_heads=4,
@@ -232,8 +232,6 @@ class TestValidateOnline:
 
     def test_all_accepted(self):
         """When all draft tokens match posterior, AR = 1 + steps."""
-        from modelopt.torch.speculative.utils import AcceptanceRateValidation
-
         validator = AcceptanceRateValidation.__new__(AcceptanceRateValidation)
         validator.check_data_consistency_across_ranks = lambda x: x
 
@@ -276,8 +274,6 @@ class TestValidateOnline:
 
     def test_all_rejected(self):
         """When no draft tokens match, AR = 1 (base token only + correction)."""
-        from modelopt.torch.speculative.utils import AcceptanceRateValidation
-
         validator = AcceptanceRateValidation.__new__(AcceptanceRateValidation)
         validator.check_data_consistency_across_ranks = lambda x: x
 
@@ -351,8 +347,6 @@ class TestDFlashExporter:
 
     def test_export_config_fields(self, tmp_path):
         """Exported config.json should have required DFlash fields."""
-        import json
-
         model = get_tiny_llama(num_hidden_layers=4)
         config = _get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
@@ -406,8 +400,6 @@ class TestEnsureGenerationTags:
 
     def test_chatml_think_template_produces_assistant_mask(self, tiny_tokenizer):
         """Verify generation-tagged chat template produces correct assistant masks."""
-        from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
-
         collator = LanguageDataCollator(
             tokenizer=tiny_tokenizer,
             train_len=128,
@@ -445,8 +437,6 @@ class TestEnsureGenerationTags:
 
     def test_multi_turn_masks_only_assistant(self, tiny_tokenizer):
         """Verify multi-turn: only assistant turns are unmasked."""
-        from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
-
         collator = LanguageDataCollator(
             tokenizer=tiny_tokenizer,
             train_len=256,

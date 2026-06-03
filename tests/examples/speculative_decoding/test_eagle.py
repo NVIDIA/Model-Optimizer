@@ -210,32 +210,40 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
         ],
         "speculative_decoding",
     )
+# fmt: on
 
 
 @pytest.mark.parametrize(
     ("model_source", "use_fake_base"),
     [
-        (None, False),                       # tiny_llama (from fixture), no FakeBase
-        pytest.param(
-            "moonshotai/Kimi-K2.5", True,    # remote HF repo, FakeBaseModel
+        (None, False),  # tiny_llama (from fixture), no FakeBase
+        pytest.param(  # remote HF repo, FakeBaseModel
+            "moonshotai/Kimi-K2.5",
+            True,
             # Kimi's large vocab/hidden_size make the offline data + draft head heavy; this one
             # sometimes runs a bit over the 300s default timeout.
             marks=pytest.mark.timeout(360),
         ),
-        pytest.param(
-            "moonshotai/Kimi-K2-Thinking", True,   # remote HF repo, no FakeBaseModel
+        pytest.param(  # remote HF repo, no FakeBaseModel
+            "moonshotai/Kimi-K2-Thinking",
+            True,
             marks=pytest.mark.manual(reason="skip redundand test, too slow"),
         ),
         pytest.param(
-            "MiniMaxAI/MiniMax-M2.5", True,
+            "MiniMaxAI/MiniMax-M2.5",
+            True,
             marks=pytest.mark.manual(reason="skip redundand test, too slow"),
         ),
     ],
-    ids=["tinyllama", "kimi-k2.5","kimi-k2-thinking","minimax-m2.5"],
+    ids=["tinyllama", "kimi-k2.5", "kimi-k2-thinking", "minimax-m2.5"],
 )
 def test_offline_eagle3_training(
-    tiny_llama_path, tiny_daring_anteater_path, tmp_path, eagle_output_dir,
-    model_source, use_fake_base,
+    tiny_llama_path,
+    tiny_daring_anteater_path,
+    tmp_path,
+    eagle_output_dir,
+    model_source,
+    use_fake_base,
 ):
     """Test Eagle3 training with pre-computed hidden states (offline mode / FakeBaseModel)."""
     model_path = tiny_llama_path if model_source is None else model_source
@@ -301,9 +309,12 @@ def test_eagle3_dry_run(tiny_llama_path, tmp_path, eagle_output_dir):
     # The dry-run checkpoint must be exportable to the deployment format.
     run_example_command(
         [
-            "python", "./scripts/export_hf_checkpoint.py",
-            "--model_path", output_subdir,
-            "--export_path", export_subdir,
+            "python",
+            "./scripts/export_hf_checkpoint.py",
+            "--model_path",
+            output_subdir,
+            "--export_path",
+            export_subdir,
         ],
         "speculative_decoding",
     )

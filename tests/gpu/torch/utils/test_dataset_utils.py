@@ -22,6 +22,7 @@ which is kept hermetic with toy local fixtures.
 import json
 
 import pytest
+from datasets import load_dataset
 from huggingface_hub import get_token
 
 from modelopt.torch.utils.dataset_utils import (
@@ -105,8 +106,6 @@ _HF_TINY = "hf-internal-testing/dataset_with_data_files"  # train, test splits, 
 
 
 def _hf_dump_to_jsonl(name: str, split: str, path) -> str:
-    from datasets import load_dataset
-
     ds = load_dataset(name, split=split)
     ds.to_json(str(path), lines=True)
     return str(path)
