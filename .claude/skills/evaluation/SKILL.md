@@ -200,15 +200,9 @@ reasoning/CoT trace before scoring (grade only the final answer). Set per type:
 2. **Reasoning → `use_reasoning: true`**, especially when the deployment sets
    `--reasoning-parser` (vLLM emits a separate reasoning channel to strip).
 3. **Hybrid (reasoning on *or* off) → turn it ON** (`use_reasoning: true` +
-   force the thinking flag in `chat_template_kwargs`); reasoning mode scores
-   highest. **Read the model card / `chat_template.jinja` for the exact toggle
-   key** — don't extrapolate, names drift (GLM-4.x `thinking`+`/nothink` → GLM
-   5.1 `enable_thinking`; Kimi K2.5 `enable_thinking` → K2.6 `thinking`). Set
-   only that one key. Known: `enable_thinking: true` (Qwen3.5/3.6, GLM 5.1);
-   `thinking: true` (Kimi K2.6, DeepSeek V3.2/V4 — Python encoder, not Jinja, so
-   a stray kwarg can error). If a reasoning-effort knob exists (e.g. DeepSeek
-   V4 `reasoning_effort`), pick the **highest** the card lists (usually `max`),
-   honoring any tied requirement (V4 Think Max → `--max-model-len >= 393216`).
+   force the thinking flag in `chat_template_kwargs`). For the exact toggle key
+   (it drifts across generations) and the reasoning-effort policy, see
+   `references/model-card-research.md` → "Reasoning config".
 
 ---
 

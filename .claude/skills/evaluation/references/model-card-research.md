@@ -19,7 +19,8 @@ Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it ca
   - reasoning on/off: use either:
     - `adapter_config.custom_system_prompt` (like `/think`, `/no_think`) and no `adapter_config.params_to_add` (leave `params_to_add` unrelated to reasoning untouched)
     - `adapter_config.params_to_add` for payload modifier (like `"chat_template_kwargs": {"enable_thinking": true/false}`) and no `adapter_config.custom_system_prompt` and `adapter_config.use_system_prompt: false` (leave `custom_system_prompt` and `use_system_prompt` unrelated to reasoning untouched).
-  - reasoning effort/budget (if it's configurable, AskUserQuestion what reasoning effort they want)
+  - **The `chat_template_kwargs` toggle key drifts across model generations — read the card / `chat_template.jinja`, don't extrapolate, and set only the one key the model uses.** Known: `enable_thinking` (Qwen3.5/3.6, GLM 5.1 — note GLM-4.x used `thinking`+`/nothink`); `thinking` (Kimi K2.6 — renamed from K2.5's `enable_thinking`; DeepSeek V3.2/V4 — Python encoder, not Jinja, so an unused kwarg can error rather than be ignored).
+  - reasoning effort/budget (if configurable, e.g. DeepSeek V4 `reasoning_effort`): default to the **highest** level the card documents (usually `max`), honoring any tied requirement (e.g. V4 Think Max needs `--max-model-len >= 393216`). AskUserQuestion only if the user signals a cost/latency preference.
   - etc.
 - Deployment-specific `extra_args` for vLLM/SGLang (look for the vLLM/SGLang deployment command)
 - Deployment-specific vLLM/SGLang versions (by default we use latest docker images, but you can control it with `deployment.image` e.g. vLLM above `vllm/vllm-openai:v0.11.0` stopped supporting `rope-scaling` arg used by Qwen models)
