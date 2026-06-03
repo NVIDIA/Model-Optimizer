@@ -22,6 +22,7 @@ exponential-model fit used by the PyTorch path.
 """
 
 import copy
+import itertools
 
 import pytest
 import torch
@@ -142,6 +143,38 @@ class TestTritonCalibrationHF:
         method._collect_calibration_stats(module)
         assert module._last_stats["phase"] == "decode"
         assert len(module._last_stats["sparsity"]) == len(THRESHOLD_TRIALS)
+
+    def test_decode_calibration_measures_full_cache_with_sink(self):
+        """Decode calibration must scan the whole KV cache and report real sparsity.
+
+        A dominant sink at position 0 makes the distant KV tiles negligible, so a
+        correct decode measurement skips almost all of them. This guards the two
+        decode bugs that random inputs don't expose:
+          * causal-offset ``kv_bound`` — without it the loop stops after the first
+            ``BLOCK_M`` tokens, so ``total`` would be a fraction of the cache.
+          * padding-row exclusion — without it the 127 padding rows veto every
+            tile and sparsity is 0%.
+        """
+        num_heads, seq_k, head_dim = 4, 2048, 64
+        block_n = 128  # the calibration kernel measures at 128x128
+        q = torch.ones(1, num_heads, 1, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.zeros(1, num_heads, seq_k, head_dim, device="cuda", dtype=torch.float16)
+        k[:, :, 0] = 20.0  # attention sink dominates every query
+        v = torch.randn(1, num_heads, seq_k, head_dim, device="cuda", dtype=torch.float16)
+
+        module = _calibration_module(THRESHOLD_TRIALS)
+        method = module._sparse_method_instance
+        triton_attention_forward(module, q, k, v, attention_mask=None, scaling=1.0 / head_dim**0.5)
+
+        counters = method._hf_calibration_counters
+        total = int(counters[0, 0])
+        # Full cache scanned (not truncated to the first block).
+        assert total == num_heads * (seq_k // block_n), total
+        sparsity = (counters[:, 1].float() / counters[:, 0].clamp(min=1)).tolist()
+        # Sink => the vast majority of tiles are negligible and skippable (not 0%).
+        assert max(sparsity) > 0.8, sparsity
+        # Skipped-tile fraction is non-decreasing as the threshold grows.
+        assert all(later >= earlier for earlier, later in itertools.pairwise(sparsity)), sparsity
 
 
 if __name__ == "__main__":
