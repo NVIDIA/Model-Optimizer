@@ -133,20 +133,20 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
                 module._apply_skip_softmax = False
                 self._clear_triton_backends()
 
-    def _get_scale_factor(self) -> float | None:
-        """Compute scale_factor from calibration params, or None if uncalibrated.
+    def _get_scale_factor(self, phase: str = "prefill") -> float | None:
+        """Compute the scale_factor for ``phase`` from calibration params, or None.
 
-        The scale_factor is sequence-length-independent. Backends divide by the
+        The scale_factor is sequence-length-independent. Callers divide by the
         actual ``seq_k`` at call time: ``threshold = scale_factor / seq_k``.
         """
         if self.calibration_params and self.target_sparse_ratio:
             import math
             import warnings
 
-            params = self.calibration_params.get("prefill", {})
+            params = self.calibration_params.get(phase, {})
             a = params.get("a", 0)
             b = params.get("b", 0)
-            target = self.target_sparse_ratio.get("prefill", 0.5)
+            target = self.target_sparse_ratio.get(phase, 0.5)
             if a > 0 and b > 0:
                 # Warn if target is outside the calibrated range
                 min_s = params.get("min_observed_sparsity")
@@ -166,6 +166,22 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
                     )
                 return a * math.exp(b * target)
         return None
+
+    def get_inference_threshold(self, seq_q: int, seq_k: int) -> float | None:
+        """Return the skip threshold to apply for this call's phase.
+
+        Picks the phase from the query length (``decode`` when ``seq_q == 1``,
+        else ``prefill``) and returns the calibrated dynamic threshold
+        ``scale_factor(phase) / seq_k`` when the phase is calibrated, otherwise
+        the static ``skip_softmax_threshold`` (or ``None`` to disable). This is
+        what the HF backend applies; it keeps prefill and decode on their own
+        calibrated ``(a, b)`` instead of forcing decode onto prefill's.
+        """
+        phase = "decode" if seq_q <= 1 else "prefill"
+        scale_factor = self._get_scale_factor(phase)
+        if scale_factor is not None and seq_k > 0:
+            return scale_factor / seq_k
+        return self.skip_softmax_threshold or None
 
     @staticmethod
     @contextmanager
