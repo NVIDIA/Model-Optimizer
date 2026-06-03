@@ -340,9 +340,13 @@ def populate_shared_state(model: nn.Module) -> int:
         parallel_state: ParallelState | None = None
         for child in members:
             wq = getattr(child, wq_attr, None)
-            if wq is None or getattr(wq, "_amax", None) is None:
+            amax = getattr(wq, "_amax", None) if wq is not None else None
+            # Skip uncalibrated or meta (no-data) amax. A meta amax — e.g. quantizing an
+            # ``init_empty_weights`` model before dispatch — would make weight_global_amax a
+            # meta buffer that then breaks the meta->device ``.to()`` (it needs ``to_empty``).
+            if amax is None or amax.is_meta:
                 continue
-            child_maxes.append(reduce_amax(wq._amax, axis=None))
+            child_maxes.append(reduce_amax(amax, axis=None))
             if parallel_state is None:
                 parallel_state = getattr(child, "parallel_state", None)
 

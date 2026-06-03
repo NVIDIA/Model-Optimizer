@@ -171,6 +171,29 @@ class TestSharedQuantStateBasics:
         assert shared is not None
         assert torch.isclose(shared, torch.tensor(3.0)), f"expected 3.0, got {shared.item()}"
 
+    def test_populate_skips_meta_amax(self):
+        """Meta (no-data) ``_amax`` must not become a meta ``weight_global_amax`` buffer.
+
+        Quantizing an ``init_empty_weights`` model produces meta ``_amax``; aggregating it
+        would make ``weight_global_amax`` a meta buffer that breaks the later meta->device
+        ``.to()`` during dispatch. The group is skipped instead, leaving the buffer ``None``.
+        """
+        attn = _DummyAttention()
+        mtq.replace_quant_module(attn)
+        cfg = _make_nvfp4_static_cfg()
+        for proj in (attn.q_proj, attn.k_proj, attn.v_proj):
+            proj.weight_quantizer.set_from_attribute_config(cfg)
+            out_features, in_features = proj.weight.shape
+            proj.weight_quantizer._amax = torch.empty(
+                (out_features, in_features // NVFP4_BLOCK), device="meta"
+            )
+
+        attach_shared_quant_states(attn, patterns=SIBLING_PATTERNS)  # groups q/k/v (no amax needed)
+        n_groups = populate_shared_state(attn)
+
+        assert n_groups == 0  # nothing real to aggregate
+        assert attn._shared_quant_state.weight_global_amax is None  # not a meta tensor
+
     def test_promote_ignores_shared_state_outside_root(self):
         """Promoting a submodule must ignore a back-ref whose owning state is outside it.
 
