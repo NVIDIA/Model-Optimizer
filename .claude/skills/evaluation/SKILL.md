@@ -191,37 +191,24 @@ Reasoning models: prefer reasoning mode (highest scores). For lower variance / c
 
 #### Reasoning adapter config (`use_reasoning`)
 
-The `evaluation.nemo_evaluator_config.target.api_endpoint.adapter_config` block in
-`example_eval.yaml` controls request/response logging and reasoning handling.
-`use_reasoning: true` makes the adapter strip the model's reasoning/CoT trace
-before the response is scored, so the harness grades only the final answer.
+The `adapter_config` block in `example_eval.yaml` controls request/response
+logging and reasoning handling. `use_reasoning: true` strips the model's
+reasoning/CoT trace before scoring (grade only the final answer). Set per type:
 
-Set it per model type:
-
-1. **Instruct (non-reasoning) models → `use_reasoning: false`.** There is no
-   reasoning trace to strip; leaving it on can mangle plain responses. Also drop
-   the `params_to_add.chat_template_kwargs` thinking block.
-2. **Reasoning models → `use_reasoning: true`.** This is especially important
-   when the deployment command sets a `--reasoning-parser` (vLLM emits a separate
-   reasoning channel that must be stripped before scoring).
-3. **Hybrid models (can run with reasoning on *or* off) → always turn reasoning
-   ON** by forcing the thinking flag inside `params_to_add.chat_template_kwargs`,
-   and keep `use_reasoning: true`. Reasoning mode yields the highest scores, so
-   default hybrids to it.
-
-   **Read the model card (and `chat_template.jinja`) for the exact reasoning-on
-   toggle** — do not extrapolate from a prior generation, the key name drifts
-   (GLM-4.x `thinking` + `/nothink` → GLM 5.1 `enable_thinking`; Kimi K2.5
-   `enable_thinking` → K2.6 `thinking`). Set only the one key your model uses;
-   do not emit several. Known examples: `enable_thinking: true` (Qwen3.5/3.6,
-   GLM 5.1); `thinking: true` (Kimi K2.6, DeepSeek V3.2/V4). DeepSeek V3.2/V4
-   use a Python encoder, not Jinja, so an unused kwarg can raise an error
-   instead of being silently ignored.
-
-   **If the model supports a reasoning-effort setting** (e.g. DeepSeek V4's
-   `reasoning_effort`), default to the **highest** level the card documents
-   (usually `max`). Note any deployment requirement the card ties to it (e.g.
-   DeepSeek V4 Think Max needs `--max-model-len >= 393216`).
+1. **Instruct → `use_reasoning: false`** and drop the `chat_template_kwargs`
+   thinking block (no trace to strip; can mangle plain responses).
+2. **Reasoning → `use_reasoning: true`**, especially when the deployment sets
+   `--reasoning-parser` (vLLM emits a separate reasoning channel to strip).
+3. **Hybrid (reasoning on *or* off) → turn it ON** (`use_reasoning: true` +
+   force the thinking flag in `chat_template_kwargs`); reasoning mode scores
+   highest. **Read the model card / `chat_template.jinja` for the exact toggle
+   key** — don't extrapolate, names drift (GLM-4.x `thinking`+`/nothink` → GLM
+   5.1 `enable_thinking`; Kimi K2.5 `enable_thinking` → K2.6 `thinking`). Set
+   only that one key. Known: `enable_thinking: true` (Qwen3.5/3.6, GLM 5.1);
+   `thinking: true` (Kimi K2.6, DeepSeek V3.2/V4 — Python encoder, not Jinja, so
+   a stray kwarg can error). If a reasoning-effort knob exists (e.g. DeepSeek
+   V4 `reasoning_effort`), pick the **highest** the card lists (usually `max`),
+   honoring any tied requirement (V4 Think Max → `--max-model-len >= 393216`).
 
 ---
 
