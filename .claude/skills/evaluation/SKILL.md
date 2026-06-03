@@ -200,7 +200,7 @@ Reasoning models: prefer reasoning mode (highest scores). For lower variance / c
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
-- **`execution.gres`** — if your NEL install ships an `internal/slurm/<cluster>` execution config, prefer it (it pre-fills `gres`/hostname/partition/node-exclusivity). Otherwise NEL defaults to `gpu:8`; set it to the node's GPU count (and match `--data-parallel-size`/`--tensor-parallel-size`), or `sbatch` rejects the job with *"Requested node configuration is not available"* (e.g. `gpu:8` on 4-GPU GB300 nodes → `gres: gpu:4`; check with `sinfo -o '%P %G'`).
+- **`execution.gres`** — auto-set if you used a predefined `internal/slurm/<cluster>` config (above). On the `slurm/default` fallback it's `gpu:8`, so set it to the node's GPU count (and match `--data-parallel-size`/`--tensor-parallel-size`) or `sbatch` rejects the job with *"Requested node configuration is not available"* (e.g. 4-GPU GB300 → `gres: gpu:4`; check with `sinfo -o '%P %G'`).
 
 **Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.
 

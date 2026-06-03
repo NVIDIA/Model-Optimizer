@@ -50,10 +50,9 @@ execution:
   account: ???
   output_dir: ???
   walltime: "04:00:00"
-  # gres defaults to gpu:8. If your NEL install ships an internal/slurm/<cluster>
-  # execution config, prefer it (it pre-fills gres/hostname/partition). Otherwise
-  # set gres to the node's GPU count or sbatch fails "Requested node configuration
-  # is not available"; match --tensor/--data-parallel-size to it (references/parallelism.md).
+  # gres: a predefined internal/slurm/<cluster> config (see SKILL Step 4) sets this.
+  # On the slurm/default fallback it's gpu:8 — set to the node's GPU count or sbatch
+  # fails "Requested node configuration is not available" (4-GPU GB300 -> gpu:4).
   mounts:
     mount_home: false
   auto_export:          # REQUIRED trigger for auto-export. Without this, the
