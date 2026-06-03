@@ -108,8 +108,8 @@ evaluation:
               thinking: true
               enable_thinking: true
               # DeepSeek V4 only: reasoning-effort axis (high|max). "max" needs
-              # --max-model-len >= 393216. Drop for non-DeepSeek-V4 models.
-              reasoning_effort: max
+              # --max-model-len >= 393216. Uncomment for DeepSeek V4.
+              # reasoning_effort: max
   tasks:
   # Reasoning (chat endpoint, 8 repeats, short)
     - name: gpqa_diamond_aa_v3
