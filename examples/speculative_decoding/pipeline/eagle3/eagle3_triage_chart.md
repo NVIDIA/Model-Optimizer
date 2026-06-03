@@ -92,7 +92,7 @@ error, root cause, and resolution.
 #### Model: Ministral-3-8B-Instruct-2512-BF16
 
 - **Date tested:** 2026-05-26
-- **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_ministral-3-8b-from-task2.yaml`
+- **Config:** `tools/launcher/examples/Mistral/Ministral-3-8B/eagle3_quick_check.yaml`
 - **Experiments:** `cicd_1779312692` (dump), `cicd_1779829129` (train+bench), `cicd_1779901409` (retry w/ fixes)
 - **task_0 (data synth):** SKIP — used vLLM dump path instead (`dump_offline_data_vllm.sh`)
 - **task_1 (hidden states):** PASS — 330/330 conversations via vLLM dump (`cicd_1779312692`)
@@ -113,14 +113,14 @@ error, root cause, and resolution.
   - `modelopt/torch/speculative/utils.py` — VLM detection via `text_config`/`llm_config`
   - `modelopt/torch/speculative/plugins/modeling_fakebase.py` — consolidated.safetensors fallback
   - `modelopt/torch/export/plugins/hf_spec_configs.py` — `use_cache: True` in templates
-- **Pipeline fixes (`offline_training.sh`):** 3 runtime patches matching above
+- **Pipeline fixes (`common/eagle3/train_eagle.sh`):** runtime patches matching above (applied only if the container ships an older modelopt)
 
 ---
 
 #### Model: gpt-oss-20b
 
 - **Date tested:** 2026-04-15
-- **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_gpt-oss-20b.yaml`
+- **Config:** `tools/launcher/examples/OpenAI/GPT-OSS-20B/eagle3_quick_check.yaml`
 - **Experiment:** `cicd_1776272530`
 - **task_0 (data synth):** FAIL — `openai_harmony.HarmonyError: error downloading or loading vocab file`. vLLM server starts loading model but tokenizer fails. Likely a gated/proprietary tokenizer issue.
 - **task_1 (hidden states):** FAIL — `dump_offline_data_vllm.sh: No such file or directory` (script didn't exist at time of run)
@@ -131,7 +131,7 @@ error, root cause, and resolution.
 #### Model: Qwen3.5-35B-A3B
 
 - **Date tested:** 2026-04-15
-- **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_qwen3.5-35b-a3b.yaml`
+- **Config:** `tools/launcher/examples/Qwen/Qwen3.5-35B-A3B/eagle3_quick_check.yaml`
 - **Experiment:** `cicd_1776272531`
 - **task_0 (data synth):** TIMEOUT — Server started successfully, data synthesis was running (5%/3295 at 38min), cancelled at time limit. `TCPTransport closed` errors during generation.
 - **task_1:** FAIL — script not found (infra issue)
@@ -142,7 +142,7 @@ error, root cause, and resolution.
 #### Model: Step-3.5-Flash
 
 - **Date tested:** 2026-04-15
-- **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_step-3.5-flash.yaml`
+- **Config:** `tools/launcher/examples/StepFun/Step-3.5-Flash/eagle3_quick_check.yaml`
 - **Experiment:** `cicd_1776272532`
 - **task_0 (data synth):** TIMEOUT — `CANCELLED AT 2026-04-15 DUE TO TIME LIMIT`
 - **task_1:** FAIL — script not found (infra issue)
@@ -153,7 +153,7 @@ error, root cause, and resolution.
 #### Model: MiniMax-M2.5
 
 - **Date tested:** 2026-04-15
-- **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_minimax-m2.5.yaml`
+- **Config:** `tools/launcher/examples/MiniMax/MiniMax-M2.5/eagle3_quick_check.yaml`
 - **Experiment:** `cicd_1776272524`
 - **task_0 (data synth):** TIMEOUT — `CANCELLED DUE TO TIME LIMIT`
 - **task_1:** FAIL — script not found (infra issue)
@@ -164,7 +164,7 @@ error, root cause, and resolution.
 #### Model: Ministral-3-14B
 
 - **Date tested:** 2026-04-15
-- **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_ministral-3-14b.yaml`
+- **Config:** `tools/launcher/examples/Mistral/Ministral-3-14B/eagle3_quick_check.yaml`
 - **Experiment:** `cicd_1776272522`
 - **task_0 (data synth):** FAIL — `TypeError: 'NoneType' object is not iterable` on all TP workers during engine core init. vLLM cannot load this model architecture.
 - **task_1:** FAIL — script not found (infra issue)
@@ -175,7 +175,7 @@ error, root cause, and resolution.
 #### Model: DeepSeek-V3.2
 
 - **Date tested:** 2026-04-15
-- **Config:** `examples/speculative_decoding/pipeline/eagle3/quick_fail_check_deepseek-v3.2.yaml`
+- **Config:** `tools/launcher/examples/DeepSeek/DeepSeek-V3.2/eagle3_quick_check.yaml`
 - **Experiment:** `cicd_1776275945`
 - **task_0 (data synth):** No log file — job may not have started (gated model?)
 - **task_1 (hidden states):** FAIL — script not found (infra issue)
@@ -190,7 +190,7 @@ error, root cause, and resolution.
 ```markdown
 #### Model: <name>
 - **Date tested:** YYYY-MM-DD
-- **Config:** examples/speculative_decoding/pipeline/eagle3/quick_fail_check_<model>.yaml
+- **Config:** tools/launcher/examples/<Org>/<Model>/eagle3_quick_check.yaml
 - **task_0:** PASS/FAIL — <notes>
 - **task_1:** PASS/FAIL — <notes>
 - **task_2:** PASS/FAIL — <notes>

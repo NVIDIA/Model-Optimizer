@@ -22,7 +22,7 @@ Model checkpoint (HuggingFace)
 │  Task 1: Dump    │  Target model runs forward pass, saves hidden states
 │  (hidden states) │  Script: common/eagle3/dump_offline_data.sh       (TRT-LLM)
 └────────┬─────────┘        or  dump_offline_data_hf.sh   (HF device_map=auto)
-                           or  dump_offline_data_vllm.sh  (vLLM + speculators)
+                           or  dump_offline_data_vllm.sh  (vLLM native extractor)
          │
          ▼
 ┌──────────────────┐
@@ -61,7 +61,7 @@ flowchart TD
     T0_CHECK -->|Cancelled - time limit| T0_TIMEOUT[⚠ TIMEOUT\nJob wall-clock limit too short.\nNote: afterany deps ensure\ntask_1 still runs.\nFix: increase time limit\nor reduce dataset size.]
 
     %% ── task_1 ──────────────────────────────────────────────────
-    T1_CHECK -->|No - script not found| T1_SCRIPT[⚠ MISSING_SCRIPT\nVerify script path. Three backends:\n• dump_offline_data_vllm.sh (vLLM + speculators)\n• dump_offline_data_hf.sh (HF device_map=auto)\n• dump_offline_data.sh (TRT-LLM, --tp/--moe-ep)]
+    T1_CHECK -->|No - script not found| T1_SCRIPT[⚠ MISSING_SCRIPT\nVerify script path. Three backends:\n• dump_offline_data_vllm.sh (vLLM native extractor)\n• dump_offline_data_hf.sh (HF device_map=auto)\n• dump_offline_data.sh (TRT-LLM, --tp/--moe-ep)]
     T1_CHECK -->|Yes| T1_RUN{Runs OK?}
     T1_RUN -->|No - OOM| T1_OOM[⚠ OOM\nIncrease TP, add EP,\nor switch to _hf script.]
     T1_RUN -->|No - NCCL error| T1_NCCL[⚠ NCCL\nNetwork/multi-node issue.\nRetry or reduce EP.]
@@ -98,7 +98,7 @@ Tests run on OCI-HSG cluster (GB200 nodes, 4 × 192 GB HBM3e per node).
 
 | # | Model | Type | Size | task_0 | task_1 | task_2 | task_3 | Notes |
 |---|-------|------|------|--------|--------|--------|--------|-------|
-| 1 | Ministral-3-8B | Dense | 8B | 🔁 RERUNNING (--num-shards 3) | 🔁 RERUNNING (speculators pin) | 🔲 | 🔲 | Issues 6+7 fixed; re-run in progress |
+| 1 | Ministral-3-8B | Dense | 8B | 🔁 RERUNNING (--num-shards 3) | 🔁 RERUNNING (vLLM native extractor) | 🔲 | 🔲 | Issues 6+7 fixed; re-run in progress |
 | 2 | Ministral-3-14B | Dense | 14B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | — |
 | 3 | GPT-OSS-20B | Dense | 20B | ❌ TOKENIZER | 🔁 NEEDS RERUN (_vllm) | 🔲 | 🔲 | Fix: populate TIKTOKEN_RS_CACHE_DIR first |
 | 4 | MiniMax-M2.5 | MoE | 230B/10B | ⏱ TIMEOUT | 🔁 NEEDS RERUN (_vllm) | 🔲 | ❌ TRUST_REMOTE_CODE | trust_remote_code needed at bench |
@@ -126,9 +126,10 @@ not yet been created. Only two scripts existed: `dump_offline_data.sh` (TRT-LLM)
 `dump_offline_data_hf.sh` (HF `device_map="auto"`).
 
 **Fix applied:** `dump_offline_data_vllm.sh` and its backing script
-`compute_hidden_states_vllm.py` were ported from a parallel sandbox branch. The vLLM script
-uses `VllmHiddenStatesGenerator` from the `speculators` library and saves output in the same
-`.pt` format as the HF variant. Both files are now in:
+`compute_hidden_states_vllm.py` were added. The vLLM script drives vLLM's built-in
+`extract_hidden_states` speculative method (via the `ExampleHiddenStatesConnector` KV
+connector) and saves output in the same `.pt` format as the HF variant. No third-party
+data-generation dependency is required. Both files are now in:
 - `tools/launcher/common/eagle3/dump_offline_data_vllm.sh`
 - `examples/speculative_decoding/collect_hidden_states/compute_hidden_states_vllm.py`
 
@@ -138,17 +139,17 @@ Three backends now available for task_1:
 |---------|--------|-------------|
 | TRT-LLM | `dump_offline_data.sh` | Pure-text models with TRT-LLM support; needs `--tp`/`--moe-ep` |
 | HF | `dump_offline_data_hf.sh` | VLMs, custom-code models, SWA; `device_map="auto"` |
-| vLLM | `dump_offline_data_vllm.sh` | Broad coverage via vLLM model implementations; requires `speculators` |
+| vLLM | `dump_offline_data_vllm.sh` | Broad coverage via vLLM model implementations; uses vLLM's native extractor |
 
 ---
 
-### Issue 2: `offline_training.sh` HuggingFace Hub upload bug — FIXED ✅
+### Issue 2: Training-step HuggingFace Hub upload bug — FIXED ✅
 
 **Was:** `HFValidationError: Repo id must be in the form 'repo_name': '/scratchspace/eagle3'`
 
-**Fix applied:** `offline_training.sh` was rewritten to call `launch_train.sh` followed by
-`export_hf_checkpoint.py` for local export only. No HF Hub upload. The `error_handler` is
-now properly sourced from `service_utils.sh`.
+**Fix applied:** The training step (`common/eagle3/train_eagle.sh`) trains and then exports the
+HF checkpoint to a local path only — no HF Hub upload — and sources `error_handler` from
+`service_utils.sh`.
 
 ---
 
@@ -201,21 +202,19 @@ that require it.
 
 ---
 
-### Issue 6: `speculators>=0.5.0` breaks `VllmHiddenStatesGenerator` (Task 1) — FIXED ✅
+### Issue 6: `speculators` dependency removed — superseded by vLLM's native extractor ✅
 
-**Symptom:**
+**History:** The vLLM dump path originally used `VllmHiddenStatesGenerator` from the
+`speculators` library. This was brittle: `speculators==0.5.0` removed that class
+(`ImportError: cannot import name 'VllmHiddenStatesGenerator'`), forcing a
+`pip install "speculators<0.5.0"` pin plus several runtime source-patches of the
+installed library for vLLM/pydantic compatibility.
 
-```text
-ImportError: cannot import name 'VllmHiddenStatesGenerator' from 'speculators.data_generation'
-```
-
-**Affected:** All models using `dump_offline_data_vllm.sh` with `vllm/vllm-openai:latest` container.
-
-**Root cause:** `speculators==0.5.0` (released after the script was written) removed
-`VllmHiddenStatesGenerator` from `speculators.data_generation`. The install line
-`pip install speculators` in the script picks up the latest version.
-
-**Fix applied:** Pin to `pip install "speculators<0.5.0"` in `dump_offline_data_vllm.sh`.
+**Resolution:** `dump_offline_data_vllm.sh` / `compute_hidden_states_vllm.py` now use
+vLLM's built-in `extract_hidden_states` speculative method (via the
+`ExampleHiddenStatesConnector` KV connector). The `speculators` dependency and all
+runtime source-patches were removed, so the version pin and these compatibility
+patches no longer apply.
 
 ---
 

@@ -13,16 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Extract hidden states from an LLM using vLLM + speculators."""
+"""Extract hidden states from an LLM using vLLM's native hidden-state extractor.
+
+This uses vLLM's built-in ``extract_hidden_states`` speculative method together with
+the ``ExampleHiddenStatesConnector`` KV connector, so no third-party data-generation
+dependency (e.g. ``speculators``) is required. Because the same ``eagle_aux_hidden_state_layer_ids``
+convention is used at EAGLE3 deployment time in vLLM, the captured aux layers match
+deployment by construction.
+
+See https://docs.vllm.ai/en/stable/features/speculative_decoding/extract_hidden_states/
+"""
 
 import argparse
 from pathlib import Path
 
 import torch
+from common import add_aux_layers_args, resolve_aux_layers
 from datasets import load_dataset
-from speculators.data_generation import VllmHiddenStatesGenerator
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
@@ -31,7 +40,7 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="""Collect hidden states from conversations using vLLM + speculators."""
+        description="""Collect hidden states from conversations using vLLM's native extractor."""
     )
 
     parser.add_argument("--model", type=str, required=True, help="HF model path.")
@@ -53,11 +62,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
     )
+    add_aux_layers_args(parser)
 
     return parser.parse_args()
 
 
 def main(args: argparse.Namespace) -> None:
+    # Import lazily so --help and arg parsing work without vLLM installed.
+    from vllm import LLM, SamplingParams
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1 import example_hidden_states_connector
+    from vllm.inputs import TokensPrompt
+
     # Load conversations
     if args.input_data.is_file() and str(args.input_data).endswith(".jsonl"):
         dataset = load_dataset("json", data_files=str(args.input_data), split="train")
@@ -89,6 +105,17 @@ def main(args: argparse.Namespace) -> None:
 
     if args.debug_max_num_conversations is not None:
         dataset = dataset.select(range(args.debug_max_num_conversations))
+
+    # Resolve the aux-layer indices and append the final-layer output. vLLM saves the
+    # final (un-normed) hidden state when ``num_hidden_layers`` is passed as a layer id.
+    config = AutoConfig.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if num_hidden_layers is None:
+        raise ValueError(f"model config has no 'num_hidden_layers' attribute: {config}")
+    aux_layer_ids = resolve_aux_layers(args, num_hidden_layers)
+    # The trailing entry is the final output hidden state; the rest are aux layers.
+    extract_layer_ids = [*aux_layer_ids, num_hidden_layers]
+    print(f"Extracting hidden states from layers {extract_layer_ids} (last = final output)")
 
     # Tokenize conversations
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
@@ -122,12 +149,13 @@ def main(args: argparse.Namespace) -> None:
             input_ids = tokenized
         if not hasattr(input_ids, "shape"):
             input_ids = torch.tensor(input_ids)
-        num_tokens = input_ids.shape[0] if input_ids.dim() == 1 else input_ids.shape[1]
+        input_ids = input_ids.squeeze(0)
+        num_tokens = input_ids.shape[0]
         if num_tokens <= 10 or num_tokens > args.max_seq_len:
             num_skipped_too_long += 1
             continue
 
-        prompts.append(input_ids.squeeze(0))
+        prompts.append(TokensPrompt(prompt_token_ids=input_ids.tolist()))
         conversation_ids.append(conversation_id)
 
     print(
@@ -138,35 +166,57 @@ def main(args: argparse.Namespace) -> None:
         print("No prompts to process.")
         return
 
-    # Initialize vLLM hidden states generator
-    tp = args.tp
-    if tp is None:
-        import torch as _torch
+    # Initialize vLLM with the native hidden-state extractor.
+    tp = args.tp if args.tp is not None else torch.cuda.device_count()
+    storage_path = output_dir / ".vllm_hidden_states"
+    storage_path.mkdir(parents=True, exist_ok=True)
 
-        tp = _torch.cuda.device_count()
-
-    generator = VllmHiddenStatesGenerator(
-        model_path=args.model,
+    llm = LLM(
+        model=args.model,
         tensor_parallel_size=tp,
         max_model_len=args.max_seq_len,
+        trust_remote_code=args.trust_remote_code,
+        enable_chunked_prefill=False,  # required by extract_hidden_states
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": extract_layer_ids},
+            },
+        },
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="ExampleHiddenStatesConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "shared_storage_path": str(storage_path),
+                "use_synchronization_lock": False,  # batch generation, no concurrent readers
+            },
+        ),
     )
 
-    # Generate hidden states
-    results = generator.generate(prompts)
+    # max_tokens=1: we only need a single forward pass over the prompt tokens.
+    outputs = llm.generate(prompts, SamplingParams(max_tokens=1))
 
-    # Save in the same format as compute_hidden_states_hf.py
+    # Save in the same format as compute_hidden_states_hf.py (sans loss_mask, which the
+    # vLLM path does not compute).
     num_success = 0
-    for conv_id, result in tqdm(zip(conversation_ids, results), total=len(results), desc="Saving"):
-        input_ids = result["input_ids"]
-        # speculators returns hidden_states as a list of tensors ordered by layer_ids
-        hidden_states_list = result["hidden_states"]
+    for conv_id, output in tqdm(zip(conversation_ids, outputs), total=len(outputs), desc="Saving"):
+        hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
+        if hidden_states_path is None:
+            print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
+            continue
 
-        # Last element = output hidden states (last captured layer)
-        output_hidden_states = hidden_states_list[-1].cpu()
+        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+        token_ids = obj["token_ids"]
+        # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
+        # extract_layer_ids. Last layer = final output; the rest = aux layers.
+        hidden_states = obj["hidden_states"]
 
-        # All but the last = aux layers, concatenated along the hidden dim
-        if len(hidden_states_list) > 1:
-            aux_hidden_states = torch.cat([h.cpu() for h in hidden_states_list[:-1]], dim=-1)
+        output_hidden_states = hidden_states[:, -1, :].cpu()
+        if hidden_states.shape[1] > 1:
+            # Concatenate aux layers along the hidden dim, matching the HF dump format.
+            aux = hidden_states[:, :-1, :].cpu()
+            aux_hidden_states = aux.reshape(aux.shape[0], -1)
         else:
             aux_hidden_states = torch.empty(0)
 
@@ -174,13 +224,14 @@ def main(args: argparse.Namespace) -> None:
         with open(output_file, "wb") as f:
             torch.save(
                 {
-                    "input_ids": input_ids.cpu() if hasattr(input_ids, "cpu") else input_ids,
+                    "input_ids": token_ids.cpu(),
                     "hidden_states": output_hidden_states,
                     "aux_hidden_states": aux_hidden_states,
                     "conversation_id": conv_id,
                 },
                 f,
             )
+        example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
         num_success += 1
 
     print(f"Successfully processed {num_success} out of {len(prompts)} conversations.")
