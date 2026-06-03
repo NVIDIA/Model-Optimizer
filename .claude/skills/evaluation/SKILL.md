@@ -77,7 +77,7 @@ nel skills build-config --execution <...> --deployment <...> --model_type <...> 
 
 **Model path.** Checkpoint path (`/`, `./`, `../`, `~`, or exists on disk) → set `deployment.checkpoint_path`, leave `hf_model_handle: null`. Else HF handle (one `/`, not on disk) → set `deployment.hf_model_handle`, leave `checkpoint_path: null`.
 
-> **Prefer `checkpoint_path` on SLURM — `hf_model_handle` is not reliably mounted at `/checkpoint` in current NEL.** With only `hf_model_handle` set, the `vllm serve /checkpoint` command finds nothing mounted there and vLLM treats the literal string `/checkpoint` as an HF repo id, so the deploy dies with `HFValidationError: Repo id must use alphanumeric chars … : '/checkpoint'`. To evaluate an un-staged HF model (e.g. a BF16 baseline for a quant comparison), first download it onto the cluster — `python -c "from huggingface_hub import snapshot_download; snapshot_download('<org>/<model>', local_dir='<path>')"` — then set `checkpoint_path: <path>` (this is the path the NVFP4/quantized run already uses).
+> **Prefer `checkpoint_path` over `hf_model_handle` on SLURM** — `hf_model_handle` isn't reliably mounted at `/checkpoint`, so the deploy dies with `HFValidationError`. To eval an un-staged HF model, stage it first (`huggingface_hub.snapshot_download`) and point `checkpoint_path` at it. See `example_eval.yaml` for why.
 
 **Auto-detect ModelOpt quantization** (checkpoint paths). Check `config.json` for `quantization_config` (or legacy `hf_quant_config.json`):
 
