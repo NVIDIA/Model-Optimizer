@@ -23,7 +23,6 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 import torch
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
@@ -404,12 +403,6 @@ class TestEnsureGenerationTags:
     ``return_assistant_tokens_mask``, so the local tiny tokenizer suffices — no
     HF Hub download needed.
     """
-
-    @pytest.fixture
-    def tiny_tokenizer(self):
-        from _test_utils.torch.transformers_models import get_tiny_tokenizer
-
-        return get_tiny_tokenizer()
 
     def test_chatml_think_template_produces_assistant_mask(self, tiny_tokenizer):
         """Verify generation-tagged chat template produces correct assistant masks."""

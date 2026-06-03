@@ -37,8 +37,15 @@ def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config):
         {
             "draft_vocab_size": model_ref.config.vocab_size,
             "hidden_size": model_ref.config.hidden_size,
+            # Shrink the eagle module so convert + save/restore serialization stay cheap.
+            "intermediate_size": 32,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 16,
+            "head_dim": 2,
         }
     )
+    # torch.compile(max-autotune) is a GPU optimization; on CPU it only adds compile time.
+    config["eagle_use_torch_compile"] = False
 
     mtsp.convert(model_ref, mode=[("eagle", config)])
     assert isinstance(model_ref, mtsp.plugins.HFEagleModel)

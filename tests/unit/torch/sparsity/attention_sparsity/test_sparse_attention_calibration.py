@@ -62,12 +62,12 @@ class TestLengthGeneration:
 class TestRulerDatasetBuilder:
     """Test RULER dataset generation without requiring real tokenizers."""
 
-    def test_builder_initialization(self):
+    def test_builder_initialization(self, tiny_tokenizer):
         """Test that builder initializes correctly."""
         builder = RulerDatasetBuilder(
             samples=12,
             max_seqlen=2048,  # Generates: [2048, 1024]
-            tokenizer_name_or_path="gpt2",
+            tokenizer_name_or_path=tiny_tokenizer,
             seed=42,
         )
 
@@ -96,12 +96,12 @@ class TestRulerDatasetBuilder:
                 tokenizer_name_or_path="gpt2",
             )
 
-    def test_dataset_generation_minimal(self):
+    def test_dataset_generation_minimal(self, tiny_tokenizer):
         """Test generating small dataset."""
         builder = RulerDatasetBuilder(
             samples=12,  # 6 tasks x 2 lengths = need 12 for 1 per task per length
             max_seqlen=2048,  # Generates: [2048, 1024]
-            tokenizer_name_or_path="gpt2",
+            tokenizer_name_or_path=tiny_tokenizer,
             seed=42,
         )
 
@@ -111,12 +111,12 @@ class TestRulerDatasetBuilder:
         assert len(dataset) == 12
         assert all(isinstance(sample, dict) for sample in dataset)
 
-    def test_dataset_structure(self):
+    def test_dataset_structure(self, tiny_tokenizer):
         """Test that dataset has correct structure."""
         builder = RulerDatasetBuilder(
             samples=6,  # Need at least 6 (1 per task)
             max_seqlen=1024,  # Generates: [1024]
-            tokenizer_name_or_path="gpt2",
+            tokenizer_name_or_path=tiny_tokenizer,
             seed=42,
         )
 
@@ -135,12 +135,12 @@ class TestRulerDatasetBuilder:
         assert isinstance(sample["task"], str)
         assert sample["length"] > 0
 
-    def test_uneven_sample_distribution(self):
+    def test_uneven_sample_distribution(self, tiny_tokenizer):
         """Test that samples are distributed evenly (remainder dropped)."""
         builder = RulerDatasetBuilder(
             samples=50,  # 50 samples across 4 lengths
             max_seqlen=8192,  # Generates: [8192, 4096, 2048, 1024]
-            tokenizer_name_or_path="gpt2",
+            tokenizer_name_or_path=tiny_tokenizer,
             seed=42,
         )
 

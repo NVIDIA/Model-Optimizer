@@ -53,13 +53,21 @@ def init_process(rank, size, job=None, backend="gloo", port=None):
         job(rank, size)
 
 
-def spawn_multiprocess_job(size, job, backend="gloo"):
+def spawn_multiprocess_job(size, job, backend="gloo", start_method=None):
+    # ``fork`` lets child processes inherit the parent's already-imported torch/modelopt
+    # modules, avoiding a ~12s re-import per process. It is only safe without CUDA (a CUDA
+    # context cannot be forked safely), so default to ``fork`` for CPU/gloo jobs and fall
+    # back to ``spawn`` when a GPU is present or a non-gloo backend is used.
+    if start_method is None:
+        start_method = "fork" if backend == "gloo" and not torch.cuda.is_available() else "spawn"
     port = get_free_port()
 
+    # Use an explicit context instead of ``set_start_method(force=True)`` so we don't mutate
+    # the global multiprocessing state shared with other tests.
+    ctx = mp.get_context(start_method)
     processes = []
-    mp.set_start_method("spawn", force=True)
     for rank in range(size):
-        p = mp.Process(target=init_process, args=(rank, size, job, backend, port))
+        p = ctx.Process(target=init_process, args=(rank, size, job, backend, port))
         p.start()
         processes.append(p)
 

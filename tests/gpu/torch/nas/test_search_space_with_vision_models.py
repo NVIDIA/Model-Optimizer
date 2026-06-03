@@ -22,11 +22,22 @@ from modelopt.torch.nas.search_space import generate_search_space
 from modelopt.torch.utils import flatten_tree, zero_grad
 from modelopt.torch.utils.random import _set_deterministic_seed
 
+# NAS search-space tests are for rarely-used fastnas/autonas paths. All but one vision
+# model are marked ``@pytest.mark.manual`` (run with ``--run-manual``); one representative
+# model per test stays enabled for sanity.
 models = get_vision_models()
 
 
+def _model_params():
+    """One representative model enabled; the rest marked manual."""
+    return [
+        pytest.param(fn, id=name, marks=([] if i == 0 else [pytest.mark.manual]))
+        for i, (name, fn) in enumerate(models.items())
+    ]
+
+
 @pytest.mark.parametrize("on_gpu", [True])  # just run on GPU, but leave it here for easy debugging
-@pytest.mark.parametrize("get_model_and_input", models.values(), ids=models.keys())
+@pytest.mark.parametrize("get_model_and_input", _model_params())
 def test_models(get_model_and_input, on_gpu):
     _set_deterministic_seed()
 
@@ -60,7 +71,7 @@ def test_models(get_model_and_input, on_gpu):
 
 # NOTE: we run this test on CPU because of better floating point precision!
 @pytest.mark.parametrize("on_gpu", [False])  # don't run on GPU but leave it here for easy debugging
-@pytest.mark.parametrize("get_model_and_input", models.values(), ids=models.keys())
+@pytest.mark.parametrize("get_model_and_input", _model_params())
 def test_dynamic_sorting(get_model_and_input, on_gpu):
     set_seed()
     # initialize model

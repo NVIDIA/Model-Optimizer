@@ -679,11 +679,13 @@ def build_conv_batchnorm_sig_mul_model():
 
 
 def build_conv_act_pool_model(include_reshape_node=False):
-    # Define your model inputs and outputs
+    # Define your model inputs and outputs. Kept tiny (this is a QDQ-placement
+    # structure test, independent of channel/spatial sizes) so calibration over the
+    # ONNX runtime stays fast.
     input_names = ["input_0"]
     output_names = ["output_0"]
-    input_shapes = [(32, 64, 256, 256)]
-    output_shapes = [(32, 128, 128, 128)]
+    input_shapes = [(1, 8, 32, 32)]
+    output_shapes = [(1, 16, 16, 16)]
 
     inputs = [
         helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
@@ -762,44 +764,44 @@ def build_conv_act_pool_model(include_reshape_node=False):
         helper.make_tensor(
             name="weights_1",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 64, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 64 * 3 * 3),
+            dims=(16, 8, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=16 * 8 * 3 * 3),
         ),
         helper.make_tensor(
             name="bias_1",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128,),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128),
+            dims=(16,),
+            vals=np.random.uniform(low=0.5, high=1.0, size=16),
         ),
         helper.make_tensor(
             name="bn1_scale",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128,),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128),
+            dims=(16,),
+            vals=np.random.uniform(low=0.5, high=1.0, size=16),
         ),
         helper.make_tensor(
             name="bn1_bias",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128,),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128),
+            dims=(16,),
+            vals=np.random.uniform(low=0.5, high=1.0, size=16),
         ),
         helper.make_tensor(
             name="bn1_mean",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128,),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128),
+            dims=(16,),
+            vals=np.random.uniform(low=0.5, high=1.0, size=16),
         ),
         helper.make_tensor(
             name="bn1_var",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128,),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128),
+            dims=(16,),
+            vals=np.random.uniform(low=0.5, high=1.0, size=16),
         ),
         helper.make_tensor(
             name="weights_2",
             data_type=onnx.TensorProto.FLOAT,
-            dims=(128, 128, 3, 3),
-            vals=np.random.uniform(low=0.5, high=1.0, size=128 * 128 * 3 * 3),
+            dims=(16, 16, 3, 3),
+            vals=np.random.uniform(low=0.5, high=1.0, size=16 * 16 * 3 * 3),
         ),
     ]
     if include_reshape_node:
@@ -808,7 +810,7 @@ def build_conv_act_pool_model(include_reshape_node=False):
                 name="shape_1",
                 data_type=onnx.TensorProto.INT64,
                 dims=(4,),
-                vals=(32, 128, 256, 256),
+                vals=(1, 16, 32, 32),
             ),
         )
 
