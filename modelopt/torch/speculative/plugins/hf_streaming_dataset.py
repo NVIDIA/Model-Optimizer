@@ -49,19 +49,27 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 from pathlib import Path
 from typing import TypedDict
 
 import httpx
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
+
+# The vLLM connector writes the safetensors file asynchronously (writer thread pool)
+# and returns its path before the write is durably visible, so an immediate read can
+# race the writer. Retry the open with linear backoff until the file lands
+# (worst case ~_READ_RETRIES * (_READ_RETRIES+1)/2 * _READ_BACKOFF s).
+_READ_RETRIES = 10
+_READ_BACKOFF = 0.05  # seconds
 
 
 def _tokenize_with_loss_mask(
@@ -427,13 +435,25 @@ class EagleVllmStreamingDataset(StreamingDataset):
         ``safe_open(..., framework="pt").get_tensor`` materializes an independent
         torch Tensor (not a view into the mmap'd file), so it is safe to unlink
         right after the ``with`` block exits.
+
+        Retries past the writer race (see ``_READ_RETRIES``): a missing file means
+        the write hasn't started; a ``SafetensorError`` means it's mid-write. Both
+        clear once the writer finishes, so back off and retry before giving up.
         """
-        with safe_open(path, framework="pt") as f:
-            token_ids = f.get_tensor("token_ids")
-            hidden_states = f.get_tensor("hidden_states")  # [seq, n_layers, hidden]
-        with contextlib.suppress(OSError):
-            os.unlink(path)
-        return token_ids, hidden_states
+        for attempt in range(_READ_RETRIES):
+            try:
+                with safe_open(path, framework="pt") as f:
+                    token_ids = f.get_tensor("token_ids")
+                    hidden_states = f.get_tensor("hidden_states")  # [seq, n_layers, hidden]
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+                return token_ids, hidden_states
+            except (FileNotFoundError, SafetensorError):  # noqa: PERF203 -- retry-on-race loop
+                if attempt == _READ_RETRIES - 1:
+                    raise
+                time.sleep(_READ_BACKOFF * (attempt + 1))
+        # Unreachable (the last attempt above re-raises); guards _READ_RETRIES < 1.
+        raise RuntimeError(f"_load_safetensors exhausted {_READ_RETRIES} retries for {path}")
 
     @staticmethod
     def _align_loss_mask(loss_mask: torch.Tensor, n: int) -> torch.Tensor:

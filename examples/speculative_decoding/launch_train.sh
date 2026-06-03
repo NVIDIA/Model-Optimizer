@@ -65,10 +65,22 @@ if [[ "$NUM_NODES" != "1" ]]; then
   # SLURM allocation reserves node 0 for something else, e.g. the streaming
   # vllm serve, so SLURM_PROCID is offset from accelerate's 0-based rank).
   # Default to $SLURM_PROCID for the all-nodes-are-trainers case.
-  MULTI_NODE_ARGS="--num_processes $TOTAL_GPU \
+  # Canonical accelerate multi-node launch for a fixed Slurm allocation:
+  # --multi_gpu + static rendezvous via main_process_ip/port (-> MASTER_ADDR/PORT).
+  #
+  # --multi_gpu is REQUIRED: with 1 GPU/node, each node's local process count is
+  # num_processes/num_machines = 1, and without --multi_gpu accelerate treats a
+  # single local process as non-distributed -- it never sets WORLD_SIZE/RANK or
+  # forms the process group, so every node trains the full dataset as its own
+  # world=1 (no hang, no real DDP). --multi_gpu forces DistributedType.MULTI_GPU
+  # so the nodes rendezvous into one world=$TOTAL_GPU group.
+  #
+  # Do NOT add --rdzv_backend c10d: that switches to the elastic launcher, which
+  # reads its endpoint from --rdzv_endpoint and ignores --main_process_ip.
+  MULTI_NODE_ARGS="--multi_gpu \
+                   --num_processes $TOTAL_GPU \
                    --num_machines $NUM_NODES \
                    --machine_rank ${MACHINE_RANK:-$SLURM_PROCID} \
-                   --rdzv_backend c10d \
                    --main_process_ip $HEAD_NODE_IP \
                    --main_process_port 29500"
 fi

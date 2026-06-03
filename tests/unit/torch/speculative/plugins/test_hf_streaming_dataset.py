@@ -271,3 +271,27 @@ def test_path_outside_shared_storage_root_is_rejected(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="no fetchable sample"):
         ds[0]
     assert forbidden.exists(), "rejected path must not be unlinked"
+
+
+def test_load_safetensors_retries_past_writer_race(tmp_path, monkeypatch):
+    """The connector writes asynchronously, so an immediate read can race it;
+    _load_safetensors must retry past the transient FileNotFound/Safetensor error."""
+    seq, n_layers, hidden = 4, 2, 8
+    path = tmp_path / "late.safetensors"
+    _write_canned_safetensors(path, seq, n_layers, hidden)
+
+    calls = {"n": 0}
+    real_safe_open = hf_streaming_dataset.safe_open
+
+    def flaky_safe_open(p, framework):
+        calls["n"] += 1
+        if calls["n"] < 3:  # first 2 reads race the writer (file not ready yet)
+            raise FileNotFoundError(f"No such file or directory: {p}")
+        return real_safe_open(p, framework=framework)
+
+    monkeypatch.setattr(hf_streaming_dataset, "safe_open", flaky_safe_open)
+    monkeypatch.setattr(hf_streaming_dataset.time, "sleep", lambda *_: None)  # no real backoff
+
+    token_ids, hidden_states = EagleVllmStreamingDataset._load_safetensors(str(path))
+    assert calls["n"] == 3
+    assert hidden_states.shape == (seq, n_layers, hidden)
