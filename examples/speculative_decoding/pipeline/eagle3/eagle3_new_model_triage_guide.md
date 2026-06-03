@@ -114,10 +114,10 @@ When adding a new patch:
 
 ## Step 6: Document results
 
-Update `examples/speculative_decoding/pipeline/eagle3/eagle3_triage_chart.md`:
-1. Update the model row in the **Model Test Matrix** (status + per-task results)
-2. Add a **Per-Model Test Results** entry with experiment IDs, errors, and fixes
-3. Add new failure patterns to the **Observed Failure Catalog**
+Record the outcome of each run (status per task, experiment IDs, errors, and the fix
+applied) in the team's internal triage tracker, and capture any new failure pattern so the
+next model benefits. Once a model is verified end-to-end, add its launcher YAML example in a
+dedicated PR.
 
 ## Known Model-Specific Issues
 
