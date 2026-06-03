@@ -163,14 +163,17 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 
 ### Test design principles
 
-- **Develop with focused tests.** During development, write as many focused
-  tests as needed, including lower-level unit tests or internal probes, to
-  understand and harden behavior.
-- **Curate production tests and keep them lean.** Before staging or committing,
-  decide which tests should be checked in. Checked-in tests should document
-  expected behavior, protect against regressions, or flag backward-incompatible
-  behavior changes. Remove redundant lower-level tests when a higher-level test
-  already covers the same behavior, keeping CI/CD fast and lean.
+- **Develop with focused tests.** During development, write as many focused tests as needed, including lower-level
+  unit tests or internal probes, to understand and harden behavior.
+- **Curate production tests and keep them lean.** Before staging or committing, decide which tests should be checked
+  in. Checked-in tests should document expected behavior, protect against regressions, or flag backward-incompatible
+  behavior changes. Remove redundant lower-level tests when a higher-level test already covers the same behavior,
+  keeping CI/CD fast and lean.
+- **Keep `tests/unit` offline — no HuggingFace Hub access.** Unit tests must be hermetic so they never flake on
+  network/timeout issues. Do not call `from_pretrained("<org>/<model>")`, `load_dataset("<hub-id>")`,
+  `snapshot_download(...)`, etc. with Hub IDs. Instead build dummy models, tokenizers, configs, and datasets locally —
+  e.g. the `create_tiny_*` helpers and `get_tiny_tokenizer()` in `tests/_test_utils/`, or a small on-disk dataset
+  directory written with `datasets.Dataset.from_dict(...).to_parquet(...)`.
 
 ## ✍️ Signing your work
 

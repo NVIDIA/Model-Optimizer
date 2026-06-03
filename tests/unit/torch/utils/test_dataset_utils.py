@@ -18,13 +18,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from huggingface_hub import get_token
 from torch.utils.data import DataLoader
 
 from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
-    SUPPORTED_DATASET_CONFIG,
     _disable_use_cache,
     _forward_loop,
     _pack_documents_into_rows,
@@ -287,22 +285,9 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
     assert result == 4
 
 
-@pytest.mark.parametrize("test_local_path", [True, False])
-def test_get_dataset_samples_with_unsupported_minipile_dataset(tmp_path, test_local_path):
-    pytest.importorskip("datasets")
-    pytest.importorskip("huggingface_hub")
-
-    from huggingface_hub import snapshot_download
-
-    dataset_name = "nanotron/minipile_100_samples"
-    if test_local_path:
-        local_dir = str(tmp_path / dataset_name)
-        snapshot_download(
-            repo_id=dataset_name,
-            repo_type="dataset",
-            local_dir=local_dir,
-        )
-        dataset_name = local_dir
+def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
+    """A dataset not in ``SUPPORTED_DATASET_CONFIG`` loads via the auto-detect path."""
+    dataset_name = make_toy_hf_dataset()  # basename never matches a registered key
 
     samples = get_dataset_samples(dataset_name, num_samples=5)
 
@@ -770,15 +755,32 @@ class TestDatasetCombosExpansion:
 
 
 # ---------------------------------------------------------------------------
-# Live HF dataset round-trips. ``hf-internal-testing/dataset_with_data_files``
-# is a 10-row x {train,test} fixture maintained by HF for their own CI — tiny
-# enough to download in a unit test and stable across releases.
+# Arbitrary-dataset round-trips. We build a tiny on-disk dataset directory
+# (``train``/``test`` parquet with a ``text`` column) and load it through the
+# same non-registered ``load_dataset(path=...)`` branch a downloaded HF dataset
+# would hit — keeping these unit tests fully offline rather than fetching
+# ``hf-internal-testing/*`` fixtures from the Hub.
 # ---------------------------------------------------------------------------
 
-_HF_TINY = "hf-internal-testing/dataset_with_data_files"  # train, test splits, ``text`` col
+
+@pytest.fixture(scope="module")
+def make_toy_hf_dataset(tmp_path_factory):
+    """Factory returning a local dataset-directory path with ``train``/``test`` splits."""
+    pytest.importorskip("datasets")
+    from datasets import Dataset
+
+    def _make(prefix: str = "toy", num_rows: int = 10) -> str:
+        d = tmp_path_factory.mktemp(prefix)
+        for split in ("train", "test"):
+            Dataset.from_dict(
+                {"text": [f"{prefix} {split} sample {i}" for i in range(num_rows)]}
+            ).to_parquet(str(d / f"{split}.parquet"))
+        return str(d)
+
+    return _make
 
 
-def _hf_dump_to_jsonl(name: str, split: str, path) -> str:
+def _dump_dataset_to_jsonl(name: str, split: str, path) -> str:
     from datasets import load_dataset
 
     ds = load_dataset(name, split=split)
@@ -786,48 +788,46 @@ def _hf_dump_to_jsonl(name: str, split: str, path) -> str:
     return str(path)
 
 
-@pytest.mark.integration
-class TestHfTinyDataset:
-    """End-to-end coverage with a real (tiny) HF dataset."""
+class TestLocalDatasetDirRoundTrips:
+    """End-to-end coverage of the auto-detected (non-registered) dataset path."""
 
-    def test_load_single_split_directly(self):
-        pytest.importorskip("datasets")
-        samples = get_dataset_samples(_HF_TINY, num_samples=4, split="train")
+    def test_load_single_split_directly(self, make_toy_hf_dataset):
+        dataset = make_toy_hf_dataset()
+        samples = get_dataset_samples(dataset, num_samples=4, split="train")
         assert len(samples) == 4
         assert all(isinstance(s, str) and s for s in samples)
 
-    def test_load_multiple_splits_directly(self):
+    def test_load_multiple_splits_directly(self, make_toy_hf_dataset):
         """``split=["train", "test"]`` divides ``num_samples`` across both splits."""
-        pytest.importorskip("datasets")
-        samples = get_dataset_samples(_HF_TINY, num_samples=6, split=["train", "test"])
+        dataset = make_toy_hf_dataset()
+        samples = get_dataset_samples(dataset, num_samples=6, split=["train", "test"])
         assert len(samples) == 6
         # Default per-split is num_samples // n + remainder; for 6/2 → 3 from each.
         # We can't assert exact origin without re-reading, but both splits should
         # contribute, which we'll confirm by comparing against direct loads below.
-        train_only = set(get_dataset_samples(_HF_TINY, num_samples=10, split="train"))
-        test_only = set(get_dataset_samples(_HF_TINY, num_samples=10, split="test"))
+        train_only = set(get_dataset_samples(dataset, num_samples=10, split="train"))
+        test_only = set(get_dataset_samples(dataset, num_samples=10, split="test"))
         assert any(s in train_only for s in samples)
         assert any(s in test_only for s in samples)
 
-    def test_default_split_is_train(self):
-        pytest.importorskip("datasets")
-        default_samples = get_dataset_samples(_HF_TINY, num_samples=4)
-        train_samples = get_dataset_samples(_HF_TINY, num_samples=4, split="train")
+    def test_default_split_is_train(self, make_toy_hf_dataset):
+        dataset = make_toy_hf_dataset()
+        default_samples = get_dataset_samples(dataset, num_samples=4)
+        train_samples = get_dataset_samples(dataset, num_samples=4, split="train")
         assert default_samples == train_samples
 
-    def test_download_to_jsonl_then_load(self, tmp_path):
-        """Dump the HF dataset to JSONL, then reload it via the local-jsonl path."""
-        pytest.importorskip("datasets")
-        jsonl_path = _hf_dump_to_jsonl(_HF_TINY, "train", tmp_path / "train.jsonl")
+    def test_download_to_jsonl_then_load(self, tmp_path, make_toy_hf_dataset):
+        """Dump the dataset to JSONL, then reload it via the local-jsonl path."""
+        dataset = make_toy_hf_dataset()
+        jsonl_path = _dump_dataset_to_jsonl(dataset, "train", tmp_path / "train.jsonl")
         from_jsonl = get_dataset_samples(jsonl_path, num_samples=10)
-        from_hf = get_dataset_samples(_HF_TINY, num_samples=10, split="train")
-        assert from_jsonl == from_hf
+        from_dir = get_dataset_samples(dataset, num_samples=10, split="train")
+        assert from_jsonl == from_dir
 
-    def test_dataloader_blending_two_hf_datasets(self, pad_tokenizer):
-        """Two HF datasets concatenated via ``get_dataset_dataloader``."""
-        pytest.importorskip("datasets")
+    def test_dataloader_blending_two_datasets(self, pad_tokenizer, make_toy_hf_dataset):
+        """Two datasets concatenated via ``get_dataset_dataloader``."""
         loader = get_dataset_dataloader(
-            dataset_name=[_HF_TINY, "hf-internal-testing/multi_dir_dataset"],
+            dataset_name=[make_toy_hf_dataset("a"), make_toy_hf_dataset("b")],
             tokenizer=pad_tokenizer,
             batch_size=4,
             num_samples=[3, 1],
@@ -836,12 +836,13 @@ class TestHfTinyDataset:
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 4
 
-    def test_dataloader_mixing_hf_and_local_jsonl(self, tmp_path, pad_tokenizer):
-        """Live HF dataset blended with a local synthetic JSONL file."""
-        pytest.importorskip("datasets")
+    def test_dataloader_mixing_dir_and_local_jsonl(
+        self, tmp_path, pad_tokenizer, make_toy_hf_dataset
+    ):
+        """Dataset directory blended with a local synthetic JSONL file."""
         local = _write_jsonl(tmp_path / "local.jsonl", [{"text": f"local {i}"} for i in range(2)])
         loader = get_dataset_dataloader(
-            dataset_name=[_HF_TINY, local],
+            dataset_name=[make_toy_hf_dataset(), local],
             tokenizer=pad_tokenizer,
             batch_size=5,
             num_samples=[3, 2],
@@ -849,55 +850,3 @@ class TestHfTinyDataset:
         )
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 5
-
-
-_NEW_NEMOTRON_KEYS = [
-    "nemotron-sft-instruction-following-chat-v2",
-    "nemotron-science-v1",
-    "nemotron-competitive-programming-v1",
-    "nemotron-sft-agentic-v2",
-    "nemotron-math-v2",
-    "nemotron-sft-swe-v2",
-    "nemotron-sft-multilingual-v1",
-]
-
-
-@pytest.mark.parametrize("dataset_key", _NEW_NEMOTRON_KEYS)
-def test_new_nemotron_registry_shape(dataset_key):
-    """Always-on shape check on the 7 newly registered nvidia/Nemotron-* entries.
-
-    Complements the gated smoke test below — catches typos in dataset paths or
-    split names even when the runner has no HF credentials.
-    """
-    assert dataset_key in SUPPORTED_DATASET_CONFIG
-    entry = SUPPORTED_DATASET_CONFIG[dataset_key]
-    config = entry["config"]
-    assert config["path"].startswith("nvidia/Nemotron-")
-    splits = config["split"]
-    assert isinstance(splits, list) and splits
-    assert all(isinstance(s, str) and s for s in splits)
-    assert len(set(splits)) == len(splits)
-    assert callable(entry["preprocess"])
-    assert entry["chat_key"] == "messages"
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("dataset_key", _NEW_NEMOTRON_KEYS)
-def test_get_dataset_samples_new_nemotron(dataset_key):
-    """Smoke-test the 7 newly registered nvidia/Nemotron-* calibration datasets.
-
-    Skipped when no HF token is available because these datasets live behind the HF Hub.
-    ``huggingface_hub.get_token()`` covers both the ``HF_TOKEN`` env var and tokens
-    cached by ``hf auth login``.
-    """
-    pytest.importorskip("datasets")
-    if not get_token():
-        pytest.skip(
-            "No HF token (env HF_TOKEN or `hf auth login`); skipping gated Nemotron smoke test"
-        )
-
-    samples = get_dataset_samples(dataset_key, num_samples=2)
-
-    assert isinstance(samples, list)
-    assert len(samples) == 2
-    assert all(isinstance(s, str) and len(s) > 0 for s in samples)

@@ -20,7 +20,6 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 
 import os
 from copy import deepcopy
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -399,37 +398,31 @@ class TestDFlashExporter:
 
 
 class TestEnsureGenerationTags:
-    """Test _ensure_generation_tags with a real tokenizer (Qwen3-0.6B from HF)."""
+    """Test _ensure_generation_tags masking with the local tiny tokenizer.
+
+    Masking is driven by the injected ``{% generation %}`` blocks and
+    ``return_assistant_tokens_mask``, so the local tiny tokenizer suffices — no
+    HF Hub download needed.
+    """
 
     @pytest.fixture
-    def qwen3_tokenizer(self):
-        from transformers import AutoTokenizer
+    def tiny_tokenizer(self):
+        from _test_utils.torch.transformers_models import get_tiny_tokenizer
 
-        return AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+        return get_tiny_tokenizer()
 
-    @pytest.fixture
-    def qwen3_chat_template(self):
-        template_path = (
-            Path(__file__).parents[5]
-            / "tools/launcher/examples/Qwen/Qwen3-8B/chat_template_train.jinja"
-        )
-        return template_path.read_text()
-
-    def test_chatml_think_template_produces_assistant_mask(
-        self, qwen3_tokenizer, qwen3_chat_template
-    ):
+    def test_chatml_think_template_produces_assistant_mask(self, tiny_tokenizer):
         """Verify generation-tagged chat template produces correct assistant masks."""
         from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
         collator = LanguageDataCollator(
-            tokenizer=qwen3_tokenizer,
+            tokenizer=tiny_tokenizer,
             train_len=128,
             return_labels=True,
             answer_only_loss=True,
-            chat_template=qwen3_chat_template,
         )
 
-        # Verify template was replaced with generation-tagged version
+        # The tiny tokenizer ships a generation-tagged chat template
         assert "generation" in collator.tokenizer.chat_template
 
         # Tokenize a sample conversation
@@ -454,19 +447,18 @@ class TestEnsureGenerationTags:
 
         # Decode the non-masked positions to verify they're assistant content
         non_masked = input_ids[labels != -100]
-        decoded = qwen3_tokenizer.decode(non_masked)
+        decoded = tiny_tokenizer.decode(non_masked)
         assert "The answer is 4" in decoded
 
-    def test_multi_turn_masks_only_assistant(self, qwen3_tokenizer, qwen3_chat_template):
+    def test_multi_turn_masks_only_assistant(self, tiny_tokenizer):
         """Verify multi-turn: only assistant turns are unmasked."""
         from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
         collator = LanguageDataCollator(
-            tokenizer=qwen3_tokenizer,
+            tokenizer=tiny_tokenizer,
             train_len=256,
             return_labels=True,
             answer_only_loss=True,
-            chat_template=qwen3_chat_template,
         )
 
         samples = [
@@ -485,7 +477,7 @@ class TestEnsureGenerationTags:
         input_ids = result["input_ids"]
 
         non_masked = input_ids[labels != -100]
-        decoded = qwen3_tokenizer.decode(non_masked)
+        decoded = tiny_tokenizer.decode(non_masked)
         # Both assistant responses should appear in unmasked tokens
         assert "Hi there" in decoded
         assert "I am fine" in decoded
