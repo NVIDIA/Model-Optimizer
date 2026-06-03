@@ -21,20 +21,16 @@ or wherever `--job-dir` was pointed.
 ls -td experiments/cicd/cicd_* | head -10
 ```
 
-Each experiment has one subdirectory per task (0–3). Logs are `sbatch_*.out` files inside:
-
-```bash
-find experiments/<exp_id>/ -name "sbatch_*.out" | sort
-```
-
-Do this in a single Bash call. If no experiments exist, ask the user for the directory.
+If no experiments exist, ask the user for the directory.
 
 ## Step 1 — Read all task logs
 
-Read the last 200 lines of each log in a single Bash call. Errors appear at the end:
+Each experiment has one subdirectory per task (0–3). Log filenames vary by launch mode
+(Slurm writes `sbatch_*.out`, local Docker writes `*.log`), so match log files generally and
+read the tail of each in a single Bash call — errors surface at the end:
 
 ```bash
-for f in $(find experiments/<exp_id>/ -name "sbatch_*.out" | sort); do
+find experiments/<exp_id>/ -type f \( -name '*.out' -o -name '*.log' \) | sort | while read -r f; do
   echo "=== $f ==="; tail -200 "$f"; echo
 done
 ```
