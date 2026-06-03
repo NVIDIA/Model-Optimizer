@@ -13,11 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Streaming datasets that fetch per-sample hidden states from a running inference server.
+"""Map-style datasets that fetch per-sample hidden states from a running inference server.
 
-The base class :class:`StreamingDataset` owns all the backend-/algorithm-
-agnostic plumbing: threading, queue, tokenization, the bounded sliding-window
-producer, loss_mask alignment, and HTTP-client lifecycle. Concrete subclasses
+This is the streaming sibling of :class:`OfflineSupervisedDataset`: instead of
+reading a pre-dumped ``.pt`` file in ``__getitem__``, it fetches the per-sample
+hidden states from a live inference server over HTTP. It is a plain
+``torch.utils.data.Dataset`` (map-style), so DDP sharding is handled the standard
+way -- HF Trainer wraps it in a ``DistributedSampler`` and each rank's DataLoader
+calls ``__getitem__`` only for that rank's indices. Each rank therefore fetches
+**only its own shard** (no rank-0 funnel, no broadcast); aggregate read bandwidth
+scales with the number of trainer ranks.
+
+Fetch concurrency comes from the DataLoader's ``num_workers`` (each worker process
+issues one blocking request at a time); there is no in-process producer thread.
+Keep ``num_workers`` modest and bounded so the per-server in-flight request count
+(``ranks-hitting-a-server x num_workers``) stays near the server's ``max_num_seqs``
+-- flooding a cold NVFP4 MoE server can stall a worker past vLLM's execute-model
+timeout and kill EngineCore.
+
+The base class :class:`StreamingDataset` owns the backend-/algorithm-agnostic
+plumbing: tokenization, the resample-on-failure ``__getitem__`` loop, the
+consecutive-failure circuit breaker, and loss_mask alignment. Concrete subclasses
 specialize along two axes:
 
 - **Backend** (how to talk to the server, how to decode the response): override
@@ -25,22 +41,14 @@ specialize along two axes:
 - **Algorithm** (how to shape the per-sample dict for the trainer): override
   :meth:`_format`.
 
-:class:`EagleVllmStreamingDataset` is currently the only concrete
-combination (Eagle algorithm × vLLM backend); future combinations live as
-sibling subclasses.
-
-Requires ``dataloader_num_workers=0``: multiple workers would each spawn their
-own asyncio loop and issue duplicate requests against the server.
+:class:`EagleVllmStreamingDataset` is currently the only concrete combination
+(Eagle algorithm x vLLM backend); future combinations live as sibling subclasses.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
-import queue
-import random
-import threading
 from pathlib import Path
 from typing import TypedDict
 
@@ -48,16 +56,12 @@ import httpx
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from safetensors import safe_open
-from torch.utils.data import IterableDataset, get_worker_info
-from transformers import TrainerCallback
+from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 
-from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
-
-_SENTINEL = object()
 
 
 def _tokenize_with_loss_mask(
@@ -104,33 +108,33 @@ def _tokenize_with_loss_mask(
 class StreamingConfig(BaseModel):
     """Static tuning knobs for :class:`StreamingDataset`.
 
-    Bundles the rarely-changing settings (loss masking, concurrency, HTTP timeout)
-    so the dataset ctor takes only ``entries`` + ``tokenizer`` + this config.
+    Bundles the rarely-changing settings (loss masking, HTTP timeout) so the dataset
+    ctor takes only ``entries`` + ``tokenizer`` + this config.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     answer_only_loss: bool = False
-    prefetch: int = Field(default=64, ge=1)
     request_timeout: float = Field(default=600.0, gt=0)
     # Token-level cap applied during tokenization (right-truncation). Must hold
     # ``max_seq_len <= vllm.max_model_len``. ``None`` disables truncation.
     max_seq_len: int | None = None
-    # Must be identical on every rank — the dataset shuffles with this seed then
-    # stripes by rank, so equal seeds are required for the partition to be disjoint.
-    seed: int = 0
-    # Circuit breaker: raise after this many consecutive _fetch failures so a dead
-    # server doesn't silently drain the corpus.
+    # Circuit breaker: raise after this many consecutive _fetch failures (per worker
+    # process) so a dead server doesn't silently resample the whole corpus.
     fail_after_consecutive_skips: int = Field(default=16, ge=1)
 
 
-class StreamingDataset(IterableDataset):
-    """Base class: stream per-sample hidden states from a running inference server.
+class StreamingDataset(Dataset):
+    """Base class: map-style dataset that streams per-sample hidden states from a server.
 
     Backend- and algorithm-agnostic; subclasses implement :meth:`_fetch` (backend) and
     :meth:`_format` (algorithm). The dict shape exchanged between them is the
     algorithm-level contract, declared as a ``TypedDict`` in :attr:`fetch_payload_cls`
     and validated against the actual ``_fetch`` output on every sample.
+
+    ``__getitem__`` must always return a valid sample for the sampler's index, so it
+    resamples forward through the corpus on an unfit entry or a fetch failure rather
+    than skipping (a skip would shrink the batch and desync DDP).
     """
 
     config_cls: type[StreamingConfig] = StreamingConfig
@@ -145,217 +149,78 @@ class StreamingDataset(IterableDataset):
         tokenizer,
         config: StreamingConfig | None = None,
     ):
-        """Hold the *full* corpus on every rank; fetch lazily, rank 0 only.
+        """Hold the full corpus; fetch lazily, per index, in ``__getitem__``.
 
-        DDP sharding is delegated to Accelerate's ``DataLoaderDispatcher``: rank 0
-        consumes the dataset and broadcasts each batch; non-zero ranks rely on
-        :meth:`__iter__`'s rank guard. The corpus is held in full on every rank --
-        the dispatcher reads only rank 0's stream, so sharding here would just
-        shrink that view. Shuffling with ``config.seed`` runs on every rank so
-        the order is reproducible regardless of which rank ends up fetching.
+        DDP sharding is handled by HF Trainer's ``DistributedSampler``: each rank's
+        DataLoader requests only its own indices, so each rank fetches only its
+        shard. The corpus order is left as given -- the sampler shuffles indices
+        (seeded by ``training_args.seed``), so no shuffle is needed here.
 
         Args:
             entries: Untokenized per-sample dicts from the input jsonl. Schema is
-                subclass-defined (see :meth:`_tokenize_entry`); passed through to :meth:`_fetch`.
+                subclass-defined (see :meth:`_tokenize_entry`); passed to :meth:`_fetch`.
             tokenizer: HF tokenizer; used for client-side tokenization and the
                 server/client loss-mask alignment in :meth:`_fetch`.
-            config: Tuning knobs (prefetch, timeout, seed, ...); defaults to
+            config: Tuning knobs (timeout, answer_only_loss, ...); defaults to
                 ``self.config_cls()``. See :class:`StreamingConfig`.
         """
         if not entries:
             raise ValueError("entries is empty")
         self.tokenizer = tokenizer
         self.config = config if config is not None else self.config_cls()
-        # One-shot, consumed by the next __iter__.
-        self._resume_skip = 0
-
-        indices = list(range(len(entries)))
-        random.Random(self.config.seed).shuffle(indices)
-        self.entries = [entries[i] for i in indices]
-        rank, world = dist_utils.rank(), dist_utils.size()
-        print_rank_0(
-            f"[{type(self).__name__}] rank {rank}/{world}: "
-            f"holds {len(self.entries)} entries (full corpus; rank 0 fetches)"
-        )
+        # Materialize to a plain list so DataLoader worker processes fork it cheaply.
+        self.entries = list(entries)
+        # Per-process consecutive-failure counter for the circuit breaker. Reset to 0
+        # on every successful fetch; tripped only by fetch failures (not unfit entries).
+        self._consecutive_fail = 0
+        print_rank_0(f"[{type(self).__name__}] map-style dataset over {len(self.entries)} entries")
 
     def __len__(self) -> int:
         return len(self.entries)
 
-    def set_resume_position(self, skip: int) -> None:
-        """Drop the first ``skip`` entries on the next ``__iter__`` without fetching.
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        """Tokenize -> fetch -> format the sample at ``idx``, resampling on miss.
 
-        One-shot; cleared once iteration starts. Used by
-        :class:`StreamingResumeCallback` on HF Trainer checkpoint resume so the
-        server is not re-queried for already-consumed samples.
+        Always returns a valid sample. An unfit entry (tokenization yields nothing) or
+        a fetch failure causes a forward probe to the next index; fetch failures bump
+        the circuit breaker, which raises once ``fail_after_consecutive_skips`` is hit.
         """
-        self._resume_skip = skip
-
-    @staticmethod
-    def _verify_accelerate_dispatcher() -> None:
-        """Raise if Accelerate is initialized for DDP with ``dispatch_batches=False``.
-
-        Best-effort: no-op when Accelerate isn't installed/initialized or in single-process.
-        """
-        try:
-            from accelerate.state import AcceleratorState
-        except ImportError:
-            return
-        if not AcceleratorState._shared_state:
-            return
-        state = AcceleratorState()
-        if getattr(state, "num_processes", 1) <= 1:
-            return
-        # Field moved to ``dataloader_config`` in newer Accelerate; check both.
-        dispatch = getattr(state, "dispatch_batches", None)
-        if dispatch is None:
-            dl_cfg = getattr(state, "dataloader_config", None)
-            if dl_cfg is not None:
-                dispatch = getattr(dl_cfg, "dispatch_batches", None)
-        if dispatch is False:
-            raise RuntimeError(
-                "StreamingDataset requires Accelerate's DataLoaderDispatcher "
-                "(dispatch_batches=True); got False — non-zero ranks would receive no data."
-            )
-
-    def __iter__(self):
-        # IterableDataset with DataLoader workers > 0 would spawn one asyncio loop
-        # per worker, each issuing the full request set — silent Nx duplication
-        # against the server. Fail loud instead.
-        if get_worker_info() is not None:
-            raise RuntimeError(
-                f"{type(self).__name__} requires dataloader_num_workers=0; "
-                "multiple workers would each spawn an asyncio loop and duplicate requests."
-            )
-        # Without dispatch_batches the rank-0 guard below would silently starve
-        # non-zero ranks; fail loud instead.
-        self._verify_accelerate_dispatcher()
-        # Only rank 0 fetches; non-zero ranks receive batches via the dispatcher's broadcast.
-        if dist_utils.rank() != 0:
-            return
-        # Fresh producer per __iter__ call so re-iteration (which shouldn't
-        # happen in 1-epoch streaming) at least doesn't deadlock.
-        q: queue.Queue = queue.Queue(maxsize=self.config.prefetch)
-        stop = threading.Event()
-        skip = self._resume_skip
-        self._resume_skip = 0  # one-shot
-        entries = self.entries[skip:] if skip else self.entries
-
-        def run():
+        n = len(self.entries)
+        for offset in range(n):
+            entry = self.entries[(idx + offset) % n]
+            sample = self._tokenize_entry(entry)
+            if sample is None:
+                continue  # entry unfit pre-fetch; server not at fault, try the next one
             try:
-                asyncio.run(self._produce(q, stop, entries))
+                fetched = self._fetch(sample)
             except Exception as e:
-                q.put(e)  # surface to consumer
-            finally:
-                q.put(_SENTINEL)
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-
-        try:
-            while True:
-                item = q.get()
-                if item is _SENTINEL:
-                    break
-                if isinstance(item, Exception):
-                    raise item
-                yield item
-        finally:
-            stop.set()
-            # Drain any leftover items so producer can exit
-            with contextlib.suppress(queue.Empty):
-                while True:
-                    q.get_nowait()
-
-    async def _produce(self, q: queue.Queue, stop: threading.Event, entries):
-        """Stream ``entries`` through a sliding window of at most ``prefetch`` in-flight tasks.
-
-        Counter is local (single writer); ``_process`` tasks report outcome via return value.
-        The circuit breaker has *batch-level* (not per-task) granularity: when
-        ``asyncio.wait(FIRST_COMPLETED)`` returns several tasks in the same loop turn,
-        ``consecutive_skips`` reflects set-iteration order over ``done`` -- sufficient
-        for "detect a dead server" but not strict temporal ordering.
-
-        Args:
-            q: Bounded queue drained by :meth:`__iter__`; full queue backpressures fetching.
-            stop: Set by the consumer to request shutdown; checked between samples.
-            entries: Resume-adjusted slice of ``self.entries`` to fetch this iteration.
-        """
-        timeout = httpx.Timeout(self.config.request_timeout, connect=10.0)
-        threshold = self.config.fail_after_consecutive_skips
-        consecutive_skips = 0
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            pending: set[asyncio.Task] = set()
-            entries_iter = iter(entries)
-            exhausted = False
-            try:
-                while not stop.is_set():
-                    while len(pending) < self.config.prefetch and not exhausted:
-                        try:
-                            entry = next(entries_iter)
-                        except StopIteration:
-                            exhausted = True
-                            break
-                        pending.add(asyncio.create_task(self._process(client, entry, q, stop)))
-                    if not pending:
-                        break
-                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
-                        outcome = task.result()  # re-raises unexpected errors
-                        if outcome is True:
-                            consecutive_skips = 0
-                        elif outcome is False:
-                            consecutive_skips += 1
-                        # None -> entry unfit pre-fetch; server not at fault
-                    if consecutive_skips >= threshold:
-                        raise RuntimeError(
-                            f"{consecutive_skips} consecutive _fetch failures "
-                            f"in {type(self).__name__}; server likely down."
-                        )
-            finally:
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
-
-    async def _process(
-        self,
-        client: httpx.AsyncClient,
-        entry: dict,
-        q: queue.Queue,
-        stop: threading.Event,
-    ) -> bool | None:
-        """Tokenize -> fetch -> format -> enqueue.
-
-        Returns True on enqueue, False on fetch failure (bumps breaker), None
-        when the entry is unfit pre-fetch (no breaker effect).
-        """
-        if stop.is_set():
-            return None
-        sample = await asyncio.to_thread(self._tokenize_entry, entry)
-        if sample is None:
-            return None
-        try:
-            fetched = await self._fetch(client, sample)
-        except Exception as e:
-            warn_rank_0(f"[streaming] error for {sample['cid']}: {e!r}")
-            return False
-        if fetched is None:
-            return False
-        if self.fetch_payload_cls is not None:
-            # ``__required_keys__`` is a TypedDict runtime attribute mypy doesn't
-            # track on ``type``; the assignment site guarantees it's a TypedDict.
-            required: frozenset[str] = self.fetch_payload_cls.__required_keys__  # type: ignore[attr-defined]
-            missing = required - set(fetched)
-            if missing:
-                raise RuntimeError(
-                    f"{type(self).__name__}._fetch missing required keys {missing}; "
-                    f"{self.fetch_payload_cls.__name__} requires "
-                    f"{set(required)}, got {set(fetched)}"
-                )
-        data = self._format(fetched)
-        # Blocking put -> backpressure when trainer is slow.
-        await asyncio.to_thread(q.put, data)
-        return True
+                warn_rank_0(f"[streaming] error for {sample['cid']}: {e!r}")
+                fetched = None
+            if fetched is None:
+                self._consecutive_fail += 1
+                if self._consecutive_fail >= self.config.fail_after_consecutive_skips:
+                    raise RuntimeError(
+                        f"{self._consecutive_fail} consecutive _fetch failures in "
+                        f"{type(self).__name__}; server likely down."
+                    )
+                continue  # resample forward
+            self._consecutive_fail = 0
+            if self.fetch_payload_cls is not None:
+                # ``__required_keys__`` is a TypedDict runtime attribute mypy doesn't
+                # track on ``type``; the assignment site guarantees it's a TypedDict.
+                required: frozenset[str] = self.fetch_payload_cls.__required_keys__  # type: ignore[attr-defined]
+                missing = required - set(fetched)
+                if missing:
+                    raise RuntimeError(
+                        f"{type(self).__name__}._fetch missing required keys {missing}; "
+                        f"{self.fetch_payload_cls.__name__} requires "
+                        f"{set(required)}, got {set(fetched)}"
+                    )
+            return self._format(fetched)
+        raise RuntimeError(
+            f"{type(self).__name__}: no fetchable sample found in the entire corpus "
+            f"({n} entries) starting at index {idx}."
+        )
 
     def _tokenize_entry(self, entry: dict) -> dict | None:
         """Tokenize a single entry.
@@ -382,14 +247,14 @@ class StreamingDataset(IterableDataset):
             "loss_mask": loss_mask,
         }
 
-    async def _fetch(self, client: httpx.AsyncClient, sample: dict) -> dict | None:
+    def _fetch(self, sample: dict) -> dict | None:
         """Backend hook: send the request and decode the server's response.
 
-        Override in subclass. Any scratch resources (per-request files, mmap'd
-        buffers) must be released before returning.
+        Override in subclass. Synchronous (called from a DataLoader worker). Any
+        scratch resources (per-request files, mmap'd buffers) must be released before
+        returning.
 
         Args:
-            client: Shared async HTTP client owned by :meth:`_produce`.
             sample: :meth:`_tokenize_entry` output:
                 ``{"cid": str, "token_ids": list[int], "loss_mask": LongTensor[seq]}``.
 
@@ -431,16 +296,24 @@ class EagleFetchPayload(TypedDict):
 class EagleVllmStreamingConfig(StreamingConfig):
     """Adds vLLM endpoint info on top of :class:`StreamingConfig`."""
 
-    server_url: str
+    # One or more vLLM endpoints; fetches round-robin across them so a single fetcher
+    # can spread load over several server replicas. Accepts a list or a single
+    # (optionally comma-separated) string.
+    server_urls: list[str]
     model: str
-    # Allowlist for ``hidden_states_path`` returned by the server. Must match the
-    # connector's ``shared_storage_path``; out-of-tree paths are rejected.
+    # Allowlist for ``hidden_states_path`` returned by the server. Must match (or be a
+    # parent of) the connector's ``shared_storage_path``; out-of-tree paths are rejected.
     shared_storage_root: str
 
-    @field_validator("server_url")
+    @field_validator("server_urls", mode="before")
     @classmethod
-    def _strip_trailing_slash(cls, v: str) -> str:
-        return v.rstrip("/")
+    def _normalize_urls(cls, v):
+        if isinstance(v, str):
+            v = v.split(",")
+        urls = [u.strip().rstrip("/") for u in v if u and str(u).strip()]
+        if not urls:
+            raise ValueError("server_urls must contain at least one non-empty URL")
+        return urls
 
     @field_validator("shared_storage_root")
     @classmethod
@@ -449,7 +322,7 @@ class EagleVllmStreamingConfig(StreamingConfig):
 
 
 class EagleVllmStreamingDataset(StreamingDataset):
-    """Eagle (algorithm) × vLLM (backend).
+    """Eagle (algorithm) x vLLM (backend).
 
     Talks to a ``vllm serve`` instance configured with the
     ``ExampleHiddenStatesConnector`` KV-transfer connector (the server dumps captured
@@ -467,13 +340,38 @@ class EagleVllmStreamingDataset(StreamingDataset):
         tokenizer,
         config: EagleVllmStreamingConfig,
     ):
-        """Same as the base; ``config`` must include ``server_url`` and ``model``."""
+        """Same as the base; ``config`` must include ``server_urls`` and ``model``."""
         super().__init__(entries=entries, tokenizer=tokenizer, config=config)
         self.config: EagleVllmStreamingConfig = config
 
-    async def _fetch(self, client: httpx.AsyncClient, sample: dict) -> EagleFetchPayload | None:
-        r = await client.post(
-            f"{self.config.server_url}/v1/completions",
+    def _client(self) -> httpx.Client:
+        """Lazily build a per-process HTTP client and round-robin cursor.
+
+        DataLoader workers are forked processes; httpx connection pools must not be
+        shared across a fork, so each process gets its own client (and its own
+        round-robin cursor over ``server_urls``), keyed by PID.
+        """
+        pid = os.getpid()
+        if getattr(self, "_client_pid", None) != pid:
+            self._http = httpx.Client(
+                timeout=httpx.Timeout(self.config.request_timeout, connect=10.0)
+            )
+            self._client_pid = pid
+            self._rr = 0
+        return self._http
+
+    def _next_url(self) -> str:
+        """Round-robin the next server URL (per-process cursor)."""
+        urls = self.config.server_urls
+        url = urls[self._rr % len(urls)]
+        self._rr += 1
+        return url
+
+    def _fetch(self, sample: dict) -> EagleFetchPayload | None:
+        client = self._client()
+        url = self._next_url()
+        r = client.post(
+            f"{url}/v1/completions",
             json={
                 "model": self.config.model,
                 "prompt": sample["token_ids"],
@@ -492,7 +390,7 @@ class EagleVllmStreamingDataset(StreamingDataset):
                 f"[streaming] path outside shared_storage_root for {sample['cid']}: {path!r}"
             )
             return None
-        token_ids, hidden_states = await asyncio.to_thread(self._load_safetensors, path)
+        token_ids, hidden_states = self._load_safetensors(path)
         # Contract: the server tokenization is the client's pre-tokenized prompt
         # verbatim, plus at most one decode-step token at the tail (from
         # ``max_tokens=1``). Anything else (e.g. server-side BOS prepend, chat
@@ -573,36 +471,3 @@ class EagleVllmStreamingDataset(StreamingDataset):
             "loss_mask": loss_mask,
             "labels": labels,
         }
-
-
-class StreamingResumeCallback(TrainerCallback):
-    """Fast-forward :class:`StreamingDataset` past consumed samples on resume.
-
-    Dispatcher pulls a *global* batch per micro-step, hence the ``world_size`` factor.
-    Requires ``training_args.ignore_data_skip=True``; round-trips only when
-    ``world_size`` and ``config.seed`` match the original run.
-    """
-
-    def on_train_begin(self, args, state, control, train_dataloader=None, **kwargs):
-        """Push the skip count into the dataset when resuming mid-training."""
-        if state.global_step <= 0 or train_dataloader is None:
-            return
-        ds = train_dataloader.dataset
-        if not hasattr(ds, "set_resume_position"):
-            return
-        if not getattr(args, "ignore_data_skip", False):
-            raise RuntimeError(
-                "StreamingResumeCallback requires ignore_data_skip=True to avoid "
-                "double-skipping on resume."
-            )
-        consumed = (
-            state.global_step
-            * args.per_device_train_batch_size
-            * dist_utils.size()
-            * args.gradient_accumulation_steps
-        )
-        ds.set_resume_position(consumed)
-        print_rank_0(
-            f"[StreamingResumeCallback] resuming at global_step={state.global_step}; "
-            f"skipping {consumed} entries"
-        )

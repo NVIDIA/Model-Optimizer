@@ -278,12 +278,12 @@ def train():
     ):
         callbacks.append(LoRAWarmupCallback(recipe.eagle.eagle_base_lora_warmup_steps))
     if recipe.data.mode == "streaming":
-        # Skip-on-resume happens inside the dataset (no re-fetch from server);
-        # disable HF Trainer's own data skip so the offset isn't applied twice.
-        from modelopt.torch.speculative.plugins.hf_streaming_dataset import StreamingResumeCallback
-
+        # The streaming dataset is map-style, so HF Trainer's default resume would
+        # fast-forward by re-iterating (= re-fetching) every consumed batch just to
+        # discard it, hammering the server. Disable the data skip: on resume, weights/
+        # optimizer/global_step still restore from the checkpoint; only the data order
+        # restarts from the top (acceptable for single-epoch streaming).
         training_args.ignore_data_skip = True
-        callbacks.append(StreamingResumeCallback())
 
     trainer = EagleTrainerWithAccLog(
         model=model,

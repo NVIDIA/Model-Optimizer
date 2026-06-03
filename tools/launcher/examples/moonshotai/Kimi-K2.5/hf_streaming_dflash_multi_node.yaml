@@ -1,13 +1,25 @@
 # DFlash streaming speculative-decoding training for Kimi-K2.5-NVFP4 on
-# GB200/Blackwell (HSG). Sibling of hf_streaming_eagle3.yaml — same vLLM-serve +
-# trainer split, same hardware reasoning — but trains a DFlash drafter instead of
-# EAGLE3 by pointing the (shared, algorithm-agnostic) streaming script at the
-# dflash recipe.
+# GB200/Blackwell (HSG). Multi-node sibling of hf_streaming_dflash.yaml — same
+# vLLM-serve + trainer split and same hardware reasoning, but scales the trainer
+# across MULTIPLE nodes (1 serve node + N trainer nodes doing multi-node DDP)
+# instead of the single trainer node in hf_streaming_dflash.yaml.
 #
 # Why GB200: nodes have only 4 GPUs each (vs CW's 8), but 192 GB/GPU and native
 # NVFP4. Kimi-K2.5-NVFP4 (~551 GB) fits at TP=4 on ONE node (4 x 192 = 768 GB,
 # ~138 GB/GPU of weights) with NO cpu-offload. So: node 0 = vllm serve (TP=4,
-# whole node), node 1 = DFlash trainer (fake base), 4 GPUs each, 2 nodes.
+# whole node), nodes 1..N = DFlash trainers (fake base), 4 GPUs each. This file
+# allocates 3 nodes (1 serve + 2 trainers); bump slurm_config.nodes/segment to
+# add more trainer nodes.
+#
+# Topology (see common/eagle3/train_eagle_streaming.sh header for the full
+# dispatch): node 0 serves; the head trainer (Slurm node 1, accelerate
+# machine_rank 0) publishes its IP via /scratchspace for accelerate's c10d
+# rendezvous, and every trainer node reads both the serve address and the
+# head-trainer address from /scratchspace. segment=<nodes> pins all nodes into
+# one NVL72 block so inter-node DDP traffic rides NVLink. NOTE: only global rank
+# 0 fetches hidden states from the single serve and broadcasts them to the rest
+# (DataLoaderDispatcher), so the single serve is the throughput ceiling — extra
+# trainer nodes scale effective batch / compute, not data-production throughput.
 #
 # How streaming feeds DFlash (vs EAGLE3): the trainer's streaming path was wired
 # up for DFlash by deriving dflash_offline from data.mode (modelopt/recipe/config.py
@@ -39,7 +51,7 @@
 #          SLURM_HF_LOCAL=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local \
 #          SLURM_JOB_DIR=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/haoguo/experiments \
 #          NEMORUN_HOME=$PWD
-#   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_streaming_dflash.yaml \
+#   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml \
 #          identity=$HOME/.ssh/id_ecdsa detach=True --yes
 #
 # The export lands in /scratchspace/export. To benchmark it, point

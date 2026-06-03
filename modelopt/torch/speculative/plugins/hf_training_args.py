@@ -62,6 +62,9 @@ class DataArguments(BaseModel):
     sample_size: int = -1
     streaming_server_url: str | None = None
     streaming_model_name: str | None = None
+    # Deprecated / no-op: the streaming dataset is map-style now, so fetch concurrency
+    # comes from the DataLoader's ``dataloader_num_workers``, not this knob. Kept so
+    # existing yamls that set ``data.streaming_prefetch`` still validate.
     streaming_prefetch: int = Field(default=64, ge=1)
     # Mirror of the vLLM connector's ``shared_storage_path``; trainer-side allowlist.
     streaming_shared_storage_path: str | None = None

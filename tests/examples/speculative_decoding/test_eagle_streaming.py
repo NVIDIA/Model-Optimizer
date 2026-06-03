@@ -118,13 +118,12 @@ def test_streaming_eagle_training(
         f"data.streaming_server_url={server_url}",
         f"data.streaming_model_name={tiny_llama_path}",
         f"data.streaming_shared_storage_path={scratch}",
-        "data.streaming_prefetch=2",
         f"training.output_dir={output_dir}",
         "training.num_train_epochs=1",
         "training.learning_rate=1e-5",
         "training.training_seq_len=32",
         "training.save_steps=1",
-        "training.dataloader_num_workers=0",  # enforced by StreamingDataset
+        "training.dataloader_num_workers=0",  # map-style; 0 keeps this test single-process
         *_TINY_EAGLE_ARCH,
     ]
 

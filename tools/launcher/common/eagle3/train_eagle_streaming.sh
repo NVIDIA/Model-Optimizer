@@ -224,8 +224,11 @@ wait_vllm_ready() {
 
 # Run the trainer then export the HF checkpoint.
 #   $1 = streaming server base URL   $2 = CUDA_VISIBLE_DEVICES ("" -> all)
-# dataloader_num_workers must be 0: the streaming dataset owns one asyncio loop
-# per process; multiple workers would duplicate requests against the server.
+# The streaming dataset is map-style now, so fetch concurrency comes from the
+# DataLoader's workers (each worker = one in-flight request). STREAMING_NUM_WORKERS
+# sets that; keep it modest so (ranks-per-server x workers) stays near the server's
+# max_num_seqs (flooding a cold NVFP4 MoE server kills EngineCore). 0 disables
+# prefetch (serialized fetches) and is usually too slow.
 run_trainer_and_export() {
     local url="$1" cvd="$2"
     # Optional multi-node trainer routing (see dispatch section). Defaults keep
@@ -247,7 +250,8 @@ run_trainer_and_export() {
         data.streaming_server_url="$url" \
         data.streaming_model_name="$HF_MODEL_CKPT" \
         data.streaming_shared_storage_path="$SERVE_SCRATCH" \
-        training.dataloader_num_workers=0 || { echo "ERROR: trainer failed." >&2; return 1; }
+        training.dataloader_num_workers="${STREAMING_NUM_WORKERS:-4}" \
+        || { echo "ERROR: trainer failed." >&2; return 1; }
 
     # Export only on the head trainer (machine_rank 0); non-head trainer nodes
     # would race writing the same export dir. The export reads the saved

@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for StreamingDataset's DDP contract.
+"""Tests for the map-style StreamingDataset.
 
-We do not spin up real torch.distributed; instead we monkeypatch the helper that
-reads rank/world_size. Sharding itself is delegated to Accelerate's
-``DataLoaderDispatcher`` (every rank holds the full corpus; only rank 0 iterates).
-These tests check the corpus-handling and rank-0-only-iter properties on which
-that delegation relies.
+The dataset is a plain ``torch.utils.data.Dataset``: DDP sharding is HF Trainer's
+job (``DistributedSampler``), so there is no rank/dispatch logic to test here.
+These tests cover the ``__getitem__`` contract: resample-on-miss, the
+consecutive-failure circuit breaker, and the vLLM wire-format -> batch-dict chain.
 """
 
 from pathlib import Path
@@ -30,7 +29,7 @@ import pytest
 import safetensors.torch
 import torch
 
-# hf_streaming_dataset imports TrainerCallback / LabelSmoother at module scope.
+# hf_streaming_dataset imports LabelSmoother at module scope.
 pytest.importorskip("transformers")
 
 from modelopt.torch.speculative.plugins import hf_streaming_dataset
@@ -47,133 +46,100 @@ def _entries(n: int) -> list[dict]:
     return [{"id": i} for i in range(n)]
 
 
-@pytest.fixture
-def patch_dist(monkeypatch):
-    """Return a setter; tests call it with (rank, world) to simulate a DDP rank.
-
-    Patches ``modelopt.torch.utils.distributed.rank/size`` as imported into the
-    streaming dataset module (``dist_utils``). The dataset reads these in
-    ``__init__`` for logging and in ``__iter__`` for the rank-0-only gate.
-    """
-
-    def _set(rank: int, world: int):
-        # ``is_master`` etc. call ``rank(group=...)`` / ``size(group=...)`` — match the signature.
-        monkeypatch.setattr(hf_streaming_dataset.dist_utils, "rank", lambda group=None: rank)
-        monkeypatch.setattr(hf_streaming_dataset.dist_utils, "size", lambda group=None: world)
-
-    return _set
-
-
-def _entry_ids(ds: StreamingDataset) -> list[int]:
-    return [e["id"] for e in ds.entries]
-
-
-@pytest.mark.parametrize("world", [1, 2, 3, 8])
-def test_every_rank_holds_full_corpus(patch_dist, world):
-    """Each rank must see all entries — Accelerate's dispatcher does the sharding,
-    so any per-rank pre-shard here would shrink rank 0's view to 1/N and break
-    ``max_steps``.
-    """
-    corpus = _entries(100)
-    for rank in range(world):
-        patch_dist(rank, world)
-        ds = StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig(seed=42))
-        assert sorted(_entry_ids(ds)) == list(range(100))
-
-
-def test_same_seed_same_order(patch_dist):
-    """The shuffle is what makes rank 0's fetch order deterministic across reruns."""
-    corpus = _entries(50)
-    patch_dist(0, 1)
-    a = _entry_ids(StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig(seed=7)))
-    b = _entry_ids(StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig(seed=7)))
-    assert a == b
-
-
-def test_different_seed_different_order(patch_dist):
-    """Sanity: changing the seed actually reshuffles (else seed is vacuous)."""
-    corpus = _entries(50)
-    patch_dist(0, 1)
-    a = _entry_ids(StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig(seed=1)))
-    b = _entry_ids(StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig(seed=2)))
-    assert a != b
-    assert sorted(a) == sorted(b)
-
-
-def test_non_rank_zero_iter_is_empty(patch_dist):
-    """Non-zero ranks must yield nothing on ``__iter__`` — their producer would burn
-    server requests that ``DataLoaderDispatcher`` would discard."""
-    corpus = _entries(8)
-    patch_dist(2, 4)
-    ds = StreamingDataset(corpus, tokenizer=MagicMock(), config=StreamingConfig(seed=0))
-    assert list(iter(ds)) == []
-
-
-def test_iter_rejects_dataloader_workers(patch_dist, monkeypatch):
-    """Iterating from within a DataLoader worker must raise — multiple workers would
-    each spawn an asyncio loop and N× the request load on the server."""
-    patch_dist(0, 1)
-    ds = StreamingDataset(_entries(4), tokenizer=MagicMock(), config=StreamingConfig(seed=0))
-    # Pretend we're inside a DataLoader worker.
-    monkeypatch.setattr(hf_streaming_dataset, "get_worker_info", lambda: MagicMock())
-    with pytest.raises(RuntimeError, match="dataloader_num_workers=0"):
-        next(iter(ds))
-
-
-def test_empty_corpus_raises(patch_dist):
-    patch_dist(0, 1)
+def test_empty_corpus_raises():
     with pytest.raises(ValueError, match="entries is empty"):
         StreamingDataset([], tokenizer=MagicMock(), config=StreamingConfig())
 
 
-def test_set_resume_position_skips_entries_without_fetching(patch_dist):
-    """Resume should fast-forward inside the dataset without invoking _fetch.
+def test_len_matches_corpus():
+    ds = StreamingDataset(_entries(37), tokenizer=MagicMock(), config=StreamingConfig())
+    assert len(ds) == 37
 
-    Verifies the contract relied on by StreamingResumeCallback: skipped entries
-    are not sent to the server, so resume costs nothing on the inference side.
-    """
-    patch_dist(0, 1)
-    fetched_ids: list[int] = []
+
+def test_getitem_resamples_past_unfit_entries():
+    """An unfit entry (tokenize -> None) must not be returned; __getitem__ probes
+    forward to the next fetchable index and returns that instead."""
+    fetched_cids: list[int] = []
 
     class _Track(StreamingDataset):
         def _tokenize_entry(self, entry):
+            # Even ids are "unfit" (e.g. truncated away / missing fields).
+            if entry["id"] % 2 == 0:
+                return None
             return {"cid": str(entry["id"]), "token_ids": [1], "loss_mask": None}
 
-        async def _fetch(self, client, sample):
-            fetched_ids.append(int(sample["cid"]))
+        def _fetch(self, sample):
+            fetched_cids.append(int(sample["cid"]))
+            return {"ok": True}
 
-    corpus = _entries(10)
-    ds = _Track(corpus, tokenizer=MagicMock(), config=StreamingConfig(seed=0, prefetch=2))
-    ds.set_resume_position(5)
-    list(ds)
+        def _format(self, fetched):
+            return {"sentinel": fetched_cids[-1]}
 
-    expected = {e["id"] for e in ds.entries[5:]}
-    assert set(fetched_ids) == expected
-    # _resume_skip is one-shot
-    assert ds._resume_skip == 0
+    ds = _Track(_entries(10), tokenizer=MagicMock(), config=StreamingConfig())
+    # idx 0 is unfit -> resamples forward to idx 1.
+    out = ds[0]
+    assert out == {"sentinel": 1}
+    assert fetched_cids == [1]
+    # An already-fit index is returned directly.
+    assert ds[3] == {"sentinel": 3}
 
 
-def test_circuit_breaker_trips_on_consecutive_fetch_failures(patch_dist):
-    """When _fetch keeps failing, the producer raises after the threshold so the
-    trainer sees a clear error instead of a silent empty epoch."""
-    patch_dist(0, 1)
+def test_circuit_breaker_trips_on_consecutive_failures():
+    """When _fetch keeps failing, __getitem__ raises after the threshold instead of
+    silently resampling the whole corpus."""
     threshold = 3
 
     class _AlwaysFails(StreamingDataset):
-        # Bypass tokenization so we don't need a real tokenizer.
         def _tokenize_entry(self, entry):
             return {"cid": str(entry["id"]), "token_ids": [1], "loss_mask": None}
 
-        async def _fetch(self, client, sample):
+        def _fetch(self, sample):
             raise RuntimeError("simulated server failure")
 
     ds = _AlwaysFails(
         _entries(20),
         tokenizer=MagicMock(),
-        config=StreamingConfig(seed=0, prefetch=2, fail_after_consecutive_skips=threshold),
+        config=StreamingConfig(fail_after_consecutive_skips=threshold),
     )
     with pytest.raises(RuntimeError, match="consecutive _fetch failures"):
-        list(ds)
+        ds[0]
+
+
+def test_fetch_returning_none_exhausts_then_raises():
+    """If every entry's fetch yields None (e.g. all rejected), __getitem__ raises a
+    clear 'no fetchable sample' error rather than hanging or returning junk."""
+
+    class _AllNone(StreamingDataset):
+        def _tokenize_entry(self, entry):
+            return {"cid": str(entry["id"]), "token_ids": [1], "loss_mask": None}
+
+        def _fetch(self, sample):
+            return None
+
+    ds = _AllNone(
+        _entries(4),
+        tokenizer=MagicMock(),
+        config=StreamingConfig(fail_after_consecutive_skips=100),
+    )
+    with pytest.raises(RuntimeError, match="no fetchable sample"):
+        ds[0]
+
+
+def test_server_urls_normalization():
+    """server_urls accepts a single string, a comma-separated string, or a list, and
+    strips trailing slashes."""
+
+    def _urls(v):
+        cfg = EagleVllmStreamingConfig(
+            server_urls=v, model="m", shared_storage_root=str(Path.cwd())
+        )
+        return cfg.server_urls
+
+    assert _urls("http://a:8000/") == ["http://a:8000"]
+    assert _urls("http://a:8000, http://b:8000/") == ["http://a:8000", "http://b:8000"]
+    assert _urls(["http://a:8000", "http://b:8000"]) == ["http://a:8000", "http://b:8000"]
+    with pytest.raises(ValueError, match="at least one non-empty URL"):
+        EagleVllmStreamingConfig(server_urls="", model="m", shared_storage_root=".")
 
 
 def _write_canned_safetensors(path: Path, seq: int, n_layers: int, hidden: int) -> None:
@@ -196,14 +162,23 @@ def _tokenizer_returning(seq: int) -> MagicMock:
     return tok
 
 
-def test_eagle_vllm_dataset_end_to_end(tmp_path, patch_dist, monkeypatch):
+def _patch_sync_client(monkeypatch, handler):
+    """Route the dataset's per-process httpx.Client through a MockTransport handler."""
+    real_client = httpx.Client
+
+    def mock_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(hf_streaming_dataset.httpx, "Client", mock_client)
+
+
+def test_eagle_vllm_dataset_end_to_end(tmp_path, monkeypatch):
     """Drive EagleVllmStreamingDataset against an in-process mocked server.
 
-    Verifies that the wire-format → tensor → batch-dict chain produces dicts
-    matching what EagleOfflineDataCollator expects, and that scratch files
-    are cleaned up after each fetch.
+    Verifies the wire-format -> tensor -> batch-dict chain produces dicts matching
+    what EagleOfflineDataCollator expects, and that scratch files are cleaned up.
     """
-    patch_dist(0, 1)
     seq, n_layers, hidden = 8, 3, 16  # n_layers = 1 final + 2 aux
     scratch = tmp_path / "vllm_scratch"
     scratch.mkdir()
@@ -219,37 +194,25 @@ def test_eagle_vllm_dataset_end_to_end(tmp_path, patch_dist, monkeypatch):
             json={"kv_transfer_params": {"hidden_states_path": str(path)}},
         )
 
-    real_async_client = httpx.AsyncClient
-
-    def mock_async_client(*args, **kwargs):
-        kwargs["transport"] = httpx.MockTransport(handler)
-        return real_async_client(*args, **kwargs)
-
-    monkeypatch.setattr(hf_streaming_dataset.httpx, "AsyncClient", mock_async_client)
+    _patch_sync_client(monkeypatch, handler)
 
     n_entries = 4
     entries = [
-        {
-            "conversation_id": f"c-{i}",
-            "messages": [{"role": "user", "content": "x"}],
-        }
+        {"conversation_id": f"c-{i}", "messages": [{"role": "user", "content": "x"}]}
         for i in range(n_entries)
     ]
     ds = EagleVllmStreamingDataset(
         entries=entries,
         tokenizer=_tokenizer_returning(seq),
         config=EagleVllmStreamingConfig(
-            server_url="http://mock:8000",
+            server_urls="http://mock:8000",
             model="mock-model",
             shared_storage_root=str(scratch),
-            prefetch=2,
-            seed=0,
         ),
     )
 
-    batches = list(ds)
+    batches = [ds[i] for i in range(n_entries)]
 
-    assert len(batches) == n_entries
     expected_keys = {
         "input_ids",
         "base_model_hidden_states",
@@ -275,9 +238,9 @@ def test_eagle_vllm_dataset_end_to_end(tmp_path, patch_dist, monkeypatch):
     assert list(scratch.iterdir()) == [], "scratch files must be unlinked after fetch"
 
 
-def test_path_outside_shared_storage_root_is_rejected(tmp_path, patch_dist, monkeypatch):
-    """Out-of-root path from server is not opened or unlinked."""
-    patch_dist(0, 1)
+def test_path_outside_shared_storage_root_is_rejected(tmp_path, monkeypatch):
+    """Out-of-root path from the server is not opened or unlinked; the fetch yields
+    None, so the single-entry corpus is exhausted and __getitem__ raises."""
     seq, n_layers, hidden = 8, 3, 16
     allowed = tmp_path / "allowed"
     allowed.mkdir()
@@ -292,26 +255,19 @@ def test_path_outside_shared_storage_root_is_rejected(tmp_path, patch_dist, monk
             json={"kv_transfer_params": {"hidden_states_path": str(forbidden)}},
         )
 
-    real_async_client = httpx.AsyncClient
-
-    def mock_async_client(*args, **kwargs):
-        kwargs["transport"] = httpx.MockTransport(handler)
-        return real_async_client(*args, **kwargs)
-
-    monkeypatch.setattr(hf_streaming_dataset.httpx, "AsyncClient", mock_async_client)
+    _patch_sync_client(monkeypatch, handler)
 
     ds = EagleVllmStreamingDataset(
         entries=[{"conversation_id": "c-0", "messages": [{"role": "user", "content": "x"}]}],
         tokenizer=_tokenizer_returning(seq),
         config=EagleVllmStreamingConfig(
-            server_url="http://mock:8000",
+            server_urls="http://mock:8000",
             model="mock-model",
             shared_storage_root=str(allowed),
             fail_after_consecutive_skips=100,
-            prefetch=1,
-            seed=0,
         ),
     )
 
-    assert list(ds) == []
+    with pytest.raises(RuntimeError, match="no fetchable sample"):
+        ds[0]
     assert forbidden.exists(), "rejected path must not be unlinked"

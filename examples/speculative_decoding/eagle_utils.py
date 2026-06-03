@@ -88,14 +88,16 @@ def make_speculative_data_module(
         ds = load_dataset("json", data_files=data_args.data_path, split="train")
         if data_args.sample_size > 0:
             ds = ds.select(range(data_args.sample_size))
+        # Map-style dataset: each rank fetches its own DistributedSampler shard.
+        # Fetch concurrency comes from the DataLoader's num_workers, not a config knob;
+        # shuffling/order is the sampler's job, so no seed is threaded here.
+        # ``server_urls`` accepts a comma-separated string for multi-server fan-out.
         streaming_cfg = EagleVllmStreamingConfig(
-            server_url=data_args.streaming_server_url,
+            server_urls=data_args.streaming_server_url,
             model=data_args.streaming_model_name,
             shared_storage_root=data_args.streaming_shared_storage_path,
             max_seq_len=train_len,
             answer_only_loss=answer_only_loss,
-            prefetch=data_args.streaming_prefetch,
-            seed=seed,
         )
         train_dataset = EagleVllmStreamingDataset(
             entries=ds,
