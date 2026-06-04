@@ -23,7 +23,7 @@ import os
 import shutil
 import sys
 import warnings
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -59,8 +59,8 @@ SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 # Preset directories under modelopt_recipes/ that back the --qformat and
 # --kv_cache_qformat CLI vocabularies of the llm_ptq example scripts (hf_ptq.py,
 # multinode_ptq.py). Each ``*.yaml`` file in these directories is automatically
-# discovered and exposed as a valid CLI value via _PresetCfgChoices, so no code
-# change is required when a YAML is added or removed. This is deliberate: every
+# discovered and exposed as a valid CLI value via _load_preset_cfg_choices, so no
+# code change is required when a YAML is added or removed. This is deliberate: every
 # preset YAML is CLI-exposed, there is no separate allow-list — the directory
 # listing is the policy.
 #
@@ -95,64 +95,48 @@ _QFORMAT_ALIASES: dict[str, str] = {
 _KV_NONE = "none"
 
 
-class _PresetCfgChoices(Mapping[str, dict[str, Any]]):
-    """Lazy mapping of qformat names → quant_cfg dicts loaded from preset YAMLs.
+def _load_preset_cfg_choices(
+    subdir: str, aliases: Mapping[str, str] | None = None
+) -> dict[str, dict[str, Any]]:
+    """Build a ``{qformat_name: quant_cfg_dict}`` mapping from the preset YAMLs.
 
-    Iterates the YAML files in ``modelopt_recipes/<subdir>/`` to populate the set
-    of available qformat names; the supplied ``aliases`` table maps additional
-    short names onto canonical preset basenames. Loading happens on first access
-    and is memoised so repeated lookups are cheap.
+    Every ``*.yaml`` under ``modelopt_recipes/<subdir>/`` is loaded and keyed by its
+    basename — the directory listing is the CLI vocabulary. ``aliases`` adds extra
+    short names pointing at canonical basenames; a stale alias raises here (at import)
+    rather than failing silently at lookup time.
+
+    Configs are loaded eagerly into a plain dict. Callers that mutate a returned
+    config must deepcopy it first (``build_quant_cfg`` and the other call sites
+    already do); this mirrors how the previous ``mtq.*_CFG`` module constants were
+    used. A lazy / copy-on-access variant can be reintroduced later if load time
+    ever becomes a concern.
     """
-
-    def __init__(self, subdir: str, aliases: Mapping[str, str] | None = None):
-        self._subdir = subdir
-        self._aliases: dict[str, str] = dict(aliases or {})
-        self._presets: set[str] = set()
-        for entry in BUILTIN_CONFIG_ROOT.joinpath(subdir).iterdir():
-            name = entry.name
-            if name.endswith((".yaml", ".yml")):
-                self._presets.add(name.rsplit(".", 1)[0])
-        # Aliases that point at non-existent presets would silently fail at access
-        # time; surface this at import instead.
-        for alias, target in self._aliases.items():
-            if target not in self._presets:
-                raise ValueError(
-                    f"Alias {alias!r} points at preset {target!r} which is not present "
-                    f"under modelopt_recipes/{subdir}/."
-                )
-        self._cache: dict[str, dict[str, Any]] = {}
-
-    def _canonical(self, key: str) -> str | None:
-        if key in self._presets:
-            return key
-        return self._aliases.get(key)
-
-    def __contains__(self, key: object) -> bool:
-        return isinstance(key, str) and self._canonical(key) is not None
-
-    def __getitem__(self, key: str) -> dict[str, Any]:
-        canon = self._canonical(key)
-        if canon is None:
-            raise KeyError(key)
-        if canon not in self._cache:
-            self._cache[canon] = load_config(
-                f"{self._subdir}/{canon}", schema_type=QuantizeConfig
-            ).model_dump(exclude_unset=True)
-        # Deepcopy on retrieval so callers can freely mutate the returned config
-        # (append per-model overrides, etc.) without poisoning the cached entry.
-        return copy.deepcopy(self._cache[canon])
-
-    def __iter__(self) -> Iterator[str]:
-        yield from sorted(self._presets | set(self._aliases))
-
-    def __len__(self) -> int:
-        return len(self._presets) + len(self._aliases)
+    aliases = aliases or {}
+    basenames = sorted(
+        entry.name.rsplit(".", 1)[0]
+        for entry in BUILTIN_CONFIG_ROOT.joinpath(subdir).iterdir()
+        if entry.name.endswith((".yaml", ".yml"))
+    )
+    choices: dict[str, dict[str, Any]] = {
+        name: load_config(f"{subdir}/{name}", schema_type=QuantizeConfig).model_dump(
+            exclude_unset=True
+        )
+        for name in basenames
+    }
+    for alias, target in sorted(aliases.items()):
+        if target not in choices:
+            raise ValueError(
+                f"Alias {alias!r} points at preset {target!r} which is not present "
+                f"under modelopt_recipes/{subdir}/."
+            )
+        choices[alias] = choices[target]
+    return choices
 
 
-QUANT_CFG_CHOICES: Mapping[str, dict[str, Any]] = _PresetCfgChoices(
+QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = _load_preset_cfg_choices(
     _QFORMAT_PRESET_DIR, _QFORMAT_ALIASES
 )
-KV_QUANT_CFG_CHOICES: Mapping[str, dict[str, Any]] = _PresetCfgChoices(_KV_QFORMAT_PRESET_DIR)
+KV_QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = _load_preset_cfg_choices(_KV_QFORMAT_PRESET_DIR)
 
 # Guard against a future ``none.yaml`` (or alias) colliding with the disable sentinel:
 # argparse would silently allow both, but the runtime branch on ``!= _KV_NONE`` would
