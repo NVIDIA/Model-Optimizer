@@ -28,7 +28,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import yaml
 from safetensors.torch import save_file
 
 try:
@@ -954,9 +953,6 @@ def _export_diffusers_checkpoint(
             is_diffusers_pipe = False
 
     # Step 3: Export each nn.Module component with quantization handling
-    # Collect sparse attention configs across all components for a unified sparse.yaml
-    pipeline_sparse_configs: dict[str, Any] = {}
-
     for component_name, component in module_components.items():
         is_quantized = has_quantized_modules(component)
         status = "quantized" if is_quantized else "non-quantized"
@@ -1036,19 +1032,7 @@ def _export_diffusers_checkpoint(
                         json.dump(config_data, file, indent=4)
                     print(f"  Added sparse_attention_config to {config_path.name}")
 
-                # Collect for the unified sparse.yaml (keyed by component name)
-                pipeline_sparse_configs[component_name] = sparse_attn_config
-
         print(f"  Saved to: {component_export_dir}")
-
-    # Step 8.5: Write unified sparse.yaml at the top-level export directory.
-    # Combines sparse configs from all components (keyed by pipeline component name)
-    # so downstream consumers get the full pipeline's sparse config in one file.
-    if pipeline_sparse_configs:
-        yaml_path = export_dir / "sparse.yaml"
-        with open(yaml_path, "w") as file:
-            yaml.dump(pipeline_sparse_configs, file, default_flow_style=False, sort_keys=False)
-        print(f"Saved unified sparse config to {yaml_path}")
 
     # Step 4: Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)
     if is_diffusers_pipe:
@@ -1281,13 +1265,6 @@ def export_hf_checkpoint(
             sparse_attn_config = export_sparse_attention_config(model)
             if sparse_attn_config is not None:
                 config_data["sparse_attention_config"] = sparse_attn_config
-
-                # Also save as standalone YAML for easy inspection and reuse
-                import yaml
-
-                yaml_path = Path(export_dir) / "sparse.yaml"
-                with open(yaml_path, "w") as file:
-                    yaml.dump(sparse_attn_config, file, default_flow_style=False, sort_keys=False)
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)
