@@ -54,37 +54,121 @@ See `README.md` in this directory for more details.
 
 import argparse
 import copy
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import torch
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
-from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.recipe import ModelOptPTQRecipe, load_config, load_recipe
+from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
+from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
 from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
 
-# Curated short-name aliases for the most common quantization configs. Any other config exposed by
-# ``mtq.config.choices`` (e.g. ``FP8_DEFAULT_CFG``) can also be passed by its full name.
-QUANT_CFG_CHOICES = {
-    "int8": mtq.INT8_DEFAULT_CFG,
-    "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
-    "fp8": mtq.FP8_DEFAULT_CFG,
-    "fp8_blockwise": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
-    "int4_awq": mtq.INT4_AWQ_CFG,
-    "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
-    "nvfp4": mtq.NVFP4_DEFAULT_CFG,
-    "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
+# Preset directories under modelopt_recipes/ that back the --quant_cfg and
+# --kv_cache_quant CLI vocabularies. Each ``*.yaml`` file in these directories is
+# automatically discovered and exposed as a valid CLI value via _PresetCfgChoices,
+# so no code change in this script is required when a YAML is added or removed.
+# This is deliberate: every preset YAML is CLI-exposed, there is no separate
+# allow-list — the directory listing is the policy. (--quant_cfg additionally accepts
+# any full config name from ``mtq.config.choices``, e.g. ``FP8_DEFAULT_CFG``.)
+#
+# That said, prefer NOT to add new YAMLs to these preset directories either. The
+# long-term direction is to retire --quant_cfg / --kv_cache_quant entirely in favour
+# of --recipe, which accepts a full PTQ recipe (see modelopt_recipes/general/ptq/
+# and modelopt/recipe/). New quantization configurations should be authored as
+# recipes, not as preset entries.
+_QUANT_PRESET_DIR = "configs/ptq/presets/model"
+_KV_QUANT_PRESET_DIR = "configs/ptq/presets/kv"
+
+# Backward-compat short names → canonical preset basename. These aliases predate the
+# YAML-driven discovery below and remain accepted so existing scripts keep working.
+#
+# DO NOT add new entries here. New quantization formats must be exposed via their YAML
+# basename under modelopt_recipes/configs/ptq/presets/model/ — the directory listing is
+# the canonical CLI vocabulary. This table exists solely to keep pre-existing short
+# names (and the scripts/docs that hardcode them) working through deprecation, and
+# should only ever shrink.
+_QUANT_CFG_ALIASES: dict[str, str] = {
+    "int8_sq": "int8_smoothquant",
+    "fp8_blockwise": "fp8_2d_blockwise_weight_only",
+    "w4a8_awq": "w4a8_awq_beta",
+    "nvfp4_awq": "nvfp4_awq_lite",
 }
 
-# KV-cache quantization configs (applied on top of the weight/activation quant config).
-KV_QUANT_CFG_CHOICES = {
-    "none": "none",
-    "fp8": "FP8_KV_CFG",
-    "nvfp4": "NVFP4_KV_CFG",
-    "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
-}
+# Sentinel value for ``--kv_cache_quant`` meaning "no KV cache quantization".
+_KV_NONE = "none"
+
+
+class _PresetCfgChoices(Mapping[str, dict[str, Any]]):
+    """Lazy mapping of quant config names → quant_cfg dicts loaded from preset YAMLs.
+
+    Iterates the YAML files in ``modelopt_recipes/<subdir>/`` to populate the set
+    of available config names; the supplied ``aliases`` table maps additional
+    short names onto canonical preset basenames. Loading happens on first access
+    and is memoised so repeated lookups are cheap.
+    """
+
+    def __init__(self, subdir: str, aliases: Mapping[str, str] | None = None):
+        self._subdir = subdir
+        self._aliases: dict[str, str] = dict(aliases or {})
+        self._presets: set[str] = set()
+        for entry in BUILTIN_CONFIG_ROOT.joinpath(subdir).iterdir():
+            name = entry.name
+            if name.endswith((".yaml", ".yml")):
+                self._presets.add(name.rsplit(".", 1)[0])
+        # Aliases that point at non-existent presets would silently fail at access
+        # time; surface this at import instead.
+        for alias, target in self._aliases.items():
+            if target not in self._presets:
+                raise ValueError(
+                    f"Alias {alias!r} points at preset {target!r} which is not present "
+                    f"under modelopt_recipes/{subdir}/."
+                )
+        self._cache: dict[str, dict[str, Any]] = {}
+
+    def _canonical(self, key: str) -> str | None:
+        if key in self._presets:
+            return key
+        return self._aliases.get(key)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and self._canonical(key) is not None
+
+    def __getitem__(self, key: str) -> dict[str, Any]:
+        canon = self._canonical(key)
+        if canon is None:
+            raise KeyError(key)
+        if canon not in self._cache:
+            self._cache[canon] = load_config(
+                f"{self._subdir}/{canon}", schema_type=QuantizeConfig
+            ).model_dump(exclude_unset=True)
+        # Deepcopy on retrieval so callers can freely mutate the returned config
+        # (append per-model overrides, etc.) without poisoning the cached entry.
+        return copy.deepcopy(self._cache[canon])
+
+    def __iter__(self) -> Iterator[str]:
+        yield from sorted(self._presets | set(self._aliases))
+
+    def __len__(self) -> int:
+        return len(self._presets) + len(self._aliases)
+
+
+QUANT_CFG_CHOICES: Mapping[str, dict[str, Any]] = _PresetCfgChoices(
+    _QUANT_PRESET_DIR, _QUANT_CFG_ALIASES
+)
+KV_QUANT_CFG_CHOICES: Mapping[str, dict[str, Any]] = _PresetCfgChoices(_KV_QUANT_PRESET_DIR)
+
+# Guard against a future ``none.yaml`` (or alias) colliding with the disable sentinel:
+# argparse would silently allow both, but the runtime branch on ``!= _KV_NONE`` would
+# become ambiguous and the user couldn't reach the real preset.
+assert _KV_NONE not in KV_QUANT_CFG_CHOICES, (
+    f"_KV_NONE sentinel {_KV_NONE!r} collides with a KV preset; rename the preset."
+)
 
 # TODO: Add AutoQuantize (mtq.auto_quantize) support to automatically search a per-layer mix of
 # quantization formats that meets a target compression / accuracy constraint, instead of applying a
@@ -123,7 +207,7 @@ def get_args() -> argparse.Namespace:
         type=str,
         default="fp8",
         help=(
-            f"Quantization config. Short aliases: {', '.join(QUANT_CFG_CHOICES)}. "
+            f"Quantization config. Preset names / short aliases: {', '.join(QUANT_CFG_CHOICES)}. "
             "You can also pass any full config name exposed by modelopt (e.g. FP8_DEFAULT_CFG). "
             "Ignored when --recipe is set."
         ),
@@ -131,8 +215,8 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv_cache_quant",
         type=str,
-        default="none",
-        choices=list(KV_QUANT_CFG_CHOICES),
+        default=_KV_NONE,
+        choices=[_KV_NONE, *KV_QUANT_CFG_CHOICES],
         help="KV-cache quantization config to apply on top of --quant_cfg. Ignored when --recipe is set.",
     )
     parser.add_argument(
@@ -205,7 +289,7 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         # customizations below are skipped.
         print_rank_0(f"Using recipe {args.recipe} for quantization")
         if (
-            args.kv_cache_quant != "none"
+            args.kv_cache_quant != _KV_NONE
             or args.weight_only
             or args.moe_calib_experts_ratio is not None
         ):
@@ -226,20 +310,21 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         mtq_config = getattr(mtq, args.quant_cfg)
     else:
         raise ValueError(
-            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose one of the short aliases "
+            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose a preset name / short alias "
             f"({', '.join(QUANT_CFG_CHOICES)}) or a full config name from {mtq.config.choices}."
         )
 
-    # Deepcopy so we don't mutate the shared module-level config, and normalize the inner quant_cfg
-    # to the list format so we can safely append customizations below.
+    # Deepcopy so we don't mutate a shared module-level config (the ``mtq.config.choices``
+    # full-name branch returns one; QUANT_CFG_CHOICES already hands back a fresh copy), and
+    # normalize the inner quant_cfg to the list format so we can safely append customizations below.
     mtq_config = copy.deepcopy(mtq_config)
     mtq_config["quant_cfg"] = mtq.normalize_quant_cfg_list(mtq_config["quant_cfg"])
 
     if args.weight_only:
         mtq_config["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
 
-    if args.kv_cache_quant != "none":
-        kv_cache_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_quant])["quant_cfg"]
+    if args.kv_cache_quant != _KV_NONE:
+        kv_cache_quant_cfg = KV_QUANT_CFG_CHOICES[args.kv_cache_quant]["quant_cfg"]
         mtq_config = mtq.utils.update_quant_cfg_with_kv_cache_quant(mtq_config, kv_cache_quant_cfg)
 
     # For MoE models, optionally calibrate only a fraction of experts per forward pass for speed.
