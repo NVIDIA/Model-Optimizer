@@ -28,7 +28,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+
+
+def _is_valid_score(val):
+    """True only for a finite real number in [_SCORE_MIN, _SCORE_MAX] (not bool)."""
+    return (
+        isinstance(val, (int, float))
+        and not isinstance(val, bool)
+        and math.isfinite(val)
+        and _SCORE_MIN <= val <= _SCORE_MAX
+    )
 
 # Decisions
 ACCEPT = "ACCEPT"
@@ -80,9 +91,16 @@ def evaluate_comparison(baseline, candidate, threshold=0.01, relative=False):
     anomalies = []
     for task in sorted(baseline):
         b, c = baseline[task], candidate[task]
+        invalid = False
         for label, val in (("baseline", b), ("candidate", c)):
-            if not isinstance(val, (int, float)) or not (_SCORE_MIN <= val <= _SCORE_MAX):
-                anomalies.append(f"{task}: {label} score {val!r} outside [0, 100]")
+            if not _is_valid_score(val):
+                anomalies.append(f"{task}: {label} score {val!r} not a finite number in [0, 100]")
+                invalid = True
+        if invalid:
+            # Don't compute deltas on non-numeric/out-of-range scores (would raise
+            # TypeError); record the anomaly and move on — the run is ANOMALOUS.
+            per_task[task] = {"baseline": b, "candidate": c, "drop": None, "within_threshold": False}
+            continue
         if relative:
             drop = (b - c) / b if b else 0.0
             limit = threshold

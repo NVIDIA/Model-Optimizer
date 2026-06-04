@@ -18,13 +18,13 @@
 These are deterministic — no GPU, cluster, or network. They test the pure
 decision functions that the gates rest on. Run with:
 
-    python -m pytest .claude/skills/day0-release/scripts/test_gates.py
+    python -m pytest .claude/skills/day0-release/tests/test_gates.py
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from gate_compare import evaluate_comparison
 from gate_ptq import evaluate_checkpoint
@@ -175,6 +175,26 @@ def test_ptq_metadata_diff():
 def test_ptq_unknown_recipe():
     r = evaluate_checkpoint(_ckpt(recipe="mystery"))
     assert not r["pass"] and r["failure_class"] == "USER_CONFIG_ERROR"
+
+
+# ── regression tests for malformed inputs ────────────────────────────
+
+
+def test_compare_non_numeric_score_is_anomalous_not_crash():
+    # A string/None score must not raise TypeError; it's ANOMALOUS.
+    for bad in ("42", None, float("nan"), True):
+        r = evaluate_comparison({"gpqa": 50.0}, {"gpqa": bad}, threshold=0.01)
+        assert not r["pass"] and r["decision"] == "ANOMALOUS", bad
+
+
+def test_run_non_numeric_score_fails():
+    r = evaluate_run({"tasks": {"gpqa": _task(score="42")}})
+    assert not r["pass"] and r["failure_class"] == "SAMPLE_ACCOUNTING_FAILED"
+
+
+def test_run_running_is_infra_transient():
+    r = evaluate_run({"tasks": {"gpqa": _task(status="RUNNING", score=None)}})
+    assert not r["pass"] and r["failure_class"] == "INFRA_TRANSIENT"
 
 
 if __name__ == "__main__":

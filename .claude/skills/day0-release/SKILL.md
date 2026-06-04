@@ -65,8 +65,11 @@ Confirm credentials (`skills/common/credentials.md`) and cluster reachability
 Invoke the **ptq** skill to produce the quantized checkpoint. Then gate:
 
 ```bash
-python .claude/skills/day0-release/scripts/gate_ptq.py \
-    --checkpoint <output_path> --source <source_model> --recipe <qformat>
+# The ptq skill's post-PTQ validation produces a validation-summary JSON (size
+# ratio + layer-precision counts + metadata diffs; see
+# ptq/references/checkpoint-validation.md). v1 gates on that summary:
+python .claude/skills/day0-release/scripts/gate_ptq.py --summary <validation-summary.json>
+#   add `--recipe <qformat>` to override the recipe recorded in the summary
 ```
 
 `gate_ptq.py` returns JSON `{pass, failure_class, detail}`. On `pass: false`,
@@ -92,7 +95,7 @@ Invoke the **evaluation** skill on the deployed quantized checkpoint, matching
 the baseline's task set and sampling params. Gate:
 
 ```bash
-python .claude/skills/day0-release/scripts/gate_run.py --run <run_dir_or_results_yml>
+python .claude/skills/day0-release/scripts/gate_run.py --run <run-summary.json>
 ```
 
 A `pass: false` here means the run is incomplete or invalid (judge/parse error,

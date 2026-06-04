@@ -24,7 +24,7 @@ The run summary is a dict with, per task:
     {
       "tasks": {
         "<task>": {
-          "status": "SUCCESS" | "FAILED" | "RUNNING" | "TIMEOUT",
+          "status": "SUCCESS" | "FAILED" | "RUNNING" | "PENDING" | "TIMEOUT" | "RESUMING",
           "expected_samples": int,
           "scored_samples": int,
           "score": float | null,          # canonical score, if extracted
@@ -32,18 +32,22 @@ The run summary is a dict with, per task:
         }
       }
     }
-A walltime TIMEOUT with a healthy resume is not a failure (NEL resumes); only a
-terminal FAILED/incomplete run fails the gate.
+Only a terminal SUCCESS with complete, numeric scores passes. Non-terminal
+statuses (RUNNING/PENDING/TIMEOUT/RESUMING) do NOT pass — the run hasn't
+finished — but they classify as INFRA_TRANSIENT (wait for NEL to resume/finish;
+not a real regression), distinct from a terminal FAILED.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 
 _TERMINAL_OK = "SUCCESS"
-_RESUMABLE = {"TIMEOUT", "RESUMING"}  # NEL dependency-chain resume — not a failure
+# Not done yet — NEL resumes/finishes these; transient, not a real failure.
+_NON_TERMINAL = {"TIMEOUT", "RESUMING", "RUNNING", "PENDING"}
 
 
 def evaluate_run(summary):
@@ -72,9 +76,9 @@ def evaluate_run(summary):
         ok = True
         reasons = []
 
-        if status in _RESUMABLE:
+        if status in _NON_TERMINAL:
             ok = False
-            reasons.append(f"status {status}: still resuming, not terminal")
+            reasons.append(f"status {status}: not terminal yet (resume/finish expected)")
         elif status != _TERMINAL_OK:
             ok = False
             reasons.append(f"status {status!r} is not SUCCESS")
@@ -95,6 +99,9 @@ def evaluate_run(summary):
         if score is None:
             ok = False
             reasons.append("no score extracted")
+        elif not (isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)):
+            ok = False
+            reasons.append(f"score not numeric/finite: {score!r}")
 
         per_task[name] = {"ok": ok, "reasons": reasons}
         if not ok:
@@ -112,10 +119,11 @@ def evaluate_run(summary):
     flat = " ".join(r for _, rs in problems for r in rs).lower()
     if any(k in flat for k in ("judge", "rate limit", "unauthorized", "auth")):
         fc = "EVAL_JUDGE_FAILED"
-    elif "sample accounting" in flat or "no score" in flat:
-        fc = "SAMPLE_ACCOUNTING_FAILED"
-    elif "resuming" in flat:
+    elif "not terminal" in flat:
+        # Non-terminal (RUNNING/PENDING/TIMEOUT/RESUMING): wait for resume/finish.
         fc = "INFRA_TRANSIENT"
+    elif "sample accounting" in flat or "no score" in flat or "score not numeric" in flat:
+        fc = "SAMPLE_ACCOUNTING_FAILED"
     else:
         fc = "UNKNOWN"
 
