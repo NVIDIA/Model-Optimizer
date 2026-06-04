@@ -1494,6 +1494,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--use_fsdp2 requires launching with torchrun")
     if args.cpu_offload and not args.use_fsdp2:
         parser.error("--cpu_offload requires --use_fsdp2")
+    if args.use_fsdp2 and args.sparsity_fmt != "dense":
+        parser.error(f"--use_fsdp2 does not support --sparsity_fmt {args.sparsity_fmt}.")
 
     return args
 

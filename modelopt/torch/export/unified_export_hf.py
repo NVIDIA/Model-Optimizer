@@ -1217,16 +1217,15 @@ def export_hf_checkpoint(
         )
         return
 
+    is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
-        # Under torch.distributed: only rank 0 writes; others sync at the barrier below.
-        # If rank 0 raises during file writes it never reaches the trailing barrier, so
-        # the other ranks wait out the NCCL timeout (~10 min) before crashing. Rank 0's
-        # traceback is visible in the same terminal, so we accept the bounded delay.
-        is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        # Under torch.distributed: only rank 0 writes; everyone syncs at the finally barrier.
+        # If rank 0 raises BEFORE the collective gather inside _export_transformers_checkpoint
+        # (e.g. rank-divergent preprocessing), other ranks hang on that collective until NCCL
+        # timeout — closing that case would need a broadcast-status pattern; out of scope.
         if is_distributed and torch.distributed.get_rank() != 0:
-            torch.distributed.barrier()
             return
 
         # Only treat the export as quantized when at least one quant_algo field is set.
@@ -1296,6 +1295,6 @@ def export_hf_checkpoint(
             " can be saved with torch.save for further inspection."
         )
         raise e
-
-    if is_distributed:
-        torch.distributed.barrier()
+    finally:
+        if is_distributed:
+            torch.distributed.barrier()

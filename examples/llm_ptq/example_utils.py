@@ -42,10 +42,10 @@ from transformers import (
 )
 
 try:
-    from huggingface_hub import snapshot_download, try_to_load_from_cache
+    from huggingface_hub import hf_hub_download, snapshot_download
 except ImportError:
     snapshot_download = None
-    try_to_load_from_cache = None
+    hf_hub_download = None
 
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.model_load_utils import parallel_load_and_prepare_fsdp2
@@ -76,25 +76,29 @@ def cleanup_distributed(args):
 
 
 def _checkpoint_has_mtp_weights(model_path: str) -> bool:
-    """Return True if the checkpoint's safetensors index advertises MTP weights."""
-    candidates = [Path(model_path) / "model.safetensors.index.json"]
-    cached = (
-        try_to_load_from_cache(model_path, "model.safetensors.index.json")
-        if try_to_load_from_cache is not None
-        else None
-    )
-    if cached:
-        candidates.append(Path(cached))
-    for index_file in candidates:
-        if not index_file.exists():
-            continue
+    """Return True if the checkpoint's safetensors index advertises MTP weights.
+
+    Resolves local directories in place; for HF Hub IDs fetches the index file
+    (cheap, ~100KB). Returns False on any access error or missing index — single-file
+    checkpoints have no MTP shards by construction.
+    """
+    local_index = Path(model_path) / "model.safetensors.index.json"
+    if local_index.exists():
+        index_path = local_index
+    elif hf_hub_download is not None:
         try:
-            with open(index_file) as f:
-                weight_map = json.load(f).get("weight_map", {})
-        except (OSError, json.JSONDecodeError):
-            continue
-        return any("mtp" in k or "mtp" in v for k, v in weight_map.items())
-    return False
+            index_path = Path(hf_hub_download(model_path, "model.safetensors.index.json"))
+        except Exception:
+            return False
+    else:
+        return False
+
+    try:
+        with open(index_path) as f:
+            weight_map = json.load(f).get("weight_map", {})
+    except (OSError, json.JSONDecodeError):
+        return False
+    return any("mtp" in k or "mtp" in v for k, v in weight_map.items())
 
 
 def validate_fsdp2_supported(args, config):

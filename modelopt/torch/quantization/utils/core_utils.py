@@ -512,25 +512,27 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
         )
         _set_parameter(module, name, nn.Parameter(working))
 
-    yield
-
-    # Write back and restore original DTensor parameters.
-    for name, (
-        original_param,
-        collected,
-        original_placements,
-        original_device_mesh,
-        cpu_local,
-        gpu_working,
-    ) in originals.items():
-        if cpu_local is not None:
-            cpu_local.data.copy_(gpu_working.data.to(cpu_local.device))
-        original_param.to_local().data.copy_(
-            collected.redistribute(
-                placements=original_placements, device_mesh=original_device_mesh
-            ).to_local()
-        )
-        _set_parameter(module, name, original_param)
+    try:
+        yield
+    finally:
+        # Write back and restore original DTensor parameters. Runs on both success
+        # and exception so the module never lingers with the temporary local params.
+        for name, (
+            original_param,
+            collected,
+            original_placements,
+            original_device_mesh,
+            cpu_local,
+            gpu_working,
+        ) in originals.items():
+            if cpu_local is not None:
+                cpu_local.data.copy_(gpu_working.data.to(cpu_local.device))
+            original_param.to_local().data.copy_(
+                collected.redistribute(
+                    placements=original_placements, device_mesh=original_device_mesh
+                ).to_local()
+            )
+            _set_parameter(module, name, original_param)
 
 
 @contextmanager
