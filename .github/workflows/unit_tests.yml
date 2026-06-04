@@ -18,7 +18,6 @@ on:
   workflow_dispatch:
     # On-demand
 
-
 concurrency:
   # Cancel previous runs if new commit is pushed
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -67,7 +66,7 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: pip install nox uv && nox -s "unit-3.12(torch_211, tf_latest)"
+        run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
@@ -86,7 +85,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run unit tests (without coverage)
-        run: pip install nox uv && nox -s "unit-3.12(torch_211, tf_latest)"
+        run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
   multi-version:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
@@ -96,14 +95,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {nox_session: "unit-3.10(torch_211, tf_latest)", python_version: "3.10"}
-          - {nox_session: "unit-3.11(torch_211, tf_latest)", python_version: "3.11"}
-          - {nox_session: "unit-3.13(torch_211, tf_latest)", python_version: "3.13"}
-          - {nox_session: "unit-3.14(torch_211, tf_latest)", python_version: "3.14"}
+          - {nox_session: "unit-3.10(torch_212, tf_latest)", python_version: "3.10"}
+          - {nox_session: "unit-3.11(torch_212, tf_latest)", python_version: "3.11"}
+          - {nox_session: "unit-3.13(torch_212, tf_latest)", python_version: "3.13"}
+          - {nox_session: "unit-3.14(torch_212, tf_latest)", python_version: "3.14"}
           - {nox_session: "unit-3.12(torch_28, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_29, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_210, tf_latest)", python_version: "3.12"}
-          - {nox_session: "unit-3.12(torch_211, tf_min)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_211, tf_latest)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_212, tf_min)", python_version: "3.12"}
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup

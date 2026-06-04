@@ -19,8 +19,7 @@ import subprocess
 import pytest
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_gpu
-
-pytestmark = pytest.mark.release(reason="This test is used for QA release.")
+from datasets import Dataset, DatasetDict
 
 
 class GPTOSS:
@@ -285,6 +284,7 @@ class GPTOSS:
         run_example_command(cmd_parts, "gpt-oss")
 
 
+@pytest.mark.release(reason="This test is used for QA release.")
 @pytest.mark.parametrize(
     "model_path",
     [
@@ -346,3 +346,70 @@ def test_gpt_oss_complete_pipeline(model_path, tmp_path):
         print("Step 3: Running deployment with MXFP4 checkpoint...")
         gpt_oss.deploy_gpt_oss_trtllm(tmp_path, model_path_override=mxfp4_checkpoint)
         print("Step 3 completed: Deployment successful")
+
+
+def test_gpt_oss_sft_toy(tiny_gpt_oss_path, tmp_path):
+    """CPU smoke test: SFT-only (no quantization) on a tiny gpt-oss model.
+
+    Validates that sft.py parses the TrlParser arguments including the new
+    QuantizationArguments.recipe field and completes train + save.
+    """
+    dataset_dir = tmp_path / "dataset"
+    DatasetDict(
+        {
+            "train": Dataset.from_dict(
+                {
+                    "text": [
+                        "The quick brown fox.",
+                        "Hello world.",
+                        "A short sentence.",
+                        "Another one.",
+                    ]
+                }
+            )
+        }
+    ).save_to_disk(str(dataset_dir))
+
+    output_dir = tmp_path / "sft-toy"
+    run_example_command(
+        [
+            "python",
+            "sft.py",
+            "--model_name_or_path",
+            tiny_gpt_oss_path,
+            "--dataset_name",
+            str(dataset_dir),
+            "--output_dir",
+            str(output_dir),
+            "--attn_implementation",
+            "eager",
+            "--max_length",
+            "64",
+            "--num_train_epochs",
+            "1",
+            "--max_steps",
+            "2",
+            "--per_device_train_batch_size",
+            "1",
+            "--per_device_eval_batch_size",
+            "1",
+            "--eval_strategy",
+            "no",
+            "--logging_steps",
+            "1",
+            "--report_to",
+            "none",
+            "--dtype",
+            "float32",
+            "--bf16",
+            "False",
+            "--use_cpu",
+            "True",
+        ],
+        "gpt-oss",
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+    )
+
+    assert output_dir.exists(), "SFT output directory should exist after training"
+    assert (output_dir / "config.json").exists(), "Saved model config.json should exist"
+    assert any(output_dir.glob("*.safetensors")), "Saved model safetensors should exist"

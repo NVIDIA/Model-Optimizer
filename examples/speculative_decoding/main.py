@@ -59,7 +59,7 @@ from modelopt.torch.speculative.plugins.hf_training_args import (
 )
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
-from modelopt.torch.utils.distributed import is_master
+from modelopt.torch.utils.distributed import is_master, local_rank
 
 torch.manual_seed(0)
 mto.enable_huggingface_checkpointing()
@@ -79,8 +79,8 @@ HfTrainingArguments = dataclasses.make_dataclass(
 )
 
 
-def _parse_cli() -> tuple[str, list[str]]:
-    """Parse --config (required) from argv; return remaining args as dotlist overrides.
+def _parse_cli() -> tuple[str, bool, list[str]]:
+    """Parse --config (required) and --dry_run from argv; return remaining args as dotlist overrides.
 
     Extra positional args use dotlist syntax, e.g.
     ``model.model_name_or_path=meta-llama/Llama-3.2-1B training.output_dir=ckpts/test``.
@@ -94,8 +94,15 @@ def _parse_cli() -> tuple[str, list[str]]:
             "(speculative_eagle / speculative_dflash / speculative_medusa)."
         ),
     )
+    p.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Skip training: load base + mtsp.convert + save_pretrained, then exit. "
+        "Produces a ModelOpt HF checkpoint with untrained draft-head weights, suitable "
+        "for end-to-end plumbing tests (e.g. running scripts/export_hf_checkpoint.py).",
+    )
     args, overrides = p.parse_known_args()
-    return args.config, overrides
+    return args.config, args.dry_run, overrides
 
 
 def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
@@ -139,7 +146,7 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
 
 
 def train():
-    config_path, overrides = _parse_cli()
+    config_path, dry_run, overrides = _parse_cli()
     recipe = load_recipe(config_path, overrides=overrides)
     if not isinstance(recipe, ModelOptSpeculativeRecipeBase):
         raise ValueError(
@@ -152,10 +159,8 @@ def train():
     training_args = HfTrainingArguments(**recipe.training.model_dump())
     init_distributed_env(training_args)
 
-    if not recipe.data.data_path and not recipe.data.offline_data_path:
-        raise ValueError(
-            "Either data.data_path or data.offline_data_path must be set in the config."
-        )
+    if not dry_run and recipe.data.mode in ("online", "streaming") and not recipe.data.data_path:
+        raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
@@ -174,7 +179,7 @@ def train():
 
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
-    use_offline_training = recipe.data.offline_data_path is not None
+    use_offline_training = recipe.data.mode != "online"
 
     if checkpoint:
         with patch_transformers5_params_loading():
@@ -227,6 +232,19 @@ def train():
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
 
+    if dry_run:
+        # is_master() is unreliable here: we return before the HF Trainer inits torch.distributed,
+        # so use local_rank() (env-based) to keep a single writer to output_dir.
+        if local_rank() == 0:
+            os.makedirs(training_args.output_dir, exist_ok=True)
+            model.save_pretrained(training_args.output_dir)
+            tokenizer.save_pretrained(training_args.output_dir)
+            print_rank_0(
+                f"[dry-run] saved ModelOpt HF checkpoint (untrained draft head) to "
+                f"{training_args.output_dir}"
+            )
+        return
+
     # Move any remaining CPU buffers to CUDA so DDP (NCCL-only) can broadcast
     # them.  We iterate named_buffers and reassign via the owning module to
     # keep the module tree consistent.  Parameters are left on CPU — the HF
@@ -249,6 +267,7 @@ def train():
         train_len=training_args.training_seq_len,
         answer_only_loss=training_args.answer_only_loss,
         shift_labels=not is_dflash,
+        seed=training_args.seed,
     )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
@@ -258,6 +277,13 @@ def train():
         and recipe.eagle.eagle_base_lora_warmup_steps > 0
     ):
         callbacks.append(LoRAWarmupCallback(recipe.eagle.eagle_base_lora_warmup_steps))
+    if recipe.data.mode == "streaming":
+        # Skip-on-resume happens inside the dataset (no re-fetch from server);
+        # disable HF Trainer's own data skip so the offset isn't applied twice.
+        from modelopt.torch.speculative.plugins.hf_streaming_dataset import StreamingResumeCallback
+
+        training_args.ignore_data_skip = True
+        callbacks.append(StreamingResumeCallback())
 
     trainer = EagleTrainerWithAccLog(
         model=model,

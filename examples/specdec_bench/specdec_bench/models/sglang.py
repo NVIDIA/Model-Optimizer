@@ -91,6 +91,7 @@ class SGLANGModel(Model):
         if "mamba_scheduler_strategy" in kwargs:
             engine_kwargs["mamba_scheduler_strategy"] = kwargs["mamba_scheduler_strategy"]
 
+        self.engine_kwargs = engine_kwargs
         self.model = sgl.Engine(**engine_kwargs)
 
         self.sampling_config = sampling_kwargs
@@ -129,3 +130,11 @@ class SGLANGModel(Model):
         output_dict["output_logits"] = None
         output_dict["token_times"] = timing
         return output_dict
+
+    def get_serving_config(self):
+        """Dump the engine_kwargs dict supplied to sgl.Engine()."""
+        try:
+            # engine_kwargs is plain dict of scalars/None — already JSON-safe.
+            return dict(self.engine_kwargs)
+        except Exception:
+            return {}

@@ -26,13 +26,20 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
+from core import (
+    SandboxPipeline,
+    SandboxTask0,
+    SandboxTask1,
+    build_docker_executor,
+    get_default_env,
+    run_jobs,
+)
+
 
 class TestBuildDockerExecutor:
     """Tests for build_docker_executor mount and directory setup."""
 
     def test_scratch_dir_created(self, tmp_path):
-        from core import build_docker_executor
-
         job_dir = str(tmp_path / "experiments")
         build_docker_executor(
             hf_local="/tmp/hf-local",
@@ -55,8 +62,6 @@ class TestBuildDockerExecutor:
         assert os.path.isdir(scratch_dir)
 
     def test_hf_local_mount(self, tmp_path):
-        from core import build_docker_executor
-
         job_dir = str(tmp_path / "experiments")
         executor = build_docker_executor(
             hf_local="/my/hf-local",
@@ -79,8 +84,6 @@ class TestBuildDockerExecutor:
         assert any("/my/hf-local:/hf-local" in v for v in volumes)
 
     def test_scratchspace_mount(self, tmp_path):
-        from core import build_docker_executor
-
         job_dir = str(tmp_path / "experiments")
         executor = build_docker_executor(
             hf_local="/tmp/hf",
@@ -104,8 +107,6 @@ class TestBuildDockerExecutor:
         assert any(f"{expected_scratch}:/scratchspace" in v for v in volumes)
 
     def test_modelopt_mount(self, tmp_path):
-        from core import build_docker_executor
-
         job_dir = str(tmp_path / "experiments")
         executor = build_docker_executor(
             hf_local="/tmp/hf",
@@ -128,8 +129,6 @@ class TestBuildDockerExecutor:
         assert any("/custom/modelopt:/opt/modelopt" in v for v in volumes)
 
     def test_experiment_title_mount(self, tmp_path):
-        from core import build_docker_executor
-
         job_dir = str(tmp_path / "experiments")
         executor = build_docker_executor(
             hf_local="/tmp/hf",
@@ -153,8 +152,6 @@ class TestBuildDockerExecutor:
         assert any(f"{exp_title_path}:/modelopt" in v for v in volumes)
 
     def test_local_slurm_config_mounts_preserved(self, tmp_path):
-        from core import build_docker_executor
-
         job_dir = str(tmp_path / "experiments")
         executor = build_docker_executor(
             hf_local="/tmp/hf",
@@ -184,8 +181,6 @@ class TestRunJobsDockerPath:
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
     def test_docker_executor_called_with_hf_local(self, mock_docker, mock_exp, tmp_path):
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         mock_exp_instance = MagicMock()
         mock_exp_instance._id = "test_exp_001"
         mock_exp_instance.__enter__ = MagicMock(return_value=mock_exp_instance)
@@ -223,8 +218,6 @@ class TestRunJobsDockerPath:
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
     def test_metadata_written(self, mock_docker, mock_exp, tmp_path):
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         mock_exp_instance = MagicMock()
         mock_exp_instance._id = "test_exp_meta"
         mock_exp_instance.__enter__ = MagicMock(return_value=mock_exp_instance)
@@ -264,8 +257,6 @@ class TestRunJobsDockerPath:
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
     def test_skipped_task_not_submitted(self, mock_docker, mock_exp, tmp_path):
-        from core import SandboxPipeline, SandboxTask0, SandboxTask1, get_default_env, run_jobs
-
         mock_exp_instance = MagicMock()
         mock_exp_instance._id = "test_exp_skip"
         mock_exp_instance.__enter__ = MagicMock(return_value=mock_exp_instance)
@@ -300,8 +291,6 @@ class TestRunJobsDockerPath:
     @patch("core.run.Experiment")
     @patch("core.build_slurm_executor")
     def test_slurm_executor_called_without_hf_local(self, mock_slurm, mock_exp, tmp_path):
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         mock_exp_instance = MagicMock()
         mock_exp_instance._id = "test_exp_slurm"
         mock_exp_instance.__enter__ = MagicMock(return_value=mock_exp_instance)

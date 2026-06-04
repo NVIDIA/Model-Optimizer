@@ -5,6 +5,11 @@
 #
 # Usage:
 #   uv run launch.py --yaml examples/Qwen/Qwen3-30B-A3B/megatron_lm_ptq.yaml --yes
+#
+# NOTE: This file uses the raw `script`/`args`/`environment` form because the
+# typed `MegatronLMQuantizeTask` (common/megatron_lm/quantize/task.py) is
+# currently not wired into SandboxPipeline — see the docstring there for
+# rationale. The typed class is retained for future re-enablement.
 
 job_name: Qwen3-30B-A3B_PTQ
 pipeline:
@@ -13,19 +18,20 @@ pipeline:
   note:
 
   task_0:
-    _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
-    config:
-      model: Qwen/Qwen3-30B-A3B
-      quant_cfg: NVFP4_DEFAULT_CFG
-      tp: 1
-      pp: 1
-      ep: 8
-      etp: 1
-      calib_dataset: abisee/cnn_dailymail
-      calib_size: 32
-      mmlu_dataset: cais/mmlu
-      mmlu_lower_bound: 0.75
-      hf_local: /hf-local/
+    script: common/megatron_lm/quantize/quantize.sh
+    args:
+      - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
+      - --calib-size 32
+    environment:
+      - MLM_MODEL_CFG: Qwen/Qwen3-30B-A3B
+      - QUANT_CFG: NVFP4_DEFAULT_CFG
+      - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-30B-A3B
+      - MMLU_DATASET: /hf-local/cais/mmlu
+      - TP: "1"
+      - PP: "1"
+      - EP: "8"
+      - ETP: "1"
+      - MMLU_LOWER_BOUND: "0.75"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
@@ -33,19 +39,20 @@ pipeline:
       gpus_per_node: 8
 
   task_1:
-    _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
-    config:
-      model: Qwen/Qwen3-30B-A3B
-      quant_cfg: FP8_DEFAULT_CFG
-      tp: 1
-      pp: 1
-      ep: 8
-      etp: 1
-      calib_dataset: abisee/cnn_dailymail
-      calib_size: 32
-      mmlu_dataset: cais/mmlu
-      mmlu_lower_bound: 0.75
-      hf_local: /hf-local/
+    script: common/megatron_lm/quantize/quantize.sh
+    args:
+      - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
+      - --calib-size 32
+    environment:
+      - MLM_MODEL_CFG: Qwen/Qwen3-30B-A3B
+      - QUANT_CFG: FP8_DEFAULT_CFG
+      - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-30B-A3B
+      - MMLU_DATASET: /hf-local/cais/mmlu
+      - TP: "1"
+      - PP: "1"
+      - EP: "8"
+      - ETP: "1"
+      - MMLU_LOWER_BOUND: "0.75"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1

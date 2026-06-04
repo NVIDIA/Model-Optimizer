@@ -14,6 +14,7 @@
 # limitations under the License.
 # mypy: ignore-errors
 import functools
+import warnings
 from collections.abc import Sequence
 
 import numpy as np
@@ -33,6 +34,32 @@ FIM_TOKEN_CONNECTOR_STAR = "_"  # nosec B105
 FIM_TOKEN_CONNECTOR_SANTA = "-"  # nosec B105
 FIM_TOKEN_END_LIST = ["prefix>", "middle>", "suffix>", "pad>"]
 CODEGEN_FIM_TOKENS = ["<mask_1>", "<|endoftext|>", "<sep>"]
+_CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED = False
+
+
+def _message_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if "text" in content:
+            return str(content["text"])
+        raise ValueError(
+            f"Unsupported structured message content without a text field: {content!r}"
+        )
+    return str(content)
+
+
+def _format_messages_without_chat_template(messages) -> str:
+    global _CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED
+    if not _CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED:
+        warnings.warn(
+            "Tokenizer has no chat_template; formatting messages as role-tagged plain text.",
+            stacklevel=2,
+        )
+        _CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED = True
+    return "\n".join(
+        f"{message['role']}: {_message_content_to_text(message['content'])}" for message in messages
+    )
 
 
 class ConstantLengthDataset(IterableDataset):
@@ -122,15 +149,21 @@ class ConstantLengthDataset(IterableDataset):
                         continue
                     if not self.is_dataset_already_tokenized:
                         sample = sample[self.content_field]
-                        if (
-                            isinstance(sample, list)
-                            and isinstance(sample[0], dict)
-                            and {"content", "role"}.issubset(sample[0])
-                        ):
-                            if len(sample) > 1:
-                                sample = self.tokenizer.apply_chat_template(sample, tokenize=False)
-                            else:
-                                sample = sample[0]["content"]
+                        if isinstance(sample, list):
+                            if len(sample) == 0:
+                                sample = ""
+                            elif isinstance(sample[0], dict) and {"content", "role"}.issubset(
+                                sample[0]
+                            ):
+                                if len(sample) > 1:
+                                    if getattr(self.tokenizer, "chat_template", None) is not None:
+                                        sample = self.tokenizer.apply_chat_template(
+                                            sample, tokenize=False
+                                        )
+                                    else:
+                                        sample = _format_messages_without_chat_template(sample)
+                                else:
+                                    sample = _message_content_to_text(sample[0]["content"])
                     else:
                         sample = sample[self.tokens_field]
                     sample = sample[: self.max_sample_length]

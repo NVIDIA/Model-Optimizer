@@ -57,13 +57,12 @@ function util_install_extra_dep {
             report_result "FAIL: util_install_extra_dep: pip install diskcache failed"
             exit 1
         fi
-        local _nvrx_dir
-        _nvrx_dir="$(mktemp -d)/nvidia-resiliency-ext"
-        if ! git clone --depth 1 https://github.com/NVIDIA/nvidia-resiliency-ext "${_nvrx_dir}"; then
-            report_result "FAIL: util_install_extra_dep: git clone nvidia-resiliency-ext failed"
-            exit 1
-        fi
-        if ! pip install "${_nvrx_dir}"; then
+        # Megatron-LM asserts nvrx >= 0.6.0 on import. nemo containers ship
+        # nvrx in two Python envs; `pip` targets the system one, `python -m
+        # pip` the uv venv. Uninstall from both, install into the venv.
+        pip uninstall -y nvidia-resiliency-ext 2>/dev/null || true
+        python -m pip uninstall -y nvidia-resiliency-ext 2>/dev/null || true
+        if ! python -m pip install --upgrade "nvidia-resiliency-ext>=0.6.0"; then
             report_result "FAIL: util_install_extra_dep: pip install nvidia-resiliency-ext failed"
             exit 1
         fi

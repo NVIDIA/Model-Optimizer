@@ -20,9 +20,13 @@ import torch
 
 def fp8_compatible():
     """Check if the current device supports FP8."""
+    if not torch.cuda.is_available():
+        return False
     return torch.cuda.get_device_capability(0) >= (8, 9)
 
 
 def fp4_compatible():
     """Check if the current device supports FP4."""
+    if not torch.cuda.is_available():
+        return False
     return torch.cuda.get_device_capability(0) >= (10, 0)

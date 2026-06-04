@@ -2,8 +2,7 @@
 
 ## Task Details
 
-- Run time: Medium
-- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html>
+- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html#nemo-skills-ns-livecodebench>
 
 ## Params
 
@@ -13,17 +12,17 @@ Use this inside the top-level `evaluation.tasks` list:
 
 ```yaml
 - name: ns_livecodebench
+  container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
   nemo_evaluator_config:
     config:
       params:
-        max_retries: 10
         extra:
+          num_repeats: 8
           dataset_split: test_v6_2408_2505
-          num_repeats: 3
-    target:
-      api_endpoint:
-        adapter_config:
-          params_to_remove:
-            - max_new_tokens
-            - max_completion_tokens
 ```
+
+## Score Extraction
+
+Result (0-100): `livecodebench_pass_at_1_avg-of-N_accuracy`
+
+N is the repeat count.  If the repeat count is unknown, use the highest available `avg-of-N`.

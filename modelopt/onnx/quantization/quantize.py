@@ -73,6 +73,7 @@ from modelopt.onnx.trt_utils import interpret_trt_plugins_precision_flag, load_o
 from modelopt.onnx.utils import (
     BASE_MIN_OPSET,
     QDQ_PRECISION_MIN_OPSET,
+    clear_stale_value_info,
     duplicate_shared_constants,
     get_opset_version,
     name_onnx_nodes,
@@ -118,6 +119,13 @@ def _preprocess_onnx(
         use_external_data_format,
         intermediate_generated_files,
     )
+
+    # Clear stale type metadata to prevent type check failures in ORT
+    if clear_stale_value_info(onnx_model):
+        onnx_path = os.path.join(output_dir, f"{model_name}_reconciled.onnx")
+        save_onnx(onnx_model, onnx_path, use_external_data_format)
+        intermediate_generated_files.append(onnx_path)
+
     if has_custom_op:
         onnx_path = os.path.join(output_dir, f"{model_name}_ort_support.onnx")
         save_onnx(onnx_model, onnx_path, use_external_data_format)
