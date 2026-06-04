@@ -140,6 +140,21 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
         )
 
 
+def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) -> None:
+    """Finalize quantization from the attached shared state: aggregate, promote, verify.
+
+    Aggregates each fusible group's shared weight ``global_amax`` and promotes it onto the
+    member NVFP4-static quantizers, so siblings read the unified value instead of their own
+    ``_amax``; under the default patterns, verifies the name groups were actually synced.
+    Call once ``_amax`` is final: single-process, or after the distributed amax sync.
+    """
+    populate_shared_state(model)
+    promote_nvfp4_static_quantizers(model)
+    # Under the default patterns, verify the fusible name groups were actually synced.
+    if weight_patterns is DEFAULT_WEIGHT_SHARED_PATTERNS:
+        _check_grouped_weight_global_amax_synced(model)
+
+
 CalibratorFactory: TypeAlias = Callable[
     [torch.Tensor, int | tuple | list | None, Callable[..., torch.Tensor]], _Calibrator
 ]
@@ -306,12 +321,8 @@ def max_calibrate(
     _check_nvfp4_static_tp_supported(model)
 
     if not distributed_sync:
-        # Single-process: _amax is final — aggregate shared global_amax, then promote.
-        populate_shared_state(model)
-        promote_nvfp4_static_quantizers(model)
-        # Under the default patterns, verify the fusible name groups were actually synced.
-        if weight_patterns is DEFAULT_WEIGHT_SHARED_PATTERNS:
-            _check_grouped_weight_global_amax_synced(model)
+        # Single-process: _amax is final.
+        _finalize_with_shared_state(model, weight_patterns)
         return
 
     # Check MoE calibration completeness before sync
@@ -428,13 +439,8 @@ def max_calibrate(
                         module.parallel_state.tensor_parallel_group
                     )
 
-    # _amax is now cross-rank consistent — aggregate shared global_amax then
-    # promote, so siblings read the unified value instead of their own _amax.
-    populate_shared_state(model)
-    promote_nvfp4_static_quantizers(model)
-    # Under the default patterns, verify the fusible name groups were actually synced.
-    if weight_patterns is DEFAULT_WEIGHT_SHARED_PATTERNS:
-        _check_grouped_weight_global_amax_synced(model)
+    # _amax is now cross-rank consistent across ranks.
+    _finalize_with_shared_state(model, weight_patterns)
 
 
 def _mse_quant_func(x, amax, quantizer):
