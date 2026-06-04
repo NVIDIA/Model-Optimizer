@@ -542,27 +542,18 @@ def fsdp2_weight_access_and_writeback_context(
         )
         local_replicated = collected.to_local()
         # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
-        if local_replicated.device.type == "cpu" and torch.cuda.is_available():
-            working_local = local_replicated.to(torch.cuda.current_device())
-            originals[name] = (
-                param,
-                collected,
-                original_placements,
-                original_device_mesh,
-                local_replicated,
-                working_local,
-            )
-            _set_parameter(module, name, nn.Parameter(working_local))
-        else:
-            originals[name] = (
-                param,
-                collected,
-                original_placements,
-                original_device_mesh,
-                None,
-                None,
-            )
-            _set_parameter(module, name, nn.Parameter(local_replicated))
+        on_cpu = local_replicated.device.type == "cpu" and torch.cuda.is_available()
+        working = local_replicated.to(torch.cuda.current_device()) if on_cpu else local_replicated
+        cpu_mirror = local_replicated if on_cpu else None
+        originals[name] = (
+            param,
+            collected,
+            original_placements,
+            original_device_mesh,
+            cpu_mirror,
+            working,
+        )
+        _set_parameter(module, name, nn.Parameter(working))
 
     yield
 
