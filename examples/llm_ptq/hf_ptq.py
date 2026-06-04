@@ -318,7 +318,7 @@ def auto_quantize(
 
     assert not (args.auto_quantize_bits and args.use_fsdp2), (
         "Auto Quantization is not supported with --use_fsdp2: mtq.auto_quantize "
-        "is invoked after fsdp2_shard has frozen every parameter."
+        "is invoked after FSDP2 loading has frozen every parameter."
     )
 
     qformat_list = args.qformat.split(",")
@@ -803,13 +803,11 @@ def export_quantized(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
             else:
-                mtp_state_dict = None
-                if not args.use_fsdp2:
-                    mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
-                        full_model, args.pyt_ckpt_path
-                    )
-                    if mtp_layer_prefixes:
-                        full_model._mtp_layer_prefixes = mtp_layer_prefixes
+                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
+                    full_model, args.pyt_ckpt_path
+                )
+                if mtp_layer_prefixes:
+                    full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
                 export_hf_checkpoint(
                     full_model,
@@ -1375,23 +1373,15 @@ def parse_args() -> argparse.Namespace:
         "--use_fsdp2",
         action="store_true",
         help=(
-            "Run calibration under PyTorch FSDP2 (requires launching with torchrun). "
-            "Takes precedence over --use_seq_device_map. "
-            "v1 limitations: standard causal-LM only (no VILA / pack-quantized / speculative / "
-            "auto-quantize / sparsity / VLM). Rank 0 holds the full model in CPU briefly "
-            "during the broadcast step; other ranks pay ~0 CPU."
+            "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
+            "--use_seq_device_map. v1: standard causal-LM only (no VILA / pack-quantized / "
+            "speculative / auto-quantize / sparsity / VLM / MTP)."
         ),
     )
     parser.add_argument(
         "--cpu_offload",
         action="store_true",
-        help=(
-            "Only valid with --use_fsdp2. Attach FSDP2's CPUOffloadPolicy so each "
-            "rank's decoder shard lives on CPU between forwards (streamed to GPU "
-            "per-layer). Frees GPU memory at the cost of PCIe traffic per layer per "
-            "batch. Worth it for trillion-param models or tight-GPU setups; usually "
-            "slows down runs where the model already fits comfortably."
-        ),
+        help="With --use_fsdp2, keep decoder shards on CPU between forwards (frees GPU memory, adds PCIe traffic).",
     )
     parser.add_argument(
         "--verbose",

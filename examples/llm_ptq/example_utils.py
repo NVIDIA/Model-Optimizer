@@ -42,9 +42,13 @@ from transformers import (
 )
 
 try:
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import snapshot_download, try_to_load_from_cache
 except ImportError:
     snapshot_download = None
+    try_to_load_from_cache = None
+
+from modelopt.torch.utils import distributed as dist_utils
+from modelopt.torch.utils.model_load_utils import parallel_load_and_prepare_fsdp2
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +57,6 @@ SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 def setup_distributed_args(args):
     """Set ``args.rank``/``world_size``/``device``/``is_main`` (single-process if FSDP2 off)."""
-    from modelopt.torch.utils import distributed as dist_utils
-
     if getattr(args, "use_fsdp2", False):
         dist_utils.setup()
         args.rank = dist_utils.rank()
@@ -69,8 +71,6 @@ def setup_distributed_args(args):
 
 def cleanup_distributed(args):
     """Destroy the process group if ``--use_fsdp2`` set it up."""
-    from modelopt.torch.utils import distributed as dist_utils
-
     if getattr(args, "use_fsdp2", False):
         dist_utils.cleanup()
 
@@ -78,12 +78,11 @@ def cleanup_distributed(args):
 def _checkpoint_has_mtp_weights(model_path: str) -> bool:
     """Return True if the checkpoint's safetensors index advertises MTP weights."""
     candidates = [Path(model_path) / "model.safetensors.index.json"]
-    try:
-        from huggingface_hub import try_to_load_from_cache
-
-        cached = try_to_load_from_cache(model_path, "model.safetensors.index.json")
-    except ImportError:
-        cached = None
+    cached = (
+        try_to_load_from_cache(model_path, "model.safetensors.index.json")
+        if try_to_load_from_cache is not None
+        else None
+    )
     if cached:
         candidates.append(Path(cached))
     for index_file in candidates:
@@ -134,14 +133,12 @@ def load_and_prepare_fsdp2_model(
     cpu_offload: bool = False,
     attn_implementation: str | None = None,
 ):
-    """Validate CLI constraints, then delegate to :func:`load_fsdp2_causal_lm`."""
-    from modelopt.torch.utils.distributed import load_fsdp2_causal_lm
-
+    """CLI wrapper: validate against example-script policy, then delegate to the core loader."""
     if args is not None:
         hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
         validate_fsdp2_supported(args, hf_config)
 
-    return load_fsdp2_causal_lm(
+    return parallel_load_and_prepare_fsdp2(
         ckpt_path,
         device,
         rank,

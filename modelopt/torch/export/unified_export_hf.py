@@ -1222,25 +1222,9 @@ def export_hf_checkpoint(
 
         # Under torch.distributed: only rank 0 writes; others sync at the barrier below.
         is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
-        if is_distributed:
-            rank = torch.distributed.get_rank()
-            populated = bool(post_state_dict)
-            if rank == 0 and not populated:
-                raise RuntimeError(
-                    "Expected rank 0 to receive a populated state_dict from "
-                    "_export_transformers_checkpoint under FSDP2 export; got empty. "
-                    "Check that StateDictOptions(broadcast_from_rank0=True) is honored "
-                    "by this PyTorch's get_model_state_dict."
-                )
-            if rank != 0 and populated:
-                raise RuntimeError(
-                    f"Expected rank {rank} to receive an empty state_dict from "
-                    "_export_transformers_checkpoint under FSDP2 export (broadcast_from_rank0=True); "
-                    "got populated. PyTorch's get_model_state_dict semantics may have changed."
-                )
-            if rank != 0:
-                torch.distributed.barrier()
-                return
+        if is_distributed and torch.distributed.get_rank() != 0:
+            torch.distributed.barrier()
+            return
 
         # Only treat the export as quantized when at least one quant_algo field is set.
         # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
