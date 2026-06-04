@@ -374,19 +374,6 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 
 ### Usage
 
-Single-node (multiple GPUs):
-
-```bash
-torchrun --standalone --nproc_per_node=<num_gpus> hf_ptq.py \
-    --pyt_ckpt_path <path_to_model> \
-    --qformat <fp8/nvfp4/nvfp4_max/nvfp4_max_layerwise/...> \
-    --kv_cache_qformat <fp8/nvfp4/nvfp4_affine/none> \
-    --batch_size <calib_batch_size> \
-    --calib_size <num_calib_samples> \
-    --export_path <export_path> \
-    --use_fsdp2
-```
-
 Multi-node (run on each node):
 
 ```bash
@@ -403,8 +390,6 @@ torchrun \
     --export_path <export_path> \
     --use_fsdp2
 ```
-
-For layerwise calibration (amortizes cross-node all-gather cost across all calibration batches), use `--qformat nvfp4_max_layerwise`.
 
 The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
 
