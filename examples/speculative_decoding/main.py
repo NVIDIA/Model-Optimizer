@@ -276,13 +276,10 @@ def train():
         and recipe.eagle.eagle_base_lora_warmup_steps > 0
     ):
         callbacks.append(LoRAWarmupCallback(recipe.eagle.eagle_base_lora_warmup_steps))
-    # NB: do NOT set training_args.ignore_data_skip for streaming. The dataset is
-    # map-style, so HF Trainer's resume skip goes through accelerate.skip_first_batches,
-    # which drops the already-consumed indices at the batch-sampler level -- those
-    # indices never reach __getitem__, so no hidden states are re-fetched from the
-    # server. Resume therefore lands at the exact data position for free (correct even
-    # when a single epoch is split across many checkpointed segments). ignore_data_skip
-    # would instead restart the data order from the top, silently re-running data.
+    # Leave training_args.ignore_data_skip at its default (False). The dataset is
+    # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
+    # level (accelerate.skip_first_batches) without re-fetching them, landing at the
+    # exact data position. Setting it True would restart the data order from the top.
 
     trainer = EagleTrainerWithAccLog(
         model=model,

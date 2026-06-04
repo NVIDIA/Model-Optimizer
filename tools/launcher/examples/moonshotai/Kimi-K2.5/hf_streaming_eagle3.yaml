@@ -1,12 +1,9 @@
-# EAGLE3 streaming speculative decoding for Kimi-K2.5-NVFP4 on GB200/Blackwell
-# (HSG). This is the streaming config that actually runs end-to-end: on CW H100
-# the ~551 GB model needed cpu-offload (-> ~1 tok/s -> vLLM EngineCore
-# TimeoutError), so the working path is GB200.
+# EAGLE3 streaming speculative decoding for Kimi-K2.5-NVFP4 on GB200/Blackwell (HSG).
 #
-# Why GB200: nodes have only 4 GPUs each (vs CW's 8), but 192 GB/GPU and native
-# NVFP4. Kimi-K2.5-NVFP4 (~551 GB) fits at TP=4 on ONE node (4 x 192 = 768 GB,
-# ~138 GB/GPU of weights) with NO cpu-offload. So here: node 0 = vllm serve
-# (TP=4, whole node), node 1 = EAGLE3 trainer (fake base), 4 GPUs each, 2 nodes.
+# Requires GB200: native NVFP4 + 192 GB/GPU lets the ~551 GB model fit at TP=4 on ONE
+# 4-GPU node with no cpu-offload (on H100 it needs offload and is too slow to be
+# usable). Topology: node 0 = vllm serve (TP=4, whole node), node 1 = EAGLE3 trainer
+# (fake base); 4 GPUs each, 2 nodes.
 #
 # Capture ids: kimi_k25 (deepseek_v3 arch), 61 layers. aux states are indexed
 # by layer INPUT (0..60); the final layer is NOT capturable, so the base is 60.

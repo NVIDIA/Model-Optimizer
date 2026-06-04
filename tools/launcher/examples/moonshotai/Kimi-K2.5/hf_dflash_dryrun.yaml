@@ -9,27 +9,25 @@
 #                                            the (untrained) ModelOpt checkpoint
 #                                            to training.output_dir right after
 #                                            mtsp.convert(model, [("dflash", ...)])
-#   data.offline_data_path=<placeholder>   → DataArguments derives data.mode from
-#                                            the data-source fields, so setting an
-#                                            offline path makes mode='offline' →
-#                                            use_offline_training=True. Combined
-#                                            with use_fake_base_for_offline=true
-#                                            this loads a FakeBaseModel (only
+#   data.offline_data_path=<placeholder>   → setting an offline path makes
+#                                            mode='offline' → use_offline_training
+#                                            =True. Combined with
+#                                            use_fake_base_for_offline=true this
+#                                            loads a FakeBaseModel (only
 #                                            embed_tokens + lm_head), so the ~1T
 #                                            MoE base fits on a single GPU. The
 #                                            file is never read in --dry_run mode.
 #   model.trust_remote_code=true           → Kimi-K2.5 (deepseek_v3 arch) ships a
 #                                            custom modeling file
-#   dflash.dflash_mask_token_id=163838     → Kimi-K2.5 has no dedicated mask token
-#                                            ([EOS]=163585, [PAD]=163839); 163838 is
-#                                            a reserved slot used as the DFlash mask
-#                                            (matches the real Kimi-K2.5 DFlash run)
+#   dflash.dflash_mask_token_id=163838     → Kimi-K2.5 has no dedicated mask token;
+#                                            163838 is a reserved slot used as the
+#                                            DFlash mask
 #
 # The dflash_online_training.sh export block then writes an HF-format DFlash draft
 # to /scratchspace/dflash/exported-checkpoint-final with the correct architecture
 # (5-layer draft block, block_size=8) but untrained weights — acceptance ~0%, by
 # design. Useful for smoke-testing the launcher / convert / export plumbing and
-# validating downstream loaders without paying for a real training run.
+# validating downstream loaders without a real training run.
 #
 # Usage:
 #   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_dflash_dryrun.yaml --yes

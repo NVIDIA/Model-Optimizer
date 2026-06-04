@@ -61,22 +61,12 @@ fi
 # Multi-node routing args (accelerate only; training config comes from the YAML)
 MULTI_NODE_ARGS=()
 if [[ "$NUM_NODES" != "1" ]]; then
-  # machine_rank: caller may pass --machine_rank explicitly (needed when the
-  # SLURM allocation reserves node 0 for something else, e.g. the streaming
-  # vllm serve, so SLURM_PROCID is offset from accelerate's 0-based rank).
-  # Default to $SLURM_PROCID for the all-nodes-are-trainers case.
-  # Canonical accelerate multi-node launch for a fixed Slurm allocation:
-  # --multi_gpu + static rendezvous via main_process_ip/port (-> MASTER_ADDR/PORT).
-  #
-  # --multi_gpu is REQUIRED: with 1 GPU/node, each node's local process count is
-  # num_processes/num_machines = 1, and without --multi_gpu accelerate treats a
-  # single local process as non-distributed -- it never sets WORLD_SIZE/RANK or
-  # forms the process group, so every node trains the full dataset as its own
-  # world=1 (no hang, no real DDP). --multi_gpu forces DistributedType.MULTI_GPU
-  # so the nodes rendezvous into one world=$TOTAL_GPU group.
-  #
-  # Do NOT add --rdzv_backend c10d: that switches to the elastic launcher, which
-  # reads its endpoint from --rdzv_endpoint and ignores --main_process_ip.
+  # machine_rank defaults to $SLURM_PROCID; pass --machine_rank explicitly when the
+  # allocation reserves node 0 for something else (e.g. a streaming vllm serve).
+  # --multi_gpu is required even at 1 GPU/node -- without it accelerate treats a lone
+  # local process as non-distributed and never forms the process group (each node
+  # would train its own world=1). Use static rendezvous via main_process_ip/port; NOT
+  # --rdzv_backend c10d, which switches to the elastic launcher and ignores it.
   MULTI_NODE_ARGS=(
     --multi_gpu
     --num_processes "$TOTAL_GPU"
@@ -89,10 +79,8 @@ fi
 
 export TOKENIZERS_PARALLELISM=False
 
-# Build the argv directly (no `sh -c`): a re-parsed command string would word-split
-# overrides that contain spaces (e.g. training.output_dir=/tmp/has space) and would
-# execute command substitutions embedded in override values. An array preserves each
-# argument boundary verbatim.
+# Run as an argv array (not `sh -c "..."`, which would word-split overrides
+# containing spaces and execute command substitutions embedded in their values).
 CMD=(accelerate launch --mixed_precision bf16
      "${MULTI_NODE_ARGS[@]}"
      "${SCRIPT_DIR}/main.py" --config "$CONFIG_FILE" "${EXTRA_ARGS[@]}")

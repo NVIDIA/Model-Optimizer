@@ -6,9 +6,8 @@
 # (world_size=8). Tune the split via slurm_config.nodes/segment + SERVE_NODES:
 #   nodes=N, SERVE_NODES=K  ->  K serve replicas + (N-K) trainer nodes.
 #
-# Why GB200: nodes have only 4 GPUs each (vs CW's 8), but 192 GB/GPU and native
-# NVFP4. Kimi-K2.5-NVFP4 (~551 GB) fits at TP=4 on ONE node (4 x 192 = 768 GB,
-# ~138 GB/GPU of weights) with NO cpu-offload. So each serve replica owns a whole
+# Why GB200: native NVFP4 + 192 GB/GPU lets the ~551 GB Kimi-K2.5-NVFP4 model fit
+# at TP=4 on ONE 4-GPU node with no cpu-offload. So each serve replica owns a whole
 # node at TP=4, and each trainer node uses all 4 GPUs for the draft (fake base).
 #
 # Topology (see common/eagle3/train_eagle_streaming.sh header for the dispatch):
@@ -18,29 +17,24 @@
 # segment=<nodes> pins all nodes into one NVL72 block so inter-node DDP traffic
 # rides NVLink.
 #
-# How it scales (map-style dataset, NOT the old rank-0-fetch+broadcast): HF
-# Trainer's DistributedSampler shards the corpus across ALL trainer ranks and each
-# rank fetches ONLY its own shard, round-robin across the K serve replicas
-# (data.streaming_server_url is the comma-joined list the script assembles). So
-# trainer nodes scale effective batch / compute and distribute the lustre reads;
-# serve nodes scale data-production throughput (~K x), lifting the single-serve
-# ceiling that bounded the old single-serve multi-node path.
+# How it scales: HF Trainer's DistributedSampler shards the corpus across ALL
+# trainer ranks and each rank fetches ONLY its own shard, round-robin across the K
+# serve replicas (data.streaming_server_url is the comma-joined list the script
+# assembles). Trainer nodes scale effective batch / compute and distribute the
+# lustre reads; serve nodes scale data-production throughput (~K x).
 #
-# Concurrency (must stay low for cold NVFP4 MoE — see SERVE_MAX_NUM_SEQS below):
-# per-serve in-flight requests = world_size x STREAMING_NUM_WORKERS / SERVE_NODES
-# = 8 x 1 / 2 = 4, matching SERVE_MAX_NUM_SEQS=4. Flooding a cold NVFP4-MoE server
-# stalls a worker past vLLM's execute-model timeout and kills EngineCore.
+# Concurrency: keep it low for cold NVFP4 MoE (see SERVE_MAX_NUM_SEQS below).
+# Per-serve in-flight requests = world_size x STREAMING_NUM_WORKERS / SERVE_NODES
+# = 8 x 1 / 2 = 4, matching SERVE_MAX_NUM_SEQS=4.
 #
-# How streaming feeds DFlash (vs EAGLE3): the trainer's streaming path was wired
-# up for DFlash by deriving dflash_offline from data.mode (modelopt/recipe/config.py
-# ModelOptDFlashRecipe._derive_dflash_offline), so data.mode=streaming sets
-# dflash_offline=True and the DFlash module consumes the streamed hidden states
-# (base_model_outputs) instead of running the fake base. The vLLM connector,
-# streaming dataset, and offline collator are all algorithm-agnostic: vLLM dumps
-# captured layers as [seq, n_captured, hidden]; the dataset splits the LAST
-# captured layer into base_model_hidden_states (used for DFlash self-logit
-# distillation) and the REST into aux_hidden_states (DFlash's concatenated
-# target-layer features). So n_captured must be (num DFlash target layers + 1).
+# How streaming feeds DFlash: data.mode=streaming derives dflash_offline=True
+# (modelopt/recipe/config.py ModelOptDFlashRecipe._derive_dflash_offline), so the
+# DFlash module consumes the streamed hidden states (base_model_outputs) instead of
+# running the fake base. vLLM dumps captured layers as [seq, n_captured, hidden];
+# the dataset splits the LAST captured layer into base_model_hidden_states (DFlash
+# self-logit distillation) and the REST into aux_hidden_states (DFlash's
+# concatenated target-layer features). So n_captured must be (num DFlash target
+# layers + 1).
 #
 # Capture ids (kimi_k25 / deepseek_v3 arch, 61 layers, capture id space 0..60;
 # the true final layer is NOT capturable so we use 60 as the base, same as EAGLE3):
@@ -130,24 +124,20 @@ pipeline:
       - SERVE_TP: "4"
       # DataLoader workers per trainer rank = in-flight requests per rank. Keep at 1:
       # per-serve in-flight = world_size(8) x 1 / SERVE_NODES(2) = 4 = SERVE_MAX_NUM_SEQS.
-      # A wider flood stalls a cold NVFP4-MoE worker past vLLM's engine<->worker
-      # timeout, killing EngineCore (TimeoutError) mid-serve -> 500s -> trainer abort.
       - STREAMING_NUM_WORKERS: "1"
       # DFlash on a custom-modeling base (Kimi) needs --trust_remote_code at export.
       - EXPORT_EXTRA_ARGS: "--trust_remote_code"
-      # Kimi-K2.5-NVFP4 ~138 GB weights/GPU at TP=4; GB200 has 184 GB. The model's
-      # native max_seq_len is 262144, whose KV cache OOMs. Cap context to the
-      # training seq len and leave headroom for activation spikes.
+      # The model's native max_seq_len is 262144, whose KV cache OOMs. Cap context
+      # to the training seq len and leave headroom for activation spikes.
       - SERVE_MAX_MODEL_LEN: "4096"
       # Small batches: smaller per-step MoE compute stays under the engine timeout.
       - SERVE_MAX_NUM_SEQS: "4"
       - SERVE_GPU_MEM_UTIL: "0.8"
       - SERVE_READY_TIMEOUT: "2400"
       - SERVE_EXTRA_ARGS: "--trust-remote-code"
-      # The killer was "RPC call to sample_tokens timed out" — a worker stalls on
-      # the first real serving step (cold NVFP4 MoE kernels) past vLLM's default
-      # execute-model timeout, so EngineCore dies. Extend the timeouts that govern
-      # that path (seconds). VLLM_RPC_TIMEOUT (ms) is a different RPC and didn't help.
+      # A worker can stall on the first real serving step (cold NVFP4 MoE kernels)
+      # past vLLM's default execute-model timeout, killing EngineCore. Extend the
+      # timeouts that govern that path (seconds).
       - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
       - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
     slurm_config:

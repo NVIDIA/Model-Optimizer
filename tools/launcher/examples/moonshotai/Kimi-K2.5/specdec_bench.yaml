@@ -6,10 +6,8 @@
 # aa_timing.json + acceptance_rate.json + mtbench.json + specbench_responses.jsonl
 # to /scratchspace/specdec_bench/.
 #
-# Hardware = GB200/Blackwell (HSG), same reasoning as hf_streaming_eagle3.yaml:
-# Kimi-K2.5-NVFP4 (~551 GB) needs native NVFP4 + the 192 GB/GPU of GB200; it fits
-# at TP=4 on ONE 4-GPU node with no cpu-offload. On CW H100 it has no native FP4
-# and falls back to offload, so the working path is GB200.
+# Requires GB200/Blackwell (HSG): Kimi-K2.5-NVFP4 (~551 GB) needs native NVFP4 + the
+# 192 GB/GPU of GB200 to fit at TP=4 on ONE 4-GPU node with no cpu-offload.
 #
 # DFLASH specifics:
 #   - draft tokens default to 8 in specdec_bench (matches DFlash block_size=8);

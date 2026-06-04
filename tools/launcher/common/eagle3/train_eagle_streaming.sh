@@ -23,7 +23,7 @@
 # `nodes:` field) and $SERVE_NODES; nemo_run runs this script once per node, so it
 # branches on $SLURM_NODEID:
 #   nodes == 1       -> co-located: vllm serve on $SERVE_GPU, trainer on the rest
-#                       of the local GPUs (original single-node behavior).
+#                       of the local GPUs.
 #   nodes >= 2       -> split: Slurm nodes 0..SERVE_NODES-1 each run an independent
 #                       vllm serve replica (whole node); nodes SERVE_NODES..NNODES-1
 #                       are trainers doing multi-node DDP. SERVE_NODES defaults to 1
@@ -36,8 +36,8 @@
 # The streaming dataset is map-style: HF Trainer's DistributedSampler shards the
 # corpus across all trainer ranks and each rank fetches ONLY its own shard,
 # round-robin across the SERVE_NODES replicas (data.streaming_server_url is the
-# comma-joined list). So trainer nodes scale effective batch / compute and
-# distribute the reads; serve nodes scale data-production throughput (~K x).
+# comma-joined list). Trainer nodes scale compute and distribute the reads; serve
+# nodes scale data-production throughput.
 #
 # Env vars (required):
 #   HF_MODEL_CKPT       Target model path. Used by both vllm serve (as the
@@ -79,14 +79,12 @@ source "${SCRIPT_DIR}/../service_utils.sh"
 # Container provisioning
 #
 # vllm/vllm-openai:* has vllm and torch but not modelopt or the speculative
-# trainer's deps. modelopt is bind-mounted at
-# /usr/local/lib/python3.12/dist-packages/modelopt, but it has no .dist-info
-# (so `importlib.metadata.version('nvidia-modelopt')` would fail). nemo_run
-# only ships modelopt subdirs, not the real pyproject.toml, so we synthesize
-# a minimal one with a correctly-scoped setuptools.packages.find include —
-# without `include = ["modelopt*"]`, setuptools sees both `modelopt/` and
-# `modelopt_recipes/` at the top level and refuses with a "flat-layout"
-# error. We then `pip install -e .` to register the dist-info.
+# trainer's deps. modelopt is bind-mounted but has no .dist-info (so
+# `importlib.metadata.version('nvidia-modelopt')` would fail), and nemo_run does
+# not ship the real pyproject.toml, so we synthesize a minimal one and
+# `pip install -e .` to register the dist-info. The setuptools.packages.find
+# `include` must be scoped (modelopt*, modelopt_recipes*) or setuptools sees two
+# top-level packages and fails with a "flat-layout" error.
 
 TOML=modules/Model-Optimizer/pyproject.toml
 if [ ! -f "$TOML" ]; then
@@ -144,13 +142,13 @@ SERVE_NODES="${SERVE_NODES:-1}"
 # by a unique vllm request id, so they don't collide across servers.
 SERVE_SCRATCH="/scratchspace/streaming_serve_scratch"
 SERVE_LOG="/scratchspace/vllm_serve.log"   # serve nodes override with a per-node path
-# Rendezvous over the shared /scratchspace mount (lustre, visible on every node):
-# each serve node i publishes its address to ${SERVE_ADDR_FILE}.i; the head trainer
-# signals completion via DONE_FILE; trainers collect all serve addresses.
+# Rendezvous over the shared /scratchspace mount (visible on every node): each serve
+# node i publishes its address to ${SERVE_ADDR_FILE}.i; the head trainer signals
+# completion via DONE_FILE; trainers collect all serve addresses.
 # Namespace the rendezvous/sentinel files per Slurm job so concurrent allocations on
 # the same shared mount don't read/write each other's addresses. SLURM_JOB_ID is
-# identical across every node of one allocation (so the namespacing is consistent)
-# and unique across allocations; falls back to a fixed token off-Slurm (single run).
+# identical across every node of one allocation and unique across allocations; falls
+# back to a fixed token off-Slurm (single run).
 RUN_ID="${SLURM_JOB_ID:-local}"
 SERVE_ADDR_FILE="/scratchspace/.serve_addr.${RUN_ID}"
 DONE_FILE="/scratchspace/.training_done.${RUN_ID}"
@@ -199,11 +197,9 @@ launch_vllm() {
     # features skip recomputing cached/partial prefixes, which yields short or
     # empty hidden_states. Required, not optional.
     # --no-enable-flashinfer-autotune: on big NVFP4 MoE (Kimi) the flashinfer
-    # trtllm_fp4_block_scale_moe autotuner re-tunes on the first real serving
-    # step and stalls a worker past vLLM's execute-model timeout -> EngineCore
-    # dies with "RPC call to sample_tokens timed out" -> 500s -> trainer aborts.
-    # Disabling autotune keeps kernels static (and pairs with the larger
-    # VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS set in the example env).
+    # autotuner re-tunes on the first real serving step and stalls a worker past
+    # vLLM's execute-model timeout, killing EngineCore and aborting the trainer.
+    # Required there; keeps kernels static.
     "${gpu_env[@]}" vllm serve "$HF_MODEL_CKPT" \
         --host "$bind_host" \
         --port "$SERVE_PORT" \
@@ -249,22 +245,21 @@ wait_vllm_ready() {
 
 # Run the trainer then export the HF checkpoint.
 #   $1 = streaming server base URL   $2 = CUDA_VISIBLE_DEVICES ("" -> all)
-# The streaming dataset is map-style now, so fetch concurrency comes from the
-# DataLoader's workers (each worker = one in-flight request). STREAMING_NUM_WORKERS
-# sets that; keep it modest so (ranks-per-server x workers) stays near the server's
-# max_num_seqs (flooding a cold NVFP4 MoE server kills EngineCore). 0 disables
-# prefetch (serialized fetches) and is usually too slow.
+# Fetch concurrency comes from the DataLoader's workers (each worker = one in-flight
+# request). STREAMING_NUM_WORKERS sets that; keep it modest so (ranks-per-server x
+# workers) stays near the server's max_num_seqs (flooding a cold NVFP4 MoE server
+# kills EngineCore). 0 disables prefetch (serialized fetches) and is usually too slow.
 run_trainer_and_export() {
     local url="$1" cvd="$2"
-    # Optional multi-node trainer routing (see dispatch section). Defaults keep
-    # the original single-trainer-node behavior: no --num_nodes, export on rank 0.
+    # Optional multi-node trainer routing (see dispatch section). Defaults: single
+    # trainer node, no --num_nodes, export on rank 0.
     local num_tnodes="${3:-1}" head_ip="${4:-}" mrank="${5:-0}"
     echo "Launching trainer (server=${url}, CUDA_VISIBLE_DEVICES=${cvd:-all}, trainer_nodes=${num_tnodes}, machine_rank=${mrank})..."
     # Empty cvd -> use all GPUs on the node (don't set the var; "" would hide all).
     local -a gpu_env=()
     [ -n "$cvd" ] && gpu_env=(env "CUDA_VISIBLE_DEVICES=$cvd")
     # Engage accelerate multi-node routing only when >1 trainer node; a single
-    # trainer node keeps the original invocation (no --num_nodes) verbatim.
+    # trainer node omits --num_nodes.
     local -a mn_args=()
     if [ "${num_tnodes}" -gt 1 ]; then
         mn_args=(--num_nodes "$num_tnodes" --head_node_ip "$head_ip" --machine_rank "$mrank")

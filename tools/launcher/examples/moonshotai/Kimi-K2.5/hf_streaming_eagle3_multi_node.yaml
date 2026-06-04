@@ -6,12 +6,9 @@
 # via slurm_config.nodes/segment + SERVE_NODES:
 #   nodes=N, SERVE_NODES=K  ->  K serve replicas + (N-K) trainer nodes.
 #
-# Why GB200: nodes have only 4 GPUs each (vs CW's 8), but 192 GB/GPU and native
-# NVFP4. Kimi-K2.5-NVFP4 (~551 GB) fits at TP=4 on ONE node (4 x 192 = 768 GB,
-# ~138 GB/GPU of weights) with NO cpu-offload. On CW H100 the model needed
-# cpu-offload (-> ~1 tok/s -> vLLM EngineCore TimeoutError), so GB200 is the
-# working path. Each serve replica owns a whole node at TP=4; each trainer node
-# uses all 4 GPUs for the draft (fake base).
+# Requires GB200: native NVFP4 + 192 GB/GPU lets the ~551 GB model fit at TP=4 on ONE
+# 4-GPU node with no cpu-offload. Each serve replica owns a whole node at TP=4; each
+# trainer node uses all 4 GPUs for the draft (fake base).
 #
 # Topology (see common/eagle3/train_eagle_streaming.sh header for the dispatch):
 # Slurm nodes 0..K-1 each serve and publish their address via /scratchspace; nodes
@@ -20,13 +17,12 @@
 # segment=<nodes> pins all nodes into one NVL72 block so inter-node DDP traffic
 # rides NVLink.
 #
-# How it scales (map-style dataset, NOT the old rank-0-fetch+broadcast): HF
-# Trainer's DistributedSampler shards the corpus across ALL trainer ranks and each
-# rank fetches ONLY its own shard, round-robin across the K serve replicas
-# (data.streaming_server_url is the comma-joined list the script assembles). So
-# trainer nodes scale effective batch / compute and distribute the lustre reads;
-# serve nodes scale data-production throughput (~K x), lifting the single-serve
-# ceiling.
+# How it scales: the dataset is map-style, so HF Trainer's DistributedSampler shards
+# the corpus across ALL trainer ranks and each rank fetches ONLY its own shard,
+# round-robin across the K serve replicas (data.streaming_server_url is the
+# comma-joined list the script assembles). So trainer nodes scale effective batch /
+# compute and distribute the lustre reads; serve nodes scale data-production
+# throughput (~K x), lifting the single-serve ceiling.
 #
 # Concurrency (must stay low for cold NVFP4 MoE — see SERVE_MAX_NUM_SEQS below):
 # per-serve in-flight requests = world_size x STREAMING_NUM_WORKERS / SERVE_NODES

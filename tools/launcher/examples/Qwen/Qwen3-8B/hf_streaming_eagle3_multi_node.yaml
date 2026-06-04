@@ -15,9 +15,8 @@
 # How it scales: the dataset is map-style, so HF Trainer's DistributedSampler
 # shards the corpus across ALL trainer ranks and each rank fetches ONLY its own
 # shard, round-robin across the K serve replicas (data.streaming_server_url is the
-# comma-joined list). Trainer nodes scale effective batch / compute and distribute
-# the lustre reads; serve nodes scale data-production throughput (~K x), lifting
-# the single-serve ceiling.
+# comma-joined list). Trainer nodes scale effective batch / compute; serve nodes
+# scale data-production throughput (~K x).
 #
 # 3-step pipeline:
 #   task_0: Build input conversations (jsonl)
@@ -79,8 +78,8 @@ pipeline:
       # K serve replica nodes (Slurm nodes 0..K-1); the rest are trainers.
       - SERVE_NODES: "2"
       # Per-serve in-flight requests = (trainer ranks) x STREAMING_NUM_WORKERS / SERVE_NODES.
-      # Here 4 ranks (2 nodes x 2 GPU) x 4 / 2 serves = 8 concurrent per serve — fine
-      # for Qwen's max_num_seqs.
+      # Here 4 ranks x 4 / 2 serves = 8 concurrent per serve — fine for Qwen's
+      # max_num_seqs.
       - STREAMING_NUM_WORKERS: "4"
     slurm_config:
       _factory_: "slurm_factory"
