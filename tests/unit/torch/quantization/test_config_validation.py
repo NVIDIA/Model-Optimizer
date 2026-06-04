@@ -18,6 +18,7 @@
 import pytest
 from pydantic import ValidationError
 
+from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 from modelopt.torch.quantization.config import (
     FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     FP8_DEFAULT_CFG,
@@ -438,8 +439,6 @@ class TestMatchQuantizerCfg:
 
     def test_wildcard_matches_bare_name(self):
         """'*weight_quantizer' matches bare 'weight_quantizer'."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
@@ -449,8 +448,6 @@ class TestMatchQuantizerCfg:
 
     def test_star_matches_any_bare_name(self):
         """'*' matches any bare quantizer name."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list([{"quantizer_name": "*", "enable": False}])
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
         assert matched is None  # enable-only entry has cfg=None
@@ -458,8 +455,6 @@ class TestMatchQuantizerCfg:
 
     def test_path_scoped_pattern_matches_matching_suffix(self):
         """'*mlp*weight_quantizer' matches bare 'weight_quantizer' (suffix match)."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
@@ -468,8 +463,6 @@ class TestMatchQuantizerCfg:
 
     def test_path_scoped_pattern_does_not_match_different_suffix(self):
         """'*mlp*weight_quantizer' does NOT match bare 'input_quantizer'."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
@@ -479,8 +472,6 @@ class TestMatchQuantizerCfg:
 
     def test_last_match_wins(self):
         """Later entries override earlier ones."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [
                 {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
@@ -492,8 +483,6 @@ class TestMatchQuantizerCfg:
 
     def test_no_match_returns_none(self):
         """No matching entry returns (None, None)."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
@@ -503,8 +492,6 @@ class TestMatchQuantizerCfg:
 
     def test_bracket_pattern_matches_correctly(self):
         """'*[kv]_bmm_quantizer' matches 'k_bmm_quantizer' and 'v_bmm_quantizer'."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3)}}]
         )
@@ -521,8 +508,6 @@ class TestMatchQuantizerCfg:
         Regression test: the old rsplit('*') logic would strip to 'weight_quantizer' and
         overmatch any quantizer ending in 'weight_quantizer', but should not match unrelated names.
         """
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [
                 {"quantizer_name": "*", "enable": False},

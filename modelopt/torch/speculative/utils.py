@@ -595,7 +595,21 @@ def load_vlm_or_llm(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
     )
-    if "vl" in model_config.model_type.lower():
+
+    # Detect VLMs: either "vl" in model_type (e.g. "llava") or has a nested text config
+    # (e.g. Mistral3Config with model_type="mistral3" and text_config attribute).
+    _is_vlm = "vl" in model_config.model_type.lower() or any(
+        getattr(model_config, attr, None) is not None for attr in ["text_config", "llm_config"]
+    )
+
+    if _is_vlm and use_offline_training:
+        # For VLMs in offline training, FakeBaseModel loads only embed_tokens + lm_head
+        # and auto-detects VLM weight key layouts (e.g. "language_model.model.embed_tokens").
+        from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
+
+        return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
+
+    if _is_vlm:
         model_cls = transformers.AutoModelForVision2Seq
     else:
         model_cls = transformers.AutoModelForCausalLM

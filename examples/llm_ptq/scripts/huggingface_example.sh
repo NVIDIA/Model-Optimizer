@@ -328,7 +328,7 @@ if [[ $TASKS =~ "livecodebench" || $TASKS =~ "simple_eval" ]]; then
 
     if [[ $TASKS =~ "simple_eval" ]]; then
         echo "Using the following config: max output $BUILD_MAX_OUTPUT_LEN max batch $BUILD_MAX_BATCH_SIZE"
-        bash run_simple_eval.sh $MODEL_NAME $SIMPLE_EVAL_TASKS $BUILD_MAX_OUTPUT_LEN $PORT | tee $SAVE_PATH/simple_eval.txt
+        bash run_simple_eval.sh $MODEL_NAME $SIMPLE_EVAL_TASKS $BUILD_MAX_OUTPUT_LEN $PORT $SIMPLE_EVAL_LIMIT | tee $SAVE_PATH/simple_eval.txt
         echo "Simple eval results are saved under $SAVE_PATH/simple_eval.txt."
     fi
 

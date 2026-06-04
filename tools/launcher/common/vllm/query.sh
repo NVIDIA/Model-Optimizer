@@ -41,7 +41,7 @@ source ${SCRIPT_DIR}/../service_utils.sh
 # vLLM notes:
 #   - vLLM manages GPU distribution internally; run with ntasks_per_node: 1
 #     in slurm_config and pass --tensor-parallel-size to match gpus_per_node.
-#   - NVFP4 models require vllm/vllm-openai:v0.15.0+ on Blackwell GPUs.
+#   - NVFP4 models require vllm/vllm-openai:v0.21.0+ on Blackwell GPUs.
 #   - Use --trust-remote-code for models with custom architectures (e.g. Kimi).
 #
 # In a pipeline YAML task config:

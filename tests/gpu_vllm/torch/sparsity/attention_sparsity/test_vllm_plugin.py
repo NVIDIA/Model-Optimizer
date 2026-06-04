@@ -30,9 +30,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
-pytest.importorskip("vllm")
-
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE

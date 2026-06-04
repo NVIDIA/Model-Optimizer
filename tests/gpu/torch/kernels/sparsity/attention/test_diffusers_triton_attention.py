@@ -18,12 +18,6 @@
 import pytest
 import torch
 
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::UserWarning"),
-    pytest.mark.filterwarnings("ignore::RuntimeWarning"),
-    pytest.mark.filterwarnings("ignore::DeprecationWarning"),
-]
-
 diffusers = pytest.importorskip("diffusers")
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE

@@ -1,6 +1,5 @@
 {
   "bos_token": "<|begin_of_text|>",
-  "chat_template": "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' %}Q: {{ message['content'] }}{% elif message['role'] == 'assistant' %}A: {{ message['content'] }}{% endif %}{{ eos_token }}{% endfor %}",
   "clean_up_tokenization_spaces": true,
   "eos_token": "<|eot_id|>",
   "pad_token": "<|eot_id|>",

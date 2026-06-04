@@ -19,7 +19,10 @@ the NVFP4 forward path uses a fused Triton kernel."""
 import pytest
 import torch
 
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export.quant_utils import get_weight_scaling_factor
 from modelopt.torch.quantization.calib import MseCalibrator
+from modelopt.torch.quantization.model_calib import mse_calibrate
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
 
 
@@ -59,9 +62,6 @@ def test_mixed_nvfp4_fp8_sweep_true_skips_fp8():
     """fp8_scale_sweep=True: NVFP4 layer is promoted to NVFP4StaticQuantizer; the
     FP8 layer is left as a plain TensorQuantizer (no backend factory registered →
     no MseCalibrator replacement, max-calibrated amax preserved)."""
-    import modelopt.torch.quantization as mtq
-    from modelopt.torch.quantization.model_calib import mse_calibrate
-
     device = torch.device("cuda")
     model = _TwoLayer().to(device)
     inputs = torch.randn(1, 16, device=device)
@@ -79,9 +79,6 @@ def test_mixed_nvfp4_fp8_sweep_false_uses_mse_for_both():
     """fp8_scale_sweep=False: both NVFP4 and FP8 layers get an MseCalibrator. NVFP4
     layer is still promoted to NVFP4StaticQuantizer (promotion is independent of
     the sweep flag)."""
-    import modelopt.torch.quantization as mtq
-    from modelopt.torch.quantization.model_calib import mse_calibrate
-
     device = torch.device("cuda")
     model = _TwoLayer().to(device)
     inputs = torch.randn(1, 16, device=device)
@@ -100,8 +97,6 @@ def test_output_layer_nvfp4_promotion_and_forward():
     NVFP4StaticQuantizer and its forward dispatches cleanly through the static
     blockwise FP4 kernel (regression for the lm_head crash that motivated the
     NVFP4 promotion in mse_calibrate)."""
-    import modelopt.torch.quantization as mtq
-    from modelopt.torch.quantization.model_calib import mse_calibrate
 
     class _WithOutputLayer(torch.nn.Module):
         def __init__(self):
@@ -146,9 +141,6 @@ def test_output_layer_nvfp4_promotion_and_forward():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 path requires CUDA")
 def test_output_layer_nvfp4_export_keys():
     """A W4A16-quantized output_layer exports with CT-style weight + scale keys."""
-    import modelopt.torch.quantization as mtq
-    from modelopt.torch.export.quant_utils import get_weight_scaling_factor
-    from modelopt.torch.quantization.model_calib import mse_calibrate
 
     class _OutputOnly(torch.nn.Module):
         def __init__(self):

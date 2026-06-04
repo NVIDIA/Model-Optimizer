@@ -75,10 +75,12 @@ def load_mbridge_model_from_hf(
             assert hasattr(provider, key), f"{type(provider)} does not have attribute {key}"
             setattr(provider, key, value)
 
-    # disable moe_grouped_gemm in default TE spec until its supported
+    # Only MoE models need their layer spec overridden to disable moe_grouped_gemm (not supported
+    # by pruning yet). Dense models keep the bridge's native spec, which is required for models
+    # with custom layers (e.g. Gemma3's gemma3_layer_spec) to be built correctly.
     if isinstance(provider, MambaModelProvider):
         provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
-    else:
+    elif (provider.num_moe_experts or 0) > 0:
         provider.transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
             num_experts=provider.num_moe_experts,
             moe_grouped_gemm=moe_grouped_gemm,

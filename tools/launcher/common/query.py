@@ -208,7 +208,7 @@ else:
     dataset = load_dataset(args.data, split=args.data_split)
 
 if args.num_shards * 100 > len(dataset):
-    args.num_shards = min(16, len(dataset) // 100)
+    args.num_shards = max(1, min(16, len(dataset) // 100))
 
 if args.save is not None:
     print(f"Create save dir: {args.save}")

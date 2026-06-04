@@ -77,6 +77,8 @@ nel skills build-config --execution <...> --deployment <...> --model_type <...> 
 
 **Model path.** Checkpoint path (`/`, `./`, `../`, `~`, or exists on disk) → set `deployment.checkpoint_path`, leave `hf_model_handle: null`. Else HF handle (one `/`, not on disk) → set `deployment.hf_model_handle`, leave `checkpoint_path: null`.
 
+> **Prefer `checkpoint_path` over `hf_model_handle` on SLURM** — `hf_model_handle` isn't reliably mounted at `/checkpoint`, so the deploy dies with `HFValidationError`. To eval an un-staged HF model, stage it first (`huggingface_hub.snapshot_download`) and point `checkpoint_path` at it. See `example_eval.yaml` for why.
+
 **Auto-detect ModelOpt quantization** (checkpoint paths). Check `config.json` for `quantization_config` (or legacy `hf_quant_config.json`):
 
 - **vLLM:** no `--quantization` flag by default — vLLM auto-detects from `quantization_config` / `hf_quant_config.json`. Add only when the card, vLLM version, or dry-run error requires it.
@@ -136,11 +138,13 @@ deployment:
     <... rest of cross-checked flags ...>
 ```
 
-Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
+Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--served-model-name ${deployment.served_model_name}` (**required**; see `example_eval.yaml` for why); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
 
 For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
 
 **Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
+
+> **NVFP4 on Blackwell B300/GB300 (sm_103): append `-cu130` to the image tag** (e.g. `vllm/vllm-openai:v0.19.1-cu130` — release tags are multi-arch). The default cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. If a pinned release predates the model's arch, use `cu130-nightly-<arch>` (Qwen3.5-9B's `qwen3_5` needed it, vLLM 0.19.2rc1.dev134). Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 
@@ -189,13 +193,40 @@ For quantized checkpoints, read `references/quantization-benchmarks.md` for sens
 
 Reasoning models: prefer reasoning mode (highest scores). For lower variance / cost / apples-to-apples vs non-reasoning baselines, also consider a non-reasoning companion run.
 
+#### Reasoning adapter config (`use_reasoning`)
+
+The `adapter_config` block in `example_eval.yaml` controls request/response
+logging and reasoning handling. `use_reasoning: true` strips the model's
+reasoning/CoT trace before scoring (grade only the final answer). Set per type:
+
+1. **Instruct → `use_reasoning: false`** and drop the `chat_template_kwargs`
+   thinking block (no trace to strip; can mangle plain responses).
+2. **Reasoning → `use_reasoning: true`**, especially when the deployment sets
+   `--reasoning-parser` (vLLM emits a separate reasoning channel to strip).
+3. **Hybrid (reasoning on *or* off) → turn it ON** (`use_reasoning: true` +
+   force the thinking flag in `chat_template_kwargs`). For the exact toggle key
+   (it drifts across generations) and the reasoning-effort policy, see
+   `references/model-card-research.md` → "Reasoning config".
+
 ---
 
 ### Step 4 — Fill remaining ??? values
 
+**Predefined per-cluster execution config (check FIRST).** Some installs ship `internal/slurm/<cluster>` execution groups (optional `nemo_evaluator_launcher_internal` pkg) that pre-fill hostname/partition/gres — leaving only account/output_dir/walltime. Discover at runtime (nothing cluster-specific hardcoded):
+
+```bash
+python3 -c 'import nemo_evaluator_launcher_internal' 2>/dev/null && \
+PKG=$(python3 -c 'import nemo_evaluator_launcher_internal as m,os;print(os.path.dirname(m.__file__))') && \
+for f in "$PKG"/configs/execution/internal/slurm/*.yaml; do \
+  echo "$(basename "$f" .yaml) -> $(grep -E '^hostname:' "$f" | awk '{print $2}')"; done
+```
+
+Hostname match → set `defaults: - execution: internal/slurm/<cluster>`, drop the redundant `execution.hostname` (keep account/output_dir/walltime), verify with `--dry-run`. Else keep `slurm/default` and fill hostname/account/output_dir manually.
+
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
+- **`execution.gres`** — auto-set if you used a predefined `internal/slurm/<cluster>` config (above). On the `slurm/default` fallback it's `gpu:8`, so set it to the node's GPU count (and match `--data-parallel-size`/`--tensor-parallel-size`) or `sbatch` rejects the job with *"Requested node configuration is not available"* (e.g. 4-GPU GB300 → `gres: gpu:4`; check with `sinfo -o '%P %G'`).
 
 **Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.
 
@@ -229,15 +260,21 @@ Implications for the agent:
 
 **Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness.
 
-**Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks with self-deployment (vLLM/SGLang/NIM), add at top level:
+**Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks (`ns_*`) with self-deployment (vLLM/SGLang/NIM), you need **both** of these:
 
 ```yaml
-target:
-  api_endpoint:
-    api_key_name: DUMMY_API_KEY
+evaluation:
+  env_vars:
+    DUMMY_API_KEY: lit:dummy   # MUST be set here — see below
+  nemo_evaluator_config:
+    target:
+      api_endpoint:
+        api_key_name: DUMMY_API_KEY
 ```
 
-External-deployment configs already define `api_key_name`. Export of `DUMMY_API_KEY` is handled in Step 8.
+`api_key_name` only names the env var; the nemo-skills client **hard-fails if that var has no value inside the eval container** (`ValueError: api_key_env_var=DUMMY_API_KEY but the value is not set`). On SLURM, a shell `export DUMMY_API_KEY=dummy` (Step 8) does **NOT** propagate into the container — NEL only injects vars declared in `env_vars`. So declare `DUMMY_API_KEY: lit:dummy` under `evaluation.env_vars` (note the `lit:` prefix — see below). The shell export only helps for local/Docker runs. External-deployment configs already define `api_key_name`.
+
+**NEL env-var value prefixes (required):** every value in an `env_vars` map needs an explicit prefix — `host:VAR` (read from the submitting shell's env at submit time), `lit:value` (literal string), or `runtime:VAR` (read in the job at run time). A bare value (e.g. `DUMMY_API_KEY: dummy`) hard-errors: *"Env var value '…' must have an explicit prefix."* Use `lit:` for constants like `DUMMY_API_KEY` and `VLLM_*` backend selectors, `host:` for secrets like `HF_TOKEN` / `INFERENCE_API_KEY`.
 
 ---
 
@@ -247,7 +284,7 @@ For models > ~120B or higher throughput needs, read `references/multi-node.md` f
 
 ### Step 7 — Interceptors
 
-Direct user to <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html>. Do not provide generic interceptor info — read the specific interceptor's page if asked, then configure via `evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config` (NOT under `target.api_endpoint.adapter_config`). Use the per-field syntax from the CLI Configuration section, not a full `interceptors:` list (that overrides the default chain).
+Direct user to <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html>. Do not provide generic interceptor info — read the specific interceptor's page if asked, then configure via `evaluation.nemo_evaluator_config.target.api_endpoint.adapter_config` (`target` is a sibling of `config`, not nested under it). Use the per-field syntax from the CLI Configuration section, not a full `interceptors:` list (that overrides the default chain).
 
 **Errata:** Logging field names are `max_logged_requests` / `max_logged_responses` (NOT `max_saved_*` / `max_*` as some docs show).
 
@@ -258,9 +295,12 @@ Default images:
 | Framework | Image | Registry |
 | --- | --- | --- |
 | vLLM | `vllm/vllm-openai:v0.19.1` (bump per recipe; never `:latest`) | DockerHub |
+| vLLM (NVFP4 on Blackwell) | `vllm/vllm-openai:v0.19.1-cu130` (bump to `cu130-nightly-<arch>` for new archs) | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
+
+> NVFP4 checkpoints on Blackwell (sm_100/sm_103) need the `cu130-nightly` image — cu129/v0.19.1 lack sm_103 FP4 kernels (see the "NVFP4 on Blackwell" note in Step 3).
 
 Public images → submit without preflight. Private/restricted → check credentials:
 
@@ -284,8 +324,10 @@ set -a && source .env && set +a
 
 # If pre_cmd/post_cmd in config (review pre_cmd first — runs arbitrary commands):
 export NEMO_EVALUATOR_TRUST_PRE_CMD=1
-# If nemo_skills.* + self-deployment:
+# If nemo_skills.* + self-deployment, for LOCAL/Docker runs only:
 export DUMMY_API_KEY=dummy
+# On SLURM this shell export does NOT reach the container — instead declare
+# `DUMMY_API_KEY: lit:dummy` under evaluation.env_vars (see Step 5).
 ```
 
 **Step 8.1 — Dry-run** (config validation):

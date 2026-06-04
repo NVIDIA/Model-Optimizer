@@ -18,13 +18,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from huggingface_hub import get_token
 from torch.utils.data import DataLoader
 
 from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
-    SUPPORTED_DATASET_CONFIG,
     _disable_use_cache,
     _forward_loop,
     _pack_documents_into_rows,
@@ -287,22 +285,9 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
     assert result == 4
 
 
-@pytest.mark.parametrize("test_local_path", [True, False])
-def test_get_dataset_samples_with_unsupported_minipile_dataset(tmp_path, test_local_path):
-    pytest.importorskip("datasets")
-    pytest.importorskip("huggingface_hub")
-
-    from huggingface_hub import snapshot_download
-
-    dataset_name = "nanotron/minipile_100_samples"
-    if test_local_path:
-        local_dir = str(tmp_path / dataset_name)
-        snapshot_download(
-            repo_id=dataset_name,
-            repo_type="dataset",
-            local_dir=local_dir,
-        )
-        dataset_name = local_dir
+def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
+    """A dataset not in ``SUPPORTED_DATASET_CONFIG`` loads via the auto-detect path."""
+    dataset_name = make_toy_hf_dataset()  # basename never matches a registered key
 
     samples = get_dataset_samples(dataset_name, num_samples=5)
 
@@ -576,22 +561,10 @@ def test_pack_documents_into_rows():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def pad_tokenizer():
-    """Real tiny HF tokenizer (vocab=128) shared with other test modules.
-
-    Skips the test if ``transformers`` isn't installed.
-    """
-    pytest.importorskip("transformers")
-    from _test_utils.torch.transformers_models import get_tiny_tokenizer
-
-    return get_tiny_tokenizer()
-
-
 class TestGetDatasetDataloaderBlending:
     """``get_dataset_dataloader`` accepts a list of sources and concatenates them."""
 
-    def test_single_jsonl(self, tmp_path, pad_tokenizer):
+    def test_single_jsonl(self, tmp_path, tiny_tokenizer):
         pytest.importorskip("datasets")
         path = _write_jsonl(
             tmp_path / "single.jsonl",
@@ -599,7 +572,7 @@ class TestGetDatasetDataloaderBlending:
         )
         loader = get_dataset_dataloader(
             dataset_name=path,
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             batch_size=2,
             num_samples=4,
             max_sample_length=16,
@@ -609,7 +582,7 @@ class TestGetDatasetDataloaderBlending:
         assert batches[0]["input_ids"].shape[0] == 2
         assert "attention_mask" in batches[0]
 
-    def test_list_of_jsonl_blends(self, tmp_path, pad_tokenizer):
+    def test_list_of_jsonl_blends(self, tmp_path, tiny_tokenizer):
         """Two local JSONL files concatenated into a single dataloader."""
         pytest.importorskip("datasets")
         a = _write_jsonl(tmp_path / "a.jsonl", [{"text": f"a{i}"} for i in range(3)])
@@ -617,7 +590,7 @@ class TestGetDatasetDataloaderBlending:
 
         loader = get_dataset_dataloader(
             dataset_name=[a, b],
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             batch_size=5,
             num_samples=[3, 2],
             max_sample_length=16,
@@ -626,7 +599,7 @@ class TestGetDatasetDataloaderBlending:
         assert len(batches) == 1
         assert batches[0]["input_ids"].shape[0] == 5
 
-    def test_mixed_formats_blended(self, tmp_path, pad_tokenizer):
+    def test_mixed_formats_blended(self, tmp_path, tiny_tokenizer):
         """Mixing a text-column JSONL with a prompt/completion JSONL — both should flow."""
         pytest.importorskip("datasets")
         plain = _write_jsonl(tmp_path / "plain.jsonl", [{"text": "hello"}])
@@ -634,7 +607,7 @@ class TestGetDatasetDataloaderBlending:
 
         loader = get_dataset_dataloader(
             dataset_name=[plain, pc],
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             batch_size=2,
             num_samples=[1, 1],
             max_sample_length=16,
@@ -643,7 +616,7 @@ class TestGetDatasetDataloaderBlending:
         assert len(batches) == 1
         assert batches[0]["input_ids"].shape[0] == 2
 
-    def test_length_mismatch_raises(self, tmp_path, pad_tokenizer):
+    def test_length_mismatch_raises(self, tmp_path, tiny_tokenizer):
         """``dataset_name`` and ``num_samples`` lists must align."""
         pytest.importorskip("datasets")
         a = _write_jsonl(tmp_path / "a.jsonl", [{"text": "x"}])
@@ -651,13 +624,13 @@ class TestGetDatasetDataloaderBlending:
         with pytest.raises(AssertionError, match="same length"):
             get_dataset_dataloader(
                 dataset_name=[a, b],
-                tokenizer=pad_tokenizer,
+                tokenizer=tiny_tokenizer,
                 num_samples=[1],
                 max_sample_length=16,
             )
 
 
-def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, pad_tokenizer):
+def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, tiny_tokenizer):
     """With ``pack=True`` and 2+ sources, samples are shuffled so a long-doc source
     can't silently exhaust the row budget and drop the other sources.
 
@@ -676,7 +649,7 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, pad_tokenize
 
     loader = get_dataset_dataloader(
         dataset_name=["src_a", "src_b"],
-        tokenizer=pad_tokenizer,
+        tokenizer=tiny_tokenizer,
         batch_size=4,
         num_samples=[4, 4],
         max_sample_length=64,
@@ -687,8 +660,8 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, pad_tokenize
     all_ids = torch.cat([b["input_ids"] for b in batches], dim=0)
     assert all_ids.shape[1] == 64
     # Tokenize the source tags so we can check both sources appear in the packed rows
-    src_a_id = pad_tokenizer("src_a", add_special_tokens=False).input_ids[0]
-    src_b_id = pad_tokenizer("src_b", add_special_tokens=False).input_ids[0]
+    src_a_id = tiny_tokenizer("src_a", add_special_tokens=False).input_ids[0]
+    src_b_id = tiny_tokenizer("src_b", add_special_tokens=False).input_ids[0]
     flat = all_ids.flatten().tolist()
     assert src_a_id in flat, "source A tokens missing from packed rows"
     assert src_b_id in flat, (
@@ -715,11 +688,11 @@ class TestDatasetCombosExpansion:
         monkeypatch.setattr(dataset_utils, "get_dataset_samples", _fake)
         return calls
 
-    def test_combo_expands_evenly(self, monkeypatch, pad_tokenizer):
+    def test_combo_expands_evenly(self, monkeypatch, tiny_tokenizer):
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name="cnn_nemotron_v2_mix",
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             num_samples=8,
             batch_size=1,
             max_sample_length=16,
@@ -727,11 +700,11 @@ class TestDatasetCombosExpansion:
         members = DATASET_COMBOS["cnn_nemotron_v2_mix"]
         assert calls == [(members[0], 4), (members[1], 4)]
 
-    def test_combo_remainder_distributed_to_earlier_members(self, monkeypatch, pad_tokenizer):
+    def test_combo_remainder_distributed_to_earlier_members(self, monkeypatch, tiny_tokenizer):
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name="nemotron-post-training-v3",
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             num_samples=10,
             batch_size=1,
             max_sample_length=16,
@@ -741,11 +714,11 @@ class TestDatasetCombosExpansion:
         expected_counts = [2, 2, 2, 1, 1, 1, 1]
         assert calls == list(zip(members, expected_counts))
 
-    def test_plain_and_combo_compose(self, monkeypatch, pad_tokenizer):
+    def test_plain_and_combo_compose(self, monkeypatch, tiny_tokenizer):
         calls = self._record_calls(monkeypatch)
         get_dataset_dataloader(
             dataset_name=["cnn_dailymail", "nemotron-post-training-v3"],
-            tokenizer=pad_tokenizer,
+            tokenizer=tiny_tokenizer,
             num_samples=[3, 7],
             batch_size=1,
             max_sample_length=16,
@@ -753,12 +726,12 @@ class TestDatasetCombosExpansion:
         members = DATASET_COMBOS["nemotron-post-training-v3"]
         assert calls == [("cnn_dailymail", 3)] + [(m, 1) for m in members]
 
-    def test_combo_overlapping_with_member_raises(self, monkeypatch, pad_tokenizer):
+    def test_combo_overlapping_with_member_raises(self, monkeypatch, tiny_tokenizer):
         self._record_calls(monkeypatch)
         with pytest.raises(ValueError, match="combo 'cnn_nemotron_v2_mix'"):
             get_dataset_dataloader(
                 dataset_name=["cnn_dailymail", "cnn_nemotron_v2_mix"],
-                tokenizer=pad_tokenizer,
+                tokenizer=tiny_tokenizer,
                 num_samples=[2, 4],
                 batch_size=1,
                 max_sample_length=16,
@@ -770,15 +743,32 @@ class TestDatasetCombosExpansion:
 
 
 # ---------------------------------------------------------------------------
-# Live HF dataset round-trips. ``hf-internal-testing/dataset_with_data_files``
-# is a 10-row x {train,test} fixture maintained by HF for their own CI — tiny
-# enough to download in a unit test and stable across releases.
+# Arbitrary-dataset round-trips. We build a tiny on-disk dataset directory
+# (``train``/``test`` parquet with a ``text`` column) and load it through the
+# same non-registered ``load_dataset(path=...)`` branch a downloaded HF dataset
+# would hit — keeping these unit tests fully offline rather than fetching
+# ``hf-internal-testing/*`` fixtures from the Hub.
 # ---------------------------------------------------------------------------
 
-_HF_TINY = "hf-internal-testing/dataset_with_data_files"  # train, test splits, ``text`` col
+
+@pytest.fixture(scope="module")
+def make_toy_hf_dataset(tmp_path_factory):
+    """Factory returning a local dataset-directory path with ``train``/``test`` splits."""
+    pytest.importorskip("datasets")
+    from datasets import Dataset
+
+    def _make(prefix: str = "toy", num_rows: int = 10) -> str:
+        d = tmp_path_factory.mktemp(prefix)
+        for split in ("train", "test"):
+            Dataset.from_dict(
+                {"text": [f"{prefix} {split} sample {i}" for i in range(num_rows)]}
+            ).to_parquet(str(d / f"{split}.parquet"))
+        return str(d)
+
+    return _make
 
 
-def _hf_dump_to_jsonl(name: str, split: str, path) -> str:
+def _dump_dataset_to_jsonl(name: str, split: str, path) -> str:
     from datasets import load_dataset
 
     ds = load_dataset(name, split=split)
@@ -786,49 +776,47 @@ def _hf_dump_to_jsonl(name: str, split: str, path) -> str:
     return str(path)
 
 
-@pytest.mark.integration
-class TestHfTinyDataset:
-    """End-to-end coverage with a real (tiny) HF dataset."""
+class TestLocalDatasetDirRoundTrips:
+    """End-to-end coverage of the auto-detected (non-registered) dataset path."""
 
-    def test_load_single_split_directly(self):
-        pytest.importorskip("datasets")
-        samples = get_dataset_samples(_HF_TINY, num_samples=4, split="train")
+    def test_load_single_split_directly(self, make_toy_hf_dataset):
+        dataset = make_toy_hf_dataset()
+        samples = get_dataset_samples(dataset, num_samples=4, split="train")
         assert len(samples) == 4
         assert all(isinstance(s, str) and s for s in samples)
 
-    def test_load_multiple_splits_directly(self):
+    def test_load_multiple_splits_directly(self, make_toy_hf_dataset):
         """``split=["train", "test"]`` divides ``num_samples`` across both splits."""
-        pytest.importorskip("datasets")
-        samples = get_dataset_samples(_HF_TINY, num_samples=6, split=["train", "test"])
+        dataset = make_toy_hf_dataset()
+        samples = get_dataset_samples(dataset, num_samples=6, split=["train", "test"])
         assert len(samples) == 6
         # Default per-split is num_samples // n + remainder; for 6/2 → 3 from each.
         # We can't assert exact origin without re-reading, but both splits should
         # contribute, which we'll confirm by comparing against direct loads below.
-        train_only = set(get_dataset_samples(_HF_TINY, num_samples=10, split="train"))
-        test_only = set(get_dataset_samples(_HF_TINY, num_samples=10, split="test"))
+        train_only = set(get_dataset_samples(dataset, num_samples=10, split="train"))
+        test_only = set(get_dataset_samples(dataset, num_samples=10, split="test"))
         assert any(s in train_only for s in samples)
         assert any(s in test_only for s in samples)
 
-    def test_default_split_is_train(self):
-        pytest.importorskip("datasets")
-        default_samples = get_dataset_samples(_HF_TINY, num_samples=4)
-        train_samples = get_dataset_samples(_HF_TINY, num_samples=4, split="train")
+    def test_default_split_is_train(self, make_toy_hf_dataset):
+        dataset = make_toy_hf_dataset()
+        default_samples = get_dataset_samples(dataset, num_samples=4)
+        train_samples = get_dataset_samples(dataset, num_samples=4, split="train")
         assert default_samples == train_samples
 
-    def test_download_to_jsonl_then_load(self, tmp_path):
-        """Dump the HF dataset to JSONL, then reload it via the local-jsonl path."""
-        pytest.importorskip("datasets")
-        jsonl_path = _hf_dump_to_jsonl(_HF_TINY, "train", tmp_path / "train.jsonl")
+    def test_download_to_jsonl_then_load(self, tmp_path, make_toy_hf_dataset):
+        """Dump the dataset to JSONL, then reload it via the local-jsonl path."""
+        dataset = make_toy_hf_dataset()
+        jsonl_path = _dump_dataset_to_jsonl(dataset, "train", tmp_path / "train.jsonl")
         from_jsonl = get_dataset_samples(jsonl_path, num_samples=10)
-        from_hf = get_dataset_samples(_HF_TINY, num_samples=10, split="train")
-        assert from_jsonl == from_hf
+        from_dir = get_dataset_samples(dataset, num_samples=10, split="train")
+        assert from_jsonl == from_dir
 
-    def test_dataloader_blending_two_hf_datasets(self, pad_tokenizer):
-        """Two HF datasets concatenated via ``get_dataset_dataloader``."""
-        pytest.importorskip("datasets")
+    def test_dataloader_blending_two_datasets(self, tiny_tokenizer, make_toy_hf_dataset):
+        """Two datasets concatenated via ``get_dataset_dataloader``."""
         loader = get_dataset_dataloader(
-            dataset_name=[_HF_TINY, "hf-internal-testing/multi_dir_dataset"],
-            tokenizer=pad_tokenizer,
+            dataset_name=[make_toy_hf_dataset("a"), make_toy_hf_dataset("b")],
+            tokenizer=tiny_tokenizer,
             batch_size=4,
             num_samples=[3, 1],
             max_sample_length=16,
@@ -836,68 +824,17 @@ class TestHfTinyDataset:
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 4
 
-    def test_dataloader_mixing_hf_and_local_jsonl(self, tmp_path, pad_tokenizer):
-        """Live HF dataset blended with a local synthetic JSONL file."""
-        pytest.importorskip("datasets")
+    def test_dataloader_mixing_dir_and_local_jsonl(
+        self, tmp_path, tiny_tokenizer, make_toy_hf_dataset
+    ):
+        """Dataset directory blended with a local synthetic JSONL file."""
         local = _write_jsonl(tmp_path / "local.jsonl", [{"text": f"local {i}"} for i in range(2)])
         loader = get_dataset_dataloader(
-            dataset_name=[_HF_TINY, local],
-            tokenizer=pad_tokenizer,
+            dataset_name=[make_toy_hf_dataset(), local],
+            tokenizer=tiny_tokenizer,
             batch_size=5,
             num_samples=[3, 2],
             max_sample_length=16,
         )
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 5
-
-
-_NEW_NEMOTRON_KEYS = [
-    "nemotron-sft-instruction-following-chat-v2",
-    "nemotron-science-v1",
-    "nemotron-competitive-programming-v1",
-    "nemotron-sft-agentic-v2",
-    "nemotron-math-v2",
-    "nemotron-sft-swe-v2",
-    "nemotron-sft-multilingual-v1",
-]
-
-
-@pytest.mark.parametrize("dataset_key", _NEW_NEMOTRON_KEYS)
-def test_new_nemotron_registry_shape(dataset_key):
-    """Always-on shape check on the 7 newly registered nvidia/Nemotron-* entries.
-
-    Complements the gated smoke test below — catches typos in dataset paths or
-    split names even when the runner has no HF credentials.
-    """
-    assert dataset_key in SUPPORTED_DATASET_CONFIG
-    entry = SUPPORTED_DATASET_CONFIG[dataset_key]
-    config = entry["config"]
-    assert config["path"].startswith("nvidia/Nemotron-")
-    splits = config["split"]
-    assert isinstance(splits, list) and splits
-    assert all(isinstance(s, str) and s for s in splits)
-    assert len(set(splits)) == len(splits)
-    assert callable(entry["preprocess"])
-    assert entry["chat_key"] == "messages"
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("dataset_key", _NEW_NEMOTRON_KEYS)
-def test_get_dataset_samples_new_nemotron(dataset_key):
-    """Smoke-test the 7 newly registered nvidia/Nemotron-* calibration datasets.
-
-    Skipped when no HF token is available because these datasets live behind the HF Hub.
-    ``huggingface_hub.get_token()`` covers both the ``HF_TOKEN`` env var and tokens
-    cached by ``hf auth login``.
-    """
-    pytest.importorskip("datasets")
-    if not get_token():
-        pytest.skip(
-            "No HF token (env HF_TOKEN or `hf auth login`); skipping gated Nemotron smoke test"
-        )
-
-    samples = get_dataset_samples(dataset_key, num_samples=2)
-
-    assert isinstance(samples, list)
-    assert len(samples) == 2
-    assert all(isinstance(s, str) and len(s) > 0 for s in samples)

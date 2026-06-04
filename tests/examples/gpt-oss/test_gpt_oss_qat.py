@@ -19,6 +19,7 @@ import subprocess
 import pytest
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_gpu
+from _test_utils.torch.transformers_models import create_tiny_gpt_oss_dir
 from datasets import Dataset, DatasetDict
 
 
@@ -116,24 +117,9 @@ class GPTOSS:
         if sft_dir is None:
             sft_dir = tmp_path / f"{model_name}-sft"
 
-        # If SFT directory doesn't exist, create a mock one for standalone testing
+        # If SFT directory doesn't exist, create a tiny stand-in model for standalone testing
         if not sft_dir.exists():
-            sft_dir.mkdir()
-
-            # Create minimal config.json for the mock model
-            config_content = {
-                "model_type": "gpt_oss",
-                "hidden_size": 5120,
-                "num_attention_heads": 40,
-                "num_hidden_layers": 44,
-                "vocab_size": 100000,
-                "torch_dtype": "bfloat16",
-            }
-
-            import json
-
-            with open(sft_dir / "config.json", "w") as f:
-                json.dump(config_content, f)
+            sft_dir = create_tiny_gpt_oss_dir(tmp_path, with_tokenizer=True)
 
         qat_output_dir = tmp_path / f"{model_name}-qat"
 
