@@ -322,8 +322,6 @@ def main(args: argparse.Namespace):
 
     if hasattr(unwrapped_model, "calibration_mode"):
         # Some model wrappers (e.g. distillation/speculative) gate calibration behind a flag.
-        # Reset it in a finally so a failure mid-calibration doesn't leave the flag set for the
-        # subsequent compress / save calls.
         unwrapped_model.calibration_mode = True
         mtq.quantize(unwrapped_model, mtq_config, forward_loop)
         unwrapped_model.calibration_mode = False

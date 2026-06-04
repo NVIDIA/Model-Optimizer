@@ -36,17 +36,16 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
     megatron_path = tmp_path / "qwen3_fp8_megatron"
     hf_export_path = tmp_path / "qwen3_fp8_hf"
 
-    # Step 1: quantize (tensor parallelism is supported here) and save a Megatron checkpoint. The
-    # checkpoint must carry the ModelOpt state so it can be reloaded (for export or further QAT/QAD).
+    # Step 1: quantize and save a Megatron checkpoint
     quantize_cmd = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
         hf_model_name_or_path=hf_model_path,
         recipe="general/ptq/fp8_default-kv_fp8",
         tp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
-        calib_num_samples=16,
-        calib_batch_size=4,
-        seq_length=32,
+        calib_num_samples=4,
+        calib_batch_size=2,
+        seq_length=16,
         export_megatron_path=megatron_path,
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
@@ -55,8 +54,7 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
         "Expected modelopt_state in the Megatron checkpoint"
     )
 
-    # Step 2: export to HF (re-shards to TP=1) on a single rank. export.py reloads the quantized
-    # Megatron checkpoint (restoring the ModelOpt quantizers) before converting to HF.
+    # Step 2: export to HF
     export_cmd = extend_cmd_parts(
         ["torchrun", "--nproc_per_node=1", "export.py"],
         hf_model_name_or_path=hf_model_path,
@@ -64,16 +62,12 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
         export_unified_hf_path=hf_export_path,
     )
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
-
-    # HF (unified) quantized checkpoint exists with the exported quantization config + weights.
-    # hf_quant_config.json is only written when the reloaded model is actually quantized, so its
-    # presence also confirms export.py restored the ModelOpt quantizers from the checkpoint.
     assert (hf_export_path / "config.json").exists()
     assert (hf_export_path / "hf_quant_config.json").exists()
     assert list(hf_export_path.glob("*.safetensors")), "Expected exported safetensors weights"
 
     # The exported unified checkpoint should be loadable and runnable by vLLM. The deployment check below
-    # is disabled because it hangs in CI; to validate deployment locally in nemo container, uncomment it
+    # is disabled because it takes too long in CI (likely because of first run)
     #
     # import vllm
     # llm = vllm.LLM(

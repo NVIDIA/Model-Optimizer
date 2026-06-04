@@ -64,7 +64,7 @@ with contextlib.suppress(ModuleNotFoundError):
 def _patched_to_cfg_dict(self):
     """Patched DistillationProvider.to_cfg_dict method for heterogeneous teacher and student models.
 
-    Can be removed from nemo:26.02.01 container onwards.
+    TODO: Remove once we drop nemo:26.02 container support
     """
     from megatron.bridge.training.utils.config_utils import _ConfigContainerBase
 
@@ -94,7 +94,7 @@ def _patched_to_cfg_dict(self):
 DistillationProvider.to_cfg_dict = _patched_to_cfg_dict
 
 
-# Megatron-Bridge does not (yet) expose a hook to initialize the student before the
+# TODO: Megatron-Bridge does not (yet) expose a hook to initialize the student before the
 # knowledge-distillation conversion, so we patch ``DistillationProvider.provide`` to do it. Replace
 # this block once a first-class mechanism is available upstream.
 #
@@ -162,7 +162,7 @@ DistillationProvider.provide = _distill_provide_with_megatron_student
 def get_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Distillation for Megatron-Bridge.")
-    # Model arguments (accepts HuggingFace input only at the moment)
+    # Model arguments (HF teacher, HF or Megatron student)
     parser.add_argument(
         "--student_hf_path",
         type=str,
@@ -181,10 +181,9 @@ def get_args():
         type=str,
         default=None,
         help=(
-            "Path to a Megatron checkpoint (e.g. produced by quantize.py or prune_minitron.py) to "
-            "initialize the student weights from, instead of the HuggingFace weights of "
-            "--student_hf_path (which is still required to build the student model structure). If "
-            "the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
+            "Path to a Megatron checkpoint to initialize the student weights from, instead of the HuggingFace "
+            "weights of --student_hf_path (which is still required to build the student model structure). "
+            "If the checkpoint carries ModelOpt state (i.e. it is quantized), the quantizers are "
             "restored automatically, turning distillation into Quantization Aware Distillation (QAD)."
         ),
     )
@@ -205,9 +204,6 @@ def get_args():
         "--data_paths",
         nargs="+",
         help="List of tokenized data paths to load from (weight1 path1 weight2 path2 ...)",
-    )
-    parser.add_argument(
-        "--split", type=str, default="99,1,0", help="Train,Val,Test ratios to split data"
     )
     parser.add_argument(
         "--data_path_to_cache", type=str, default=None, help="Path to cache the dataset indices"
@@ -395,7 +391,7 @@ def main(args: argparse.Namespace):
     else:
         # Convert flat CLI list (e.g. ["1.0", "/path/data"]) to Megatron blend format
         blend = get_blend_from_list(args.data_paths)
-        dataset_config = GPTDatasetConfig(blend=blend, split=args.split, **dataset_kwargs)
+        dataset_config = GPTDatasetConfig(blend=blend, split="99,1,0", **dataset_kwargs)
 
     # Assemble ConfigContainer and run distillation
     config = ConfigContainer(
@@ -409,7 +405,7 @@ def main(args: argparse.Namespace):
             manual_gc=True,
             manual_gc_interval=100,
         ),
-        # TODO: Replace validation args in train with validation config in nemo:26.04
+        # TODO: Replace validation args in train with validation config once we drop nemo:26.02 container support
         # validation=ValidationConfig(eval_interval=args.eval_interval, eval_iters=args.eval_iters),
         optimizer=optimizer_config,
         scheduler=scheduler_config,

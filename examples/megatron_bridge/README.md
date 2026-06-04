@@ -14,6 +14,9 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 
 </div>
 
+> [!TIP]
+> Checkout the [Nemotron-3-Nano-30B-A3B pruning + distillation (with data blend prep) + quantization tutorial](../pruning/minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) for a complete end-to-end workflow using Megatron-Bridge!
+
 ## Pre-Requisites
 
 Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.04`) which has all the dependencies installed.
@@ -65,7 +68,7 @@ This section shows how to quantize a HuggingFace model using ModelOpt in the Meg
 
 `quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `FP8_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/fp8_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
 
-**Step 1 — quantize** Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from default dataset for calibration (sequence length = 512):
+**Step 1 — quantize** Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from default dataset (Mix of [`cnn_dailymail`](https://huggingface.co/datasets/abisee/cnn_dailymail) and [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2)) for calibration (sequence length = 16):
 
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
@@ -169,7 +172,7 @@ torchrun --nproc_per_node 8 distill.py \
 
 ### Quantization Aware Distillation (QAD)
 
-To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model:
+To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model. We also use a smaller learning rate for QAD:
 
 ```bash
 torchrun --nproc_per_node 8 distill.py \
@@ -177,10 +180,13 @@ torchrun --nproc_per_node 8 distill.py \
     --teacher_hf_path Qwen/Qwen3-8B \
     --student_hf_path Qwen/Qwen3-8B \
     --student_megatron_path /tmp/Qwen3-8B-FP8-megatron \
-    --data_paths 1.0 tokenized_qwen3/data_text_document \
+    --data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document \
     --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
     --seq_length 8192 \
+    --gbs 768 \
     --train_iters 1000 \
+    --lr 1e-5 \
+    --min_lr 5e-6 \
     --output_dir /output/qwen3_8b_qad
 ```
 
