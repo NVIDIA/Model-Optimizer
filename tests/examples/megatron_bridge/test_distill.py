@@ -14,7 +14,6 @@
 # limitations under the License.
 """Tests for prune_minitron.py and distill.py scripts."""
 
-import subprocess
 from pathlib import Path
 
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
@@ -28,6 +27,7 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
     train_iters = 2
     distill_output_dir = tmp_path / "distill_output"
+    distilled_hf_path = tmp_path / "distilled_hf"
     distill_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
         student_hf_path=teacher_hf_path,
@@ -35,7 +35,7 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
         output_dir=distill_output_dir,
         tp_size=num_gpus,
         pp_size=1,
-        seq_length=32,
+        seq_length=16,
         mbs=1,
         gbs=4,
         train_iters=train_iters,
@@ -43,28 +43,12 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
         eval_interval=5,
         eval_iters=1,
         log_interval=1,
+        hf_export_path=distilled_hf_path,
+        student_hf_model=teacher_hf_path,
     )
     run_example_command(distill_cmd_parts, example_path="megatron_bridge")
 
-    megatron_ckpt_path = distill_output_dir / f"checkpoints/iter_{train_iters:07d}"
-    assert megatron_ckpt_path.exists()
-
-    # Convert distilled Megatron checkpoint back to HF format
-    distilled_hf_path = tmp_path / "distilled_hf"
-    subprocess.run(
-        [
-            "python",
-            "/opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py",
-            "export",
-            "--hf-model",
-            str(teacher_hf_path),
-            "--megatron-path",
-            str(megatron_ckpt_path),
-            "--hf-path",
-            str(distilled_hf_path),
-        ],
-        check=True,
-    )
+    assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
     assert (distilled_hf_path / "config.json").exists()
 
 
@@ -79,7 +63,7 @@ def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
         _prepare_puzzletron_anymodel_student_and_teacher(tmp_path)
     )
 
-    train_iters = 2
+    train_iters = 5
     output_dir = tmp_path / "distill_output"
     hf_export_path = tmp_path / "distilled_anymodel_hf"
     cmd_parts = extend_cmd_parts(
@@ -89,7 +73,7 @@ def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
         output_dir=output_dir,
         tp_size=num_gpus,
         pp_size=1,
-        seq_length=32,
+        seq_length=16,
         mbs=1,
         gbs=4,
         train_iters=train_iters,
