@@ -48,7 +48,6 @@ pipeline:
       - model.model_name_or_path=<<global_vars.hf_model>>
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
-      - data.streaming_prefetch=64
       - training.output_dir=/scratchspace/eagle3
       - training.training_seq_len=4096
       - training.disable_tqdm=true

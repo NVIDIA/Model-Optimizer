@@ -148,6 +148,56 @@ def test_fetch_returning_none_exhausts_then_raises():
         ds[0]
 
 
+def test_resume_skips_consumed_samples_without_refetching():
+    """Map-style resume contract: HF Trainer skips consumed batches via
+    accelerate.skip_first_batches, which drops their indices at the batch-sampler
+    level so __getitem__ (and thus _fetch) is never called for them. This is why
+    main.py leaves ignore_data_skip at its default (False) for streaming -- resume
+    lands at the exact position with no re-fetch. Guards against a regression that
+    would re-fetch (or re-stream) already-consumed samples on resume."""
+    pytest.importorskip("accelerate")
+    from accelerate import skip_first_batches
+    from torch.utils.data import DataLoader, RandomSampler
+
+    fetched: list[int] = []
+
+    class _Recording(StreamingDataset):
+        def _tokenize_entry(self, entry):
+            return {"cid": str(entry["id"]), "token_ids": [1], "loss_mask": None}
+
+        def _fetch(self, sample):
+            cid = int(sample["cid"])
+            fetched.append(cid)  # stands in for the HTTP fetch
+            return {"cid": cid}
+
+        def _format(self, payload):
+            return torch.tensor(payload["cid"])
+
+    n, batch_size, skip_batches = 20, 2, 3
+    ds = _Recording(_entries(n), tokenizer=MagicMock(), config=StreamingConfig())
+
+    def make_dl():
+        # Fresh, identically-seeded sampler -> identical permutation across runs.
+        return DataLoader(
+            ds,
+            batch_size=batch_size,
+            sampler=RandomSampler(ds, generator=torch.Generator().manual_seed(0)),
+        )
+
+    # Full pass -> ground-truth consumption order (cid == requested index here).
+    full_order = [int(x) for batch in make_dl() for x in batch]
+    fetched.clear()
+
+    # Resume: skip the first `skip_batches` batches.
+    tail_order = [int(x) for batch in skip_first_batches(make_dl(), skip_batches) for x in batch]
+
+    consumed = full_order[: skip_batches * batch_size]
+    expected_tail = full_order[skip_batches * batch_size :]
+    assert tail_order == expected_tail, "resume must continue at the exact data position"
+    assert set(fetched).isdisjoint(consumed), "skipped (consumed) samples must not be re-fetched"
+    assert fetched == expected_tail, "only the un-consumed tail is fetched after resume"
+
+
 def test_server_urls_normalization():
     """server_urls accepts a single string, a comma-separated string, or a list, and
     strips trailing slashes."""

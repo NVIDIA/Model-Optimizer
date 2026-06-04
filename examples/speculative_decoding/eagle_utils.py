@@ -59,7 +59,6 @@ def make_speculative_data_module(
     train_len=None,
     answer_only_loss=False,
     shift_labels=True,
-    seed: int = 0,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -90,7 +89,7 @@ def make_speculative_data_module(
             ds = ds.select(range(data_args.sample_size))
         # Map-style dataset: each rank fetches its own DistributedSampler shard.
         # Fetch concurrency comes from the DataLoader's num_workers, not a config knob;
-        # shuffling/order is the sampler's job, so no seed is threaded here.
+        # shuffling/order is the sampler's job (seeded by training_args.seed).
         # ``server_urls`` accepts a comma-separated string for multi-server fan-out.
         streaming_cfg = EagleVllmStreamingConfig(
             server_urls=data_args.streaming_server_url,

@@ -267,7 +267,6 @@ def train():
         train_len=training_args.training_seq_len,
         answer_only_loss=training_args.answer_only_loss,
         shift_labels=not is_dflash,
-        seed=training_args.seed,
     )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
@@ -277,13 +276,13 @@ def train():
         and recipe.eagle.eagle_base_lora_warmup_steps > 0
     ):
         callbacks.append(LoRAWarmupCallback(recipe.eagle.eagle_base_lora_warmup_steps))
-    if recipe.data.mode == "streaming":
-        # The streaming dataset is map-style, so HF Trainer's default resume would
-        # fast-forward by re-iterating (= re-fetching) every consumed batch just to
-        # discard it, hammering the server. Disable the data skip: on resume, weights/
-        # optimizer/global_step still restore from the checkpoint; only the data order
-        # restarts from the top (acceptable for single-epoch streaming).
-        training_args.ignore_data_skip = True
+    # NB: do NOT set training_args.ignore_data_skip for streaming. The dataset is
+    # map-style, so HF Trainer's resume skip goes through accelerate.skip_first_batches,
+    # which drops the already-consumed indices at the batch-sampler level -- those
+    # indices never reach __getitem__, so no hidden states are re-fetched from the
+    # server. Resume therefore lands at the exact data position for free (correct even
+    # when a single epoch is split across many checkpointed segments). ignore_data_skip
+    # would instead restart the data order from the top, silently re-running data.
 
     trainer = EagleTrainerWithAccLog(
         model=model,
