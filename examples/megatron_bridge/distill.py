@@ -24,7 +24,6 @@ import argparse
 import contextlib
 import os
 from dataclasses import fields
-from pathlib import Path
 
 import torch
 from megatron.bridge import AutoBridge
@@ -35,10 +34,6 @@ from megatron.bridge.models.distillation_provider import (
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
-
-# _load_model_weights_from_checkpoint is the (private) helper bridge.load_megatron_model uses to load
-# a (quantized) Megatron checkpoint into an already-built model; reused here to initialize the student.
-from megatron.bridge.training.checkpointing import _load_model_weights_from_checkpoint
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
@@ -50,10 +45,7 @@ from megatron.bridge.training.config import (
     TrainingConfig,
 )
 from megatron.bridge.training.distill import distill
-from megatron.bridge.training.post_training.checkpointing import (
-    has_modelopt_state,
-    load_modelopt_state,
-)
+from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
@@ -63,6 +55,7 @@ import modelopt.torch.distill as mtd
 import modelopt.torch.distill.plugins.megatron as mtd_mcore
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import print_args, print_rank_0
+from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
@@ -71,7 +64,7 @@ with contextlib.suppress(ModuleNotFoundError):
 def _patched_to_cfg_dict(self):
     """Patched DistillationProvider.to_cfg_dict method for heterogeneous teacher and student models.
 
-    TODO: Upstream this patch to Megatron-Bridge.
+    Can be removed from nemo:26.02.01 container onwards.
     """
     from megatron.bridge.training.utils.config_utils import _ConfigContainerBase
 
@@ -101,46 +94,15 @@ def _patched_to_cfg_dict(self):
 DistillationProvider.to_cfg_dict = _patched_to_cfg_dict
 
 
-def _restore_megatron_student(student_model, megatron_path: str, restore_modelopt_state: bool):
-    """Initialize a student model from a Megatron checkpoint produced by quantize.py / prune.
-
-    Mirrors how ``bridge.load_megatron_model`` / ``export.py`` reload such a checkpoint: it restores
-    the ModelOpt state (registering the quantize mode so it survives the next checkpoint save) and
-    loads the base weights while stripping the Transformer-Engine extra-state that the generic resume
-    path mishandles. This must run on the *plain* student before the knowledge-distillation
-    conversion, since ``restore_sharded_modelopt_state`` is a no-op once the model is already
-    converted -- keeping the QAD mode stack as ``[quantize, kd_loss]``.
-    """
-    # The Megatron checkpoint stores weights under an iter_<N> subdirectory; resolve the latest one
-    # (mirrors AutoBridge.load_megatron_model).
-    ckpt_root = Path(megatron_path)
-    iter_dirs = [d for d in ckpt_root.iterdir() if d.is_dir() and d.name.startswith("iter_")]
-    ckpt_dir = (
-        max(iter_dirs, key=lambda d: int(d.name.removeprefix("iter_"))) if iter_dirs else ckpt_root
-    )
-
-    if restore_modelopt_state:
-        load_modelopt_state([student_model], str(ckpt_root))
-    print_rank_0(f"Loading student weights from Megatron checkpoint {ckpt_dir}")
-    # strict=False because the bridge loader strips Transformer-Engine extra-state from the loaded
-    # state-dict (delete_extra_state), so those buffer keys are intentionally absent from it.
-    _load_model_weights_from_checkpoint(str(ckpt_dir), [student_model], strict=False)
-
-
-# --------------------------------------------------------------------------------------------------
-# WORKAROUND (nemo:26.04). Megatron-Bridge has since gained a first-class
-# ``DistillationProvider.student_pre_conversion_hook``; from nemo:26.06 onwards, DELETE this whole
-# block (down to the ``DistillationProvider.provide = ...`` line) and instead pass the hook directly:
-#     convert_to_distillation_provider(
-#         student_provider, teacher_provider, kd_config,
-#         student_pre_conversion_hook=(lambda m: _restore_megatron_student(m, path, restore_modelopt_state) or m),
-#     )
-# --------------------------------------------------------------------------------------------------
-# Maps id(distill_provider) -> (megatron_checkpoint_path, restore_modelopt_state) for providers whose student
-# should be initialized from a Megatron checkpoint. A registry is used (instead of an instance
-# attribute) because a DistillationProvider proxies attribute assignment to its teacher once the
-# teacher is set, so anything stored on the instance would leak onto the teacher.
-_MEGATRON_STUDENT_CONFIG: dict[int, tuple[str, bool]] = {}
+# Megatron-Bridge does not (yet) expose a hook to initialize the student before the
+# knowledge-distillation conversion, so we patch ``DistillationProvider.provide`` to do it. Replace
+# this block once a first-class mechanism is available upstream.
+#
+# Maps id(distill_provider) -> megatron_checkpoint_path for providers whose student should be
+# initialized from a Megatron checkpoint. A registry is used (instead of an instance attribute)
+# because a DistillationProvider proxies attribute assignment to its teacher once the teacher is
+# set, so anything stored on the instance would leak onto the teacher.
+_MEGATRON_STUDENT_CKPT_PATHS: dict[int, str] = {}
 
 _original_distill_provide = DistillationProvider.provide
 
@@ -150,33 +112,33 @@ def _distill_provide_with_megatron_student(
 ):
     """Replacement for ``DistillationProvider.provide`` that can initialize the student from a ckpt.
 
-    For providers registered in ``_MEGATRON_STUDENT_CONFIG``, the student is built and its weights
+    For providers registered in ``_MEGATRON_STUDENT_CKPT_PATHS``, the student is built and its weights
     (plus, for a quantized checkpoint, the ModelOpt quantize mode) are restored from the Megatron
     checkpoint *before* the knowledge-distillation conversion -- otherwise the quantize mode is lost,
     since ``restore_sharded_modelopt_state`` is a no-op once a model is already converted. The rest
     mirrors the upstream implementation. Patched at the class level (not the instance) to avoid the
-    teacher-proxying issue described on ``_MEGATRON_STUDENT_CONFIG``.
+    teacher-proxying issue described on ``_MEGATRON_STUDENT_CKPT_PATHS``.
     """
-    cfg = _MEGATRON_STUDENT_CONFIG.get(id(self))
-    if cfg is None:
-        # If a config was registered (for some provider) but this provide() call doesn't match,
+    if vp_stage is not None:
+        raise ValueError("ModelOpt KD currently does not support virtual-pipeline parallel.")
+
+    megatron_path = _MEGATRON_STUDENT_CKPT_PATHS.get(id(self))
+    if megatron_path is None:
+        # If a path was registered (for some provider) but this provide() call doesn't match,
         # the provider was likely copied/wrapped between convert_to_distillation_provider() and now,
         # so the id()-keyed lookup silently misses. Fail loudly rather than train an uninitialized
         # student (this script only ever builds one DistillationProvider).
-        if _MEGATRON_STUDENT_CONFIG:
+        if _MEGATRON_STUDENT_CKPT_PATHS:
             raise RuntimeError(
-                "DistillationProvider.provide() found no registered Megatron-student config for this "
-                "provider, but one was registered for a different provider id -- the provider was "
-                "likely copied/wrapped. Update this workaround or use the upstream "
-                "student_pre_conversion_hook."
+                "DistillationProvider.provide() found no registered Megatron-student checkpoint path "
+                "for this provider, but one was registered for a different provider id -- the provider "
+                "was likely copied/wrapped. Update this workaround."
             )
         return _original_distill_provide(self, pre_process, post_process, vp_stage)
 
-    megatron_path, restore_modelopt_state = cfg
-    if vp_stage is not None:
-        raise ValueError("ModelOpt KD currently does not support virtual-pipeline parallel.")
     student_model = self._super_class.provide(self, pre_process, post_process, vp_stage)
-    _restore_megatron_student(student_model, megatron_path, restore_modelopt_state)
+    print_rank_0(f"Loading student weights from Megatron checkpoint {megatron_path}")
+    load_modelopt_megatron_checkpoint([student_model], megatron_path)
     # Hack to get teacher's pre-wrap hooks called to potentially load HF weights
     teacher_model = self.teacher.provide_distributed_model(
         wrap_with_ddp=False, mixed_precision_wrapper=None
@@ -405,10 +367,7 @@ def main(args: argparse.Namespace):
             )
         # Register so the patched DistillationProvider.provide initializes this provider's student
         # from the Megatron checkpoint (see _distill_provide_with_megatron_student).
-        _MEGATRON_STUDENT_CONFIG[id(distill_provider)] = (
-            args.student_megatron_path,
-            student_has_modelopt_state,
-        )
+        _MEGATRON_STUDENT_CKPT_PATHS[id(distill_provider)] = args.student_megatron_path
 
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(

@@ -38,13 +38,16 @@ See `README.md` in this directory for more details.
 import argparse
 
 import torch
-from megatron.bridge import AutoBridge
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from megatron.core.utils import unwrap_model
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import export_mcore_gpt_to_hf
 from modelopt.torch.utils import print_args, print_rank_0
+from modelopt.torch.utils.plugins.mbridge import (
+    load_mbridge_model_from_hf,
+    load_modelopt_megatron_checkpoint,
+)
 
 
 def get_args() -> argparse.Namespace:
@@ -68,13 +71,25 @@ def get_args() -> argparse.Namespace:
         help="Directory to write the exported HuggingFace (unified) checkpoint to.",
     )
     parser.add_argument("--trust_remote_code", action="store_true")
-
-    # Only Pipeline parallelism is supported for export
-    parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument(
         "--export_extra_modules",
         action="store_true",
         help="Export extra modules such as Medusa heads, EAGLE, or MTP.",
+    )
+
+    # Only Pipeline parallelism is supported for export
+    parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
+    parser.add_argument(
+        "--num_layers_in_first_pipeline_stage",
+        type=int,
+        default=None,
+        help="Number of layers in the first pipeline stage (Uneven Pipeline Parallelism)",
+    )
+    parser.add_argument(
+        "--num_layers_in_last_pipeline_stage",
+        type=int,
+        default=None,
+        help="Number of layers in the last pipeline stage (Uneven Pipeline Parallelism)",
     )
 
     args = parser.parse_args()
@@ -89,33 +104,32 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
     )
 
-    # Build the model structure + tokenizer from HF (weights come from the Megatron checkpoint).
-    bridge = AutoBridge.from_hf_pretrained(
-        args.hf_model_name_or_path, trust_remote_code=trust_remote_code
-    )
-    provider = bridge.to_megatron_provider(load_weights=False)
-    provider.tensor_model_parallel_size = 1  # Tensor parallelism is not supported
-    provider.pipeline_model_parallel_size = args.pp_size
-    provider.expert_model_parallel_size = 1  # Expert parallelism is not supported
-    provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
-    provider.pipeline_dtype = torch.bfloat16
-    provider.finalize()
-    provider.initialize_model_parallel(seed=0)
-
-    # Load the quantized checkpoint. ModelOpt state + weights are restored automatically, and the
-    # checkpoint is re-sharded to TP=1 regardless of the parallelism used during quantization.
-    print_rank_0(f"Loading quantized Megatron checkpoint from {args.megatron_path}...")
-    megatron_model = bridge.load_megatron_model(
-        args.megatron_path,
-        mp_overrides={
-            "tensor_model_parallel_size": 1,
+    # Build the model structure from HF.
+    # The weights come from the Megatron checkpoint, so HF weights are not loaded.
+    _bridge, _provider, model, _unwrapped_model, _tokenizer = load_mbridge_model_from_hf(
+        hf_model_name_or_path=args.hf_model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        provider_overrides={
+            "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
             "pipeline_model_parallel_size": args.pp_size,
-            "expert_model_parallel_size": 1,
-            "expert_tensor_parallel_size": 1,
+            "expert_model_parallel_size": 1,  # Expert parallelism is not supported
+            "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
+            "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
+            "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
+            "pipeline_dtype": torch.bfloat16,
         },
-        wrap_with_ddp=False,
+        init_model_parallel=True,
+        # Grouped GEMM is not supported for export; use the per-expert (sequential) MLP, matching
+        # how the checkpoint was built in quantize.py.
+        moe_grouped_gemm=False,
+        load_weights=False,
     )
-    unwrapped_model = unwrap_model(megatron_model[0])
+
+    # Load the quantized checkpoint (with the correct layer spec) rather than reconstructing it from the checkpoint
+    # config, which avoids the non-serializable layer-spec issue for MoE / Mamba models.
+    print_rank_0(f"Loading quantized Megatron checkpoint from {args.megatron_path}...")
+    load_modelopt_megatron_checkpoint(model, args.megatron_path)
+    unwrapped_model = unwrap_model(model[0])
 
     # Extra modules (Medusa / EAGLE / MTP) only exist on the last pipeline stage. Use an all-reduce
     # MAX over all ranks (rather than a broadcast from a hard-coded source rank) so the decision is
