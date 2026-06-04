@@ -1,44 +1,26 @@
-# DFLASH speculative-decoding benchmark for Kimi-K2.5-NVFP4 via vLLM.
+# DFLASH speculative-decoding benchmark for Kimi-K2.5-NVFP4 via vLLM (in-process
+# AsyncLLM, TP=4 + EP), benchmarking on MT-Bench. Outputs to /scratchspace/specdec_bench/.
 #
-# Serves Kimi-K2.5-NVFP4 in-process (no HTTP server — specdec_bench drives an
-# AsyncLLM) at TP=4 with expert parallelism, attaches a trained/exported DFLASH
-# draft, and benchmarks speculative decoding on MT-Bench. Writes timing.json +
-# aa_timing.json + acceptance_rate.json + mtbench.json + specbench_responses.jsonl
-# to /scratchspace/specdec_bench/.
+# Requires GB200: native NVFP4 + 192 GB/GPU fits ~551 GB Kimi-K2.5-NVFP4 at TP=4
+# on one 4-GPU node.
 #
-# Requires GB200/Blackwell (HSG): Kimi-K2.5-NVFP4 (~551 GB) needs native NVFP4 + the
-# 192 GB/GPU of GB200 to fit at TP=4 on ONE 4-GPU node with no cpu-offload.
+# DFLASH: draft tokens default to 8 (=block_size); --draft_length does NOT apply.
+# To override sampling/engine args, add `- --runtime_params <yaml>` (see
+# examples/specdec_bench/README.md).
 #
-# DFLASH specifics:
-#   - draft tokens default to 8 in specdec_bench (matches DFlash block_size=8);
-#     --draft_length does NOT apply to DFLASH. To override sampling / engine args
-#     (e.g. speculative_num_draft_tokens, temperature), write a runtime-params
-#     yaml and add `- --runtime_params <path>` below — see
-#     examples/specdec_bench/README.md (runtime_args_long_context.yaml pattern).
-#   - --draft_model_dir must point at a trained+exported HF-format DFLASH draft
-#     (e.g. produced by hf_offline_dflash.yaml / a real DFlash run). Set it via the
-#     `draft_model_dir` global_var below, or override on the CLI:
-#     pipeline.global_vars.draft_model_dir=/hf-local/<draft>
-#   - Kimi needs --trust_remote_code for both tokenizer and model.
+# NOTE on dataset: MT-Bench needs no data-prep. For SPEED-Bench instead, first run
+# `prepare_data.py --dataset speed --config all`, then replace --mtbench with
+# `--dataset speed` + `--dataset_path .../data/speed/<split>`.
 #
-# NOTE on dataset: uses MT-Bench (the question.jsonl staged under /hf-local), so
-# it runs without any data-prep step. To benchmark on SPEED-Bench instead, first
-# generate + stage a split:
-#     python3 examples/specdec_bench/prepare_data.py --dataset speed --config all
-# (splits: qualitative, throughput_1k, throughput_16k, ...) then swap the
-# `--mtbench` arg for:
-#     - --dataset speed
-#     - --dataset_path modules/Model-Optimizer/examples/specdec_bench/data/speed/throughput_16k
+# NOTE on container: vllm/vllm-openai:latest is x86 and may lack DFLASH; on
+# GB200/aarch64 use an aarch64 DFLASH-capable image (e.g. a 0511 nightly), via
+# pipeline.task_0.slurm_config.container=<image>. UNRESOLVED.
 #
-# NOTE on container: vllm/vllm-openai:latest is x86 and may lack DFLASH support;
-# on GB200/aarch64 use an aarch64 vLLM image new enough for DFLASH (validated on
-# a 0511 nightly). Override with: pipeline.task_0.slurm_config.container=<image>
-#
-# Run ON the HSG login node (paramiko can't reach HSG through the sss proxy):
-#   export SLURM_HOST=localhost SLURM_ACCOUNT=coreai_dlalgo_modelopt \
+# Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
 #          SLURM_PARTITION=batch \
-#          SLURM_HF_LOCAL=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local \
-#          SLURM_JOB_DIR=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/haoguo/experiments \
+#          SLURM_HF_LOCAL=<hf_models_dir> \
+#          SLURM_JOB_DIR=<experiments_dir> \
 #          NEMORUN_HOME=$PWD
 #   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/specdec_bench.yaml \
 #          identity=$HOME/.ssh/id_ecdsa detach=True --yes
@@ -52,8 +34,7 @@ pipeline:
 
   global_vars:
     hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4
-    # Trained + exported HF-format DFLASH draft checkpoint. Defaults to the standard
-    # export path; override on the CLI with: pipeline.global_vars.draft_model_dir=<path>
+    # Trained+exported DFLASH draft; override: pipeline.global_vars.draft_model_dir=<path>
     draft_model_dir: /hf-local/nvidia/Kimi-K2.5-DFlash
 
   task_0:

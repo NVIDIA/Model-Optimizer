@@ -1,33 +1,6 @@
-# DFlash dry-run smoke test for Kimi-K2.5 (NVFP4).
-#
-# Single-task pipeline that exercises the full convert→save→export path WITHOUT
-# actually training. Uses the same `common/specdec/dflash_online_training.sh`
-# entrypoint as a real DFlash run; all dry-run behaviour is expressed as dotlist
-# overrides on `main.py` (shared with EAGLE3 — `--dry_run` is mode-agnostic):
-#
-#   --dry_run                              → main.py skips trainer.train(), saves
-#                                            the (untrained) ModelOpt checkpoint
-#                                            to training.output_dir right after
-#                                            mtsp.convert(model, [("dflash", ...)])
-#   data.offline_data_path=<placeholder>   → setting an offline path makes
-#                                            mode='offline' → use_offline_training
-#                                            =True. Combined with
-#                                            use_fake_base_for_offline=true this
-#                                            loads a FakeBaseModel (only
-#                                            embed_tokens + lm_head), so the ~1T
-#                                            MoE base fits on a single GPU. The
-#                                            file is never read in --dry_run mode.
-#   model.trust_remote_code=true           → Kimi-K2.5 (deepseek_v3 arch) ships a
-#                                            custom modeling file
-#   dflash.dflash_mask_token_id=163838     → Kimi-K2.5 has no dedicated mask token;
-#                                            163838 is a reserved slot used as the
-#                                            DFlash mask
-#
-# The dflash_online_training.sh export block then writes an HF-format DFlash draft
-# to /scratchspace/dflash/exported-checkpoint-final with the correct architecture
-# (5-layer draft block, block_size=8) but untrained weights — acceptance ~0%, by
-# design. Useful for smoke-testing the launcher / convert / export plumbing and
-# validating downstream loaders without a real training run.
+# DFlash dry-run smoke test for Kimi-K2.5 (NVFP4): exercises the full
+# convert->save->export path WITHOUT training, to validate launcher/export
+# plumbing and downstream loaders. Exported draft has untrained weights.
 #
 # Usage:
 #   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_dflash_dryrun.yaml --yes
@@ -41,18 +14,22 @@ pipeline:
   global_vars:
     hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4/
 
-  # Convert → save → export (no training).
+  # Convert -> save -> export (no training).
   task_0:
     script: common/specdec/dflash_online_training.sh
     args:
+      # Skips trainer.train(), saves the untrained checkpoint right after convert.
       - --dry_run
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
+      # FakeBaseModel (embed + lm_head only) so the base fits one GPU; never read in dry-run.
       - model.use_fake_base_for_offline=true
       - model.trust_remote_code=true
+      # An offline path forces mode=offline; value unused in dry-run.
       - data.offline_data_path=/tmp/dryrun-placeholder
       - training.output_dir=/scratchspace/dflash
       - training.disable_tqdm=true
+      # Kimi has no dedicated mask token; 163838 is a reserved slot used as the mask.
       - dflash.dflash_mask_token_id=163838
     slurm_config:
       _factory_: "slurm_factory"

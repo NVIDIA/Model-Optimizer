@@ -28,26 +28,6 @@ from dataclasses import dataclass
 import nemo_run as run
 import yaml
 
-__all__ = [
-    "DEFAULT_EXPERIMENT_TITLE",
-    "GlobalVariables",
-    "SandboxPipeline",
-    "SandboxTask",
-    "SandboxTask0",
-    "SandboxTask1",
-    "SandboxTask2",
-    "SandboxTask3",
-    "SandboxTask4",
-    "build_docker_executor",
-    "build_slurm_executor",
-    "create_task_from_yaml",
-    "get_default_env",
-    "register_factory",
-    "report_versions",
-    "run_jobs",
-    "set_slurm_config_type",
-]
-
 # ---------------------------------------------------------------------------
 # Default environment variables injected into every job
 # ---------------------------------------------------------------------------
@@ -277,8 +257,8 @@ def build_slurm_executor(
     # use a LocalTunnel: nemo_run then runs sbatch and copies artifacts via local
     # subprocess/shutil instead of ssh+rsync. This avoids flaky/hanging ssh-to-
     # localhost (e.g. MaxStartups throttling on a shared login node, or clusters
-    # like HSG that are only reachable through an sss proxy so paramiko can't
-    # tunnel in from outside). For real remote hosts, keep the SSHTunnel.
+    # only reachable through a login proxy so paramiko can't tunnel in from
+    # outside). For real remote hosts, keep the SSHTunnel.
     if slurm_config.host in ("localhost", "127.0.0.1"):
         tunnel = run.LocalTunnel(job_dir=job_dir)
     else:

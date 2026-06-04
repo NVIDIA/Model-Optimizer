@@ -1,22 +1,7 @@
 # EAGLE3 streaming speculative decoding pipeline for Qwen3-8B — MULTI-NODE.
 #
-# Multi-node sibling of hf_streaming_eagle3.yaml. Both the serve and trainer sides
-# scale across multiple nodes, with multiple GPUs per node. task_1 allocates 4
-# nodes x 2 GPUs: SERVE_NODES (=2) run independent vllm serve replicas (TP=2 each),
-# the remaining 2 run multi-node-DDP trainers (2 GPUs each -> world_size=4). Tune
-# the split via slurm_config.nodes/gpus_per_node + the SERVE_NODES env:
-#   nodes=N, SERVE_NODES=K  ->  K serve replicas + (N-K) trainer nodes.
-#
-# Topology (see common/eagle3/train_eagle_streaming.sh header for the dispatch):
-# Slurm nodes 0..K-1 each serve and publish their address via /scratchspace; nodes
-# K..N-1 are trainers. The head trainer publishes its IP for accelerate's
-# rendezvous; every trainer reads all serve addresses and joins the DDP group.
-#
-# How it scales: the dataset is map-style, so HF Trainer's DistributedSampler
-# shards the corpus across ALL trainer ranks and each rank fetches ONLY its own
-# shard, round-robin across the K serve replicas (data.streaming_server_url is the
-# comma-joined list). Trainer nodes scale effective batch / compute; serve nodes
-# scale data-production throughput (~K x).
+# task_1 splits N nodes into K serve replicas + (N-K) DDP trainers via SERVE_NODES;
+# see common/eagle3/train_eagle_streaming.sh for dispatch, rendezvous, and sharding.
 #
 # 3-step pipeline:
 #   task_0: Build input conversations (jsonl)
@@ -49,12 +34,7 @@ pipeline:
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
   # Step 2: Streaming EAGLE3 training — 2 serve replicas (TP=2) + 2 trainer nodes (2 GPU each).
-  # Reuses the shared streaming orchestrator (common/eagle3/train_eagle_streaming.sh);
-  # SERVE_NODES + nodes select the K-serve + (N-K)-trainer multi-node topology.
-  #
-  # Qwen3-8B has 36 hidden layers; default_eagle_aux_layer_ids(36) = [1, 17, 32];
-  # vllm capture ids are those shifted by +1, plus the final layer:
-  #   [2, 18, 33] + [36] = [2, 18, 33, 36].
+  # Capture ids: default_eagle_aux_layer_ids(36)=[1,17,32] +1, plus final layer 36.
   task_1:
     script: common/eagle3/train_eagle_streaming.sh
     args:
@@ -70,16 +50,12 @@ pipeline:
       - eagle.eagle_use_torch_compile=false
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
-      # No spaces: nemo_run emits `export FOO=value` without quotes, so a
-      # space-separated value would be split by the shell.
+      # No spaces: nemo_run emits `export FOO=value` unquoted.
       - EAGLE_CAPTURE_IDS: "[2,18,33,36]"
-      # Each serve node has 2 GPUs -> TP=2.
       - SERVE_TP: "2"
       # K serve replica nodes (Slurm nodes 0..K-1); the rest are trainers.
       - SERVE_NODES: "2"
-      # Per-serve in-flight requests = (trainer ranks) x STREAMING_NUM_WORKERS / SERVE_NODES.
-      # Here 4 ranks x 4 / 2 serves = 8 concurrent per serve — fine for Qwen's
-      # max_num_seqs.
+      # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
       - STREAMING_NUM_WORKERS: "4"
     slurm_config:
       _factory_: "slurm_factory"

@@ -19,9 +19,8 @@
 #   Multi-node:   ./launch_train.sh --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml --num_nodes 2 --head_node_ip <IP>
 #   With overrides: ./launch_train.sh --config my.yaml model.model_name_or_path=xxx training.output_dir=yyy
 #
-# Extra key=value args are forwarded as OmegaConf dotlist overrides to main.py.
-# All training config (model, data, hyperparams, eagle, fsdp) lives in the YAML file.
-# Only multi-node routing args are passed here; mixed_precision is fixed to bf16.
+# Extra key=value args are forwarded as OmegaConf dotlist overrides to main.py; all
+# training config lives in the YAML. mixed_precision is fixed to bf16.
 
 set -eo pipefail
 
@@ -48,7 +47,6 @@ if [ -z "$CONFIG_FILE" ]; then
   exit 1
 fi
 
-# GPU count detection
 if [[ "$NUM_NODES" != "1" ]]; then
   GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
   TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
@@ -58,15 +56,10 @@ else
   echo "Total GPUs: $TOTAL_GPU (single node)"
 fi
 
-# Multi-node routing args (accelerate only; training config comes from the YAML)
 MULTI_NODE_ARGS=()
 if [[ "$NUM_NODES" != "1" ]]; then
-  # machine_rank defaults to $SLURM_PROCID; pass --machine_rank explicitly when the
-  # allocation reserves node 0 for something else (e.g. a streaming vllm serve).
-  # --multi_gpu is required even at 1 GPU/node -- without it accelerate treats a lone
-  # local process as non-distributed and never forms the process group (each node
-  # would train its own world=1). Use static rendezvous via main_process_ip/port; NOT
-  # --rdzv_backend c10d, which switches to the elastic launcher and ignores it.
+  # --multi_gpu is required even at 1 GPU/node, else accelerate won't form the DDP group.
+  # machine_rank defaults to $SLURM_PROCID; override --machine_rank if node 0 isn't a trainer.
   MULTI_NODE_ARGS=(
     --multi_gpu
     --num_processes "$TOTAL_GPU"
@@ -79,8 +72,7 @@ fi
 
 export TOKENIZERS_PARALLELISM=False
 
-# Run as an argv array (not `sh -c "..."`, which would word-split overrides
-# containing spaces and execute command substitutions embedded in their values).
+# argv array, not `sh -c` (which would word-split overrides and run embedded substitutions).
 CMD=(accelerate launch --mixed_precision bf16
      "${MULTI_NODE_ARGS[@]}"
      "${SCRIPT_DIR}/main.py" --config "$CONFIG_FILE" "${EXTRA_ARGS[@]}")

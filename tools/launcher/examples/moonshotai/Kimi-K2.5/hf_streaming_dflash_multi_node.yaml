@@ -1,59 +1,20 @@
 # DFlash streaming speculative-decoding training for Kimi-K2.5-NVFP4 on
-# GB200/Blackwell (HSG) — MULTI-NODE (multi-serve). Multi-node sibling of
-# hf_streaming_dflash.yaml: BOTH sides scale out. SERVE_NODES (=2) run independent
-# vllm serve replicas (TP=4 each, whole node); the remaining nodes run multi-node-DDP
-# trainers (4 GPUs each). This file allocates 4 nodes = 2 serve + 2 trainer
-# (world_size=8). Tune the split via slurm_config.nodes/segment + SERVE_NODES:
-#   nodes=N, SERVE_NODES=K  ->  K serve replicas + (N-K) trainer nodes.
+# GB200/Blackwell — MULTI-NODE: both serve and trainer sides scale out.
+# nodes=N, SERVE_NODES=K -> K serve replicas (TP=4, whole node) + (N-K) trainer
+# nodes. See common/eagle3/train_eagle_streaming.sh for dispatch/sharding/scaling.
 #
-# Why GB200: native NVFP4 + 192 GB/GPU lets the ~551 GB Kimi-K2.5-NVFP4 model fit
-# at TP=4 on ONE 4-GPU node with no cpu-offload. So each serve replica owns a whole
-# node at TP=4, and each trainer node uses all 4 GPUs for the draft (fake base).
+# Requires GB200: native NVFP4 + 192 GB/GPU fits ~551 GB Kimi-K2.5-NVFP4 at TP=4
+# on one 4-GPU node, so each serve replica owns a whole node.
 #
-# Topology (see common/eagle3/train_eagle_streaming.sh header for the dispatch):
-# Slurm nodes 0..K-1 each serve and publish their address via /scratchspace; nodes
-# K..N-1 are trainers. The head trainer publishes its IP for accelerate's c10d
-# rendezvous; every trainer reads all K serve addresses and joins the DDP group.
-# segment=<nodes> pins all nodes into one NVL72 block so inter-node DDP traffic
-# rides NVLink.
+# Capture ids: build_target_layer_ids(num_orig=61, num_draft=5)=[1,15,30,44,58]
+# -> +1 for embedding = [2,16,31,45,59], append base 60 (final layer uncapturable).
+# 6 captured = 5 aux layers, matching the 5-layer DFlash draft block.
 #
-# How it scales: HF Trainer's DistributedSampler shards the corpus across ALL
-# trainer ranks and each rank fetches ONLY its own shard, round-robin across the K
-# serve replicas (data.streaming_server_url is the comma-joined list the script
-# assembles). Trainer nodes scale effective batch / compute and distribute the
-# lustre reads; serve nodes scale data-production throughput (~K x).
-#
-# Concurrency: keep it low for cold NVFP4 MoE (see SERVE_MAX_NUM_SEQS below).
-# Per-serve in-flight requests = world_size x STREAMING_NUM_WORKERS / SERVE_NODES
-# = 8 x 1 / 2 = 4, matching SERVE_MAX_NUM_SEQS=4.
-#
-# How streaming feeds DFlash: data.mode=streaming derives dflash_offline=True
-# (modelopt/recipe/config.py ModelOptDFlashRecipe._derive_dflash_offline), so the
-# DFlash module consumes the streamed hidden states (base_model_outputs) instead of
-# running the fake base. vLLM dumps captured layers as [seq, n_captured, hidden];
-# the dataset splits the LAST captured layer into base_model_hidden_states (DFlash
-# self-logit distillation) and the REST into aux_hidden_states (DFlash's
-# concatenated target-layer features). So n_captured must be (num DFlash target
-# layers + 1).
-#
-# Capture ids (kimi_k25 / deepseek_v3 arch, 61 layers, capture id space 0..60;
-# the true final layer is NOT capturable so we use 60 as the base, same as EAGLE3):
-#   DFlash target layers come from build_target_layer_ids(num_orig=61, num_draft=5)
-#   = [1,15,30,44,58] (0-based) -> vLLM ids (+1 for the embedding layer) =
-#   [2,16,31,45,59]. Append base 60. captured = [2,16,31,45,59,60] = 6, so the
-#   dataset yields 5 aux layers, matching the 5-layer DFlash draft block.
-#
-# answer_only_loss: forced false here. DFlash's recipe default is true, which
-# requires the tokenizer chat template to carry {% generation %} tags so the
-# streaming dataset can derive an assistant-token mask; Kimi's template does not,
-# and the streaming path (unlike online) does not inject data.chat_template. To
-# train assistant-only later, supply a generation-tagged template and flip this on.
-#
-# Run ON the HSG login node (paramiko can't reach HSG through the sss proxy):
-#   export SLURM_HOST=localhost SLURM_ACCOUNT=coreai_dlalgo_modelopt \
+# Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
 #          SLURM_PARTITION=batch \
-#          SLURM_HF_LOCAL=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local \
-#          SLURM_JOB_DIR=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/haoguo/experiments \
+#          SLURM_HF_LOCAL=<hf_models_dir> \
+#          SLURM_JOB_DIR=<experiments_dir> \
 #          NEMORUN_HOME=$PWD
 #   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml \
 #          identity=$HOME/.ssh/id_ecdsa detach=True --yes
@@ -70,7 +31,7 @@ pipeline:
   global_vars:
     hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4
 
-  # Step 1: Build input conversations (model-agnostic)
+  # Build input conversations.
   task_0:
     script: common/eagle3/make_dataset.sh
     args:
@@ -80,14 +41,11 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      # HSG QOS (QOSMinGRES) requires whole-node GPU allocation (4 on GB200),
-      # so request 4 even though make_dataset is CPU-only.
+      # The cluster QOS requires whole-node GPU alloc even though make_dataset is CPU-only.
       gpus_per_node: 4
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
-  # Step 2: Streaming DFlash training — 2 serve replicas (TP=4) + 2 trainer nodes (4 GPU each).
-  # Reuses the shared streaming orchestrator (common/eagle3/train_eagle_streaming.sh);
-  # SERVE_NODES + nodes select the K-serve + (N-K)-trainer multi-node topology.
+  # Streaming DFlash training: 2 serve replicas (TP=4) + 2 trainer nodes.
   task_1:
     script: common/eagle3/train_eagle_streaming.sh
     args:
@@ -98,51 +56,41 @@ pipeline:
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
       - training.output_dir=/scratchspace/dflash
-      # Must be divisible by dflash_block_size (8). DFlash trains on fixed-length blocks.
+      # Must be divisible by dflash_block_size (8).
       - training.training_seq_len=4096
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
       - training.max_steps=500
-      # See header: Kimi's template lacks {% generation %} tags; train on all tokens.
+      # Kimi's template lacks {% generation %} tags, so train on all tokens.
       - training.answer_only_loss=false
-      # dflash.yaml sets report_to=tensorboard, but the vLLM container has no
-      # tensorboard -> TensorBoardCallback RuntimeError at trainer init. Disable
-      # reporting (loss still prints to stdout via logging_steps).
+      # vLLM container has no tensorboard (dflash.yaml's default) -> init crash.
       - training.report_to=none
-      # Kimi-K2.5 has no dedicated mask token ([EOS]=163585, [PAD]=163839); 163838
-      # is a reserved slot used as the DFlash mask (matches the real Kimi DFlash run).
+      # Kimi has no dedicated mask token; 163838 is a reserved slot used as the mask.
       - dflash.dflash_mask_token_id=163838
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
-      # No spaces in values: nemo_run emits `export FOO=value` unquoted.
-      # DFlash target layers (vLLM-indexed) + base 60; see header for derivation.
+      # See header for derivation.
       - EAGLE_CAPTURE_IDS: "[2,16,31,45,59,60]"
-      # K serve replica nodes (Slurm nodes 0..K-1); the rest are trainers.
       - SERVE_NODES: "2"
-      # Each serve node has 4 GB200 GPUs -> TP=4 (whole node, the only fit for Kimi).
       - SERVE_TP: "4"
-      # DataLoader workers per trainer rank = in-flight requests per rank. Keep at 1:
-      # per-serve in-flight = world_size(8) x 1 / SERVE_NODES(2) = 4 = SERVE_MAX_NUM_SEQS.
+      # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
       - STREAMING_NUM_WORKERS: "1"
-      # DFlash on a custom-modeling base (Kimi) needs --trust_remote_code at export.
+      # Kimi's custom-modeling base needs --trust_remote_code at export.
       - EXPORT_EXTRA_ARGS: "--trust_remote_code"
-      # The model's native max_seq_len is 262144, whose KV cache OOMs. Cap context
-      # to the training seq len and leave headroom for activation spikes.
+      # Cap context to the train seq len; the model's native 262144 KV-cache OOMs at TP=4.
       - SERVE_MAX_MODEL_LEN: "4096"
-      # Small batches: smaller per-step MoE compute stays under the engine timeout.
       - SERVE_MAX_NUM_SEQS: "4"
       - SERVE_GPU_MEM_UTIL: "0.8"
       - SERVE_READY_TIMEOUT: "2400"
       - SERVE_EXTRA_ARGS: "--trust-remote-code"
-      # A worker can stall on the first real serving step (cold NVFP4 MoE kernels)
-      # past vLLM's default execute-model timeout, killing EngineCore. Extend the
-      # timeouts that govern that path (seconds).
+      # Cold NVFP4-MoE kernels stall the first serving step past vLLM's default execute-model timeout; raise it (seconds).
       - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
       - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 4
+      # Pin nodes into one NVL72 block (essential for cross-node trainer DDP).
       segment: 4
       ntasks_per_node: 1
       gpus_per_node: 4
