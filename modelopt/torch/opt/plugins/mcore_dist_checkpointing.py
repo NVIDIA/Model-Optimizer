@@ -23,8 +23,8 @@ from typing import Any
 
 import torch
 from megatron.core import dist_checkpointing, mpu
-from megatron.core.dist_checkpointing.serialization import get_default_load_sharded_strategy
 from megatron.core.dist_checkpointing.strategies.common import COMMON_STATE_FNAME
+from megatron.core.dist_checkpointing.strategies.torch import TorchDistLoadShardedStrategy
 from megatron.core.dist_checkpointing.validation import StrictHandling
 from megatron.core.transformer.module import Float16Module
 
@@ -162,7 +162,7 @@ def _load_extra_state_from_sharded_checkpoint(
     extra_state_dict = dist_checkpointing.load(
         extra_sharded_state_dict,
         checkpoint_name,
-        get_default_load_sharded_strategy(checkpoint_name),
+        TorchDistLoadShardedStrategy(),
         strict=StrictHandling.LOG_UNEXPECTED,
     )
     extra_state_dict_no_prefix = {}
