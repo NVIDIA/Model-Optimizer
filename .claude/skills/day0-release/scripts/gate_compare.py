@@ -41,6 +41,7 @@ def _is_valid_score(val):
         and _SCORE_MIN <= val <= _SCORE_MAX
     )
 
+
 # Decisions
 ACCEPT = "ACCEPT"
 REGRESSION = "REGRESSION"
@@ -99,7 +100,12 @@ def evaluate_comparison(baseline, candidate, threshold=0.01, relative=False):
         if invalid:
             # Don't compute deltas on non-numeric/out-of-range scores (would raise
             # TypeError); record the anomaly and move on — the run is ANOMALOUS.
-            per_task[task] = {"baseline": b, "candidate": c, "drop": None, "within_threshold": False}
+            per_task[task] = {
+                "baseline": b,
+                "candidate": c,
+                "drop": None,
+                "within_threshold": False,
+            }
             continue
         if relative:
             drop = (b - c) / b if b else 0.0

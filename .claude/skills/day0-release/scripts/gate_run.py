@@ -99,7 +99,9 @@ def evaluate_run(summary):
         if score is None:
             ok = False
             reasons.append("no score extracted")
-        elif not (isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)):
+        elif not (
+            isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+        ):
             ok = False
             reasons.append(f"score not numeric/finite: {score!r}")
 
