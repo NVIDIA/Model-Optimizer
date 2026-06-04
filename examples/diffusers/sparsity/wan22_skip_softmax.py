@@ -426,9 +426,7 @@ def main() -> None:
             if args.calibrate:
                 print("Warning: --calibrate is ignored when --skip-softmax-threshold is set")
         elif args.calibrate:
-            calib_frames = (
-                args.calib_frames if args.calib_frames is not None else args.num_frames
-            )
+            calib_frames = args.calib_frames if args.calib_frames is not None else args.num_frames
             forward_loop = build_calibration_forward_loop(
                 pipe,
                 calib_size=args.calib_size,

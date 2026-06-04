@@ -413,15 +413,23 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     target_sparse_ratio = None
     sparse_softmax_config = None
     target_classes: set[str] = set()
+    disabled_layer_names: list[str] = []
 
-    for module in get_sparse_attention_modules(model):
+    for name, module in get_named_sparse_attention_modules(model):
         # Get the original wrapped module's class name
         if hasattr(module, "get_original_cls_by_level"):
             original_cls = module.get_original_cls_by_level(level=0)
             if original_cls is not None:
                 target_classes.add(original_cls.__name__)
 
-        # Get calibration params from first module that has them
+        # Record layers kept dense (e.g. cross-attention, first/last blocks) so the
+        # deployment side sparsifies the same subset that was calibrated, rather than
+        # every instance of the target class.
+        if not module.is_enabled:
+            disabled_layer_names.append(get_unwrapped_name(name, model))
+            continue
+
+        # Get calibration params from first enabled module that has them
         if calibration_params is None:
             calibration_params = getattr(module._sparse_method_instance, "calibration_params", None)
         if target_sparse_ratio is None:
@@ -442,6 +450,8 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
             "sparse_algo": "softmax_skip",
             "targets": targets,
         }
+        if disabled_layer_names:
+            config_groups[f"group_{group_idx}"]["disabled_layers"] = disabled_layer_names
         group_idx += 1
     if sparse_softmax_config is not None:
         config_groups[f"group_{group_idx}"] = {
