@@ -24,13 +24,21 @@ For background on how QAT enables low-precision accuracy recovery, see the [QAT/
 
 ### Prerequisites
 
-Please refer to [llm_ptq/README.md](../llm_ptq/README.md#pre-requisites) for prerequisites.
+Please refer to [llm_ptq/README.md](../llm_ptq/README.md#pre-requisites) for container
+recommendations and base ModelOpt installation guidance. For this QAT/QAD example,
+install the Hugging Face dependencies and the example-specific requirements:
+
+```bash
+pip install -U nvidia-modelopt[hf]
+pip install -r examples/llm_qat/requirements.txt
+```
 
 The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 
 ## Run End-to-End QAT/QAD Example
 
-All arguments can be specified via YAML config, CLI flags, or both (CLI overrides YAML). See [ARGUMENTS.md](ARGUMENTS.md) for the full per-script argument reference, or run any script with `--help`.
+All arguments can be set via YAML, CLI, or both (CLI overrides YAML). See
+[ARGUMENTS.md](ARGUMENTS.md), `--help`, and [Configuration](#advanced-configuration).
 
 ### QAT
 
@@ -141,22 +149,23 @@ trainer.train()
 trainer.save_model()
 ```
 
-`QADTrainer` extends `QATTrainer` with distillation:
+`QADTrainer` extends `QATTrainer` with distillation. Pass the teacher model and a `DistillArguments` instance:
 
 ```python
-from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
+from modelopt.torch.distill.plugins.huggingface import DistillArguments
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 
-distill_config = {
-    "teacher_model": teacher_model,
-    "criterion": LMLogitsLoss(),
-}
+distill_args = DistillArguments(
+    distill=True,
+    teacher_model="Qwen/Qwen3-8B",
+    criterion="logits_loss",
+)
 
 trainer = QADTrainer(
     model=model,            # pre-quantized model
     processing_class=tokenizer,
     args=training_args,
-    distill_config=distill_config,
+    distill_args=distill_args,
     **data_module,
 )
 trainer.train()
@@ -188,13 +197,20 @@ See [custom calibration](https://nvidia.github.io/Model-Optimizer/guides/_pytorc
 
 ### Supported Quantization Formats
 
-| Format | Precision | Recipe | Use Case |
-|--------|-----------|--------|----------|
-| **NVFP4** | W4A4 + FP8 KV | `general/ptq/nvfp4_default-kv_fp8` | Maximum compression for Blackwell GPUs |
-| **FP8** | W8A8 + FP8 KV | `general/ptq/fp8_default-fp8_kv` | Balanced speed and accuracy |
-| **INT4** weight-only | W4A16 | `general/ptq/int4_blockwise_weight_only` | Deployable on all Ampere or later GPUs |
+Built-in recipes support full-model, partial-layer, and mixed-precision quantization. Common entry points:
 
-> **NVFP4** uses 4-bit FP weights and activations (E2M1 with FP8 dynamic scales) plus FP8 KV cache. Partial variants are available for quantizing only specific layers (e.g., MLP-only, MoE experts-only) — see [`modelopt_recipes/general/ptq/`](../../modelopt_recipes/general/ptq/) for all options.
+| Format | Precision | Example Recipe | Use Case |
+|--------|-----------|----------------|----------|
+| **NVFP4** | W4A4 + FP8 KV | `general/ptq/nvfp4_default-kv_fp8` | FP4 compute and compression on Blackwell GPUs |
+| **FP8** | W8A8 + FP8 KV | `general/ptq/fp8_default-kv_fp8` | Near-BF16 accuracy on Hopper or later GPUs |
+| **INT4** weight-only | W4A16 | `general/ptq/int4_blockwise_weight_only` | Deployable on all Ampere or later GPUs |
+| **Partial / mixed** | Pattern-specific | `general/ptq/nvfp4_mlp_only-kv_fp8` | Quantize selected layers or combine precisions |
+
+> Recipes can target different layers or GEMMs with different precisions, such as NVFP4
+> for MLP/MoE GEMMs and FP8 for attention GEMMs or KV cache. See
+> [`modelopt_recipes/general/ptq/`](../../modelopt_recipes/general/ptq/) and
+> [`modelopt_recipes/configs/ptq/`](../../modelopt_recipes/configs/ptq/) for built-in
+> options and reusable recipe units.
 
 ### Supported Backends
 
@@ -271,7 +287,7 @@ Common layer class names:
 
 </details>
 
-<details>
+<details id="advanced-configuration">
 <summary><b>Configuration</b></summary>
 
 There are two types of configs:
