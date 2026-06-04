@@ -1496,6 +1496,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--cpu_offload requires --use_fsdp2")
     if args.use_fsdp2 and args.sparsity_fmt != "dense":
         parser.error(f"--use_fsdp2 does not support --sparsity_fmt {args.sparsity_fmt}.")
+    if args.use_fsdp2 and args.vllm_fakequant_export:
+        parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
+    if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
+        parser.error("--use_fsdp2 does not support --cast_mxfp4_to_nvfp4.")
 
     return args
 

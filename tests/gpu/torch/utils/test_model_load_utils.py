@@ -18,7 +18,9 @@
 import json
 import os
 import tempfile
+from functools import partial
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -114,13 +116,19 @@ def _build_tiny_llama_checkpoint(path: str) -> None:
     model.save_pretrained(path)
 
 
-def _test_parallel_load_and_export(rank, size):
-    """Load a tiny Llama via the FSDP2 loader, forward, then export — config.architectures preserved."""
+def _test_parallel_load_and_export(rank, size, cpu_offload):
+    """Load a tiny Llama via the FSDP2 loader, forward, then export — config.architectures preserved.
+
+    Parametrized over ``cpu_offload`` to cover both shard placements:
+      - off: decoder DTensor shards on GPU, plain root on GPU.
+      - on:  decoder DTensor shards on CPU (streamed per layer), root promoted to GPU
+             via ``_promote_non_dtensor_to_gpu``.
+    """
     from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
     from modelopt.torch.utils.model_load_utils import parallel_load_and_prepare_fsdp2
 
-    # Rank 0 writes the checkpoint; others wait.
-    ckpt_dir = os.path.join(tempfile.gettempdir(), f"_test_parallel_load_{os.getpid()}")
+    suffix = "offload" if cpu_offload else "noffload"
+    ckpt_dir = os.path.join(tempfile.gettempdir(), f"_test_parallel_load_{suffix}_{os.getpid()}")
     if rank == 0:
         os.makedirs(ckpt_dir, exist_ok=True)
         _build_tiny_llama_checkpoint(ckpt_dir)
@@ -128,21 +136,33 @@ def _test_parallel_load_and_export(rank, size):
 
     device = torch.device(f"cuda:{rank}")
     model = parallel_load_and_prepare_fsdp2(
-        ckpt_dir, device=device, rank=rank, world_size=size, freeze=True
+        ckpt_dir,
+        device=device,
+        rank=rank,
+        world_size=size,
+        cpu_offload=cpu_offload,
+        freeze=True,
     )
 
-    # Decoder layers are sharded; root params (embed/lm_head) are plain.
+    # Decoder layers are sharded; root params (embed/lm_head) are plain on GPU.
     decoder_params = list(model.model.layers[0].parameters())
     assert any(isinstance(p, DTensor) for p in decoder_params)
     assert not isinstance(model.model.embed_tokens.weight, DTensor)
+    assert model.model.embed_tokens.weight.device.type == "cuda"
+    if cpu_offload:
+        # Under cpu_offload the decoder shards live on CPU between forwards.
+        decoder_dtensors = [p for p in decoder_params if isinstance(p, DTensor)]
+        assert all(p.to_local().device.type == "cpu" for p in decoder_dtensors)
 
-    # Forward exercises FSDP2 hooks + root replication.
+    # Forward exercises FSDP2 hooks + (under cpu_offload) the per-layer CPU↔GPU stream.
     input_ids = torch.randint(0, 64, (1, 8), device=device)
     out = model(input_ids=input_ids).logits
     assert out.shape == (1, 8, 64)
 
     # Export and verify the saved config.json retains the original architectures.
-    export_dir = os.path.join(tempfile.gettempdir(), f"_test_parallel_export_{os.getpid()}")
+    export_dir = os.path.join(
+        tempfile.gettempdir(), f"_test_parallel_export_{suffix}_{os.getpid()}"
+    )
     if rank == 0:
         os.makedirs(export_dir, exist_ok=True)
     dist.barrier()
@@ -154,5 +174,6 @@ def _test_parallel_load_and_export(rank, size):
         assert cfg["architectures"] == ["LlamaForCausalLM"]
 
 
-def test_parallel_load_and_export(dist_workers):
-    dist_workers.run(_test_parallel_load_and_export)
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_parallel_load_and_export(dist_workers, cpu_offload):
+    dist_workers.run(partial(_test_parallel_load_and_export, cpu_offload=cpu_offload))
