@@ -16,11 +16,13 @@
 """Multi-node PTQ (Post-Training Quantization) with FSDP2 support."""
 
 import argparse
+import copy
 import json
 import os
 import random
 import time
 import warnings
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -34,34 +36,114 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedTo
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_config
 from modelopt.torch.export import get_model_type
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
-from modelopt.torch.quantization.config import need_calibration
+from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
+from modelopt.torch.quantization.config import QuantizeConfig, need_calibration
 from modelopt.torch.quantization.utils import patch_fsdp_mp_dtypes
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader, get_supported_datasets
 
 # Constants
 RAND_SEED = 1234
 
-QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
-    "int8": mtq.INT8_DEFAULT_CFG,
-    "int4_awq": mtq.INT4_AWQ_CFG,
-    "fp8": mtq.FP8_DEFAULT_CFG,
-    "nvfp4": mtq.NVFP4_DEFAULT_CFG,
-    "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
-    "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
-    "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
-    "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
-    "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
+# Preset directories under modelopt_recipes/ that back the --qformat and
+# --kv_cache_qformat CLI vocabularies. Each ``*.yaml`` file in these directories is
+# automatically discovered and exposed as a valid CLI value via _PresetCfgChoices,
+# so no code change in this script is required when a YAML is added or removed.
+# This is deliberate: every preset YAML is CLI-exposed, there is no separate
+# allow-list — the directory listing is the policy.
+#
+# That said, prefer NOT to add new YAMLs to these preset directories either. The
+# long-term direction is to retire --qformat / --kv_cache_qformat entirely in favour
+# of --recipe, which accepts a full PTQ recipe (see modelopt_recipes/general/ptq/
+# and modelopt/recipe/). New quantization configurations should be authored as
+# recipes, not as preset entries.
+_QFORMAT_PRESET_DIR = "configs/ptq/presets/model"
+_KV_QFORMAT_PRESET_DIR = "configs/ptq/presets/kv"
+
+# Backward-compat short names → canonical preset basename. These aliases predate the
+# YAML-driven discovery below and remain accepted so existing scripts keep working.
+#
+# DO NOT add new entries here. New quantization formats must be exposed via their YAML
+# basename under modelopt_recipes/configs/ptq/presets/model/ — the directory listing is
+# the canonical CLI vocabulary. This table exists solely to keep pre-existing short
+# names (and the scripts/docs that hardcode them) working through deprecation, and
+# should only ever shrink.
+_QFORMAT_ALIASES: dict[str, str] = {
+    "nvfp4_awq": "nvfp4_awq_lite",
 }
 
-KV_QUANT_CFG_CHOICES = {
-    "none": "none",
-    "fp8": "FP8_KV_CFG",
-    "nvfp4": "NVFP4_KV_CFG",
-    "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
-}
+# Sentinel value for ``--kv_cache_qformat`` meaning "no KV cache quantization".
+_KV_NONE = "none"
+
+
+class _PresetCfgChoices(Mapping[str, dict[str, Any]]):
+    """Lazy mapping of qformat names → quant_cfg dicts loaded from preset YAMLs.
+
+    Iterates the YAML files in ``modelopt_recipes/<subdir>/`` to populate the set
+    of available qformat names; the supplied ``aliases`` table maps additional
+    short names onto canonical preset basenames. Loading happens on first access
+    and is memoised so repeated lookups are cheap.
+    """
+
+    def __init__(self, subdir: str, aliases: Mapping[str, str] | None = None):
+        self._subdir = subdir
+        self._aliases: dict[str, str] = dict(aliases or {})
+        self._presets: set[str] = set()
+        for entry in BUILTIN_CONFIG_ROOT.joinpath(subdir).iterdir():
+            name = entry.name
+            if name.endswith((".yaml", ".yml")):
+                self._presets.add(name.rsplit(".", 1)[0])
+        # Aliases that point at non-existent presets would silently fail at access
+        # time; surface this at import instead.
+        for alias, target in self._aliases.items():
+            if target not in self._presets:
+                raise ValueError(
+                    f"Alias {alias!r} points at preset {target!r} which is not present "
+                    f"under modelopt_recipes/{subdir}/."
+                )
+        self._cache: dict[str, dict[str, Any]] = {}
+
+    def _canonical(self, key: str) -> str | None:
+        if key in self._presets:
+            return key
+        return self._aliases.get(key)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and self._canonical(key) is not None
+
+    def __getitem__(self, key: str) -> dict[str, Any]:
+        canon = self._canonical(key)
+        if canon is None:
+            raise KeyError(key)
+        if canon not in self._cache:
+            self._cache[canon] = load_config(
+                f"{self._subdir}/{canon}", schema_type=QuantizeConfig
+            ).model_dump(exclude_unset=True)
+        # Deepcopy on retrieval so callers can freely mutate the returned config
+        # (append per-model overrides, etc.) without poisoning the cached entry.
+        return copy.deepcopy(self._cache[canon])
+
+    def __iter__(self) -> Iterator[str]:
+        yield from sorted(self._presets | set(self._aliases))
+
+    def __len__(self) -> int:
+        return len(self._presets) + len(self._aliases)
+
+
+QUANT_CFG_CHOICES: Mapping[str, dict[str, Any]] = _PresetCfgChoices(
+    _QFORMAT_PRESET_DIR, _QFORMAT_ALIASES
+)
+KV_QUANT_CFG_CHOICES: Mapping[str, dict[str, Any]] = _PresetCfgChoices(_KV_QFORMAT_PRESET_DIR)
+
+# Guard against a future ``none.yaml`` (or alias) colliding with the disable sentinel:
+# argparse would silently allow both, but the runtime branch on ``!= _KV_NONE`` would
+# become ambiguous and the user couldn't reach the real preset.
+assert _KV_NONE not in KV_QUANT_CFG_CHOICES, (
+    f"_KV_NONE sentinel {_KV_NONE!r} collides with a KV preset; rename the preset."
+)
 
 
 # Enable HuggingFace checkpointing
@@ -80,13 +162,13 @@ def parse_args():
     parser.add_argument(
         "--qformat",
         default="fp8",
-        choices=QUANT_CFG_CHOICES.keys(),
+        choices=list(QUANT_CFG_CHOICES),
         help="Quantization format",
     )
     parser.add_argument(
         "--kv_cache_qformat",
         default="fp8",
-        choices=list(KV_QUANT_CFG_CHOICES.keys()),
+        choices=[_KV_NONE, *KV_QUANT_CFG_CHOICES],
         help="KV cache quantization format",
     )
     parser.add_argument(
@@ -280,7 +362,7 @@ def main(args):
     # Validate quantization format
     if args.qformat not in QUANT_CFG_CHOICES:
         raise ValueError(
-            f"Quantization format {args.qformat} not supported. Choose from: {QUANT_CFG_CHOICES.keys()}"
+            f"Quantization format {args.qformat} not supported. Choose from: {list(QUANT_CFG_CHOICES)}"
         )
 
     # Set random seeds
@@ -334,14 +416,14 @@ def main(args):
         args.awq_block_size,
     )
 
-    enable_quant_kv_cache = args.kv_cache_qformat != "none"
+    enable_quant_kv_cache = args.kv_cache_qformat != _KV_NONE
     print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
 
     # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
     if enable_quant_kv_cache:
         quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
             quant_cfg,
-            getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
+            KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
         )
 
     # Quantize the model
