@@ -147,8 +147,13 @@ SERVE_LOG="/scratchspace/vllm_serve.log"   # serve nodes override with a per-nod
 # Rendezvous over the shared /scratchspace mount (lustre, visible on every node):
 # each serve node i publishes its address to ${SERVE_ADDR_FILE}.i; the head trainer
 # signals completion via DONE_FILE; trainers collect all serve addresses.
-SERVE_ADDR_FILE="/scratchspace/.serve_addr"
-DONE_FILE="/scratchspace/.training_done"
+# Namespace the rendezvous/sentinel files per Slurm job so concurrent allocations on
+# the same shared mount don't read/write each other's addresses. SLURM_JOB_ID is
+# identical across every node of one allocation (so the namespacing is consistent)
+# and unique across allocations; falls back to a fixed token off-Slurm (single run).
+RUN_ID="${SLURM_JOB_ID:-local}"
+SERVE_ADDR_FILE="/scratchspace/.serve_addr.${RUN_ID}"
+DONE_FILE="/scratchspace/.training_done.${RUN_ID}"
 SERVE_PID=""
 mkdir -p "$SERVE_SCRATCH"
 
@@ -302,6 +307,14 @@ run_trainer_and_export() {
 NNODES="${SLURM_NNODES:-1}"
 NODEID="${SLURM_NODEID:-0}"
 
+# Multi-node needs at least one trainer node: with SERVE_NODES >= NNODES every node
+# takes the serve branch, so no trainer ever publishes the rendezvous address or the
+# DONE_FILE and the serve nodes block forever. Reject it up front.
+if [ "$NNODES" -gt 1 ] && [ "$SERVE_NODES" -ge "$NNODES" ]; then
+    echo "ERROR: SERVE_NODES ($SERVE_NODES) must be < SLURM_NNODES ($NNODES); need >=1 trainer node." >&2
+    exit 1
+fi
+
 if [ "$NNODES" -le 1 ]; then
     # ----------------------------- single node -----------------------------
     SERVE_HOST="${SERVE_HOST:-127.0.0.1}"
@@ -352,7 +365,7 @@ else
     # mapping to 0-based accelerate machine ranks (head trainer = first trainer node).
     NUM_TRAINER_NODES=$(( NNODES - SERVE_NODES ))
     TRAINER_RANK=$(( NODEID - SERVE_NODES ))
-    TRAINER_ADDR_FILE="/scratchspace/.trainer_addr"
+    TRAINER_ADDR_FILE="/scratchspace/.trainer_addr.${RUN_ID}"  # per-job (see RUN_ID)
 
     # Only the head trainer (rank 0) signals the serve nodes to release on exit;
     # a non-head node exiting first must NOT tear the serves down early.

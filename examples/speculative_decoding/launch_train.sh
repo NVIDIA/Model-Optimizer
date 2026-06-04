@@ -59,7 +59,7 @@ else
 fi
 
 # Multi-node routing args (accelerate only; training config comes from the YAML)
-MULTI_NODE_ARGS=""
+MULTI_NODE_ARGS=()
 if [[ "$NUM_NODES" != "1" ]]; then
   # machine_rank: caller may pass --machine_rank explicitly (needed when the
   # SLURM allocation reserves node 0 for something else, e.g. the streaming
@@ -77,17 +77,27 @@ if [[ "$NUM_NODES" != "1" ]]; then
   #
   # Do NOT add --rdzv_backend c10d: that switches to the elastic launcher, which
   # reads its endpoint from --rdzv_endpoint and ignores --main_process_ip.
-  MULTI_NODE_ARGS="--multi_gpu \
-                   --num_processes $TOTAL_GPU \
-                   --num_machines $NUM_NODES \
-                   --machine_rank ${MACHINE_RANK:-$SLURM_PROCID} \
-                   --main_process_ip $HEAD_NODE_IP \
-                   --main_process_port 29500"
+  MULTI_NODE_ARGS=(
+    --multi_gpu
+    --num_processes "$TOTAL_GPU"
+    --num_machines "$NUM_NODES"
+    --machine_rank "${MACHINE_RANK:-$SLURM_PROCID}"
+    --main_process_ip "$HEAD_NODE_IP"
+    --main_process_port 29500
+  )
 fi
 
 export TOKENIZERS_PARALLELISM=False
 
+# Build the argv directly (no `sh -c`): a re-parsed command string would word-split
+# overrides that contain spaces (e.g. training.output_dir=/tmp/has space) and would
+# execute command substitutions embedded in override values. An array preserves each
+# argument boundary verbatim.
+CMD=(accelerate launch --mixed_precision bf16
+     "${MULTI_NODE_ARGS[@]}"
+     "${SCRIPT_DIR}/main.py" --config "$CONFIG_FILE" "${EXTRA_ARGS[@]}")
+
 set -x
 start_time=$(date +%s)
-sh -c "accelerate launch --mixed_precision bf16 $MULTI_NODE_ARGS ${SCRIPT_DIR}/main.py --config $CONFIG_FILE ${EXTRA_ARGS[*]}"
+"${CMD[@]}"
 echo "Total time: $(( $(date +%s) - $start_time )) seconds"

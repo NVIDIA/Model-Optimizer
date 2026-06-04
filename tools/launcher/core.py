@@ -270,6 +270,15 @@ def build_slurm_executor(
             identity=identity,
         )
 
+    # --segment=<N>: pin all nodes into one topology block (one NVL72 / NVLink domain).
+    # getattr (not attribute access) keeps older/custom SlurmConfig types patched in via
+    # set_slurm_config_type that predate the `segment` field from raising AttributeError.
+    # None -> omit the kwarg entirely so the scheduler places freely (default behavior).
+    optional_kwargs = {}
+    segment = getattr(slurm_config, "segment", None)
+    if segment is not None:
+        optional_kwargs["segment"] = segment
+
     executor = run.SlurmExecutor(
         account=slurm_config.account,
         partition=slurm_config.partition,
@@ -286,9 +295,7 @@ def build_slurm_executor(
         retries=0,
         packager=packager,
         srun_args=slurm_config.srun_args,
-        # --segment=<N>: pin all nodes into one topology block (one NVL72 / NVLink
-        # domain). None -> omitted, scheduler places freely (default behavior).
-        segment=slurm_config.segment,
+        **optional_kwargs,
     )
     return executor
 
