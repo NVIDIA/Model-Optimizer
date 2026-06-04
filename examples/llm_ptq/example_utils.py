@@ -48,7 +48,6 @@ except ImportError:
     hf_hub_download = None
 
 from modelopt.torch.utils import distributed as dist_utils
-from modelopt.torch.utils.model_load_utils import parallel_load_and_prepare_fsdp2
 
 logger = logging.getLogger(__name__)
 
@@ -125,36 +124,6 @@ def validate_fsdp2_supported(args, config):
             + "\n  - ".join(issues)
             + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
         )
-
-
-def load_and_prepare_fsdp2_model(
-    ckpt_path: str,
-    device: torch.device,
-    rank: int,
-    world_size: int,
-    args=None,
-    trust_remote_code: bool = False,
-    mp_policy=None,
-    cpu_offload: bool = False,
-    attn_implementation: str | None = None,
-) -> torch.nn.Module:
-    """CLI wrapper: validate against example-script policy, then delegate to the core loader."""
-    hf_config = None
-    if args is not None:
-        hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
-        validate_fsdp2_supported(args, hf_config)
-
-    return parallel_load_and_prepare_fsdp2(
-        ckpt_path,
-        device,
-        rank,
-        world_size,
-        trust_remote_code=trust_remote_code,
-        mp_policy=mp_policy,
-        cpu_offload=cpu_offload,
-        attn_implementation=attn_implementation,
-        hf_config=hf_config,
-    )
 
 
 def run_nemotron_vl_preview(

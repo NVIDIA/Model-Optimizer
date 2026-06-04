@@ -137,9 +137,9 @@ def _test_parallel_load_and_export(rank, size, cpu_offload):
     device = torch.device(f"cuda:{rank}")
     model = parallel_load_and_prepare_fsdp2(
         ckpt_dir,
-        device=device,
-        rank=rank,
-        world_size=size,
+        device,
+        rank,
+        size,
         cpu_offload=cpu_offload,
         freeze=True,
     )

@@ -37,12 +37,12 @@ from example_utils import (
     get_tokenizer,
     is_enc_dec,
     is_nemotron_vl,
-    load_and_prepare_fsdp2_model,
     load_mtp_weights,
     needs_checkpoint_path_update,
     resolve_checkpoint_dir,
     run_nemotron_vl_preview,
     setup_distributed_args,
+    validate_fsdp2_supported,
 )
 from torch.utils.data import DataLoader
 from transformers import (
@@ -85,6 +85,7 @@ from modelopt.torch.utils.dataset_utils import (
 )
 from modelopt.torch.utils.distributed import fsdp_aware_forward_loop, shard_dataloader
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
+from modelopt.torch.utils.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -448,15 +449,19 @@ def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
     if args.use_fsdp2:
-        full_model = load_and_prepare_fsdp2_model(
-            ckpt_path=args.pyt_ckpt_path,
-            device=args.device,
-            rank=args.rank,
-            world_size=args.world_size,
-            args=args,
+        hf_config = AutoConfig.from_pretrained(
+            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
+        )
+        validate_fsdp2_supported(args, hf_config)
+        full_model = parallel_load_and_prepare_fsdp2(
+            args.pyt_ckpt_path,
+            args.device,
+            args.rank,
+            args.world_size,
             trust_remote_code=args.trust_remote_code,
             cpu_offload=args.cpu_offload,
             attn_implementation=args.attn_implementation,
+            hf_config=hf_config,
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
