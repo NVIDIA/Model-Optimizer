@@ -67,7 +67,6 @@ from modelopt.torch.export import (
     save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
-from modelopt.torch.quantization._auto_quantize_cost import EXCLUDED_MODULE_NAME_PATTERNS_KEY
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -162,13 +161,6 @@ def get_auto_quantize_disabled_layers(model) -> list[str]:
     if is_multimodal_model(model):
         disabled_layers.extend(p for p in _VLM_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
     return disabled_layers
-
-
-def get_auto_quantize_cost_excluded_patterns(model) -> list[str]:
-    """Return layer patterns excluded only from AutoQuantize cost accounting."""
-    if is_multimodal_model(model):
-        return list(_VLM_AUTOQ_DISABLED_LAYERS)
-    return []
 
 
 def extract_and_prepare_language_model_from_vl(full_model):
@@ -421,11 +413,10 @@ def auto_quantize(
     auto_quantize_cost = {}
     if args.auto_quantize_active_moe_expert_ratio is not None:
         auto_quantize_cost["active_moe_expert_ratio"] = args.auto_quantize_active_moe_expert_ratio
-    cost_excluded_patterns = get_auto_quantize_cost_excluded_patterns(language_model)
-    if cost_excluded_patterns:
-        auto_quantize_cost[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = cost_excluded_patterns
     if auto_quantize_cost:
         auto_quantize_constraints["cost"] = auto_quantize_cost
+    if args.auto_quantize_cost_lower_bound is not None:
+        auto_quantize_constraints["cost_lower_bound"] = args.auto_quantize_cost_lower_bound
 
     language_model, _ = mtq.auto_quantize(
         language_model,
@@ -1460,6 +1451,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--auto_quantize_cost_lower_bound",
+        type=float,
+        default=None,
+        help=(
+            "Optional lower-bound ratio for the AutoQuant cost constraint. For example, "
+            "0.99 asks the solver to search within 99% of the target effective-bits budget "
+            "instead of accepting any cheaper solution below the upper bound."
+        ),
+    )
+    parser.add_argument(
         "--moe_calib_experts_ratio",
         type=float,
         default=None,
@@ -1496,6 +1497,10 @@ def parse_args() -> argparse.Namespace:
         0.0 < args.auto_quantize_active_moe_expert_ratio <= 1.0
     ):
         parser.error("--auto_quantize_active_moe_expert_ratio must be in the range (0.0, 1.0].")
+    if args.auto_quantize_cost_lower_bound is not None and not (
+        0.0 < args.auto_quantize_cost_lower_bound <= 1.0
+    ):
+        parser.error("--auto_quantize_cost_lower_bound must be in the range (0.0, 1.0].")
     if (
         args.auto_quantize_cost_model == "weight"
         and args.auto_quantize_active_moe_expert_ratio is not None

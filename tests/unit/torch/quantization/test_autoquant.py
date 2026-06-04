@@ -25,9 +25,9 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization._auto_quantize_cost import (
-    EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     get_auto_quantize_cost_model,
     infer_active_moe_expert_ratio,
+    normalize_auto_quantize_constraints,
 )
 from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
@@ -89,6 +89,30 @@ class _AutoQuantMoeModel(torch.nn.Module):
         for expert in self.mlp.experts:
             y = y + expert.down_proj(expert.gate_proj(x) + expert.up_proj(x))
         return y
+
+    def get_input(self):
+        return torch.randn(1, 4, 32)
+
+
+class _QwenStyleSharedExpert(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(32, 32)
+        self.up_proj = torch.nn.Linear(32, 32)
+        self.down_proj = torch.nn.Linear(32, 32)
+
+    def forward(self, x):
+        return self.down_proj(self.gate_proj(x) + self.up_proj(x))
+
+
+class _QwenStyleSharedExpertModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = torch.nn.Module()
+        self.mlp.shared_expert = _QwenStyleSharedExpert()
+
+    def forward(self, x):
+        return self.mlp.shared_expert(x)
 
     def get_input(self):
         return torch.randn(1, 4, 32)
@@ -171,12 +195,11 @@ def test_quant_recipe_hparam_zero_cost_weight():
     assert hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG)) == pytest.approx(0.0)
 
 
-def test_auto_quantize_cost_model_excludes_module_name_patterns():
+def test_auto_quantize_cost_model_excludes_default_module_name_patterns():
     visual = torch.nn.Linear(4, 16)
     mtp = torch.nn.Linear(4, 16)
     lm_head = torch.nn.Linear(4, 16)
     cost_model = get_auto_quantize_cost_model("weight")
-    cost_constraints = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*", "*vision_tower*", "*mtp*"]}
 
     total_weight_size = cost_model.total_weight_size(
         [
@@ -185,18 +208,13 @@ def test_auto_quantize_cost_model_excludes_module_name_patterns():
             ("lm_head", lm_head),
         ],
         is_auto_quantize_module=lambda module: True,
-        cost_constraints=cost_constraints,
+        cost_constraints={},
     )
 
     assert total_weight_size == pytest.approx(lm_head.weight.numel())
-    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
-    assert cost_model.module_cost_weight(["model.mtp.layers.0.mlp"], cost_constraints) == 0
-    assert (
-        cost_model.module_cost_weight(
-            ["model.visual.blocks.0.attn.qkv", "lm_head"], cost_constraints
-        )
-        == 1.0
-    )
+    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], {}) == 0
+    assert cost_model.module_cost_weight(["model.mtp.layers.0.mlp"], {}) == 0
+    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv", "lm_head"], {}) == 1.0
 
 
 def test_active_moe_cost_model_counts_fused_experts_without_weight():
@@ -212,10 +230,7 @@ def test_active_moe_cost_model_counts_fused_experts_without_weight():
             ("model.visual.blocks.0.attn.qkv", visual),
         ],
         is_auto_quantize_module=lambda module: True,
-        cost_constraints={
-            "active_moe_expert_ratio": 0.25,
-            EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
-        },
+        cost_constraints={"active_moe_expert_ratio": 0.25},
     )
 
     assert total_weight_size == pytest.approx(
@@ -287,6 +302,22 @@ def test_active_moe_search_prefers_budget_lower_bound():
 
     assert is_satisfied
     assert best_recipes["layers.0.mlp.quant_recipe"]["format"] == "near_budget"
+
+
+def test_auto_quantize_explicit_cost_lower_bound():
+    model = torch.nn.Linear(4, 16)
+    constraints = normalize_auto_quantize_constraints(
+        model, {"effective_bits": 4.8, "cost_lower_bound": 0.99}
+    )
+
+    assert constraints["cost_lower_bound"] == pytest.approx(0.99)
+
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.constraints = constraints
+    assert searcher._get_search_lower_bounds() == [pytest.approx(0.99)]
+
+    with pytest.raises(ValueError, match="cost_lower_bound"):
+        normalize_auto_quantize_constraints(model, {"effective_bits": 4.8, "cost_lower_bound": 1.1})
 
 
 # use this config to test custom quantization config
@@ -409,6 +440,48 @@ def test_auto_quantize_disabled_layers_no_poison():
     assert not best_model.mlp.input_quantizer.is_enabled
     hparam = best_model.attn.q_proj.get_hparam("quant_recipe")
     assert QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG) in hparam.choices
+
+
+def test_auto_quantize_groups_qwen_shared_expert_projection_family():
+    model = _QwenStyleSharedExpertModel()
+
+    model, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    shared_expert = model.mlp.shared_expert
+    hparam = shared_expert.gate_proj.get_hparam("quant_recipe")
+
+    assert shared_expert.up_proj.get_hparam("quant_recipe") is hparam
+    assert shared_expert.down_proj.get_hparam("quant_recipe") is hparam
+    assert set(hparam.quant_module_names) == {
+        "mlp.shared_expert.gate_proj",
+        "mlp.shared_expert.up_proj",
+        "mlp.shared_expert.down_proj",
+    }
+    assert set(hparam.score_modules) == {model.mlp}
+    assert (
+        len(
+            [
+                stats
+                for stats in search_history["candidate_stats"].values()
+                if set(stats["module_names"])
+                == {
+                    "mlp.shared_expert.gate_proj",
+                    "mlp.shared_expert.up_proj",
+                    "mlp.shared_expert.down_proj",
+                }
+            ]
+        )
+        == 1
+    )
 
 
 INT4INT8_AWQ_CFG = {

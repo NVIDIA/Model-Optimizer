@@ -445,6 +445,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
+        # Qwen3 shared experts are also fused/semantic groups. Keep gate/up/down
+        # together instead of letting the generic gate/up rule split down_proj.
+        r"^((?:.*\.)?mlp\.shared_expert)\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
@@ -707,11 +710,12 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 costs.append(cost)
                 prev_score = score
 
-            self.candidate_stats[name]["formats"] = formats
-            self.candidate_stats[name]["scores"] = scores
-            self.candidate_stats[name]["costs"] = costs
-            self.candidate_stats[name]["module_names"] = hparam.quant_module_names
-            self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
+            stats = self.candidate_stats.setdefault(name, {})
+            stats["formats"] = formats
+            stats["scores"] = scores
+            stats["costs"] = costs
+            stats["module_names"] = hparam.quant_module_names
+            stats["cost_weight"] = hparam.cost_weight
 
     def _run_func(self, func, num_iters=1, desc=""):
         for i, data in tqdm(
@@ -864,6 +868,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         return constraints, "weight_size_after_compression"
 
     def _get_search_lower_bounds(self):
+        constraints = getattr(self, "constraints", {})
+        if constraints.get("cost_lower_bound") is not None:
+            return [constraints["cost_lower_bound"]]
         cost_model = getattr(self, "cost_model", getattr(self, "config", {}).get("cost_model"))
         if cost_model == COST_MODEL_ACTIVE_MOE:
             return [0.99, 0.90, None]
@@ -879,7 +886,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert "effective_bits" in self.constraints and (
             set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
         ), (
-            "`constraints` must contain 'effective_bits' and may contain 'cost_model' and 'cost'. "
+            "`constraints` must contain 'effective_bits' and may contain 'cost_model', "
+            "'cost', and 'cost_lower_bound'. "
             f"Got {self.constraints.keys()}."
         )
 
@@ -983,6 +991,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     score_module_rules = [
         # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
         r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^((?:.*\.)?mlp)\.shared_expert\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts

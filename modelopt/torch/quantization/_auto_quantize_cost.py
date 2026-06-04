@@ -26,11 +26,13 @@ import torch.nn as nn
 # constraint is supplied. The value is intentionally kept for backward compatibility.
 DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS: Final = 4.8
 
-AUTO_QUANTIZE_CONSTRAINT_KEYS: Final = frozenset({"effective_bits", "cost_model", "cost"})
+AUTO_QUANTIZE_CONSTRAINT_KEYS: Final = frozenset(
+    {"effective_bits", "cost_model", "cost", "cost_lower_bound"}
+)
 ACTIVE_MOE_EXPERT_RATIO_KEY: Final = "active_moe_expert_ratio"
-EXCLUDED_MODULE_NAME_PATTERNS_KEY: Final = "excluded_module_name_patterns"
 COST_MODEL_WEIGHT: Final = "weight"
 COST_MODEL_ACTIVE_MOE: Final = "active_moe"
+_DEFAULT_COST_EXCLUDED_MODULE_NAME_PATTERNS: Final = ("*visual*", "*vision_tower*", "*mtp*")
 
 _ROUTED_MOE_EXPERT_NAME_RE = re.compile(r"(^|\.)experts(\.|$)")
 _ACTIVE_MOE_TOP_K_ATTRS = (
@@ -116,7 +118,7 @@ class AutoQuantizeCostModel:
     """Base class for AutoQuantize effective-bits cost accounting."""
 
     name: str
-    supported_cost_keys: frozenset[str] = frozenset({EXCLUDED_MODULE_NAME_PATTERNS_KEY})
+    supported_cost_keys: frozenset[str] = frozenset()
 
     def normalize_cost_constraints(
         self, model: nn.Module, cost_constraints: dict[str, Any]
@@ -125,33 +127,18 @@ class AutoQuantizeCostModel:
         unknown_cost_keys = set(cost_constraints) - self.supported_cost_keys
         if unknown_cost_keys:
             raise ValueError(f"Unsupported auto_quantize cost constraints: {unknown_cost_keys}.")
-        excluded_patterns = cost_constraints.get(EXCLUDED_MODULE_NAME_PATTERNS_KEY)
-        if excluded_patterns is None:
-            return cost_constraints
-        if isinstance(excluded_patterns, str):
-            excluded_patterns = [excluded_patterns]
-        if not isinstance(excluded_patterns, Sequence) or not all(
-            isinstance(pattern, str) for pattern in excluded_patterns
-        ):
-            raise ValueError(
-                f"constraints['cost']['{EXCLUDED_MODULE_NAME_PATTERNS_KEY}'] must be a string "
-                "or a sequence of strings."
-            )
-        cost_constraints[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = list(excluded_patterns)
         return cost_constraints
 
     def module_cost_weight(
         self, module_names: Sequence[str], cost_constraints: dict[str, Any]
     ) -> float:
         """Return the cost multiplier for a group of modules."""
-        excluded_patterns = cost_constraints.get(EXCLUDED_MODULE_NAME_PATTERNS_KEY, [])
-        if (
-            module_names
-            and excluded_patterns
-            and all(
-                any(fnmatch.fnmatch(name, pattern) for pattern in excluded_patterns)
-                for name in module_names
+        if module_names and all(
+            any(
+                fnmatch.fnmatch(name, pattern)
+                for pattern in _DEFAULT_COST_EXCLUDED_MODULE_NAME_PATTERNS
             )
+            for name in module_names
         ):
             return 0.0
         return 1.0
@@ -180,9 +167,7 @@ class ActiveMoECostModel(AutoQuantizeCostModel):
     """Scale routed MoE expert weights by the active experts per-token ratio."""
 
     name = COST_MODEL_ACTIVE_MOE
-    supported_cost_keys = frozenset(
-        {ACTIVE_MOE_EXPERT_RATIO_KEY, EXCLUDED_MODULE_NAME_PATTERNS_KEY}
-    )
+    supported_cost_keys = frozenset({ACTIVE_MOE_EXPERT_RATIO_KEY})
 
     def normalize_cost_constraints(
         self, model: nn.Module, cost_constraints: dict[str, Any]
@@ -248,8 +233,17 @@ def normalize_auto_quantize_constraints(
     if unexpected_constraint_keys:
         raise ValueError(
             f"Unsupported auto_quantize constraints: {unexpected_constraint_keys}. "
-            "Supported constraints are 'effective_bits', 'cost_model', and 'cost'."
+            "Supported constraints are 'effective_bits', 'cost_model', 'cost', and "
+            "'cost_lower_bound'."
         )
+
+    cost_lower_bound = constraints.get("cost_lower_bound")
+    if cost_lower_bound is not None:
+        if not isinstance(cost_lower_bound, (int, float)) or isinstance(cost_lower_bound, bool):
+            raise ValueError("constraints['cost_lower_bound'] must be numeric when provided.")
+        if cost_lower_bound <= 0 or cost_lower_bound > 1:
+            raise ValueError("constraints['cost_lower_bound'] must be in the interval (0, 1].")
+        constraints["cost_lower_bound"] = float(cost_lower_bound)
 
     cost_model_name = constraints.get("cost_model", COST_MODEL_WEIGHT)
     if not isinstance(cost_model_name, str):
