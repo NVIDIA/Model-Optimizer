@@ -311,3 +311,52 @@ def _test_writeback_root_unwrapped(rank, size):
 
 def test_writeback_root_unwrapped(dist_workers):
     dist_workers.run(_test_writeback_root_unwrapped)
+
+
+def _test_writeback_cpu_offload(rank, size):
+    """Writeback round-trip when the FSDP2 shard is CPU-resident (``CPUOffloadPolicy``).
+
+    Regression guard for the CPU↔GPU mirror added to
+    ``fsdp2_weight_access_and_writeback_context``: the gathered shard is on CPU,
+    so the helper mirrors it to GPU for in-context mutation and must copy
+    modifications back to the CPU shard on exit.
+    """
+    from torch.distributed.fsdp import CPUOffloadPolicy
+    from torch.distributed.tensor import DTensor
+
+    from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
+
+    dim = 32
+    torch.manual_seed(1)
+    model = nn.Sequential(nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim))).cuda(rank)
+    synchronize_state_dict(model)
+
+    # Wrap the "decoder layer" with cpu_offload; root stays unwrapped.
+    fully_shard(model[0], offload_policy=CPUOffloadPolicy())
+    layer = model[0]
+
+    # Warmup forward triggers FSDP2's lazy_init.
+    model(torch.randn(2, dim).cuda(rank))
+
+    # Under CPUOffloadPolicy the DTensor's local shard lives on CPU.
+    p = next(iter(layer.parameters()))
+    assert isinstance(p, DTensor) and p.to_local().device.type == "cpu"
+
+    with enable_weight_access_and_writeback(layer[0], model):
+        # Working copy is mirrored to GPU so calibration ops match activation device.
+        assert not isinstance(layer[0].weight, DTensor)
+        assert layer[0].weight.device.type == "cuda"
+        ref_weight = layer[0].weight.clone()
+        layer[0].weight.data.add_(1.0)
+
+    # Shard restored to CPU-resident DTensor.
+    p = next(iter(layer.parameters()))
+    assert isinstance(p, DTensor) and p.to_local().device.type == "cpu"
+
+    # Mutation written back to the CPU shard.
+    with enable_weight_access_and_writeback(layer[0], model):
+        assert torch.allclose(layer[0].weight, ref_weight + 1.0)
+
+
+def test_writeback_cpu_offload(dist_workers):
+    dist_workers.run(_test_writeback_cpu_offload)

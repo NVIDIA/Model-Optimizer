@@ -1507,31 +1507,14 @@ def main(args: argparse.Namespace):
 
     setup_distributed_args(args)
 
-    # launch a memory monitor to read the currently used GPU memory.
-    launch_memory_monitor()
+    try:
+        # launch a memory monitor to read the currently used GPU memory.
+        launch_memory_monitor()
 
-    # Force eager execution for all model types.
-    torch.compiler.set_stance("force_eager")
+        # Force eager execution for all model types.
+        torch.compiler.set_stance("force_eager")
 
-    (
-        full_model,
-        language_model,
-        model_type,
-        calibration_only,
-        processor,
-        tokenizer,
-        default_padding_side,
-        default_pad_token,
-        device,
-    ) = load_model(args)
-
-    if args.sparsity_fmt != "dense":
-        # Sparse
-        sparsity_main(args, full_model, tokenizer, device)
-    else:
-        # Quantize
-        quantize_main(
-            args,
+        (
             full_model,
             language_model,
             model_type,
@@ -1541,9 +1524,27 @@ def main(args: argparse.Namespace):
             default_padding_side,
             default_pad_token,
             device,
-        )
+        ) = load_model(args)
 
-    cleanup_distributed(args)
+        if args.sparsity_fmt != "dense":
+            # Sparse
+            sparsity_main(args, full_model, tokenizer, device)
+        else:
+            # Quantize
+            quantize_main(
+                args,
+                full_model,
+                language_model,
+                model_type,
+                calibration_only,
+                processor,
+                tokenizer,
+                default_padding_side,
+                default_pad_token,
+                device,
+            )
+    finally:
+        cleanup_distributed(args)
 
 
 if __name__ == "__main__":

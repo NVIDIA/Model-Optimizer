@@ -63,23 +63,23 @@ pip install -U transformers --no-deps
 
 Estimate GPU count from model size and available GPU memory. `hf_ptq.py` uses `device_map="auto"` so it fills GPUs automatically — request only as many as needed.
 
-For multi-node PTQ (200B+ params), use `examples/llm_ptq/multinode_ptq.py` with FSDP2 and accelerate:
+For multi-node PTQ (200B+ params), use `hf_ptq.py --use_fsdp2` launched via `torchrun`:
 
 ```bash
-accelerate launch \
-    --config_file examples/llm_ptq/fsdp2.yaml \
-    --num_machines $NUM_NODES \
-    --num_processes $((NUM_NODES * GPUS_PER_NODE)) \
-    --main_process_ip $MASTER_ADDR \
-    --main_process_port $MASTER_PORT \
-    --machine_rank $SLURM_PROCID \
-    examples/llm_ptq/multinode_ptq.py \
+torchrun \
+    --nnodes=$NUM_NODES \
+    --node_rank=$SLURM_PROCID \
+    --nproc_per_node=$GPUS_PER_NODE \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
+    examples/llm_ptq/hf_ptq.py \
         --pyt_ckpt_path <model> \
         --qformat <format> \
-        --export_path <output>
+        --export_path <output> \
+        --use_fsdp2
 ```
 
-The `num_machines`, `num_processes`, `main_process_ip`, and `machine_rank` are overridden on the command line — no need to edit `fsdp2.yaml`. Only update `fsdp_transformer_layer_cls_to_wrap` in the YAML if the model uses a non-default decoder layer class.
+Add `--cpu_offload` when the per-rank decoder shard approaches GPU capacity (200B+ at low rank count). Layer detection is automatic; no YAML config needed.
 
 Use the multi-node template from `skills/common/slurm-setup.md` section 4 as the job script wrapper.
 

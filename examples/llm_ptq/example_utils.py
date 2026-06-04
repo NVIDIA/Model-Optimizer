@@ -89,7 +89,8 @@ def _checkpoint_has_mtp_weights(model_path: str) -> bool:
         if not index_file.exists():
             continue
         try:
-            weight_map = json.load(open(index_file)).get("weight_map", {})
+            with open(index_file) as f:
+                weight_map = json.load(f).get("weight_map", {})
         except (OSError, json.JSONDecodeError):
             continue
         return any("mtp" in k or "mtp" in v for k, v in weight_map.items())
@@ -126,14 +127,15 @@ def load_and_prepare_fsdp2_model(
     ckpt_path: str,
     device: torch.device,
     rank: int,
-    world_size: int = 1,
+    world_size: int,
     args=None,
     trust_remote_code: bool = False,
     mp_policy=None,
     cpu_offload: bool = False,
     attn_implementation: str | None = None,
-):
+) -> torch.nn.Module:
     """CLI wrapper: validate against example-script policy, then delegate to the core loader."""
+    hf_config = None
     if args is not None:
         hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
         validate_fsdp2_supported(args, hf_config)
@@ -147,6 +149,7 @@ def load_and_prepare_fsdp2_model(
         mp_policy=mp_policy,
         cpu_offload=cpu_offload,
         attn_implementation=attn_implementation,
+        hf_config=hf_config,
     )
 
 

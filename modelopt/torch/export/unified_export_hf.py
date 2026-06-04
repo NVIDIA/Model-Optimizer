@@ -1221,6 +1221,9 @@ def export_hf_checkpoint(
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
         # Under torch.distributed: only rank 0 writes; others sync at the barrier below.
+        # If rank 0 raises during file writes it never reaches the trailing barrier, so
+        # the other ranks wait out the NCCL timeout (~10 min) before crashing. Rank 0's
+        # traceback is visible in the same terminal, so we accept the bounded delay.
         is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
         if is_distributed and torch.distributed.get_rank() != 0:
             torch.distributed.barrier()
