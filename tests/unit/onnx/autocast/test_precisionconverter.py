@@ -1019,19 +1019,12 @@ def test_empty_tensor_handling(
     assert empty_tensor_info.type.tensor_type.elem_type == expected_type
 
 
-@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
-def test_empty_tensor_network_input_keep_io_types(
-    low_precision_type, use_standalone_type_inference
-):
-    """Empty network I/O tensors must keep their type when keep_io_types=True (nvbug 6058870).
-
-    An empty tensor consumed by a low-precision node used to be "fake-cast" (retyped in place).
-    Because setup_mappings aliases the graph.input ValueInfoProto, this silently changed the
-    network input's type to the low precision type, breaking the keep_io_types contract and
-    failing the sanity check. A real Cast must be inserted instead.
-    """
-    # Concat(X[2, 1], X_empty[2, 0]) -> Y[2, 1] along axis=1, mirroring the bug's empty-input Concat.
+####################################################################################################
+# Graph with an empty tensor (a dimension of size 0) as a network input
+####################################################################################################
+@pytest.fixture
+def model_with_empty_network_input():
+    # Concat(X[2, 1], X_empty[2, 0]) -> Relu -> Y[2, 1] along axis=1, mirroring the bug's empty-input Concat.
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 1])
     x_empty = helper.make_tensor_value_info("X_empty", TensorProto.FLOAT, [2, 0])
     y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 1])
@@ -1047,9 +1040,24 @@ def test_empty_tensor_network_input_keep_io_types(
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(
-        model, use_standalone_type_inference
-    )
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_empty_tensor_network_input_keep_io_types(
+    model_with_empty_network_input, low_precision_type, use_standalone_type_inference
+):
+    """Empty network I/O tensors must keep their type when keep_io_types=True (nvbug 6058870).
+
+    An empty tensor consumed by a low-precision node used to be "fake-cast" (retyped in place).
+    Because setup_mappings aliases the graph.input ValueInfoProto, this silently changed the
+    network input's type to the low precision type, breaking the keep_io_types contract and
+    failing the sanity check. A real Cast must be inserted instead.
+    """
+    model, value_info_map, initializer_map, node_to_init_map = model_with_empty_network_input
     converter = PrecisionConverter(
         model,
         value_info_map,
