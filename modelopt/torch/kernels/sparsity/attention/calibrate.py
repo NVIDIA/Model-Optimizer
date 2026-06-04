@@ -261,11 +261,7 @@ def attention_calibrate(
 
     num_thresholds = len(threshold_trials)
 
-    # Convert thresholds to log2 space: log2(lambda).
-    # Lambda is the post-softmax-scale skip threshold (fraction of running
-    # attention-weight max). Matches both flash_skip_softmax (LLM path) and
-    # the TRT-LLM deployment kernel's expf(post_sm_diff) < threshold/seqlen
-    # rule, so the calibrated (a, b) load directly into TRT-LLM.
+    # Scores already include sm_scale and LOG2E; convert lambda to log2 space only.
     threshold_tensor = torch.tensor(
         [math.log2(t) for t in threshold_trials],
         dtype=torch.float32,

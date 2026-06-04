@@ -75,7 +75,7 @@ flowchart LR
 
 - **Quantization**: reducing numerical precision (e.g. FP16 → INT8).
 - **Sparsity**: zeroing out weights while keeping the architecture.
-- **MoE and hybrid architectures**: this guide focuses on dense Transformer models. For an end-to-end Minitron pruning + distillation + FP8 PTQ + vLLM deployment example on a Mamba-Transformer hybrid, see the [Nemotron-Nano-9B-v2 tutorial](../minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md). Compression of Mixture-of-Experts (MoE) architectures will be covered in a future guide.
+- **MoE and hybrid architectures**: this guide focuses on dense Transformer models. For an end-to-end Minitron pruning + distillation + FP8 PTQ + vLLM deployment example on a MoE + Mamba-Transformer hybrid, see the [Nemotron-3-Nano-30B-A3B-BF16 tutorial](../minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md).
 
 > **Note:** Pruning and quantization are complementary. After following this guide, you can further compress your pruned model with quantization for additional deployment gains.
 
@@ -574,7 +574,7 @@ The key insight is the accuracy-performance trade-off: Puzzletron 78k retains 74
 
 - **Single base model:** All experiments use Qwen3-8B. Results (especially distillation convergence speed and the crossover point between Minitron and Puzzletron) may differ on other models and model families.
 - **Limited benchmarks:** The notebooks reproduce MMLU end-to-end. Supplementary evaluations on HellaSwag and GSM8K (see [Section 5.4](#54-benchmark-specific-behavior)) confirm that the best method is benchmark-dependent, but three benchmarks on one model are not enough to build general per-task guidelines.
-- **Minimal distillation:** 100 iterations on WikiText-103 is a lower bound. Production deployments should use more iterations, larger datasets, and a curated data blend (e.g. Nemotron pretraining + post-training mix). See the [Nemotron-Nano-9B-v2 Data Preparation guide](../minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md#1-data-preparation) for a worked example, and [`MEGATRON_DATA_PREP.md`](../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands.
+- **Minimal distillation:** 100 iterations on WikiText-103 is a lower bound. Production deployments should use more iterations, larger datasets, and a curated data blend (e.g. Nemotron pretraining + post-training mix). See the [Nemotron-3-Nano-30B-A3B-BF16 Data Preparation guide](../minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md#1-data-preparation) for a worked example, and [`MEGATRON_DATA_PREP.md`](../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands.
 - **Fixed search space for Puzzletron:** The NAS search space (FFN candidate sizes, attention removal options) was kept small for tractability. A broader search space could yield better architectures at the cost of longer search time.
 - **Single-step Minitron:** We use a one-shot Minitron configuration rather than a multi-step iterative scheme, which simplifies the pipeline but typically achieves less compression and leaves some potential quality–compression gains on the table.
 
@@ -603,7 +603,7 @@ All our results come from a single model (Qwen3-8B). Do other architectures or m
 
 **Distillation recipe: how to choose the dataset, duration, and scale?**
 Our experiments used 100 iterations on WikiText-103, a deliberately minimal setup that happened to work well for Qwen3-8B. But how should one choose the distillation dataset (generic vs. domain-specific?), the number of iterations, and the token budget for a new model? Is there a principled way to estimate the required distillation effort given a model and compression level, or does it always require empirical tuning?
-> For a concrete recipe and detailed ablations on data blend, token budget, and convergence (on Nemotron-Nano-9B-v2), see the [Nano-9B-v2 tutorial](../minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md) and its [blend ablations](../minitron/NVIDIA-Nemotron-Nano-9B-v2/ABLATIONS.md).
+> For a concrete recipe and detailed ablations on data blend, token budget, and convergence (on Nemotron-3-Nano-30B-A3B-BF16, an MoE + Mamba-Transformer hybrid), see the [Nemotron-3-Nano-30B-A3B-BF16 tutorial](../minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) and its [blend / long-context / pruning ablations](../minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ABLATIONS.md).
 
 **Serving heterogeneous architectures: how to balance Tensor Parallelism and Pipeline Parallelism?**
 Puzzletron produces models where layers have different widths and some lack attention entirely. Standard TP/PP strategies assume uniform layers. How should parallelism be partitioned when layer costs vary significantly? Finding efficient serving configurations for heterogeneous architectures is an open problem that directly impacts their practical deployment.

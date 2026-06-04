@@ -113,6 +113,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
+    "w4a16_nvfp4": mtq.W4A16_NVFP4_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
     "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
@@ -381,9 +382,18 @@ def auto_quantize(
             f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
         )
 
+    auto_quantize_constraints = {
+        "effective_bits": args.auto_quantize_bits,
+        "cost_model": args.auto_quantize_cost_model,
+    }
+    if args.auto_quantize_active_moe_expert_ratio is not None:
+        auto_quantize_constraints["cost"] = {
+            "active_moe_expert_ratio": args.auto_quantize_active_moe_expert_ratio
+        }
+
     language_model, _ = mtq.auto_quantize(
         language_model,
-        constraints={"effective_bits": args.auto_quantize_bits},
+        constraints=auto_quantize_constraints,
         data_loader=calib_dataloader,
         forward_step=forward_step,
         loss_func=loss_func,  # Only used for gradient-based method
@@ -530,9 +540,10 @@ def load_model(args: argparse.Namespace):
             language_model = full_model
         else:
             if args.dataset is None:
-                args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+                args.dataset = ["cnn_nemotron_v2_mix"]
                 warnings.warn(
-                    "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+                    "No dataset specified. Defaulting to the 'cnn_nemotron_v2_mix' combo "
+                    "(cnn_dailymail + nemotron-post-training-dataset-v2)."
                 )
             # Adjust calib_size to match dataset length by extending or truncating as needed
             args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
@@ -540,12 +551,17 @@ def load_model(args: argparse.Namespace):
             ]
 
             # We only quantize the language model for VLMs other than the type supported above.
-            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
-                full_model
-            )
-            if extracted_lm is not None:
-                language_model = extracted_lm
-                model_type = extracted_model_type
+            # Recipe mode is the exception: in Qwen3.5/3.6-MoE VLMs, lm_head sits
+            # on the outer CausalLM, not the inner language backbone. A recipe that targets
+            # lm_head must therefore quantize against the full model and explicitly keep visual
+            # and MTP siblings disabled.
+            if args.recipe is None:
+                extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
+                    full_model
+                )
+                if extracted_lm is not None:
+                    language_model = extracted_lm
+                    model_type = extracted_model_type
 
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
@@ -623,22 +639,6 @@ def mono_quantize(
             "\n####\nAWQ calibration could take longer than other calibration methods. "
             "Consider reducing calib_size to reduce calibration time.\n####\n"
         )
-
-    # For Nemotron VL models, disable quantization of vision components
-    if is_nemotron_vl_model:
-        print("Disabling quantization for vision components in Nemotron VL model")
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
-        # Also disable radio model components specifically (for Nemotron-Parse)
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*radio*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*visual*", "enable": False})
-        quant_cfg["quant_cfg"].append(
-            {"quantizer_name": "*encoder*", "enable": False}
-        )  # Disable encoder
-        quant_cfg["quant_cfg"].append(
-            {"quantizer_name": "*model_encoder*", "enable": False}
-        )  # Nemotron-Parse specific
-        print("Quantization will only be applied to the decoder (text generation) component")
 
     if not model_is_already_quantized or calibration_only:
         # quantize the model
@@ -784,6 +784,12 @@ def export_quantized(
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
                 )
+
+                if args.qformat == "w4a16_nvfp4":
+                    warnings.warn(
+                        "TensorRT-LLM and SGLang do not support this format. "
+                        "vLLM deployment support is in progress."
+                    )
 
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
@@ -988,6 +994,25 @@ def quantize_main(
     default_pad_token,
     device: torch.device,
 ):
+    # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
+    recipe = None
+    if args.recipe is not None and not args.auto_quantize_bits:
+        print(f"Use recipe {args.recipe} for quantization")
+        recipe = load_recipe(args.recipe)
+        if not isinstance(recipe, ModelOptPTQRecipe):
+            raise TypeError(
+                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
+            )
+
+    def _is_layerwise(obj):
+        if isinstance(obj, ModelOptPTQRecipe):
+            return _is_layerwise(obj.quantize.algorithm)
+        if isinstance(obj, list):
+            return any(_is_layerwise(a) for a in obj)
+        return bool(getattr(obj, "layerwise", False))
+
+    is_layerwise = _is_layerwise(recipe)
+
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
         # since get_max_batch_size can't handle multimodal inputs
@@ -1000,6 +1025,11 @@ def quantize_main(
             print(
                 "Offline speculative decoding calibration enabled. Using default batch_size=1 for calibration."
             )
+            args.batch_size = 1
+        # Layerwise calibration processes one layer at a time; auto batch-size probing runs a
+        # full-model forward which defeats the point and can OOM on very large models.
+        elif is_layerwise:
+            print("Layerwise calibration enabled. Using default batch_size=1 for calibration.")
             args.batch_size = 1
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
@@ -1064,12 +1094,7 @@ def quantize_main(
     else:
         # mono quantization
 
-        if args.recipe is not None:
-            print(f"Use recipe {args.recipe} for quantization")
-            recipe = load_recipe(args.recipe)
-            assert isinstance(recipe, ModelOptPTQRecipe), (
-                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
-            )
+        if recipe is not None:
             quant_cfg = recipe.quantize.model_dump()
 
         else:
@@ -1083,10 +1108,8 @@ def quantize_main(
             quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
             quant_cfg = build_quant_cfg(
-                args.qformat,
                 quant_cfg,
                 args.awq_block_size,
-                model_type,
                 args.moe_calib_experts_ratio,
             )
 
@@ -1100,8 +1123,10 @@ def quantize_main(
                     getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
                 )
 
-        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
-        # These layers are typically speculative decoding layers that should be exported as-is
+        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92).
+        # These layers are typically speculative decoding layers that should be exported as-is.
+        # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
+        # identified by index.
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
         if mtp_layer_prefixes:
             quant_cfg = copy.deepcopy(quant_cfg)
@@ -1128,7 +1153,7 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             force_weight_quantizers_static(quant_cfg["quant_cfg"])
 
-        if args.qformat in QUANT_CFG_CHOICES:
+        if quant_cfg:
             mono_quantize(
                 args,
                 quant_cfg,
@@ -1212,7 +1237,7 @@ def parse_args() -> argparse.Namespace:
             "This argument will be parsed and converted as a list of ints."
         ),
         type=str,
-        default="512",
+        default="1024",
     )
     parser.add_argument(
         "--calib_seq",
@@ -1376,6 +1401,29 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--auto_quantize_cost_model",
+        type=str,
+        default="weight",
+        choices=["weight", "active_moe"],
+        help=(
+            "Cost model for auto_quantize effective-bits accounting. 'weight' counts all "
+            "quantizable weights equally. 'active_moe' scales routed MoE expert weights by "
+            "--auto_quantize_active_moe_expert_ratio, or infers top_k/num_experts from model config."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_active_moe_expert_ratio",
+        type=float,
+        default=None,
+        help=(
+            "Routed MoE expert active ratio for --auto_quantize_cost_model active_moe. "
+            "For top-k MoE this is top_k / num_experts. If omitted, common model config "
+            "fields such as num_experts_per_tok and num_experts are used when available. "
+            "This only affects AutoQuant cost accounting and does not change calibration "
+            "routing; use --moe_calib_experts_ratio to control calibration expert coverage."
+        ),
+    )
+    parser.add_argument(
         "--moe_calib_experts_ratio",
         type=float,
         default=None,
@@ -1408,6 +1456,18 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+    if args.auto_quantize_active_moe_expert_ratio is not None and not (
+        0.0 < args.auto_quantize_active_moe_expert_ratio <= 1.0
+    ):
+        parser.error("--auto_quantize_active_moe_expert_ratio must be in the range (0.0, 1.0].")
+    if (
+        args.auto_quantize_cost_model == "weight"
+        and args.auto_quantize_active_moe_expert_ratio is not None
+    ):
+        parser.error(
+            "--auto_quantize_active_moe_expert_ratio requires "
+            "--auto_quantize_cost_model active_moe."
+        )
 
     if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
         parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")

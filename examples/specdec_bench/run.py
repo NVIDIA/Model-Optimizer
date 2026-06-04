@@ -20,6 +20,7 @@ import yaml
 from specdec_bench import datasets, metrics, models, runners
 from specdec_bench.utils import (
     decode_chat,
+    dump_env,
     encode_chat,
     get_tokenizer,
     postprocess_base,
@@ -174,6 +175,10 @@ def run_simple(args):
     if args.save_dir is not None:
         for metric in metrics_list:
             metric.update_directory(args.save_dir)
+        # Stamp configuration.json BEFORE the run loop so the file lands even
+        # when the run crashes mid-way. Engine init is already done, so the
+        # live serving_config from the model is available.
+        dump_env(args, args.save_dir, overrides={"serving_config": model.get_serving_config()})
 
     runner = runners.SimpleRunner(model, metrics=metrics_list)
 
@@ -265,7 +270,7 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="EAGLE3",
-        choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "NONE"],
+        choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "DFLASH", "NONE"],
         help="Speculative algorithm to use",
     )
     parser.add_argument("--model_dir", type=str, required=True, help="Path to the model directory")

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# W4A4 NVFP4: NVFP4 E2M1 dynamic weight and activation quantizers.
+# QuantizerCfgList snippet that enables dynamic NVFP4 on weight and input quantizers.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:

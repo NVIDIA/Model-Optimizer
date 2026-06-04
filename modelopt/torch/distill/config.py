@@ -16,7 +16,7 @@
 """Configurations for distillation modes."""
 
 import warnings
-from typing import Any, Union
+from typing import Any, TypeAlias
 
 import pydantic
 from torch.nn.modules.loss import _Loss as Loss
@@ -28,7 +28,7 @@ from .loss_balancers import DistillationLossBalancer
 
 __all__ = ["ExportStudentConfig", "KDLossConfig", "LayerwiseKDConfig"]
 
-Criterion = Union[Loss, dict[tuple[str, str], Loss]]  # noqa: UP007
+Criterion: TypeAlias = Loss | dict[tuple[str, str], Loss]
 
 
 class KDLossConfig(ModeloptBaseConfig):

@@ -20,14 +20,14 @@ import inspect
 import os
 import warnings
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt import apply_mode
-from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
@@ -268,7 +268,7 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
 
 def auto_quantize(
     model: nn.Module,
-    constraints: dict[str, float | str] = {"effective_bits": 4.8},
+    constraints: dict[str, Any] | None = None,
     quantization_formats: list[dict[str, Any] | str] = [
         mtq.NVFP4_AWQ_LITE_CFG,
         mtq.FP8_DEFAULT_CFG,
@@ -301,15 +301,25 @@ def auto_quantize(
 
     Args:
         model: A pytorch model with quantizer modules.
-        constraints: Constraints for the search. Currently we support only ``effective_bits``.
-            ``effective_bits`` specifies the effective number of bits for the quantized model.
+        constraints: Constraints for the search. ``effective_bits`` specifies the effective number
+            of bits for the quantized model and defaults to 4.8. ``cost_model`` selects the metric
+            used for the effective-bits constraint and currently supports ``"weight"`` (default)
+            and ``"active_moe"``. Additional cost-model parameters are provided through the nested
+            ``cost`` dict.
 
             Here is an example for valid ``effective_bits`` argument:
 
             .. code-block:: python
 
-                # For an effective quantization bits of 4.8
+                # For the default AutoQuantize effective-bits target
                 constraints = {"effective_bits": 4.8}
+
+                # For active-MoE accounting where 2 of 8 routed experts are active per token
+                constraints = {
+                    "effective_bits": 4.8,
+                    "cost_model": "active_moe",
+                    "cost": {"active_moe_expert_ratio": 0.25},
+                }
 
         quantization_formats: A list of quantization format config dictionaries or string names to search for.
             Each config dictionary should be valid as a ``config`` argument in
@@ -533,7 +543,8 @@ def auto_quantize(
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
-    searcher.search(model, constraints, config=search_config)  # type: ignore[arg-type]
+    search_constraints = cast("ConstraintsDict", constraints or {})
+    searcher.search(model, search_constraints, config=search_config)
 
     return model, searcher.state_dict()
 
@@ -595,6 +606,7 @@ def print_quant_summary(model: nn.Module, output_dir: str | None = None):
     lines.append(f"{len(lines)} TensorQuantizers found in model")
 
     if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, ".quant_summary.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")

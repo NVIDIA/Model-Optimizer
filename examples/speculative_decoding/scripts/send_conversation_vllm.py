@@ -117,8 +117,8 @@ def parse_args() -> argparse.Namespace:
 async def main(args: argparse.Namespace) -> None:
     for shard_id in range(args.shard_id_begin, args.num_shards, args.shard_id_step):
         if args.num_shards > 1:
-            input_file_path = args.input_file / "train-{:05}-{:05}.jsonl".format(
-                shard_id + 1, args.num_shards
+            input_file_path = (
+                args.input_file / f"train-{shard_id + 1:05}-{args.num_shards:05}.jsonl"
             )
         else:
             input_file_path = args.input_file
@@ -177,7 +177,7 @@ async def main(args: argparse.Namespace) -> None:
             if conversation_id is None:
                 conversation_id = entry.get("uuid", None)
             if conversation_id is None:
-                conversation_id = "{:08d}".format(idx)
+                conversation_id = f"{idx:08d}"
             conversations = entry["conversations"]
             if not conversations or not isinstance(conversations, list):
                 num_invalid += 1

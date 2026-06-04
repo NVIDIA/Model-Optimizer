@@ -15,16 +15,38 @@
 
 import subprocess
 
-from _test_utils.examples.models import TINY_LLAMA_PATH
-from _test_utils.examples.run_command import run_llm_ptq_command
+from _test_utils.examples.run_command import (
+    extend_cmd_parts,
+    run_example_command,
+    run_llm_ptq_command,
+)
 from _test_utils.torch.misc import minimum_sm
+from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
+
+
+def test_lm_eval_hf(tmp_path):
+    model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+
+    cmd_parts = extend_cmd_parts(
+        ["python", "lm_eval_hf.py"],
+        model="hf",
+        model_args=f"pretrained={model_dir}",
+        tasks="mmlu",
+        num_fewshot=5,
+        limit=0.1,
+        batch_size=8,
+    )
+    run_example_command(cmd_parts, "llm_eval")
 
 
 @minimum_sm(89)
-def test_llama_eval_fp8():
+def test_qwen3_eval_fp8(tmp_path):
+    # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than
+    # max_seq_len, and the default (32) is shorter than even simple MMLU prompts.
+    model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, max_position_embeddings=2048)
     try:
         run_llm_ptq_command(
-            model=TINY_LLAMA_PATH,
+            model=str(model_dir),
             quant="fp8",
             tasks="mmlu,lm_eval,simple_eval",
             calib=64,

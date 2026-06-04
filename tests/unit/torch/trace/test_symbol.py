@@ -130,15 +130,6 @@ def test_sym_map_registry():
         nn.ConvTranspose3d,
     }
 
-    try:
-        from transformers.models.bert.modeling_bert import BertAttention
-        from transformers.models.gptj.modeling_gptj import GPTJAttention
-
-        mods_in_registry.add(BertAttention)
-        mods_in_registry.add(GPTJAttention)
-    except ImportError:
-        pass
-
     not_a_leaf = {nn.Sequential}
     dependent_registry = set()
 

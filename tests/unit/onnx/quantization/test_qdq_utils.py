@@ -1108,3 +1108,96 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         scale_arr = numpy_helper.to_array(value_attr.t)
         assert not (scale_arr == 0).any()
         assert (scale_arr > 0).all()
+
+
+class TestLegacyEdgeLLMShims:
+    """Smoke tests for the deprecated top-level shims kept for TensorRT-Edge-LLM 0.6.1.
+
+    These are the functions edgellm 0.6.1 imports from
+    ``modelopt.onnx.quantization.qdq_utils`` directly (not via the staged exporters).
+    Tests verify each shim runs end-to-end on the same fixtures used for the staged
+    exporters and emits a ``DeprecationWarning``.
+    """
+
+    def test_quantize_weights_to_int4_shim(self):
+        import warnings
+
+        from modelopt.onnx.quantization.qdq_utils import quantize_weights_to_int4
+
+        model = create_test_model_with_int4_dq_reshape_transpose_matmul()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            quantized_model = quantize_weights_to_int4(model)
+
+        assert any(
+            issubclass(w.category, DeprecationWarning)
+            and "quantize_weights_to_int4" in str(w.message)
+            for w in caught
+        )
+
+        weight_tensor = next(
+            init for init in quantized_model.graph.initializer if init.name == "weight"
+        )
+        assert weight_tensor.data_type == TensorProto.INT4
+
+        node_types = [node.op_type for node in quantized_model.graph.node]
+        assert "Reshape" not in node_types
+        assert "Transpose" not in node_types
+
+    def test_quantize_weights_to_mxfp8_shim(self):
+        import warnings
+
+        from modelopt.onnx.quantization.qdq_utils import quantize_weights_to_mxfp8
+
+        model = create_test_model_with_mxfp8_dq()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            quantized_model = quantize_weights_to_mxfp8(model)
+
+        assert any(
+            issubclass(w.category, DeprecationWarning)
+            and "quantize_weights_to_mxfp8" in str(w.message)
+            for w in caught
+        )
+
+        weight_tensor = next(
+            init for init in quantized_model.graph.initializer if init.name == "linear.weight"
+        )
+        assert weight_tensor.data_type == TensorProto.FLOAT8E4M3FN
+
+        gelu_node = next(node for node in quantized_model.graph.node if node.op_type == "Gelu")
+        approximate_attr = next(attr for attr in gelu_node.attribute if attr.name == "approximate")
+        assert approximate_attr.s == b"tanh"
+
+    @pytest.mark.parametrize("with_transpose", [False, True])
+    def test_fp4qdq_to_2dq_shim(self, with_transpose):
+        import warnings
+
+        from modelopt.onnx.quantization.qdq_utils import fp4qdq_to_2dq
+
+        model = create_test_model_with_nvfp4_qdq(with_transpose=with_transpose)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            converted_model = fp4qdq_to_2dq(model)
+
+        assert any(
+            issubclass(w.category, DeprecationWarning) and "fp4qdq_to_2dq" in str(w.message)
+            for w in caught
+        )
+
+        fp4qdq_nodes = [node for node in converted_model.graph.node if node.op_type == "TRT_FP4QDQ"]
+        assert len(fp4qdq_nodes) == 0
+
+        dq_nodes = [
+            node for node in converted_model.graph.node if node.op_type == "DequantizeLinear"
+        ]
+        assert len(dq_nodes) == 2
+
+        initializer_names = {init.name for init in converted_model.graph.initializer}
+        assert "linear.weight_f4" in initializer_names
+        assert "linear.weight_f8_scale" in initializer_names
+        assert "linear.weight_f8_scale_f32_scale" in initializer_names
+        assert "linear.weight" not in initializer_names

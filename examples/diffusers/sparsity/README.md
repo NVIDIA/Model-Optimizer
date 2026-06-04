@@ -18,8 +18,8 @@ tiles whose attention scores are negligible during the FlashAttention computatio
 reducing FLOPs without retraining.
 
 Two modes are supported:
-- **Fixed raw threshold** — pass a log2-space threshold directly to the Triton
-  kernel. No calibration needed. Good for quick testing and sweeps.
+- **Fixed threshold** — pass a BLASST lambda threshold directly. No calibration
+  needed. Good for quick testing and sweeps.
 - **Calibrated threshold** — an exponential model
   (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once via the
   Triton calibration kernel, then the target sparsity can be adjusted at runtime
@@ -37,10 +37,10 @@ Two modes are supported:
 ## Quick Start
 
 ```bash
-# Fixed raw threshold (no calibration, fast)
+# Fixed threshold (no calibration, fast)
 python wan22_skip_softmax.py \
     --model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
-    --raw-threshold -0.7 \
+    --skip-softmax-threshold 0.61557 \
     --prompt "A cat playing piano" --output out.mp4
 
 # Calibrate + export for TRT-LLM deployment (typical flow)
@@ -59,13 +59,13 @@ python wan22_skip_softmax.py \
 # Report runtime sparsity (per-layer tile skip ratios)
 python wan22_skip_softmax.py \
     --model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
-    --raw-threshold -0.7 --report-avg-sparsity \
+    --skip-softmax-threshold 0.61557 --report-avg-sparsity \
     --prompt "A cat playing piano" --output out.mp4
 ```
 
-`--export-dir` writes a Hugging Face checkpoint (config.json per component
-plus a top-level `sparse.yaml`) carrying the calibrated
-`threshold_scale_factor` block. TRT-LLM's
+`--export-dir` writes a Hugging Face checkpoint with the calibrated
+`threshold_scale_factor` block embedded in each component's `config.json`
+(under the `sparse_attention_config` key). TRT-LLM's
 `SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` reads the
 `(a, b)` directly via `coeffs['a'] * math.exp(coeffs['b'] * sparsity)` —
 no extra conversion needed downstream.
@@ -74,14 +74,9 @@ no extra conversion needed downstream.
 
 | Mode | How threshold reaches the kernel | Use case |
 |------|----------------------------------|----------|
-| **Raw threshold** (`--raw-threshold -0.7`) | Passed directly as `skip_threshold_log2` — no conversion | Quick testing, sweeps |
-| **Calibrated** (`--calibrate --target-sparsity 0.5`) | `scale_factor = a * exp(b * target)`, then backend computes `threshold = scale_factor / seq_k`, then kernel uses `log2(threshold)` | Production use with automatic seqlen adaptation |
-| **Static lambda** (default `skip_softmax_threshold=0.1`) | `log2(lambda)` | Fallback when neither raw nor calibrated |
-
-Lambda is interpreted in *post-softmax-scale* space (matches both the LLM
-`flash_skip_softmax` path and TRT-LLM's deployment kernel rule
-`expf(local_max - global_max) < threshold / seq_k` on post-sm_scale
-scores).
+| **Fixed threshold** (`--skip-softmax-threshold 0.61557`) | Kernel converts the lambda threshold with `log2(lambda)` | Quick testing, sweeps |
+| **Calibrated** (`--calibrate --target-sparsity 0.5`) | `scale_factor = a * exp(b * target)`, then backend computes `threshold = scale_factor / seq_k`, then kernel converts `log2(threshold)` | Production use with automatic seqlen adaptation |
+| **Static lambda** (default `skip_softmax_threshold=0.1`) | Kernel converts `log2(lambda)` | Fallback when neither fixed nor calibrated |
 
 ## Known Issues
 

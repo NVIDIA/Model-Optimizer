@@ -142,6 +142,7 @@ class GlobalVariables:
     hf_model: str = None
     hf_data: str = None
     hf_local: str = None
+    output_dir: str = None
 
 
 @dataclass
@@ -252,17 +253,27 @@ def build_slurm_executor(
         f"{job_dir}/{experiment_title}:/{experiment_title}",
     ]
 
-    tunnel = run.SSHTunnel(
-        host=slurm_config.host,
-        user=user or getattr(slurm_config, "user", None) or getpass.getuser(),
-        port=slurm_config.port,
-        job_dir=job_dir,
-        identity=identity,
-    )
+    # When launching from a login node inside the cluster (host is localhost),
+    # use a LocalTunnel: nemo_run then runs sbatch and copies artifacts via local
+    # subprocess/shutil instead of ssh+rsync. This avoids flaky/hanging ssh-to-
+    # localhost (e.g. MaxStartups throttling on a shared login node, or clusters
+    # like HSG that are only reachable through an sss proxy so paramiko can't
+    # tunnel in from outside). For real remote hosts, keep the SSHTunnel.
+    if slurm_config.host in ("localhost", "127.0.0.1"):
+        tunnel = run.LocalTunnel(job_dir=job_dir)
+    else:
+        tunnel = run.SSHTunnel(
+            host=slurm_config.host,
+            user=user or getattr(slurm_config, "user", None) or getpass.getuser(),
+            port=slurm_config.port,
+            job_dir=job_dir,
+            identity=identity,
+        )
 
     executor = run.SlurmExecutor(
         account=slurm_config.account,
         partition=slurm_config.partition,
+        qos=slurm_config.qos,
         ntasks_per_node=slurm_config.ntasks_per_node,
         gpus_per_node=slurm_config.gpus_per_node,
         nodes=slurm_config.nodes,
