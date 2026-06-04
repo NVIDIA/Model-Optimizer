@@ -15,6 +15,7 @@
 
 import argparse
 import copy
+import math
 import random
 import time
 import warnings
@@ -437,7 +438,7 @@ def auto_quantize(
         num_calib_steps=len(calib_dataloader),
         # AutoQuantize scoring is the costly phase; allow smaller sample counts than calibration.
         num_score_steps=min(
-            len(calib_dataloader), max(auto_quantize_score_size // args.batch_size, 1)
+            len(calib_dataloader), max(math.ceil(auto_quantize_score_size / args.batch_size), 1)
         ),
         verbose=True,
         disabled_layers=get_auto_quantize_disabled_layers(language_model),

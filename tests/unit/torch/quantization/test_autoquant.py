@@ -604,6 +604,12 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     # Verify method is correctly persisted in checkpoint and state dicts
     saved = safe_load(checkpoint_path)
     assert saved["method"] == method
+    assert saved["cost_denominator"] is not None
+    assert saved["best"]["recipe"] == state_dict_2["best"]["recipe"]
+    assert (
+        pytest.approx(saved["best"]["constraints"]["effective_bits"])
+        == state_dict_2["best"]["constraints"]["effective_bits"]
+    )
     assert state_dict_1["method"] == method
     assert state_dict_2["method"] == method
 

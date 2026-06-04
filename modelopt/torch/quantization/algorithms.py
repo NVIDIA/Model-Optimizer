@@ -932,6 +932,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.best["constraints"] = {"effective_bits": effective_bits_from_search}
         self.best["score"] = best_scores
 
+        self.save_search_checkpoint(verbose=verbose)
+
         QuantRecipe.fold_pqs_to_weights(self.model)
 
 
