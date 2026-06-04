@@ -83,6 +83,63 @@ def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
     quantizer(weight)
 
 
+def _is_calibrated_nvfp4_static(q) -> bool:
+    """True iff ``q`` is an enabled NVFP4-static weight quantizer with ``_amax`` set."""
+    return (
+        isinstance(q, NVFP4StaticQuantizer)
+        and not q._disabled
+        and q.is_nvfp4_static
+        and getattr(q, "_amax", None) is not None
+    )
+
+
+def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
+    """Collect name-based sibling groups (Q/K/V, gate/up, w1/w3) of calibrated NVFP4-static linears."""
+    # Inline import: layer_utils -> quant_utils -> model_calib cycle.
+    from modelopt.torch.export.layer_utils import _GATE_UP_PAIRS
+
+    patterns: tuple[tuple[str, ...], ...] = (("q_proj", "k_proj", "v_proj"), *_GATE_UP_PAIRS)
+    groups: list[list[nn.Module]] = []
+    for parent in model.modules():
+        for sibling_names in patterns:
+            members = [
+                child
+                for child in (getattr(parent, n, None) for n in sibling_names)
+                if child is not None
+                and _is_calibrated_nvfp4_static(getattr(child, "weight_quantizer", None))
+            ]
+            if len(members) >= 2:
+                groups.append(members)
+    return groups
+
+
+@torch.no_grad()
+def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
+    """Verify SharedQuantState unified each name-based fusible group's weight global_amax.
+
+    The legacy name-based grouping (Q/K/V, gate/up, w1/w3) is kept here as a *check*
+    rather than performed: after attach/populate/promote, the promoted static-NVFP4 weight
+    quantizers in each name group must already share one ``global_amax``. This catches the
+    SharedQuantState path failing to form or sync a group it should have (e.g. a
+    :data:`DEFAULT_WEIGHT_SHARED_PATTERNS` regression, or an architecture the regexes miss)
+    before the MSE per-block search — computed against ``global_amax`` — bakes in the
+    inconsistency. Run only when the default patterns are in effect (custom
+    ``shared_patterns`` may intentionally group differently). Members whose ``global_amax``
+    is not materialized (``None``/meta, e.g. an ``init_empty_weights`` model) are skipped.
+    """
+    for group in _collect_grouped_linears(model):
+        amaxes = [m.weight_quantizer.global_amax for m in group]
+        amaxes = [a for a in amaxes if a is not None and not a.is_meta]
+        if len(amaxes) < 2:
+            continue
+        ref = amaxes[0]
+        assert all(torch.equal(a, ref) for a in amaxes), (
+            "A fusible sibling group (q/k/v or gate/up) was not unified to a shared weight "
+            "global_amax; SharedQuantState failed to sync it, so the per-block MSE scales "
+            "would be inconsistent across the group."
+        )
+
+
 CalibratorFactory: TypeAlias = Callable[
     [torch.Tensor, int | tuple | list | None, Callable[..., torch.Tensor]], _Calibrator
 ]
@@ -252,6 +309,9 @@ def max_calibrate(
         # Single-process: _amax is final — aggregate shared global_amax, then promote.
         populate_shared_state(model)
         promote_nvfp4_static_quantizers(model)
+        # Under the default patterns, verify the fusible name groups were actually synced.
+        if weight_patterns is DEFAULT_WEIGHT_SHARED_PATTERNS:
+            _check_grouped_weight_global_amax_synced(model)
         return
 
     # Check MoE calibration completeness before sync
@@ -372,6 +432,9 @@ def max_calibrate(
     # promote, so siblings read the unified value instead of their own _amax.
     populate_shared_state(model)
     promote_nvfp4_static_quantizers(model)
+    # Under the default patterns, verify the fusible name groups were actually synced.
+    if weight_patterns is DEFAULT_WEIGHT_SHARED_PATTERNS:
+        _check_grouped_weight_global_amax_synced(model)
 
 
 def _mse_quant_func(x, amax, quantizer):
