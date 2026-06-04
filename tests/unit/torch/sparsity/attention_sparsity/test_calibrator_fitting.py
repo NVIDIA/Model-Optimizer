@@ -46,10 +46,6 @@ class TestDynamicThresholdCalibratorInit:
         cal = DynamicThresholdCalibrator(threshold_trials=trials)
         assert cal.threshold_trials == trials
 
-    def test_fit_logspace(self):
-        cal = DynamicThresholdCalibrator(fit_logspace=True)
-        assert cal.fit_logspace is True
-
 
 class TestExponentialFitting:
     """Test the calibration pipeline with synthetic stats injected via mock modules."""
@@ -73,19 +69,21 @@ class TestExponentialFitting:
     def _inject_synthetic_stats(self, model, threshold_trials, sample_length=4096):
         """Inject synthetic calibration stats into the sparse modules.
 
-        Generates stats matching the exponential model: scale_factor = a * exp(b * sparsity),
-        with a=0.1, b=5.0. For each threshold, the expected sparsity is:
-            sparsity = ln(threshold * sample_length / a) / b
+        Generates stats matching the calibration model
+            t = 1 - exp(-a * (S/(1-S))^b / L^c)
+        with a=1.5, b=0.86, c=1.26. Inverse:
+            S/(1-S) = (-L^c * log(1-t) / a)^(1/b)
+            S       = X / (1 + X)
         """
-        a_true, b_true = 0.1, 5.0
+        a_true, b_true, c_true = 1.5, 0.86, 1.26
 
         for module in model.modules():
             if isinstance(module, SparseAttentionModule):
                 sparsity_list = []
                 for t in threshold_trials:
-                    sf = t * sample_length
-                    # Invert the model: sparsity = ln(sf / a) / b
-                    s = np.log(sf / a_true) / b_true
+                    log_term = -np.log(1.0 - t)
+                    X = (sample_length**c_true * log_term / a_true) ** (1.0 / b_true)  # noqa: N806
+                    s = X / (1.0 + X)
                     s = max(0.0, min(1.0, s))
                     sparsity_list.append(s)
                 module._last_stats = {
@@ -94,34 +92,11 @@ class TestExponentialFitting:
                     "phase": "prefill",
                 }
 
-    def test_calibrate_with_synthetic_linear(self):
-        """Test linear-space fitting recovers known parameters."""
+    def test_calibrate_recovers_synthetic_params(self):
+        """The lstsq fit recovers known (a, b, c) from clean synthetic data."""
         model = self._make_sparse_model()
         trials = [1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 0.1, 0.3, 0.5]
-        cal = DynamicThresholdCalibrator(threshold_trials=trials, fit_logspace=False)
-
-        def forward_loop(m):
-            # Simulate 3 samples with different lengths
-            for length in [2048, 4096, 8192]:
-                self._inject_synthetic_stats(m, trials, sample_length=length)
-                for module in m.modules():
-                    if isinstance(module, SparseAttentionModule) and module._stats_manager:
-                        stats = module._last_stats
-                        if stats:
-                            module._stats_manager.collect(stats)
-
-        result = cal.calibrate(model, forward_loop, "prefill")
-        # Should produce valid result with a and b close to ground truth
-        if result:
-            assert "a" in result
-            assert "b" in result
-            assert result["r_squared"] > 0.8
-
-    def test_calibrate_with_synthetic_logspace(self):
-        """Test log-space fitting recovers known parameters."""
-        model = self._make_sparse_model()
-        trials = [1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 0.1, 0.3, 0.5]
-        cal = DynamicThresholdCalibrator(threshold_trials=trials, fit_logspace=True)
+        cal = DynamicThresholdCalibrator(threshold_trials=trials)
 
         def forward_loop(m):
             for length in [2048, 4096, 8192]:
@@ -133,10 +108,14 @@ class TestExponentialFitting:
                             module._stats_manager.collect(stats)
 
         result = cal.calibrate(model, forward_loop, "prefill")
-        if result:
-            assert "a" in result
-            assert "b" in result
-            assert result["r_squared"] > 0.9  # Log-space should fit better
+        assert result, "Calibration should produce a result on clean synthetic data"
+        assert "a" in result and "b" in result and "c" in result
+        # Ground-truth params from _inject_synthetic_stats: a=1.5, b=0.86, c=1.26.
+        # Clean data should recover all three to within ~1% relative error.
+        assert abs(result["a"] - 1.5) / 1.5 < 0.05
+        assert abs(result["b"] - 0.86) / 0.86 < 0.02
+        assert abs(result["c"] - 1.26) / 1.26 < 0.02
+        assert result["r_squared"] > 0.999
 
     def test_calibrate_no_modules_raises(self):
         """Test error when no sparse attention modules exist."""

@@ -122,10 +122,13 @@ def test_forward_delegates_cascade_metadata_to_vllm(monkeypatch):
     [
         ({"skip_softmax_threshold": 0.001}, 1, 128),
         (
+            # Pathological large `a` makes the envelope saturate to threshold=1.0
+            # exactly in float64 (1 - exp(-huge) underflows), triggering the
+            # "outside (0, 1)" warn-and-disable fallback path.
             {
                 "threshold_scale_factor": {
-                    "formula": "a * exp(b * target_sparsity)",
-                    "prefill": {"a": 10.0, "b": 0.0},
+                    "formula": "1 - exp(-a * (S/(1-S))^b / L^c)",
+                    "prefill": {"a": 1.0e9, "b": 0.0, "c": 1.0},
                 },
                 "target_sparse_ratio": {"prefill": 0.5},
             },
@@ -182,7 +185,7 @@ def test_forward_delegates_launches_without_effective_sparse_work(
     monkeypatch.setattr(FlashAttentionImpl, "forward", fake_forward)
 
     maybe_warns = (
-        pytest.warns(UserWarning, match="outside the valid lambda range")
+        pytest.warns(UserWarning, match=r"outside the valid \(0, 1\) range")
         if "threshold_scale_factor" in sparse_kw
         else nullcontext()
     )
@@ -206,15 +209,19 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(monkeypatch):
     """Forward should convert checkpoint calibration params to kernel threshold."""
     max_query_len = 128
     seq_len = 128
-    expected_scale = 2.0 * math.exp(3.0 * 0.4)
+    # scale = a * (S/(1-S))^b; threshold = 1 - exp(-scale / seq_len^c)
+    target = 0.4
+    a_p, b_p, c_p = 2.0, 0.86, 1.0
+    expected_scale = a_p * (target / (1.0 - target)) ** b_p
+    expected_threshold = 1.0 - math.exp(-expected_scale / (seq_len**c_p))
     impl = _clone_sparse_impl(_make_old_impl())
     impl.sparse_kw = {
         "threshold_scale_factor": {
-            "formula": "a * exp(b * target_sparsity)",
-            "prefill": {"a": 2.0, "b": 3.0},
-            "decode": {"a": 0.1, "b": 1.0},
+            "formula": "1 - exp(-a * (S/(1-S))^b / L^c)",
+            "prefill": {"a": a_p, "b": b_p, "c": c_p},
+            "decode": {"a": 0.1, "b": 0.91, "c": 1.0},
         },
-        "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+        "target_sparse_ratio": {"prefill": target, "decode": 0.6},
     }
     q = torch.zeros(max_query_len, impl.num_heads, impl.head_size, dtype=torch.float16)
     kv_cache = torch.zeros(2, 1, seq_len, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
@@ -248,41 +255,50 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(monkeypatch):
         output=torch.empty_like(q),
     )
 
-    assert captured["skip_softmax_threshold"] == pytest.approx(expected_scale / seq_len)
+    assert captured["skip_softmax_threshold"] == pytest.approx(expected_threshold)
     assert "threshold_scale_factor" not in captured
     assert "target_sparse_ratio" not in captured
 
 
 def test_resolve_calibrated_skip_softmax_threshold_for_decode():
     """Calibration conversion is phase-aware even when decode later delegates."""
+    a_d, b_d, c_d, target_d, seq_len = 0.1, 1.0, 1.0, 0.6, 256
     sparse_kw = {
         "threshold_scale_factor": {
-            "formula": "a * exp(b * target_sparsity)",
-            "decode": {"a": 0.1, "b": 1.0},
+            "formula": "1 - exp(-a * (S/(1-S))^b / L^c)",
+            "decode": {"a": a_d, "b": b_d, "c": c_d},
         },
-        "target_sparse_ratio": {"decode": 0.6},
+        "target_sparse_ratio": {"decode": target_d},
     }
 
     vllm_plugin._resolve_skip_softmax_calibration(
         sparse_kw,
         is_prefill=False,
-        max_seq_len=256,
+        max_seq_len=seq_len,
     )
 
-    assert sparse_kw == {"skip_softmax_threshold": pytest.approx(0.1 * math.exp(1.0 * 0.6) / 256)}
+    expected_scale = a_d * (target_d / (1.0 - target_d)) ** b_d
+    expected_threshold = 1.0 - math.exp(-expected_scale / (seq_len**c_d))
+    assert sparse_kw == {"skip_softmax_threshold": pytest.approx(expected_threshold)}
 
 
 def test_resolve_calibrated_skip_softmax_warns_and_disables_for_large_threshold():
-    """A derived lambda >= 1 is invalid and disables calibrated skip-softmax."""
+    """A degenerate threshold (saturates to 1.0) disables calibrated skip-softmax.
+
+    With the bounded envelope, threshold is always in (0, 1) for finite scale.
+    But a pathologically huge `a` makes `1 - exp(-scale/seq_len^c)` round to
+    exactly 1.0 in float64, which fails the `< 1.0` check and triggers the
+    fallback to dense attention.
+    """
     sparse_kw = {
         "threshold_scale_factor": {
-            "formula": "a * exp(b * target_sparsity)",
-            "decode": {"a": 925.492, "b": 0.0},
+            "formula": "1 - exp(-a * (S/(1-S))^b / L^c)",
+            "decode": {"a": 1.0e9, "b": 0.0, "c": 1.0},
         },
         "target_sparse_ratio": {"decode": 0.5},
     }
 
-    with pytest.warns(UserWarning, match="outside the valid lambda range"):
+    with pytest.warns(UserWarning, match=r"outside the valid \(0, 1\) range"):
         vllm_plugin._resolve_skip_softmax_calibration(
             sparse_kw,
             is_prefill=False,
@@ -301,7 +317,7 @@ def test_build_sparse_kw_restores_checkpoint_sparse_metadata():
         "sparsity_m": 4,
         "dense_sink_tokens": 3,
         "dense_recent_tokens": 64,
-        "threshold_scale_factor": {"prefill": {"a": 1.0, "b": 2.0}},
+        "threshold_scale_factor": {"prefill": {"a": 1.0, "b": 0.86, "c": 1.0}},
         "target_sparse_ratio": {"prefill": 0.5},
     }
 
@@ -310,7 +326,7 @@ def test_build_sparse_kw_restores_checkpoint_sparse_metadata():
         "sparsity_m": 4,
         "dense_sink_tokens": 3,
         "dense_recent_tokens": 64,
-        "threshold_scale_factor": {"prefill": {"a": 1.0, "b": 2.0}},
+        "threshold_scale_factor": {"prefill": {"a": 1.0, "b": 0.86, "c": 1.0}},
         "target_sparse_ratio": {"prefill": 0.5},
     }
 

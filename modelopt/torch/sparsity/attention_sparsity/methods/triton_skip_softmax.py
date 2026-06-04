@@ -94,7 +94,12 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         # Priority: calibrated dynamic threshold > static threshold.
         scale_factor = self._get_scale_factor()
         if scale_factor is not None:
-            self._set_triton_backends(scale_factor=scale_factor, **backend_kwargs)
+            length_exponent = self._get_length_exponent()
+            self._set_triton_backends(
+                scale_factor=scale_factor,
+                length_exponent=length_exponent,
+                **backend_kwargs,
+            )
         else:
             self._set_triton_backends(threshold=self.skip_softmax_threshold, **backend_kwargs)
         with self._get_diffusers_backend_context():
@@ -122,13 +127,13 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
                 self._clear_triton_backends()
 
     def _get_scale_factor(self) -> float | None:
-        """Compute scale_factor from calibration params, or None if uncalibrated.
+        """Return the per-target scale factor ``a * (S / (1-S))^b``, or None if uncalibrated.
 
-        The scale_factor is sequence-length-independent. Backends divide by the
-        actual ``seq_k`` at call time: ``threshold = scale_factor / seq_k``.
+        Combined with the length exponent ``c`` (see :meth:`_get_length_exponent`),
+        the diffusers/LTX Triton backends compute the threshold envelope
+        ``t = 1 - exp(-scale / L^c)`` at attention call time.
         """
         if self.calibration_params and self.target_sparse_ratio:
-            import math
             import warnings
 
             params = self.calibration_params.get("prefill", {})
@@ -136,7 +141,6 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             b = params.get("b", 0)
             target = self.target_sparse_ratio.get("prefill", 0.5)
             if a > 0 and b > 0:
-                # Warn if target is outside the calibrated range
                 min_s = params.get("min_observed_sparsity")
                 max_s = params.get("max_observed_sparsity")
                 if min_s is not None and target < min_s:
@@ -152,8 +156,16 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
                         f"during calibration ({max_s:.1%}). The model is extrapolating.",
                         stacklevel=2,
                     )
-                return a * math.exp(b * target)
+                s_clipped = min(max(float(target), 1e-6), 1.0 - 1e-6)
+                return float(a) * (s_clipped / (1.0 - s_clipped)) ** float(b)
         return None
+
+    def _get_length_exponent(self) -> float:
+        """Return the calibrated length exponent ``c`` (default 1.0 if uncalibrated)."""
+        if self.calibration_params:
+            params = self.calibration_params.get("prefill", {})
+            return float(params.get("c", 1.0))
+        return 1.0
 
     @staticmethod
     @contextmanager
@@ -260,8 +272,9 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         if scale_factor is not None:
             return {
                 "type": "dynamic_calibrated",
-                "formula": "threshold = scale_factor / seq_k (computed at runtime)",
+                "formula": "threshold = 1 - exp(-scale_factor / L^c)",
                 "scale_factor": scale_factor,
+                "length_exponent": self._get_length_exponent(),
                 "calibration_params": self.calibration_params,
                 "target_sparse_ratio": self.target_sparse_ratio,
             }

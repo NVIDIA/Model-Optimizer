@@ -102,9 +102,9 @@ class TestLoadFromCheckpointMetadata:
     def test_maps_calibrated_softmax_skip_to_dynamic_config(self):
         """Test that calibrated softmax_skip preserves checkpoint coefficients."""
         threshold_scale_factor = {
-            "formula": "a * exp(b * target_sparsity)",
-            "prefill": {"a": 2.0, "b": 3.0},
-            "decode": {"a": 5.0, "b": 7.0},
+            "formula": "1 - exp(-a * (S/(1-S))^b / L^c)",
+            "prefill": {"a": 2.0, "b": 0.86, "c": 1.26},
+            "decode": {"a": 5.0, "b": 0.91, "c": 1.18},
         }
         meta = {
             "config_groups": {"group_0": {"sparse_algo": "softmax_skip"}},
@@ -161,8 +161,8 @@ class TestLoadFromCheckpointMetadata:
     def test_maps_calibrated_softmax_skip_with_sparse_softmax_overlay(self):
         """Test that vLLM restores combined skip-softmax plus N:M sparse-softmax."""
         threshold_scale_factor = {
-            "formula": "a * exp(b * target_sparsity)",
-            "prefill": {"a": 2.0, "b": 3.0},
+            "formula": "1 - exp(-a * (S/(1-S))^b / L^c)",
+            "prefill": {"a": 2.0, "b": 0.86, "c": 1.26},
         }
         meta = {
             "config_groups": {

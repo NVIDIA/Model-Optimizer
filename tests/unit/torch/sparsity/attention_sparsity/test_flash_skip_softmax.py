@@ -323,13 +323,18 @@ class TestFlashSkipSoftmaxMethod:
                 "is_causal": True,
             }
         )
-        method.calibration_params = {"prefill": {"a": 1.0, "b": 5.0}}
+        method.calibration_params = {
+            "prefill": {"a": 1.0, "b": 1.5, "c": 1.2},
+        }
         method.target_sparse_ratio = {"prefill": 0.5}
         info = method.get_threshold_info()
         assert info["type"] == "dynamic_calibrated"
         assert "phases" in info
         assert "prefill" in info["phases"]
-        assert "scale_factor" in info["phases"]["prefill"]
+        prefill = info["phases"]["prefill"]
+        # Logit-power envelope surfaces (a, b, c).
+        assert "c" in prefill
+        assert "example_thresholds" in prefill
 
     def test_get_threshold_info_static(self):
         """get_threshold_info returns static type when no calibration."""

@@ -20,11 +20,10 @@ reducing FLOPs without retraining.
 Two modes are supported:
 - **Fixed threshold** — pass a BLASST lambda threshold directly. No calibration
   needed. Good for quick testing and sweeps.
-- **Calibrated threshold** — an exponential model
-  (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once via the
-  Triton calibration kernel, then the target sparsity can be adjusted at runtime
-  without recalibration. Log-space fitting (`fit_logspace=True`) is recommended
-  for diffusion models where scale_factors span many orders of magnitude.
+- **Calibrated threshold** — the dynamic threshold model
+  (`t = 1 - exp(-a * (S/(1-S))^b / L^c)`) is calibrated once via the Triton
+  calibration kernel, then the target sparsity can be adjusted at runtime
+  without recalibration.
 
 ## Supported Models
 
@@ -66,9 +65,9 @@ python wan22_skip_softmax.py \
 
 | Mode | How threshold reaches the kernel | Use case |
 |------|----------------------------------|----------|
-| **Fixed threshold** (`--skip-softmax-threshold 0.61557`) | Kernel converts the lambda threshold with `log2(lambda)` | Quick testing, sweeps |
-| **Calibrated** (`--calibrate --target-sparsity 0.5`) | `scale_factor = a * exp(b * target)`, then backend computes `threshold = scale_factor / seq_k`, then kernel converts `log2(threshold)` | Production use with automatic seqlen adaptation |
-| **Static lambda** (default `skip_softmax_threshold=0.1`) | Kernel converts `log2(lambda)` | Fallback when neither fixed nor calibrated |
+| **Fixed threshold** (`--skip-softmax-threshold 0.61557`) | Kernel converts the threshold with `log2(t)` | Quick testing, sweeps |
+| **Calibrated** (`--calibrate --target-sparsity 0.5`) | `scale = a * (S/(1-S))^b`; backend computes `t = 1 - exp(-scale / L^c)`; kernel converts `log2(t)` | Production use with automatic seqlen adaptation |
+| **Static threshold** (default `skip_softmax_threshold=0.1`) | Kernel converts `log2(t)` | Fallback when neither fixed nor calibrated |
 
 ## Known Issues
 

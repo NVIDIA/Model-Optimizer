@@ -23,48 +23,42 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy.optimize import curve_fit
 
 from ..stats_manager import SparseAttentionStatsManager
 from ..utils import get_sparse_attention_modules
 
 
 class DynamicThresholdCalibrator:
-    """Dynamic threshold calibrator using Exponential model.
+    """Dynamic threshold calibrator.
 
-    Calibration Algorithm:
-        1. For each threshold λ_j in threshold_trials:
-           - Run ALL samples through forward_loop
-           - For each sample i with length L_i, collect sparsity S_ij
-           - Compute scale_factor_ij = λ_j × L_i
+    The calibration fits the model::
 
-        2. Fit Exponential model to ALL individual (sf_ij, S_ij) pairs:
-           scale_factor = a * exp(b * sparsity)
+        t = 1 - exp(-a * (S / (1 - S)) ^ b / L ^ c)
 
-        3. Return fitted a and b parameters
+    to ``(t_j, S_ij, L_i)`` tuples collected from a forward pass. Taking logs
+    yields a linear model in ``(log a, b, -c)``::
 
-    At inference time (user specifies target_sparsity S*):
-        scale_factor = a * exp(b * S*)
-        threshold = scale_factor / seqlen
+        log(-log(1-t_j)) = log(a) + b * logit(S_ij) - c * log(L_i)
 
-    Key insight: Using all individual data points (N_thresholds × N_samples)
-    instead of per-threshold averages provides more accurate fitting without
-    additional calibration time cost.
+    which is solved in closed form with ``np.linalg.lstsq``. At inference
+    time, given target sparsity ``S``, the threshold is
+    ``t = 1 - exp(-a * (S / (1-S))^b / L^c)``.
+
+    Properties:
+        - Bounded in ``(0, 1)`` by construction (no clamping required).
+        - Correct asymptotes: ``t->0`` as ``S->0`` or ``L->inf``; ``t->1`` as
+          ``S->1`` or ``L->0``.
     """
 
     def __init__(
         self,
         threshold_trials: list[float] | None = None,
-        fit_logspace: bool = False,
     ):
         """Initialize dynamic threshold calibrator.
 
         Args:
             threshold_trials: List of thresholds to try during calibration.
                 Should span a range that achieves sparsities from ~10% to ~95%.
-            fit_logspace: If True, fit the exponential model in log space
-                (minimizes relative error). Recommended for diffusion models
-                where scale_factors span many orders of magnitude.
         """
         # Default threshold trials if not provided
         self.threshold_trials = threshold_trials or [
@@ -89,32 +83,32 @@ class DynamicThresholdCalibrator:
             9.5e-1,
             9.9e-1,
         ]
-        self.fit_logspace = fit_logspace
 
     def calibrate(self, model: nn.Module, forward_loop: Callable, phase: str) -> dict[str, Any]:
-        """Calibrate a and b parameters for Exponential model.
+        """Calibrate (a, b, c) for the dynamic threshold model.
 
-        Algorithm:
-            1. Set thresholds = threshold_trials on all modules, run ONE forward pass.
-               Each module returns a sparsity list (one entry per threshold) per sample.
-               Unpack to get (scale_factor_ij = λ_j × L_i, sparsity_ij) pairs.
+        Algorithm: set thresholds = ``threshold_trials`` on all modules and
+        run ONE forward pass. Each module returns a sparsity list (one entry
+        per threshold) per sample. For each ``(t_j, L_i, S_ij)`` triple, form::
 
-            2. Fit Exponential model to ALL (sf_ij, S_ij) pairs:
-               scale_factor = a * exp(b * sparsity)
+            y_ij = log(-log(1 - t_j))
+            x_S  = logit(S_ij) = log(S_ij / (1 - S_ij))
+            x_L  = log(L_i)
 
-            3. Return fitted a and b parameters
+        The model ``log(-log(1-t)) = log(a) + b*logit(S) - c*log(L)`` is
+        linear in ``(log a, b, -c)`` and solved with ``np.linalg.lstsq``.
 
-        At inference time (user specifies target_sparsity S*):
-            scale_factor = a * exp(b * S*)
-            threshold = scale_factor / seqlen
+        At inference time, given target sparsity ``S``, the threshold is
+        ``t = 1 - exp(-a * (S / (1 - S))^b / L^c)``.
 
         Args:
-            model: The model with sparse attention modules
-            forward_loop: Callable that takes model and forwards calibration data
-            phase: Phase to calibrate ('prefill' or 'decode')
+            model: The model with sparse attention modules.
+            forward_loop: Callable that takes model and forwards calibration data.
+            phase: Phase to calibrate (``'prefill'`` or ``'decode'``).
 
         Returns:
-            Dict with calibration results including a, b, r_squared, and num_data_points
+            Dict with calibration results including ``a``, ``b``, ``c``,
+            ``r_squared``, and ``num_data_points``.
         """
         # Extract attention modules
         attention_modules = get_sparse_attention_modules(model)
@@ -122,15 +116,15 @@ class DynamicThresholdCalibrator:
         if not attention_modules:
             raise ValueError("No sparse attention modules found for calibration")
 
-        print(f"Starting Exponential model calibration ({phase} phase)")
+        print(f"Starting dynamic threshold calibration ({phase} phase)")
         print(f"Threshold trials: {len(self.threshold_trials)}")
 
-        # Stage 1: Collect ALL (scale_factor, sparsity) pairs in a single forward pass.
-        # All threshold_trials are passed at once; each module returns a sparsity list
-        # with one entry per threshold, eliminating the need for repeated forward passes.
+        # Stage 1: collect (t, L, S) triples in a single forward pass. All
+        # threshold_trials are passed at once; each module returns a sparsity
+        # list with one entry per threshold.
         print(f"\nStage 1: Collecting {phase} sparsity data for all thresholds in one pass...")
 
-        all_data_points = []  # List of {"threshold", "length", "scale_factor", "sparsity"}
+        all_data_points = []  # List of {"threshold", "length", "sparsity"}
 
         self._set_thresholds(attention_modules, self.threshold_trials)
         self._enable_calibration_mode(attention_modules)
@@ -143,12 +137,10 @@ class DynamicThresholdCalibrator:
             length = sample_stat["sample_length"]
             sparsity_list = sample_stat["sparsity"]
             for threshold, sparsity in zip(self.threshold_trials, sparsity_list):
-                scale_factor = threshold * length
                 all_data_points.append(
                     {
                         "threshold": threshold,
                         "length": length,
-                        "scale_factor": scale_factor,
                         "sparsity": sparsity,
                     }
                 )
@@ -160,129 +152,109 @@ class DynamicThresholdCalibrator:
             )
             return {}
 
-        print(f"Collected {len(all_data_points)} individual (scale_factor, sparsity) pairs")
+        print(f"Collected {len(all_data_points)} individual (t, L, S) triples")
 
-        # Stage 2: Fit Exponential model: scale_factor = a * exp(b * sparsity)
-        print("\nStage 2: Fitting Exponential model to all data points...")
+        # Stage 2: closed-form linear fit on the transformed coordinates.
+        print("\nStage 2: Fitting threshold model (closed-form linear lstsq)...")
 
-        # Extract data for fitting
-        scale_factors = np.array([pt["scale_factor"] for pt in all_data_points])
-        sparsities = np.array([pt["sparsity"] for pt in all_data_points])
+        thresholds_arr = np.array([pt["threshold"] for pt in all_data_points], dtype=np.float64)
+        lengths_arr = np.array([pt["length"] for pt in all_data_points], dtype=np.float64)
+        sparsities_arr = np.array([pt["sparsity"] for pt in all_data_points], dtype=np.float64)
 
-        # Filter out extreme sparsities (must be in (10%, 90%))
-        # Extreme values are unreliable for fitting
-        valid_mask = (sparsities >= 0.10) & (sparsities <= 0.90)
-        if self.fit_logspace:
-            valid_mask &= scale_factors > 0  # log requires positive values
-        scale_factors = scale_factors[valid_mask]
-        sparsities = sparsities[valid_mask]
+        # Filter:
+        #  - extreme sparsities (must be in (10%, 90%); extremes are unreliable)
+        #  - t must be in (0, 1) for log(-log(1-t)) to be defined
+        #  - L must be > 0
+        valid_mask = (
+            (sparsities_arr >= 0.10)
+            & (sparsities_arr <= 0.90)
+            & (thresholds_arr > 0)
+            & (thresholds_arr < 1)
+            & (lengths_arr > 0)
+        )
 
-        if len(scale_factors) < 3:
+        if int(valid_mask.sum()) < 3:
             warnings.warn(
-                f"Not enough valid data points after filtering. Got {len(scale_factors)}."
+                f"Not enough valid data points after filtering. Got {int(valid_mask.sum())}."
             )
             return {}
 
-        # Record observed sparsity range for feasibility checks at inference
-        min_observed_sparsity = float(np.min(sparsities))
-        max_observed_sparsity = float(np.max(sparsities))
+        # Uppercase L, S, X below match the regression notation used in
+        # the model docstring above.
+        t_obs = thresholds_arr[valid_mask]
+        L = lengths_arr[valid_mask]  # noqa: N806
+        S = sparsities_arr[valid_mask]  # noqa: N806
+
+        y = np.log(-np.log(1.0 - t_obs))
+        logit_S = np.log(S / (1.0 - S))  # noqa: N806
+        log_L = np.log(L)  # noqa: N806
+
+        # Design matrix X with columns [1, logit(S), -log(L)] so coefficients
+        # are [log(a), b, c] in that order.
+        X = np.column_stack([np.ones_like(y), logit_S, -log_L])  # noqa: N806
 
         try:
-            if self.fit_logspace:
-                # Log-space fit: minimizes relative error. Recommended for
-                # diffusion models where scale_factors span many orders of
-                # magnitude (e.g. 0.06 to 57,000) — a linear-space fit would
-                # be dominated by the largest values.
-                log_scale_factors = np.log(scale_factors)
-
-                def log_exponential(sparsity, log_a, b):
-                    return log_a + b * sparsity
-
-                popt, pcov = curve_fit(
-                    log_exponential,
-                    sparsities,
-                    log_scale_factors,
-                    p0=[0.0, 10.0],
-                    maxfev=10000,
-                )
-                log_a, b = popt
-                a = np.exp(log_a)
-
-                # R-squared in log space (where the fit was performed)
-                pred = log_exponential(sparsities, log_a, b)
-                ss_res = np.sum((log_scale_factors - pred) ** 2)
-                ss_tot = np.sum((log_scale_factors - np.mean(log_scale_factors)) ** 2)
-            else:
-                # Linear-space fit (default): minimizes absolute error.
-
-                def exponential(sparsity, a, b):
-                    return a * np.exp(b * sparsity)
-
-                popt, pcov = curve_fit(
-                    exponential,
-                    sparsities,
-                    scale_factors,
-                    p0=[1.0, 5.0],
-                    bounds=([0.0, 0.0], [np.inf, 20.0]),
-                    maxfev=10000,
-                )
-                a, b = popt
-
-                pred = exponential(sparsities, a, b)
-                ss_res = np.sum((scale_factors - pred) ** 2)
-                ss_tot = np.sum((scale_factors - np.mean(scale_factors)) ** 2)
+            coefs, _residuals, _rank, _sv = np.linalg.lstsq(X, y, rcond=None)
         except Exception as e:
-            warnings.warn(f"Curve fitting failed: {e}")
+            warnings.warn(f"Linear fit failed: {e}")
             return {}
 
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        log_a, b, c = coefs.tolist()
+        a = float(np.exp(log_a))
 
-        fit_label = "log-space" if self.fit_logspace else "linear-space"
-        print(f"\n{phase.capitalize()} Calibration Results (Exponential Model, {fit_label} fit):")
-        print("  Model: scale_factor = a * exp(b * sparsity)")
-        print(f"  Fitted a: {a:.6e}")
-        print(f"  Fitted b: {b:.4f}")
-        print(f"  R-squared: {r_squared:.6f}")
+        pred = X @ coefs
+        ss_res = float(np.sum((y - pred) ** 2))
+        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+        r_squared = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+        min_observed_sparsity = float(S.min())
+        max_observed_sparsity = float(S.max())
+
+        print(f"\n{phase.capitalize()} Calibration Results:")
+        print("  Model: t = 1 - exp(-a * (S/(1-S))^b / L^c)")
+        print(f"  Fitted a:     {a:.6e}")
+        print(f"  Fitted b:     {b:.4f}")
+        print(f"  Fitted c:     {c:.4f}")
+        print(f"  R-squared:    {r_squared:.6f}")
         print(
             f"  Observed sparsity range: [{min_observed_sparsity:.1%}, {max_observed_sparsity:.1%}]"
         )
-        print(f"  Data points used: {int(np.sum(valid_mask))} / {len(all_data_points)}")
+        print(f"  Data points used: {int(valid_mask.sum())} / {len(all_data_points)}")
 
-        # Show scale_factor for various target sparsities
-        print("\nScale factors for different target sparsities:")
-        print(f"  {'Target':<10} {'Scale Factor':<15} {'Note':<20}")
-        print(f"  {'-' * 10} {'-' * 15} {'-' * 20}")
-        for target in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]:
-            sf = a * np.exp(b * target)
+        # Show predicted threshold for a few (S, L) combinations.
+        print("\nExample thresholds t(S, L) = 1 - exp(-a*(S/(1-S))^b / L^c):")
+        print(f"  {'Target S':<12} {'L=4096':<14} {'L=16384':<14} {'L=65536':<14}")
+        print(f"  {'-' * 12} {'-' * 14} {'-' * 14} {'-' * 14}")
+        for target in [0.3, 0.5, 0.7, 0.9]:
+            scale = a * (target / (1.0 - target)) ** b
+            tvals = [1.0 - np.exp(-scale / (Lx**c)) for Lx in (4096, 16384, 65536)]
             note = ""
             if target < min_observed_sparsity or target > max_observed_sparsity:
-                note = "(extrapolation)"
-            print(f"  {target:<10.0%} {sf:<15.4f} {note:<20}")
+                note = " (extrapolation)"
+            print(f"  {target:<12.0%} {tvals[0]:<14.4e} {tvals[1]:<14.4e} {tvals[2]:<14.4e}{note}")
 
-        # Print calibration data summary by threshold
+        # Per-threshold summary (handy for debugging).
         print("\nCalibration data summary (per threshold):")
-        print(f"  {'Threshold':<12} {'Avg SF':<12} {'Avg Sparsity':<12} {'Samples':<8}")
-        print(f"  {'-' * 12} {'-' * 12} {'-' * 12} {'-' * 8}")
-
-        # Group by threshold for summary
+        print(f"  {'Threshold':<12} {'Avg Sparsity':<14} {'Avg L':<12} {'Samples':<8}")
+        print(f"  {'-' * 12} {'-' * 14} {'-' * 12} {'-' * 8}")
         by_threshold = defaultdict(list)
         for point in all_data_points:
             by_threshold[point["threshold"]].append(point)
-
         for threshold in sorted(by_threshold.keys()):
             points = by_threshold[threshold]
-            avg_sf = np.mean([p["scale_factor"] for p in points])
             avg_s = np.mean([p["sparsity"] for p in points])
-            print(f"  {threshold:<12.4f} {avg_sf:<12.2f} {avg_s:<12.2%} {len(points):<8}")
+            avg_l = np.mean([p["length"] for p in points])
+            print(f"  {threshold:<12.4f} {avg_s:<14.2%} {avg_l:<12.1f} {len(points):<8}")
 
         return {
             "phase": phase,
             "a": float(a),
             "b": float(b),
+            "c": float(c),
             "r_squared": float(r_squared),
-            "num_data_points": int(np.sum(valid_mask)),
+            "num_data_points": int(valid_mask.sum()),
             "total_samples": len(all_data_points),
-            "calibration_type": "exponential",
+            "calibration_type": "dynamic_threshold",
             "min_observed_sparsity": min_observed_sparsity,
             "max_observed_sparsity": max_observed_sparsity,
         }

@@ -51,11 +51,13 @@ class TestThreadLocalContext:
             calibration_mode=False,
             threshold_trials=[0.01, 0.1],
             scale_factor=2.0,
+            length_exponent=1.5,
         )
-        active, threshold, scale_factor = ltx_mod._get_ltx_triton_context()
+        active, threshold, scale_factor, length_exponent = ltx_mod._get_ltx_triton_context()
         assert active is True
         assert threshold == 0.1
         assert scale_factor == 2.0
+        assert length_exponent == 1.5
 
     def test_set_context_without_calibration_mode_clears_counters(self, ltx_mod):
         """Setting non-calibration mode resets calibration_counters to None."""
@@ -71,12 +73,18 @@ class TestThreadLocalContext:
         assert ltx_mod._thread_local.calibration_counters is existing
 
     def test_clear_context_resets_all(self, ltx_mod):
-        ltx_mod.set_ltx_triton_context(active=True, threshold=0.1, scale_factor=2.0)
+        ltx_mod.set_ltx_triton_context(
+            active=True,
+            threshold=0.1,
+            scale_factor=2.0,
+            length_exponent=1.5,
+        )
         ltx_mod.clear_ltx_triton_context()
-        active, threshold, scale_factor = ltx_mod._get_ltx_triton_context()
+        active, threshold, scale_factor, length_exponent = ltx_mod._get_ltx_triton_context()
         assert active is False
         assert threshold is None
         assert scale_factor is None
+        assert length_exponent == 1.0  # default reset value
 
     def test_get_calibration_counters_returns_none_initially(self, ltx_mod):
         assert ltx_mod.get_calibration_counters() is None

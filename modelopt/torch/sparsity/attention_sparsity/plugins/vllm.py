@@ -69,6 +69,7 @@ def _resolve_skip_softmax_calibration(
     try:
         a = float(params["a"])
         b = float(params["b"])
+        c = float(params.get("c", 1.0))
         seq_len = int(max_seq_len)
     except (KeyError, TypeError, ValueError):
         return
@@ -76,15 +77,23 @@ def _resolve_skip_softmax_calibration(
         return
 
     target = _target_sparse_ratio_for_phase(sparse_target_ratio, phase)
-    scale_factor = a * math.exp(b * target)
-    # The current Triton kernel accepts one scalar threshold per launch. Use
-    # the max KV length in the scheduled batch; shorter sequences are denser.
-    threshold = scale_factor / seq_len
-    if threshold >= 1.0:
+    # Dynamic threshold:
+    #   scale = a * (S / (1 - S))^b
+    #   t = 1 - exp(-scale / seq_len^c)
+    # Bounded in (0, 1) by construction. The Triton kernel takes one scalar
+    # threshold per launch; we use the max KV length in the scheduled batch,
+    # so shorter sequences in the batch end up slightly denser than target.
+    s_clipped = min(max(target, 1e-6), 1.0 - 1e-6)
+    scale = a * (s_clipped / (1.0 - s_clipped)) ** b
+    threshold = 1.0 - math.exp(-scale / (seq_len**c))
+    # Sanity check: the envelope guarantees threshold ∈ (0, 1) for finite
+    # positive scale and seq_len, but clamp defensively against pathological
+    # parameter values (e.g., scale=0 -> threshold=0, which disables sparsity).
+    if not (0.0 < threshold < 1.0):
         warnings.warn(
             "Disabling calibrated skip-softmax for this vLLM launch because "
-            f"the derived threshold is outside the valid lambda range: "
-            f"phase={phase}, seq_len={seq_len}, scale_factor={scale_factor:.6g}, "
+            f"the derived threshold is outside the valid (0, 1) range: "
+            f"phase={phase}, seq_len={seq_len}, scale={scale:.6g}, "
             f"target_sparse_ratio={target:.6g}, threshold={threshold:.6g}.",
             stacklevel=2,
         )
@@ -227,7 +236,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 )
         if not sparse_kw:
             # Dynamic calibration can disable sparse work for a launch, e.g.
-            # short-prefill thresholds outside the valid lambda range. Avoid
+            # short-prefill thresholds outside the valid (0, 1) range. Avoid
             # swapping in the ModelOpt dense kernel when no sparse feature is active.
             return self._forward_vllm_flash_attn(
                 layer,

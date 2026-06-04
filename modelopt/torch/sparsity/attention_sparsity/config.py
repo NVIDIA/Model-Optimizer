@@ -267,20 +267,23 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
 class CalibrationConfig(ModeloptBaseConfig):
     """Configuration for automatic threshold calibration using RULER dataset.
 
-    Calibration fits an Exponential model to determine dynamic thresholds that
-    achieve target sparsity. The model learns parameters a and b per phase:
+    Calibration determines dynamic thresholds that achieve target sparsity.
+    Three parameters (a, b, c) are fit per phase via closed-form linear
+    regression on
 
-        scale_factor = a * exp(b * target_sparsity)
+        log(-log(1 - t)) = log(a) + b * logit(S) - c * log(L)
 
-    At inference time, the threshold is computed as:
+    At inference time, the threshold is computed as
 
-        threshold = scale_factor / sequence_length
+        threshold = 1 - exp(-a * (S / (1 - S))^b / L^c)
 
-    Key benefits:
+    Key properties:
+    - Bounded in (0, 1) by construction (no runtime clamp needed)
+    - Correct asymptotes: t->0 as S->0 or L->inf; t->1 as S->1 or L->0
     - Target sparsity can be changed at runtime without recalibration
-    - Threshold automatically adapts to sequence length
+    - Threshold adapts to sequence length via the L^c term
     - Supports independent prefill and decode phase calibration
-    - Exponential model provides better fit (lower RMSE)
+    - Closed-form linear fit (np.linalg.lstsq); no nonlinear curve_fit needed
     """
 
     target_sparse_ratio: dict[str, float] = ModeloptField(
@@ -339,15 +342,6 @@ class CalibrationConfig(ModeloptBaseConfig):
             "If None, uses default: [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, "
             "1e-2, 2e-2, 5e-2, 1e-1, 2e-1, 3e-1, 5e-1, 7e-1]. "
             "Increasing the number of trials improves calibration accuracy but slows down calibration."
-        ),
-    )
-
-    fit_logspace: bool = ModeloptField(
-        default=False,
-        title="Fit in log space",
-        description=(
-            "If True, fit the exponential model in log space (minimizes relative error). "
-            "Recommended for diffusion models where scale_factors span many orders of magnitude."
         ),
     )
 
@@ -523,8 +517,8 @@ SKIP_SOFTMAX_DEFAULT = {
 
 
 # Configuration with RULER calibration
-# Note: threshold field is omitted - calibration determines dynamic threshold lambda = a / length
-# The calibrated threshold adapts to sequence length for optimal sparsity
+# Note: threshold field is omitted - calibration determines a dynamic threshold t
+# from target sparsity and sequence length using the fitted (a, b, c) parameters.
 SKIP_SOFTMAX_CALIB = {
     "sparse_cfg": {
         "calibration": {
