@@ -44,9 +44,9 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
         recipe="general/ptq/fp8_default-kv_fp8",
         tp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
-        calib_num_samples=4,
-        calib_batch_size=1,
-        seq_length=16,
+        calib_num_samples=16,
+        calib_batch_size=4,
+        seq_length=32,
         export_megatron_path=megatron_path,
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)

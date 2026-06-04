@@ -26,9 +26,10 @@ during quantization). Use --pp_size to shard a large model across GPUs for expor
 
 Example usage to export an FP8 checkpoint produced by quantize.py:
 
-    torchrun --nproc_per_node 1 export.py \
+    torchrun --nproc_per_node 2 export.py \
         --hf_model_name_or_path Qwen/Qwen3-8B \
         --megatron_path /tmp/Qwen3-8B-FP8-megatron \
+        --pp_size 2 \
         --export_unified_hf_path /tmp/Qwen3-8B-FP8-hf
 
 See `README.md` in this directory for more details.
@@ -41,11 +42,9 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from megatron.core.utils import unwrap_model
 
-import modelopt.torch.export as mtex
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.export import export_mcore_gpt_to_hf
 from modelopt.torch.utils import print_args, print_rank_0
-
-_DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 
 
 def get_args() -> argparse.Namespace:
@@ -73,13 +72,6 @@ def get_args() -> argparse.Namespace:
     # Only Pipeline parallelism is supported for export
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument(
-        "--dtype",
-        type=str,
-        default="bfloat16",
-        choices=list(_DTYPE_MAP),
-        help="Data type for the exported weights.",
-    )
-    parser.add_argument(
         "--export_extra_modules",
         action="store_true",
         help="Export extra modules such as Medusa heads, EAGLE, or MTP.",
@@ -96,7 +88,6 @@ def main(args: argparse.Namespace):
     trust_remote_code = is_safe_repo(
         trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
     )
-    torch_dtype = _DTYPE_MAP[args.dtype]
 
     # Build the model structure + tokenizer from HF (weights come from the Megatron checkpoint).
     bridge = AutoBridge.from_hf_pretrained(
@@ -107,7 +98,7 @@ def main(args: argparse.Namespace):
     provider.pipeline_model_parallel_size = args.pp_size
     provider.expert_model_parallel_size = 1  # Expert parallelism is not supported
     provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
-    provider.pipeline_dtype = torch_dtype
+    provider.pipeline_dtype = torch.bfloat16
     provider.finalize()
     provider.initialize_model_parallel(seed=0)
 
@@ -143,11 +134,11 @@ def main(args: argparse.Namespace):
     print_rank_0(
         f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."
     )
-    mtex.export_mcore_gpt_to_hf(
+    export_mcore_gpt_to_hf(
         unwrapped_model,
         args.hf_model_name_or_path,
         export_extra_modules=export_extra_modules,
-        dtype=torch_dtype,
+        dtype=torch.bfloat16,
         export_dir=args.export_unified_hf_path,
         moe_router_dtype=getattr(unwrapped_model.config, "moe_router_dtype", None),
         trust_remote_code=trust_remote_code,

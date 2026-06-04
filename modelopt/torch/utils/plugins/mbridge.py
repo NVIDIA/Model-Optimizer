@@ -99,4 +99,8 @@ def load_mbridge_model_from_hf(
         hf_model_name_or_path, trust_remote_code=trust_remote_code
     )
 
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"  # better for calibration
+
     return bridge, provider, model, unwrapped_model, tokenizer

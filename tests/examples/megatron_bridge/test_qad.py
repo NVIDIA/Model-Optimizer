@@ -36,7 +36,7 @@ def test_qad(tmp_path: Path, num_gpus):
         tp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
         calib_num_samples=16,
-        calib_batch_size=1,
+        calib_batch_size=4,
         seq_length=32,
         export_megatron_path=quantized_megatron_path,
     )

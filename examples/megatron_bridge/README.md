@@ -65,22 +65,25 @@ This section shows how to quantize a HuggingFace model using ModelOpt in the Meg
 
 `quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `FP8_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/fp8_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
 
-**Step 1 — quantize** Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration:
+**Step 1 — quantize** Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from default dataset for calibration (sequence length = 512):
 
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
     --quant_cfg fp8 \
     --tp_size 2 \
+    --calib_batch_size 16 \
+    --seq_length 512 \
     --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
 ```
 
 **Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
 
 ```bash
-torchrun --nproc_per_node 1 export.py \
+torchrun --nproc_per_node 2 export.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
     --megatron_path /tmp/Qwen3-8B-FP8-megatron \
+    --pp_size 2 \
     --export_unified_hf_path /tmp/Qwen3-8B-FP8-hf
 ```
 
