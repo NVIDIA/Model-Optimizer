@@ -34,6 +34,10 @@ Changelog
   - ``hf_ptq.py`` also unwraps ``ModelOutput`` dataclasses from ``.generate()`` so the preview decode works on diffusion models. Non-tied models see no behavioral change.
 - Add **context-parallel (CP)** and **data-parallel (DP)** support to the shared Megatron-Core inference/calibration utilities. Under CP, ``get_megatron_calibration_forward_loop`` and ``megatron_mmlu`` partition each sequence across CP ranks (zigzag load-balanced), ``megatron_prefill`` accepts a CP-partitioned ``position_ids`` and lets the CP-aware causal attention build the mask, and MMLU gathers per-rank logits back to the full sequence for last-token scoring. Under DP, calibration shards the dataset across data-parallel ranks (``DistributedSampler``; amax is max-reduced across the DP group inside ``mtq``) and ``megatron_mmlu`` shards whole batches across DP ranks and all-reduces the per-subject counts. DP is implicit (``world_size / (tp * pp * cp)``); ``examples/megatron_bridge/quantize.py`` gains a ``--cp_size`` flag.
 
+**Bug Fixes**
+
+- Fix ``ShapeInferenceError`` during ONNX INT8 + FP16 quantization (``--high_precision_dtype fp16``) of weakly-typed models (e.g. TensorFlow exports) that carry stale rank-0 ``graph.output`` shapes or ops such as ``TopK`` that ONNX's static shape inference cannot resolve. ``clear_stale_value_info`` now reconciles stale output shapes via symbolic shape inference (keeping every output's shape field populated), and AutoCast runs ONNX shape inference in strict mode and falls back to schema-based standalone type inference when it fails, so unresolved ops no longer leave tensors untyped.
+
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^
 

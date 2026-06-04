@@ -1205,19 +1205,32 @@ def infer_types(
     When use_standalone_type_inference is True, uses a standalone type inference implementation
     that only infers types. Otherwise, uses ONNX's infer_shapes which infers both types and shapes.
 
+    ONNX's ``infer_shapes`` can fail on weakly-typed models -- with ``strict_mode=True`` it raises
+    on an op it cannot resolve (e.g. a ``TopK`` whose axis it resolves to a stale dimension)
+    instead of silently leaving that node's outputs untyped. On any shape-inference failure this
+    falls back to the standalone type inferencer, which derives types from operator schemas
+    regardless of shapes, so downstream type lookups (e.g. in AutoCast) do not fail. Callers that
+    need a fully typed graph should pass ``strict_mode=True`` so incomplete inference surfaces as
+    an exception that triggers the fallback.
+
     Args:
         model: ONNX model to infer types/shapes for.
         use_standalone_type_inference: If True, use standalone type inference (_infer_types_only).
                                        If False, use ONNX's shape inference (infer_shapes).
-        **kwargs: Additional arguments passed to infer_shapes when not using standalone type inference.
+        **kwargs: Additional arguments passed to infer_shapes when not using standalone type
+            inference (e.g. ``strict_mode``, ``check_type``, ``data_prop``).
 
     Returns:
         onnx.ModelProto: Model with inferred types (and shapes if not using standalone type inference).
     """
     if use_standalone_type_inference:
         return _infer_types_only(model)
-    else:
+
+    try:
         return infer_shapes(model, **kwargs)
+    except Exception as e:
+        logger.debug("ONNX shape inference failed (%s); using standalone type inference.", e)
+        return _infer_types_only(model)
 
 
 def onnx_type_str_to_enum(dtype: str) -> int:
@@ -1862,21 +1875,126 @@ def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> 
     return model
 
 
-def clear_stale_value_info(model: onnx.ModelProto) -> int:
-    """Clear stale type metadata that would otherwise trip ORT's type checker.
+def _reconcile_stale_output_shapes(model: onnx.ModelProto) -> int:
+    """Re-derive stale ``graph.output`` shapes from the operator graph.
 
-    Walks every ``Cast`` node and forces the ``elem_type`` of any
-    ``graph.output`` entry produced by that Cast to match the Cast's ``to``
-    attribute (the spec-defined contract for a Cast's output dtype). Then
-    clears ``value_info`` so ORT/shape-inference re-derives intermediate-tensor
-    types from the operator graph during session setup -- except entries for
-    outputs of ``trt.plugins`` custom-op nodes, whose types ORT cannot infer.
+    Weakly-typed models (e.g. exported from TensorFlow) can declare an output rank
+    that conflicts with the graph topology -- most commonly a leftover rank-0
+    (scalar) annotation on a tensor that is really rank-2+. Such a stale rank poisons
+    downstream shape inference: ORT fails while augmenting the model for INT8
+    calibration (``axis must be in [-rank, rank-1]. Input rank was 0``), and
+    ``onnx.shape_inference`` with ``strict_mode=True`` raises ``Inferred shape and
+    existing shape differ in rank`` during fp16 autocast.
+
+    Strategy: snapshot the declared output shapes, clear them, and re-derive them from
+    the operator graph -- preferring ORT's symbolic shape inference (it resolves ops
+    such as ``TopK`` that ONNX's static inference gives up on) and falling back to the
+    size-aware ``infer_shapes`` wrapper. A declared shape is only overwritten when it is
+    genuinely stale -- a rank mismatch (the rank-0-vs-rank-N bug) or a conflicting
+    concrete dimension. Outputs that merely differ in symbolic ``dim_param`` names (e.g.
+    a re-derived ``unk__0`` vs a declared ``batch``) keep their original declaration, so
+    healthy models -- including dynamic batch/sequence dims -- are left untouched. A
+    graph output is never left without a shape (``onnx.checker`` requires the field).
+
+    Args:
+        model: Loaded in-memory onnx ModelProto, ideally with ``value_info`` already
+            cleared so re-inference derives shapes from the operator graph.
+
+    Returns:
+        Number of graph outputs whose shape was changed.
+    """
+    outputs = model.graph.output
+    if not outputs:
+        return 0
+
+    def _sig(shape: onnx.TensorShapeProto | None) -> bytes | None:
+        return None if shape is None else shape.SerializeToString()
+
+    def _is_stale(declared: onnx.TensorShapeProto | None, inferred: onnx.TensorShapeProto | None):
+        # Only treat a declaration as stale when inference contradicts it: a different
+        # rank, or a concrete dim that disagrees with an inferred concrete dim. A missing
+        # declaration is "stale" (adopt whatever was inferred); a missing inference is not
+        # (keep the declaration). Symbolic dim_param renames are intentionally ignored.
+        if inferred is None:
+            return False
+        if declared is None:
+            return True
+        if len(declared.dim) != len(inferred.dim):
+            return True
+        return any(
+            d.HasField("dim_value") and i.HasField("dim_value") and d.dim_value != i.dim_value
+            for d, i in zip(declared.dim, inferred.dim)
+        )
+
+    # Snapshot declared shapes, then clear them so re-inference starts from the
+    # topology instead of being biased by the stale annotations.
+    declared: dict[str, onnx.TensorShapeProto | None] = {}
+    for o in outputs:
+        tt = o.type.tensor_type
+        if tt.HasField("shape"):
+            snapshot = onnx.TensorShapeProto()
+            snapshot.CopyFrom(tt.shape)
+            declared[o.name] = snapshot
+        else:
+            declared[o.name] = None
+        tt.ClearField("shape")
+
+    # Re-derive output shapes from the cleared model (neither inference call mutates it):
+    # prefer ORT symbolic shape inference, then fall back to the size-aware infer_shapes
+    # wrapper if it is unavailable or yields nothing.
+    inferred: dict[str, onnx.TensorShapeProto] = {}
+    try:
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
+
+        inferred_model = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
+        inferred = {
+            o.name: o.type.tensor_type.shape
+            for o in inferred_model.graph.output
+            if o.type.tensor_type.HasField("shape")
+        }
+    except Exception as e:
+        logger.debug("Symbolic shape inference unavailable/failed: %s", e)
+    if not inferred:
+        try:
+            inferred_model = infer_shapes(model, strict_mode=False, data_prop=True)
+            inferred = {
+                o.name: o.type.tensor_type.shape
+                for o in inferred_model.graph.output
+                if o.type.tensor_type.HasField("shape")
+            }
+        except Exception as e:
+            logger.debug("ONNX shape inference for output reconciliation failed: %s", e)
+
+    changed = 0
+    for o in outputs:
+        decl = declared[o.name]
+        # Adopt the inferred shape only when the declaration is genuinely stale; otherwise
+        # restore the declared shape (never leaving a graph output shapeless).
+        new_shape = inferred.get(o.name) if _is_stale(decl, inferred.get(o.name)) else decl
+        if new_shape is not None:
+            o.type.tensor_type.shape.CopyFrom(new_shape)
+        if _sig(decl) != _sig(new_shape):
+            changed += 1
+    return changed
+
+
+def clear_stale_value_info(model: onnx.ModelProto) -> int:
+    """Clear stale type/shape metadata that would otherwise trip ORT's type checker.
+
+    Walks every ``Cast`` node and forces the ``elem_type`` of any ``graph.output``
+    entry produced by that Cast to match the Cast's ``to`` attribute (the spec-defined
+    contract for a Cast's output dtype). Clears ``value_info`` so ORT/shape-inference
+    re-derives intermediate-tensor types from the operator graph during session setup
+    -- except entries for outputs of ``trt.plugins`` custom-op nodes, whose types ORT
+    cannot infer. Finally, reconciles stale ``graph.output`` *shapes* (e.g. a leftover
+    rank-0 scalar on a tensor that is really rank-2+) which would otherwise propagate a
+    wrong rank into downstream shape inference.
 
     Args:
         model: Loaded in-memory onnx ModelProto.
 
     Returns:
-        Number of Cast outputs reconciled plus value_info entries cleared.
+        Total number of entries reconciled or cleared.
     """
     cast_to_by_output = {
         node.output[0]: get_cast_to_type(node)
@@ -1901,4 +2019,9 @@ def clear_stale_value_info(model: onnx.ModelProto) -> int:
     if n_cleared:
         del model.graph.value_info[:]
         model.graph.value_info.extend(preserved)
-    return fixed_outputs + n_cleared
+
+    # Reconcile output shapes after value_info is cleared so the re-inference inside
+    # the helper derives shapes cleanly from the operator graph.
+    fixed_shapes = _reconcile_stale_output_shapes(model)
+
+    return fixed_outputs + fixed_shapes + n_cleared
