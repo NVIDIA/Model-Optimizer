@@ -134,8 +134,6 @@ def build_meta_causal_lm(
             hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
         )
     model.eval()
-    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-        model.config.use_cache = False
     return model
 
 
