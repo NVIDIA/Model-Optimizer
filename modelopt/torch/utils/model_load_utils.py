@@ -110,12 +110,24 @@ def _promote_non_dtensor_to_gpu(model: nn.Module, device: torch.device) -> None:
             module._buffers[name] = buf.to(device)
 
 
-def build_meta_causal_lm(ckpt_path: str, trust_remote_code: bool, attn_implementation: str | None):
-    """Build a meta-init causal LM (no real storage allocated)."""
-    config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
-    if attn_implementation is not None:
-        config_kwargs["attn_implementation"] = attn_implementation
-    hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+def build_meta_causal_lm(
+    ckpt_path: str,
+    trust_remote_code: bool,
+    attn_implementation: str | None,
+    hf_config=None,
+):
+    """Build a meta-init causal LM (no real storage allocated).
+
+    Pass ``hf_config`` to skip the ``AutoConfig.from_pretrained`` fetch.
+    """
+    if hf_config is None:
+        config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
+        if attn_implementation is not None:
+            config_kwargs["attn_implementation"] = attn_implementation
+        hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+    elif attn_implementation is not None:
+        # Honor the override even when the caller passed in a pre-fetched config.
+        hf_config._attn_implementation = attn_implementation
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
     with init_empty_weights(include_buffers=False):
         model = AutoModelForCausalLM.from_config(
@@ -131,21 +143,27 @@ def parallel_load_and_prepare_fsdp2(
     ckpt_path: str,
     device: torch.device,
     rank: int,
-    world_size: int = 1,
+    world_size: int,
     *,
     trust_remote_code: bool = False,
     mp_policy=None,
     cpu_offload: bool = False,
     attn_implementation: str | None = None,
     freeze: bool = True,
-):
+    hf_config=None,
+) -> nn.Module:
     """Load and FSDP2-shard a HuggingFace causal LM via parallel safetensors reads.
 
     Round-robin assigns decoder layers to ranks; each rank reads only its owned
     layers' weights from disk in parallel, then broadcasts to the others. Non-decoder
     weights (embed, lm_head, norm) are read on rank 0 and broadcast.
 
+    Requires an initialized ``torch.distributed`` process group (FSDP2's ``fully_shard``
+    and the per-layer broadcasts both need it). A 1-rank PG (e.g. ``torchrun
+    --nproc_per_node=1``) is allowed; bare single-process is not.
+
     Set ``freeze=False`` for training callers; PTQ keeps the default ``True``.
+    Pass ``hf_config`` if the caller has already fetched it (skips a redundant fetch).
     """
     # Lazy import: layerwise_calib imports modelopt.torch.utils.distributed (circular).
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -162,7 +180,7 @@ def parallel_load_and_prepare_fsdp2(
     weight_map = weight_map_for(resolved_path)
 
     # Meta skeleton on every rank.
-    model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation)
+    model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
 
     # Detect decoder layers + their fully qualified prefixes.
     decoder_layers = LayerActivationCollector.get_decoder_layers(model)
@@ -189,8 +207,8 @@ def parallel_load_and_prepare_fsdp2(
         if layer_idx % world_size == rank:
             prefix = layer_prefixes[layer_idx]
 
-            def _has_prefix(n: str, p: str = prefix) -> bool:
-                return n.startswith(p)
+            def _has_prefix(n: str) -> bool:
+                return n.startswith(prefix)
 
             owned[layer_idx] = read_safetensors_subset(resolved_path, weight_map, _has_prefix)
 
@@ -222,6 +240,8 @@ def parallel_load_and_prepare_fsdp2(
     non_layer = broadcast_state_dict(non_layer, src=0, device=device)
     if cpu_offload:
         non_layer = {k: v.cpu() for k, v in non_layer.items()}
+    # strict=False: non_layer is a subset of the full model — decoder keys will
+    # show up as "missing" but that's expected. We filter and warn below.
     missing, unexpected = model.load_state_dict(non_layer, strict=False, assign=False)
     real_missing = [k for k in missing if not k.startswith(layer_prefix_tuple)]
     if real_missing:
@@ -230,6 +250,10 @@ def parallel_load_and_prepare_fsdp2(
         warn(f"Unexpected keys in non-layer state dict on rank {rank}: {unexpected[:3]}...")
 
     if cpu_offload:
+        # All tensors were materialized on CPU only to satisfy set_model_state_dict's
+        # uniform-device requirement. FSDP2 only manages the wrapped decoder layers
+        # (streamed CPU↔GPU per forward); the unwrapped root (embed/lm_head/norm +
+        # buffers) is ours to place, and we retain it on GPU.
         _promote_non_dtensor_to_gpu(model, device)
     if hasattr(model, "tie_weights"):
         model.tie_weights()
