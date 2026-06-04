@@ -1779,3 +1779,306 @@ def test_if_subgraph_outer_scope_type_preservation(
     assert len(else_x_info) > 0, "X value_info should be preserved in else branch"
     assert then_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED
     assert else_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED
+
+
+####################################################################################################
+# Regression tests for bug 6058841: inconsistent tensor types on control-flow If nodes during
+# ONNX FP16/BF16 conversion.
+#
+# Converting a model with control-flow subgraphs to FP16 used to blindly convert every subgraph
+# initializer to the parent node's precision, which broke models where a subgraph node also consumes
+# a float activation/outer-scope tensor (e.g. a Gemm reading a network input) or whose inputs must
+# stay in high precision per the ONNX spec (e.g. Resize 'scales').
+####################################################################################################
+@pytest.fixture
+def model_if_subgraph_gemm_outer_input():
+    """If branches with a Gemm consuming an outer-scope input plus subgraph weight initializers."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 4])
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3])
+
+    def _branch(name):
+        w = numpy_helper.from_array(np.random.randn(4, 3).astype(np.float32), name=f"w_{name}")
+        b = numpy_helper.from_array(np.random.randn(3).astype(np.float32), name=f"b_{name}")
+        out = helper.make_tensor_value_info(f"{name}_out", TensorProto.FLOAT, [1, 3])
+        gemm = helper.make_node(
+            "Gemm", ["X", f"w_{name}", f"b_{name}"], [f"{name}_out"], name=f"{name}_gemm"
+        )
+        return helper.make_graph([gemm], f"{name}_branch", [], [out], [w, b])
+
+    if_node = helper.make_node(
+        "If",
+        ["condition"],
+        ["Y"],
+        name="if_node",
+        then_branch=_branch("then"),
+        else_branch=_branch("else"),
+    )
+    main_graph = helper.make_graph([if_node], "model_if_gemm", [x, condition], [y])
+    model = helper.make_model(main_graph, producer_name="model_if_gemm")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return setup_mappings(model)
+
+
+@pytest.mark.parametrize("keep_io_types", [True, False])
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_if_subgraph_gemm_with_outer_scope_input(
+    model_if_subgraph_gemm_outer_input,
+    keep_io_types,
+    low_precision_type,
+    use_standalone_type_inference,
+):
+    """A Gemm inside an If branch consuming an outer-scope input must not end up with fp16 weights
+    feeding alongside an fp32 activation (regression test for bug 6058841)."""
+    model, value_info_map, initializer_map, node_to_init_map = model_if_subgraph_gemm_outer_input
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=keep_io_types,
+        low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+    converted_model = converter.convert(high_precision_nodes=[], low_precision_nodes=["if_node"])
+    onnx.checker.check_model(converted_model)
+    # Strict type checking must pass; this is what failed before the fix.
+    onnx.shape_inference.infer_shapes(converted_model, strict_mode=True, check_type=True)
+
+
+@pytest.fixture
+def model_if_subgraph_resize():
+    """If branches containing a Resize whose 'roi'/'scales' inputs must remain in high precision."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 8, 8])
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 16, 16])
+
+    def _branch(name):
+        roi = numpy_helper.from_array(np.array([], dtype=np.float32), name=f"roi_{name}")
+        scales = numpy_helper.from_array(
+            np.array([1.0, 1.0, 2.0, 2.0], dtype=np.float32), name=f"scales_{name}"
+        )
+        out = helper.make_tensor_value_info(f"{name}_out", TensorProto.FLOAT, [1, 3, 16, 16])
+        resize = helper.make_node(
+            "Resize",
+            ["X", f"roi_{name}", f"scales_{name}"],
+            [f"{name}_out"],
+            name=f"{name}_resize",
+            mode="nearest",
+        )
+        return helper.make_graph([resize], f"{name}_branch", [], [out], [roi, scales])
+
+    if_node = helper.make_node(
+        "If",
+        ["condition"],
+        ["Y"],
+        name="if_node",
+        then_branch=_branch("then"),
+        else_branch=_branch("else"),
+    )
+    main_graph = helper.make_graph([if_node], "model_if_resize", [x, condition], [y])
+    model = helper.make_model(main_graph, producer_name="model_if_resize")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return setup_mappings(model)
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_if_subgraph_resize_scales_stay_high_precision(
+    model_if_subgraph_resize, low_precision_type, use_standalone_type_inference
+):
+    """Resize 'scales' inside an If branch must remain FP32 (regression test for bug 6058841)."""
+    model, value_info_map, initializer_map, node_to_init_map = model_if_subgraph_resize
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+    converted_model = converter.convert(high_precision_nodes=[], low_precision_nodes=["if_node"])
+    onnx.checker.check_model(converted_model)
+    onnx.shape_inference.infer_shapes(converted_model, strict_mode=True, check_type=True)
+
+    # The 'scales' (and 'roi') initializers must stay FP32 in both branches.
+    if_node = next(n for n in converted_model.graph.node if n.op_type == "If")
+    for attr in if_node.attribute:
+        if attr.type == onnx.AttributeProto.GRAPH:
+            scales = [init for init in attr.g.initializer if init.name.startswith("scales_")]
+            assert scales, "scales initializer should be present in the branch"
+            for init in scales:
+                assert init.data_type == TensorProto.FLOAT, (
+                    f"Resize scales must remain FP32, but '{init.name}' is {init.data_type}"
+                )
+
+
+@pytest.fixture
+def model_chained_if_capture():
+    """Two chained If nodes; the second's subgraph captures the first If node's output."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 4])
+    cond1 = helper.make_tensor_value_info("cond1", TensorProto.BOOL, [])
+    cond2 = helper.make_tensor_value_info("cond2", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3])
+
+    def _gemm_branch(name, data, k, n):
+        w = numpy_helper.from_array(np.random.randn(k, n).astype(np.float32), name=f"w_{name}")
+        out = helper.make_tensor_value_info(f"{name}_out", TensorProto.FLOAT, [1, n])
+        gemm = helper.make_node("Gemm", [data, f"w_{name}"], [f"{name}_out"], name=f"{name}_gemm")
+        return helper.make_graph([gemm], f"{name}_branch", [], [out], [w])
+
+    if1 = helper.make_node(
+        "If",
+        ["cond1"],
+        ["mid"],
+        name="if1",
+        then_branch=_gemm_branch("then1", "X", 4, 3),
+        else_branch=_gemm_branch("else1", "X", 4, 3),
+    )
+    if2 = helper.make_node(
+        "If",
+        ["cond2"],
+        ["Y"],
+        name="if2",
+        then_branch=_gemm_branch("then2", "mid", 3, 3),
+        else_branch=_gemm_branch("else2", "mid", 3, 3),
+    )
+    main_graph = helper.make_graph([if1, if2], "chained_if", [x, cond1, cond2], [y])
+    model = helper.make_model(main_graph, producer_name="chained_if")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return setup_mappings(model)
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_chained_if_subgraph_capture(model_chained_if_capture, low_precision_type):
+    """An If subgraph capturing another control-flow node's output must reconcile its precision
+    (regression test for bug 6058841; an If subgraph capturing another If node's output)."""
+    model, value_info_map, initializer_map, node_to_init_map = model_chained_if_capture
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+    )
+    converted_model = converter.convert(high_precision_nodes=[], low_precision_nodes=["if1", "if2"])
+    onnx.checker.check_model(converted_model)
+    onnx.shape_inference.infer_shapes(converted_model, strict_mode=True, check_type=True)
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_constant_cast_fold_refreshes_value_info(low_precision_type):
+    """Folding a Constant->Cast must refresh the constant's value_info, otherwise a same-type
+    constrained consumer (e.g. Greater) sees a stale, conflicting type and strict type inference
+    fails (regression test for bug 6058841; Constant feeding a same-type-constrained Greater)."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [4])
+    y = helper.make_tensor_value_info("Y", TensorProto.BOOL, [4])
+    w = numpy_helper.from_array(np.ones([4], dtype=np.float32), name="w")
+    nodes = [
+        helper.make_node("Mul", ["X", "w"], ["m0"], name="mul0"),
+        helper.make_node(
+            "Constant",
+            [],
+            ["c0"],
+            name="const0",
+            value=numpy_helper.from_array(np.array([0.5, 0.5, 0.5, 0.5], dtype=np.float32), "cv"),
+        ),
+        helper.make_node("Greater", ["m0", "c0"], ["Y"], name="greater0"),
+    ]
+    graph = helper.make_graph(nodes, "const_greater", [x], [y], [w])
+    model = helper.make_model(graph, producer_name="const_greater")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+    )
+    converted_model = converter.convert(
+        high_precision_nodes=[], low_precision_nodes=["mul0", "greater0"]
+    )
+    onnx.checker.check_model(converted_model)
+    onnx.shape_inference.infer_shapes(converted_model, strict_mode=True, check_type=True)
+
+
+@pytest.fixture
+def model_loop_subgraph_capture():
+    """A Loop whose body captures a low-precision outer-scope activation.
+
+    A main-graph ``Mul`` runs in low precision and produces ``pre``; the high-precision Loop body
+    reads ``pre`` (an outer-scope capture) alongside its float loop-carried state var, so the body
+    must reconcile the captured tensor's precision with a ``Cast``.
+    """
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3])
+    trip_count = helper.make_tensor_value_info("M", TensorProto.INT64, [])
+    cond = helper.make_tensor_value_info("cond", TensorProto.BOOL, [])
+    acc_init = helper.make_tensor_value_info("acc_init", TensorProto.FLOAT, [1, 3])
+    acc_final = helper.make_tensor_value_info("acc_final", TensorProto.FLOAT, [1, 3])
+
+    iter_num = helper.make_tensor_value_info("iter_num", TensorProto.INT64, [])
+    cond_in = helper.make_tensor_value_info("cond_in", TensorProto.BOOL, [])
+    acc_in = helper.make_tensor_value_info("acc_in", TensorProto.FLOAT, [1, 3])
+    cond_out = helper.make_tensor_value_info("cond_out", TensorProto.BOOL, [])
+    acc_out = helper.make_tensor_value_info("acc_out", TensorProto.FLOAT, [1, 3])
+    body = helper.make_graph(
+        [
+            helper.make_node("Add", ["acc_in", "pre"], ["acc_out"], name="body_acc"),
+            helper.make_node("Identity", ["cond_in"], ["cond_out"], name="body_cond"),
+        ],
+        "loop_body",
+        [iter_num, cond_in, acc_in],
+        [cond_out, acc_out],
+    )
+
+    scale = numpy_helper.from_array(np.ones((1, 3), dtype=np.float32), name="scale")
+    pre = helper.make_node("Mul", ["X", "scale"], ["pre"], name="pre_mul")
+    loop = helper.make_node(
+        "Loop", ["M", "cond", "acc_init"], ["acc_final"], name="loop_node", body=body
+    )
+    main_graph = helper.make_graph(
+        [pre, loop], "model_loop", [x, trip_count, cond, acc_init], [acc_final], [scale]
+    )
+    model = helper.make_model(main_graph, producer_name="model_loop")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return setup_mappings(model)
+
+
+@pytest.mark.parametrize("keep_io_types", [True, False])
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_loop_subgraph_high_precision_capture(
+    model_loop_subgraph_capture, keep_io_types, low_precision_type
+):
+    """A high-precision Loop body capturing a low-precision outer-scope activation must reconcile it
+    with a ``Cast`` so the subgraph stays a single precision (regression test for bug 6058841;
+    control-flow subgraph capture). Low-precision Loop/Scan bodies with float loop-carried inputs are
+    tracked separately and not exercised here."""
+    model, value_info_map, initializer_map, node_to_init_map = model_loop_subgraph_capture
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=keep_io_types,
+        low_precision_type=low_precision_type,
+    )
+    converted_model = converter.convert(
+        high_precision_nodes=["loop_node"], low_precision_nodes=["pre_mul"]
+    )
+    onnx.checker.check_model(converted_model)
+    onnx.shape_inference.infer_shapes(converted_model, strict_mode=True, check_type=True)
