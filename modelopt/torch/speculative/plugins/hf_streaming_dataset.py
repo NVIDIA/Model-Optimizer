@@ -374,7 +374,9 @@ class EagleVllmStreamingDataset(StreamingDataset):
 
         DataLoader workers are forked processes; httpx connection pools must not be
         shared across a fork, so each process gets its own client (and its own
-        round-robin cursor over ``server_urls``), keyed by PID.
+        round-robin cursor over ``server_urls``), keyed by PID. The cursor starts
+        at a per-(rank, worker) offset so cold-start fetches fan out across
+        replicas instead of all hitting ``server_urls[0]``.
         """
         pid = os.getpid()
         if getattr(self, "_client_pid", None) != pid:
@@ -382,7 +384,14 @@ class EagleVllmStreamingDataset(StreamingDataset):
                 timeout=httpx.Timeout(self.config.request_timeout, connect=10.0)
             )
             self._client_pid = pid
-            self._rr = 0
+            # Stagger the initial cursor by (rank, worker) so cold-start fetches
+            # fan out instead of all pinning server_urls[0] (which can flood one
+            # cold replica past its execute-model timeout and kill the EngineCore).
+            info = torch.utils.data.get_worker_info()
+            worker_id = info.id if info is not None else 0
+            num_workers = info.num_workers if info is not None else 1
+            rank = int(os.environ.get("RANK", "0"))
+            self._rr = rank * num_workers + worker_id
         return self._http
 
     def _next_url(self) -> str:

@@ -236,7 +236,12 @@ run_trainer_and_export() {
     # custom-modeling base (e.g. Kimi) pass --trust_remote_code; empty by default.
     local out_dir
     out_dir=$(printf '%s\n' "${SCRIPT_ARGS[@]}" | sed -n 's/^training\.output_dir=//p' | tail -1)
-    out_dir="${out_dir:-/scratchspace/eagle3}"
+    # Fail loud rather than guess a default: a wrong dir would silently export the
+    # wrong checkpoint. Every streaming yaml already forwards training.output_dir=.
+    if [ -z "$out_dir" ]; then
+        echo "ERROR: no training.output_dir= forwarded in SCRIPT_ARGS; cannot locate checkpoint to export." >&2
+        return 1
+    fi
     python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
         --model_path "$out_dir" \
         --export_path "${EXPORT_PATH:-/scratchspace/export}" \
