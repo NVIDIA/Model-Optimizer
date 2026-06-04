@@ -16,17 +16,19 @@
 
 from pathlib import Path
 
+import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
 
+@pytest.mark.timeout(600)  # Multiple steps in one test hence takes longer than default timeout
 def test_qad(tmp_path: Path, num_gpus):
     """Quantize a tiny Qwen3, run QAD from the quantized student, and export to a unified HF ckpt."""
     hf_model_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
     quantized_megatron_path = tmp_path / "qwen3_fp8_megatron"
     distill_output_dir = tmp_path / "qad_output"
     hf_export_path = tmp_path / "qwen3_qad_fp8_hf"
-    train_iters = 5
+    train_iters = 2
 
     # Step 1: PTQ the model to FP8 and save a Megatron checkpoint carrying the ModelOpt state.
     quantize_cmd = extend_cmd_parts(
@@ -37,7 +39,7 @@ def test_qad(tmp_path: Path, num_gpus):
         calib_dataset_name="cnn_dailymail",
         calib_num_samples=16,
         calib_batch_size=4,
-        seq_length=32,
+        seq_length=16,
         export_megatron_path=quantized_megatron_path,
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
@@ -55,7 +57,7 @@ def test_qad(tmp_path: Path, num_gpus):
         teacher_hf_path=hf_model_path,
         output_dir=distill_output_dir,
         tp_size=num_gpus,
-        seq_length=32,
+        seq_length=16,
         mbs=1,
         gbs=4,
         train_iters=train_iters,

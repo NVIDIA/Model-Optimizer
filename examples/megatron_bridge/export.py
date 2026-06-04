@@ -104,8 +104,7 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
     )
 
-    # Build the model structure from HF.
-    # The weights come from the Megatron checkpoint, so HF weights are not loaded.
+    # Build the model structure from HF
     _bridge, _provider, model, _unwrapped_model, _tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
         trust_remote_code=trust_remote_code,
@@ -119,10 +118,7 @@ def main(args: argparse.Namespace):
             "pipeline_dtype": torch.bfloat16,
         },
         init_model_parallel=True,
-        # Grouped GEMM is not supported for export; use the per-expert (sequential) MLP, matching
-        # how the checkpoint was built in quantize.py.
-        moe_grouped_gemm=False,
-        load_weights=False,
+        load_weights=False,  # The weights come from the Megatron checkpoint, so HF weights are not loaded
     )
 
     # Load the quantized checkpoint (with the correct layer spec) rather than reconstructing it from the checkpoint

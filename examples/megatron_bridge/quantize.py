@@ -283,8 +283,6 @@ def main(args: argparse.Namespace):
             "gradient_accumulation_fusion": False,  # not supported
         },
         init_model_parallel=True,
-        # Grouped GEMM is not supported for PTQ + export; use the per-expert (sequential) MLP.
-        moe_grouped_gemm=False,
     )
 
     mtq_config = get_quant_config(args)
