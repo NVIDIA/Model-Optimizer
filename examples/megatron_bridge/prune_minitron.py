@@ -471,7 +471,7 @@ def main(args: argparse.Namespace):
         )
         pruned_bridge.save_hf_weights(model, args.output_hf_path)
 
-        copy_hf_ckpt_remote_code(args.student_hf_path, args.output_hf_path)
+        copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
 
     print_rank_0("Done!")

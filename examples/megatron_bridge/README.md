@@ -8,6 +8,7 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 | :------------: | :------------: | :------------: |
 | Pre-Requisites | Development environment setup | \[[Link](#pre-requisites)\] |
 | Post-Training Quantization | Quantizing a model | \[[Link](#post-training-quantization)\] |
+| Sanity-Check Generation | Quick generation check with vLLM | \[[Link](#sanity-check-generation)\] |
 | Distillation | Distilling a pruned or quantized model | \[[Link](#distillation)\] |
 | Pruning | Pruning a model using Minitron algorithm | \[[Link](#pruning)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
@@ -99,6 +100,14 @@ torchrun --nproc_per_node 2 export.py \
 To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export.py --help`).
 
 For VLM (vision-language model) quantization, see the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
+
+## Sanity-Check Generation
+
+[generate_vllm.py](generate_vllm.py) runs a quick generation check on a unified HuggingFace checkpoint using vLLM. vLLM auto-detects the ModelOpt quantization from the exported `hf_quant_config.json`, so no extra quant flags are needed:
+
+```bash
+python generate_vllm.py --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 --trust_remote_code
+```
 
 ## Distillation
 
