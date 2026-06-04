@@ -85,8 +85,8 @@ def test_getitem_resamples_past_unfit_entries():
 
 
 def test_circuit_breaker_trips_on_consecutive_failures():
-    """When _fetch keeps failing, __getitem__ raises after the threshold instead of
-    silently resampling the whole corpus."""
+    """When _fetch keeps hitting transient errors (server down), __getitem__ raises
+    after the threshold instead of silently resampling the whole corpus."""
     threshold = 3
 
     class _AlwaysFails(StreamingDataset):
@@ -94,7 +94,8 @@ def test_circuit_breaker_trips_on_consecutive_failures():
             return {"cid": str(entry["id"]), "token_ids": [1], "loss_mask": None}
 
         def _fetch(self, sample):
-            raise RuntimeError("simulated server failure")
+            # A down server surfaces as a transport error, which the breaker counts.
+            raise httpx.ConnectError("simulated server down")
 
     ds = _AlwaysFails(
         _entries(20),
@@ -102,6 +103,28 @@ def test_circuit_breaker_trips_on_consecutive_failures():
         config=StreamingConfig(fail_after_consecutive_skips=threshold),
     )
     with pytest.raises(RuntimeError, match="consecutive _fetch failures"):
+        ds[0]
+
+
+def test_contract_violation_propagates_not_swallowed():
+    """A non-transient error from _fetch (e.g. a contract violation / bug) must
+    surface immediately, not be masked as a fetch miss and silently resampled."""
+
+    class _BadContract(StreamingDataset):
+        def _tokenize_entry(self, entry):
+            return {"cid": str(entry["id"]), "token_ids": [1], "loss_mask": None}
+
+        def _fetch(self, sample):
+            raise RuntimeError("server token_ids drift")
+
+    ds = _BadContract(
+        _entries(20),
+        tokenizer=MagicMock(),
+        # High threshold: if the error were (wrongly) swallowed, the breaker wouldn't
+        # fire, so a leaked breaker message would mask the regression.
+        config=StreamingConfig(fail_after_consecutive_skips=100),
+    )
+    with pytest.raises(RuntimeError, match="server token_ids drift"):
         ds[0]
 
 
@@ -236,6 +259,50 @@ def test_eagle_vllm_dataset_end_to_end(tmp_path, monkeypatch):
         assert b["labels"][-1].item() == hf_streaming_dataset.IGNORE_TOKEN_ID
 
     assert list(scratch.iterdir()) == [], "scratch files must be unlinked after fetch"
+
+
+def test_fetch_round_robins_across_server_urls(tmp_path, monkeypatch):
+    """With multiple server_urls, consecutive fetches alternate across endpoints so
+    load is spread over replicas rather than pinned to the first one."""
+    seq, n_layers, hidden = 8, 3, 16
+    scratch = tmp_path / "vllm_scratch"
+    scratch.mkdir()
+
+    hosts: list[str] = []
+    counter = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        counter["n"] += 1
+        path = scratch / f"req_{counter['n']}.safetensors"
+        _write_canned_safetensors(path, seq, n_layers, hidden)
+        return httpx.Response(
+            200,
+            json={"kv_transfer_params": {"hidden_states_path": str(path)}},
+        )
+
+    _patch_sync_client(monkeypatch, handler)
+
+    n_entries = 4
+    entries = [
+        {"conversation_id": f"c-{i}", "messages": [{"role": "user", "content": "x"}]}
+        for i in range(n_entries)
+    ]
+    ds = EagleVllmStreamingDataset(
+        entries=entries,
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_urls=["http://a:8000", "http://b:8000"],
+            model="mock-model",
+            shared_storage_root=str(scratch),
+        ),
+    )
+
+    for i in range(n_entries):
+        ds[i]
+
+    # Per-process round-robin cursor: a, b, a, b -- one request each, alternating.
+    assert hosts == ["a", "b", "a", "b"]
 
 
 def test_path_outside_shared_storage_root_is_rejected(tmp_path, monkeypatch):

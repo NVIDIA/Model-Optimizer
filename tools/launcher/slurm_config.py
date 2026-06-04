@@ -24,6 +24,8 @@ from typing import Optional
 
 import nemo_run as run
 
+__all__ = ["SlurmConfig", "slurm_factory"]
+
 
 @dataclass
 class SlurmConfig:

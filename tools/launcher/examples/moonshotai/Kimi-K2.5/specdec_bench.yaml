@@ -18,8 +18,9 @@
 #     yaml and add `- --runtime_params <path>` below — see
 #     examples/specdec_bench/README.md (runtime_args_long_context.yaml pattern).
 #   - --draft_model_dir must point at a trained+exported HF-format DFLASH draft
-#     (e.g. produced by hf_offline_dflash.yaml / a real DFlash run). Edit the path
-#     below, or override on the CLI: pipeline.task_0.args[0]="--draft_model_dir /hf-local/<draft>"
+#     (e.g. produced by hf_offline_dflash.yaml / a real DFlash run). Set it via the
+#     `draft_model_dir` global_var below, or override on the CLI:
+#     pipeline.global_vars.draft_model_dir=/hf-local/<draft>
 #   - Kimi needs --trust_remote_code for both tokenizer and model.
 #
 # NOTE on dataset: uses MT-Bench (the question.jsonl staged under /hf-local), so
@@ -53,12 +54,14 @@ pipeline:
 
   global_vars:
     hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4
+    # Trained + exported HF-format DFLASH draft checkpoint. Defaults to the standard
+    # export path; override on the CLI with: pipeline.global_vars.draft_model_dir=<path>
+    draft_model_dir: /hf-local/nvidia/Kimi-K2.5-DFlash
 
   task_0:
     script: common/specdec_bench/run.sh
     args:
-      # TODO: point at your trained + exported HF-format DFLASH draft checkpoint.
-      - --draft_model_dir /hf-local/nvidia/Kimi-K2.5-DFlash
+      - --draft_model_dir <<global_vars.draft_model_dir>>
       - --speculative_algorithm DFLASH
       - --engine VLLM
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl

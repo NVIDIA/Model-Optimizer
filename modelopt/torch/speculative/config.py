@@ -23,6 +23,18 @@ from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
 from .eagle.default_config import default_eagle_config, default_kimik2_eagle_config
 
+__all__ = [
+    "DFLASH_DEFAULT_CFG",
+    "EAGLE3_DEFAULT_CFG",
+    "EAGLE_MTP_DEFAULT_CFG",
+    "DFlashConfig",
+    "EagleConfig",
+    "MedusaConfig",
+    "eagle3_default_config",
+    "eagle_mtp_default_config",
+    "kimik2_eagle_default_config",
+]
+
 kimik2_eagle_default_config = deepcopy(default_kimik2_eagle_config)
 
 eagle3_default_config = deepcopy(default_eagle_config)

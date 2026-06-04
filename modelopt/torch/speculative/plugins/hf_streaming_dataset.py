@@ -62,6 +62,14 @@ from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 
+__all__ = [
+    "EagleFetchPayload",
+    "EagleVllmStreamingConfig",
+    "EagleVllmStreamingDataset",
+    "StreamingConfig",
+    "StreamingDataset",
+]
+
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 # The vLLM connector writes the safetensors file asynchronously (writer thread pool)
@@ -70,6 +78,13 @@ IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 # (worst case ~_READ_RETRIES * (_READ_RETRIES+1)/2 * _READ_BACKOFF s).
 _READ_RETRIES = 10
 _READ_BACKOFF = 0.05  # seconds
+
+# Errors from ``_fetch`` that are genuinely transient (server overloaded / connection
+# reset / timeout, or the safetensors writer race) and so count against the circuit
+# breaker and trigger a resample. Anything else -- notably the ``RuntimeError`` raised
+# on server token drift, or a programming/contract bug (``ValueError``/``KeyError``) --
+# is a real fault and propagates instead of being silently masked as a fetch miss.
+_TRANSIENT_FETCH_ERRORS = (httpx.HTTPError, OSError, SafetensorError)
 
 
 def _tokenize_with_loss_mask(
@@ -201,8 +216,10 @@ class StreamingDataset(Dataset):
                 continue  # entry unfit pre-fetch; server not at fault, try the next one
             try:
                 fetched = self._fetch(sample)
-            except Exception as e:
-                warn_rank_0(f"[streaming] error for {sample['cid']}: {e!r}")
+            except _TRANSIENT_FETCH_ERRORS as e:
+                # Transport/IO miss: count against the circuit breaker and resample.
+                # Contract violations and bugs are not caught here -- they propagate.
+                warn_rank_0(f"[streaming] fetch error for {sample['cid']}: {e!r}")
                 fetched = None
             if fetched is None:
                 self._consecutive_fail += 1
