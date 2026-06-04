@@ -142,7 +142,6 @@ def parallel_load_and_prepare_fsdp2(
     device: torch.device,
     rank: int,
     world_size: int,
-    *,
     trust_remote_code: bool = False,
     mp_policy=None,
     cpu_offload: bool = False,
