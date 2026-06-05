@@ -739,3 +739,19 @@ def test_nvidia_nemotron_3_ultra_550b_a55b_nvfp4(command):
 )
 def test_wan2_2_t2v_a14b_diffusers_nvfp4(command):
     command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/Wan2.2-T2V-A14B-Diffusers-FP8",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=1,
+            mini_sm=89,
+        ),
+    ],
+    ids=idfn,
+)
+def test_wan2_2_t2v_a14b_diffusers_fp8(command):
+    command.run()
