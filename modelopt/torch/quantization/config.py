@@ -689,7 +689,56 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         return self
 
 
-class MaxCalibConfig(QuantizeAlgorithmConfig):
+class _SharedStatesConfig(ModeloptBaseConfig):
+    """The ``shared_states`` grouping knob, shared by max / mse / local_hessian calibration."""
+
+    shared_states: dict[str, dict[str, list[str]]] | None = ModeloptField(
+        default=None,
+        title="Concrete shared quantization states and their grouping patterns",
+        description=(
+            "Optional dict keyed by shared-state name. ``'weight_global_amax'`` is implemented "
+            "today and accepts ``{'patterns': [...]}``, where patterns are full-match regexes "
+            "against module fully-qualified names. Omitted patterns use the state's defaults; "
+            "an empty pattern list disables that state."
+        ),
+    )
+
+    @field_validator("shared_states")
+    @classmethod
+    def validate_shared_states(cls, v):
+        """Reject unknown shared-state names, fields, and invalid regexes."""
+        if v is None:
+            return v
+        supported = {"weight_global_amax"}
+        unknown = set(v) - supported
+        if unknown:
+            raise ValueError(
+                f"shared_states has unsupported state(s) {sorted(unknown)}; "
+                f"expected keys from {sorted(supported)}."
+            )
+
+        offending = ("", "")
+        try:
+            for name, state_cfg in v.items():
+                unknown_fields = set(state_cfg) - {"patterns"}
+                if unknown_fields:
+                    raise ValueError(
+                        f"shared_states[{name!r}] has unsupported field(s) "
+                        f"{sorted(unknown_fields)}; expected ['patterns']."
+                    )
+                for pattern in state_cfg.get("patterns", []):
+                    offending = (name, pattern)
+                    re.compile(pattern)
+        except re.error as e:
+            bad_state, bad_pattern = offending
+            raise ValueError(
+                f"shared_states[{bad_state!r}]['patterns'] has an invalid regex "
+                f"{bad_pattern!r}: {e}"
+            ) from e
+        return v
+
+
+class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.
 
     Max calibration estimates max values of activations or weights and use this max values
@@ -716,52 +765,8 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
         ),
     )
 
-    shared_patterns: dict[str, list[str]] | None = ModeloptField(
-        default=None,
-        title="Regex patterns for groups that share quantization state",
-        description=(
-            "Optional dict keyed by quantizer kind (``'weight'`` and/or ``'input'``), each a list "
-            "of regexes matched (full-match) against module fully-qualified names. They must list "
-            "every group you want for that kind. Modules whose match yields the same capture-group "
-            "tuple form one group; the capture boundary chooses granularity: capture the immediate "
-            "parent for per-parent / per-expert groups (e.g. ``r'(.*)\\.(?:q_proj|k_proj|v_proj)'``, "
-            "``r'(.*)\\.(?:w1|w3)'``); leave the expert index uncaptured for one cross-expert group "
-            "(``r'(.*)\\.experts\\.\\d+\\.(?:w1|w3)'``). Only ``'weight'`` is used today; ``'input'`` is "
-            "reserved for future input-quantizer sharing. When the ``'weight'`` list is omitted, "
-            "the default fusible patterns (q/k/v, gate/up, w1/w3) are used — these match exactly "
-            "the sibling groups export fuses, avoiding the over-grouping a shared-input heuristic "
-            "would cause (e.g. a ``shared_expert_gate`` that reads the same input but is not fused)."
-        ),
-    )
 
-    @field_validator("shared_patterns")
-    @classmethod
-    def validate_shared_patterns(cls, v):
-        """Reject unknown quantizer kinds and invalid regexes at the config boundary."""
-        if v is None:
-            return v
-        supported = {"weight", "input"}
-        unknown = set(v) - supported
-        if unknown:
-            raise ValueError(
-                f"shared_patterns has unsupported quantizer kind(s) {sorted(unknown)}; "
-                f"expected keys from {sorted(supported)}."
-            )
-        offending = ("", "")  # (kind, pattern) of the last regex tried; set before each compile
-        try:
-            for kind, patterns in v.items():
-                for pattern in patterns:
-                    offending = (kind, pattern)
-                    re.compile(pattern)
-        except re.error as e:
-            bad_kind, bad_pattern = offending
-            raise ValueError(
-                f"shared_patterns[{bad_kind!r}] has an invalid regex {bad_pattern!r}: {e}"
-            ) from e
-        return v
-
-
-class MseCalibConfig(QuantizeAlgorithmConfig):
+class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
 
     Finds a scale s (via amax a, with s = a / q_max) that minimizes the
@@ -811,7 +816,7 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
+class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for local Hessian-weighted MSE calibration.
 
     This algorithm uses activation information to optimize per-block scales for weight

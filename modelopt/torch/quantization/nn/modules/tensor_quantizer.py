@@ -172,11 +172,18 @@ class TensorQuantizer(nn.Module):
         "pre_bwd_fn",
         # quantizer cache for custom backends, like luts
         "_quantizer_cache",
-        # Runtime-only back-reference to a sibling group's SharedQuantState; it is
-        # re-established during calibration and must not be serialized (it points to a
-        # live module whose dynamic QuantLinear members are not picklable).
-        "_shared_quant_state_ref",
+        # Runtime-only set of storage attributes tied to shared state. The tied
+        # aliases are rebuilt from calibration config and tensor state during restore.
+        "_shared_quant_tied_attrs",
     }
+
+    def __setattr__(self, name, value):
+        if name in self.__dict__.get("_shared_quant_tied_attrs", set()):
+            raise RuntimeError(
+                f"{name} is tied shared quant state; update it via the owning shared-state "
+                "object or in place (e.g. .copy_), not by reassignment on a member."
+            )
+        return super().__setattr__(name, value)
 
     def __init__(
         self,
@@ -1368,8 +1375,11 @@ class NVFP4StaticQuantizer(TensorQuantizer):
         if amax is not None:
             self._amax = amax.to(dtype=torch.float32)
         global_amax = getattr(self, "_global_amax", None)
-        if global_amax is not None:
-            self._global_amax = global_amax.to(dtype=torch.float32)
+        if global_amax is not None and global_amax.dtype != torch.float32:
+            if "_global_amax" in self.__dict__.get("_shared_quant_tied_attrs", set()):
+                global_amax.data = global_amax.to(dtype=torch.float32)
+            else:
+                self._global_amax = global_amax.to(dtype=torch.float32)
 
     def _amax_setter_helper(self, value):
         super()._amax_setter_helper(value)

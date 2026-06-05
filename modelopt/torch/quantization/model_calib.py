@@ -43,8 +43,8 @@ from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
-    DEFAULT_WEIGHT_SHARED_PATTERNS,
-    attach_shared_quant_states,
+    SHARED_PATTERNS,
+    SharedWeightGlobalAmaxState,
     disable_calib,
     enable_fake_quant,
     enable_quant,
@@ -53,10 +53,7 @@ from .utils import (
     is_quantized_linear,
     is_quantized_row_parallel_linear,
     persistent_materialization,
-    populate_shared_state,
     promote_nvfp4_static_quantizers,
-    quantizer_attr_names,
-    reduce_amax,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -115,16 +112,16 @@ def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
 
 @torch.no_grad()
 def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
-    """Verify SharedQuantState unified each name-based fusible group's weight global_amax.
+    """Verify shared NVFP4 state unified each name-based fusible group's weight global_amax.
 
-    The legacy name-based grouping (Q/K/V, gate/up, w1/w3) is kept here as a *check*
+    The default name-based grouping (Q/K/V, gate/up, w1/w3) is kept here as a *check*
     rather than performed: after attach/populate/promote, the promoted static-NVFP4 weight
     quantizers in each name group must already share one ``global_amax``. This catches the
-    SharedQuantState path failing to form or sync a group it should have (e.g. a
-    :data:`DEFAULT_WEIGHT_SHARED_PATTERNS` regression, or an architecture the regexes miss)
+    SharedWeightGlobalAmaxState path failing to form or sync a group it should have (e.g. a
+    default-pattern regression, or an architecture the regexes miss)
     before the MSE per-block search — computed against ``global_amax`` — bakes in the
     inconsistency. Run only when the default patterns are in effect (custom
-    ``shared_patterns`` may intentionally group differently). Members whose ``global_amax``
+    ``shared_states`` may intentionally group differently). Members whose ``global_amax``
     is not materialized (``None``/meta, e.g. an ``init_empty_weights`` model) are skipped.
     """
     for group in _collect_grouped_linears(model):
@@ -135,8 +132,8 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
         ref = amaxes[0]
         assert all(torch.equal(a, ref) for a in amaxes), (
             "A fusible sibling group (q/k/v or gate/up) was not unified to a shared weight "
-            "global_amax; SharedQuantState failed to sync it, so the per-block MSE scales "
-            "would be inconsistent across the group."
+            "global_amax; SharedWeightGlobalAmaxState failed to sync it, so the per-block "
+            "MSE scales would be inconsistent across the group."
         )
 
 
@@ -148,10 +145,10 @@ def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) ->
     ``_amax``; under the default patterns, verifies the name groups were actually synced.
     Call once ``_amax`` is final: single-process, or after the distributed amax sync.
     """
-    populate_shared_state(model)
+    SharedWeightGlobalAmaxState.populate(model)
     promote_nvfp4_static_quantizers(model)
     # Under the default patterns, verify the fusible name groups were actually synced.
-    if weight_patterns is DEFAULT_WEIGHT_SHARED_PATTERNS:
+    if weight_patterns == list(SHARED_PATTERNS):
         _check_grouped_weight_global_amax_synced(model)
 
 
@@ -267,7 +264,7 @@ def max_calibrate(
     forward_loop: ForwardLoop | None = None,
     distributed_sync=True,
     sync_expert_weight_amax=False,
-    shared_patterns: Mapping[str, Sequence[str]] | None = None,
+    shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ):
     """Calibrate the model using max.
 
@@ -278,30 +275,20 @@ def max_calibrate(
         distributed_sync: Whether to sync input_quantizer amax across distributed processes.
         sync_expert_weight_amax: SequentialMLP only — share one weight amax across all experts
             in a MoE layer (within-rank sync + EP all-reduce when EP>1).
-        shared_patterns: Optional dict keyed by quantizer kind (``"weight"``/``"input"``), each a
-            list of regexes over module FQNs. When the ``"weight"`` list is omitted,
-            :data:`DEFAULT_WEIGHT_SHARED_PATTERNS` (q/k/v, gate/up, w1/w3) is used. Modules whose
-            regex match yields the same capture-group tuple form one group — capture the immediate
-            parent for per-parent (per-expert) grouping, or leave the expert index uncaptured for
-            cross-expert. Only ``"weight"`` is used today; ``"input"`` is reserved for future
-            input-quantizer sharing.
+        shared_states: Optional dict keyed by shared-state name. ``"weight_global_amax"`` is
+            implemented today and accepts ``{"patterns": [...]}``; omitted patterns use
+            ``SHARED_PATTERNS``, while an empty list disables the state.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
     """
     # Discover fusible sibling groups by name regex and attach the (initially empty) shared
-    # state up front, so the SharedQuantState container exists for the whole calibration —
-    # forward-time fields can accumulate into it. Discovery is structural (a pattern over the
-    # module tree), so it needs no ``_amax``; per-member values are aggregated later by
-    # populate_shared_state, after the forward and any cross-rank ``_amax`` sync. Default to
-    # q/k/v + gate/up when no "weight" key is given; an explicit (possibly empty) list
-    # overrides it — key presence, not truthiness, so {"weight": []} disables grouping.
-    # Only "weight" is consumed today; "input" is reserved.
-    if shared_patterns is not None and "weight" in shared_patterns:
-        weight_patterns = list(shared_patterns["weight"])
-    else:
-        weight_patterns = DEFAULT_WEIGHT_SHARED_PATTERNS
-    attach_shared_quant_states(model, patterns=weight_patterns)
+    # state up front, so parent-level runtime hooks can be installed by future concrete
+    # states. Discovery is structural (a pattern over the module tree), so it needs no
+    # ``_amax``; per-member values are aggregated later by
+    # SharedWeightGlobalAmaxState.populate, after the forward and any cross-rank ``_amax`` sync.
+    weight_patterns = SharedWeightGlobalAmaxState.resolve_patterns(shared_states=shared_states)
+    SharedWeightGlobalAmaxState.attach(model, patterns=weight_patterns)
 
     # Always run weight calibration on the weight tensor directly so every weight
     # quantizer gets ``_amax``, regardless of MoE routing. Downstream algorithms
@@ -541,6 +528,7 @@ def mse_calibrate(
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
     fp8_scale_sweep: bool = False,
+    shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ):
     """Calibrate weight quantizers using MSE-based amax search.
 
@@ -566,7 +554,7 @@ def mse_calibrate(
     details on the remaining arguments.
     """
     # max_calibrate initializes activations and weights; MSE only refines weights below.
-    max_calibrate(model, forward_loop, distributed_sync)
+    max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
     name_to_module = dict(model.named_modules())
     _mse_calibrate_weights(
         model,
@@ -792,6 +780,7 @@ def local_hessian_calibrate(
     fp8_scale_sweep: bool = True,
     block_size: int = 16,
     debug: bool = False,
+    shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ):
     """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
@@ -827,7 +816,7 @@ def local_hessian_calibrate(
 
     # Phase 1: max-calibrate (also bootstraps dead experts + promotes/syncs NVFP4 static).
     print_rank_0("local_hessian: Running max calibration for all quantizers...")
-    max_calibrate(model, forward_loop, distributed_sync)
+    max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
 
     name_to_module = dict(model.named_modules())
 

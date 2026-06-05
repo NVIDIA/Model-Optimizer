@@ -21,10 +21,11 @@ from .layerwise_calib import LayerActivationCollector
 from .shared_input import *
 
 __all__ = [
-    "DEFAULT_WEIGHT_SHARED_PATTERNS",
     "EXPORT_MODE",
+    "SHARED_PATTERNS",
+    "SHARED_PATTERNS_ACROSS_EXPERTS",
     "SharedQuantState",
-    "attach_shared_quant_states",
+    "SharedWeightGlobalAmaxState",
     "convert_quantization_axis_to_reduce_axis",
     "export_torch_mode",
     "find_shared_input_groups",
@@ -32,7 +33,7 @@ __all__ = [
     "is_quantized_column_parallel_linear",
     "is_quantized_linear",
     "is_quantized_row_parallel_linear",
-    "populate_shared_state",
+    "iter_shared_quant_states",
     "reduce_amax",
     "reduce_sum",
     "replace_function",

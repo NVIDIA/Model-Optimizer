@@ -13,28 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-group shared quantization state for fusible sibling modules.
+"""Shared quantization state for fusible sibling modules.
 
 Weight ``global_amax`` must be unified across modules that get **fused** at export
 (q/k/v -> qkv, gate/up -> gate_up) so they quantize with one per-tensor scale.
 :func:`find_shared_input_groups` discovers these groups by regex over module FQNs;
-:data:`DEFAULT_WEIGHT_SHARED_PATTERNS` covers the standard q/k/v, gate/up and w1/w3
-names, and callers may override per quantizer kind via ``MaxCalibConfig.shared_patterns``.
+``SHARED_PATTERNS`` covers the standard q/k/v, gate/up and per-expert w1/w3 names.
 
 Discovery is name/pattern-based (not input-hook-based) on purpose: "shares an input
 tensor" is broader than "gets fused" — e.g. a ``shared_expert_gate`` reads the same
 hidden states as the GLU pair but is never fused with it, so a hook would over-group
 it. Patterns match exactly the roles export fuses.
 
-:class:`SharedQuantState` is an ``nn.Module`` attached to a group's parent so its
-tensors ride along in ``state_dict``. Holds only ``weight_global_amax`` today;
-designed to grow (act scales, LoRA factors, ...). The ``(parent, members)`` tuples
-from :func:`find_shared_input_groups` are consumed by
-:func:`attach_shared_quant_states` and :func:`populate_shared_state`.
+The shared-state abstraction is intentionally stronger than a post-processing helper:
+concrete states own the canonical tensor(s), tie member quantizers to the same buffer
+object, and can install parent-level hooks for future runtime shared computation.
 """
 
 import re
-from collections.abc import Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.distributed as dist
@@ -45,65 +44,291 @@ from modelopt.torch.utils.distributed import ParallelState
 from .core_utils import quantizer_attr_names, reduce_amax
 
 __all__ = [
-    "DEFAULT_WEIGHT_SHARED_PATTERNS",
+    "SHARED_PATTERNS",
+    "SHARED_PATTERNS_ACROSS_EXPERTS",
     "SharedQuantState",
-    "attach_shared_quant_states",
+    "SharedWeightGlobalAmaxState",
     "find_shared_input_groups",
-    "populate_shared_state",
+    "iter_shared_quant_states",
 ]
 
-# Default fusible-sibling patterns for WEIGHT global_amax — the groups export fuses:
-# q/k/v -> qkv, gate/up (incl. Mixtral w1/w3) -> gate_up. These reproduce the legacy
-# name-based grouping exactly. Regexes are ``re.fullmatch``-ed against module FQNs;
-# ``(?:(.*)\.)?`` captures the immediate parent so grouping is per-parent (per-expert
-# for MoE experts). Override per quantizer kind via ``MaxCalibConfig.shared_patterns``.
-DEFAULT_WEIGHT_SHARED_PATTERNS = [
+# Groups export fuses: q/k/v -> qkv, gate/up (incl. Mixtral w1/w3) -> gate_up.
+# Regexes are ``re.fullmatch``-ed against module FQNs; ``(?:(.*)\.)?`` captures the
+# immediate parent so MoE ``w1``/``w3`` groups are per-expert.
+SHARED_PATTERNS = (
     r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)",
     r"(?:(.*)\.)?(?:gate_proj|up_proj)",
     r"(?:(.*)\.)?(?:w1|w3)",
-]
+)
+
+# Future variant for states that intentionally share one group across all experts in the
+# same ``experts``/``local_experts`` container. Kept unused until a state opts into it.
+SHARED_PATTERNS_ACROSS_EXPERTS = (
+    r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)",
+    r"(?:(.*)\.)?(?:gate_proj|up_proj)",
+    r"(?:(.*)\.)?(?:experts|local_experts)\.\d+\.(?:w1|w3)",
+)
 
 
+def _clone_tied_buffers_for_serialization(module, state_dict, prefix, local_metadata):
+    """Clone a quantizer's tied managed buffers so the serialized tensors are independent.
+
+    ``state_dict`` hook. Members alias one storage at runtime (single source of truth);
+    ``torch.save`` dedups that, but safetensors (HF ``save_pretrained``) rejects shared storage.
+    Restore re-ties.
+    """
+    for attr in module.__dict__.get("_shared_quant_tied_attrs", ()):
+        key = prefix + attr
+        tensor = state_dict.get(key)
+        if tensor is not None:
+            state_dict[key] = tensor.detach().clone()
 
 
-class SharedQuantState(nn.Module):
-    """State shared across a sibling group of quantized modules.
+class SharedQuantState(nn.Module, ABC):
+    """Base class for shared quantization state owned by a group parent.
 
-    Attached to the group's parent (e.g. ``self_attn``, ``block_sparse_moe``) as a
-    submodule, but its buffers are **non-persistent**: this is a calibration-time
-    artifact, not part of the checkpoint. Members that quantize the same input resolve
-    shared values here during calibration; the resolved value is then baked into each
-    member's promoted quantizer (``NVFP4StaticQuantizer._global_amax``, which *is*
-    serialized). So the scale survives save/restore via the members, and restore need
-    not re-create this submodule (it isn't in ``state_dict``) — see
-    :func:`attach_shared_quant_states`.
-
-    Holds only ``weight_global_amax`` today, and it is mirrored onto every member. Any
-    future field that is **not** mirrored on a member would not survive save/restore as
-    a non-persistent buffer and would need its own restore path.
+    Subclasses define when and how their canonical state is initialized. Runtime states
+    can override :meth:`install_hooks` to compute/cache group-level values at the parent
+    instead of doing the same work in every member.
     """
 
+    name: ClassVar[str]
+    managed_attrs: ClassVar[tuple[str, ...]] = ()
+    target_quantizer_kind: ClassVar[str] = "weight"
+    default_patterns: ClassVar[tuple[str, ...]] = ()
+
     def __init__(self) -> None:
-        """Initialize with an unset ``weight_global_amax`` and no registered members."""
+        """Initialize an empty shared-state owner."""
         super().__init__()
-        # NVFP4 two-level FP8 grid scale = max over members' per-block ``_amax``.
-        # Non-persistent: a calibration-time artifact. The resolved value is baked into
-        # each member's ``NVFP4StaticQuantizer._global_amax`` (which IS serialized), so
-        # restore rebuilds scales from members and need not re-create this submodule.
-        self.register_buffer("weight_global_amax", None, persistent=False)
-        # Back-references to member modules. ``object.__setattr__`` keeps them out of
-        # ``_modules`` so members' params don't re-enter our ``state_dict``.
-        object.__setattr__(self, "_members", [])
+        object.__setattr__(self, "_parent", None)
+        object.__setattr__(self, "_members", ())
+        object.__setattr__(self, "_hook_handles", [])
 
-    def sync_weight_global_amax(self, parallel_state: ParallelState | None) -> None:
-        """All-reduce (MAX) ``weight_global_amax`` across EP, plus TP defensively.
+    def set_members(self, parent: nn.Module, members: Sequence[nn.Module]) -> None:
+        """Set the owning parent and linked member modules."""
+        object.__setattr__(self, "_parent", parent)
+        object.__setattr__(self, "_members", tuple(members))
 
-        Weights are DP-replicated (no DP sync needed). EP sync is required since
-        ranks hold different experts; TP sync guards against per-child ``_amax`` TP
-        sync skipping block-quantized weights. Raises on a failed all-reduce: a silent
-        failure would leave ranks with different scales and still promote/export them.
+    @property
+    def members(self) -> tuple[nn.Module, ...]:
+        """Return linked member modules."""
+        return cast("tuple[nn.Module, ...]", self.__dict__["_members"])
+
+    def install_hooks(self) -> None:
+        """Install parent/member hooks for runtime shared computation."""
+
+    def remove_hooks(self) -> None:
+        """Remove hooks installed by :meth:`install_hooks`."""
+        for handle in cast("list[Any]", self.__dict__["_hook_handles"]):
+            handle.remove()
+        object.__setattr__(self, "_hook_handles", [])
+
+    @abstractmethod
+    def sync(self, parallel_state: ParallelState | None = None) -> None:
+        """Synchronize canonical state across distributed process groups."""
+
+    def finalize(self) -> bool:
+        """Whether the managed buffer(s) are populated; the finalize hook-produced states inherit.
+
+        A state whose value is produced *during the forward* (e.g. the shared input-amax state's
+        parent hook) needs only this readiness gate — the value already exists by now. States
+        that produce on demand override it: weight aggregates member ``_amax``, SVDQuant runs an
+        SVD. :meth:`populate` skips a state whose ``finalize`` returns ``False`` (uncalibrated /
+        meta / forward never ran).
         """
-        if self.weight_global_amax is None or parallel_state is None:
+        return any(
+            (value := getattr(self, attr, None)) is not None and not value.is_meta
+            for attr in self.managed_attrs
+        )
+
+    def _target_quantizer(self, member: nn.Module) -> nn.Module | None:
+        attr = getattr(quantizer_attr_names(), f"{self.target_quantizer_kind}_quantizer")
+        return getattr(member, attr, None)
+
+    def _member_quantizers(self) -> list[nn.Module]:
+        return [q for m in self.members if (q := self._target_quantizer(m)) is not None]
+
+    def _set_state_buffer(self, state_attr: str, value: torch.Tensor | None) -> None:
+        if state_attr not in self._buffers:
+            self.register_buffer(state_attr, value, persistent=False)
+        else:
+            self._buffers[state_attr] = value
+            self._non_persistent_buffers_set.add(state_attr)
+
+    def tie_member_quantizer(self, quantizer: nn.Module) -> bool:
+        """Alias a member quantizer's managed buffers to this state's canonical buffers.
+
+        For each managed attr, point ``quantizer._buffers[attr]`` at the *same tensor object*
+        as ``self.<attr>`` (register it if absent, else replace) so the member and the state
+        share one storage, not a copy. Records the attr in the quantizer's
+        ``_shared_quant_tied_attrs`` so ``TensorQuantizer.__setattr__`` rejects a later rebind.
+        Returns whether anything was tied.
+        """
+        tied_any = False
+        for attr in self.managed_attrs:
+            value = getattr(self, attr, None)
+            if value is None:
+                continue
+            if attr not in quantizer._buffers:
+                quantizer.register_buffer(attr, value)
+            else:
+                quantizer._buffers[attr] = value
+            tied = quantizer.__dict__.setdefault("_shared_quant_tied_attrs", set())
+            tied.add(attr)
+            tied_any = True
+        # Serialized buffers must be independent: torch.save dedups shared storage, but
+        # safetensors (HF save_pretrained) forbids it. The hook clones the tied buffers in the
+        # output state_dict only; the runtime buffers stay aliased and restore re-ties.
+        if (
+            tied_any
+            and _clone_tied_buffers_for_serialization not in quantizer._state_dict_hooks.values()
+        ):
+            quantizer._register_state_dict_hook(_clone_tied_buffers_for_serialization)
+        return tied_any
+
+    def tie_member_quantizers(self) -> None:
+        """Tie all eligible member quantizers to the canonical state buffers."""
+        for quantizer in self._member_quantizers():
+            self.tie_member_quantizer(quantizer)
+
+    def restore_from_members(self) -> bool:
+        """Rebuild the canonical buffer from members' restored buffers and re-tie.
+
+        Used only on checkpoint restore: the state is non-persistent, so it is absent until
+        rebuilt here from the members' (persistent, just-loaded) buffers.
+        """
+        restored = False
+        for attr in self.managed_attrs:
+            for quantizer in self._member_quantizers():
+                value = getattr(quantizer, attr, None)
+                if value is None or value.is_meta:
+                    continue
+                self._set_state_buffer(attr, value)
+                restored = True
+                break
+        if restored:
+            self.tie_member_quantizers()
+        return restored
+
+    def _post_apply(self) -> None:
+        """Per-state fixup after an ``_apply`` (dtype/device) move, before members are re-tied.
+
+        No-op by default; override to do whatever the state needs (restore a dtype, re-slice a
+        shared tensor, recompute, ...).
+        """
+
+    def _apply(self, fn, recurse=True):
+        # ``_apply`` (.to/.cuda/.half/...) allocates fresh tensors and breaks the member
+        # aliases; run the per-state fixup, then re-tie so members keep sharing one buffer.
+        module = super()._apply(fn, recurse=recurse)
+        self._post_apply()
+        self.tie_member_quantizers()
+        return module
+
+    @classmethod
+    def attach(cls, model: nn.Module, patterns: Sequence[str] | None = None) -> int:
+        """Create this state on each discovered group's parent."""
+        n_created = 0
+        for parent, members in find_shared_input_groups(
+            model,
+            patterns=patterns,
+            target_quantizer_kind=cls.target_quantizer_kind,
+        ):
+            state = cls()
+            state.set_members(parent, members)
+            created = _register_parent_shared_state(parent, state)
+            n_created += int(created)
+            if created:
+                state.install_hooks()
+        return n_created
+
+    @classmethod
+    def resolve_patterns(
+        cls, shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None
+    ) -> list[str]:
+        """Resolve the max-calibration config into grouping patterns for this state."""
+        if shared_states is not None:
+            state_cfg = shared_states.get(cls.name, {})
+            return list(state_cfg.get("patterns", cls.default_patterns))
+        return list(cls.default_patterns)
+
+    @classmethod
+    @torch.no_grad()
+    def populate(cls, model: nn.Module) -> int:
+        """Finalize and sync every state of this type in ``model``; return the count populated."""
+        n_groups = 0
+        for state in iter_shared_quant_states(model, cls):
+            if not state.finalize():
+                continue
+            state.sync(_first_parallel_state(state))
+            state.remove_hooks()  # calibration done; drop any forward hooks (no-op if none)
+            n_groups += 1
+        return n_groups
+
+    @classmethod
+    def restore(cls, model: nn.Module, patterns: Sequence[str] | None = None) -> None:
+        """Re-attach states and rebuild member aliases from members' restored buffers."""
+        cls.attach(model, patterns=patterns)
+        for state in iter_shared_quant_states(model, cls):
+            state.restore_from_members()
+
+    @classmethod
+    def metadata(cls, model: nn.Module) -> dict[str, bool]:
+        """Return restore metadata for this state when present in ``model``."""
+        if any(iter_shared_quant_states(model, cls)):
+            return {cls.name: True}
+        return {}
+
+
+class SharedWeightGlobalAmaxState(SharedQuantState):
+    """Canonical shared weight ``global_amax`` for one fusible sibling group."""
+
+    name: ClassVar[str] = "weight_global_amax"
+    managed_attrs: ClassVar[tuple[str, ...]] = ("_global_amax",)
+    target_quantizer_kind: ClassVar[str] = "weight"
+    default_patterns: ClassVar[tuple[str, ...]] = SHARED_PATTERNS
+
+    def __init__(self) -> None:
+        """Initialize with an unset canonical ``global_amax`` buffer."""
+        super().__init__()
+        # Non-persistent canonical runtime buffer. It is serialized through the tied
+        # member quantizer buffers (``*_weight_quantizer._global_amax``), so fresh-model
+        # restore can rebuild the alias graph before ``load_state_dict``.
+        self.register_buffer("_global_amax", None, persistent=False)
+
+    @property
+    def global_amax(self):
+        """Return the canonical shared global amax."""
+        return getattr(self, "_global_amax", None)
+
+    @global_amax.setter
+    def global_amax(self, value):
+        self._set_state_buffer("_global_amax", value)
+
+    def tie_member_quantizer(self, quantizer: nn.Module) -> bool:
+        """Tie one member quantizer to the shared ``_global_amax`` buffer when eligible."""
+        if not hasattr(quantizer, "global_amax") or self.global_amax is None:
+            return False
+        return super().tie_member_quantizer(quantizer)
+
+    def finalize(self) -> bool:
+        """Set ``global_amax`` to the max over members' calibrated ``_amax``."""
+        child_maxes: list[torch.Tensor] = []
+        for quantizer in self._member_quantizers():
+            amax = getattr(quantizer, "_amax", None)
+            if amax is None or amax.is_meta:
+                continue
+            child_maxes.append(reduce_amax(amax, axis=None))
+
+        if not child_maxes:
+            return False
+
+        self.global_amax = torch.max(torch.stack(child_maxes)).clone().detach().to(torch.float32)
+        return True
+
+    def sync(self, parallel_state: ParallelState | None = None) -> None:
+        """All-reduce (MAX) ``global_amax`` across EP, plus TP defensively."""
+        if self.global_amax is None or parallel_state is None:
             return
         for group in (
             parallel_state.expert_model_parallel_group,
@@ -113,20 +338,24 @@ class SharedQuantState(nn.Module):
                 continue
             try:
                 dist.all_reduce(
-                    self.weight_global_amax,
+                    self.global_amax,
                     op=dist.ReduceOp.MAX,
                     group=group.group,
                 )
             except RuntimeError as e:
-                raise RuntimeError("Failed to sync shared weight_global_amax") from e
+                raise RuntimeError("Failed to sync shared weight global_amax") from e
+
+    def _post_apply(self) -> None:
+        """Keep the NVFP4 scale in fp32 regardless of the model dtype after an ``_apply`` move."""
+        if self.global_amax is not None:
+            self.global_amax = self.global_amax.to(dtype=torch.float32)
 
 
-
-def _has_enabled_weight_quantizer(child: nn.Module, wq_attr: str) -> bool:
+def _has_enabled_quantizer(child: nn.Module, quantizer_attr: str) -> bool:
     # Membership is structural (independent of calibration), so this intentionally does NOT
     # require ``_amax`` — letting attach run before ``weight_only_quantize``.
-    wq = getattr(child, wq_attr, None)
-    return wq is not None and hasattr(wq, "_disabled") and not wq._disabled
+    quantizer = getattr(child, quantizer_attr, None)
+    return quantizer is not None and hasattr(quantizer, "_disabled") and not quantizer._disabled
 
 
 def _build_parent_map(model: nn.Module) -> dict[nn.Module, nn.Module]:
@@ -142,7 +371,7 @@ def _climb_past_modulelist(
     parent_map: dict[nn.Module, nn.Module],
     fallback: nn.Module,
 ) -> nn.Module:
-    # Attaching SharedQuantState to a ModuleList registers it in the container's ``_modules``
+    # Attaching shared states to a ModuleList registers them in the container's ``_modules``
     # and corrupts its iteration/length, so climb to the first non-ModuleList ancestor.
     # (Only ModuleList today; extend to ModuleDict etc. if needed.)
     cur = module
@@ -186,6 +415,7 @@ def _lowest_common_ancestor(
 def find_shared_input_groups(
     model: nn.Module,
     patterns: Sequence[str] | None = None,
+    target_quantizer_kind: str = "weight",
 ) -> list[tuple[nn.Module, list[nn.Module]]]:
     r"""Find fusible sibling groups by regex over module FQNs; capture groups define the key.
 
@@ -201,19 +431,18 @@ def find_shared_input_groups(
 
     Roles to fuse together go in a non-capturing alternation ``(?:w1|w3)`` so they don't
     split the key; what you wrap in ``(...)`` is the group boundary. Pass
-    :data:`DEFAULT_WEIGHT_SHARED_PATTERNS` for the standard q/k/v + gate/up groups, or
-    override via ``MaxCalibConfig.shared_patterns``. The caller selects which quantizer
-    these groups apply to (today only the weight quantizer). Returns ``(parent, members)``
-    tuples; empty when no patterns are given.
+    ``SHARED_PATTERNS`` for the standard q/k/v + gate/up groups, or override via
+    ``MaxCalibConfig.shared_states``. The caller selects which quantizer these groups
+    apply to. Returns ``(parent, members)`` tuples; empty when no patterns are given.
     """
     if not patterns:
         return []
-    wq_attr = quantizer_attr_names("weight").weight_quantizer
+    quantizer_attr = getattr(quantizer_attr_names(), f"{target_quantizer_kind}_quantizer")
     compiled = [re.compile(p) for p in patterns]
     buckets: dict[tuple, list[nn.Module]] = {}
     order: list[tuple] = []
     for name, module in model.named_modules():
-        if not _has_enabled_weight_quantizer(module, wq_attr):
+        if not _has_enabled_quantizer(module, quantizer_attr):
             continue
         for pattern_idx, regex in enumerate(compiled):
             match = regex.fullmatch(name)
@@ -240,104 +469,48 @@ def find_shared_input_groups(
 # ---------------------------------------------------------------------------
 
 
-def attach_shared_quant_states(
+def _members_key(members: Sequence[nn.Module]) -> tuple[int, ...]:
+    return tuple(id(m) for m in members)
+
+
+def _shared_state_list(parent: nn.Module) -> nn.ModuleList:
+    states = getattr(parent, "_shared_quant_states", None)
+    if states is None:
+        states = nn.ModuleList()
+        parent._shared_quant_states = states
+    return states
+
+
+def _register_parent_shared_state(
+    parent: nn.Module,
+    state: SharedQuantState,
+) -> bool:
+    """Register ``state`` on ``parent`` if an equivalent state is not already owned."""
+    state_cls = type(state)
+    wanted = _members_key(state.members)
+    states = _shared_state_list(parent)
+    for existing_state in states:
+        if isinstance(existing_state, state_cls) and _members_key(existing_state.members) == wanted:
+            return False
+
+    states.append(state)
+    return True
+
+
+def iter_shared_quant_states(
     model: nn.Module,
-    patterns: Sequence[str] | None = None,
-) -> int:
-    """Create ``SharedQuantState`` on each group's parent and link members.
-
-    Groups are discovered by ``patterns`` (regexes over module FQNs; see
-    :func:`find_shared_input_groups`). The parent owns the state under
-    ``_shared_quant_state`` (normal setattr → a registered submodule, so its buffer
-    rides along in ``state_dict``). Each member's weight quantizer — the only consumer,
-    via ``promote_nvfp4_static_quantizers`` — gets a back-reference under the distinct
-    name ``_shared_quant_state_ref`` set with ``object.__setattr__`` (not a submodule,
-    so the buffer isn't duplicated per member). The distinct names let
-    ``populate_shared_state`` select owners with a plain ``getattr``.
-
-    Idempotent (reuses an existing parent state). Returns the number created.
-    """
-    n_created = 0
-    wq_attr = quantizer_attr_names("weight").weight_quantizer
-    for parent, members in find_shared_input_groups(model, patterns=patterns):
-        if not hasattr(parent, "_shared_quant_state"):
-            parent._shared_quant_state = SharedQuantState()
-            n_created += 1
-        state = parent._shared_quant_state
-        # Record members so populate_shared_state needn't re-run discovery.
-        object.__setattr__(state, "_members", list(members))
-        for child in members:
-            wq = getattr(child, wq_attr, None)
-            if wq is None:
-                continue
-            # Groups are disjoint after merging, so each quantizer gets one state per
-            # call and a re-attach reuses the same object; a different existing state
-            # would mean an inconsistent re-attach.
-            existing = getattr(wq, "_shared_quant_state_ref", None)
-            assert existing is None or existing is state, (
-                f"{type(wq).__name__} already belongs to a different shared-input "
-                "group; groups should be disjoint after merging."
-            )
-            object.__setattr__(wq, "_shared_quant_state_ref", state)
-    return n_created
+    state_cls: type[SharedQuantState] = SharedQuantState,
+):
+    """Yield shared quant states owned within ``model``."""
+    for module in model.modules():
+        for state in getattr(module, "_shared_quant_states", ()):
+            if isinstance(state, state_cls):
+                yield state
 
 
-@torch.no_grad()
-def populate_shared_state(model: nn.Module) -> int:
-    """Aggregate per-member stats into each group's ``SharedQuantState``.
-
-    Currently sets ``weight_global_amax`` = max over members' reduced ``_amax``,
-    EP-synced so all ranks agree, then writes it back to each member's
-    ``global_amax`` (overriding any stale value from an earlier promotion). Future
-    fields plug in here as extra aggregation steps.
-
-    Call after members' ``_amax`` is cross-rank consistent (post TP/DP/EP sync in
-    ``max_calibrate``). Members not yet promoted to ``NVFP4StaticQuantizer`` are
-    skipped on write-back; the next promotion reads the shared value instead.
-    Returns the number of groups populated.
-    """
-    from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
-
-    wq_attr = quantizer_attr_names("weight").weight_quantizer
-    n_groups = 0
-
-    for parent in model.modules():
-        # Owners hold the state under ``_shared_quant_state`` (members use the
-        # distinct ``_shared_quant_state_ref``), so getattr matches owners only.
-        state = getattr(parent, "_shared_quant_state", None)
-        if not isinstance(state, SharedQuantState):
-            continue
-
-        members = getattr(state, "_members", [])
-        if not members:
-            continue
-
-        child_maxes: list[torch.Tensor] = []
-        parallel_state: ParallelState | None = None
-        for child in members:
-            wq = getattr(child, wq_attr, None)
-            amax = getattr(wq, "_amax", None) if wq is not None else None
-            # Skip uncalibrated or meta (no-data) amax. A meta amax — e.g. quantizing an
-            # ``init_empty_weights`` model before dispatch — would make weight_global_amax a
-            # meta buffer that then breaks the meta->device ``.to()`` (it needs ``to_empty``).
-            if amax is None or amax.is_meta:
-                continue
-            child_maxes.append(reduce_amax(amax, axis=None))
-            if parallel_state is None:
-                parallel_state = getattr(child, "parallel_state", None)
-
-        if not child_maxes:
-            continue
-
-        local_max = torch.max(torch.stack(child_maxes))
-        state.weight_global_amax = local_max
-        state.sync_weight_global_amax(parallel_state)
-
-        synced = state.weight_global_amax
-        for child in members:
-            wq = getattr(child, wq_attr, None)
-            if isinstance(wq, NVFP4StaticQuantizer):
-                wq.global_amax = synced
-        n_groups += 1
-
-    return n_groups
+def _first_parallel_state(state: SharedQuantState) -> ParallelState | None:
+    for member in state.members:
+        parallel_state = getattr(member, "parallel_state", None)
+        if parallel_state is not None:
+            return parallel_state
+    return None

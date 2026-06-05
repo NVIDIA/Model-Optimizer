@@ -32,9 +32,8 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     register_quant_backend,
 )
 from modelopt.torch.quantization.utils import (
-    attach_shared_quant_states,
+    SharedWeightGlobalAmaxState,
     enable_fake_quant,
-    populate_shared_state,
     promote_nvfp4_static_quantizers,
 )
 
@@ -774,8 +773,8 @@ class TestStaticNVFP4Promotion:
         model.k_proj = self._LinearLike(torch.tensor([3.0, 4.0]))
         model.v_proj = self._LinearLike(torch.tensor([5.0, 6.0]))
 
-        attach_shared_quant_states(model, patterns=[r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)"])
-        populate_shared_state(model)
+        SharedWeightGlobalAmaxState.attach(model, patterns=[r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)"])
+        SharedWeightGlobalAmaxState.populate(model)
         promote_nvfp4_static_quantizers(model)
 
         for child in (model.q_proj, model.k_proj, model.v_proj):
