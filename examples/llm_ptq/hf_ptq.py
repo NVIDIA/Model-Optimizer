@@ -159,7 +159,7 @@ def _canonical_qformat(name: str) -> str:
 mto.enable_huggingface_checkpointing()
 
 
-# TODO: To be refacored into config system.
+# TODO: Refactor into the config system.
 _QWEN36_AUTOQ_DISABLED_LAYERS = (
     "*shared_expert_gate*",
     "*linear_attn.in_proj_a*",
@@ -168,20 +168,44 @@ _QWEN36_AUTOQ_DISABLED_LAYERS = (
 _VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
 
 
-def get_auto_quantize_disabled_layers(model) -> list[str]:
+def _is_qwen_model(model) -> bool:
+    """Return True when model/config identifiers indicate a Qwen-family model."""
+    candidates = [type(model).__name__]
+    config = getattr(model, "config", None)
+    configs = [
+        config,
+        getattr(config, "text_config", None),
+        getattr(config, "language_config", None),
+    ]
+    for cfg in configs:
+        if cfg is None:
+            continue
+        candidates.append(type(cfg).__name__)
+        model_type = getattr(cfg, "model_type", None)
+        if model_type is not None:
+            candidates.append(str(model_type))
+        architectures = getattr(cfg, "architectures", ()) or ()
+        if isinstance(architectures, str):
+            architectures = (architectures,)
+        candidates.extend(str(architecture) for architecture in architectures)
+    return any("qwen" in candidate.lower() for candidate in candidates)
+
+
+def _get_auto_quantize_disabled_layers(model) -> list[str]:
     """Return layer patterns that should be excluded from AutoQuantize search."""
     disabled_layers = [
         entry["quantizer_name"]
         for entry in _default_disabled_quantizer_cfg
         if "parent_class" not in entry and entry["quantizer_name"] != "*lm_head*"
     ]
-    disabled_layers.extend(p for p in _QWEN36_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    if _is_qwen_model(model):
+        disabled_layers.extend(p for p in _QWEN36_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
     if is_multimodal_model(model):
         disabled_layers.extend(p for p in _VLM_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
     return disabled_layers
 
 
-def get_auto_quantize_cost_excluded_patterns(model) -> list[str]:
+def _get_auto_quantize_cost_excluded_patterns(model) -> list[str]:
     """Return layer patterns excluded only from AutoQuantize cost accounting."""
     if is_multimodal_model(model):
         return list(_VLM_AUTOQ_DISABLED_LAYERS)
@@ -421,7 +445,7 @@ def auto_quantize(
     auto_quantize_cost = {}
     if args.auto_quantize_active_moe_expert_ratio is not None:
         auto_quantize_cost["active_moe_expert_ratio"] = args.auto_quantize_active_moe_expert_ratio
-    cost_excluded_patterns = get_auto_quantize_cost_excluded_patterns(language_model)
+    cost_excluded_patterns = _get_auto_quantize_cost_excluded_patterns(language_model)
     if cost_excluded_patterns:
         auto_quantize_cost[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = cost_excluded_patterns
     if auto_quantize_cost:
@@ -441,7 +465,7 @@ def auto_quantize(
             len(calib_dataloader), max(auto_quantize_score_size // args.batch_size, 1)
         ),
         verbose=True,
-        disabled_layers=get_auto_quantize_disabled_layers(language_model),
+        disabled_layers=_get_auto_quantize_disabled_layers(language_model),
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
     )
@@ -517,7 +541,7 @@ def load_model(args: argparse.Namespace):
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
     # Default to image-text calibration for VLM models
-    if is_nemotron_vl_model and not args.calib_with_images:
+    if is_nemotron_vl_model and not args.calib_with_images and args.auto_quantize_bits is None:
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
@@ -1472,6 +1496,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+    if args.auto_quantize_bits is not None and args.calib_with_images:
+        parser.error("--calib_with_images is not supported with --auto_quantize_bits.")
     if args.auto_quantize_active_moe_expert_ratio is not None and not (
         0.0 < args.auto_quantize_active_moe_expert_ratio <= 1.0
     ):

@@ -483,8 +483,6 @@ class TestMatchQuantizerCfg:
 
     def test_parent_class_scoped_entries_are_ignored_for_bare_autoquant_lookup(self):
         """parent_class-scoped globals should not override AutoQuantize bare-name lookup."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [
                 {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
