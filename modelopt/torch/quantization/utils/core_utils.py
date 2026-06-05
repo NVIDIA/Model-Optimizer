@@ -478,7 +478,7 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
     """
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
     fsdp_module = _get_enclosing_fsdp_module(module, root_model)
-    assert fsdp_module is not None, "Module is not wrapped by FSDP2"
+    assert fsdp_module is not None, "Module is not wrapped by FSDP"
     fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
     fsdp_dim = fsdp_device_mesh.ndim
 

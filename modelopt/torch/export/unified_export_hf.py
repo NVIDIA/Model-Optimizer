@@ -57,6 +57,7 @@ from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
+from modelopt.torch.utils.distributed import is_fsdp2_model
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -827,13 +828,14 @@ def _export_transformers_checkpoint(
 
     _reconstruct_fused_moe_linear(model)
 
-    if any(isinstance(m, FSDPModule) for m in model.modules()):
+    if is_fsdp2_model(model):
         # FSDP2: gather full state_dict to CPU on rank 0 only.
+        # full_state_dict=True + cpu_offload=True + initialized PG already gates
+        # ranks_only=(0,) in _maybe_full_or_cpu_state_dict; broadcast_from_rank0 is
+        # a set-side option and would be a no-op here.
         quantized_state_dict = get_model_state_dict(
             model,
-            options=StateDictOptions(
-                full_state_dict=True, cpu_offload=True, broadcast_from_rank0=True
-            ),
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
     else:
         quantized_state_dict = model.state_dict()
