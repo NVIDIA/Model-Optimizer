@@ -1803,7 +1803,6 @@ def layerwise_calibrate(
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
     save_every = calib_kwargs.pop("save_every", 1)
-    save_quantizers_only = calib_kwargs.pop("save_quantizers_only", False)
 
     if forward_loop is None:
         raise ValueError(
@@ -1825,7 +1824,6 @@ def layerwise_calibrate(
         checkpoint_dir,
         num_layers,
         save_every=save_every,
-        save_quantizers_only=save_quantizers_only,
     )
     start_layer = ckpt.start_layer if ckpt else 0
 

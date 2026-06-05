@@ -478,7 +478,6 @@ def _write_manifest(
     last_completed_layer: int,
     num_layers: int,
     save_every: int,
-    save_quantizers_only: bool,
 ) -> None:
     """Atomically write manifest.json. Config keys are persisted so resume can detect drift."""
     path = os.path.join(checkpoint_dir, "manifest.json")
@@ -489,7 +488,6 @@ def _write_manifest(
                 "last_completed_layer": last_completed_layer,
                 "num_layers": num_layers,
                 "save_every": save_every,
-                "save_quantizers_only": save_quantizers_only,
             },
             f,
         )
@@ -511,10 +509,9 @@ def _save_layer_files(
     """Write the per-layer files for layer *idx*.
 
     Exactly one of ``weights`` (full layer state_dict) or ``quantizer_buffers``
-    (just the TensorQuantizer state_dict slice, used by ``save_quantizers_only``)
-    is written; ``full_restore`` falls back to whichever is present.
-    ``next_inputs.pt`` and ``manifest.json`` are deferred to window boundaries
-    in :meth:`_CheckpointState.save`.
+    (just the TensorQuantizer state_dict slice) is written; ``full_restore``
+    falls back to whichever is present. ``next_inputs.pt`` and ``manifest.json``
+    are deferred to window boundaries in :meth:`_CheckpointState.save`.
     """
     d = _layer_dir(checkpoint_dir, idx)
     if os.path.isdir(d):
@@ -564,7 +561,6 @@ class _CheckpointState:
         num_layers: int,
         start_layer: int = 0,
         save_every: int = 1,
-        save_quantizers_only: bool = False,
     ):
         if dist.is_initialized() and dist.size() > 1:
             raise RuntimeError(
@@ -577,7 +573,6 @@ class _CheckpointState:
         self.num_layers = num_layers
         self.start_layer = start_layer
         self.save_every = save_every
-        self.save_quantizers_only = save_quantizers_only
         # Tracks the most recent saved layer so save() can window-save the layers
         # since the last save event. Initialized to start_layer - 1 so the first
         # save event after resume covers the new work only.
@@ -589,7 +584,6 @@ class _CheckpointState:
         checkpoint_dir: str | None,
         num_layers: int,
         save_every: int = 1,
-        save_quantizers_only: bool = False,
     ) -> _CheckpointState | None:
         """Create from folder. Detects resume point. Returns None if no checkpoint_dir."""
         if not checkpoint_dir:
@@ -598,12 +592,11 @@ class _CheckpointState:
         info = detect_resume_point(checkpoint_dir)
         if info is not None:
             manifest = info[1]
-            # Pre-0.45 manifests omit save_every / save_quantizers_only; skip the
-            # check for keys absent from the on-disk manifest.
+            # Pre-0.45 manifests omit save_every; skip the check for keys absent
+            # from the on-disk manifest.
             for key, new_value in (
                 ("num_layers", num_layers),
                 ("save_every", save_every),
-                ("save_quantizers_only", save_quantizers_only),
             ):
                 ckpt_value = manifest.get(key)
                 if ckpt_value is not None and ckpt_value != new_value:
@@ -621,7 +614,6 @@ class _CheckpointState:
             num_layers,
             start_layer=start,
             save_every=save_every,
-            save_quantizers_only=save_quantizers_only,
         )
 
     def setup_resume(self, layers: nn.ModuleList) -> list | None:
@@ -659,10 +651,7 @@ class _CheckpointState:
         """Restore weights and quantizer state for layers 0..K-1 after the calibration loop."""
         from modelopt.torch.quantization.config import QuantizeConfig
         from modelopt.torch.quantization.conversion import restore_quantizer_state
-        from modelopt.torch.quantization.utils.core_utils import (
-            enable_weight_access_and_writeback,
-            set_quantizer_state_dict,
-        )
+        from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 
         if self.start_layer == 0:
             return
@@ -684,22 +673,10 @@ class _CheckpointState:
                     weights_only=False,
                 )
                 restore_quantizer_state(layer, dummy_config, {"quantizer_state": qstate})
-                weights_path = os.path.join(d, "weights.pt")
-                buffers_path = os.path.join(d, "quantizer_buffers.pt")
-                if os.path.isfile(weights_path):
-                    weights = torch.load(
-                        weights_path, map_location=layer_device, weights_only=False
-                    )
-                    layer.load_state_dict(weights, strict=False, assign=True)
-                elif os.path.isfile(buffers_path):
-                    # save_quantizers_only mode: restore just the TensorQuantizer
-                    # state_dict (carries _amax). The layer's other weights
-                    # weren't modified by the algorithm, so the in-memory values
-                    # already match what would have been saved.
-                    quantizer_buffers = torch.load(
-                        buffers_path, map_location=layer_device, weights_only=False
-                    )
-                    set_quantizer_state_dict(layer, quantizer_buffers)
+                weights = torch.load(
+                    os.path.join(d, "weights.pt"), map_location=layer_device, weights_only=False
+                )
+                layer.load_state_dict(weights, strict=False, assign=True)
 
         print_rank_0(f"Checkpoint: restored {self.start_layer} previously calibrated layers")
 
@@ -720,21 +697,13 @@ class _CheckpointState:
         previous boundary.
         """
         from modelopt.torch.quantization.conversion import quantizer_state
-        from modelopt.torch.quantization.utils.core_utils import (
-            enable_weight_access_and_writeback,
-            get_quantizer_state_dict,
-        )
+        from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 
         _cpu = torch.device("cpu")
         layer = layers[layer_idx]
         with enable_weight_access_and_writeback(layer, model):
             qstate = _move_to_device(quantizer_state(layer), _cpu)
-            if self.save_quantizers_only:
-                weights = None
-                quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
-            else:
-                weights = _move_to_device(layer.state_dict(), _cpu)
-                quantizer_buffers = None
+            weights = _move_to_device(layer.state_dict(), _cpu)
 
         output_meta = getattr(layer._layerwise_calib, "output_meta", None)
         if output_meta is None:
@@ -746,7 +715,7 @@ class _CheckpointState:
             layer_idx,
             weights,
             qstate,
-            quantizer_buffers,
+            None,
             _move_to_device(output_meta, _cpu),
         )
 
@@ -766,7 +735,6 @@ class _CheckpointState:
             layer_idx,
             self.num_layers,
             save_every=self.save_every,
-            save_quantizers_only=self.save_quantizers_only,
         )
         window_start = self._last_saved_layer + 1
         self._last_saved_layer = layer_idx

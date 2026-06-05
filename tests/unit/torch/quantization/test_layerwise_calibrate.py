@@ -866,24 +866,20 @@ def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monke
 
 
 @pytest.mark.parametrize(
-    ("scenario", "n_layers", "save_every", "save_quantizers_only", "rewind_to"),
+    ("n_layers", "save_every", "rewind_to"),
     [
-        # Pins the quantizer_buffers.pt restore path (no weights.pt on disk).
-        ("quantizers_only", 3, 1, True, 0),
         # Pins the per-call snapshot fix: each save() captures the
         # just-calibrated layer's state before the next-layer capture forward
         # swaps it to _SkipLayer.
-        ("save_every", 4, 2, False, 1),
+        (4, 2, 1),
     ],
 )
 def test_layerwise_checkpoint_resume_matches_one_shot_amax(
-    monkeypatch, tmp_path, scenario, n_layers, save_every, save_quantizers_only, rewind_to
+    monkeypatch, tmp_path, n_layers, save_every, rewind_to
 ):
     """Full run → rewind manifest → fresh resume reproduces one-shot ``_amax``.
 
-    Single test covering both checkpoint optimizations. For the
-    ``save_quantizers_only`` case also asserts the on-disk shape (no
-    ``weights.pt``, ``quantizer_buffers.pt`` present per layer).
+    Covers the per-window save/resume path with always-full-weight saves.
     """
     _register_test_discoverer(monkeypatch)
 
@@ -898,7 +894,6 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
                     "enable": True,
                     "checkpoint_dir": str(ckpt_dir),
                     "save_every": save_every,
-                    "save_quantizers_only": save_quantizers_only,
                 },
             }
         )
@@ -915,19 +910,12 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     setup_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
     mtq.quantize(setup_model, build_cfg(resume_dir), forward_loop=forward_loop)
 
-    if scenario == "quantizers_only":
-        for name in _layer_dir_names(resume_dir):
-            d = resume_dir / name
-            assert not (d / "weights.pt").exists()
-            assert (d / "quantizer_buffers.pt").exists()
-
     (resume_dir / "manifest.json").write_text(
         json.dumps(
             {
                 "last_completed_layer": rewind_to,
                 "num_layers": n_layers,
                 "save_every": save_every,
-                "save_quantizers_only": save_quantizers_only,
             }
         )
     )
@@ -936,7 +924,7 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     resumed_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
     mtq.quantize(resumed_model, build_cfg(resume_dir), forward_loop=forward_loop)
 
-    _assert_amax_close(_collect_amax(resumed_model), baseline_amax, f"{scenario} resume")
+    _assert_amax_close(_collect_amax(resumed_model), baseline_amax, "resume")
 
 
 def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeypatch, tmp_path):
@@ -1013,7 +1001,6 @@ def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
                 "last_completed_layer": 1,
                 "num_layers": 4,
                 "save_every": 2,
-                "save_quantizers_only": False,
             }
         )
     )

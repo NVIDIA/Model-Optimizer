@@ -228,7 +228,6 @@ def wrapped_calib_func(
     checkpoint_dir = layerwise_cfg.get("checkpoint_dir")
     qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", False)
     save_every = layerwise_cfg.get("save_every", 1)
-    save_quantizers_only = layerwise_cfg.get("save_quantizers_only", False)
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
@@ -263,7 +262,6 @@ def wrapped_calib_func(
                 checkpoint_dir=checkpoint_dir,
                 get_qdq_activations_from_prev_layer=qdq_from_prev,
                 save_every=save_every,
-                save_quantizers_only=save_quantizers_only,
                 **kwargs,
             )
         else:
