@@ -1454,6 +1454,16 @@ def parse_args() -> argparse.Namespace:
     if args.specdec_offline_dataset is not None and args.low_memory_mode:
         parser.error("--specdec_offline_dataset is not compatible with --low_memory_mode.")
 
+    # The low-memory loader pre-instruments quantizers from --qformat/--kv_cache_qformat
+    # via init_quantized_weights(), so it cannot honor a --recipe (which is authoritative
+    # for the quant layout in quantize_main). Reject the combination rather than silently
+    # instrumenting a layout that diverges from the recipe.
+    if args.low_memory_mode and args.recipe is not None:
+        parser.error(
+            "--low_memory_mode does not yet support --recipe; the low-memory loader still "
+            "initializes quantizers from --qformat/--kv_cache_qformat."
+        )
+
     return args
 
 
