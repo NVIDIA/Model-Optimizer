@@ -37,11 +37,17 @@ if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
     from modelopt.torch.kernels.common.attention.triton_fa import attention
     from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import e4m3_emulate
+    from modelopt.torch.kernels.quantization.attention.softmax_fakequant import softmax_round
 
     @triton.jit
     def _e4m3_emulate_kernel(X, Y, N: tl.constexpr):
         i = tl.arange(0, N)
         tl.store(Y + i, e4m3_emulate(tl.load(X + i)))
+
+    @triton.jit
+    def _softmax_round_kernel(X, Y, N: tl.constexpr, MODE: tl.constexpr):
+        i = tl.arange(0, N)
+        tl.store(Y + i, softmax_round(tl.load(X + i), MODE))
 
 
 FP8, BLK = 448.0, 16
@@ -106,6 +112,19 @@ def test_e4m3_emulation_bit_exact():
     _e4m3_emulate_kernel[(1,)](x, y, N=4096)
     ref = x.clamp(-FP8, FP8).to(torch.float8_e4m3fn).to(torch.float32)
     assert (y - ref).abs().max().item() == 0.0
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+@pytest.mark.parametrize(("mode", "ref_dtype"), [(13, torch.float16), (12, torch.bfloat16)])
+def test_softmax_round_rne(mode, ref_dtype):
+    """softmax_round FP16/BF16 round-to-nearest == the torch cast; mode 0 is identity."""
+    torch.manual_seed(0)
+    x = (torch.rand(4096, device="cuda") * 8 - 4).float()
+    y = torch.empty_like(x)
+    _softmax_round_kernel[(1,)](x, y, N=4096, MODE=mode)
+    assert (y - x.to(ref_dtype).to(torch.float32)).abs().max().item() == 0.0
+    _softmax_round_kernel[(1,)](x, y, N=4096, MODE=0)  # NONE -> identity
+    assert (y - x).abs().max().item() == 0.0
 
 
 def _paged(k, v, S, page=16):

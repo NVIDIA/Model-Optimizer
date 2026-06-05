@@ -62,6 +62,10 @@ from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
     fake_quant_fp4_k1,
     tensor_global_scale,
 )
+from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
+    resolve_softmax_mode,
+    softmax_round,
+)
 
 # Cap on the auto-chosen split count. Decode KV reads dominate, so a handful of
 # splits is enough to fill the SMs at small batch; more just fragments skipping.
@@ -108,7 +112,9 @@ def _attn_decode_split_fwd(
     NVFP4_K: tl.constexpr,  # fakequant K -> NVFP4 before BMM1 (= NVFP4 KV$ K side)
     NVFP4_P: tl.constexpr,  # fakequant softmax P -> NVFP4 before BMM2
     NVFP4_V: tl.constexpr,  # fakequant V -> NVFP4 before BMM2 (= NVFP4 KV$ V side)
-    FP16_SOFTMAX: tl.constexpr,  # compute the softmax exp in fp16 (mixed precision)
+    DIFF_QUANT: tl.constexpr,  # softmax-datapath modes: DIFF (pre-exp2), EXP2, ACC (sum)
+    EXP2_QUANT: tl.constexpr,
+    ACC_QUANT: tl.constexpr,
     q_global_scale,  # per-tensor NVFP4 global scales (amax/(6*448)), computed host-side
     k_global_scale,
     p_global_scale,
@@ -193,12 +199,11 @@ def _attn_decode_split_fwd(
 
         if not skip:
             m_new = tl.maximum(m_i, tile_max)
-            p = tl.math.exp2(scores - m_new)  # [BLOCK_N]
-            if FP16_SOFTMAX:
-                p = p.to(tl.float16).to(tl.float32)  # mixed-precision (fp16) softmax
+            s_shift = softmax_round(scores - m_new, DIFF_QUANT)  # DIFF: input to exp2
+            p = softmax_round(tl.math.exp2(s_shift), EXP2_QUANT)  # EXP2: output of exp2
             p = tl.where(kv_valid, p, 0.0)
             correction = tl.math.exp2(m_i - m_new)
-            l_i = l_i * correction + tl.sum(p, axis=0)
+            l_i = l_i * correction + softmax_round(tl.sum(p, axis=0), ACC_QUANT)  # ACC: sum
             acc = acc * correction
             # P operand of BMM2 -> NVFP4. NVFP4 is homogeneous (NVFP4(c*x)=c*NVFP4(x)),
             # so quantizing the unnormalized exp here equals quantizing normalized P,
@@ -312,6 +317,7 @@ def attention_decode(
     measure_sparsity: bool = False,
     nvfp4: set[str] | None = None,
     fp16_softmax: bool = False,
+    softmax_quant: dict | None = None,
 ) -> torch.Tensor:
     """Decode attention (one query token per request) over a paged KV cache.
 
@@ -372,6 +378,12 @@ def attention_decode(
     k_gs = tensor_global_scale(k_cache) if "k" in nvfp4 else 1.0
     v_gs = tensor_global_scale(v_cache) if "v" in nvfp4 else 1.0
     p_gs = (1.0 / (6.0 * 448.0) + 1e-30) if "p" in nvfp4 else 1.0  # unnormalized exp P max ~1
+    # Softmax-datapath modes (DIFF/EXP2/ACC); fp16_softmax = FP16-RNE at all three.
+    _sq = softmax_quant or {}
+    _sm_default = "fp16_rne" if fp16_softmax else None
+    diff_q = resolve_softmax_mode(_sq.get("diff", _sm_default))
+    exp2_q = resolve_softmax_mode(_sq.get("exp2", _sm_default))
+    acc_q = resolve_softmax_mode(_sq.get("acc", _sm_default))
 
     # Per-split partial softmax state, merged by the combine kernel.
     m_partial = torch.empty(batch, num_q_heads, num_kv_splits, dtype=torch.float32, device=q.device)
@@ -428,7 +440,9 @@ def attention_decode(
             NVFP4_K="k" in nvfp4,
             NVFP4_P="p" in nvfp4,
             NVFP4_V="v" in nvfp4,
-            FP16_SOFTMAX=fp16_softmax,
+            DIFF_QUANT=diff_q,
+            EXP2_QUANT=exp2_q,
+            ACC_QUANT=acc_q,
             q_global_scale=q_gs,
             k_global_scale=k_gs,
             p_global_scale=p_gs,

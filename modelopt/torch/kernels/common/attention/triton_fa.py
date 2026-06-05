@@ -36,6 +36,26 @@ from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
     fake_quant_fp4_k1,
     tensor_global_scale,
 )
+from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
+    resolve_softmax_mode,
+    softmax_round,
+)
+
+
+def _resolve_softmax_modes(fp16_softmax, softmax_quant):
+    """(fp16_softmax bool, per-point dict) -> (DIFF, EXP2, ACC) integer modes.
+
+    ``fp16_softmax=True`` is a shortcut for FP16-RNE at all three points; the optional
+    ``softmax_quant`` dict ({"diff"/"exp2"/"acc": mode}) overrides per point.
+    """
+    sq = softmax_quant or {}
+    default = "fp16_rne" if fp16_softmax else None
+    return (
+        resolve_softmax_mode(sq.get("diff", default)),
+        resolve_softmax_mode(sq.get("exp2", default)),
+        resolve_softmax_mode(sq.get("acc", default)),
+    )
+
 
 # Helpers for optional N:M sparsity and sink/window-aware dense regions live
 # in the sparsity package. The baseline forward kernel below calls them
@@ -272,7 +292,9 @@ def _attn_fwd(
     NVFP4_K: tl.constexpr = False,  # fakequant K -> NVFP4 before BMM1 (= NVFP4 KV$ K side)
     NVFP4_P: tl.constexpr = False,  # fakequant softmax P -> NVFP4 before BMM2
     NVFP4_V: tl.constexpr = False,  # fakequant V -> NVFP4 before BMM2 (= NVFP4 KV$ V side)
-    FP16_SOFTMAX: tl.constexpr = False,  # compute softmax exp in fp16 (mixed precision)
+    DIFF_QUANT: tl.constexpr = 0,  # softmax-datapath modes: DIFF (pre-exp2), EXP2, ACC (sum)
+    EXP2_QUANT: tl.constexpr = 0,
+    ACC_QUANT: tl.constexpr = 0,
     q_global_scale=1.0,  # per-tensor NVFP4 global scales (amax/(6*448)), computed host-side
     k_global_scale=1.0,
     p_global_scale=1.0,
@@ -396,12 +418,11 @@ def _attn_fwd(
             )
 
         if not skip_tile:
-            # --- Online softmax update ---
+            # --- Online softmax update (with optional mixed-precision datapath quant) ---
             m_new = tl.maximum(row_max, tl.max(scores, 1))
-            p = tl.math.exp2(scores - m_new[:, None])
-            if FP16_SOFTMAX:  # mixed-precision (fp16) softmax
-                p = p.to(tl.float16).to(tl.float32)
-            l_new = tl.sum(p, 1)
+            s_shift = softmax_round(scores - m_new[:, None], DIFF_QUANT)  # DIFF: input to exp2
+            p = softmax_round(tl.math.exp2(s_shift), EXP2_QUANT)  # EXP2: output of exp2
+            l_new = softmax_round(tl.sum(p, 1), ACC_QUANT)  # ACC: running softmax denom
             correction = tl.math.exp2(row_max - m_new)
             row_sum = row_sum * correction + l_new
             acc = acc * correction[:, None]
@@ -847,6 +868,7 @@ class _Attention(torch.autograd.Function):
         page_size,
         nvfp4=None,
         fp16_softmax=False,
+        softmax_quant=None,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -929,6 +951,7 @@ class _Attention(torch.autograd.Function):
         )
         _nvfp4 = nvfp4 or set()
         assert _nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
+        _diff_q, _exp2_q, _acc_q = _resolve_softmax_modes(fp16_softmax, softmax_quant)
         # Per-tensor NVFP4 global scales (host-side amax/(6*448)), aligned with the
         # mni/attnOpt convention (tensor_scale). K/V are read from the paged cache.
         _k_src = k_cache if is_paged else k
@@ -966,7 +989,9 @@ class _Attention(torch.autograd.Function):
             "NVFP4_K": "k" in _nvfp4,
             "NVFP4_P": "p" in _nvfp4,
             "NVFP4_V": "v" in _nvfp4,
-            "FP16_SOFTMAX": fp16_softmax,
+            "DIFF_QUANT": _diff_q,
+            "EXP2_QUANT": _exp2_q,
+            "ACC_QUANT": _acc_q,
             "q_global_scale": tensor_global_scale(q) if "q" in _nvfp4 else 1.0,
             "k_global_scale": tensor_global_scale(_k_src) if "k" in _nvfp4 else 1.0,
             "p_global_scale": _p_global if "p" in _nvfp4 else 1.0,
@@ -1165,6 +1190,7 @@ class _Attention(torch.autograd.Function):
             None,  # page_size
             None,  # nvfp4
             None,  # fp16_softmax
+            None,  # softmax_quant
         )
 
 
@@ -1189,6 +1215,7 @@ def attention(
     measure_sparsity: bool = False,
     nvfp4: set[str] | None = None,
     fp16_softmax: bool = False,
+    softmax_quant: dict | None = None,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1269,6 +1296,7 @@ def attention(
         page_size,
         nvfp4,
         fp16_softmax,
+        softmax_quant,
     )
 
 
