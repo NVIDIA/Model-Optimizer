@@ -313,7 +313,7 @@ def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
     """Invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
     ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
     ``{"mtp", "mtp.layers.0"}``. ``"model"`` top-level is dropped to avoid the
-    ``"model*"`` wildcard covering the whole backbone (nvbug 6108133).
+    ``"model*"`` wildcard covering the whole backbone.
     """
     prefixes: set[str] = set()
     for key in keys:
