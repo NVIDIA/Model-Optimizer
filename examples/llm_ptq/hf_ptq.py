@@ -27,10 +27,6 @@ from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
-    _KV_NONE,
-    _QFORMAT_ALIASES,
-    KV_QUANT_CFG_CHOICES,
-    QUANT_CFG_CHOICES,
     build_quant_cfg,
     copy_custom_model_files,
     create_vlm_calibration_loop,
@@ -60,6 +56,12 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.recipe.presets import (
+    KV_CACHE_NONE,
+    KV_QUANT_CFG_CHOICES,
+    QFORMAT_ALIASES,
+    QUANT_CFG_CHOICES,
+)
 from modelopt.torch.export import (
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
@@ -149,7 +151,7 @@ def _canonical_qformat(name: str) -> str:
     (``int8_smoothquant``). Unknown tokens pass through unchanged so the existing
     error paths still fire.
     """
-    return _QFORMAT_ALIASES.get(name, name)
+    return QFORMAT_ALIASES.get(name, name)
 
 
 mto.enable_huggingface_checkpointing()
@@ -416,7 +418,7 @@ def auto_quantize(
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     # We need to explicitly set up KV cache quantization after auto_quantize
-    enable_quant_kv_cache = args.kv_cache_qformat != _KV_NONE
+    enable_quant_kv_cache = args.kv_cache_qformat != KV_CACHE_NONE
     print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
     if enable_quant_kv_cache:
         kv_cache_quant_cfg = copy.deepcopy(KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"])
@@ -452,7 +454,7 @@ def load_model(args: argparse.Namespace):
             f"Quantization format is not supported for low memory mode. Supported formats: {list(QUANT_CFG_CHOICES)}"
         )
         quant_cfg = QUANT_CFG_CHOICES[args.qformat]
-        if args.kv_cache_qformat != _KV_NONE:
+        if args.kv_cache_qformat != KV_CACHE_NONE:
             quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
                 quant_cfg,
                 KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
@@ -1100,7 +1102,7 @@ def quantize_main(
                 args.moe_calib_experts_ratio,
             )
 
-            enable_quant_kv_cache = args.kv_cache_qformat != _KV_NONE
+            enable_quant_kv_cache = args.kv_cache_qformat != KV_CACHE_NONE
             print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
 
             # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
@@ -1272,7 +1274,7 @@ def parse_args() -> argparse.Namespace:
         "--kv_cache_qformat",
         required=False,
         default="fp8_cast",
-        choices=[_KV_NONE, *KV_QUANT_CFG_CHOICES],
+        choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
         help=(
             "Specify KV cache quantization format. Default: fp8_cast. "
             "Formats ending in '_cast' (fp8_cast, nvfp4_cast) set the amax to FP8 range "

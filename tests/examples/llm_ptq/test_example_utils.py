@@ -12,30 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for ``examples/llm_ptq/example_utils``.
+"""End-to-end unit tests for ``examples/llm_ptq/example_utils.load_mtp_weights``.
 
-Covers:
-
-* ``load_mtp_weights`` — one test per supported on-disk MTP convention
-  (inlined-orphaned, inlined-in-state-dict, separate-file-standalone,
-  separate-file-indexed) plus a negative case.
-* the YAML-driven ``QUANT_CFG_CHOICES`` / ``KV_QUANT_CFG_CHOICES`` preset
-  discovery — every preset under the model/KV dirs loads, aliases resolve, and
-  the KV ``none`` sentinel does not collide with a discovered preset. These are
-  cheap smoke tests guarding the eager import-time load: a single malformed
-  preset YAML would otherwise break ``import example_utils`` (and every llm_ptq
-  script) before the user reaches CLI validation.
+One test per supported on-disk MTP convention (inlined-orphaned, inlined-in-state-dict,
+separate-file-standalone, separate-file-indexed) plus a negative case.
 """
 
 import json
 from types import SimpleNamespace
 
-import pytest
 import torch
 from _test_utils.examples.llm_ptq_example_utils import example_utils
 from safetensors.torch import save_file
-
-from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
 
 
 class _FakeModel:
@@ -161,49 +149,3 @@ def test_load_mtp_weights_no_mtp_returns_empty(tmp_path):
     prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
     assert prefixes == []
     assert orphans == {}
-
-
-# ---------------------------------------------------------------------------
-# Preset discovery: QUANT_CFG_CHOICES / KV_QUANT_CFG_CHOICES
-# ---------------------------------------------------------------------------
-
-
-def _yaml_basenames(subdir: str) -> set[str]:
-    return {
-        entry.name.rsplit(".", 1)[0]
-        for entry in BUILTIN_CONFIG_ROOT.joinpath(subdir).iterdir()
-        if entry.name.endswith((".yaml", ".yml"))
-    }
-
-
-@pytest.mark.parametrize(
-    ("choices", "preset_dir"),
-    [
-        (example_utils.QUANT_CFG_CHOICES, example_utils._QFORMAT_PRESET_DIR),
-        (example_utils.KV_QUANT_CFG_CHOICES, example_utils._KV_QFORMAT_PRESET_DIR),
-    ],
-    ids=["model", "kv"],
-)
-def test_every_discovered_preset_loads(choices, preset_dir):
-    # Configs are loaded eagerly at import, so a malformed preset would already have
-    # raised before this test runs. Assert discovery is non-empty, covers every YAML
-    # on disk, and that each resolved entry is a usable quant_cfg dict.
-    basenames = _yaml_basenames(preset_dir)
-    assert basenames, f"no preset YAMLs discovered under {preset_dir}"
-    assert basenames <= set(choices), "a preset YAML is missing from the discovered choices"
-    for name, cfg in choices.items():
-        assert isinstance(cfg, dict), f"{name} did not resolve to a dict"
-        assert "quant_cfg" in cfg, f"{name} is missing the 'quant_cfg' key"
-
-
-def test_aliases_resolve_to_their_canonical_preset():
-    for alias, target in example_utils._QFORMAT_ALIASES.items():
-        assert alias in example_utils.QUANT_CFG_CHOICES, f"alias {alias!r} not exposed"
-        assert target in example_utils.QUANT_CFG_CHOICES, f"alias target {target!r} missing"
-        assert example_utils.QUANT_CFG_CHOICES[alias] == example_utils.QUANT_CFG_CHOICES[target]
-
-
-def test_kv_none_sentinel_is_not_a_discovered_preset():
-    # The runtime branches on ``args.kv_cache_qformat != _KV_NONE``; a real preset
-    # named "none" would make that branch ambiguous.
-    assert example_utils._KV_NONE not in example_utils.KV_QUANT_CFG_CHOICES

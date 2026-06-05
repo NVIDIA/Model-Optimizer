@@ -27,18 +27,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
-from example_utils import (
-    _KV_NONE,
-    KV_QUANT_CFG_CHOICES,
-    QUANT_CFG_CHOICES,
-    build_quant_cfg,
-    get_tokenizer,
-)
+from example_utils import build_quant_cfg, get_tokenizer
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.export import get_model_type
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
@@ -72,7 +67,7 @@ def parse_args():
     parser.add_argument(
         "--kv_cache_qformat",
         default="fp8",
-        choices=[_KV_NONE, *KV_QUANT_CFG_CHOICES],
+        choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
         help="KV cache quantization format",
     )
     parser.add_argument(
@@ -320,7 +315,7 @@ def main(args):
         args.awq_block_size,
     )
 
-    enable_quant_kv_cache = args.kv_cache_qformat != _KV_NONE
+    enable_quant_kv_cache = args.kv_cache_qformat != KV_CACHE_NONE
     print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
 
     # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
