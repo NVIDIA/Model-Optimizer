@@ -598,6 +598,12 @@ def get_model(
             # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
             device_map = None
 
+        if hf_config.model_type == "t5":
+            # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
+            # position-bias buffers across GPUs, which non-deterministically produces NaN
+            # activations during calibration on multi-GPU machines (see HF transformers #21093).
+            device_map = None
+
         # Helper function to check if model has pack-quantized config
         def has_pack_quantized_config(config):
             # Check top-level quantization_config
