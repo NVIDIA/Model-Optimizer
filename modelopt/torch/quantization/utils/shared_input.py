@@ -123,19 +123,13 @@ class SharedQuantState(nn.Module):
 
 
 def _has_enabled_weight_quantizer(child: nn.Module, wq_attr: str) -> bool:
-    """A child is eligible if it has an enabled weight quantizer.
-
-    Group membership is structural (a pattern over the module tree), independent of
-    calibration — so this does NOT require ``_amax``. That lets attach run before
-    ``weight_only_quantize``; per-member ``_amax`` is aggregated later in
-    :func:`populate_shared_state`.
-    """
+    # Membership is structural (independent of calibration), so this intentionally does NOT
+    # require ``_amax`` — letting attach run before ``weight_only_quantize``.
     wq = getattr(child, wq_attr, None)
     return wq is not None and hasattr(wq, "_disabled") and not wq._disabled
 
 
 def _build_parent_map(model: nn.Module) -> dict[nn.Module, nn.Module]:
-    """Build a ``{child_module: direct_parent}`` map by walking ``named_children``."""
     parent_map: dict[nn.Module, nn.Module] = {}
     for parent in model.modules():
         for child in parent.children():
@@ -148,15 +142,9 @@ def _climb_past_modulelist(
     parent_map: dict[nn.Module, nn.Module],
     fallback: nn.Module,
 ) -> nn.Module:
-    """Walk up past any ``nn.ModuleList`` ancestors to a regular module.
-
-    Attaching ``SharedQuantState`` to a ``ModuleList`` registers it in that
-    container's ``_modules`` and corrupts its iteration/length (the state shows up
-    alongside the experts), so attach to the first non-ModuleList ancestor.
-
-    Only ``nn.ModuleList`` is handled today. It can be extended in the future to include modules
-    like nn.ModuleDict``.
-    """
+    # Attaching SharedQuantState to a ModuleList registers it in the container's ``_modules``
+    # and corrupts its iteration/length, so climb to the first non-ModuleList ancestor.
+    # (Only ModuleList today; extend to ModuleDict etc. if needed.)
     cur = module
     while isinstance(cur, nn.ModuleList):
         parent = parent_map.get(cur)
@@ -171,11 +159,6 @@ def _lowest_common_ancestor(
     parent_map: dict[nn.Module, nn.Module],
     fallback: nn.Module,
 ) -> nn.Module:
-    """LCA of ``members`` in the module tree (``fallback`` if none).
-
-    Climbs past ``nn.ModuleList`` ancestors so the result can host
-    ``SharedQuantState`` as a submodule.
-    """
     if not members:
         return fallback
 
