@@ -352,6 +352,75 @@ def test_qkv_slicing_gqa_tp2(dist_workers_size_2, tmp_path):
     dist_workers_size_2.run(partial(_test_qkv_slicing_gqa_tp2, tmp_path))
 
 
+def _test_export_pp2_mtp_metadata_matches_shards(tmp_path, model_dir, rank, size):
+    """With PP>1, per-shard JSON keys should exist in the referenced safetensors shard."""
+    config = transformers.AutoConfig.from_pretrained(model_dir)
+
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=config.num_hidden_layers,
+        hidden_size=config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        num_query_groups=config.num_key_value_heads,
+        ffn_hidden_size=config.intermediate_size,
+        max_sequence_length=config.max_position_embeddings,
+        vocab_size=config.vocab_size,
+        activation_func="swiglu",
+        normalization="RMSNorm",
+        transformer_impl="modelopt",
+    ).cuda()
+
+    export_dir = tmp_path / "export_pp2"
+    original_get_mtp_state_dict = GPTModelExporter._get_mtp_state_dict
+
+    # Simulate stage-local MTP tensors (only on the last PP rank).
+    def _fake_get_mtp_state_dict(self):
+        if rank != size - 1:
+            return {}
+        return {f"mtp.injected.rank{rank}.weight": torch.ones(8, dtype=torch.bfloat16).cpu()}
+
+    GPTModelExporter._get_mtp_state_dict = _fake_get_mtp_state_dict
+
+    try:
+        export_mcore_gpt_to_hf(
+            model,
+            model_dir,
+            dtype=torch.bfloat16,
+            export_dir=str(export_dir),
+        )
+    finally:
+        GPTModelExporter._get_mtp_state_dict = original_get_mtp_state_dict
+
+    if rank == 0:
+        shard_json_files = sorted(export_dir.glob("model-*.json"))
+        assert shard_json_files, "no per-shard metadata json files found"
+
+        shard_keys_cache = {}
+        all_weight_map_keys = set()
+        for shard_json_file in shard_json_files:
+            with open(shard_json_file) as f:
+                shard_meta = json.load(f)
+            for key, shard_file in shard_meta["weight_map"].items():
+                all_weight_map_keys.add(key)
+                if shard_file not in shard_keys_cache:
+                    with safe_open(str(export_dir / shard_file), framework="pt", device="cpu") as sf:
+                        shard_keys_cache[shard_file] = set(sf.keys())
+                assert key in shard_keys_cache[shard_file], (
+                    f"key '{key}' from {shard_json_file.name} missing in {shard_file}"
+                )
+
+        assert any(key.startswith("mtp.injected.") for key in all_weight_map_keys), (
+            "expected injected mtp.* key missing from shard metadata/index map"
+        )
+
+
+def test_unified_export_megatron_pp2_mtp_metadata_matches_shards(dist_workers_size_2, tmp_path):
+    model_dir = create_tiny_llama_dir(tmp_path)
+    dist_workers_size_2.run(partial(_test_export_pp2_mtp_metadata_matches_shards, tmp_path, model_dir))
+
+
 def test_qkv_slicing_records_hf_excludes_for_unquantized_fused_qkv():
     """Unquantized fused MCore linear_qkv should become HF q/k/v excludes."""
     exporter = object.__new__(GPTModelExporter)
