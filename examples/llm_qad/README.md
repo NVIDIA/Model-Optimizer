@@ -2,6 +2,8 @@
 
 Quantization-Aware Distillation (QAD) training scripts for language models using Megatron-LM. These scripts enable training quantized (e.g., NVFP4) student models with knowledge distillation from full-precision teacher models.
 
+> **Note:** For Hugging Face LLM QAD, see the [LLM QAT QAD section](../llm_qat/README.md#end-to-end-qad-example).
+
 ## Overview
 
 | Script | Purpose |

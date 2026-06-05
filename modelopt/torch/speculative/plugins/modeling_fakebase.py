@@ -40,8 +40,13 @@ _EMBED_TOKENS_PATHS = [
     "backbone.embeddings",
     "language_model.backbone.embeddings",
     "model.language_model.embed_tokens",
+    "tok_embeddings",  # Mistral native checkpoints (consolidated.safetensors)
 ]
-_LM_HEAD_PATHS = ["lm_head", "language_model.lm_head"]
+_LM_HEAD_PATHS = [
+    "lm_head",
+    "language_model.lm_head",
+    "output",  # Mistral native checkpoints (consolidated.safetensors)
+]
 _BASE_MODEL_PATHS = [
     "language_model.model",
     "model.language_model",
@@ -51,7 +56,9 @@ _BASE_MODEL_PATHS = [
 ]
 _VLM_CONFIG_ATTRS = ["text_config", "llm_config"]
 _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
-_SAFETENSORS_SINGLE_FILENAME = "model.safetensors"
+# Single-file safetensors names to try, in order.  Mistral native checkpoints
+# use ``consolidated.safetensors`` instead of the HF-standard ``model.safetensors``.
+_SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
 
 
 class FakeBaseConfig(PretrainedConfig):
@@ -67,14 +74,35 @@ class FakeBaseConfig(PretrainedConfig):
         max_position_embeddings=None,
         dtype=torch.bfloat16,
         tie_word_embeddings=False,
+        num_orig_hidden_layers=None,
+        num_attention_heads=None,
+        num_key_value_heads=None,
+        intermediate_size=None,
         **kwargs,
     ):
         """Initialize FakeBaseConfig with minimal model configuration parameters."""
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
         self.num_hidden_layers = num_hidden_layers
+        # Mirror the original base layer count. The non-fake offline path loads with
+        # num_hidden_layers=0 and stashes the real count here (see utils.load_vlm_or_llm);
+        # the fake base keeps num_hidden_layers as the real count, so default to it. DFlash's
+        # offline modify() reads num_orig_hidden_layers directly (hf_dflash.py), so it must
+        # always be present on the base config.
+        self.num_orig_hidden_layers = (
+            num_orig_hidden_layers if num_orig_hidden_layers is not None else num_hidden_layers
+        )
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
+        # Attention/MLP dims needed when exporting a draft head built on a fake base: the
+        # DFlash exporter (hf_spec_export._export_config) references base_config.{num_attention_heads,
+        # num_key_value_heads, intermediate_size} as getattr fallbacks, which Python evaluates
+        # eagerly, so they must exist even though the fake base has no real layers.
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = (
+            num_key_value_heads if num_key_value_heads is not None else num_attention_heads
+        )
+        self.intermediate_size = intermediate_size
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
         self.dtype = dtype
@@ -141,6 +169,9 @@ class FakeBaseModel(PreTrainedModel):
             max_position_embeddings=getattr(base_cfg, "max_position_embeddings", None),
             dtype=getattr(base_cfg, "dtype", torch.bfloat16),
             tie_word_embeddings=getattr(base_cfg, "tie_word_embeddings", False),
+            num_attention_heads=getattr(base_cfg, "num_attention_heads", None),
+            num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
+            intermediate_size=getattr(base_cfg, "intermediate_size", None),
         )
         model = cls(config)
         # Load lm_head and embed_tokens only from checkpoint
@@ -182,11 +213,12 @@ class FakeBaseModel(PreTrainedModel):
         if (index_path := _try_fetch(_SAFETENSORS_INDEX_FILENAME)) is not None:
             with open(index_path) as f:
                 return json.load(f).get("weight_map", {})
-        if (single_path := _try_fetch(_SAFETENSORS_SINGLE_FILENAME)) is not None:
-            with safe_open(single_path, framework="pt") as h:
-                return dict.fromkeys(h.keys(), _SAFETENSORS_SINGLE_FILENAME)
+        for single_name in _SAFETENSORS_SINGLE_FILENAMES:
+            if (single_path := _try_fetch(single_name)) is not None:
+                with safe_open(single_path, framework="pt") as h:
+                    return dict.fromkeys(h.keys(), single_name)
         raise FileNotFoundError(
-            f"No {_SAFETENSORS_INDEX_FILENAME} or {_SAFETENSORS_SINGLE_FILENAME} found at "
+            f"No {_SAFETENSORS_INDEX_FILENAME} or {_SAFETENSORS_SINGLE_FILENAMES} found at "
             f"{source!r}. FakeBaseModel only supports safetensors checkpoints; "
             "pytorch_model.bin is not supported."
         )

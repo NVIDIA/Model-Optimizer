@@ -16,6 +16,7 @@
 import json
 
 import pytest
+import torch
 from _test_utils.torch.diffusers_models import (
     get_tiny_dit,
     get_tiny_flux,
@@ -25,7 +26,9 @@ from _test_utils.torch.diffusers_models import (
 
 pytest.importorskip("diffusers")
 
+import modelopt.torch.export.unified_export_hf as unified_export_hf
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
+from modelopt.torch.export.diffusers_utils import generate_diffusion_dummy_inputs
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 
@@ -53,8 +56,6 @@ def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
 def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatch):
     model = get_tiny_unet()
     export_dir = tmp_path / "export_unet_quant"
-
-    import modelopt.torch.export.unified_export_hf as unified_export_hf
 
     monkeypatch.setattr(unified_export_hf, "has_quantized_modules", lambda *_: True)
 
@@ -93,10 +94,6 @@ def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatc
 
 def test_flux2_dummy_inputs_shape():
     """Verify Flux2-specific dummy input shapes: 4-col RoPE ids, no pooled_projections, guidance."""
-    import torch
-
-    from modelopt.torch.export.diffusers_utils import generate_diffusion_dummy_inputs
-
     model = get_tiny_flux2()
     cfg = model.config
     inputs = generate_diffusion_dummy_inputs(model, torch.device("cpu"), torch.float32)

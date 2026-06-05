@@ -111,47 +111,6 @@ def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
 
 
 @torch.no_grad()
-def _bootstrap_uncalibrated_weight_quantizers(model: nn.Module) -> int:
-    """Re-run weight calibration on the weight tensor for quantizers missing ``_amax``.
-
-    Covers MoE experts that ``max_calibrate`` skipped (no routed tokens) so MSE
-    doesn't drop them and break the gate==up ``weight_scale_2`` export invariant.
-    Activation quantizers on those modules remain uncalibrated; emits a warning.
-    """
-    name_to_module = dict(model.named_modules())
-    n = 0
-    for module in name_to_module.values():
-        if not isinstance(module, QuantModule):
-            continue
-        with enable_weight_access_and_writeback(module, model, name_to_module):
-            for weight, q in module.iter_weights_for_calibration():
-                if (
-                    not isinstance(q, TensorQuantizer)
-                    or q._disabled
-                    or q._dynamic
-                    or q._calibrator is None
-                ):
-                    continue
-                if weight.is_meta:
-                    continue
-                amax = q.amax
-                if amax is not None and (amax.is_meta or not torch.all(amax == 0)):
-                    continue
-                _run_and_load_max_stats(q, partial(_collect_weight_stats, weight=weight))
-                if hasattr(q._calibrator, "reset"):
-                    q._calibrator.reset()
-                n += 1
-    if n > 0:
-        warnings.warn(
-            f"Bootstrapped {n} weight quantizer(s) with no routed calibration tokens; "
-            f"their activation quantizers (if any) remain uncalibrated. "
-            f"Increase calib size/seq len to activate all experts.",
-            stacklevel=2,
-        )
-    return n
-
-
-@torch.no_grad()
 def _sync_grouped_weight_global_amax(model: nn.Module) -> int:
     """Unify NVFP4 ``global_amax`` across Q/K/V and gate/up sibling weight quantizers.
 
@@ -304,7 +263,14 @@ def max_calibrate(
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
     """
-    _run_and_load_max_stats(model, forward_loop)
+    # Always run weight calibration on the weight tensor directly so every weight
+    # quantizer gets ``_amax``, regardless of MoE routing. Downstream algorithms
+    # (MSE, AWQ, export) then no longer need to patch in a missing ``_amax``.
+    enable_stats_collection(model)
+    weight_only_quantize(model)
+    if forward_loop is not None:
+        forward_loop(model)
+    finish_stats_collection(model)
 
     # Sync quantizer amax across local experts within each rank (for SequentialMLP)
     for name, module in model.named_modules():
@@ -313,8 +279,6 @@ def max_calibrate(
 
     # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
     _check_nvfp4_static_tp_supported(model)
-
-    _bootstrap_uncalibrated_weight_quantizers(model)
 
     # Promote eligible static-block NVFP4 weight quantizers to NVFP4StaticQuantizer so
     # the static blockwise fake-quant path is used in forward and export picks up the

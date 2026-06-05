@@ -22,6 +22,9 @@ import torch.nn.functional as F
 
 pytest.importorskip("transformers")
 
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export.moe_utils import _export_fused_experts
+from modelopt.torch.export.quant_utils import get_quant_config
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
@@ -32,6 +35,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
+from modelopt.torch.quantization.utils.core_utils import weight_attr_names
 
 # ---------------------------------------------------------------------------
 # Synthetic fused expert module matching the HF transformers 5.0+ pattern
@@ -263,9 +267,6 @@ class TestExportFusedExperts:
 
     def test_export_creates_per_expert_submodules(self):
         """_export_fused_experts should create per-expert submodules with standard naming."""
-        import modelopt.torch.quantization as mtq
-        from modelopt.torch.export.moe_utils import _export_fused_experts
-
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -336,8 +337,6 @@ class TestExportFusedExperts:
         tensor before the deepcopies, so gate's clone and up's clone start with
         the same amax.
         """
-        from modelopt.torch.export.moe_utils import _export_fused_experts
-
         # Build experts where gate and up have very different magnitudes —
         # any per-half fallback would clearly produce different amaxes.
         experts = _SyntheticFusedExperts()
@@ -420,8 +419,6 @@ class TestExportFusedExperts:
         per-projection scales. The fix reshapes to ``(fused_total, blocks_per_row)``
         before slicing on dim-0 when ``amax.numel() % fused_total == 0``.
         """
-        from modelopt.torch.export.moe_utils import _export_fused_experts
-
         experts = _SyntheticFusedExperts()
         expert_type = type(experts)
         if QuantModuleRegistry.get(expert_type) is None:
@@ -600,8 +597,6 @@ class TestFusedExpertsCalibration:
 
     def test_calibration_populates_all_expert_quantizers(self):
         """After PTQ, every input/weight quantizer on the fused-experts module has amax set."""
-        import modelopt.torch.quantization as mtq
-
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -664,8 +659,6 @@ class TestFusedExpertsCalibration:
         ``_amax=None`` unless static NVFP4 finalization bootstraps them from the
         per-expert weight slice.
         """
-        import modelopt.torch.quantization as mtq
-
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -767,8 +760,6 @@ class TestMixedPrecisionExport:
     def test_weight_attr_names_yields_fused_expert_params(self):
         """weight_attr_names must yield gate_up_proj / down_proj on fused experts
         even though their quantizers are a plural ModuleList, not singular."""
-        from modelopt.torch.quantization.utils.core_utils import weight_attr_names
-
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -788,9 +779,6 @@ class TestMixedPrecisionExport:
         """Mixed-precision recipe (experts FP8 + dense Linear FP8 per-channel) should
         show both modules in quantized_layers. Using two distinct formats would
         trigger MIXED_PRECISION; using same-format still exercises enumeration."""
-        import modelopt.torch.quantization as mtq
-        from modelopt.torch.export.quant_utils import get_quant_config
-
         model = _MixedPrecisionModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)

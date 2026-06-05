@@ -30,6 +30,7 @@ from _test_utils.torch.transformers_models import (
 )
 from safetensors import safe_open
 from safetensors.torch import save_file
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
@@ -179,8 +180,6 @@ def _test_unified_export_megatron(
             "vision encoder keys missing from export"
         )
         # try to load the model and run a forward pass
-        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
-
         vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
             tmp_export_dir, torch_dtype=torch.bfloat16
         ).cuda()

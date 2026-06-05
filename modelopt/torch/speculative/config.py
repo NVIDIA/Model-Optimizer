@@ -139,8 +139,9 @@ class EagleConfig(ModeloptBaseConfig):
     eagle_offline: bool = ModeloptField(
         default=False,
         description=(
-            "Whether to use detached Eagle. Derived by ModelOptEagleRecipe from "
-            "data.offline_data_path; not user-configurable."
+            "Whether the Eagle module consumes pre-computed hidden states (offline or streaming) "
+            "instead of running the base model in-process. Derived by ModelOptEagleRecipe from "
+            "``data.mode``; not user-configurable."
         ),
     )
 
@@ -246,6 +247,14 @@ class EagleConfig(ModeloptBaseConfig):
         description=(
             "Number of warmup steps where LoRA is frozen and only the EAGLE draft head trains. "
             "After warmup, LoRA is enabled for co-training."
+        ),
+    )
+
+    eagle_base_lora_start_layer: int | None = ModeloptField(
+        default=None,
+        description=(
+            "If set, only inject LoRA into base model layers with index >= this value. "
+            "For example, setting to 17 on a 36-layer model applies LoRA to layers 17-35 only."
         ),
     )
 

@@ -22,6 +22,7 @@ MODEL_NAME=$1
 EVALS=$2
 BUILD_MAX_OUTPUT_LEN=${3:-2048}
 PORT=${4:-8000}
+NUM_EXAMPLES=${5:-}  # optional: limit examples per eval (default: full eval)
 
 if [ ! -d "human-eval" ]; then
     git clone https://github.com/openai/human-eval.git
@@ -42,4 +43,9 @@ popd
 export OPENAI_API_KEY="local"
 export OPENAI_BASE_URL="http://localhost:$PORT/v1"
 
-python -m simple-evals.simple_evals --model $MODEL_NAME --evals $EVALS --max_tokens $BUILD_MAX_OUTPUT_LEN
+examples_flag=""
+if [ -n "$NUM_EXAMPLES" ]; then
+    examples_flag="--examples $NUM_EXAMPLES"
+fi
+
+python -m simple-evals.simple_evals --model $MODEL_NAME --evals $EVALS --max_tokens $BUILD_MAX_OUTPUT_LEN $examples_flag

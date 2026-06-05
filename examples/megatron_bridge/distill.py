@@ -51,7 +51,7 @@ from megatron.core.distributed import DistributedDataParallelConfig
 from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_args, print_rank_0
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
@@ -112,7 +112,6 @@ def get_args():
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
-    parser.add_argument("--etp_size", type=int, default=1, help="Expert tensor parallel size")
 
     # Dataset arguments
     parser.add_argument(
@@ -225,10 +224,7 @@ def get_args():
     if args.hf_export_path and not args.student_hf_model:
         raise ValueError("Must provide --student_hf_model if --hf_export_path is provided.")
 
-    print_rank_0("\n==================== Arguments ====================")
-    for k, v in args.__dict__.items():
-        print_rank_0(f"{k:<35} {v}")
-    print_rank_0("===================================================\n")
+    print_args(args)
 
     return args
 
@@ -249,7 +245,7 @@ def main(args: argparse.Namespace):
         provider.pipeline_dtype = torch.bfloat16
         provider.context_parallel_size = args.cp_size
         provider.expert_model_parallel_size = args.ep_size
-        provider.expert_tensor_parallel_size = args.etp_size
+        provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
@@ -343,7 +339,7 @@ def main(args: argparse.Namespace):
             load=checkpoint_dir,  # Resume from this directory (if exists)
             most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
-            async_save=False,
+            async_save=True,
             fully_parallel_save=True,
         ),
         rng=RNGConfig(seed=args.seed),

@@ -17,6 +17,7 @@ import itertools
 import os
 import subprocess
 import sys
+import traceback
 
 import pytest
 import torch
@@ -84,8 +85,6 @@ def _run_trtllm_deploy(
         )
         deployer._deploy_trtllm_impl()
     except Exception:
-        import traceback
-
         traceback.print_exc()
         pytest.fail(traceback.format_exc())
 
@@ -111,8 +110,6 @@ def _run_vllm_deploy(
         )
         deployer._deploy_vllm_impl()
     except Exception:
-        import traceback
-
         traceback.print_exc()
         pytest.fail(traceback.format_exc())
 
@@ -138,8 +135,6 @@ def _run_sglang_deploy(
         )
         deployer._deploy_sglang_impl()
     except Exception:
-        import traceback
-
         traceback.print_exc()
         pytest.fail(traceback.format_exc())
 

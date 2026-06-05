@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import tempfile
 from collections import OrderedDict
@@ -170,8 +171,6 @@ def test_invalid_json(reference_runner):
     inputs = {"X1": [[1.0, 2.0, 3.0]], "X2": [[4.0, 5.0, 6.0]]}
 
     with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
-        import json
-
         json.dump(inputs, f)
         input_path = f.name
     try:
