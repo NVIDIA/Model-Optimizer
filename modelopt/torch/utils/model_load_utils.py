@@ -162,9 +162,6 @@ def parallel_load_and_prepare_fsdp2(
     Set ``freeze=False`` for training callers; PTQ keeps the default ``True``.
     Pass ``hf_config`` if the caller has already fetched it (skips a redundant fetch).
     """
-    # Lazy import: layerwise_calib imports modelopt.torch.utils.distributed (circular).
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-
     # Resolve HF Hub IDs to a local cache dir (rank 0 downloads; others wait).
     if os.path.isdir(ckpt_path):
         resolved_path = ckpt_path
@@ -179,21 +176,10 @@ def parallel_load_and_prepare_fsdp2(
     # Meta skeleton on every rank.
     model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
 
-    # Detect decoder layers + their fully qualified prefixes.
-    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
-    if decoder_layers is None:
-        raise RuntimeError(
-            "Could not auto-detect decoder layers; FSDP2 load requires a standard HF causal-LM layout."
-        )
+    # Shard decoder layers (root stays unwrapped); reuse the returned detection result.
+    decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
-
-    # Shard decoder layers (root stays unwrapped). Snapshot/restore ``config.architectures``
-    # because some HF builders mutate it during ``fully_shard``.
-    architectures = list(getattr(model.config, "architectures", []) or [])
-    fsdp2_wrap(decoder_layers, mp_policy=mp_policy, cpu_offload=cpu_offload)
-    if architectures:
-        model.config.architectures = architectures
 
     # Materialize meta → empty real tensors (CPU when cpu_offload, GPU otherwise).
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
@@ -226,6 +212,7 @@ def parallel_load_and_prepare_fsdp2(
             del owned[layer_idx]
 
     # Non-decoder params (embed, lm_head, norm) — rank 0 reads + broadcasts.
+    # TODO: add support for shard_root=True and layerwise.
     layer_prefix_tuple = tuple(layer_prefixes)
     non_layer = (
         read_safetensors_subset(
