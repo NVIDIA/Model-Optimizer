@@ -116,6 +116,10 @@ def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
 # of the YAML itself. A preset can exist and be valid for plain PTQ while not being
 # safe to mix into an auto_quantize search. Update this set when adding/removing a
 # format from auto_quantize support.
+#
+# NOTE: auto_quantize is being refactored/reimplemented; this table and the
+# _canonical_qformat helper below are expected to be removed in the near future, so
+# deliberately not invested in deriving them from the presets.
 _AUTO_QUANTIZE_QFORMATS: frozenset[str] = frozenset(
     {
         "fp8",
