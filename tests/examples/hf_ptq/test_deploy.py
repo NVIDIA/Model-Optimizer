@@ -671,3 +671,19 @@ def test_eagle(command):
         command.run()
     else:
         pytest.skip(f"Local model not found: {local_path}")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+    ],
+    ids=idfn,
+)
+def test_nvidia_nemotron_3_ultra_550b_a55b_nvfp4(command):
+    command.run()
