@@ -20,7 +20,11 @@ from dataclasses import field
 import transformers
 
 from modelopt.torch.distill.plugins.huggingface import DistillArguments
-from modelopt.torch.opt.plugins.transformers import ModelOptArgParser, ModelOptHFArguments
+from modelopt.torch.opt.plugins.transformers import (
+    ModelOptArgParser,
+    ModelOptHFArguments,
+    ModelOptTrainerArguments,
+)
 from modelopt.torch.quantization.plugins.transformers_trainer import (
     QuantizationArguments as ModelOptQuantizationArguments,
 )
@@ -34,10 +38,19 @@ class ModelArguments(ModelOptHFArguments):
         },
     )
     model_max_length: int = field(
-        default=4096,
+        default=8192,
         metadata={
             "help": (
                 "Maximum sequence length. Sequences will be right-padded (and possibly truncated)."
+            )
+        },
+    )
+    attn_implementation: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Attention implementation: 'flash_attention_2', 'flash_attention_3', "
+                "'sdpa', or 'eager'."
             )
         },
     )
@@ -78,10 +91,13 @@ class DataArguments(ModelOptHFArguments):
     )
 
 
-class TrainingArguments(ModelOptHFArguments, transformers.TrainingArguments):
-    cache_dir: str | None = field(default=None)
+class TrainingArguments(ModelOptTrainerArguments, transformers.TrainingArguments):
     dataloader_drop_last: bool = field(default=True)
     bf16: bool = field(default=True)
+    use_liger_kernel: bool = field(
+        default=True,
+        metadata={"help": "Use Liger kernel for fused loss computation. Reduces memory usage."},
+    )
     lora: bool = field(
         default=False,
         metadata={

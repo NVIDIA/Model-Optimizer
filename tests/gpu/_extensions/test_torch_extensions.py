@@ -19,7 +19,7 @@ import pytest
 import modelopt.torch.quantization.extensions as ext
 
 # Override default timeout as these tests JIT-compile the CUDA extensions, which is slow
-pytestmark = pytest.mark.timeout(180)
+pytestmark = pytest.mark.timeout(240)
 
 
 # Compile extensions first so it does not count towards time used to run a test that needs it
