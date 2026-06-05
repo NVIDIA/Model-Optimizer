@@ -69,3 +69,9 @@
   - parent_class: 'nn.Embedding'
     quantizer_name: '*'
     enable: false
+  # Diffusion self-conditioning network: text-only and not exercised by
+  # typical calibration; without exclusion its TensorQuantizers never see
+  # input and export crashes with "AttributeError: '...' has no attribute
+  # '_amax'". Companion to the vision excludes above.
+  - quantizer_name: '*self_conditioning*'
+    enable: false
