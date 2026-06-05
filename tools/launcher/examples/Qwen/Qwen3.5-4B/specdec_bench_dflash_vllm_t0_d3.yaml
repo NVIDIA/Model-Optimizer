@@ -10,7 +10,7 @@ pipeline:
       - --dataset speed
       - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
       - --engine VLLM
-      - --speculative_algorithm DFlash
+      - --speculative_algorithm DFLASH
       - --draft_length 3
       - --runtime_params common/specdec_bench/_cells/qwen3.5-4b_dflash_vllm_t0_d3.yaml
       - --tp_size 2
@@ -36,7 +36,7 @@ pipeline:
       - --dataset speed
       - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
       - --engine VLLM
-      - --speculative_algorithm DFlash
+      - --speculative_algorithm DFLASH
       - --draft_length 3
       - --runtime_params common/specdec_bench/_cells/qwen3.5-4b_dflash_vllm_t0_d3.yaml
       - --tp_size 2
