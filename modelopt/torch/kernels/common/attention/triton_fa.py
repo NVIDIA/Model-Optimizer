@@ -30,6 +30,12 @@ import torch
 import triton
 import triton.language as tl
 
+from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
+    nvfp4_qdq_axis0,
+    nvfp4_qdq_lastdim_2d,
+    nvfp4_qdq_lastdim_2d_perrow,
+)
+
 # Helpers for optional N:M sparsity and sink/window-aware dense regions live
 # in the sparsity package. The baseline forward kernel below calls them
 # conditionally under constexpr guards, so the unified single-kernel design
@@ -261,6 +267,11 @@ def _attn_fwd(
     stride_vc_head=0,
     PAGE_SIZE: tl.constexpr = 16,
     max_blocks_per_seq=0,
+    NVFP4_Q: tl.constexpr = False,  # fakequant Q -> NVFP4 before BMM1
+    NVFP4_K: tl.constexpr = False,  # fakequant K -> NVFP4 before BMM1 (= NVFP4 KV$ K side)
+    NVFP4_P: tl.constexpr = False,  # fakequant softmax P -> NVFP4 before BMM2
+    NVFP4_V: tl.constexpr = False,  # fakequant V -> NVFP4 before BMM2 (= NVFP4 KV$ V side)
+    FP16_SOFTMAX: tl.constexpr = False,  # compute softmax exp in fp16 (mixed precision)
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -289,6 +300,8 @@ def _attn_fwd(
     # --- Load Q tile [BLOCK_M, BLOCK_D]: stays in SRAM for the entire KV loop ---
     q_ptrs = (q_offset + q_pos[:, None]) * stride_qbs + head_idx * stride_qh + dim_pos[None, :]
     q = tl.load(Q + q_ptrs, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :], other=0.0)
+    if NVFP4_Q:  # BMM1 query operand -> NVFP4 (contraction = head dim)
+        q = nvfp4_qdq_lastdim_2d(q.to(tl.float32), BLOCK_M, BLOCK_D // 16, 16).to(q.dtype)
 
     # Base pointers for K and V at this KV head (per-tile offset added in loop)
     k_base = K + kv_head_idx * stride_kh
@@ -339,6 +352,9 @@ def _attn_fwd(
                 other=0.0,
             )
 
+        if NVFP4_K:  # BMM1 key operand -> NVFP4 (K^T [BLOCK_D, BLOCK_N], contraction = head dim)
+            k = nvfp4_qdq_axis0(k.to(tl.float32), BLOCK_D // 16, 16, BLOCK_N).to(k.dtype)
+
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
         scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
@@ -378,6 +394,8 @@ def _attn_fwd(
             # --- Online softmax update ---
             m_new = tl.maximum(row_max, tl.max(scores, 1))
             p = tl.math.exp2(scores - m_new[:, None])
+            if FP16_SOFTMAX:  # mixed-precision (fp16) softmax
+                p = p.to(tl.float16).to(tl.float32)
             l_new = tl.sum(p, 1)
             correction = tl.math.exp2(row_max - m_new)
             row_sum = row_sum * correction + l_new
@@ -410,7 +428,16 @@ def _attn_fwd(
                     mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                     other=0.0,
                 )
-            acc = tl.dot(p.to(v.dtype), v, acc)
+            if NVFP4_V:  # BMM2 value operand -> NVFP4 (V [BLOCK_N, BLOCK_D], contraction = keys)
+                v = nvfp4_qdq_axis0(v.to(tl.float32), BLOCK_N // 16, 16, BLOCK_D).to(v.dtype)
+            # BMM2 prob operand -> NVFP4 (contraction = keys), per-row (per-query-token)
+            # global. NVFP4 is homogeneous, so quantizing the unnormalized exp with a
+            # per-row global equals quantizing the normalized P (row_sum normalization is
+            # applied to acc after the loop). NOTE: exact only within a KV tile; across
+            # tiles the online-softmax rescaling makes multi-tile P-NVFP4 approximate —
+            # the faithful full-P NVFP4 is the materialized (eager) path.
+            p_dot = nvfp4_qdq_lastdim_2d_perrow(p, BLOCK_M, BLOCK_N // 16, 16) if NVFP4_P else p
+            acc = tl.dot(p_dot.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
 
@@ -810,6 +837,8 @@ class _Attention(torch.autograd.Function):
         v_cache,
         block_table,
         page_size,
+        nvfp4=None,
+        fp16_softmax=False,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -890,6 +919,8 @@ class _Attention(torch.autograd.Function):
             lse.stride(0),
             lse.stride(1),
         )
+        _nvfp4 = nvfp4 or set()
+        assert _nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
         fwd_kwargs = {
             "N_CTX": max_input_len,
             "kv_group_num": kv_group_num,
@@ -918,6 +949,11 @@ class _Attention(torch.autograd.Function):
             "stride_vc_head": v_cache.stride(2) if is_paged else 0,
             "PAGE_SIZE": page_size,
             "max_blocks_per_seq": block_table.shape[1] if is_paged else 0,
+            "NVFP4_Q": "q" in _nvfp4,
+            "NVFP4_K": "k" in _nvfp4,
+            "NVFP4_P": "p" in _nvfp4,
+            "NVFP4_V": "v" in _nvfp4,
+            "FP16_SOFTMAX": fp16_softmax,
         }
 
         # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.
@@ -1110,6 +1146,8 @@ class _Attention(torch.autograd.Function):
             None,  # v_cache
             None,  # block_table
             None,  # page_size
+            None,  # nvfp4
+            None,  # fp16_softmax
         )
 
 
@@ -1132,6 +1170,8 @@ def attention(
     dense_recent_tokens: int = 64,
     skip_softmax_threshold: float | None = None,
     measure_sparsity: bool = False,
+    nvfp4: set[str] | None = None,
+    fp16_softmax: bool = False,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1210,6 +1250,8 @@ def attention(
         v_cache,
         block_table,
         page_size,
+        nvfp4,
+        fp16_softmax,
     )
 
 
