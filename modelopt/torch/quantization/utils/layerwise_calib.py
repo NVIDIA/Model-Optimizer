@@ -107,11 +107,11 @@ class LayerActivationCollector:
     Each decoder layer is patched with a unified forward whose behaviour is
     governed by a per-layer :class:`_LayerCalibState`:
 
-    * **skip** — return a zero-filled dummy whose shape and type match the
-      layer's real output (reconstructed from lightweight metadata).  No
-      computation is performed.  The correctly shaped dummy ensures un-patched
-      inter-layer operations in the parent forward (e.g. LayerNorm, tuple
-      unpacking) do not raise shape or type errors.
+    * **skip** — return a zero-filled meta-device dummy whose shape and type
+      match the layer's real output (reconstructed from lightweight metadata).
+      No computation or real-device allocation is performed. Tuple/list
+      structure is preserved for parent code that unpacks outputs, but
+      real-device inter-layer tensor operations are intentionally unsupported.
     * **run** — replay previously captured inputs through the original forward,
       ignoring whatever the parent passes in.  Only the just-calibrated layer
       uses this mode, so its output reflects updated weights.
@@ -176,7 +176,9 @@ class LayerActivationCollector:
 
         Recursively handles tensors, tuples, lists, and non-tensor values (e.g. None).
         The returned structure can be passed to ``_zeros_from_meta`` to reconstruct a
-        zero-filled output with identical shape and type.
+        zero-filled output with identical structure, shape, and dtype. Tensor
+        placeholders are allocated on the meta device; the recorded device is kept
+        in metadata for checkpoint compatibility.
         """
         if isinstance(output, torch.Tensor):
             return ("tensor", output.shape, output.dtype, output.device)
@@ -191,11 +193,11 @@ class LayerActivationCollector:
 
     @staticmethod
     def _zeros_from_meta(meta):
-        """Reconstruct a zero-filled output from metadata produced by ``_extract_output_meta``."""
+        """Reconstruct a zero-filled meta placeholder from ``_extract_output_meta`` metadata."""
         tag = meta[0]
         if tag == "tensor":
-            _, shape, dtype, device = meta
-            return torch.zeros(shape, dtype=dtype, device=device)
+            _, shape, dtype, _device = meta
+            return torch.zeros(shape, dtype=dtype, device=torch.device("meta"))
         if tag == "tuple":
             return tuple(LayerActivationCollector._zeros_from_meta(m) for m in meta[1])
         if tag == "list":
@@ -460,19 +462,6 @@ def _move_to_device(obj: Any, device: torch.device) -> Any:
     return obj
 
 
-def _remap_output_metadata_device(meta: tuple, device: torch.device) -> tuple:
-    """Patch the device field inside output_meta tuples so _zeros_from_meta uses *device*."""
-    tag = meta[0]
-    if tag == "tensor":
-        _, shape, dtype, _old_device = meta
-        return ("tensor", shape, dtype, device)
-    if tag == "tuple":
-        return ("tuple", tuple(_remap_output_metadata_device(m, device) for m in meta[1]))
-    if tag == "list":
-        return ("list", [_remap_output_metadata_device(m, device) for m in meta[1]])
-    return meta
-
-
 def _read_manifest(checkpoint_dir: str) -> dict | None:
     """Read manifest.json from *checkpoint_dir*. Returns None if missing or corrupt."""
     path = os.path.join(checkpoint_dir, "manifest.json")
@@ -651,8 +640,6 @@ class _CheckpointState:
             meta = torch.load(
                 os.path.join(d, "output_meta.pt"), map_location="cpu", weights_only=False
             )
-            layer_device = get_module_device(layers[i])
-            meta = _remap_output_metadata_device(meta, layer_device)
             layers[i]._layerwise_calib.output_meta = meta
 
         d = _layer_dir(self.checkpoint_dir, last_ckpt)
