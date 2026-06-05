@@ -30,6 +30,7 @@ live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 import functools
 import inspect
 import math
+import os
 import warnings
 
 import torch
@@ -94,6 +95,41 @@ def _resolve_skip_softmax_calibration(
         )
         return
     sparse_kw["skip_softmax_threshold"] = threshold
+
+
+def parse_attn_quant_env() -> dict:
+    """Read ``MODELOPT_ATTN_*`` env knobs into an attention-quant config.
+
+    Mirrors the env-driven ``vllm_serve_fakequant`` flow (``QUANT_CFG``/``KV_QUANT_CFG``):
+    lets a single served checkpoint toggle NVFP4 attention BMMs, mixed-precision softmax,
+    and N:M sparse softmax at serve time, with no re-export. Returns ``{}`` if none set.
+
+    Env knobs:
+      ``MODELOPT_ATTN_NVFP4``        e.g. ``"q,k,p,v"`` | ``"kv"`` | ``"qkpv"`` — BMM operands -> NVFP4
+      ``MODELOPT_ATTN_FP16_SOFTMAX`` ``"1"`` -> FP16 softmax (all DIFF/EXP2/ACC points)
+      ``MODELOPT_ATTN_SOFTMAX_QUANT`` e.g. ``"diff:fp16_rz,exp2:bf16_rne,acc:fp16"``
+      ``MODELOPT_ATTN_SPARSITY_NM``  e.g. ``"2:4"`` — N:M sparse softmax (prefill)
+    """
+    cfg: dict = {}
+    nv = os.environ.get("MODELOPT_ATTN_NVFP4", "")
+    ops = {ch for tok in nv.replace(" ", "").split(",") for ch in tok if ch in "qkpv"}
+    if ops:
+        cfg["nvfp4"] = ops
+    if os.environ.get("MODELOPT_ATTN_FP16_SOFTMAX", "0").lower() in ("1", "true", "yes"):
+        cfg["fp16_softmax"] = True
+    sq = os.environ.get("MODELOPT_ATTN_SOFTMAX_QUANT", "")
+    sq_map = {}
+    for pair in sq.split(","):
+        key, sep, val = pair.partition(":")
+        if sep and key.strip() and val.strip():
+            sq_map[key.strip()] = val.strip()
+    if sq_map:
+        cfg["softmax_quant"] = sq_map
+    nm = os.environ.get("MODELOPT_ATTN_SPARSITY_NM", "")
+    if ":" in nm:
+        n, m = nm.split(":", 1)
+        cfg["sparsity_n"], cfg["sparsity_m"] = int(n), int(m)
+    return cfg
 
 
 def _build_sparse_kw(layer_cfg: dict) -> dict:
@@ -243,6 +279,12 @@ class _SparseCalibrationMixin:
         disabled sparsity).
         """
         sparse_kw = dict(getattr(self, "sparse_kw", {}))
+        # Attention-quant knobs (env-harness): NVFP4 BMMs + mixed-precision softmax.
+        aq = getattr(self, "attn_quant_kw", {}) or {}
+        nvfp4 = aq.get("nvfp4")
+        fp16_softmax = aq.get("fp16_softmax", False)
+        softmax_quant = aq.get("softmax_quant")
+        quant_active = bool(nvfp4) or fp16_softmax or bool(softmax_quant)
         _resolve_skip_softmax_calibration(
             sparse_kw, is_prefill=not is_decode_only, max_seq_len=max_seq_len
         )
@@ -251,11 +293,11 @@ class _SparseCalibrationMixin:
             for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
                 sparse_kw.pop(name, None)
             threshold = sparse_kw.get("skip_softmax_threshold")
-            if threshold is None:
-                # No decode sparsity active for this launch.
+            if threshold is None and not quant_active:
+                # No decode sparsity and no attention quant active for this launch.
                 return dense_fallback()
-            # Decode-only skip-softmax runs on the dedicated decode kernel
-            # (one query vector per request, split-K), not the prefill kernel.
+            # Decode runs on the dedicated decode kernel (one query vector per request,
+            # split-K). It applies skip-softmax and/or NVFP4 + mixed-precision softmax.
             return self._forward_sparse_decode(
                 query=query,
                 key_cache=key_cache,
@@ -265,9 +307,12 @@ class _SparseCalibrationMixin:
                 block_table=block_table,
                 num_actual_tokens=num_actual_tokens,
                 skip_softmax_threshold=threshold,
+                nvfp4=nvfp4,
+                fp16_softmax=fp16_softmax,
+                softmax_quant=softmax_quant,
                 output=output,
             )
-        if not sparse_kw:
+        if not sparse_kw and not quant_active:
             # Dynamic calibration can disable sparse work for a launch (e.g. a
             # short-prefill threshold outside the valid lambda range).
             return dense_fallback()
@@ -292,6 +337,9 @@ class _SparseCalibrationMixin:
             v_cache=value_cache,
             block_table=block_table,
             page_size=page_size,
+            nvfp4=nvfp4,
+            fp16_softmax=fp16_softmax,
+            softmax_quant=softmax_quant,
             **sparse_kw,
         )
         output[:num_actual_tokens] = triton_out
@@ -307,10 +355,13 @@ class _SparseCalibrationMixin:
         seq_lens: torch.Tensor,
         block_table: torch.Tensor,
         num_actual_tokens: int,
-        skip_softmax_threshold: float,
         output: torch.Tensor,
+        skip_softmax_threshold: float | None = None,
+        nvfp4: set[str] | None = None,
+        fp16_softmax: bool = False,
+        softmax_quant: dict | None = None,
     ) -> torch.Tensor:
-        """Decode-only skip-softmax via the dedicated paged decode kernel.
+        """Decode via the dedicated paged decode kernel (skip-softmax and/or NVFP4).
 
         Standard decode schedules exactly one query token per request, so the
         ``num_actual_tokens`` query rows are the per-request decode queries. The
@@ -330,6 +381,9 @@ class _SparseCalibrationMixin:
             softmax_scale=self.scale,
             skip_softmax_threshold=skip_softmax_threshold,
             page_size=page_size,
+            nvfp4=nvfp4,
+            fp16_softmax=fp16_softmax,
+            softmax_quant=softmax_quant,
         )
         output[:num_actual_tokens] = decode_out
         return output

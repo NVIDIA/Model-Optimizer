@@ -114,7 +114,25 @@ Workflow:
    python vllm_serve_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
    ```
 
-If the checkpoint has no `sparse_attention_config`, the worker logs a message and passes through — vLLM runs unchanged. Quant-only flows are handled by `vllm_serve_fakequant.py`; combined sparse + quant will land in a follow-up PR.
+If the checkpoint has no `sparse_attention_config`, the worker logs a message and passes through — vLLM runs unchanged.
+
+### Attention quantization knobs (env-driven, no re-export)
+
+For attention-numerics accuracy studies you can toggle **NVFP4 attention BMMs**, a **mixed-precision softmax datapath**, and **N:M sparse softmax** on a *single served checkpoint* via env vars — mirroring the env-driven `vllm_serve_fakequant.py` flow (no re-export, no `sparse_attention_config` required; the worker force-swaps the ModelOpt sparse impl when any are set):
+
+| Env var | Example | Effect |
+|---------|---------|--------|
+| `MODELOPT_ATTN_NVFP4` | `q,k,p,v` (or `kv`, `qkpv`) | fake-quant those BMM operands to NVFP4 (`k,v` = NVFP4 KV$; all four = full BMM1+BMM2) |
+| `MODELOPT_ATTN_FP16_SOFTMAX` | `1` | FP16 softmax at all DIFF/EXP2/ACC points |
+| `MODELOPT_ATTN_SOFTMAX_QUANT` | `diff:fp16_rz,exp2:bf16_rne,acc:fp16` | per-point softmax-datapath precision (overrides the FP16 shortcut) |
+| `MODELOPT_ATTN_SPARSITY_NM` | `2:4` | N:M sparse softmax (prefill) |
+
+```bash
+MODELOPT_ATTN_NVFP4=q,k,p,v MODELOPT_ATTN_FP16_SOFTMAX=1 \
+  python vllm_serve_sparse_attn.py <CKPT> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
+```
+
+These apply to both prefill and decode (the decode kernel runs them too), and the NVFP4 numerics are bit-exact to the customized-vLLM attention-quant reference. The fakequant `tl.dot` still runs in bf16/fp32 — this measures accuracy, not throughput.
 
 Limitations:
 

@@ -54,6 +54,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config impor
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     _build_sparse_kw,
     _clone_sparse_impl,
+    parse_attn_quant_env,
     select_sparse_impl_cls,
 )
 
@@ -62,21 +63,38 @@ def _replace_attention_impl(worker):
     """Replace the attention impl with the ModelOpt sparse impl on all Attention layers.
 
     Supports the FlashAttention and FlashInfer backends (the matching sparse impl
-    is selected per layer). The sole configuration source is the checkpoint's
-    ``sparse_attention_config`` metadata. No-op if the checkpoint has no such block.
+    is selected per layer). Configuration comes from the checkpoint's
+    ``sparse_attention_config`` metadata and/or the ``MODELOPT_ATTN_*`` env knobs
+    (NVFP4 BMMs / mixed-precision softmax / N:M sparse softmax) — the latter mirror
+    the env-driven ``vllm_serve_fakequant`` flow and let one served checkpoint toggle
+    configs with no re-export. No-op only if neither is present.
     """
     hf_config = getattr(worker.model_runner.model_config, "hf_config", None)
     detected = load_from_checkpoint_metadata(hf_config)
-    if detected is None:
+    env_q = parse_attn_quant_env()
+    if detected is None and not env_q:
         print(
-            "[ModelOpt] No sparse_attention_config found in the checkpoint; "
-            "skipping sparse attention. Run examples/llm_sparsity/"
-            "attention_sparsity/hf_sa.py to calibrate and export a checkpoint "
-            "with the config embedded."
+            "[ModelOpt] No sparse_attention_config and no MODELOPT_ATTN_* env knobs; "
+            "skipping sparse attention. Run examples/llm_sparsity/attention_sparsity/"
+            "hf_sa.py to export a config, or set e.g. MODELOPT_ATTN_NVFP4=q,k,p,v."
         )
         return
-    cfg, preset_name = detected
-    print(f"[ModelOpt] Sparse attention config: algo -> {preset_name}")
+    cfg, preset_name = detected if detected is not None else (None, "env-attn-quant")
+    print(f"[ModelOpt] Sparse attention config: algo -> {preset_name}; env knobs -> {env_q}")
+
+    # Env N:M sparse softmax (prefill) augments the per-layer kwargs; the NVFP4 /
+    # mixed-precision-softmax knobs ride on the impl as attn_quant_kw.
+    env_nm = (
+        {
+            "sparsity_n": env_q["sparsity_n"],
+            "sparsity_m": env_q["sparsity_m"],
+            "dense_sink_tokens": 0,
+            "dense_recent_tokens": 0,
+        }
+        if "sparsity_n" in env_q
+        else {}
+    )
+    env_attn_quant = {k: env_q[k] for k in ("nvfp4", "fp16_softmax", "softmax_quant") if k in env_q}
 
     model = worker.model_runner.model
     if hasattr(model, "unwrap"):
@@ -88,14 +106,17 @@ def _replace_attention_impl(worker):
         if not isinstance(module, VLLMAttention):
             continue
 
-        layer_cfg = match_sparse_config(name, cfg)
-        if layer_cfg is None or not layer_cfg.get("enable", True):
-            continue
+        if cfg is not None:
+            layer_cfg = match_sparse_config(name, cfg)
+            if layer_cfg is None or not layer_cfg.get("enable", True):
+                continue
+        else:
+            layer_cfg = {}  # env-only: apply the env knobs to every attention layer
 
         sparse_kw = _build_sparse_kw(layer_cfg)
-        if not sparse_kw:
-            # Keep vLLM's original impl when the exported layer config does not
-            # enable any sparse feature.
+        sparse_kw.update(env_nm)  # env N:M sparse softmax augments/overrides
+        if not sparse_kw and not env_attn_quant:
+            # Neither metadata nor env enables any sparse/quant feature here.
             continue
         new_cls = select_sparse_impl_cls(module.impl)
         if new_cls is None:
@@ -109,6 +130,7 @@ def _replace_attention_impl(worker):
             skipped_backends.add(type(module.impl).__name__)
             continue
         new_impl.sparse_kw = sparse_kw
+        new_impl.attn_quant_kw = env_attn_quant  # NVFP4 BMMs + mixed-precision softmax
         module.impl = new_impl
         patched += 1
     print(f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers")
