@@ -19,7 +19,6 @@ import math
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager, nullcontext
 from functools import partial
 from typing import TypeAlias
 
@@ -1862,33 +1861,35 @@ def layerwise_calibrate(
 
             is_last = layer_idx + 1 >= num_layers
 
-            # qdq_from_prev=False: capture before calib_func so the forward
-            # replay uses the original FP weights. Disable quantizers too in
-            # case any pre-calibration observer behavior would perturb the
-            # captured activations.
-            if not is_last and not qdq_from_prev:
-                with set_quantizer_by_cfg_context(
-                    layer, [{"quantizer_name": "*", "enable": False}]
-                ):
+            with persistent_materialization(layer):
+                # qdq_from_prev=False: capture before calib_func so the forward
+                # replay uses the original FP weights. Disable quantizers too in
+                # case any pre-calibration observer behavior would perturb the
+                # captured activations.
+                if not is_last and not qdq_from_prev:
+                    with set_quantizer_by_cfg_context(
+                        layer, [{"quantizer_name": "*", "enable": False}]
+                    ):
+                        next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                            layer, forward_loop
+                        )
+                    # cache_outputs left this layer in "run" mode with an empty
+                    # deque; reset so calib_func's replay hits the real forward.
+                    layer._layerwise_calib.mode = "original"
+
+                calib_func(layer, _layer_forward_loop, **calib_kwargs)
+
+                # qdq_from_prev=True: capture after calib_func so the next layer
+                # sees QDQ error and any in-place weight updates from this layer.
+                if not is_last and qdq_from_prev:
                     next_inputs = input_getter.cache_outputs_for_next_layer_calib(
                         layer, forward_loop
                     )
-                # cache_outputs left this layer in "run" mode with an empty
-                # deque; reset so calib_func's replay hits the real forward.
-                layer._layerwise_calib.mode = "original"
+                elif is_last:
+                    next_inputs = None
 
-            with persistent_materialization(layer):
-                calib_func(layer, _layer_forward_loop, **calib_kwargs)
-
-            # qdq_from_prev=True: capture after calib_func so the next layer
-            # sees QDQ error and any in-place weight updates from this layer.
-            if not is_last and qdq_from_prev:
-                next_inputs = input_getter.cache_outputs_for_next_layer_calib(layer, forward_loop)
-            elif is_last:
-                next_inputs = None
-
-            if ckpt:
-                ckpt.save(layer_idx, model, transformer_layers, next_inputs)
+                if ckpt:
+                    ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
             del layer_inputs
             torch.cuda.empty_cache()

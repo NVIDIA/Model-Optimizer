@@ -501,26 +501,21 @@ def _layer_dir(checkpoint_dir: str, idx: int) -> str:
 def _save_layer_files(
     checkpoint_dir: str,
     idx: int,
-    weights: dict | None,
+    weights: dict,
     qstate: dict,
-    quantizer_buffers: dict | None,
     output_meta: tuple,
 ) -> None:
     """Write the per-layer files for layer *idx*.
 
-    Exactly one of ``weights`` (full layer state_dict) or ``quantizer_buffers``
-    (just the TensorQuantizer state_dict slice) is written; ``full_restore``
-    falls back to whichever is present. ``next_inputs.pt`` and ``manifest.json``
-    are deferred to window boundaries in :meth:`_CheckpointState.save`.
+    ``weights.pt``, ``quantizer_state.pt``, and ``output_meta.pt`` are written
+    every call. ``next_inputs.pt`` and ``manifest.json`` are deferred to window
+    boundaries in :meth:`_CheckpointState.save`.
     """
     d = _layer_dir(checkpoint_dir, idx)
     if os.path.isdir(d):
         shutil.rmtree(d)
     os.makedirs(d)
-    if weights is not None:
-        torch.save(weights, os.path.join(d, "weights.pt"))
-    elif quantizer_buffers is not None:
-        torch.save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
+    torch.save(weights, os.path.join(d, "weights.pt"))
     torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
     torch.save(output_meta, os.path.join(d, "output_meta.pt"))
 
@@ -715,7 +710,6 @@ class _CheckpointState:
             layer_idx,
             weights,
             qstate,
-            None,
             _move_to_device(output_meta, _cpu),
         )
 

@@ -599,11 +599,13 @@ def test_cleanup_restores_original_layers(monkeypatch):
         assert not hasattr(orig, "_layerwise_calib"), f"Layer {i} still has _layerwise_calib"
 
 
-def _int8_layerwise_config(algorithm: dict) -> dict:
-    """Start from the shipped INT8 config and enable layerwise in the algorithm block.
+def _int8_cfg_with_algorithm(algorithm: dict) -> dict:
+    """Build an INT8 quant config with the given ``algorithm`` block.
 
-    Using a real shipped config guarantees the same include/exclude rules
-    production PTQ relies on, so algorithm dispatch matches real usage.
+    Starts from a real shipped INT8 config (so include/exclude rules match
+    production PTQ) and overrides only the ``algorithm`` entry. Layerwise
+    calibration runs only when ``algorithm`` sets ``layerwise={"enable": True}``;
+    a plain ``{"method": ...}`` yields the standard non-layerwise (sequential) path.
     """
     cfg = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
     cfg["algorithm"] = algorithm
@@ -641,7 +643,7 @@ def test_mtq_quantize_layerwise_e2e_max(monkeypatch):
     CUDA) or unnecessary duplication.
     """
     _register_test_discoverer(monkeypatch)
-    config = _int8_layerwise_config({"method": "max", "layerwise": True})
+    config = _int8_cfg_with_algorithm({"method": "max", "layerwise": True})
 
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=3, dim=16)
@@ -695,7 +697,7 @@ def test_mtq_quantize_layerwise_dispatches_for_algorithm(monkeypatch, algorithm)
     if algorithm == "awq_lite":
         config = _awq_layerwise_config()
     else:
-        config = _int8_layerwise_config({"method": algorithm, "layerwise": True})
+        config = _int8_cfg_with_algorithm({"method": algorithm, "layerwise": True})
 
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
@@ -761,10 +763,10 @@ def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
         for batch in calib_data:
             m(batch)
 
-    mtq.quantize(model_seq, _int8_layerwise_config({"method": "max"}), forward_loop=fwd)
+    mtq.quantize(model_seq, _int8_cfg_with_algorithm({"method": "max"}), forward_loop=fwd)
     mtq.quantize(
         model_lw,
-        _int8_layerwise_config(
+        _int8_cfg_with_algorithm(
             {
                 "method": "max",
                 "layerwise": {"enable": True, "get_qdq_activations_from_prev_layer": False},
@@ -835,7 +837,7 @@ def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monke
     """
     _register_test_discoverer(monkeypatch)
 
-    config = _int8_layerwise_config(
+    config = _int8_cfg_with_algorithm(
         {
             "method": "max",
             "layerwise": {
@@ -887,7 +889,7 @@ def test_layerwise_checkpoint_resume_matches_one_shot_amax(
     forward_loop = lambda m: [m(b) for b in calib_data]  # noqa: E731
 
     def build_cfg(ckpt_dir):
-        return _int8_layerwise_config(
+        return _int8_cfg_with_algorithm(
             {
                 "method": "max",
                 "layerwise": {
@@ -937,7 +939,7 @@ def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeyp
     """
     _register_test_discoverer(monkeypatch)
 
-    cfg = _int8_layerwise_config(
+    cfg = _int8_cfg_with_algorithm(
         {
             "method": "max",
             "layerwise": {
@@ -978,7 +980,7 @@ def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
     """
     _register_test_discoverer(monkeypatch)
 
-    cfg_first = _int8_layerwise_config(
+    cfg_first = _int8_cfg_with_algorithm(
         {
             "method": "max",
             "layerwise": {
@@ -1004,7 +1006,7 @@ def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
             }
         )
     )
-    cfg_mismatched = _int8_layerwise_config(
+    cfg_mismatched = _int8_cfg_with_algorithm(
         {
             "method": "max",
             "layerwise": {
