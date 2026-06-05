@@ -231,10 +231,6 @@ class QATTrainer(ModelOptHFTrainer):
         elif is_quantized(self.model):
             self._save_modelopt_state_with_weights()
 
-        self._original_dtype = getattr(
-            getattr(self.model, "config", None), "dtype", None
-        ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
-
     def _save_modelopt_state_with_weights(self):
         """Save the modelopt weights for fsdp2 models."""
         if torch.distributed.is_initialized():

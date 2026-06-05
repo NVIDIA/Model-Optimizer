@@ -235,15 +235,6 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
             ),
         },
     )
-    save_dtype: str | None = dataclasses.field(
-        default="bfloat16",
-        metadata={
-            "help": (
-                "Dtype string to write into the saved model's config.json "
-                "(e.g. 'bfloat16', 'float16'). Set to None to preserve the original dtype."
-            ),
-        },
-    )
     manual_gc: bool = dataclasses.field(
         default=False,
         metadata={
@@ -475,7 +466,7 @@ class ModelOptHFTrainer(Trainer):
     """A drop-in replacement of HuggingFace's Trainer for ModelOpt.
 
     This class adds extra utilities for ModelOpt checkpointing, memory reporting,
-    parameter freezing, per-layer learning rates, Liger fused loss, and save dtype.
+    parameter freezing, per-layer learning rates, Liger fused loss, and original-dtype-preserving save.
 
     **Liger kernel support:** When ``--use_liger_kernel`` is set, this trainer provides
     model-agnostic fused loss computation that extends HuggingFace's built-in Liger
@@ -500,12 +491,16 @@ class ModelOptHFTrainer(Trainer):
         """Initialize.
 
         Args:
-            trainer_args: Optional arguments for param freeze, lr config, and save dtype.
+            trainer_args: Optional arguments for param freeze and lr config.
             lr_config: Optional dict for per-pattern optimizer param groups
                 (overrides trainer_args.lr_config).
         """
         enable_huggingface_checkpointing()
         super().__init__(*args, **kwargs)
+        _raw_dtype = getattr(getattr(self.model, "config", None), "dtype", None) or getattr(
+            getattr(self.model, "config", None), "torch_dtype", None
+        )
+        self._original_dtype = None if _raw_dtype is None else str(_raw_dtype).rsplit(".", 1)[-1]
         if trainer_args is None and isinstance(self.args, ModelOptTrainerArguments):
             trainer_args = self.args
         self.trainer_args = trainer_args or ModelOptTrainerArguments()
@@ -766,12 +761,11 @@ class ModelOptHFTrainer(Trainer):
         return self._sharded_liger_compute(_compute)
 
     def save_model(self, *args, **kwargs):
-        """Save the model and rewrite config.json dtype to ``save_dtype``."""
+        """Save the model and rewrite config.json dtype to preserve the original model dtype."""
         outputs = super().save_model(*args, **kwargs)
         if (not self.is_in_train) and self.args.should_save:
             out_dir = args[0] if args else self.args.output_dir
-            save_dtype = getattr(self.trainer_args, "save_dtype", None)
-            self._update_config_json_dtype(out_dir, save_dtype)
+            self._update_config_json_dtype(out_dir, self._original_dtype)
         return outputs
 
     def _update_config_json_dtype(self, output_dir: str, dtype_str: str | None) -> None:
