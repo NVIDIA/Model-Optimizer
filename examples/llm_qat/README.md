@@ -87,11 +87,15 @@ python export.py --pyt_ckpt_path qwen3-8b-qad-nvfp4 --export_path qwen3-8b-qad-d
 
 Exported checkpoints can be deployed on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang). See [llm_ptq/README.md](../llm_ptq/README.md#deployment) for deployment instructions. For quick accuracy evaluation without exporting, see [Native Fake-Quantized Evaluation](#native-fake-quantized-evaluation).
 
-> **Note:** To see the full QAT flow in a single script (quantize + train + save), see [simple_qat_train.py](simple_qat_train.py):
+> [!NOTE]
+> To see the full QAT flow in a single script (quantize + train + save), see [simple_qat_train.py](simple_qat_train.py):
 >
 > ```sh
 > python simple_qat_train.py --model-path meta-llama/Llama-3.2-3B --recipe general/ptq/nvfp4_default-kv_fp8
 > ```
+
+> [!TIP]
+> For more performant QAD, please refer to [examples/megatron_bridge/README.md](../megatron_bridge/README.md) for example scripts for PTQ / QAD with Megatron-Bridge which is generally more performant than the Hugging Face scripts.
 
 ## Background
 
