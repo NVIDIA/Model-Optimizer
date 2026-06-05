@@ -383,7 +383,7 @@ class TestExportSparseAttentionConfig:
         tsf = out["threshold_scale_factor"]
         assert tsf["prefill"] == {"a": 3.14, "b": 7.5}
         assert tsf["decode"] == {"a": 0.5, "b": 9.0}
-        assert out["target_sparse_ratio"] == {"prefill": 0.4, "decode": 0.6}
+        assert out["target_sparsity"] == {"prefill": 0.4, "decode": 0.6}
         assert out["producer"]["name"] == "modelopt"
 
     def test_exports_sparse_softmax_metadata(self):
@@ -413,7 +413,7 @@ class TestExportSparseAttentionConfig:
         out = export_sparse_attention_config(model)
 
         assert out is not None
-        assert out["config_groups"]["group_0"]["sparse_algo"] == "sparse_softmax"
+        assert out["config_groups"]["group_0"]["algorithm"] == "sparse_softmax"
         assert out["sparse_softmax"] == {
             "sparsity_n": 2,
             "sparsity_m": 4,
@@ -443,10 +443,10 @@ class TestExportSparseAttentionConfig:
         out = export_sparse_attention_config(model)
 
         assert out is not None
-        assert out["config_groups"]["group_0"]["sparse_algo"] == "softmax_skip"
-        assert out["config_groups"]["group_1"]["sparse_algo"] == "sparse_softmax"
+        assert out["config_groups"]["group_0"]["algorithm"] == "skip_softmax"
+        assert out["config_groups"]["group_1"]["algorithm"] == "sparse_softmax"
         assert out["threshold_scale_factor"]["prefill"] == {"a": 3.14, "b": 7.5}
-        assert out["target_sparse_ratio"] == {"prefill": 0.4, "decode": 0.6}
+        assert out["target_sparsity"] == {"prefill": 0.4, "decode": 0.6}
         assert out["sparse_softmax"] == {
             "sparsity_n": 2,
             "sparsity_m": 4,

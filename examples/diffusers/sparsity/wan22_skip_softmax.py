@@ -210,6 +210,14 @@ def parse_args() -> argparse.Namespace:
         "The sparse_attention_config (calibration params, disabled layers, etc.) "
         "is written into each component's config.json.",
     )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=0,
+        help="User-specified warmup value carried into the exported sparse attention "
+        "config (config.json). Only emitted when > 0; not interpreted at "
+        "sparsify/calibration time.",
+    )
     return parser.parse_args()
 
 
@@ -243,6 +251,10 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
     # Fixed threshold bypasses calibration.
     if args.skip_softmax_threshold is not None:
         attn_cfg["skip_softmax_threshold"] = args.skip_softmax_threshold
+
+    # Opt-in warmup metadata — carried through to the exported config when > 0.
+    if args.warmup > 0:
+        attn_cfg["warmup"] = args.warmup
 
     sparse_cfg: dict = {
         "*.attn1*": attn_cfg,  # Self-attention only

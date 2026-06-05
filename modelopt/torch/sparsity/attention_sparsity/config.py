@@ -155,6 +155,16 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    warmup: int = ModeloptField(
+        default=0,
+        title="Warmup value.",
+        description=(
+            "User-specified warmup value passed straight through to the exported "
+            "sparse attention config. Not interpreted by sparsify or calibration; "
+            "only written to the checkpoint when > 0."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):

@@ -28,9 +28,9 @@ import fnmatch
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 
-# Maps ``sparse_algo`` values without calibration metadata into mtsa presets.
+# Maps ``algorithm`` values without calibration metadata into mtsa presets.
 ALGO_TO_PRESET = {
-    "softmax_skip": "SKIP_SOFTMAX_TRITON_DEFAULT",
+    "skip_softmax": "SKIP_SOFTMAX_TRITON_DEFAULT",
 }
 
 DEFAULT_TARGET_SPARSE_RATIO = {"prefill": 0.5, "decode": 0.5}
@@ -83,7 +83,7 @@ def _sparse_softmax_params(sparse_meta: dict, config_groups: dict) -> dict:
         return params
 
     for group in config_groups.values():
-        if not isinstance(group, dict) or group.get("sparse_algo") not in SPARSE_SOFTMAX_ALGOS:
+        if not isinstance(group, dict) or group.get("algorithm") not in SPARSE_SOFTMAX_ALGOS:
             continue
         params.update({key: group[key] for key in SPARSE_SOFTMAX_DEFAULTS if key in group})
         return params
@@ -103,7 +103,7 @@ def _build_calibrated_softmax_skip_config(sparse_meta: dict) -> dict:
                 "method": "triton_skip_softmax",
                 "threshold_scale_factor": sparse_meta["threshold_scale_factor"],
                 "target_sparse_ratio": _normalize_target_sparse_ratio(
-                    sparse_meta.get("target_sparse_ratio")
+                    sparse_meta.get("target_sparsity")
                 ),
                 "backend": "triton",
                 "enable": True,
@@ -150,7 +150,7 @@ def load_from_checkpoint_metadata(hf_config) -> tuple[dict, str] | None:
 
     Reads ``sparse_attention_config`` written by ModelOpt's HF export
     (``unified_export_hf.export_sparse_attention_config``). Calibrated
-    ``softmax_skip`` metadata is converted into a dynamic Triton config;
+    ``skip_softmax`` metadata is converted into a dynamic Triton config;
     uncalibrated algorithms fall back to mtsa presets via :data:`ALGO_TO_PRESET`.
 
     Args:
@@ -170,8 +170,8 @@ def load_from_checkpoint_metadata(hf_config) -> tuple[dict, str] | None:
     config_groups = sparse_meta.get("config_groups", {})
     if not isinstance(config_groups, dict):
         return None
-    algos = {grp.get("sparse_algo") for grp in config_groups.values() if isinstance(grp, dict)}
-    if "softmax_skip" in algos and _has_calibrated_threshold_scale_factor(
+    algos = {grp.get("algorithm") for grp in config_groups.values() if isinstance(grp, dict)}
+    if "skip_softmax" in algos and _has_calibrated_threshold_scale_factor(
         sparse_meta.get("threshold_scale_factor")
     ):
         cfg = _build_calibrated_softmax_skip_config(sparse_meta)

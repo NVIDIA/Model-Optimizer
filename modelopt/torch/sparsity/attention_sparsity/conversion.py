@@ -392,7 +392,7 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
 
         {
             "config_groups": {
-                "group_0": {"sparse_algo": "softmax_skip", "targets": ["LlamaAttention"]}
+                "group_0": {"algorithm": "skip_softmax", "targets": ["LlamaAttention"]}
             },
             "threshold_scale_factor": {
                 "formula": "a * exp(b * target_sparsity)",
@@ -414,6 +414,7 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     sparse_softmax_config = None
     target_classes: set[str] = set()
     disabled_layer_names: list[str] = []
+    warmup = 0
 
     for name, module in get_named_sparse_attention_modules(model):
         # Get the original wrapped module's class name
@@ -438,6 +439,8 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
             )
         if sparse_softmax_config is None:
             sparse_softmax_config = _get_sparse_softmax_export_config(module)
+        if not warmup:
+            warmup = module._method_config.get("warmup", 0)
 
     if calibration_params is None and sparse_softmax_config is None:
         return None
@@ -447,15 +450,17 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     group_idx = 0
     if calibration_params is not None:
         config_groups[f"group_{group_idx}"] = {
-            "sparse_algo": "softmax_skip",
+            "algorithm": "skip_softmax",
             "targets": targets,
         }
         if disabled_layer_names:
-            config_groups[f"group_{group_idx}"]["disabled_layers"] = disabled_layer_names
+            config_groups[f"group_{group_idx}"]["ignore"] = disabled_layer_names
+        if warmup:
+            config_groups[f"group_{group_idx}"]["warmup"] = warmup
         group_idx += 1
     if sparse_softmax_config is not None:
         config_groups[f"group_{group_idx}"] = {
-            "sparse_algo": "sparse_softmax",
+            "algorithm": "sparse_softmax",
             "targets": targets,
         }
 
@@ -482,7 +487,7 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
         export_config["threshold_scale_factor"] = threshold_scale_factor
 
     if calibration_params is not None and target_sparse_ratio is not None:
-        export_config["target_sparse_ratio"] = target_sparse_ratio
+        export_config["target_sparsity"] = target_sparse_ratio
     if sparse_softmax_config is not None:
         export_config["sparse_softmax"] = sparse_softmax_config
 

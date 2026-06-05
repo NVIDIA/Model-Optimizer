@@ -82,14 +82,14 @@ class TestLoadFromCheckpointMetadata:
 
     def test_returns_none_for_unknown_algo(self):
         """Test that an unrecognized sparse_algo returns None."""
-        meta = {"config_groups": {"group_0": {"sparse_algo": "future_algo_v9000"}}}
+        meta = {"config_groups": {"group_0": {"algorithm": "future_algo_v9000"}}}
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
         assert load_from_checkpoint_metadata(hf_config) is None
 
     def test_maps_uncalibrated_softmax_skip_to_preset(self):
         """Test that uncalibrated softmax_skip uses the static Triton preset."""
         meta = {
-            "config_groups": {"group_0": {"sparse_algo": "softmax_skip"}},
+            "config_groups": {"group_0": {"algorithm": "skip_softmax"}},
             "producer": {"name": "modelopt", "version": "0.37.0"},
         }
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
@@ -107,9 +107,9 @@ class TestLoadFromCheckpointMetadata:
             "decode": {"a": 5.0, "b": 7.0},
         }
         meta = {
-            "config_groups": {"group_0": {"sparse_algo": "softmax_skip"}},
+            "config_groups": {"group_0": {"algorithm": "skip_softmax"}},
             "threshold_scale_factor": threshold_scale_factor,
-            "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+            "target_sparsity": {"prefill": 0.4, "decode": 0.6},
             "producer": {"name": "modelopt", "version": "0.45.0"},
         }
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
@@ -131,7 +131,7 @@ class TestLoadFromCheckpointMetadata:
     def test_maps_sparse_softmax_to_dynamic_config(self):
         """Test that checkpoint N:M sparse-softmax metadata restores layer params."""
         meta = {
-            "config_groups": {"group_0": {"sparse_algo": "sparse_softmax"}},
+            "config_groups": {"group_0": {"algorithm": "sparse_softmax"}},
             "sparse_softmax": {
                 "sparsity_n": 2,
                 "sparsity_m": 4,
@@ -166,11 +166,11 @@ class TestLoadFromCheckpointMetadata:
         }
         meta = {
             "config_groups": {
-                "group_0": {"sparse_algo": "softmax_skip"},
-                "group_1": {"sparse_algo": "sparse_softmax"},
+                "group_0": {"algorithm": "skip_softmax"},
+                "group_1": {"algorithm": "sparse_softmax"},
             },
             "threshold_scale_factor": threshold_scale_factor,
-            "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+            "target_sparsity": {"prefill": 0.4, "decode": 0.6},
             "sparse_softmax": {"sparsity_n": 2, "sparsity_m": 4},
             "producer": {"name": "modelopt", "version": "0.45.0"},
         }
