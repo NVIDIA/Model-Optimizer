@@ -73,6 +73,7 @@ def dflash_output_dir(tmp_path_factory):
     return tmp_path_factory.mktemp("dflash_output")
 
 
+@pytest.mark.timeout(300)
 def test_dflash_training(qwen3_model_name, dflash_output_dir):
     """Train DFlash on Qwen3-0.6B and validate loss convergence."""
     output_dir = str(dflash_output_dir / "dflash-qwen3-0.6b")

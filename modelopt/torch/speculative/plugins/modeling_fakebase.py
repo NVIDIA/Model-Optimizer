@@ -40,8 +40,13 @@ _EMBED_TOKENS_PATHS = [
     "backbone.embeddings",
     "language_model.backbone.embeddings",
     "model.language_model.embed_tokens",
+    "tok_embeddings",  # Mistral native checkpoints (consolidated.safetensors)
 ]
-_LM_HEAD_PATHS = ["lm_head", "language_model.lm_head"]
+_LM_HEAD_PATHS = [
+    "lm_head",
+    "language_model.lm_head",
+    "output",  # Mistral native checkpoints (consolidated.safetensors)
+]
 _BASE_MODEL_PATHS = [
     "language_model.model",
     "model.language_model",
@@ -51,7 +56,9 @@ _BASE_MODEL_PATHS = [
 ]
 _VLM_CONFIG_ATTRS = ["text_config", "llm_config"]
 _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
-_SAFETENSORS_SINGLE_FILENAME = "model.safetensors"
+# Single-file safetensors names to try, in order.  Mistral native checkpoints
+# use ``consolidated.safetensors`` instead of the HF-standard ``model.safetensors``.
+_SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
 
 
 class FakeBaseConfig(PretrainedConfig):
@@ -206,11 +213,12 @@ class FakeBaseModel(PreTrainedModel):
         if (index_path := _try_fetch(_SAFETENSORS_INDEX_FILENAME)) is not None:
             with open(index_path) as f:
                 return json.load(f).get("weight_map", {})
-        if (single_path := _try_fetch(_SAFETENSORS_SINGLE_FILENAME)) is not None:
-            with safe_open(single_path, framework="pt") as h:
-                return dict.fromkeys(h.keys(), _SAFETENSORS_SINGLE_FILENAME)
+        for single_name in _SAFETENSORS_SINGLE_FILENAMES:
+            if (single_path := _try_fetch(single_name)) is not None:
+                with safe_open(single_path, framework="pt") as h:
+                    return dict.fromkeys(h.keys(), single_name)
         raise FileNotFoundError(
-            f"No {_SAFETENSORS_INDEX_FILENAME} or {_SAFETENSORS_SINGLE_FILENAME} found at "
+            f"No {_SAFETENSORS_INDEX_FILENAME} or {_SAFETENSORS_SINGLE_FILENAMES} found at "
             f"{source!r}. FakeBaseModel only supports safetensors checkpoints; "
             "pytorch_model.bin is not supported."
         )

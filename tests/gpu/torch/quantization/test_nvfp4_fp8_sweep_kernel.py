@@ -33,6 +33,7 @@ from conftest import requires_triton
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep
 from modelopt.torch.quantization.calib import NVFP4MSECalibrator
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -205,8 +206,6 @@ def test_reset_allows_recollect():
 @requires_triton
 def test_input_validation():
     """``nvfp4_fp8_scale_sweep`` should reject malformed inputs cleanly."""
-    from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep
-
     device = "cuda"
     x = torch.randn(64, BLOCK_SIZE, device=device)
     g = x.abs().amax()

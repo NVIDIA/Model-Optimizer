@@ -13,16 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for sparse attention vLLM worker compatibility helpers."""
+"""Tests for sparse attention vLLM worker compatibility helpers."""
 
 import math
 from contextlib import nullcontext
 
 import pytest
 import torch
-
-pytest.importorskip("vllm")
-
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as vllm_plugin

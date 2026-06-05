@@ -27,12 +27,6 @@ import pytest
 import torch
 from conftest import make_qkv, make_varlen_meta
 
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::UserWarning"),
-    pytest.mark.filterwarnings("ignore::RuntimeWarning"),
-    pytest.mark.filterwarnings("ignore::DeprecationWarning"),
-]
-
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:

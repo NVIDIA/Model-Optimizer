@@ -193,9 +193,35 @@ For quantized checkpoints, read `references/quantization-benchmarks.md` for sens
 
 Reasoning models: prefer reasoning mode (highest scores). For lower variance / cost / apples-to-apples vs non-reasoning baselines, also consider a non-reasoning companion run.
 
+#### Reasoning adapter config (`use_reasoning`)
+
+The `adapter_config` block in `example_eval.yaml` controls request/response
+logging and reasoning handling. `use_reasoning: true` strips the model's
+reasoning/CoT trace before scoring (grade only the final answer). Set per type:
+
+1. **Instruct → `use_reasoning: false`** and drop the `chat_template_kwargs`
+   thinking block (no trace to strip; can mangle plain responses).
+2. **Reasoning → `use_reasoning: true`**, especially when the deployment sets
+   `--reasoning-parser` (vLLM emits a separate reasoning channel to strip).
+3. **Hybrid (reasoning on *or* off) → turn it ON** (`use_reasoning: true` +
+   force the thinking flag in `chat_template_kwargs`). For the exact toggle key
+   (it drifts across generations) and the reasoning-effort policy, see
+   `references/model-card-research.md` → "Reasoning config".
+
 ---
 
 ### Step 4 — Fill remaining ??? values
+
+**Predefined per-cluster execution config (check FIRST).** Some installs ship `internal/slurm/<cluster>` execution groups (optional `nemo_evaluator_launcher_internal` pkg) that pre-fill hostname/partition/gres — leaving only account/output_dir/walltime. Discover at runtime (nothing cluster-specific hardcoded):
+
+```bash
+python3 -c 'import nemo_evaluator_launcher_internal' 2>/dev/null && \
+PKG=$(python3 -c 'import nemo_evaluator_launcher_internal as m,os;print(os.path.dirname(m.__file__))') && \
+for f in "$PKG"/configs/execution/internal/slurm/*.yaml; do \
+  echo "$(basename "$f" .yaml) -> $(grep -E '^hostname:' "$f" | awk '{print $2}')"; done
+```
+
+Hostname match → set `defaults: - execution: internal/slurm/<cluster>`, drop the redundant `execution.hostname` (keep account/output_dir/walltime), verify with `--dry-run`. Else keep `slurm/default` and fill hostname/account/output_dir manually.
 
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
@@ -258,7 +284,7 @@ For models > ~120B or higher throughput needs, read `references/multi-node.md` f
 
 ### Step 7 — Interceptors
 
-Direct user to <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html>. Do not provide generic interceptor info — read the specific interceptor's page if asked, then configure via `evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config` (NOT under `target.api_endpoint.adapter_config`). Use the per-field syntax from the CLI Configuration section, not a full `interceptors:` list (that overrides the default chain).
+Direct user to <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html>. Do not provide generic interceptor info — read the specific interceptor's page if asked, then configure via `evaluation.nemo_evaluator_config.target.api_endpoint.adapter_config` (`target` is a sibling of `config`, not nested under it). Use the per-field syntax from the CLI Configuration section, not a full `interceptors:` list (that overrides the default chain).
 
 **Errata:** Logging field names are `max_logged_requests` / `max_logged_responses` (NOT `max_saved_*` / `max_*` as some docs show).
 

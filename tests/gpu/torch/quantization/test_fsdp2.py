@@ -23,9 +23,15 @@ import torch
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch.distributed._composable.fsdp.fully_shard import fully_shard
+from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.dynamic import _pytorch_managed
+from modelopt.torch.quantization.utils import (
+    enable_weight_access_and_writeback,
+    persistent_materialization,
+)
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
 def _test_fsdp2_simple_linear(rank, size):
@@ -162,8 +168,6 @@ class _SimpleTransformerModel(nn.Module):
 
 def _test_layerwise_calibrate_fsdp2(rank, size):
     """Layerwise calibration on FSDP2-wrapped model matches non-FSDP reference."""
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-
     dim = 32
     torch.manual_seed(1)
     model = _SimpleTransformerModel(n_layers=3, dim=dim).cuda()
@@ -206,13 +210,6 @@ def test_layerwise_calibrate_fsdp2(dist_workers):
 
 def _test_persistent_materialization(rank, size):
     """persistent_materialization keeps weights accessible and writes back modifications."""
-    from torch.distributed.tensor import DTensor
-
-    from modelopt.torch.quantization.utils import (
-        enable_weight_access_and_writeback,
-        persistent_materialization,
-    )
-
     dim = 32
     torch.manual_seed(1)
     model = nn.Sequential(
