@@ -13,16 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 
+import modelopt.torch.utils.dataset_utils as dataset_utils
 from modelopt.torch.utils.dataset_utils import (
     _disable_use_cache,
     _forward_loop,
     _process_batch,
+    get_dataloader_from_dataset,
     get_dataset_dataloader,
     get_dataset_samples,
     get_max_batch_size,
@@ -231,6 +234,42 @@ def test_disable_use_cache_restores_on_exception():
         raise RuntimeError("boom")
 
     assert model.config.use_cache is True
+
+
+def test_get_dataloader_from_dataset_preserves_order_without_distributed():
+    dataset = torch.arange(5)
+
+    loader = get_dataloader_from_dataset(dataset, batch_size=2)
+
+    assert [batch.tolist() for batch in loader] == [[0, 1], [2, 3], [4]]
+
+
+def test_get_dataloader_from_dataset_uses_distributed_sampler_kwargs():
+    dataset = torch.arange(6)
+
+    loader = get_dataloader_from_dataset(
+        dataset,
+        batch_size=2,
+        distributed=True,
+        sampler_kwargs={"num_replicas": 2, "rank": 1},
+    )
+
+    assert isinstance(loader.sampler, DistributedSampler)
+    assert [batch.tolist() for batch in loader] == [[1, 3], [5]]
+
+
+def test_get_dataloader_from_dataset_sampler_kwargs_override_defaults():
+    dataset = torch.arange(6)
+
+    loader = get_dataloader_from_dataset(
+        dataset,
+        batch_size=2,
+        distributed=True,
+        sampler_kwargs={"num_replicas": 2, "rank": 1, "shuffle": True, "drop_last": True},
+    )
+
+    assert loader.sampler.shuffle is True
+    assert loader.sampler.drop_last is True
 
 
 def test_get_max_batch_size_oom_retry_shrinks_input():
@@ -517,7 +556,7 @@ class TestLocalJsonlLoading:
 class _FakeTokenizer:
     """Minimal callable tokenizer that mimics the HF tokenizer surface used by the dataloader.
 
-    Tokenizes by character ordinal and left-pads to the longest sample (capped at max_length).
+    Tokenizes by character ordinal and pads to the longest sample (capped at max_length).
     Avoids a hard dependency on ``transformers`` in the test environment.
     """
 
@@ -526,9 +565,13 @@ class _FakeTokenizer:
 
     def __call__(self, texts, return_tensors=None, padding=True, truncation=True, max_length=16):
         ids = [[ord(c) % 100 + 1 for c in t][:max_length] for t in texts]
-        n = max(len(x) for x in ids)
-        input_ids = [[self.pad_token_id] * (n - len(x)) + x for x in ids]
-        attention = [[0] * (n - len(x)) + [1] * len(x) for x in ids]
+        n = max_length if padding == "max_length" else max(len(x) for x in ids)
+        if self.padding_side == "left":
+            input_ids = [[self.pad_token_id] * (n - len(x)) + x for x in ids]
+            attention = [[0] * (n - len(x)) + [1] * len(x) for x in ids]
+        else:
+            input_ids = [x + [self.pad_token_id] * (n - len(x)) for x in ids]
+            attention = [[1] * len(x) + [0] * (n - len(x)) for x in ids]
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention, dtype=torch.long),
@@ -542,6 +585,71 @@ def pad_tokenizer():
 
 class TestGetDatasetDataloaderBlending:
     """``get_dataset_dataloader`` accepts a list of sources and concatenates them."""
+
+    def test_distributed_uses_distributed_sampler(self, monkeypatch, pad_tokenizer):
+        monkeypatch.setattr(
+            dataset_utils,
+            "get_dataset_samples",
+            lambda *args, **kwargs: ["a", "b", "c", "d"],
+        )
+
+        loader = get_dataset_dataloader(
+            dataset_name="dummy",
+            tokenizer=pad_tokenizer,
+            batch_size=2,
+            num_samples=4,
+            max_sample_length=16,
+            distributed=True,
+            sampler_kwargs={"num_replicas": 2, "rank": 1},
+        )
+
+        assert isinstance(loader.sampler, DistributedSampler)
+
+    def test_pad_to_max_length_uses_fixed_sequence_length(self, monkeypatch, pad_tokenizer):
+        monkeypatch.setattr(
+            dataset_utils,
+            "get_dataset_samples",
+            lambda *args, **kwargs: ["a", "abcd"],
+        )
+
+        loader = get_dataset_dataloader(
+            dataset_name="dummy",
+            tokenizer=pad_tokenizer,
+            batch_size=2,
+            num_samples=2,
+            max_sample_length=8,
+            pad_to_max_length=True,
+        )
+
+        batch = next(iter(loader))
+        assert batch["input_ids"].shape == (2, 8)
+        assert batch["attention_mask"].shape == (2, 8)
+
+    def test_right_padding_warning_can_be_disabled(self, monkeypatch, pad_tokenizer):
+        pad_tokenizer.padding_side = "right"
+        monkeypatch.setattr(
+            dataset_utils,
+            "get_dataset_samples",
+            lambda *args, **kwargs: ["a", "abcd"],
+        )
+
+        with pytest.warns(UserWarning, match="right padding_side"):
+            get_dataset_dataloader(
+                dataset_name="dummy",
+                tokenizer=pad_tokenizer,
+                num_samples=2,
+            )
+
+        with warnings.catch_warnings(record=True) as records:
+            warnings.simplefilter("always")
+            get_dataset_dataloader(
+                dataset_name="dummy",
+                tokenizer=pad_tokenizer,
+                num_samples=2,
+                warn_on_right_padding=False,
+            )
+
+        assert not any("right padding_side" in str(record.message) for record in records)
 
     def test_single_jsonl(self, tmp_path, pad_tokenizer):
         pytest.importorskip("datasets")

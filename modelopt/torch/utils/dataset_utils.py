@@ -26,7 +26,7 @@ from warnings import warn
 
 import requests
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -109,6 +109,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
 __all__ = [
     "create_forward_loop",
     "download_hf_dataset_as_jsonl",
+    "get_dataloader_from_dataset",
     "get_dataset_dataloader",
     "get_dataset_samples",
     "get_jsonl_text_samples",
@@ -423,6 +424,49 @@ class _CustomDataset(torch.utils.data.Dataset):
         return len(next(iter(self.encodings.values())))
 
 
+def get_dataloader_from_dataset(
+    dataset: torch.utils.data.Dataset,
+    batch_size: int = 1,
+    distributed: bool = False,
+    sampler_kwargs: dict[str, Any] | None = None,
+    dataloader_kwargs: dict[str, Any] | None = None,
+) -> DataLoader:
+    """Create a dataloader from an existing dataset.
+
+    Args:
+        dataset: Dataset to wrap in a dataloader.
+        batch_size: Batch size of the returned dataloader.
+        distributed: Whether to shard the dataset with ``DistributedSampler``.
+        sampler_kwargs: Optional keyword arguments for ``DistributedSampler``.
+        dataloader_kwargs: Optional keyword arguments for ``DataLoader``.
+
+    Returns:
+        An instance of dataloader.
+    """
+    sampler_kwargs = {"shuffle": False, "drop_last": False, **(sampler_kwargs or {})}
+    dataloader_kwargs = dataloader_kwargs or {}
+
+    if not distributed:
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            **dataloader_kwargs,
+        )
+
+    sampler = DistributedSampler(
+        dataset,
+        **sampler_kwargs,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        shuffle=False,
+        **dataloader_kwargs,
+    )
+
+
 def get_dataset_dataloader(
     dataset_name: str | list[str] = "cnn_dailymail",
     tokenizer: "PreTrainedTokenizerBase | None" = None,
@@ -432,6 +476,10 @@ def get_dataset_dataloader(
     device: torch.device | None = None,
     include_labels: bool = False,
     apply_chat_template: bool = False,
+    distributed: bool = False,
+    sampler_kwargs: dict[str, Any] | None = None,
+    pad_to_max_length: bool = False,
+    warn_on_right_padding: bool = True,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
@@ -448,6 +496,10 @@ def get_dataset_dataloader(
         include_labels: Whether to include labels in the dataloader.
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).
+        distributed: Whether to shard the dataset with ``DistributedSampler``.
+        sampler_kwargs: Optional keyword arguments for ``DistributedSampler``.
+        pad_to_max_length: Whether to pad every tokenized sample to ``max_sample_length``.
+        warn_on_right_padding: Whether to warn when the tokenizer uses right padding.
 
     Returns:
         An instance of dataloader.
@@ -456,7 +508,7 @@ def get_dataset_dataloader(
     # Tokenizer encoding may modify the tokenizer in place, so we need to clone it.
     tokenizer = copy.deepcopy(tokenizer)
 
-    if tokenizer.padding_side != "left":
+    if warn_on_right_padding and tokenizer.padding_side != "left":
         warn(
             "Tokenizer with the right padding_side may impact calibration accuracy. Recommend set to left"
         )
@@ -481,7 +533,7 @@ def get_dataset_dataloader(
     batch_encoded = tokenizer(
         all_samples,
         return_tensors="pt",
-        padding=True,
+        padding="max_length" if pad_to_max_length else True,
         truncation=True,
         max_length=max_sample_length,
     )
@@ -509,7 +561,12 @@ def get_dataset_dataloader(
             }
         )
 
-    calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
+    calib_dataloader = get_dataloader_from_dataset(
+        tokenized_dataset,
+        batch_size=batch_size,
+        distributed=distributed,
+        sampler_kwargs=sampler_kwargs,
+    )
 
     return calib_dataloader
 

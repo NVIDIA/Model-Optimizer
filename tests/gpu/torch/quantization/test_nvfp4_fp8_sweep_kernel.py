@@ -31,6 +31,7 @@ import torch
 from conftest import requires_triton
 
 from modelopt.torch.quantization.calib import NVFP4MSECalibrator
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.tensor_quant import static_blockwise_fp4_fake_quant
 
 BLOCK_SIZE = 16
@@ -130,8 +131,30 @@ def test_quantized_output_matches():
 
 
 @requires_triton
+@pytest.mark.parametrize("triton_enabled", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_sweep_stores_fp32_amax_and_preserves_output_dtype(dtype, triton_enabled):
+    """NVFP4 MSE stores selected amax in fp32 without changing fake-quant output dtype."""
+    torch.manual_seed(11)
+    device = "cuda"
+    num_blocks = 64
+    x = torch.randn(num_blocks, BLOCK_SIZE, device=device, dtype=dtype)
+    per_block_amax = x.abs().amax(dim=-1).to(dtype=dtype)
+    global_amax = per_block_amax.max()
+
+    with _force_sweep_path(triton_enabled=triton_enabled):
+        cal = _make_calibrator(per_block_amax, global_amax)
+        cal.collect(x)
+        amax = cal.compute_amax()
+
+    assert amax.dtype == torch.float32
+    xq = static_blockwise_fp4_fake_quant(x, amax, global_amax, True, x.dtype)
+    assert xq.dtype == x.dtype
+
+
+@requires_triton
 def test_reset_allows_recollect():
-    """After the fast path runs, a second collect() requires reset() in between."""
+    """After collect() caches an amax, a second collect() requires reset() in between."""
     torch.manual_seed(0)
     device = "cuda"
     num_blocks = 32
@@ -143,10 +166,10 @@ def test_reset_allows_recollect():
         cal = _make_calibrator(per_block_amax, global_amax)
         cal.collect(x)
         first = cal.compute_amax().clone()
-        assert cal._best_amax_fast is not None  # fast path was taken
+        assert cal._best_amax_fast is not None  # final amax was cached
 
-        # Second collect after the fast path is not allowed without a reset.
-        with pytest.raises(RuntimeError, match="multi-collect after the fast path"):
+        # Second collect after a final amax is cached is not allowed without a reset.
+        with pytest.raises(RuntimeError, match="multi-collect"):
             cal.collect(x)
 
         cal.reset()
@@ -198,7 +221,7 @@ def test_dispatch_fast_path_default():
 
 @requires_triton
 def test_dispatch_env_optout_falls_back():
-    """``MODELOPT_NVFP4_TRITON_SWEEP=0`` forces the reference 126-step sweep."""
+    """``MODELOPT_NVFP4_TRITON_SWEEP=0`` forces the cached reference sweep."""
     torch.manual_seed(0)
     num_blocks = 32
     x = torch.randn(num_blocks, BLOCK_SIZE, device="cuda", dtype=torch.float32)
@@ -208,8 +231,8 @@ def test_dispatch_env_optout_falls_back():
     with _force_sweep_path(triton_enabled=False):
         cal = _make_calibrator(per_block_amax, global_amax)
         cal.collect(x)
-        assert cal._best_amax_fast is None
-        assert cal._losses_sum is not None
+        assert cal._best_amax_fast is not None
+        assert cal._losses_sum is None
 
 
 @requires_triton
@@ -238,8 +261,8 @@ def test_dispatch_custom_error_func_falls_back():
             error_func=hessian_like_error,
         )
         cal.collect(x)
-        assert cal._best_amax_fast is None
-        assert cal._losses_sum is not None
+        assert cal._best_amax_fast is not None
+        assert cal._losses_sum is None
 
 
 @requires_triton
@@ -306,19 +329,30 @@ def test_mse_calibrate_end_to_end(monkeypatch):
                 m(batch)
 
         mtq.quantize(model, cfg, forward_loop=forward_loop)
+        amax_dtypes = {}
+        for name, module in model.named_modules():
+            if (
+                isinstance(module, TensorQuantizer)
+                and module.is_nvfp4_static
+                and module.amax is not None
+            ):
+                amax_dtypes[name] = module.amax.dtype
+        assert amax_dtypes
         # Run a deterministic input through and snapshot the output.
         torch.manual_seed(1)
         x = torch.randn(4, 16, device="cuda")
         with torch.no_grad():
             y = model(x).detach().clone()
-        return y, weight_snapshots
+        return y, weight_snapshots, amax_dtypes
 
-    y_default, w0 = _run_calibrated(env_value=None)
-    y_optout, w1 = _run_calibrated(env_value="0")
+    y_default, w0, dtypes_default = _run_calibrated(env_value=None)
+    y_optout, w1, dtypes_optout = _run_calibrated(env_value="0")
     # Both runs must start from the same weights (sanity: SimpleLinear is deterministic
     # under the same seed) before we compare post-calibration outputs.
     for name in w0:
         assert torch.equal(w0[name], w1[name]), name
+    assert all(dtype == torch.float32 for dtype in dtypes_default.values())
+    assert all(dtype == torch.float32 for dtype in dtypes_optout.values())
     assert torch.equal(y_default, y_optout)
 
 
