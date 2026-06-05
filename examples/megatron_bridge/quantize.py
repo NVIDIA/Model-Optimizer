@@ -27,26 +27,26 @@ The process is as follows:
 Tensor / pipeline / expert parallelism are all supported here — the Megatron checkpoint is saved
 sharded and can be re-sharded on load (e.g. `export.py` reloads it at TP=1 for the HF export).
 
-Example usage to quantize Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2):
-    1024 samples from default dataset are used for calibration (sequence length = 512).
+Example usage to quantize Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2):
+    1024 samples from default dataset are used for calibration (sequence length = 4096).
 
     torchrun --nproc_per_node 2 quantize.py \
         --hf_model_name_or_path Qwen/Qwen3-8B \
-        --quant_cfg fp8 \
+        --quant_cfg nvfp4 \
         --tp_size 2 \
-        --calib_batch_size 16 \
-        --seq_length 512 \
-        --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
+        --calib_batch_size 1 \
+        --seq_length 4096 \
+        --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 
 Equivalent run using a YAML recipe (authoritative for quant_cfg + algorithm + KV-cache config):
 
     torchrun --nproc_per_node 2 quantize.py \
         --hf_model_name_or_path Qwen/Qwen3-8B \
-        --recipe general/ptq/fp8_default-kv_fp8 \
+        --recipe general/ptq/nvfp4_default-kv_fp8 \
         --tp_size 2 \
-        --calib_batch_size 16 \
-        --seq_length 512 \
-        --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
+        --calib_batch_size 1 \
+        --seq_length 4096 \
+        --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 
 To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, run `export.py`.
 
@@ -175,7 +175,7 @@ def get_args() -> argparse.Namespace:
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
     )
     parser.add_argument("--calib_batch_size", type=int, default=1, help="Calibration batch size")
-    parser.add_argument("--seq_length", type=int, default=512, help="Calibration sequence length")
+    parser.add_argument("--seq_length", type=int, default=4096, help="Calibration sequence length")
 
     # Post-quantization generation (sanity check) arguments
     parser.add_argument(

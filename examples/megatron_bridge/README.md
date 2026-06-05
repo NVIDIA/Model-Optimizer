@@ -67,18 +67,18 @@ This section shows how to quantize a HuggingFace model using ModelOpt in the Meg
 1. [quantize.py](quantize.py) applies post-training quantization (PTQ) with calibration and saves a **Megatron checkpoint** (with ModelOpt state). Tensor / pipeline / expert parallelism are all supported, and the checkpoint can be reloaded for further training (Quantization Aware Training / Quantization Aware Distillation).
 2. [export.py](export.py) converts that Megatron checkpoint to a **HuggingFace (unified) checkpoint** that deploys directly with TensorRT-LLM, vLLM, or SGLang.
 
-`quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `FP8_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/fp8_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
+`quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `NVFP4_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/nvfp4_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
 
-**Step 1 — quantize** Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from default dataset (Mix of [`cnn_dailymail`](https://huggingface.co/datasets/abisee/cnn_dailymail) and [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2)) for calibration (sequence length = 16):
+**Step 1 — quantize** Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from default dataset (Mix of [`cnn_dailymail`](https://huggingface.co/datasets/abisee/cnn_dailymail) and [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2)) for calibration (sequence length = 4096):
 
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
-    --quant_cfg fp8 \
+    --quant_cfg nvfp4 \
     --tp_size 2 \
-    --calib_batch_size 16 \
-    --seq_length 512 \
-    --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
+    --calib_batch_size 1 \
+    --seq_length 4096 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 ```
 
 **Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
@@ -86,9 +86,9 @@ torchrun --nproc_per_node 2 quantize.py \
 ```bash
 torchrun --nproc_per_node 2 export.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
-    --megatron_path /tmp/Qwen3-8B-FP8-megatron \
+    --megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
     --pp_size 2 \
-    --export_unified_hf_path /tmp/Qwen3-8B-FP8-hf
+    --export_unified_hf_path /tmp/Qwen3-8B-NVFP4-hf
 ```
 
 > [!NOTE]
@@ -106,7 +106,7 @@ For VLM (vision-language model) quantization, see the Megatron-Bridge repository
 [generate_vllm.py](generate_vllm.py) runs a quick generation check on a unified HuggingFace checkpoint using vLLM. vLLM auto-detects the ModelOpt quantization from the exported `hf_quant_config.json`, so no extra quant flags are needed:
 
 ```bash
-python generate_vllm.py --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 --trust_remote_code
+python generate_vllm.py --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 --trust_remote_code
 ```
 
 ## Distillation
@@ -188,7 +188,7 @@ torchrun --nproc_per_node 8 distill.py \
     --tp_size 8 \
     --teacher_hf_path Qwen/Qwen3-8B \
     --student_hf_path Qwen/Qwen3-8B \
-    --student_megatron_path /tmp/Qwen3-8B-FP8-megatron \
+    --student_megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
     --data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document \
     --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
     --seq_length 8192 \
@@ -196,7 +196,7 @@ torchrun --nproc_per_node 8 distill.py \
     --train_iters 1000 \
     --lr 1e-5 \
     --min_lr 5e-6 \
-    --output_dir /output/qwen3_8b_qad
+    --output_dir /output/qwen3_8b_nvfp4_qad
 ```
 
 The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export.py](export.py) (point `--megatron_path` at `<output_dir>/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
