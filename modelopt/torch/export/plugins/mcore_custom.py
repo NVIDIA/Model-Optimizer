@@ -251,14 +251,14 @@ def save_safetensors(state_dict, save_directory: str | os.PathLike):
         meta_filename = filename + ".json"
         ckpt_filename = filename + ".safetensors"
 
-        # Keep safetensors-first ordering so late shard updates are reflected
-        # in both the shard file and the shard metadata JSON.
-        save_file(tensors, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
+        # Freeze a per-shard snapshot so safetensors and JSON are emitted from the same view.
+        frozen_tensors = dict(tensors)
+        save_file(frozen_tensors, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
 
         weight_map = {}
         local_total_size = 0
 
-        for key, val in tensors.items():
+        for key, val in frozen_tensors.items():
             local_total_size += val.numel() * val.element_size()
             weight_map[key] = ckpt_filename
 
@@ -308,17 +308,17 @@ def save_safetensors_by_layer_index(
         meta_filename = filename + ".json"
         ckpt_filename = filename + ".safetensors"
 
-        # Keep safetensors-first ordering so late layer_state_dict updates are captured
-        # in the layer .safetensors shard and reflected in its per-layer metadata JSON.
+        # Freeze a per-layer snapshot so safetensors and JSON are emitted from the same view.
+        frozen_layer_state_dict = dict(layer_state_dict)
         save_file(
-            layer_state_dict,
+            frozen_layer_state_dict,
             save_directory + "/" + ckpt_filename,
             metadata={"format": "pt"},
         )
 
         weight_map = {}
         layer_total_size = 0
-        for key, val in layer_state_dict.items():
+        for key, val in frozen_layer_state_dict.items():
             tensor_size = val.numel() * val.element_size()
             layer_total_size += tensor_size
             weight_map[key] = ckpt_filename
