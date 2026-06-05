@@ -22,6 +22,9 @@ import torch.nn.functional as F
 
 pytest.importorskip("transformers")
 
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export.moe_utils import _export_fused_experts
+from modelopt.torch.export.quant_utils import get_quant_config
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
@@ -32,6 +35,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
 )
+from modelopt.torch.quantization.utils.core_utils import weight_attr_names
 
 # ---------------------------------------------------------------------------
 # Synthetic fused expert module matching the HF transformers 5.0+ pattern
@@ -256,27 +260,48 @@ class TestQuantFusedExperts:
 # Tests for export
 # ---------------------------------------------------------------------------
 class TestExportFusedExperts:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
     def test_export_creates_per_expert_submodules(self):
         """_export_fused_experts should create per-expert submodules with standard naming."""
-        from modelopt.torch.export.moe_utils import _export_fused_experts
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
 
-        experts = _SyntheticFusedExperts()
-        expert_type = type(experts)
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
 
-        # Manually register and convert
-        if QuantModuleRegistry.get(expert_type) is None:
-            QuantModuleRegistry.register({expert_type: "test.SyntheticFusedExperts"})(
-                _QuantFusedExperts
-            )
-        converted = QuantModuleRegistry.convert(experts)
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                x = torch.randn(1, 4, HIDDEN_DIM)
+                m(x)
 
-        # Run a forward pass to calibrate (set amaxes)
-        seq_len = 16
-        hidden_states = torch.randn(seq_len, HIDDEN_DIM)
-        top_k_index = torch.randint(0, NUM_EXPERTS, (seq_len, TOP_K))
-        top_k_weights = torch.softmax(torch.randn(seq_len, TOP_K), dim=-1)
-        with torch.no_grad():
-            converted(hidden_states, top_k_index, top_k_weights)
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+        converted = model.moe.experts
 
         _export_fused_experts(converted, torch.float16)
 
@@ -297,8 +322,7 @@ class TestExportFusedExperts:
         assert not hasattr(converted, "down_proj")
         assert not hasattr(converted, "gate_up_proj_weight_quantizers")
 
-        if QuantModuleRegistry.get(expert_type) is not None:
-            QuantModuleRegistry.unregister(expert_type)
+        self._cleanup_registry(expert_type)
 
     def test_uncalibrated_expert_gate_up_share_amax(self, monkeypatch):
         """gate_proj and up_proj must share weight_scale_2 even when an expert
@@ -313,8 +337,6 @@ class TestExportFusedExperts:
         tensor before the deepcopies, so gate's clone and up's clone start with
         the same amax.
         """
-        from modelopt.torch.export.moe_utils import _export_fused_experts
-
         # Build experts where gate and up have very different magnitudes —
         # any per-half fallback would clearly produce different amaxes.
         experts = _SyntheticFusedExperts()
@@ -397,8 +419,6 @@ class TestExportFusedExperts:
         per-projection scales. The fix reshapes to ``(fused_total, blocks_per_row)``
         before slicing on dim-0 when ``amax.numel() % fused_total == 0``.
         """
-        from modelopt.torch.export.moe_utils import _export_fused_experts
-
         experts = _SyntheticFusedExperts()
         expert_type = type(experts)
         if QuantModuleRegistry.get(expert_type) is None:
@@ -577,8 +597,6 @@ class TestFusedExpertsCalibration:
 
     def test_calibration_populates_all_expert_quantizers(self):
         """After PTQ, every input/weight quantizer on the fused-experts module has amax set."""
-        import modelopt.torch.quantization as mtq
-
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -633,21 +651,14 @@ class TestFusedExpertsCalibration:
 
         self._cleanup_registry(expert_type)
 
-    def test_bootstrap_populates_dead_expert_quantizers(self):
-        """`_bootstrap_uncalibrated_weight_quantizers` fills `_amax` on experts the
-        forward pass never routed to.
+    def test_max_calibrate_populates_dead_static_nvfp4_expert_quantizers(self):
+        """max calibration fills static NVFP4 ``_amax`` on experts the forward never routed to.
 
         Regression for the dead-expert MSE skip: with partial routing during max
         calibration, never-routed experts' weight quantizers stay with
-        ``_amax=None``; bootstrap must run the calibrator on the per-expert weight
-        slice (via ``iter_weights_for_calibration``) to populate them so MSE
-        doesn't skip them.
+        ``_amax=None`` unless static NVFP4 finalization bootstraps them from the
+        per-expert weight slice.
         """
-        import modelopt.torch.quantization as mtq
-        from modelopt.torch.quantization.model_calib import (
-            _bootstrap_uncalibrated_weight_quantizers,
-        )
-
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -657,11 +668,17 @@ class TestFusedExpertsCalibration:
                 {"quantizer_name": "*", "enable": False},
                 {
                     "quantizer_name": "*gate_up_proj_weight_quantizer",
-                    "cfg": {"num_bits": 8, "axis": 0},
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    },
                 },
                 {
                     "quantizer_name": "*down_proj_weight_quantizer",
-                    "cfg": {"num_bits": 8, "axis": 0},
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                    },
                 },
             ],
             "algorithm": "max",
@@ -688,41 +705,25 @@ class TestFusedExpertsCalibration:
 
         experts = model.moe.experts
 
-        # Pre-bootstrap: dead experts have no/zero _amax.
-        for idx in dead:
-            gu_q = experts.gate_up_proj_weight_quantizers[idx]
-            d_q = experts.down_proj_weight_quantizers[idx]
-            assert getattr(gu_q, "_amax", None) is None or torch.all(gu_q._amax == 0), (
-                f"Dead expert {idx} gate_up_proj should be uncalibrated pre-bootstrap"
-            )
-            assert getattr(d_q, "_amax", None) is None or torch.all(d_q._amax == 0), (
-                f"Dead expert {idx} down_proj should be uncalibrated pre-bootstrap"
-            )
-
-        n_bootstrapped = _bootstrap_uncalibrated_weight_quantizers(model)
-        assert n_bootstrapped >= 2 * len(dead), (
-            f"Expected ≥{2 * len(dead)} bootstrapped (gate_up + down per dead expert), "
-            f"got {n_bootstrapped}"
-        )
-
-        # Post-bootstrap: every expert has populated _amax matching max(|weight|).
+        # Static NVFP4 finalization in max_calibrate bootstraps every expert.
         for idx in range(NUM_EXPERTS):
             gu_q = experts.gate_up_proj_weight_quantizers[idx]
             d_q = experts.down_proj_weight_quantizers[idx]
             assert gu_q._amax is not None and not torch.all(gu_q._amax == 0), (
-                f"Expert {idx} gate_up_proj _amax not populated after bootstrap"
+                f"Expert {idx} gate_up_proj _amax not populated after max_calibrate"
             )
             assert d_q._amax is not None and not torch.all(d_q._amax == 0), (
-                f"Expert {idx} down_proj _amax not populated after bootstrap"
+                f"Expert {idx} down_proj _amax not populated after max_calibrate"
             )
 
-        # For dead experts, bootstrap reads max(|weight|). Sanity-check it matches
-        # the actual weight tensor's per-row max (axis=0 reduces over hidden_dim).
+        # For dead experts, bootstrap reads blockwise max(|weight|). Sanity-check it
+        # matches the actual weight tensor's per-block max over hidden_dim.
         for idx in dead:
-            expected = experts.gate_up_proj.data[idx].abs().amax(dim=1)
+            expected = experts.gate_up_proj.data[idx].reshape(2 * INTERMEDIATE_DIM, 2, 16)
+            expected = expected.abs().amax(dim=2).flatten()
             got = experts.gate_up_proj_weight_quantizers[idx]._amax.flatten()
             assert torch.allclose(got, expected, atol=1e-4), (
-                f"Expert {idx} bootstrap amax should equal per-row max(|weight|); "
+                f"Expert {idx} amax should equal blockwise max(|weight|); "
                 f"max diff {(got - expected).abs().max().item()}"
             )
 
@@ -759,8 +760,6 @@ class TestMixedPrecisionExport:
     def test_weight_attr_names_yields_fused_expert_params(self):
         """weight_attr_names must yield gate_up_proj / down_proj on fused experts
         even though their quantizers are a plural ModuleList, not singular."""
-        from modelopt.torch.quantization.utils.core_utils import weight_attr_names
-
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -780,9 +779,6 @@ class TestMixedPrecisionExport:
         """Mixed-precision recipe (experts FP8 + dense Linear FP8 per-channel) should
         show both modules in quantized_layers. Using two distinct formats would
         trigger MIXED_PRECISION; using same-format still exercises enumeration."""
-        import modelopt.torch.quantization as mtq
-        from modelopt.torch.export.quant_utils import get_quant_config
-
         model = _MixedPrecisionModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)

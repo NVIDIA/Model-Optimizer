@@ -297,6 +297,11 @@ def is_quantized_linear(module):
     """Check if a module is a quantized linear module."""
     from ..nn import QuantModule, TensorQuantizer
 
+    # Embedding has a 2D weight but is not a GEMM op, so calibration passes that operate
+    # on linear activations (AWQ, SmoothQuant, SVDQuant) must skip it.
+    if isinstance(module, nn.Embedding):
+        return False
+
     return (
         isinstance(module, QuantModule)
         and isinstance(getattr(module, "input_quantizer", None), TensorQuantizer)
@@ -955,11 +960,17 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
 
     converted = 0
     for _name, module in list(model.named_modules()):
-        if isinstance(module, TensorQuantizer) and not module._disabled:
-            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                if module.is_nvfp4_static:
-                    initial_amax = module._amax.clone().detach()
-                    global_amax = reduce_amax(initial_amax, axis=None)
-                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
-                    converted += 1
+        if not isinstance(module, TensorQuantizer) or not module.is_enabled:
+            continue
+        if not module.is_nvfp4_static:
+            continue
+        amax = module.amax
+        if amax is None:
+            continue
+
+        already_promoted = isinstance(module, NVFP4StaticQuantizer)
+        global_amax = reduce_amax(amax.clone().detach(), axis=None)
+        NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+        if not already_promoted:
+            converted += 1
     return converted

@@ -208,14 +208,14 @@ else:
     dataset = load_dataset(args.data, split=args.data_split)
 
 if args.num_shards * 100 > len(dataset):
-    args.num_shards = min(16, len(dataset) // 100)
+    args.num_shards = max(1, min(16, len(dataset) // 100))
 
 if args.save is not None:
-    print("Create save dir: {}".format(args.save))
+    print(f"Create save dir: {args.save}")
     os.makedirs(args.save, exist_ok=True)
 
 for shard_id in range(args.shard_id_begin, args.num_shards, args.shard_id_step):
-    file_path = args.save + "/train-{:05}-{:05}.jsonl".format(shard_id + 1, args.num_shards)
+    file_path = args.save + f"/train-{shard_id + 1:05}-{args.num_shards:05}.jsonl"
 
     if os.path.exists(file_path):
         continue

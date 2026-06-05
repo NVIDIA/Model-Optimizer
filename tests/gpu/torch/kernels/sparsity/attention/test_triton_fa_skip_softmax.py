@@ -18,14 +18,11 @@
 import pytest
 import torch
 from conftest import make_varlen_meta
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::UserWarning"),
-    pytest.mark.filterwarnings("ignore::RuntimeWarning"),
-    pytest.mark.filterwarnings("ignore::DeprecationWarning"),
-]
-
+import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.sparsity.attention_sparsity.methods.flash_skip_softmax import FlashSkipSoftmax
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention, register_triton_attention
@@ -90,7 +87,7 @@ class TestSkipSoftmax:
         scale = 1.0 / (head_dim**0.5)
         out_dense = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale)
         out_skip = attention(
-            q, k, v, locs, lens, seq_len, softmax_scale=scale, skip_softmax_threshold=0.5
+            q, k, v, locs, lens, seq_len, softmax_scale=scale, skip_softmax_threshold=0.99
         )
         assert not torch.allclose(out_skip, out_dense, atol=1e-3)
 
@@ -176,10 +173,6 @@ class TestSkipSoftmaxVsPytorchRef:
         and applies them to standard softmax attention. The Triton kernel fuses the same skip
         logic into the online softmax inner loop.
         """
-        from modelopt.torch.sparsity.attention_sparsity.methods.flash_skip_softmax import (
-            FlashSkipSoftmax,
-        )
-
         batch, seq_len = 1, 256
         num_heads, num_kv_heads, head_dim = 4, 4, 64  # MHA for simplicity
         scale = 1.0 / (head_dim**0.5)
@@ -248,11 +241,6 @@ class TestSkipSoftmaxHFIntegration:
 
     def test_skip_softmax_via_sparsify(self, tiny_llama_dir):
         """mtsa.sparsify() with triton_skip_softmax produces finite logits."""
-        pytest.importorskip("transformers")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        import modelopt.torch.sparsity.attention_sparsity as mtsa
-
         tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
         if tok.pad_token_id is None:
             tok.pad_token_id = tok.eos_token_id

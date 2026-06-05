@@ -19,15 +19,13 @@ Exercises ``attention_calibrate`` which computes full attention while counting
 how many KV tiles would be skipped at each threshold in ``threshold_trials``.
 """
 
+import os
+import subprocess
+import sys
+
 import pytest
 import torch
 from conftest import make_qkv, make_varlen_meta
-
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::UserWarning"),
-    pytest.mark.filterwarnings("ignore::RuntimeWarning"),
-    pytest.mark.filterwarnings("ignore::DeprecationWarning"),
-]
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
@@ -159,6 +157,50 @@ class TestAttentionCalibrate:
         assert c1[0, 1].item() == c2[1, 1].item()
         assert c1[1, 1].item() == c2[0, 1].item()
 
+    def test_threshold_semantics_match_runtime_counts(self):
+        """Calibration threshold trials use the same lambda semantics as runtime."""
+        batch, seq_len, num_heads, head_dim = 1, 256, 1, 64
+        total = batch * seq_len
+        scale = 1.0 / (head_dim**0.5)
+        qk_scale = scale * 1.44269504088896
+        threshold = 0.1
+
+        q = torch.zeros(total, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.zeros_like(q)
+        v = torch.zeros_like(q)
+        q[:, :, 0] = 1.0
+        k[128:, :, 0] = -1.0 / qk_scale
+        v[128:] = 1.0
+        locs = torch.zeros(batch, device="cuda", dtype=torch.int32)
+        lens = torch.full((batch,), seq_len, device="cuda", dtype=torch.int32)
+
+        out = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            softmax_scale=scale,
+            is_causal=False,
+            skip_softmax_threshold=threshold,
+            measure_sparsity=True,
+        )
+        _, counters = attention_calibrate(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            softmax_scale=scale,
+            is_causal=False,
+            threshold_trials=[threshold],
+        )
+
+        assert counters[0, 0].item() == out._sparsity_total
+        assert counters[0, 1].item() == out._sparsity_skipped
+
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 class TestMeasureSparsity:
@@ -192,6 +234,50 @@ class TestMeasureSparsity:
         assert out._sparsity_total > 0
         assert out._sparsity_skipped <= out._sparsity_total
 
+    def test_first_measured_call_has_real_tile_count_with_autotune(self):
+        """Counters from the first measured call should not include autotune trials."""
+        script = r"""
+import torch
+from modelopt.torch.kernels.common.attention import attention
+
+batch, seq_len, num_heads, head_dim = 1, 256, 1, 64
+total = batch * seq_len
+scale = 1.0 / (head_dim**0.5)
+q = torch.zeros(total, num_heads, head_dim, device="cuda", dtype=torch.float16)
+k = torch.zeros_like(q)
+v = torch.zeros_like(q)
+locs = torch.zeros(batch, device="cuda", dtype=torch.int32)
+lens = torch.full((batch,), seq_len, device="cuda", dtype=torch.int32)
+out = attention(
+    q,
+    k,
+    v,
+    locs,
+    lens,
+    seq_len,
+    softmax_scale=scale,
+    is_causal=False,
+    skip_softmax_threshold=0.5,
+    measure_sparsity=True,
+)
+torch.cuda.synchronize()
+print(f"TOTAL={out._sparsity_total}")
+"""
+        env = os.environ.copy()
+        env.pop("PYTEST_VERSION", None)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=os.getcwd(),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        totals = [line for line in result.stdout.splitlines() if line.startswith("TOTAL=")]
+        assert totals, result.stdout
+        assert int(totals[-1].split("=", maxsplit=1)[1]) == 8
+
     def test_measure_sparsity_without_skip_is_noop(self):
         """Without skip-softmax, measure_sparsity doesn't attach counters."""
         q, k, v = make_qkv(256, 4, 4, 64, dtype=torch.float16)
@@ -204,12 +290,12 @@ class TestMeasureSparsity:
         # No skip-softmax active => counters should not be attached
         assert not hasattr(out, "_sparsity_total")
 
-    def test_raw_threshold_path(self):
-        """Raw threshold is passed directly to the kernel without conversion."""
+    def test_tiny_threshold_path(self):
+        """A tiny lambda threshold keeps output close to dense."""
         q, k, v = make_qkv(256, 4, 4, 64, dtype=torch.float16)
         locs, lens = make_varlen_meta([256])
         scale = 1.0 / (64**0.5)
-        out_raw = attention(
+        out_skip = attention(
             q,
             k,
             v,
@@ -218,12 +304,11 @@ class TestMeasureSparsity:
             256,
             softmax_scale=scale,
             is_causal=False,
-            skip_softmax_raw_threshold=-20.0,
+            skip_softmax_threshold=2**-20,
         )
-        # With a very negative raw threshold, almost no tiles are skipped
-        # Output should be close to dense
+        # A near-zero threshold skips very few tiles, so output stays close to dense.
         out_dense = attention(q, k, v, locs, lens, 256, softmax_scale=scale, is_causal=False)
-        torch.testing.assert_close(out_raw, out_dense, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(out_skip, out_dense, rtol=1e-2, atol=1e-2)
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")

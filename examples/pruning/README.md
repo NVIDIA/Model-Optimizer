@@ -50,9 +50,9 @@ Please see example snippets of both modes for Minitron pruning on Megatron-Bridg
 ```python
 import torch
 import modelopt.torch.prune as mtp
-from modelopt.torch.utils.plugins.mbridge import (
-    get_hf_mbridge_calibration_loop,
-    load_mbridge_model_from_hf,
+from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.megatron_calibration import (
+    get_megatron_calibration_forward_loop,
 )
 
 # Import the Megatron-Bridge Qwen3-8B model from Hugging Face checkpoint
@@ -67,13 +67,11 @@ bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf
 )
 
 # Set up the forward loop to run on 1024 train samples
-forward_loop = get_hf_mbridge_calibration_loop(
-    model=model,
-    provider=provider,
-    tokenizer=tokenizer,
-    hf_model_name_or_path="Qwen/Qwen3-8B",
+forward_loop = get_megatron_calibration_forward_loop(
+    tokenizer,
     dataset_name="nemotron-post-training-dataset-v2",
     num_samples=1024,
+    seq_length=4096,
 )
 
 # Run pruning on the unwrapped model
@@ -296,7 +294,8 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 
 End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletron pruning:
 
-- **[Minitron — Nemotron-Nano-9B-v2](minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: End-to-end tutorial of structured pruning for Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Achieves near-parity with the official 9B model across popular pretraining and reasoning benchmarks.
+- **[Minitron — Nemotron-3-Nano-30B-A3B-BF16](minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md)** ⭐ *recommended — newer and most comprehensive*: End-to-end tutorial of structured pruning for Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B) to 22B/A3.0B active parameters followed by two-phase knowledge distillation (80B tokens @ 8K seq length + 20B tokens @ 32K seq length = 100B tokens total), quantization, and vLLM deployment. Covers MoE + Mamba-Transformer hybrid, tool-calling data, and a long-context fine-tuning phase. Achieves near-parity with the official 30B model across popular pretraining and reasoning benchmarks while delivering up to 1.64× throughput speedup and 2.6× memory reduction when combined with FP8 quantization.
+- **[Minitron — Nemotron-Nano-9B-v2](minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: Earlier end-to-end tutorial covering structured pruning of the dense Mamba-Transformer Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Simpler architecture, single-phase 8K seq length distillation, no tool-calling or long-context phase.
 - **[Puzzletron — Qwen3-8B and Llama-3.1-8B-Instruct](puzzletron/Llama-3.1-8B-Instruct.md)**: MIP-based compression followed by short distillation runs on WikiText-103. Shows MMLU recovery and illustrates the importance of using larger datasets to avoid overfitting.
 
 ## Resources

@@ -26,8 +26,11 @@ from transformers import (
     AutoModelForQuestionAnswering,
     AutoTokenizer,
     BertConfig,
+    DeepseekV3Config,
+    Gemma3TextConfig,
     GptOssConfig,
     LlamaConfig,
+    NemotronConfig,
     PreTrainedModel,
     Qwen3Config,
     Qwen3MoeConfig,
@@ -42,8 +45,16 @@ SEED = 1234
 TINY_TOKENIZER_PATH = Path(__file__).parent / "tokenizer"
 
 
-def get_tiny_tokenizer() -> "transformers.PreTrainedTokenizerBase":
-    return AutoTokenizer.from_pretrained(TINY_TOKENIZER_PATH)
+def get_tiny_tokenizer(*, pad_side: str = "left") -> "transformers.PreTrainedTokenizerBase":
+    """Returns a tiny tokenizer for tests.
+
+    Default to left padding, which is what decoder-LM calibration/generation expects and what
+    ``get_dataset_dataloader`` warns about otherwise. Callers needing right padding can override
+    with ``pad_side="right"``.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(TINY_TOKENIZER_PATH)
+    tokenizer.padding_side = pad_side
+    return tokenizer
 
 
 ##### Qwen3 #####
@@ -120,6 +131,135 @@ def create_tiny_qwen3_moe_dir(
     return qwen3_moe_dir
 
 
+##### Qwen3-VL #####
+def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
+    # Lazy imports — Qwen3VL classes live under transformers.models.qwen3_vl which
+    # may not exist in older transformers builds, and this module is imported by
+    # every test that uses transformers_models.py.
+    from transformers import Qwen3VLConfig
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+
+    set_seed(SEED)
+
+    # Defaults: hidden_size=num_attention_heads*head_dim (e.g. 4*8=32).
+    # Pass config_kwargs to override for multi-GPU tests (e.g. num_attention_heads=num_gpus,
+    # num_key_value_heads=num_gpus, hidden_size=num_gpus*head_dim).
+    text_kwargs = {
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+    }
+    text_kwargs.update(config_kwargs)
+    # Pass as dicts — transformers 5.3.0 Qwen3VLConfig.__init__ only handles
+    # vision_config/text_config when they are dicts or None, not instances.
+    vision_kwargs = {
+        "depth": 1,
+        "hidden_size": 16,
+        "intermediate_size": 16,
+        "num_heads": 2,
+        "in_channels": 3,
+        "patch_size": 4,
+        "spatial_merge_size": 1,
+        "temporal_patch_size": 1,
+        "out_hidden_size": text_kwargs["hidden_size"],  # must match text hidden_size
+    }
+    cfg = Qwen3VLConfig(text_config=text_kwargs, vision_config=vision_kwargs)
+    return Qwen3VLForConditionalGeneration(cfg)
+
+
+def create_tiny_qwen3vl_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    qwen3vl_dir = Path(tmp_path) / "tiny_qwen3vl"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(qwen3vl_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_qwen3vl(**config_kwargs).save_pretrained(qwen3vl_dir)
+    return qwen3vl_dir
+
+
+##### NEMOTRON #####
+def get_tiny_nemotron(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+
+    # hidden_size=64, ffn_hidden_size=128: relu2 activation needs non-trivial dims
+    # to avoid all-zero activations (scaling factor 0) in NVFP4 quantization.
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 1,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+    }
+    kwargs.update(**config_kwargs)
+    return AutoModelForCausalLM.from_config(NemotronConfig(**kwargs))
+
+
+def create_tiny_nemotron_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    nemotron_dir = Path(tmp_path) / "tiny_nemotron"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(nemotron_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_nemotron(**config_kwargs).save_pretrained(nemotron_dir)
+    return nemotron_dir
+
+
+##### DeepSeek V3 #####
+def get_tiny_deepseek_v3(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "vocab_size": 128,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "moe_intermediate_size": 64,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "n_routed_experts": 4,
+        "num_experts_per_tok": 2,
+        "n_shared_experts": 1,
+        "first_k_dense_replace": 0,
+        "kv_lora_rank": 16,
+        "q_lora_rank": 32,
+        "qk_rope_head_dim": 16,
+        "qk_nope_head_dim": 16,
+        "v_head_dim": 16,
+        "max_position_embeddings": 128,
+        # Required so vLLM allocates ``gate.e_score_correction_bias`` (HF saves it unconditionally).
+        "topk_method": "noaux_tc",
+    }
+    kwargs.update(**config_kwargs)
+    cfg = DeepseekV3Config(**kwargs)
+    # Survive transformers versions that drop unknown kwargs from the dataclass.
+    cfg.topk_method = kwargs["topk_method"]
+    return AutoModelForCausalLM.from_config(cfg)
+
+
+def create_tiny_deepseek_v3_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    deepseek_dir = Path(tmp_path) / "tiny_deepseek_v3"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(deepseek_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_deepseek_v3(**config_kwargs).save_pretrained(deepseek_dir)
+    return deepseek_dir
+
+
 ##### GPT-OSS #####
 def get_tiny_gpt_oss(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
@@ -151,6 +291,50 @@ def create_tiny_gpt_oss_dir(
         config_kwargs["vocab_size"] = tokenizer.vocab_size
     get_tiny_gpt_oss(**config_kwargs).save_pretrained(gpt_oss_dir)
     return gpt_oss_dir
+
+
+##### Gemma3 #####
+def get_tiny_gemma3(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+
+    # head_dim is independent of hidden_size / num_attention_heads in Gemma3.
+    # layer_types is left to auto-generate (all `sliding_attention` for tiny layer
+    # counts) so the sliding/full attention layer_types code path is still exercised.
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "max_position_embeddings": 32,
+        "sliding_window": 16,
+        "vocab_size": 32,
+    }
+    kwargs.update(**config_kwargs)
+    # query_pre_attn_scalar sets the attention scale (1/sqrt(query_pre_attn_scalar)); default it
+    # to head_dim (Gemma3's convention for all sizes except 27B) unless the caller overrides it,
+    # so overriding head_dim alone stays consistent.
+    kwargs.setdefault("query_pre_attn_scalar", kwargs["head_dim"])
+    return AutoModelForCausalLM.from_config(Gemma3TextConfig(**kwargs))
+
+
+def create_tiny_gemma3_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+) -> Path | tuple[Path, PreTrainedModel]:
+    gemma3_dir = Path(tmp_path) / "tiny_gemma3"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(gemma3_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    tiny_gemma3 = get_tiny_gemma3(**config_kwargs)
+    tiny_gemma3.save_pretrained(gemma3_dir)
+
+    if return_model:
+        return gemma3_dir, tiny_gemma3
+    else:
+        return gemma3_dir
 
 
 ##### LLAMA #####

@@ -22,7 +22,6 @@ import random
 import time
 import warnings
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
@@ -34,6 +33,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedTo
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.export import get_model_type
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
@@ -43,25 +43,6 @@ from modelopt.torch.utils.dataset_utils import get_dataset_dataloader, get_suppo
 
 # Constants
 RAND_SEED = 1234
-
-QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
-    "int8": mtq.INT8_DEFAULT_CFG,
-    "int4_awq": mtq.INT4_AWQ_CFG,
-    "fp8": mtq.FP8_DEFAULT_CFG,
-    "nvfp4": mtq.NVFP4_DEFAULT_CFG,
-    "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
-    "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
-    "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
-    "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
-    "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
-}
-
-KV_QUANT_CFG_CHOICES = {
-    "none": "none",
-    "fp8": "FP8_KV_CFG",
-    "nvfp4": "NVFP4_KV_CFG",
-    "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
-}
 
 
 # Enable HuggingFace checkpointing
@@ -80,13 +61,13 @@ def parse_args():
     parser.add_argument(
         "--qformat",
         default="fp8",
-        choices=QUANT_CFG_CHOICES.keys(),
+        choices=list(QUANT_CFG_CHOICES),
         help="Quantization format",
     )
     parser.add_argument(
         "--kv_cache_qformat",
         default="fp8",
-        choices=list(KV_QUANT_CFG_CHOICES.keys()),
+        choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
         help="KV cache quantization format",
     )
     parser.add_argument(
@@ -280,7 +261,7 @@ def main(args):
     # Validate quantization format
     if args.qformat not in QUANT_CFG_CHOICES:
         raise ValueError(
-            f"Quantization format {args.qformat} not supported. Choose from: {QUANT_CFG_CHOICES.keys()}"
+            f"Quantization format {args.qformat} not supported. Choose from: {list(QUANT_CFG_CHOICES)}"
         )
 
     # Set random seeds
@@ -330,20 +311,18 @@ def main(args):
     quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
     quant_cfg = build_quant_cfg(
-        args.qformat,
         quant_cfg,
         args.awq_block_size,
-        model_type,
     )
 
-    enable_quant_kv_cache = args.kv_cache_qformat != "none"
+    enable_quant_kv_cache = args.kv_cache_qformat != KV_CACHE_NONE
     print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
 
     # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
     if enable_quant_kv_cache:
         quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
             quant_cfg,
-            getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
+            KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
         )
 
     # Quantize the model

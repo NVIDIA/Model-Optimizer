@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import tempfile
 from collections import OrderedDict
 
 import numpy as np
@@ -29,6 +30,7 @@ from modelopt.onnx.autocast.nodeclassifier import (
     InitializerRangeRule,
     IORangeRule,
     NodeClassifier,
+    NodeRuleBase,
 )
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner, TensorStats
 
@@ -280,8 +282,6 @@ def test_node_classifier_custom_rule(test_model):
         "mul_node": [numpy_helper.from_array(np.array([[0.5, 0.5], [0.5, 0.5]], dtype=np.float32))],
     }
 
-    from modelopt.onnx.autocast.nodeclassifier import NodeRuleBase
-
     class CustomRule(NodeRuleBase):
         def _check_inner(self, node):
             # Return True if any initializer contains zeros
@@ -520,8 +520,6 @@ def test_depth_of_reduction_rule_with_tensor_stats():
 )
 def test_node_classifier_with_multi_batch_calibration(test_model):
     """Test NodeClassifier with multi-batch calibration data."""
-    import tempfile
-
     node_to_init_map = {key: [] for key in ["add_node", "mul_node"]}
 
     # Create multiple batches of calibration data

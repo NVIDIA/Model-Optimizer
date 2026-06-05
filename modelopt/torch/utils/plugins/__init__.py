@@ -17,6 +17,9 @@
 
 from modelopt.torch.utils import import_plugin
 
+with import_plugin("megatron_calibration"):
+    from .megatron_calibration import *
+
 with import_plugin("megatron_generate"):
     from .megatron_generate import *
 

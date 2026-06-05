@@ -28,14 +28,22 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from core import (
+    GlobalVariables,
+    SandboxPipeline,
+    SandboxTask,
+    SandboxTask0,
+    _git_info,
+    create_task_from_yaml,
+    get_default_env,
+    run_jobs,
+)
 
 
 class TestCreateTaskFromYamlErrors:
     """Error handling in create_task_from_yaml."""
 
     def test_missing_factory_raises(self, tmp_yaml):
-        from core import create_task_from_yaml
-
         yaml_content = """
 script: test.sh
 slurm_config:
@@ -47,8 +55,6 @@ slurm_config:
             create_task_from_yaml(path, factory_lookup={})
 
     def test_missing_slurm_config_raises(self, tmp_yaml):
-        from core import create_task_from_yaml
-
         yaml_content = """
 script: test.sh
 """
@@ -57,8 +63,6 @@ script: test.sh
             create_task_from_yaml(path, factory_lookup={})
 
     def test_environment_preserved(self, tmp_yaml):
-        from core import create_task_from_yaml
-
         def factory(nodes=1):
             return {"nodes": nodes}
 
@@ -81,8 +85,6 @@ class TestSandboxPipelineExtended:
 
     def test_dict_environment_interpolation(self):
         """Global vars resolve in dict-format environment (not list)."""
-        from core import GlobalVariables, SandboxPipeline, SandboxTask0
-
         t0 = SandboxTask0(
             script="test.sh",
             environment={"MODEL": "<<global_vars.hf_model>>", "STATIC": "value"},
@@ -98,8 +100,6 @@ class TestSandboxPipelineExtended:
 
     def test_tasks_list_directly(self):
         """Pipeline can receive tasks as a list directly."""
-        from core import SandboxPipeline, SandboxTask
-
         tasks = [
             SandboxTask(script="a.sh"),
             SandboxTask(script="b.sh"),
@@ -111,8 +111,6 @@ class TestSandboxPipelineExtended:
 
     def test_no_global_vars_no_error(self):
         """Pipeline without global_vars doesn't crash on interpolation."""
-        from core import SandboxPipeline, SandboxTask0
-
         t0 = SandboxTask0(
             script="test.sh",
             args=["<<global_vars.hf_model>>"],
@@ -126,23 +124,17 @@ class TestGitInfo:
     """Direct tests for _git_info helper."""
 
     def test_valid_git_repo(self):
-        from core import _git_info
-
         commit, branch = _git_info(os.getcwd())
         assert commit != "unknown"
         assert branch != "unknown"
         assert len(commit) >= 7  # short hash
 
     def test_nonexistent_directory(self):
-        from core import _git_info
-
         commit, branch = _git_info("/tmp/nonexistent_xyz_12345")
         assert commit == "unknown"
         assert branch == "unknown"
 
     def test_non_git_directory(self):
-        from core import _git_info
-
         # Use /tmp which is outside any git repo
         commit, branch = _git_info("/tmp")
         # /tmp may or may not be inside a git worktree depending on the system
@@ -158,8 +150,6 @@ class TestRunJobsExtended:
     @patch("core.build_docker_executor")
     def test_environment_list_merged_to_env(self, mock_docker, mock_exp, tmp_path):
         """List-of-dicts environment is merged into task_env."""
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         mock_exp_inst = MagicMock()
         mock_exp_inst._id = "exp_env"
         mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)
@@ -197,8 +187,6 @@ class TestRunJobsExtended:
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
     def test_none_env_values_converted_to_empty_string(self, mock_docker, mock_exp, tmp_path):
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         mock_exp_inst = MagicMock()
         mock_exp_inst._id = "exp_none"
         mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)
@@ -234,8 +222,6 @@ class TestRunJobsExtended:
     @patch("core.build_docker_executor")
     def test_test_level_filters_pipeline(self, mock_docker, mock_exp, tmp_path):
         """Pipelines with test_level > current are skipped."""
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         mock_exp_inst = MagicMock()
         mock_exp_inst._id = "exp_lvl"
         mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)
@@ -267,8 +253,6 @@ class TestRunJobsExtended:
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
     def test_skipped_pipeline_not_run(self, mock_docker, mock_exp, tmp_path):
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         slurm_env, local_env = get_default_env()
 
         t0 = SandboxTask0(script="test.sh", slurm_config=MagicMock())
@@ -291,8 +275,6 @@ class TestRunJobsExtended:
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
     def test_detach_flag_passed_to_experiment(self, mock_docker, mock_exp, tmp_path):
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         mock_exp_inst = MagicMock()
         mock_exp_inst._id = "exp_detach"
         mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)
@@ -323,8 +305,6 @@ class TestRunJobsExtended:
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
     def test_version_report_called(self, mock_docker, mock_exp, tmp_path, capsys):
-        from core import SandboxPipeline, SandboxTask0, get_default_env, run_jobs
-
         mock_exp_inst = MagicMock()
         mock_exp_inst._id = "exp_ver"
         mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)

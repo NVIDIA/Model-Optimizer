@@ -44,26 +44,26 @@ class SpecBench(AcceptanceRate):
 
     def process_final(self, text_outputs):
         lengths = {}
-        self.out["Request_AR"] = {}
+        self.out["Request_AL"] = {}
         for request_id, request in enumerate(self.requests):
             turns = self.prompt_ar[request_id].values()
             assert len(turns) == len(request.turns), (
                 f"Number of turns {len(turns)} does not match number of turns in request {len(request.turns)}"
             )
-            self.out["Request_AR"][request.question_id] = mean(list(chain(*turns)))
+            self.out["Request_AL"][request.question_id] = mean(list(chain(*turns)))
             for turn in turns:
                 self._get_lengths(turn, lengths)
-            print(request.category, self.out["Request_AR"][request.question_id])
+            print(request.category, self.out["Request_AL"][request.question_id])
         per_category = defaultdict(list)
         for request in self.requests:
-            per_category[request.category].append(self.out["Request_AR"][request.question_id])
-        self.out["Category_AR"] = {}
+            per_category[request.category].append(self.out["Request_AL"][request.question_id])
+        self.out["Category_AL"] = {}
         for category_name, category_ar in per_category.items():
             if len(category_ar) > 0:
                 category_ar = mean(category_ar)
-                self.out["Category_AR"][category_name] = category_ar
-        average_ar = mean(self.out["Request_AR"].values())
-        self.out["Average_AR"] = average_ar
+                self.out["Category_AL"][category_name] = category_ar
+        average_ar = mean(self.out["Request_AL"].values())
+        self.out["Average_AL"] = average_ar
         self._process_lengths(lengths)
         self.write()
         self._format_write_output(text_outputs)
@@ -93,15 +93,15 @@ class SpecBench(AcceptanceRate):
             header_style="bold magenta",
         )
         table.add_column("Category", style="cyan", no_wrap=True)
-        table.add_column("Average AR", justify="right", style="green")
+        table.add_column("Average AL", justify="right", style="green")
 
         # Add category rows
-        for category_name, category_ar in sorted(self.out["Category_AR"].items()):
+        for category_name, category_ar in sorted(self.out["Category_AL"].items()):
             table.add_row(category_name, f"{category_ar:.4f}")
 
         # Add separator and summary row
         table.add_section()
-        table.add_row("[bold]Overall Average[/bold]", f"[bold]{self.out['Average_AR']:.4f}[/bold]")
+        table.add_row("[bold]Overall Average[/bold]", f"[bold]{self.out['Average_AL']:.4f}[/bold]")
 
         console.print(table)
 
@@ -124,8 +124,8 @@ class SpecBench(AcceptanceRate):
 
         df_clean = pd.DataFrame.from_dict(
             {
-                "question_id": list(self.out["Request_AR"].keys()),
-                "acceptance_rate": list(self.out["Request_AR"].values()),
+                "question_id": list(self.out["Request_AL"].keys()),
+                "acceptance_rate": list(self.out["Request_AL"].values()),
                 "category": [request.category for request in self.requests],
                 "response_length": [
                     mean([len(c["content"]) for c in messages if c["role"] == "assistant"])

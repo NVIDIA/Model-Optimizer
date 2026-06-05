@@ -34,10 +34,10 @@ default_cluster: my-cluster
 Workstation filesystems (`/home/scratch.*`, local NFS) are **not** mounted on the cluster. If a checkpoint was produced on your workstation, copy it to the cluster's own storage before submitting any job that references it — NEL and SLURM do NOT sync checkpoints automatically.
 
 ```bash
-rsync -av /path/to/local/checkpoint <cluster-login>:<cluster-workspace>/checkpoints/
+rsync -av /path/to/local/checkpoint <cluster-login>:<cluster-workspace>/<session_id>/<model>/checkpoints/
 ```
 
-Use the `workspace` path from your cluster config as the destination. Compute nodes on a given cluster share the same storage as its login node, so once staged, the path works everywhere on that cluster.
+Use the `workspace` path from your cluster config as the destination root, and keep staged checkpoints under the session/model directory. Compute nodes on a given cluster share the same storage as its login node, so once staged, the path works everywhere on that cluster.
 
 See `.agents/clusters.yaml.example` for a fully annotated example with multiple cluster types.
 
@@ -119,8 +119,8 @@ When submitting SLURM jobs remotely, write **two files** locally to avoid shell 
 Then upload both and submit:
 
 ```bash
-remote_sync_to /local/scripts/ scripts/
-JOBID=$(remote_run "sbatch /remote/path/scripts/job_slurm.sh" | grep -o '[0-9]\+' | tail -1)
+remote_sync_to /local/scripts/ <session_id>/<model>/scripts/
+JOBID=$(remote_run "sbatch <remote_workspace>/<session_id>/<model>/scripts/job_slurm.sh" | grep -o '[0-9]\+' | tail -1)
 ```
 
 ---

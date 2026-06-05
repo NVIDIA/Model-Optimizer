@@ -4,6 +4,8 @@ reviews:
   profile: chill
   collapse_walkthrough: true
   poem: false
+  # Allow CodeRabbit to formally approve once its comments are resolved and pre-merge checks pass
+  request_changes_workflow: true
   path_instructions:
     - path: "modelopt/**/*.py"
       instructions: &security_instructions |
@@ -25,6 +27,21 @@ reviews:
            @NVIDIA/modelopt-setup-codeowners with an explicit justification in the PR description.
     - path: "examples/**/*.py"
       instructions: *security_instructions
+    - path: "tests/**/*.py"
+      instructions: |
+        Verify tests follow the conventions in CONTRIBUTING.md. Flag the following as
+        IMPORTANT issues:
+        1. Imports inside functions or test methods without explicit justification.
+           Imports belong at the top of the file so import errors surface at collection
+           time, not mid-test. The only acceptable in-function imports are for circular
+           imports or optional dependencies (e.g., TensorRT-LLM, Megatron-Core), and
+           those should carry a brief comment naming the reason.
+        2. Redundant lower-level tests that duplicate behavior already covered by a
+           higher-level test — checked-in tests should be lean and document expected
+           behavior, protect against regressions, or flag backward-incompatible changes.
+        3. Tests placed in the wrong directory for their cost profile (e.g., multi-minute
+           tests under tests/unit, which targets a few-seconds budget; GPU-requiring
+           tests under tests/unit instead of tests/gpu*).
   auto_review:
     auto_incremental_review: true
     drafts: false
