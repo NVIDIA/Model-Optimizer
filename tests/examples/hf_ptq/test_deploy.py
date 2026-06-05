@@ -377,6 +377,12 @@ def test_mixtral(command):
             mini_sm=100,
             attn_backend="FLASHINFER",
         ),
+        *ModelDeployerList(
+            model_id="nvidia/Gemma-4-26B-A4B-NVFP4",
+            backend=("vllm",),
+            tensor_parallel_size=2,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
