@@ -51,3 +51,16 @@
   - parent_class: 'nn.Embedding'
     quantizer_name: '*'
     enable: false
+  # ---- Vision-tower / multimodal modules (DiffusionGemma4 v6+) ----
+  # These modules exist in vision-enabled checkpoints but are never touched by
+  # text-only PTQ calibration. Without these excludes, FP8 quant_cfg assigns
+  # TensorQuantizer instances to them; they never see calibration data; their
+  # _amax is never set; and export crashes at _export_quantized_weight with
+  # "AttributeError: 'TensorQuantizer' object has no attribute '_amax'".
+  # Patterns harmless for non-multimodal models (no matches → no-op).
+  - quantizer_name: '*vision_tower*'
+    enable: false
+  - quantizer_name: '*embed_vision*'
+    enable: false
+  - quantizer_name: '*self_conditioning*'
+    enable: false
