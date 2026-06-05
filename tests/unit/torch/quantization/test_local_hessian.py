@@ -158,36 +158,30 @@ class TestLocalHessianCalibrateDense:
         assert all(torch.equal(before[n], a) for n, a in _weight_amaxes(model).items())
 
 
-class TestActivationCaptureExtensionPoint:
-    """The extension point that decouples local-Hessian capture from module type."""
+class TestLocalHessianFallbacks:
+    """Weights local-Hessian can't pair with an input fall back to plain MSE (no Hessian)."""
 
-    def test_dense_captures_and_conv_falls_back(self):
+    def test_conv_weight_falls_back_without_crash(self):
         torch.manual_seed(0)
-        model = SimpleLinear()
-        mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=_make_forward_loop())
-        captured = []
-        handles = model.net[0].register_calibration_input_hooks(
-            lambda wq, w, x: captured.append((tuple(w.shape), x.shape[-1]))
-        )
-        assert len(handles) == 1
-        with torch.no_grad():
-            model(torch.randn(2, 16))
-        for h in handles:
-            h.remove()
-        assert captured and captured[0] == ((32, 16), 16)  # cin from activation matches weight
+        model = SimpleConv()  # 4-D conv weights — no single 2-D weight to pair
+        forward_loop = lambda m: m(SimpleConv.get_input())  # noqa: E731
+        mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=forward_loop)
+        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
+        conv = model.net[0]
+        assert id(conv.weight_quantizer) not in model._local_hessian_accumulators
+        assert conv.weight_quantizer.amax is not None  # still calibrated via plain MSE
 
-        conv = SimpleConv()
-        mtq.quantize(conv, INT8_WEIGHT_CFG, forward_loop=lambda m: m(SimpleConv.get_input()))
-        assert conv.net[0].register_calibration_input_hooks(lambda *a: None) == []  # 4-D weight
-
-    def test_sequential_quantizer_weight_not_hooked(self):
+    def test_sequential_quantizer_weight_falls_back_without_crash(self):
         torch.manual_seed(0)
         model = SimpleLinear()
         mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=_make_forward_loop())
         linear = model.net[0]
         linear.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
-        assert linear.register_calibration_input_hooks(lambda *a: None) == []  # unsupported
+        local_hessian_calibrate(model, _make_forward_loop(), fp8_scale_sweep=False, debug=True)
+        assert id(linear.weight_quantizer) not in model._local_hessian_accumulators
 
+
+class TestBlockSizeMismatchWarning:
     def test_block_size_mismatch_warns_only_on_mismatch(self):
         def q(block):
             return TensorQuantizer(

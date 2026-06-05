@@ -652,9 +652,8 @@ class TestFusedExpertsCalibration:
 
         self._cleanup_registry(expert_type)
 
-    def test_local_hessian_per_expert_capture_and_refinement(self):
-        """The plugin's extension point pairs each per-expert weight quantizer with its routed
-        input, and local_hessian uses that to refine every expert's weight amax."""
+    def test_local_hessian_refines_per_expert_weights(self):
+        """local_hessian captures each expert's routed activations and refines its weight amax."""
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -679,28 +678,25 @@ class TestFusedExpertsCalibration:
         expert_quantizers = list(experts.gate_up_proj_weight_quantizers) + list(
             experts.down_proj_weight_quantizers
         )
-
-        # Extension point captures per-expert (weight_quantizer, weight_slice, cin).
-        captured = []
-        handles = experts.register_calibration_input_hooks(
-            lambda wq, w, x: captured.append((id(wq), tuple(w.shape), x.shape[-1]))
-        )
-        assert len(handles) == 2  # one pre-hook per shared input quantizer (gate_up, down)
-        with torch.no_grad():
-            model(torch.randn(1, 8, HIDDEN_DIM))
-        for h in handles:
-            h.remove()
-        valid_ids = {id(q) for q in expert_quantizers}
-        shapes = {(2 * INTERMEDIATE_DIM, HIDDEN_DIM), (HIDDEN_DIM, INTERMEDIATE_DIM)}
-        assert captured and all(
-            wq_id in valid_ids and shape in shapes and cin == shape[1]
-            for wq_id, shape, cin in captured
-        )
-
-        # End-to-end: local_hessian refines per-expert weight amax via that capture.
         max_amax = {id(q): q.amax.clone() for q in expert_quantizers if q.amax is not None}
+        # Expected (cout, cin) keyed by quantizer id, to verify each Hessian pairs with its
+        # own expert's weight slice (catches gate_up/down swaps and stale-index mis-pairing).
+        expected_shape = {}
+        for quantizers, weight in (
+            (experts.gate_up_proj_weight_quantizers, experts.gate_up_proj),
+            (experts.down_proj_weight_quantizers, experts.down_proj),
+        ):
+            for i, q in enumerate(quantizers):
+                expected_shape[id(q)] = (weight[i].shape[0], weight[i].shape[1])
+
         local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
-        assert any(a.num_samples > 0 for a in model._local_hessian_accumulators.values())
+
+        # Each captured Hessian is keyed to a real per-expert quantizer with the matching weight
+        # shape, spans multiple distinct experts, and the refinement moved at least one amax.
+        routed = {qid: a for qid, a in model._local_hessian_accumulators.items() if a.num_samples}
+        assert len(routed) >= 2, "expected multiple distinct experts to capture Hessians"
+        for qid, acc in routed.items():
+            assert (acc.cout, acc.cin) == expected_shape[qid]
         assert all(q.amax is not None and torch.isfinite(q.amax).all() for q in expert_quantizers)
         assert any(
             id(q) in max_amax and not torch.allclose(q.amax, max_amax[id(q)])

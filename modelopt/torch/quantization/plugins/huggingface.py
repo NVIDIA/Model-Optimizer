@@ -918,36 +918,6 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             for idx, q in enumerate(quantizers):
                 yield weight[idx], q
 
-    def register_calibration_input_hooks(self, callback):
-        """Pair each per-expert weight quantizer with its routed input activation.
-
-        Hooks the shared input quantizers, which the eager ``F.linear`` path calls per expert
-        while ``_current_expert_idx`` is set. Batched/grouped kernels never call them, so those
-        experts get no capture (fall back to plain weight calibration).
-        """
-        handles = []
-        for weight_name, quantizers_name, input_quantizer_name in (
-            ("gate_up_proj", "gate_up_proj_weight_quantizers", "gate_up_proj_input_quantizer"),
-            ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
-        ):
-            weight = getattr(self, weight_name, None)
-            quantizers = getattr(self, quantizers_name, None)
-            input_quantizer = getattr(self, input_quantizer_name, None)
-            if weight is None or quantizers is None or input_quantizer is None:
-                continue
-
-            def _pre_hook(_iq, args, _weight_name=weight_name, _quantizers=quantizers):
-                if not args:
-                    return
-                idx = self._current_expert_idx
-                weight_quantizer = _quantizers[idx]
-                if weight_quantizer.is_enabled:
-                    # Read the weight fresh (valid under accelerate/FSDP re-materialization).
-                    callback(weight_quantizer, getattr(self, _weight_name)[idx], args[0])
-
-            handles.append(input_quantizer.register_forward_pre_hook(_pre_hook))
-        return handles
-
     def fold_weight(self, keep_attrs: bool = False):
         """Fold per-expert weight quantizers into the fused 3-D weights.
 

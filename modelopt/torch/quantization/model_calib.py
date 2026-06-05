@@ -465,10 +465,10 @@ def _make_weight_mse_calibrator(
         )
         if backend is not None and backend_factory is not None:
             if error_func is not None:
-                # Registered backends can't take a custom error_func; skip Hessian refinement.
+                # Registered backend factories don't accept a custom error_func.
                 warnings.warn(
-                    f"local_hessian: backend '{backend}' does not support a custom error "
-                    "function; skipping Hessian-weighted calibration for this quantizer."
+                    f"backend '{backend}' does not support a custom error function; skipping "
+                    "error-function-weighted MSE calibration for this quantizer."
                 )
                 return None
             return backend_factory(initial_amax, axis, quant_func)
@@ -670,6 +670,80 @@ def _warn_local_hessian_fallback(name, weight, weight_quantizer, block_size, war
     _warn_if_block_size_mismatch(weight_quantizer, block_size, name)
 
 
+def _is_quant_fused_experts(module: nn.Module) -> bool:
+    """Whether ``module`` is a converted HF fused-MoE-experts wrapper with per-expert quantizers."""
+    return hasattr(module, "_current_expert_idx") and hasattr(
+        module, "gate_up_proj_weight_quantizers"
+    )
+
+
+def _register_local_hessian_input_hooks(model, name_to_module, capture, block_size, warned):
+    """Register forward hooks feeding each weight's input activations to ``capture``.
+
+    Local-Hessian-specific (kept here rather than as a general ``QuantModule`` API): dense
+    quantized linears hook the layer input; HF fused-MoE experts hook the shared input quantizers,
+    keyed by the active expert (``_current_expert_idx``). Weights without a hook (conv,
+    SequentialQuantizer, non-eager experts) fall back to plain MSE. Returns removable handles.
+    """
+    handles: list = []
+
+    def _make_expert_hook(expert_module, weight_name, quantizers, enabled):
+        def _expert_hook(_input_quantizer, args):
+            if not args:
+                return
+            idx = expert_module._current_expert_idx
+            if idx in enabled:
+                # Read the weight fresh (valid under accelerate/FSDP re-materialization).
+                capture(quantizers[idx], getattr(expert_module, weight_name)[idx], args[0])
+
+        return _expert_hook
+
+    for name, module in name_to_module.items():
+        if is_quantized_linear(module) and isinstance(module.weight_quantizer, TensorQuantizer):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
+                # ``weight`` may be absent (e.g. TE GroupedLinear exposes weight0..N, not weight);
+                # such modules have no single 2-D weight to pair and fall back to plain MSE.
+                weight = getattr(module, "weight", None)
+                if weight is None or weight.dim() != 2 or not module.weight_quantizer.is_enabled:
+                    continue
+                _warn_local_hessian_fallback(
+                    name, weight, module.weight_quantizer, block_size, warned
+                )
+
+            def _dense_hook(linear, args):
+                if args:
+                    capture(linear.weight_quantizer, linear.weight, args[0])
+
+            handles.append(module.register_forward_pre_hook(_dense_hook))
+        elif _is_quant_fused_experts(module):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
+                for weight_name, quantizers_name, input_q_name in (
+                    (
+                        "gate_up_proj",
+                        "gate_up_proj_weight_quantizers",
+                        "gate_up_proj_input_quantizer",
+                    ),
+                    ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
+                ):
+                    weight = getattr(module, weight_name, None)
+                    quantizers = getattr(module, quantizers_name, None)
+                    input_quantizer = getattr(module, input_q_name, None)
+                    if weight is None or quantizers is None or input_quantizer is None:
+                        continue
+                    _warn_local_hessian_fallback(
+                        f"{name}.{weight_name}", weight[0], quantizers[0], block_size, warned
+                    )
+                    # Snapshot which experts are enabled now, before the caching forward silences
+                    # all weight quantizers — so we don't capture (and discard) disabled experts.
+                    enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
+                    handles.append(
+                        input_quantizer.register_forward_pre_hook(
+                            _make_expert_hook(module, weight_name, quantizers, enabled)
+                        )
+                    )
+    return handles
+
+
 @torch.no_grad()
 def local_hessian_calibrate(
     model: nn.Module,
@@ -731,53 +805,19 @@ def local_hessian_calibrate(
             accumulators[id(weight_quantizer)] = acc
         acc.accumulate(input_local)
 
-    # Phase 2: register capture hooks, disable weight fake-quant (input quantizers left as-is,
-    # matching prior behavior), run one forward to accumulate Hessians. Hooks live only for it.
-    handles: list = []
-    silenced_weight_quantizers: list[TensorQuantizer] = []
+    # Phase 2: capture each weight's input activations during a forward with weight fake-quant
+    # disabled (so H = ΣXᵀX reflects full-precision weights); input quantizers are left as-is.
     warned: set = set()
-    seen_modules: set[int] = set()
-    for name, module in name_to_module.items():
-        if not isinstance(module, QuantModule) or id(module) in seen_modules:
-            continue
-        seen_modules.add(id(module))
-        with enable_weight_access_and_writeback(module, model, name_to_module):
-            captures = module.register_calibration_input_hooks(capture)
-            handles.extend(captures)
-            for weight, weight_quantizer in module.iter_weights_for_calibration():
-                # Silence weight fake-quant (incl. SequentialQuantizer leaves) so the capture
-                # forward uses full-precision weights and downstream Hessians aren't corrupted.
-                leaves = (
-                    list(weight_quantizer)
-                    if isinstance(weight_quantizer, SequentialQuantizer)
-                    else [weight_quantizer]
-                )
-                silenced_weight_quantizers.extend(
-                    q
-                    for q in leaves
-                    if isinstance(q, TensorQuantizer) and q.is_enabled and q._if_quant
-                )
-                # Only TensorQuantizer weights are refined (same as mse_calibrate); other types
-                # (e.g. SequentialQuantizer) are unsupported and left at their max-cal scale.
-                if not isinstance(weight_quantizer, TensorQuantizer):
-                    if weight_quantizer.is_enabled and "unsupported" not in warned:
-                        warned.add("unsupported")
-                        warn_rank_0(
-                            "local_hessian: only TensorQuantizer weights are calibrated; other "
-                            "types (e.g. SequentialQuantizer) stay at their max-calibrated scale."
-                        )
-                    continue
-                if captures:
-                    _warn_local_hessian_fallback(name, weight, weight_quantizer, block_size, warned)
-
-    for weight_quantizer in silenced_weight_quantizers:
-        weight_quantizer.disable_quant()
+    handles = _register_local_hessian_input_hooks(
+        model, name_to_module, capture, block_size, warned
+    )
     print_rank_0("local_hessian: Caching activations and computing local Hessian...")
     try:
-        forward_loop(model)
+        with set_quantizer_by_cfg_context(
+            model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+        ):
+            forward_loop(model)
     finally:
-        for weight_quantizer in silenced_weight_quantizers:
-            weight_quantizer.enable_quant()
         for handle in handles:
             handle.remove()
 
