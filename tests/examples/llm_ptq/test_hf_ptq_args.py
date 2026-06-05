@@ -28,6 +28,11 @@ def _import_hf_ptq(monkeypatch):
     return importlib.import_module("hf_ptq")
 
 
+def _import_example_utils(monkeypatch):
+    monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
+    return importlib.import_module("example_utils")
+
+
 def _parse_hf_ptq_args(monkeypatch, *args):
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py", *args])
@@ -87,7 +92,7 @@ def test_load_model_keeps_nemotron_vl_text_calibration_for_autoquant(monkeypatch
 
 
 def test_qwen_autoquant_disabled_layers_are_scoped_to_qwen_models(monkeypatch):
-    hf_ptq = _import_hf_ptq(monkeypatch)
+    example_utils = _import_example_utils(monkeypatch)
     qwen_model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3_moe"))
     llama_model = SimpleNamespace(config=SimpleNamespace(model_type="llama"))
     qwen_only_patterns = {
@@ -96,10 +101,10 @@ def test_qwen_autoquant_disabled_layers_are_scoped_to_qwen_models(monkeypatch):
         "*linear_attn.in_proj_b*",
     }
 
-    monkeypatch.setattr(hf_ptq, "is_multimodal_model", lambda model: False)
+    monkeypatch.setattr(example_utils, "is_multimodal_model", lambda model: False)
 
-    qwen_disabled_layers = set(hf_ptq._get_auto_quantize_disabled_layers(qwen_model))
-    llama_disabled_layers = set(hf_ptq._get_auto_quantize_disabled_layers(llama_model))
+    qwen_disabled_layers = set(example_utils._get_auto_quantize_disabled_layers(qwen_model))
+    llama_disabled_layers = set(example_utils._get_auto_quantize_disabled_layers(llama_model))
 
     assert qwen_only_patterns <= qwen_disabled_layers
     assert qwen_only_patterns.isdisjoint(llama_disabled_layers)

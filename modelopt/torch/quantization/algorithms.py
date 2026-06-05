@@ -55,22 +55,15 @@ from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQua
 from .utils import is_quantized_linear
 
 
-def _is_fused_experts_module(module: nn.Module) -> bool:
-    """Return True if ``module`` is a quantized fused-MoE-experts container.
-
-    These modules expose plural ``*_input_quantizer`` and ``*_weight_quantizers``
-    (an ``nn.ModuleList`` of per-expert quantizers) instead of the singular
-    ``input_quantizer`` / ``weight_quantizer`` attrs found on standard
-    ``nn.Linear``-derived QuantModules. AutoQuantize hparam discovery and cost
-    accounting need to recognize this layout to enumerate fused experts as
-    search dimensions.
-    """
-    # Late import to avoid a circular import at module load time.
+def _is_hf_quant_fused_experts_module(module: nn.Module) -> bool:
+    """Return True for a converted HF fused-MoE-experts quantization wrapper."""
+    # Late import avoids a circular import: the HF plugin registers AutoQuantize
+    # support from this module at import time.
     try:
-        from .plugins.huggingface import _QuantFusedExperts
+        from .plugins.huggingface import _is_quant_fused_experts_module
     except ImportError:
         return False
-    return isinstance(module, _QuantFusedExperts)
+    return _is_quant_fused_experts_module(module)
 
 
 # Quantizer attribute names that participate in AutoQuantize snapshot/restore.
@@ -90,7 +83,7 @@ def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
     shared input quantizers + two ``ModuleList`` of per-expert weight quantizers).
     For standard Linear-derived QuantModules, returns the canonical trio.
     """
-    if _is_fused_experts_module(module):
+    if _is_hf_quant_fused_experts_module(module):
         return _FUSED_EXPERTS_QUANTIZER_ATTRS
     return _STD_QUANTIZER_ATTRS
 
@@ -517,7 +510,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         # weight quantizers in an ``nn.ModuleList`` plus shared input quantizers.
         # All N experts in a layer share one search dimension (one recipe per
         # fused module).
-        return _is_fused_experts_module(module) and isinstance(module, QuantModule)
+        return _is_hf_quant_fused_experts_module(module) and isinstance(module, QuantModule)
 
     @staticmethod
     def _get_search_recipes(quantization_formats):
