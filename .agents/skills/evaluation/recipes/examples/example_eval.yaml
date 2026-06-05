@@ -56,13 +56,24 @@ execution:
   # On the slurm/default fallback it's gpu:8 — set to the node's GPU count or sbatch
   # fails "Requested node configuration is not available" (4-GPU GB300 -> gpu:4).
   mounts:
+    # mount_home ALWAYS false: true mounts host ~/.cache, which (if a shared-fs symlink) dangles
+    # in-container -> vLLM deploy dies "FileNotFoundError /root/.cache/huggingface" (unseen by
+    # --dry-run). Instead mount the real HF cache to /hf-cache + set HF_HOME below. See SKILL Step 4.
     mount_home: false
+    # deployment: { <shared-fs>/<user>/.cache/huggingface: /hf-cache }
+    # evaluation: { <shared-fs>/<user>/.cache/huggingface: /hf-cache }
   auto_export:          # REQUIRED trigger for auto-export. Without this, the
     destinations:       # export.mlflow block below is ignored and the run is
       - mlflow          # NOT uploaded — you'd have to `nel export` it by hand.
 deployment:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
+    HF_HOME: lit:/hf-cache    # with the /hf-cache mount above
+    # vLLM backend env vars go HERE, not in the command below. Some models need
+    # a card-documented toggle — e.g. NVFP4 MoE (NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4)
+    # needs FlashInfer FP4 kernels. Uncomment per card (`lit:` prefix, Step 5):
+    #   VLLM_USE_FLASHINFER_MOE_FP4: lit:1
+    #   VLLM_FLASHINFER_MOE_BACKEND: lit:throughput
   checkpoint_path: ???
   hf_model_handle:
   served_model_name: ???
@@ -96,6 +107,7 @@ deployment:
 evaluation:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
+    HF_HOME: lit:/hf-cache    # with the /hf-cache mount above
     # nemo-skills tasks (ns_*) hard-require the served-endpoint api key env var
     # (api_key_name below) to be set WITH A VALUE inside the eval container.
     # A shell `export DUMMY_API_KEY=dummy` does NOT reach the SLURM container —

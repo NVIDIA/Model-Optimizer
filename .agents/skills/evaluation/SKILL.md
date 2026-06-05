@@ -84,7 +84,7 @@ nel skills build-config --execution <...> --deployment <...> --model_type <...> 
 - **vLLM:** no `--quantization` flag by default — vLLM auto-detects from `quantization_config` / `hf_quant_config.json`. Add only when the card, vLLM version, or dry-run error requires it.
 - **SGLang:** may need `--quantization modelopt_fp8` / `modelopt_fp4` / `modelopt` — verify against installed version.
 
-Some models need extra env vars (e.g. `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super) — discovered via model card research.
+Some models need extra vLLM backend env vars (model-card research) — e.g. `VLLM_NVFP4_GEMM_BACKEND=marlin` (Nemotron Super), or `VLLM_USE_FLASHINFER_MOE_FP4=1` + `VLLM_FLASHINFER_MOE_BACKEND=throughput` (NVFP4 MoE, e.g. NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4). Put them in `deployment.env_vars` (**not** `command`) with the `lit:` prefix (`VLLM_USE_FLASHINFER_MOE_FP4: lit:1`); see `example_eval.yaml` and Step 5's prefix rule.
 
 **Auto-detect from `config.json`:**
 
@@ -223,6 +223,8 @@ for f in "$PKG"/configs/execution/internal/slurm/*.yaml; do \
 
 Hostname match → set `defaults: - execution: internal/slurm/<cluster>`, drop the redundant `execution.hostname` (keep account/output_dir/walltime), verify with `--dry-run`. Else keep `slurm/default` and fill hostname/account/output_dir manually.
 
+On SLURM, several deploy/eval failures are invisible to `--dry-run` and only surface at canary (`mount_home`, HF cache, `cpu_partition`, top-level vs per-stage `env_vars`) — read `references/slurm.md`.
+
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
@@ -295,12 +297,12 @@ Default images:
 | Framework | Image | Registry |
 | --- | --- | --- |
 | vLLM | `vllm/vllm-openai:v0.19.1` (bump per recipe; never `:latest`) | DockerHub |
-| vLLM (NVFP4 on Blackwell) | `vllm/vllm-openai:v0.19.1-cu130` (bump to `cu130-nightly-<arch>` for new archs) | DockerHub |
+| vLLM (NVFP4 on B300/GB300) | `vllm/vllm-openai:v0.19.1-cu130` (bump to `cu130-nightly-<arch>` for new archs) | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
 
-> NVFP4 checkpoints on Blackwell (sm_100/sm_103) need the `cu130-nightly` image — cu129/v0.19.1 lack sm_103 FP4 kernels (see the "NVFP4 on Blackwell" note in Step 3).
+> NVFP4 checkpoints on B300/GB300 (sm_103) need the `cu130` image — cu129/v0.19.1 lack sm_103 FP4 kernels (see the "NVFP4 on Blackwell" note in Step 3).
 
 Public images → submit without preflight. Private/restricted → check credentials:
 

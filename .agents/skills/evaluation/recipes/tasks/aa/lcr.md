@@ -42,6 +42,7 @@ block. Per SKILL.md Step 3, the deployment flag must live inside
   container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
   env_vars:
     INFERENCE_API_KEY: host:INFERENCE_API_KEY
+    LOG_LEVEL: lit:WARNING # Skip logging the long context inputs.
   nemo_evaluator_config:
     target:
       api_endpoint:
