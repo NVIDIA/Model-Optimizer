@@ -1277,9 +1277,9 @@ def parse_args() -> argparse.Namespace:
         choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
         help=(
             "Specify KV cache quantization format. Default: fp8_cast. "
-            "Formats ending in '_cast' (fp8_cast, nvfp4_cast) set the amax to FP8 range "
-            "without data-driven calibration. "
-            "Other formats (fp8, nvfp4, etc.) use data-driven calibration. "
+            "Formats whose preset pins use_constant_amax on the KV bmm quantizer "
+            "(e.g. fp8_cast, nvfp4_cast) set the amax to FP8 range without data-driven "
+            "calibration; all other formats (fp8, nvfp4, ...) use data-driven calibration. "
             "Ignored when --recipe is given: the recipe YAML is authoritative for KV "
             "cache config (use the *_cast_kv.yaml recipes for the cast variants)."
         ),
