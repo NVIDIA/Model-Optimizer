@@ -590,15 +590,15 @@ def persistent_materialization(layer, writeback: bool = True):
     Suppresses per-forward weight transfers so that N calibration batches
     pay the cost of one load/unload instead of N.
 
-    - **FSDP2**: patches ``FSDPParamGroup.unshard/reshard`` to no-ops, then
-      gathers weights once via ``enable_weight_access_and_writeback``.
+    - **FSDP2**: gathers weights once via ``enable_weight_access_and_writeback``,
+      then patches ``FSDPParamGroup.unshard/reshard`` to no-ops.
     - **Accelerate**: materializes weights, sets ``hook.offload = False``,
       and bypasses the layer's top-level accelerate hook while the weights are
       materialized.
     """
     with (
-        _disable_fsdp_unshard_reshard(layer),
         enable_weight_access_and_writeback(layer, layer, writeback=writeback),
+        _disable_fsdp_unshard_reshard(layer),
         temporarily_remove_accelerate_hook(layer),
     ):
         yield

@@ -16,6 +16,7 @@
 """Test of quantization with FSDP2."""
 
 import copy
+from contextlib import contextmanager
 from functools import partial
 
 import pytest
@@ -162,6 +163,9 @@ class _SimpleTransformerModel(nn.Module):
 
 def _test_layerwise_calibrate_fsdp2(rank, size):
     """Layerwise calibration on FSDP2-wrapped model matches non-FSDP reference."""
+    from torch.distributed.tensor import DTensor
+
+    import modelopt.torch.quantization.model_calib as model_calib
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     dim = 32
@@ -179,8 +183,21 @@ def _test_layerwise_calibrate_fsdp2(rank, size):
         ),
         *old_support,
     ]
+    original_persistent_materialization = model_calib.persistent_materialization
+    materialized_fsdp_layers = 0
+
+    @contextmanager
+    def tracked_persistent_materialization(layer, writeback=True):
+        nonlocal materialized_fsdp_layers
+        with original_persistent_materialization(layer, writeback=writeback):
+            if isinstance(layer, torch.distributed.fsdp.FSDPModule) and not writeback:
+                assert all(not isinstance(param, DTensor) for param in layer.parameters())
+                materialized_fsdp_layers += 1
+            yield
 
     try:
+        model_calib.persistent_materialization = tracked_persistent_materialization
+
         # Reference: non-FSDP layerwise calibration
         ref_model = copy.deepcopy(model)
         seq_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
@@ -199,7 +216,9 @@ def _test_layerwise_calibrate_fsdp2(rank, size):
         output_test = model(inputs)
 
         assert torch.allclose(output_ref, output_test)
+        assert materialized_fsdp_layers == len(model.layers)
     finally:
+        model_calib.persistent_materialization = original_persistent_materialization
         LayerActivationCollector._decoder_layer_support = old_support
 
 
