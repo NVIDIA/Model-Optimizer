@@ -405,7 +405,9 @@ def _test_export_pp2_mtp_metadata_matches_shards(tmp_path, model_dir, rank, size
             for key, shard_file in shard_meta["weight_map"].items():
                 all_weight_map_keys.add(key)
                 if shard_file not in shard_keys_cache:
-                    with safe_open(str(export_dir / shard_file), framework="pt", device="cpu") as sf:
+                    with safe_open(
+                        str(export_dir / shard_file), framework="pt", device="cpu"
+                    ) as sf:
                         shard_keys_cache[shard_file] = set(sf.keys())
                 assert key in shard_keys_cache[shard_file], (
                     f"key '{key}' from {shard_json_file.name} missing in {shard_file}"
@@ -418,7 +420,9 @@ def _test_export_pp2_mtp_metadata_matches_shards(tmp_path, model_dir, rank, size
 
 def test_unified_export_megatron_pp2_mtp_metadata_matches_shards(dist_workers_size_2, tmp_path):
     model_dir = create_tiny_llama_dir(tmp_path)
-    dist_workers_size_2.run(partial(_test_export_pp2_mtp_metadata_matches_shards, tmp_path, model_dir))
+    dist_workers_size_2.run(
+        partial(_test_export_pp2_mtp_metadata_matches_shards, tmp_path, model_dir)
+    )
 
 
 def test_qkv_slicing_records_hf_excludes_for_unquantized_fused_qkv():
