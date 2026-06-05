@@ -251,6 +251,10 @@ def save_safetensors(state_dict, save_directory: str | os.PathLike):
         meta_filename = filename + ".json"
         ckpt_filename = filename + ".safetensors"
 
+        # Keep safetensors-first ordering so late shard updates are reflected
+        # in both the shard file and the shard metadata JSON.
+        save_file(tensors, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
+
         weight_map = {}
         local_total_size = 0
 
@@ -264,7 +268,6 @@ def save_safetensors(state_dict, save_directory: str | os.PathLike):
                 f,
                 indent=4,
             )
-        save_file(tensors, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
 
     # Barrier to ensure all ranks have written the metadata
     torch.distributed.barrier()
