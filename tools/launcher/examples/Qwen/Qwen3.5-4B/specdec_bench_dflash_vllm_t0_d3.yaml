@@ -29,7 +29,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 2
-      container: vllm/vllm-openai:qwen3_5-cu130
+      container: vllm/vllm-openai:v0.22.1
 
   task_1:
     script: common/specdec_bench/run.sh
@@ -57,4 +57,4 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 2
-      container: vllm/vllm-openai:qwen3_5-cu130
+      container: vllm/vllm-openai:v0.22.1
