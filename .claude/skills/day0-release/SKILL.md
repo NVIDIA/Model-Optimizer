@@ -111,6 +111,13 @@ python .claude/skills/day0-release/scripts/gate_compare.py \
     --threshold 0.01
 ```
 
+The threshold is a fraction of each task's score scale. Most AA tasks report
+0-100, but some (e.g. `tau2_bench_telecom` `Result`) report 0-1; the gate infers
+each task's scale (0-1 if both scores are within [0, 1], else 0-100) and
+normalizes the drop accordingly, so `--threshold 0.01` means "≤1 pt on a 0-100
+task / ≤0.01 on a 0-1 task" uniformly. Pass `--scales '{"task": max}'` to
+override inference if a task's scores happen to fall in an ambiguous range.
+
 Decision from `gate_compare.py`:
 
 - **ACCEPT** — every task within threshold → go to Step 7.

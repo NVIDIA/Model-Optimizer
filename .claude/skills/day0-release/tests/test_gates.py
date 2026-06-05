@@ -67,6 +67,40 @@ def test_compare_relative_threshold():
     assert not evaluate_comparison({"t": 50.0}, {"t": 49.4}, threshold=0.01, relative=True)["pass"]
 
 
+def test_compare_0_to_1_scale_full_collapse_is_regression():
+    # tau2_bench_telecom reports Result on a 0-1 scale. A full collapse
+    # (1.0 -> 0.0) must REGRESS, not pass via the old 0-100 limit assumption.
+    r = evaluate_comparison(
+        {"tau2_bench_telecom": 1.0}, {"tau2_bench_telecom": 0.0}, threshold=0.01
+    )
+    assert not r["pass"] and r["decision"] == "REGRESSION"
+    assert "tau2_bench_telecom" in r["detail"]
+
+
+def test_compare_0_to_1_scale_within_threshold_accepts():
+    # A 0.005 drop on a 0-1 task is within the 0.01 threshold.
+    r = evaluate_comparison({"t": 0.900}, {"t": 0.895}, threshold=0.01)
+    assert r["pass"] and r["decision"] == "ACCEPT"
+
+
+def test_compare_explicit_scale_override():
+    # Force a 0-100 scale even though both scores fit in [0, 1]: a 0.5 -> 0.4
+    # drop is 0.1 pts on a 0-100 scale, well within threshold.
+    r = evaluate_comparison({"t": 0.5}, {"t": 0.4}, threshold=0.01, scales={"t": 100.0})
+    assert r["pass"] and r["decision"] == "ACCEPT"
+
+
+def test_compare_mixed_scales_in_one_suite():
+    # 0-100 task within threshold + 0-1 task collapsing -> overall REGRESSION.
+    r = evaluate_comparison(
+        {"gpqa": 50.0, "tau2_bench_telecom": 1.0},
+        {"gpqa": 49.8, "tau2_bench_telecom": 0.0},
+        threshold=0.01,
+    )
+    assert not r["pass"] and r["decision"] == "REGRESSION"
+    assert "tau2_bench_telecom" in r["detail"] and "gpqa" not in r["detail"]
+
+
 # ── gate_run ──────────────────────────────────────────────────────────
 
 
