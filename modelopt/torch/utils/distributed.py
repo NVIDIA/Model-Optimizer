@@ -27,7 +27,7 @@ from warnings import warn
 
 import torch
 import torch.distributed
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
+from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -41,6 +41,7 @@ __all__ = [
     "fsdp2_wrap",
     "fsdp_aware_forward_loop",
     "is_available",
+    "is_fsdp2_model",
     "is_initialized",
     "is_master",
     "rank",
@@ -223,23 +224,45 @@ def cleanup():
         torch.distributed.destroy_process_group()
 
 
-def fsdp2_wrap(modules, *, mp_policy=None, cpu_offload: bool = False):
-    """Apply FSDP2 ``fully_shard`` to each module in ``modules``.
+def is_fsdp2_model(model) -> bool:
+    """Return True if any submodule of ``model`` has been wrapped with FSDP2 ``fully_shard``."""
+    return any(isinstance(m, FSDPModule) for m in model.modules())
 
-    Args:
-        modules: iterable of ``nn.Module`` to shard (typically a model's decoder layers,
-            but works for any module the caller wants wrapped). Each module is sharded
-            wherever it currently lives.
-        mp_policy: ``MixedPrecisionPolicy`` for compute/reduce dtype.
-        cpu_offload: attach ``CPUOffloadPolicy`` so shards live on CPU between forwards.
+
+def fsdp2_wrap(model, shard_root=False, mp_policy=None, cpu_offload: bool = False):
+    """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
+
+    With ``shard_root``, the root module is wrapped too so embed/lm_head/norm are sharded
+    instead of replicated per rank; the parallel loader doesn't load sharded root params
+    yet, so only callers that load weights themselves should set it. Returns the detected
+    decoder layers so callers can reuse the detection result.
     """
+    # Lazy import: layerwise_calib imports this module at top level (circular).
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if decoder_layers is None:
+        raise RuntimeError(
+            "Could not auto-detect decoder layers; FSDP2 wrap requires a standard HF causal-LM layout."
+        )
+
     fsdp_kwargs: dict[str, Any] = {"reshard_after_forward": True}
     if mp_policy is not None:
         fsdp_kwargs["mp_policy"] = mp_policy
     if cpu_offload:
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
-    for module in modules:
-        fully_shard(module, **fsdp_kwargs)
+
+    # Snapshot/restore config.architectures: some HF builders mutate it during fully_shard.
+    config = getattr(model, "config", None)
+    architectures = list(getattr(config, "architectures", []) or [])
+    for layer in decoder_layers:
+        fully_shard(layer, **fsdp_kwargs)
+    if shard_root:
+        fully_shard(model, **fsdp_kwargs)
+    if config is not None and architectures:
+        config.architectures = architectures
+
+    return decoder_layers
 
 
 def shard_dataloader(loader, rank: int, world_size: int):
@@ -327,7 +350,7 @@ def broadcast_state_dict(
     out: dict[str, torch.Tensor] = {}
     for name, (shape, dtype) in meta_dict.items():
         if is_src:
-            t = src_state_dict[name].to(device, non_blocking=True)
+            t = src_state_dict[name].to(device)
         else:
             t = torch.empty(shape, dtype=dtype, device=device)
         torch.distributed.broadcast(t, src=src, group=pg)
