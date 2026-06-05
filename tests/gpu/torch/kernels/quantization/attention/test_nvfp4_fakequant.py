@@ -17,10 +17,10 @@
 
 """GPU tests for in-kernel NVFP4 fake quantization of the attention BMM operands.
 
-Validates, against PyTorch references using ``torch.float8_e4m3fn``:
-  - the fp32 E4M3 emulation (block scale) is bit-exact to hardware fp8;
-  - the decode and prefill kernels' in-kernel NVFP4 reproduce a materialized NVFP4
-    attention for every operand subset {q, k, p, v}.
+The PyTorch reference mirrors the kernels' scheme, which is aligned with the
+customized vLLM ``mni/attnOpt`` framework: a per-tensor global scale
+(``amax/(6*448)``), block-16 E4M3 per-block scale, E2M1 ``>=`` decision boundaries,
+and (for P) quantizing the *unnormalized* exp then normalizing the accumulator.
 """
 
 import pytest
@@ -44,10 +44,10 @@ if TRITON_KERNEL_AVAILABLE:
         tl.store(Y + i, e4m3_emulate(tl.load(X + i)))
 
 
-E2M1, FP8, BLK = 6.0, 448.0, 16
+FP8, BLK = 448.0, 16
 
 
-# --- PyTorch NVFP4 reference (matches the kernels' E2M1 + E4M3-block + global scheme) ---
+# --- PyTorch reference mirroring the aligned kernel scheme ---
 def _e4m3(x):
     ax = x.abs().clamp(max=FP8).float()
     o = torch.zeros_like(ax)
@@ -58,21 +58,23 @@ def _e4m3(x):
     return torch.sign(x) * o.clamp(max=FP8)
 
 
-def _e2m1(b):
+def _e2m1(a):  # a = |x| / scale ; >= boundaries (matches mni/attnOpt + our kernel)
     return torch.where(
-        b <= 0.25,
-        0.0,
+        a >= 5.0,
+        6.0,
         torch.where(
-            b < 0.75,
-            0.5,
+            a >= 3.5,
+            4.0,
             torch.where(
-                b <= 1.25,
-                1.0,
+                a >= 2.5,
+                3.0,
                 torch.where(
-                    b < 1.75,
-                    1.5,
+                    a >= 1.75,
+                    2.0,
                     torch.where(
-                        b <= 2.5, 2.0, torch.where(b < 3.5, 3.0, torch.where(b <= 5.0, 4.0, 6.0))
+                        a >= 1.25,
+                        1.5,
+                        torch.where(a >= 0.75, 1.0, torch.where(a >= 0.25, 0.5, 0.0)),
                     ),
                 ),
             ),
@@ -80,40 +82,41 @@ def _e2m1(b):
     )
 
 
-def _qdq(x, axis, per_row=False):
+def _gscale(t):
+    return t.float().abs().max().item() / (6.0 * FP8) + 1e-30
+
+
+def _qdq(x, axis, gscale):
+    """NVFP4 fakequant: per-tensor gscale, block-16 along `axis`, E4M3 block scale, E2M1."""
     xt = x.transpose(axis, -1).float()
-    gmax = xt.abs().amax(-1, keepdim=True) if per_row else xt.abs().max()
-    g = gmax / (E2M1 * FP8)
     n = xt.shape[-1]
     xr = xt.reshape(*xt.shape[:-1], n // BLK, BLK)
-    bamax = xr.abs().amax(-1, keepdim=True)
-    gb = g.unsqueeze(-1) if per_row else g
-    scale = _e4m3((bamax / (E2M1 * gb)).clamp(max=FP8)) * gb
-    scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+    scale_f32 = xr.abs().amax(-1, keepdim=True) / 6.0 + 1e-30
+    scale = _e4m3(scale_f32 / gscale) * gscale
     xq = torch.sign(xr) * _e2m1(xr.abs() / scale) * scale
     return xq.reshape(xt.shape).transpose(axis, -1)
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 def test_e4m3_emulation_bit_exact():
-    """The fp32 E4M3 emulation used for the block scale matches torch.float8_e4m3fn."""
+    """The fp32 E4M3 emulation (block scale) is bit-exact to torch.float8_e4m3fn."""
     torch.manual_seed(0)
-    x = (torch.rand(4096, device="cuda") * 900 - 450).float()  # full range incl. >448
+    x = (torch.rand(4096, device="cuda") * 900 - 450).float()
     y = torch.empty_like(x)
     _e4m3_emulate_kernel[(1,)](x, y, N=4096)
     ref = x.clamp(-FP8, FP8).to(torch.float8_e4m3fn).to(torch.float32)
     assert (y - ref).abs().max().item() == 0.0
 
 
-def _paged_decode(k, v, seq_len, page=16):
+def _paged(k, v, S, page=16):
     b, kvh, _, d = k.shape
-    nb = (seq_len + page - 1) // page
+    nb = (S + page - 1) // page
     kc = torch.zeros(b * nb, page, kvh, d, device=k.device, dtype=k.dtype)
     vc = torch.zeros_like(kc)
     bt = torch.arange(b * nb, device=k.device, dtype=torch.int32).view(b, nb)
     for bb in range(b):
         for blk in range(nb):
-            ts, te = blk * page, min((blk + 1) * page, seq_len)
+            ts, te = blk * page, min((blk + 1) * page, S)
             kc[bb * nb + blk, : te - ts] = k[bb, :, ts:te].transpose(0, 1)
             vc[bb * nb + blk, : te - ts] = v[bb, :, ts:te].transpose(0, 1)
     return kc, vc, bt
@@ -122,40 +125,43 @@ def _paged_decode(k, v, seq_len, page=16):
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 @pytest.mark.parametrize("ops", [(), ("k", "v"), ("q", "k"), ("p", "v"), ("q", "k", "p", "v")])
 def test_decode_kernel_nvfp4(ops):
-    """Decode kernel NVFP4 == materialized NVFP4 decode (single tile, num_kv_splits=1)."""
+    """Decode kernel NVFP4 == per-tensor-global materialized NVFP4 (single tile)."""
     b, H, KVH, S, d = 2, 4, 2, 112, 64
     sm = 1.0 / (d**0.5)
     torch.manual_seed(0)
     q = torch.randn(b, H, d, device="cuda", dtype=torch.float16)
     k = torch.randn(b, KVH, S, d, device="cuda", dtype=torch.float16)
     v = torch.randn(b, KVH, S, d, device="cuda", dtype=torch.float16)
-    kc, vc, bt = _paged_decode(k, v, S)
+    kc, vc, bt = _paged(k, v, S)
     sl = torch.full((b,), S, device="cuda", dtype=torch.int32)
     got = attention_decode(
         q, kc, vc, bt, sl, softmax_scale=sm, page_size=16, num_kv_splits=1, nvfp4=set(ops)
     )
+    qg, kg, vg = _gscale(q), _gscale(kc), _gscale(vc)
+    pg = 1.0 / (6.0 * FP8) + 1e-30
     g = H // KVH
     ref = torch.empty_like(q)
     for bb in range(b):
         for h in range(H):
             qh, kh, vh = q[bb, h].float(), k[bb, h // g].float(), v[bb, h // g].float()
             if "q" in ops:
-                qh = _qdq(qh, 0)
+                qh = _qdq(qh, 0, qg)
             if "k" in ops:
-                kh = _qdq(kh, -1)
-            p = torch.softmax((qh @ kh.t()) * sm, dim=-1)
-            if "p" in ops:
-                p = _qdq(p, 0)  # 1-D row -> per-row global
+                kh = _qdq(kh, -1, kg)  # block-16 along d, per key
+            scores = (qh @ kh.t()) * sm
+            p = torch.exp(scores - scores.max())  # unnormalized exp
+            denom = p.sum()
+            p_bmm = _qdq(p, 0, pg) if "p" in ops else p  # quantize unnormalized
             if "v" in ops:
-                vh = _qdq(vh, 0)
-            ref[bb, h] = (p @ vh).to(ref.dtype)
+                vh = _qdq(vh, 0, vg)  # block-16 along keys (axis 0)
+            ref[bb, h] = ((p_bmm @ vh) / denom).to(ref.dtype)
     torch.testing.assert_close(got.float(), ref.float(), rtol=5e-3, atol=3e-3)
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 @pytest.mark.parametrize("ops", [(), ("k", "v"), ("q", "k"), ("p", "v"), ("q", "k", "p", "v")])
 def test_prefill_kernel_nvfp4(ops):
-    """Prefill kernel NVFP4 == materialized NVFP4 attention (single tile, non-causal)."""
+    """Prefill kernel NVFP4 == per-tensor-global materialized NVFP4 (single tile, non-causal)."""
     S, H, KVH, d = 16, 4, 2, 64
     sm = 1.0 / (d**0.5)
     torch.manual_seed(0)
@@ -165,21 +171,23 @@ def test_prefill_kernel_nvfp4(ops):
     bsl = torch.tensor([0], device="cuda", dtype=torch.int32)
     bseq = torch.tensor([S], device="cuda", dtype=torch.int32)
     got = attention(q, k, v, bsl, bseq, S, is_causal=False, softmax_scale=sm, nvfp4=set(ops))
+    qg, kg, vg = _gscale(q), _gscale(k), _gscale(v)
+    pg = 1.0 / (6.0 * FP8) + 1e-30
     g = H // KVH
     ref = torch.empty_like(q)
     for h in range(H):
         qh, kh, vh = q[:, h].float(), k[:, h // g].float(), v[:, h // g].float()
         if "q" in ops:
-            qh = _qdq(qh, -1)
+            qh = _qdq(qh, -1, qg)  # block-16 along d, per query row
         if "k" in ops:
-            kh = _qdq(kh, -1)
-        sc = (qh.half().float() @ kh.half().float().t()) * sm
-        p = torch.softmax(sc, dim=-1)
-        if "p" in ops:
-            p = _qdq(p, -1, per_row=True)  # per-query-token global (flash homogeneity)
+            kh = _qdq(kh, -1, kg)
+        sc = (qh.half().float() @ kh.half().float().t()) * sm  # fp16 matmul
+        p = torch.exp(sc - sc.max(dim=-1, keepdim=True).values)  # unnormalized exp [S,S]
+        denom = p.sum(dim=-1, keepdim=True)
+        p_bmm = _qdq(p, -1, pg) if "p" in ops else p  # block-16 along keys, per query row
         if "v" in ops:
-            vh = _qdq(vh, 0)
-        ref[:, h] = (p.half().float() @ vh.half().float()).to(ref.dtype)
+            vh = _qdq(vh, 0, vg)
+        ref[:, h] = ((p_bmm.half().float() @ vh.half().float()) / denom).to(ref.dtype)
     torch.testing.assert_close(got.float(), ref.float(), rtol=5e-3, atol=5e-3)
 
 

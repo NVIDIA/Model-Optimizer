@@ -31,9 +31,10 @@ import triton
 import triton.language as tl
 
 from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
-    nvfp4_qdq_axis0,
-    nvfp4_qdq_lastdim_2d,
-    nvfp4_qdq_lastdim_2d_perrow,
+    QUANT_NVFP4,
+    fake_quant_fp4_k0,
+    fake_quant_fp4_k1,
+    tensor_global_scale,
 )
 
 # Helpers for optional N:M sparsity and sink/window-aware dense regions live
@@ -272,6 +273,10 @@ def _attn_fwd(
     NVFP4_P: tl.constexpr = False,  # fakequant softmax P -> NVFP4 before BMM2
     NVFP4_V: tl.constexpr = False,  # fakequant V -> NVFP4 before BMM2 (= NVFP4 KV$ V side)
     FP16_SOFTMAX: tl.constexpr = False,  # compute softmax exp in fp16 (mixed precision)
+    q_global_scale=1.0,  # per-tensor NVFP4 global scales (amax/(6*448)), computed host-side
+    k_global_scale=1.0,
+    p_global_scale=1.0,
+    v_global_scale=1.0,
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -300,8 +305,8 @@ def _attn_fwd(
     # --- Load Q tile [BLOCK_M, BLOCK_D]: stays in SRAM for the entire KV loop ---
     q_ptrs = (q_offset + q_pos[:, None]) * stride_qbs + head_idx * stride_qh + dim_pos[None, :]
     q = tl.load(Q + q_ptrs, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :], other=0.0)
-    if NVFP4_Q:  # BMM1 query operand -> NVFP4 (contraction = head dim)
-        q = nvfp4_qdq_lastdim_2d(q.to(tl.float32), BLOCK_M, BLOCK_D // 16, 16).to(q.dtype)
+    if NVFP4_Q:  # BMM1 query operand (A-side, GEMM-K = head dim = axis 1)
+        q = fake_quant_fp4_k1(q, BLOCK_M, BLOCK_D, 16, q_global_scale, QUANT_NVFP4)
 
     # Base pointers for K and V at this KV head (per-tile offset added in loop)
     k_base = K + kv_head_idx * stride_kh
@@ -352,8 +357,8 @@ def _attn_fwd(
                 other=0.0,
             )
 
-        if NVFP4_K:  # BMM1 key operand -> NVFP4 (K^T [BLOCK_D, BLOCK_N], contraction = head dim)
-            k = nvfp4_qdq_axis0(k.to(tl.float32), BLOCK_D // 16, 16, BLOCK_N).to(k.dtype)
+        if NVFP4_K:  # BMM1 key operand (B-side, K^T [BLOCK_D, BLOCK_N], GEMM-K = axis 0)
+            k = fake_quant_fp4_k0(k, BLOCK_D, BLOCK_N, 16, 1, k_global_scale, QUANT_NVFP4)
 
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
         scores = tl.dot(q, k) * qk_scale
@@ -428,15 +433,18 @@ def _attn_fwd(
                     mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                     other=0.0,
                 )
-            if NVFP4_V:  # BMM2 value operand -> NVFP4 (V [BLOCK_N, BLOCK_D], contraction = keys)
-                v = nvfp4_qdq_axis0(v.to(tl.float32), BLOCK_N // 16, 16, BLOCK_D).to(v.dtype)
-            # BMM2 prob operand -> NVFP4 (contraction = keys), per-row (per-query-token)
-            # global. NVFP4 is homogeneous, so quantizing the unnormalized exp with a
-            # per-row global equals quantizing the normalized P (row_sum normalization is
-            # applied to acc after the loop). NOTE: exact only within a KV tile; across
-            # tiles the online-softmax rescaling makes multi-tile P-NVFP4 approximate —
-            # the faithful full-P NVFP4 is the materialized (eager) path.
-            p_dot = nvfp4_qdq_lastdim_2d_perrow(p, BLOCK_M, BLOCK_N // 16, 16) if NVFP4_P else p
+            if NVFP4_V:  # BMM2 value operand (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = keys = axis 0)
+                v = fake_quant_fp4_k0(v, BLOCK_N, BLOCK_D, 16, 1, v_global_scale, QUANT_NVFP4)
+            # BMM2 prob operand (A-side, P [BLOCK_M, BLOCK_N], GEMM-K = keys = axis 1) with a
+            # per-tensor p_global_scale, matching mni/attnOpt: quantize the *unnormalized* exp
+            # P tile, accumulate, normalize acc by row_sum after the loop. (Across KV tiles the
+            # online-softmax rescaling makes this an approximation of full-P NVFP4 — same as
+            # their flash kernel; the materialized/eager path is the exact reference.)
+            p_dot = (
+                fake_quant_fp4_k1(p, BLOCK_M, BLOCK_N, 16, p_global_scale, QUANT_NVFP4)
+                if NVFP4_P
+                else p
+            )
             acc = tl.dot(p_dot.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
@@ -921,6 +929,11 @@ class _Attention(torch.autograd.Function):
         )
         _nvfp4 = nvfp4 or set()
         assert _nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
+        # Per-tensor NVFP4 global scales (host-side amax/(6*448)), aligned with the
+        # mni/attnOpt convention (tensor_scale). K/V are read from the paged cache.
+        _k_src = k_cache if is_paged else k
+        _v_src = v_cache if is_paged else v
+        _p_global = 1.0 / (6.0 * 448.0) + 1e-30  # unnormalized exp P has per-row max ~1
         fwd_kwargs = {
             "N_CTX": max_input_len,
             "kv_group_num": kv_group_num,
@@ -954,6 +967,10 @@ class _Attention(torch.autograd.Function):
             "NVFP4_P": "p" in _nvfp4,
             "NVFP4_V": "v" in _nvfp4,
             "FP16_SOFTMAX": fp16_softmax,
+            "q_global_scale": tensor_global_scale(q) if "q" in _nvfp4 else 1.0,
+            "k_global_scale": tensor_global_scale(_k_src) if "k" in _nvfp4 else 1.0,
+            "p_global_scale": _p_global if "p" in _nvfp4 else 1.0,
+            "v_global_scale": tensor_global_scale(_v_src) if "v" in _nvfp4 else 1.0,
         }
 
         # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.

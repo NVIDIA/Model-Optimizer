@@ -57,11 +57,11 @@ from modelopt.torch.kernels.common.attention.triton_fa import (
     _load_paged_v_tile,
 )
 from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
-    nvfp4_qdq_1d,
-    nvfp4_qdq_axis0,
+    QUANT_NVFP4,
+    fake_quant_fp4_k0,
+    fake_quant_fp4_k1,
+    tensor_global_scale,
 )
-
-_NVFP4_BLK = 16  # NVFP4 block size (contraction-axis group)
 
 # Cap on the auto-chosen split count. Decode KV reads dominate, so a handful of
 # splits is enough to fill the SMs at small batch; more just fragments skipping.
@@ -109,8 +109,10 @@ def _attn_decode_split_fwd(
     NVFP4_P: tl.constexpr,  # fakequant softmax P -> NVFP4 before BMM2
     NVFP4_V: tl.constexpr,  # fakequant V -> NVFP4 before BMM2 (= NVFP4 KV$ V side)
     FP16_SOFTMAX: tl.constexpr,  # compute the softmax exp in fp16 (mixed precision)
-    NB_D: tl.constexpr,  # head-dim NVFP4 blocks = BLOCK_D // 16
-    NB_N: tl.constexpr,  # kv-tile NVFP4 blocks = BLOCK_N // 16
+    q_global_scale,  # per-tensor NVFP4 global scales (amax/(6*448)), computed host-side
+    k_global_scale,
+    p_global_scale,
+    v_global_scale,
 ):
     """One (request, head, KV split): partial GEMV attention with skip + optional NVFP4."""
     batch_idx = tl.program_id(0)
@@ -137,8 +139,13 @@ def _attn_decode_split_fwd(
     q = tl.load(
         Q + batch_idx * stride_qb + head_idx * stride_qh + dim_pos, mask=d_mask, other=0.0
     ).to(tl.float32)
-    if NVFP4_Q:
-        q = nvfp4_qdq_1d(q, NB_D, 16)  # BMM1 query operand -> NVFP4
+    if NVFP4_Q:  # BMM1 query (A-side, single row, GEMM-K = head dim)
+        q = tl.reshape(
+            fake_quant_fp4_k1(
+                tl.reshape(q, (1, BLOCK_D)), 1, BLOCK_D, 16, q_global_scale, QUANT_NVFP4
+            ),
+            (BLOCK_D,),
+        )
 
     m_i = -float("inf")  # running max (prefix, scalar) within this split
     l_i = 0.0  # running softmax denominator (scalar)
@@ -168,8 +175,8 @@ def _attn_decode_split_fwd(
             max_blocks_per_seq,
         )
         kt_f = kt.to(tl.float32)
-        if NVFP4_K:
-            kt_f = nvfp4_qdq_axis0(kt_f, NB_D, 16, BLOCK_N)  # BMM1 key operand -> NVFP4
+        if NVFP4_K:  # BMM1 key (B-side, K^T [BLOCK_D, BLOCK_N], GEMM-K = head dim = axis 0)
+            kt_f = fake_quant_fp4_k0(kt_f, BLOCK_D, BLOCK_N, 16, 1, k_global_scale, QUANT_NVFP4)
         scores = tl.sum(q[:, None] * kt_f, axis=0) * qk_scale  # [BLOCK_N], fp32 accum
         scores = tl.where(kv_valid, scores, -float("inf"))
 
@@ -196,7 +203,16 @@ def _attn_decode_split_fwd(
             # P operand of BMM2 -> NVFP4. NVFP4 is homogeneous (NVFP4(c*x)=c*NVFP4(x)),
             # so quantizing the unnormalized exp here equals quantizing normalized P,
             # since the final acc is divided by l_i in the combine kernel.
-            p_bmm = nvfp4_qdq_1d(p, NB_N, 16) if NVFP4_P else p
+            p_bmm = (
+                tl.reshape(
+                    fake_quant_fp4_k1(
+                        tl.reshape(p, (1, BLOCK_N)), 1, BLOCK_N, 16, p_global_scale, QUANT_NVFP4
+                    ),
+                    (BLOCK_N,),
+                )
+                if NVFP4_P
+                else p
+            )
             vt = _load_paged_v_tile(
                 V_cache,
                 Block_table,
@@ -216,8 +232,8 @@ def _attn_decode_split_fwd(
                 max_blocks_per_seq,
             )
             vt_f = vt.to(tl.float32)
-            if NVFP4_V:
-                vt_f = nvfp4_qdq_axis0(vt_f, NB_N, 16, BLOCK_D)  # BMM2 value operand -> NVFP4
+            if NVFP4_V:  # BMM2 value (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = keys = axis 0)
+                vt_f = fake_quant_fp4_k0(vt_f, BLOCK_N, BLOCK_D, 16, 1, v_global_scale, QUANT_NVFP4)
             acc += tl.sum(p_bmm[:, None] * vt_f, axis=0)  # [BLOCK_D], fp32 accum
             m_i = m_new
 
@@ -351,6 +367,11 @@ def attention_decode(
     nvfp4 = nvfp4 or set()
     assert nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
     assert BLOCK_D % 16 == 0 and BLOCK_N % 16 == 0, "NVFP4 needs dims divisible by 16"
+    # Per-tensor NVFP4 global scales (host-side amax/(6*448)), aligned with mni/attnOpt.
+    q_gs = tensor_global_scale(q) if "q" in nvfp4 else 1.0
+    k_gs = tensor_global_scale(k_cache) if "k" in nvfp4 else 1.0
+    v_gs = tensor_global_scale(v_cache) if "v" in nvfp4 else 1.0
+    p_gs = (1.0 / (6.0 * 448.0) + 1e-30) if "p" in nvfp4 else 1.0  # unnormalized exp P max ~1
 
     # Per-split partial softmax state, merged by the combine kernel.
     m_partial = torch.empty(batch, num_q_heads, num_kv_splits, dtype=torch.float32, device=q.device)
@@ -408,8 +429,10 @@ def attention_decode(
             NVFP4_P="p" in nvfp4,
             NVFP4_V="v" in nvfp4,
             FP16_SOFTMAX=fp16_softmax,
-            NB_D=BLOCK_D // 16,
-            NB_N=BLOCK_N // 16,
+            q_global_scale=q_gs,
+            k_global_scale=k_gs,
+            p_global_scale=p_gs,
+            v_global_scale=v_gs,
             num_warps=4,
             num_stages=2,
         )

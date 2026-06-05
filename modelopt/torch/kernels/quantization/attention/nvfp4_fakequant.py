@@ -13,124 +13,174 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ruff: noqa: N803 — Triton kernels use uppercase for constexpr by convention
+# ruff: noqa: N803, N806 — Triton kernels use uppercase for constexpr by convention
 
-"""In-kernel NVFP4 (E2M1) fake quantization for attention BMM operands.
+"""In-kernel FP4 fake quantization for attention BMM operands.
 
-Tile-level wrappers over the scalar FP4 device functions in
-``kernels/quantization/gemm/nvfp4_quant.py`` (the single source of truth for the
-E2M1 decision-boundary rounding). They quantize a Triton tile to NVFP4 along its
-*contraction* axis in groups of ``BLK`` (= 16, the NVFP4 block size): a per-block
-FP8-E4M3 scale plus a per-tile global scale (``global_amax / (6 * 448)``), exactly
-as ModelOpt's NVFP4 quantizer does.
+**Design-aligned with the customized vLLM** ``mni/attnOpt`` attention-quant
+framework (``vllm/v1/attention/ops/triton_quant/triton_quant_utils.py``): same
+``_fake_quant_fp4_k1`` / ``_fake_quant_fp4_k0`` signatures, the same per-tensor
+``global_scale`` convention (computed host-side by :func:`tensor_global_scale`,
+the mirror of their ``tensor_scale``), the same block-scale formula
+(``absmax/6 + 1e-30``), the same E2M1 ``>=`` decision boundaries, and the same
+``SCALE_TYPE`` enum. So our NVFP4 numerics match theirs bit-for-bit.
 
-This is *fake* quantization: values are rounded to the NVFP4 grid and dequantized
-back to fp32, so the downstream ``tl.dot`` still runs in bf16/fp32 — the intent is
-to measure the *accuracy* impact of NVFP4 attention BMMs, not to accelerate them.
+Two intentional portability tweaks (numerically identical to theirs):
+  - ``A-side``/``B-side`` use ``k1``/``k0`` for Q,P / K,V (GEMM-K = axis 1 / 0).
+  - the E4M3 per-block scale is computed with an fp32 E4M3 emulation that is
+    bit-exact to ``torch.float8_e4m3fn`` (== their ``.to(tl.float8e4nv)``), so the
+    NVFP4 path also runs on pre-sm_89 GPUs where ``tl.float8e4nv`` is unsupported;
+    the E2M1 value rounding uses their PTX ``cvt`` on sm_100 and the portable
+    ``>=`` fallback elsewhere.
 
-The per-block E4M3 scale is computed with an exact fp32 emulation of E4M3 (rather
-than ``tl.float8e4nv``) so the kernel runs on pre-sm_89 GPUs as well; the emulation
-is bit-exact to ``torch.float8_e4m3fn``. The global scale is computed per tile
-(dynamic), which captures the dominant FP4-rounding error; a calibrated per-tensor
-global scale is a follow-up (would be passed in).
+This is *fake* quantization: operands are rounded to the FP4 grid and dequantized
+to fp32; the ``tl.dot`` still runs in bf16/fp32 (accuracy study, not speed).
 """
 
 import triton
 import triton.language as tl
 from triton.language.extra.cuda import libdevice
+from triton.language.target_info import cuda_capability_geq
 
-from modelopt.torch.kernels.quantization.gemm.nvfp4_quant import nvfp4_scalar_quant
+# SCALE_TYPE enum — values mirror mni/attnOpt's triton_quant_utils for parity.
+QUANT_NVFP4 = tl.constexpr(2)  # FP4 E2M1, E4M3 per-block scale x FP32 global (true NVFP4)
+QUANT_MXFP4_RUP = tl.constexpr(3)  # FP4 E2M1, E8M0 per-block scale, round up
+QUANT_MXFP4_RNE = tl.constexpr(4)  # FP4 E2M1, E8M0 per-block scale, round to nearest
+QUANT_NVFP4_SFP32 = tl.constexpr(6)  # FP4 E2M1, full FP32 per-block scale (no scale quant)
 
-# NVFP4 second-level normalizer: E2M1 max (6.0) * FP8-E4M3 max (448.0). Must use the
-# tl.constexpr(...) instantiation form so Triton @jit functions can read it as a global.
-_NVFP4_GLOBAL_NORM = tl.constexpr(6.0 * 448.0)
+E2M1_MAX = 6.0
+FP8_E4M3_MAX = 448.0
+
+
+def tensor_global_scale(tensor, scale_type: int = 2) -> float:
+    """Per-tensor NVFP4 global scale ``amax / (6*448)`` (mirror of their ``tensor_scale``).
+
+    Computed host-side and passed into the kernels as a constant. ``scale_type`` is
+    accepted for signature parity; only NVFP4/SFP32 use a global (others ignore it).
+    """
+    return tensor.float().abs().max().item() / (E2M1_MAX * FP8_E4M3_MAX) + 1e-30
 
 
 @triton.jit
 def e4m3_emulate(x):
-    """Round ``x`` to the nearest E4M3 (E4M3fn, max 448) value in fp32.
+    """fp32 round to nearest E4M3 (E4M3fn, max 448) — bit-exact to torch.float8_e4m3fn.
 
-    Hardware-free equivalent of ``x.to(float8_e4m3fn).to(float32)`` — bit-exact to
-    ``torch.float8_e4m3fn`` over the representable range, so the NVFP4 block scale
-    can be quantized on GPUs without native fp8 (pre-sm_89).
+    Portable equivalent of ``x.to(tl.float8e4nv).to(tl.float32)`` for the per-block
+    scale, so the NVFP4 path runs on GPUs without native fp8 (pre-sm_89).
     """
     ax = tl.minimum(tl.abs(x), 448.0)
     nz = ax > 0.0
-    safe = tl.where(nz, ax, 1.0)  # avoid log2(0)
-    exp = tl.maximum(tl.floor(tl.log2(safe)), -6.0)  # clamp to min normal exponent
-    step = tl.exp2(exp - 3.0)  # 3 mantissa bits -> ulp = 2^(exp-3)
-    q = libdevice.nearbyint(safe / step) * step  # round-half-to-even (matches torch)
+    safe = tl.where(nz, ax, 1.0)
+    exp = tl.maximum(tl.floor(tl.log2(safe)), -6.0)
+    step = tl.exp2(exp - 3.0)
+    q = libdevice.nearbyint(safe / step) * step
     q = tl.minimum(tl.where(nz, q, 0.0), 448.0)
     return tl.where(x >= 0, q, -q)
 
 
 @triton.jit
-def _nvfp4_block_scale(block_amax, global_scale):
-    """Per-block NVFP4 scale: E4M3-quantized ``block_amax/6`` with the global scale."""
-    scale_in_fp8_range = tl.minimum(block_amax / (6.0 * global_scale), 448.0)
-    return e4m3_emulate(scale_in_fp8_range) * global_scale
+def _round_e2m1(x_s):
+    """Round x_s (= value / scale) to the nearest FP4 E2M1 magnitude (signed).
 
-
-@triton.jit
-def nvfp4_qdq_1d(x, NB: tl.constexpr, BLK: tl.constexpr):
-    """NVFP4 fake-quantize a 1-D tile ``x`` of length ``NB*BLK`` along its only axis."""
-    global_scale = tl.max(tl.abs(x)) / _NVFP4_GLOBAL_NORM
-    xr = tl.reshape(x, (NB, BLK))
-    block_amax = tl.max(tl.abs(xr), axis=1, keep_dims=True)  # [NB, 1]
-    scale = _nvfp4_block_scale(block_amax, global_scale)  # [NB, 1], broadcasts over BLK
-    xq = nvfp4_scalar_quant(xr, scale, BLK)
-    return tl.reshape(xq, (NB * BLK,))
-
-
-@triton.jit
-def nvfp4_qdq_lastdim_2d(x, M: tl.constexpr, NB: tl.constexpr, BLK: tl.constexpr):
-    """NVFP4 fake-quantize a 2-D tile ``x`` ``[M, NB*BLK]`` along axis 1 (contraction).
-
-    Used for operands whose contraction dimension is the column dimension, e.g. the
-    query tile ``[BLOCK_M, head_dim]`` (contract over head_dim) and the probability
-    tile ``[BLOCK_M, BLOCK_N]`` (contract over BLOCK_N) — each row is quantized
-    independently in blocks of ``BLK`` columns.
+    PTX ``cvt.rn.satfinite.e2m1x2.f32`` on sm_100+ (matches mni/attnOpt); portable
+    ``>=`` decision-boundary fallback elsewhere (identical grid + tie direction).
     """
-    global_scale = tl.max(tl.abs(x)) / _NVFP4_GLOBAL_NORM
-    xr = tl.reshape(x, (M, NB, BLK))
-    block_amax = tl.max(tl.abs(xr), axis=2, keep_dims=True)  # [M, NB, 1]
-    scale = _nvfp4_block_scale(block_amax, global_scale)  # [M, NB, 1], broadcasts over BLK
-    xq = nvfp4_scalar_quant(xr, scale, BLK)
-    return tl.reshape(xq, (M, NB * BLK))
+    if cuda_capability_geq(10, 0):
+        return tl.inline_asm_elementwise(
+            """{
+                .reg .b8 e2m1;
+                .reg .b32 f16x2;
+                .reg .b16 lo, hi;
+                cvt.rn.satfinite.e2m1x2.f32 e2m1, $2, $3;
+                cvt.rn.f16x2.e2m1x2 f16x2, e2m1;
+                mov.b32 {lo, hi}, f16x2;
+                cvt.f32.f16 $0, hi;
+                cvt.f32.f16 $1, lo;
+            }""",
+            "=r,=r,r,r",
+            args=[x_s],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=2,
+        )
+    a = tl.abs(x_s)
+    sgn = tl.where(x_s >= 0.0, 1.0, -1.0)
+    return sgn * tl.where(
+        a >= 5.0,
+        6.0,
+        tl.where(
+            a >= 3.5,
+            4.0,
+            tl.where(
+                a >= 2.5,
+                3.0,
+                tl.where(
+                    a >= 1.75,
+                    2.0,
+                    tl.where(
+                        a >= 1.25, 1.5, tl.where(a >= 0.75, 1.0, tl.where(a >= 0.25, 0.5, 0.0))
+                    ),
+                ),
+            ),
+        ),
+    )
 
 
 @triton.jit
-def nvfp4_qdq_lastdim_2d_perrow(x, M: tl.constexpr, NB: tl.constexpr, BLK: tl.constexpr):
-    """NVFP4 fake-quantize ``[M, NB*BLK]`` along axis 1 with a *per-row* global scale.
-
-    Used for the softmax probabilities P: a flash kernel quantizes the unnormalized
-    ``exp`` and divides the output by the row sum afterward. Because NVFP4 is
-    homogeneous (``NVFP4(c*x) = c*NVFP4(x)``), a *per-row* global makes that equal to
-    quantizing the normalized P — but only with a per-row (per-query-token) global,
-    since each query row has its own normalizer. (A per-tile global would mix rows
-    with different row-sums and not commute with the deferred normalization.)
-    """
-    row_amax = tl.max(tl.abs(x), axis=1, keep_dims=True)  # [M, 1] per-row global
-    global_scale = row_amax / _NVFP4_GLOBAL_NORM
-    xr = tl.reshape(x, (M, NB, BLK))
-    block_amax = tl.max(tl.abs(xr), axis=2, keep_dims=True)  # [M, NB, 1]
-    scale = _nvfp4_block_scale(block_amax, global_scale[:, :, None])  # broadcasts over NB, BLK
-    xq = nvfp4_scalar_quant(xr, scale, BLK)
-    return tl.reshape(xq, (M, NB * BLK))
+def _block_scale(scale_f32, global_scale, SCALE_TYPE: tl.constexpr):
+    """Quantize the per-block scale per SCALE_TYPE (mirror of mni/attnOpt)."""
+    if SCALE_TYPE == QUANT_NVFP4:
+        # E4M3 block scale relative to the FP32 global (emulated E4M3 == fp8e4nv).
+        return e4m3_emulate(scale_f32 / global_scale) * global_scale
+    elif SCALE_TYPE == QUANT_MXFP4_RUP:
+        return tl.exp2(tl.ceil(tl.log2(scale_f32)))
+    elif SCALE_TYPE == QUANT_MXFP4_RNE:
+        return tl.exp2(tl.floor(tl.log2(scale_f32) + 0.5))
+    else:  # QUANT_NVFP4_SFP32: full fp32 per-block scale
+        return scale_f32
 
 
 @triton.jit
-def nvfp4_qdq_axis0(x, NB: tl.constexpr, BLK: tl.constexpr, M: tl.constexpr):
-    """NVFP4 fake-quantize a 2-D tile ``x`` ``[NB*BLK, M]`` along axis 0 (contraction).
+def fake_quant_fp4_k1(
+    x,
+    M: tl.constexpr,
+    K: tl.constexpr,
+    K_BLOCK: tl.constexpr,
+    global_scale,
+    SCALE_TYPE: tl.constexpr,
+):
+    """Fake-quantize ``x [M, K]`` to FP4 E2M1, 1×K_BLOCK blocks along K (axis 1).
 
-    Used for operands whose contraction dimension is the row dimension, e.g. K^T
-    ``[head_dim, BLOCK_N]`` (contract over head_dim) and V ``[BLOCK_N, head_dim]``
-    (contract over BLOCK_N) — each column is quantized independently in blocks of
-    ``BLK`` rows.
+    A-side operands (Q, P) where the GEMM-K dim is axis 1. Per-tensor ``global_scale``.
     """
-    global_scale = tl.max(tl.abs(x)) / _NVFP4_GLOBAL_NORM
-    xr = tl.reshape(x, (NB, BLK, M))
-    block_amax = tl.max(tl.abs(xr), axis=1, keep_dims=True)  # [NB, 1, M]
-    scale = _nvfp4_block_scale(block_amax, global_scale)  # [NB, 1, M], broadcasts over BLK
-    xq = nvfp4_scalar_quant(xr, scale, BLK)
-    return tl.reshape(xq, (NB * BLK, M))
+    NG: tl.constexpr = K // K_BLOCK
+    x_r = tl.reshape(x.to(tl.float32), (M, NG, K_BLOCK))
+    scale_f32 = tl.max(tl.abs(x_r), axis=2) / 6.0 + 1e-30  # [M, NG]
+    scale = _block_scale(scale_f32, global_scale, SCALE_TYPE)
+    scale = tl.broadcast_to(tl.expand_dims(scale, 2), (M, NG, K_BLOCK))
+    x_q = _round_e2m1(x_r / scale)
+    return tl.reshape(x_q * scale, (M, K)).to(x.dtype)
+
+
+@triton.jit
+def fake_quant_fp4_k0(
+    x,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    K_BLOCK: tl.constexpr,
+    N_BLOCK: tl.constexpr,
+    global_scale,
+    SCALE_TYPE: tl.constexpr,
+):
+    """Fake-quantize ``x [K, N]`` to FP4 E2M1, K_BLOCK×N_BLOCK blocks.
+
+    B-side operands (K^T, V) where the GEMM-K dim is axis 0. ``N_BLOCK=1`` for NVFP4.
+    """
+    KG: tl.constexpr = K // K_BLOCK
+    NG: tl.constexpr = N // N_BLOCK
+    x_r = tl.reshape(x.to(tl.float32), (KG, K_BLOCK, NG, N_BLOCK))
+    scale_f32 = tl.max(tl.max(tl.abs(x_r), axis=3), axis=1) / 6.0 + 1e-30  # [KG, NG]
+    scale = _block_scale(scale_f32, global_scale, SCALE_TYPE)
+    scale = tl.broadcast_to(tl.expand_dims(tl.expand_dims(scale, 1), 3), (KG, K_BLOCK, NG, N_BLOCK))
+    x_q = _round_e2m1(x_r / scale)
+    return tl.reshape(x_q * scale, (K, N)).to(x.dtype)
