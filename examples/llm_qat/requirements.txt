@@ -1,3 +1,4 @@
-flash-attn
+flash-attn>=2.6.0
+liger-kernel>=0.5.0; platform_system != 'Darwin' and platform_system != 'Windows'
 py7zr
 tensorboard
