@@ -121,10 +121,6 @@ class SharedQuantState(nn.Module):
                 raise RuntimeError("Failed to sync shared weight_global_amax") from e
 
 
-# ---------------------------------------------------------------------------
-# Group discovery (regex over FQNs) → (parent, members) tuples
-# ---------------------------------------------------------------------------
-
 
 def _has_enabled_weight_quantizer(child: nn.Module, wq_attr: str) -> bool:
     """A child is eligible if it has an enabled weight quantizer.
