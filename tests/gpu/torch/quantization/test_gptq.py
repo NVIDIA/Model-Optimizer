@@ -18,7 +18,7 @@ import time
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
+from _test_utils.torch.transformers_models import get_tiny_llama
 from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
@@ -213,23 +213,15 @@ def test_gptq_export_roundtrip():
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
-def test_gptq_e2e_flow(quant_cfg):
-    tokenizer = get_tiny_tokenizer()
-    model = get_tiny_llama(vocab_size=tokenizer.vocab_size).to("cuda")
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    tokenizer.padding_side = "left"
-
-    assert tokenizer.pad_token is not None, "Pad token cannot be set!"
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+    model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = {"method": "gptq", "layerwise": True}
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
-        tokenizer=tokenizer,
+        tokenizer=tiny_tokenizer,
         batch_size=2,
         num_samples=8,
         device="cuda",

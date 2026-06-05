@@ -15,6 +15,7 @@
 
 import subprocess
 
+import pytest
 from _test_utils.examples.run_command import (
     extend_cmd_parts,
     run_example_command,
@@ -40,6 +41,7 @@ def test_lm_eval_hf(tmp_path):
 
 
 @minimum_sm(89)
+@pytest.mark.timeout(480)
 def test_qwen3_eval_fp8(tmp_path):
     # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than
     # max_seq_len, and the default (32) is shorter than even simple MMLU prompts.
@@ -52,7 +54,9 @@ def test_qwen3_eval_fp8(tmp_path):
             calib=64,
             lm_eval_tasks="hellaswag,gsm8k",
             simple_eval_tasks="humaneval",
-            lm_eval_limit=0.1,
+            lm_eval_limit=16,
+            simple_eval_limit=16,
+            output=128,  # Cap generation length: gsm8k/humaneval otherwise generate up to 1024 tokens/sample
             batch=8,
         )
     finally:

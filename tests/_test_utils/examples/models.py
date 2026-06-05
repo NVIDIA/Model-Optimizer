@@ -48,38 +48,28 @@ TINY_LLAMA_PATH = _select_path(
     local_id="TinyLlama-1.1B-Chat-v1.0",
 )
 
-SXDL_PATH = _select_path(
-    remote_id="stabilityai/stable-diffusion-xl-base-1.0",
-    local_id="stable-diffusion-xl-base-1.0",
-)
-
-PIXART_PATH = _select_path(
-    remote_id="PixArt-alpha/PixArt-XL-2-1024-MS",
-    local_id="PixArt-XL-2-1024-MS",
-)
-
-LLAVA_PATH = _select_path(
-    remote_id="llava-hf/llava-1.5-7b-hf",
-    local_id="llava-1.5-7b-hf",
-)
-
 QWEN_VL_PATH = _select_path(
     remote_id="Qwen/Qwen3-VL-2B-Instruct",
     local_id="Qwen3-VL-2B-Instruct",
 )
 
 # Diffusers
-FLUX_SCHNELL_PATH = _select_path(
-    remote_id="hf-internal-testing/tiny-flux-pipe",
-    local_id="black-forest-labs/FLUX.1-schnell",
-)
-
-SDXL_1_0_PATH = _select_path(
+SDXL_PATH = _select_path(
     remote_id="hf-internal-testing/tiny-sdxl-pipe",
-    local_id="stabilityai/stable-diffusion-xl-base-1.0",
+    local_id="stable-diffusion-xl-base-1.0",
 )
 
 SD3_PATH = _select_path(
     remote_id="hf-internal-testing/tiny-sd3-pipe",
-    local_id="stabilityai/stable-diffusion-3-medium-diffusers",
+    local_id="stable-diffusion-3-medium-diffusers",
+)
+
+FLUX_SCHNELL_PATH = _select_path(
+    remote_id="hf-internal-testing/tiny-flux-pipe",
+    local_id="FLUX.1-schnell",
+)
+
+PIXART_PATH = _select_path(
+    remote_id="PixArt-alpha/PixArt-XL-2-1024-MS",
+    local_id="PixArt-XL-2-1024-MS",
 )

@@ -97,6 +97,9 @@ def test_unified_hf_export_and_check_safetensors(
         qformat=qformat,
         export_path=output_dir,
         dataset="cnn_dailymail",
+        # This test only checks the exported safetensors structure (not accuracy), so a
+        # small calibration set is enough. Avoids the 1024-sample default on a toy model.
+        calib_size=64,
     )
 
     # Run the command

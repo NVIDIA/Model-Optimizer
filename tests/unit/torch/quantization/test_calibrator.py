@@ -182,9 +182,11 @@ class TestHistogramCalibrator:
 
 
 class TestEntropyCalibrator:
+    # ``num_bins=512`` (down from 2048) keeps the entropy KL-search ~8x cheaper while
+    # still discarding the single outlier; ``start_bin`` scales with num_bins (128->32).
     def test_one_tensor(self, verbose):
         hist_calibrator = calib.HistogramCalibrator(
-            8, None, False, num_bins=2048, grow_method="stretch"
+            8, None, False, num_bins=512, grow_method="stretch"
         )
 
         x_2 = torch.rand(11, 7, 3, 3)  # uniform in (0,1)
@@ -192,7 +194,7 @@ class TestEntropyCalibrator:
         hist_calibrator.collect(x_2)
 
         # Don't have a better test metric. One outlier 10 should be discarded by KL-divergence
-        amax = hist_calibrator.compute_amax("entropy", start_bin=128)
+        amax = hist_calibrator.compute_amax("entropy", start_bin=32)
 
         if verbose:
             print(f"amax={amax.item():.4f}", end=" ")
@@ -201,28 +203,24 @@ class TestEntropyCalibrator:
 
     def test_unsigned(self, verbose):
         hist_calibrator = calib.HistogramCalibrator(
-            8, None, True, num_bins=2048, grow_method="stretch"
+            8, None, True, num_bins=512, grow_method="stretch"
         )
 
         x_2 = torch.rand(11, 7, 3, 3)  # uniform in (0,1)
         x_2[1, 1, 1, 1] = 10.0  # create outlier
         hist_calibrator.collect(x_2)
 
-        amax = hist_calibrator.compute_amax("entropy", start_bin=128)
+        amax = hist_calibrator.compute_amax("entropy", start_bin=32)
 
         if verbose:
             print(f"amax={amax.item():.4f}", end=" ")
 
         assert amax < 1.1
 
-    @pytest.mark.parametrize("torch_hist", [False, True])
-    def test_two_tensor(self, torch_hist, verbose):
-        hist_calibrator = calib.HistogramCalibrator(
-            8, None, False, num_bins=2048, torch_hist=torch_hist
-        )
-
-        x_2 = torch.rand(11, 7, 3, 3)  # uniform in (0,1)
-        x_2[1, 1, 1, 1] = 10.0  # create outlier
+    # torch_hist vs numpy histogram equivalence is covered by
+    # ``TestHistogramCalibrator::test_torch_hist``, so a single case suffices here.
+    def test_two_tensor(self, verbose):
+        hist_calibrator = calib.HistogramCalibrator(8, None, False, num_bins=512)
 
         x_2 = torch.rand(11, 7, 3, 3)  # uniform in (0,1)
         x_2[1, 1, 1, 1] = 10.0  # create outlier
@@ -231,7 +229,7 @@ class TestEntropyCalibrator:
         hist_calibrator.collect(x_3)
 
         # Don't have a better test metric. One outlier 10 should be discarded by KL-divergence
-        amax = hist_calibrator.compute_amax("entropy", start_bin=128)
+        amax = hist_calibrator.compute_amax("entropy", start_bin=32)
 
         if verbose:
             print(f"amax={amax.item():.4f}", end=" ")
@@ -406,13 +404,15 @@ class TestCalibrateWeights:
                     == test_module.weight_quantizer.amax.shape
                 )
 
+    # ``num_bins=256`` (down from the 2048 default) makes the MSE bin-scan ~8x cheaper;
+    # the reference calibrator must use the same num_bins for the atol=0 comparison.
     @pytest.mark.parametrize("method", ["mse", "percentile"])
     def test_per_tensor(self, method):
         test_lenet = QuantConvLinear()
 
-        ref_calibrator = calib.HistogramCalibrator(8, None, False)
+        ref_calibrator = calib.HistogramCalibrator(8, None, False, num_bins=256)
 
-        calib.calibrate_weights(test_lenet, method=method, perchannel=False)
+        calib.calibrate_weights(test_lenet, method=method, perchannel=False, num_bins=256)
         ref_calibrator.collect(test_lenet.conv1.weight)
         ref_amax = ref_calibrator.compute_amax(method)
         assert torch.allclose(ref_amax, test_lenet.conv1.weight_quantizer.amax, rtol=0, atol=0)
@@ -421,9 +421,9 @@ class TestCalibrateWeights:
     def test_with_axis(self, method):
         test_lenet = QuantConvLinear()
 
-        ref_calibrator = calib.HistogramCalibrator(8, None, False)
+        ref_calibrator = calib.HistogramCalibrator(8, None, False, num_bins=256)
 
-        calib.calibrate_weights(test_lenet, method=method, perchannel=True)
+        calib.calibrate_weights(test_lenet, method=method, perchannel=True, num_bins=256)
         ref_calibrator.collect(test_lenet.conv2.weight[1])
         ref_amax = ref_calibrator.compute_amax(method)
         assert torch.allclose(ref_amax, test_lenet.conv2.weight_quantizer.amax[1], rtol=0, atol=0)

@@ -413,7 +413,8 @@ def _test_data_parallel_auto_quantize(rank, size):
 
 
 def test_data_parallel_auto_quantize(skip_on_windows):
-    spawn_multiprocess_job(4, _test_data_parallel_auto_quantize, backend="gloo")
+    # 2 ranks fully exercise the cross-rank sync the test asserts; more just adds spawn overhead.
+    spawn_multiprocess_job(2, _test_data_parallel_auto_quantize, backend="gloo")
 
 
 def test_estimate_quant_compression():
