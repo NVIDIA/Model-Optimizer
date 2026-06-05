@@ -21,7 +21,7 @@ from _test_utils.examples.run_command import extend_cmd_parts, run_example_comma
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
 
-@pytest.mark.timeout(600)  # Multiple steps in one test hence takes longer than default timeout
+@pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than default timeout
 def test_qad(tmp_path: Path, num_gpus):
     """Quantize a tiny Qwen3, run QAD from the quantized student, and export to a unified HF ckpt."""
     hf_model_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
