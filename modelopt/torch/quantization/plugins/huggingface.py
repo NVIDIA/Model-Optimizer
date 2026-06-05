@@ -764,10 +764,17 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         else:
             raise AttributeError("Could not find intermediate dimension size in model")
 
+        if hasattr(self, "hidden_size"):
+            self._dynamicmodule_hidden_size = self.hidden_size
+        elif hasattr(self, "intermediate_dim"):
+            self._dynamicmodule_hidden_size = self.hidden_dim
+        else:
+            raise AttributeError("Could not find hidden_size/hidden_dim in model")
+
         with init_empty_weights():
             expert_modules = nn.ModuleList(
                 [
-                    _Qwen3VLMoeExpertModule(self.hidden_size, expert_dim)
+                    _Qwen3VLMoeExpertModule(self._dynamicmodule_hidden_size, expert_dim)
                     for _ in range(self.num_experts)
                 ]
             )
@@ -804,7 +811,7 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         router_indices: torch.Tensor,
     ) -> torch.Tensor:
         batch_size = hidden_states.shape[0]
-        hidden_states = hidden_states.reshape(-1, self.hidden_size)
+        hidden_states = hidden_states.reshape(-1, self._dynamicmodule_hidden_size)
         next_states = torch.zeros_like(hidden_states)
         with torch.no_grad():
             expert_mask = torch.nn.functional.one_hot(router_indices, num_classes=self.num_experts)
@@ -822,7 +829,7 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
             out = expert.down_proj(gated_output)
             weighted_output = out * routing_weights[token_idx, expert_idx, None]
             next_states.index_add_(0, token_idx, weighted_output.to(hidden_states.dtype))
-        next_states = next_states.view(batch_size, -1, self.hidden_size)
+        next_states = next_states.view(batch_size, -1, self._dynamicmodule_hidden_size)
 
         return next_states
 
