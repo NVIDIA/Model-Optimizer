@@ -155,13 +155,13 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
-    warmup: int = ModeloptField(
+    initial_disabled_steps: int = ModeloptField(
         default=0,
-        title="Warmup value.",
+        title="Initial disabled steps.",
         description=(
-            "User-specified warmup value passed straight through to the exported "
-            "sparse attention config. Not interpreted by sparsify or calibration; "
-            "only written to the checkpoint when > 0."
+            "User-specified number of initial disabled steps recorded in the exported "
+            "sparse attention config. Passed straight through; not interpreted by "
+            "sparsify or calibration; only written to the checkpoint when > 0."
         ),
     )
 

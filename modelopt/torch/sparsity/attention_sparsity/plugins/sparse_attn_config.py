@@ -95,15 +95,15 @@ def _add_sparse_softmax_params(layer_cfg: dict, sparse_meta: dict, config_groups
     layer_cfg.update(_sparse_softmax_params(sparse_meta, config_groups))
 
 
-def _build_calibrated_softmax_skip_config(sparse_meta: dict) -> dict:
-    """Build a vLLM Triton sparse config from exported calibration metadata."""
+def _build_calibrated_softmax_skip_config(skip_group: dict) -> dict:
+    """Build a vLLM Triton sparse config from a skip_softmax config group."""
     return {
         "sparse_cfg": {
             "*attn*": {
                 "method": "triton_skip_softmax",
-                "threshold_scale_factor": sparse_meta["threshold_scale_factor"],
+                "threshold_scale_factor": skip_group["threshold_scale_factor"],
                 "target_sparse_ratio": _normalize_target_sparse_ratio(
-                    sparse_meta.get("target_sparsity")
+                    skip_group.get("target_sparsity")
                 ),
                 "backend": "triton",
                 "enable": True,
@@ -171,10 +171,18 @@ def load_from_checkpoint_metadata(hf_config) -> tuple[dict, str] | None:
     if not isinstance(config_groups, dict):
         return None
     algos = {grp.get("algorithm") for grp in config_groups.values() if isinstance(grp, dict)}
-    if "skip_softmax" in algos and _has_calibrated_threshold_scale_factor(
-        sparse_meta.get("threshold_scale_factor")
+    skip_group = next(
+        (
+            grp
+            for grp in config_groups.values()
+            if isinstance(grp, dict) and grp.get("algorithm") == "skip_softmax"
+        ),
+        None,
+    )
+    if skip_group is not None and _has_calibrated_threshold_scale_factor(
+        skip_group.get("threshold_scale_factor")
     ):
-        cfg = _build_calibrated_softmax_skip_config(sparse_meta)
+        cfg = _build_calibrated_softmax_skip_config(skip_group)
         if _has_sparse_softmax_algo(algos):
             layer_cfg = cfg["sparse_cfg"]["*attn*"]
             _add_sparse_softmax_params(layer_cfg, sparse_meta, config_groups)

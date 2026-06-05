@@ -180,7 +180,7 @@ def test_wan22_calibrated_export(tmp_path):
             "skip_softmax_threshold": 0.1,
             "backend": "triton",
             "is_causal": False,
-            "warmup": 5,
+            "initial_disabled_steps": 5,
             "enable": True,
         },
         "*.attn2*": {"enable": False},
@@ -231,11 +231,11 @@ def test_wan22_calibrated_export(tmp_path):
         assert "ignore" in group_0
         assert any(".attn2" in name for name in group_0["ignore"])
 
-        # Opt-in warmup metadata is carried through (exported only when > 0).
-        assert group_0["warmup"] == 5
+        # Opt-in initial_disabled_steps metadata is carried through (exported only when > 0).
+        assert group_0["initial_disabled_steps"] == 5
 
-        # threshold_scale_factor is a top-level block: a * exp(b * target_sparsity).
-        tsf = sa_config["threshold_scale_factor"]
+        # threshold_scale_factor lives inside the skip_softmax group.
+        tsf = group_0["threshold_scale_factor"]
         assert tsf["formula"] == "a * exp(b * target_sparsity)"
         assert tsf["prefill"]["a"] == pytest.approx(math.exp(test_log_a))
         assert tsf["prefill"]["b"] == pytest.approx(test_b)

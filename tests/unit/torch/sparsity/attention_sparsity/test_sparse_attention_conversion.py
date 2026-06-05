@@ -380,10 +380,11 @@ class TestExportSparseAttentionConfig:
         out = export_sparse_attention_config(model)
         assert out is not None
         assert "config_groups" in out
-        tsf = out["threshold_scale_factor"]
+        group_0 = out["config_groups"]["group_0"]
+        tsf = group_0["threshold_scale_factor"]
         assert tsf["prefill"] == {"a": 3.14, "b": 7.5}
         assert tsf["decode"] == {"a": 0.5, "b": 9.0}
-        assert out["target_sparsity"] == {"prefill": 0.4, "decode": 0.6}
+        assert group_0["target_sparsity"] == {"prefill": 0.4, "decode": 0.6}
         assert out["producer"]["name"] == "modelopt"
 
     def test_exports_sparse_softmax_metadata(self):
@@ -413,14 +414,13 @@ class TestExportSparseAttentionConfig:
         out = export_sparse_attention_config(model)
 
         assert out is not None
-        assert out["config_groups"]["group_0"]["algorithm"] == "sparse_softmax"
-        assert out["sparse_softmax"] == {
-            "sparsity_n": 2,
-            "sparsity_m": 4,
-            "dense_sink_tokens": 4,
-            "dense_recent_tokens": 128,
-        }
-        assert "threshold_scale_factor" not in out
+        group_0 = out["config_groups"]["group_0"]
+        assert group_0["algorithm"] == "sparse_softmax"
+        assert group_0["sparsity_n"] == 2
+        assert group_0["sparsity_m"] == 4
+        assert group_0["dense_sink_tokens"] == 4
+        assert group_0["dense_recent_tokens"] == 128
+        assert "threshold_scale_factor" not in group_0
 
     def test_exports_calibrated_skip_softmax_with_sparse_softmax_overlay(self):
         """Combined config exports both calibrated skip-softmax and N:M metadata."""
@@ -443,13 +443,13 @@ class TestExportSparseAttentionConfig:
         out = export_sparse_attention_config(model)
 
         assert out is not None
-        assert out["config_groups"]["group_0"]["algorithm"] == "skip_softmax"
-        assert out["config_groups"]["group_1"]["algorithm"] == "sparse_softmax"
-        assert out["threshold_scale_factor"]["prefill"] == {"a": 3.14, "b": 7.5}
-        assert out["target_sparsity"] == {"prefill": 0.4, "decode": 0.6}
-        assert out["sparse_softmax"] == {
-            "sparsity_n": 2,
-            "sparsity_m": 4,
-            "dense_sink_tokens": 0,
-            "dense_recent_tokens": 64,
-        }
+        group_0 = out["config_groups"]["group_0"]
+        group_1 = out["config_groups"]["group_1"]
+        assert group_0["algorithm"] == "skip_softmax"
+        assert group_1["algorithm"] == "sparse_softmax"
+        assert group_0["threshold_scale_factor"]["prefill"] == {"a": 3.14, "b": 7.5}
+        assert group_0["target_sparsity"] == {"prefill": 0.4, "decode": 0.6}
+        assert group_1["sparsity_n"] == 2
+        assert group_1["sparsity_m"] == 4
+        assert group_1["dense_sink_tokens"] == 0
+        assert group_1["dense_recent_tokens"] == 64

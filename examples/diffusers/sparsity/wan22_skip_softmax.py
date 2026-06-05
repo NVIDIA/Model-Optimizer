@@ -211,12 +211,12 @@ def parse_args() -> argparse.Namespace:
         "is written into each component's config.json.",
     )
     parser.add_argument(
-        "--warmup",
+        "--initial-disabled-steps",
         type=int,
         default=0,
-        help="User-specified warmup value carried into the exported sparse attention "
-        "config (config.json). Only emitted when > 0; not interpreted at "
-        "sparsify/calibration time.",
+        help="User-specified initial-disabled-steps value carried into the exported "
+        "sparse attention config (config.json). Only emitted when > 0; not interpreted "
+        "at sparsify/calibration time.",
     )
     return parser.parse_args()
 
@@ -252,9 +252,9 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
     if args.skip_softmax_threshold is not None:
         attn_cfg["skip_softmax_threshold"] = args.skip_softmax_threshold
 
-    # Opt-in warmup metadata — carried through to the exported config when > 0.
-    if args.warmup > 0:
-        attn_cfg["warmup"] = args.warmup
+    # Opt-in initial-disabled-steps metadata — carried through to the exported config when > 0.
+    if args.initial_disabled_steps > 0:
+        attn_cfg["initial_disabled_steps"] = args.initial_disabled_steps
 
     sparse_cfg: dict = {
         "*.attn1*": attn_cfg,  # Self-attention only

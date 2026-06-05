@@ -107,9 +107,13 @@ class TestLoadFromCheckpointMetadata:
             "decode": {"a": 5.0, "b": 7.0},
         }
         meta = {
-            "config_groups": {"group_0": {"algorithm": "skip_softmax"}},
-            "threshold_scale_factor": threshold_scale_factor,
-            "target_sparsity": {"prefill": 0.4, "decode": 0.6},
+            "config_groups": {
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "threshold_scale_factor": threshold_scale_factor,
+                    "target_sparsity": {"prefill": 0.4, "decode": 0.6},
+                }
+            },
             "producer": {"name": "modelopt", "version": "0.45.0"},
         }
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
@@ -131,12 +135,14 @@ class TestLoadFromCheckpointMetadata:
     def test_maps_sparse_softmax_to_dynamic_config(self):
         """Test that checkpoint N:M sparse-softmax metadata restores layer params."""
         meta = {
-            "config_groups": {"group_0": {"algorithm": "sparse_softmax"}},
-            "sparse_softmax": {
-                "sparsity_n": 2,
-                "sparsity_m": 4,
-                "dense_sink_tokens": 4,
-                "dense_recent_tokens": 128,
+            "config_groups": {
+                "group_0": {
+                    "algorithm": "sparse_softmax",
+                    "sparsity_n": 2,
+                    "sparsity_m": 4,
+                    "dense_sink_tokens": 4,
+                    "dense_recent_tokens": 128,
+                }
             },
             "producer": {"name": "modelopt", "version": "0.45.0"},
         }
@@ -166,12 +172,17 @@ class TestLoadFromCheckpointMetadata:
         }
         meta = {
             "config_groups": {
-                "group_0": {"algorithm": "skip_softmax"},
-                "group_1": {"algorithm": "sparse_softmax"},
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "threshold_scale_factor": threshold_scale_factor,
+                    "target_sparsity": {"prefill": 0.4, "decode": 0.6},
+                },
+                "group_1": {
+                    "algorithm": "sparse_softmax",
+                    "sparsity_n": 2,
+                    "sparsity_m": 4,
+                },
             },
-            "threshold_scale_factor": threshold_scale_factor,
-            "target_sparsity": {"prefill": 0.4, "decode": 0.6},
-            "sparse_softmax": {"sparsity_n": 2, "sparsity_m": 4},
             "producer": {"name": "modelopt", "version": "0.45.0"},
         }
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
