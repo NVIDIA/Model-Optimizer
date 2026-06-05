@@ -306,6 +306,12 @@ def test_llama(command):
             tensor_parallel_size=4,
             mini_sm=100,
         ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3.5-122B-A10B-NVFP4",
+            backend=("vllm",),
+            tensor_parallel_size=4,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
