@@ -61,6 +61,7 @@ from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import print_rank_0, warn_rank_0
+from modelopt.torch.utils.loss_mask import get_loss_mask_recovery
 
 __all__ = [
     "EagleFetchPayload",
@@ -100,31 +101,39 @@ def _tokenize_with_loss_mask(
     tags so the tokenizer can return ``assistant_masks``. When ``max_seq_len`` is set,
     truncation is delegated to the tokenizer so ids and assistant_masks are truncated
     in lockstep.
+
+    ``assistant_masks`` requires a fast tokenizer (it needs ``char_to_token``). For
+    tokenizers without it, the mask is rebuilt from token ids via a registered
+    model-specific recovery (see ``modelopt.torch.utils.loss_mask``) if one matches.
     """
+    recovery = None
+    if answer_only_loss and not getattr(tokenizer, "is_fast", False):
+        recovery = get_loss_mask_recovery(tokenizer)
     out = tokenizer.apply_chat_template(
         conversations,
         tokenize=True,
         return_tensors="pt",
         return_dict=True,
-        return_assistant_tokens_mask=answer_only_loss,
+        return_assistant_tokens_mask=answer_only_loss and recovery is None,
         add_generation_prompt=False,
         truncation=max_seq_len is not None,
         max_length=max_seq_len,
     )
     input_ids = out["input_ids"]
     seq_len = input_ids.shape[-1]
-    if answer_only_loss:
+    if not answer_only_loss:
+        loss_mask = torch.ones(seq_len, dtype=torch.long)
+    elif recovery is not None:
+        loss_mask = recovery.compute(tokenizer, input_ids[0])
+    else:
         mask = out["assistant_masks"]
         if not isinstance(mask, torch.Tensor):
             mask = torch.tensor(mask, dtype=torch.long)
         loss_mask = mask.squeeze(0).to(torch.long)
-        if loss_mask.shape[0] != seq_len:
-            raise RuntimeError(
-                f"assistant_masks length {loss_mask.shape[0]} does not match "
-                f"input_ids length {seq_len}"
-            )
-    else:
-        loss_mask = torch.ones(seq_len, dtype=torch.long)
+    if loss_mask.shape[0] != seq_len:
+        raise RuntimeError(
+            f"loss_mask length {loss_mask.shape[0]} does not match input_ids length {seq_len}"
+        )
     return input_ids, loss_mask
 
 

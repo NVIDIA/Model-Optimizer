@@ -62,8 +62,9 @@ pipeline:
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
       - training.max_steps=500
-      # Kimi's template lacks {% generation %} tags, so train on all tokens.
-      - training.answer_only_loss=false
+      # Kimi's slow tokenizer can't emit assistant masks the standard way; the mask
+      # is recovered from token ids (modelopt.torch.utils.loss_mask).
+      - training.answer_only_loss=true
       # vLLM container has no tensorboard (dflash.yaml's default) -> init crash.
       - training.report_to=none
       # Kimi has no dedicated mask token; 163838 is a reserved slot used as the mask.

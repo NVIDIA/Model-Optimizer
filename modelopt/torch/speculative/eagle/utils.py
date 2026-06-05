@@ -41,6 +41,8 @@ import torch
 from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 
+from modelopt.torch.utils.loss_mask import get_loss_mask_recovery
+
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 
@@ -96,20 +98,27 @@ class OfflineSupervisedDataset(Dataset):
         dumped_files (list): A list of file paths to the dumped .pt files.
         answer_only_loss (bool): If True, use the ``loss_mask`` stored in each .pt
             file so that only assistant-produced tokens contribute to the loss.
-            Raises ``ValueError`` on ``__getitem__`` if the file lacks ``loss_mask``.
+            If a file lacks ``loss_mask`` and ``tokenizer`` has a registered
+            model-specific recovery (see ``modelopt.torch.utils.loss_mask``), the
+            mask is rebuilt from ``input_ids``; otherwise ``__getitem__`` raises
+            ``ValueError``.
             If False (default), a uniform all-ones mask is used regardless of what
             is stored in the file (backward compatible).
+        tokenizer: Optional tokenizer used to recover the assistant mask for dumps
+            that lack a stored ``loss_mask``.
     """
 
     def __init__(
         self,
         dumped_files,
         answer_only_loss: bool = False,
+        tokenizer=None,
     ):
         """Initialize with a list of .pt file paths."""
         super().__init__()
         self.dumped_files = dumped_files
         self.answer_only_loss = answer_only_loss
+        self.tokenizer = tokenizer
 
     def __len__(self):
         return len(self.dumped_files)
@@ -121,13 +130,22 @@ class OfflineSupervisedDataset(Dataset):
         labels[..., :-1] = offline_data["input_ids"][..., 1:]
 
         if self.answer_only_loss:
-            if "loss_mask" not in offline_data:
+            recovery = get_loss_mask_recovery(self.tokenizer) if self.tokenizer else None
+            if "loss_mask" in offline_data:
+                loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
+            elif recovery is not None:
+                # Dumps from tokenizers that cannot emit assistant masks carry no
+                # loss_mask; rebuild it from the token ids.
+                loss_mask = recovery.compute(self.tokenizer, offline_data["input_ids"]).to(
+                    offline_data["input_ids"].dtype
+                )
+            else:
                 raise ValueError(
                     f"answer_only_loss=True requires a 'loss_mask' entry in the offline "
                     f".pt file, but {self.dumped_files[i]} does not have one. Re-dump "
-                    f"with --answer-only-loss in compute_hidden_states_*.py."
+                    f"with --answer-only-loss in compute_hidden_states_*.py, or pass a "
+                    f"tokenizer with a registered loss-mask recovery."
                 )
-            loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
         else:
             loss_mask = torch.ones_like(offline_data["input_ids"])
 

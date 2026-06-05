@@ -9,8 +9,10 @@
 # Capture ids = [2,16,31,45,59,60] (kimi_k25/deepseek_v3, 61 layers): 5 DFlash
 # target layers + base 60. n_captured = num_target_layers + 1.
 #
-# answer_only_loss forced false: Kimi's chat template lacks {% generation %} tags
-# needed to derive the assistant-token mask; flip on with a tagged template.
+# answer_only_loss=true: Kimi ships only a slow tokenizer, so it can't derive the
+# assistant mask the standard way (return_assistant_tokens_mask needs a fast
+# tokenizer's char_to_token). The mask is instead recovered from token ids by the
+# registered model-specific recovery in modelopt.torch.utils.loss_mask.
 #
 # Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
 #   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
@@ -61,8 +63,8 @@ pipeline:
       - training.disable_tqdm=true
       - training.num_train_epochs=1
       - training.max_steps=3000
-      # Kimi's template lacks {% generation %} tags; train on all tokens (see header).
-      - training.answer_only_loss=false
+      # Assistant mask recovered from token ids for Kimi's slow tokenizer (see header).
+      - training.answer_only_loss=true
       # vLLM container has no tensorboard (dflash.yaml's default report_to); disable.
       - training.report_to=none
       # Kimi-K2.5 has no dedicated mask token; 163838 is a reserved slot used as one.
