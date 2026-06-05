@@ -195,21 +195,38 @@ def parallel_load_and_prepare_fsdp2(
 
             owned[layer_idx] = read_safetensors_subset(resolved_path, weight_map, _has_prefix)
 
-    # Per-layer: owner broadcasts → every rank shards the full tensor into its DTensor.
-    for layer_idx in range(len(decoder_layers)):
-        src = layer_idx % world_size
-        full = broadcast_state_dict(owned.get(layer_idx), src=src, device=device)
-        prefix = layer_prefixes[layer_idx]
-        stripped = {k[len(prefix) :]: v for k, v in full.items()}
-        if cpu_offload:
-            stripped = {k: v.cpu() for k, v in stripped.items()}
-        set_model_state_dict(
-            decoder_layers[layer_idx],
-            stripped,
-            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
-        )
-        if src == rank:
-            del owned[layer_idx]
+    # Per-source batching: each owner broadcasts all its owned layers in one collective.
+    # Cuts metadata broadcasts from N_layers to world_size; peak transient memory per rank
+    # rises to (N_layers / world_size) layers' worth of GPU tensors during each call.
+    for src in range(world_size):
+        src_layers = [i for i in range(len(decoder_layers)) if i % world_size == src]
+        if not src_layers:
+            continue
+        big_dict: dict | None
+        if rank == src:
+            big_dict = {}
+            for i in src_layers:
+                big_dict.update(owned[i])
+        else:
+            big_dict = None
+        full = broadcast_state_dict(big_dict, src=src, device=device)
+
+        for layer_idx in src_layers:
+            prefix = layer_prefixes[layer_idx]
+            stripped = {k[len(prefix) :]: v for k, v in full.items() if k.startswith(prefix)}
+            if cpu_offload:
+                stripped = {k: v.cpu() for k, v in stripped.items()}
+            set_model_state_dict(
+                decoder_layers[layer_idx],
+                stripped,
+                options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
+            )
+            del stripped
+
+        del full
+        if rank == src:
+            for i in src_layers:
+                del owned[i]
 
     # Non-decoder params (embed, lm_head, norm) — rank 0 reads + broadcasts.
     # TODO: add support for shard_root=True and layerwise.
