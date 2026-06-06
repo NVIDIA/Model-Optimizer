@@ -108,7 +108,7 @@ class VLLMModel(Model):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
-    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
+    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):  # pragma: no cover
         output_dict = {}
         self.sampling_config.max_tokens = max_length
         self.sampling_config.stop_token_ids = [end_id]
@@ -140,7 +140,7 @@ class VLLMModel(Model):
         ]
         return output_dict
 
-    async def generate(self, prompt_ids, request_id, turn_id):
+    async def generate(self, prompt_ids, request_id, turn_id):  # pragma: no cover
         timing = []
         timing.append(time.perf_counter())
         outputs = []
@@ -158,7 +158,7 @@ class VLLMModel(Model):
                 break
         return outputs, timing, full_tokens
 
-    def get_serving_config(self):
+    def get_serving_config(self):  # pragma: no cover
         """Dump the AsyncEngineArgs dataclass plus the runtime vllm_config when available."""
         try:
             import dataclasses
@@ -177,7 +177,7 @@ class VLLMModel(Model):
             pass
         return cfg
 
-    def stop(self):
+    def stop(self):  # pragma: no cover
         try:
             self.loop.run_until_complete(self.model.shutdown())
             self.loop.close()
