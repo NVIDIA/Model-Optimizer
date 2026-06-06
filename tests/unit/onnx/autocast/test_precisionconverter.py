@@ -1019,6 +1019,76 @@ def test_empty_tensor_handling(
     assert empty_tensor_info.type.tensor_type.elem_type == expected_type
 
 
+####################################################################################################
+# Graph with an empty tensor (a dimension of size 0) as a network input
+####################################################################################################
+@pytest.fixture
+def model_with_empty_network_input():
+    # Concat(X[2, 1], X_empty[2, 0]) -> Relu -> Y[2, 1] along axis=1, mirroring the bug's empty-input Concat.
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 1])
+    x_empty = helper.make_tensor_value_info("X_empty", TensorProto.FLOAT, [2, 0])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 1])
+
+    concat_node = helper.make_node(
+        "Concat", ["X", "X_empty"], ["concat_output"], name="concat", axis=1
+    )
+    relu_node = helper.make_node("Relu", ["concat_output"], ["Y"], name="relu")
+
+    graph = helper.make_graph([concat_node, relu_node], "model_empty_input", [x, x_empty], [y], [])
+    model = helper.make_model(graph, producer_name="model_empty_input")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_empty_tensor_network_input_keep_io_types(
+    model_with_empty_network_input, low_precision_type, use_standalone_type_inference
+):
+    """Empty network I/O tensors must keep their type when keep_io_types=True (nvbug 6058870).
+
+    An empty tensor consumed by a low-precision node used to be "fake-cast" (retyped in place).
+    Because setup_mappings aliases the graph.input ValueInfoProto, this silently changed the
+    network input's type to the low precision type, breaking the keep_io_types contract and
+    failing the sanity check. A real Cast must be inserted instead.
+    """
+    model, value_info_map, initializer_map, node_to_init_map = model_with_empty_network_input
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+    assert converter._is_empty_tensor("X_empty")
+
+    converted_model = converter.convert(
+        high_precision_nodes=["relu"], low_precision_nodes=["concat"]
+    )
+
+    onnx.checker.check_model(converted_model)
+    # The empty network input (and all I/O) must remain FP32 - this is the regression guard.
+    for io in list(converted_model.graph.input) + list(converted_model.graph.output):
+        assert io.type.tensor_type.elem_type == TensorProto.FLOAT, (
+            f"I/O tensor {io.name} type changed despite keep_io_types=True"
+        )
+    # A real Cast must bridge the empty input to the low-precision Concat (not a metadata-only retype).
+    cast_consumers = [
+        n for n in converted_model.graph.node if n.op_type == "Cast" and "X_empty" in n.input
+    ]
+    assert len(cast_consumers) == 1
+    assert onnx_utils.get_cast_to_type(cast_consumers[0]) == low_precision_onnx_type(
+        low_precision_type
+    )
+
+
 @pytest.fixture
 def model_with_constant_cast_patterns():
     """Create a model with constant->cast patterns for testing folding logic."""

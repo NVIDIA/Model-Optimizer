@@ -312,13 +312,13 @@ def get_inlined_mtp_prefixes(config: Any) -> list[str]:
 def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
     """Invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
     ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
-    ``{"mtp", "mtp.layers.0"}``. Caller must filter out inlined keys; otherwise
-    ``"model.layers.78.eh_proj.weight"`` would emit ``"model"`` as a prefix.
+    ``{"mtp", "mtp.layers.0"}``. ``"model"`` top-level is dropped to avoid the
+    ``"model*"`` wildcard covering the whole backbone.
     """
     prefixes: set[str] = set()
     for key in keys:
         parts = key.split(".")
-        if parts:
+        if parts and parts[0] != "model":
             prefixes.add(parts[0])
         for i, part in enumerate(parts):
             if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
@@ -596,6 +596,12 @@ def get_model(
 
         if hf_config.model_type == "bart":
             # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
+            device_map = None
+
+        if hf_config.model_type == "t5":
+            # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
+            # position-bias buffers across GPUs, which non-deterministically produces NaN
+            # activations during calibration on multi-GPU machines (see HF transformers #21093).
             device_map = None
 
         # Helper function to check if model has pack-quantized config

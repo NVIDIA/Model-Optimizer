@@ -15,9 +15,7 @@
 
 """Support quantization for megatron linear layers."""
 
-import logging
 import types
-import warnings
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -38,9 +36,11 @@ from modelopt.torch.opt.plugins.megatron import (
     ensure_metadata_has_dp_cp_group,
     register_modelopt_extra_state_callbacks,
 )
+from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..conversion import maybe_promote_nvfp4_static_quantizer
+from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
@@ -63,9 +63,40 @@ try:
 except ImportError:
     HAS_TE = False
 
-logger = logging.getLogger(__name__)
 
 __all__ = []
+
+
+def _check_nvfp4_static_tp_supported(model: torch.nn.Module) -> None:
+    """Raise if using NVFP4-static weight quantization with TP>1.
+
+    Static-block _amax is shard-local but sharded_state_dict treats it as replicated.
+    """
+    offending = []
+    for name, module in model.named_modules():
+        if not isinstance(module, QuantModule):
+            continue
+        parallel_state = getattr(module, "parallel_state", None)
+        if parallel_state is None:
+            continue
+        tp_group = getattr(parallel_state, "tensor_parallel_group", None)
+        if tp_group is None or not tp_group.is_initialized() or tp_group.world_size() <= 1:
+            continue
+        weight_quantizer = getattr(module, "weight_quantizer", None)
+        if weight_quantizer is None:
+            continue
+        leaves = (
+            list(weight_quantizer)
+            if isinstance(weight_quantizer, SequentialQuantizer)
+            else [weight_quantizer]
+        )
+        if any(leaf.is_nvfp4_static for leaf in leaves):
+            offending.append((name, tp_group.world_size()))
+    if offending:
+        raise NotImplementedError(
+            "Static-block NVFP4 weight quantization (e.g. MSE) is not supported with TP > 1. Please re-run with TP=1. "
+            f"Offending modules (showing first 5 of {len(offending)}): {offending[:5]}"
+        )
 
 
 def real_quant_module_get_extra_state(self) -> dict:
@@ -190,7 +221,9 @@ def quant_module_set_extra_state(self, state: Any):
     if quantizer_state is not None:
         for name, module in self.named_modules():
             if isinstance(module, TensorQuantizer):
-                module.set_from_modelopt_state(quantizer_state[name], properties_only=False)
+                quantizer_substate = quantizer_state[name]
+                maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
+                module.set_from_modelopt_state(quantizer_substate, properties_only=False)
         self.modelopt_post_restore()
 
     # Handle real_quantizer_state and q_tensor_state
@@ -229,7 +262,7 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
         """Configure Attention module for KV cache quantization compatibility."""
         # Disable flash_decode if enabled - it bypasses core_attention (only called during inference)
         if getattr(module.config, "flash_decode", False):
-            warnings.warn(
+            warn_rank_0(
                 "flash_decode=True is incompatible with ModelOpt KV cache quantization. "
                 "Setting flash_decode=False. Flash decode bypasses core_attention during decode phase."
             )
@@ -250,13 +283,12 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
 
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
-            if name.endswith("output_layer"):
-                # output_layer is not quantized,
-                # hence we don't need to register extra state callbacks for it
-                continue
-
             if type(module) in QuantModuleRegistry:
-                # This module will be replaced as a QuantModule
+                # Skip output_layer w/o enabled weight_quantizer
+                if name.endswith("output_layer") and not getattr(
+                    getattr(module, "weight_quantizer", None), "is_enabled", False
+                ):
+                    continue
                 register_modelopt_extra_state_callbacks(
                     module,
                     quant_module_get_extra_state,
@@ -290,9 +322,7 @@ class _MegatronParallelLinear(_ParallelLinear):
             try:
                 data_parallel_group = get_data_parallel_group(with_context_parallel=True)
             except AssertionError:
-                logger.warning(
-                    "Context parallel group is not initialized, using data parallel group"
-                )
+                warn_rank_0("Context parallel group is not initialized, using data parallel group")
                 data_parallel_group = get_data_parallel_group()
             self.parallel_state = ParallelState(
                 data_parallel_group,
@@ -300,7 +330,7 @@ class _MegatronParallelLinear(_ParallelLinear):
             )
 
         if getattr(self, "gradient_accumulation_fusion", False):
-            warnings.warn(
+            warn_rank_0(
                 "gradient_accumulation_fusion is not supported with ModelOpt quantization. "
                 "Setting gradient_accumulation_fusion to False."
             )
@@ -336,16 +366,22 @@ class _MegatronParallelLinear(_ParallelLinear):
         # Ensure metadata has dp_cp_group to avoid None subscript errors
         metadata = ensure_metadata_has_dp_cp_group(metadata)
 
-        # [WAR]: although we disable output_layer quantization by default but it will
-        # still be picked up by mtq.quantize since it is a ColumnParallelLinear. We need
-        # to further ensure that its sharded state_dict has no scalars or amax since
-        # 1) MCore's vocabulary padding may change but we didn't support this feature
-        # 2) When embedding and output_layer are sharing weights, PP>1 will have
+        # Only allow output_layer quantization when embeddings and output_weights are untied
+        # When embedding and output_layer are sharing weights, PP>1 will have
         #    output_layer.input_quantizer._amax but TP-only does not. This lead to
         #    state_dict mismatch.
         if prefix.endswith("output_layer."):
-            # assert not any("_quantizer" in k for k in self.state_dict()), "quantized output_layer"
-            return super().sharded_state_dict(prefix, sharded_offsets, metadata)
+            try:
+                from megatron.training import get_args as _mlm_get_args
+
+                _untied = bool(
+                    getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False)
+                )
+            except Exception as e:
+                warn_rank_0(f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}")
+                _untied = False
+            if not _untied:
+                return super().sharded_state_dict(prefix, sharded_offsets, metadata)
 
         quantizer_state_dict = {}
         for k, v in self.state_dict(prefix="", keep_vars=True).items():
@@ -356,7 +392,7 @@ class _MegatronParallelLinear(_ParallelLinear):
             elif self._parameter_to_keep_in_quantizer_state_dict(k):
                 quantizer_state_dict[k] = v
             elif "quantizer" in k:
-                warnings.warn(
+                warn_rank_0(
                     f"Quantizer state {k} is not supported for sharded_state_dict. "
                     "Please use regular state_dict."
                 )
@@ -399,6 +435,9 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
+            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            if k.endswith("_global_amax"):
+                continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
                 if weight_quantizer_axis is not None:
@@ -427,6 +466,9 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
+            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            if k.endswith("_global_amax"):
+                continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = None
                 if isinstance(self.weight_quantizer, TensorQuantizer):

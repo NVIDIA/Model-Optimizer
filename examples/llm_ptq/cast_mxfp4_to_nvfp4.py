@@ -297,8 +297,8 @@ def force_weight_quantizers_static(quant_cfg: list) -> None:
     The MXFP4 -> NVFP4 cast needs the per-block weight ``_amax`` to be recorded
     by max-cal (so it can be paired with the pinned global_amax later). Setting
     ``block_sizes['type'] = 'static'`` makes ``is_static_block_quant`` True so
-    ``promote_nvfp4_static_quantizers`` picks the entry up automatically at the
-    end of max_calibrate.
+    static NVFP4 finalization picks the entry up automatically at the end of
+    max_calibrate.
     """
     for i, entry in enumerate(quant_cfg):
         qname = entry.get("quantizer_name", "")

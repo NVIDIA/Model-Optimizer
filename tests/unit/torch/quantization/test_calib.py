@@ -30,6 +30,7 @@ from modelopt.torch.quantization.model_calib import (
     layerwise_calibrate,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
 class _SimpleMLP(nn.Module):
@@ -480,8 +481,6 @@ def test_layerwise_calibrate_support_gate():
 
 
 def test_layerwise_calibrate_propagates_inputs_without_replaying_full_model(monkeypatch):
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-
     class _ToyLayer(nn.Module):
         def __init__(self, scale: float, bias: float):
             super().__init__()
@@ -562,7 +561,6 @@ def test_layerwise_calibrate_propagates_inputs_without_replaying_full_model(monk
 
 def test_layerwise_calibrate_handles_inter_layer_logic(monkeypatch):
     """Verify that parent-level inter-layer logic (e.g. mask selection) works correctly."""
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     class _ToyLayer(nn.Module):
         def __init__(self, scale: float):

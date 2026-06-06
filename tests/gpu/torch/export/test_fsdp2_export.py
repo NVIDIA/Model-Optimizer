@@ -32,8 +32,6 @@ from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, patch_f
 
 def _update_weight_test(rank, size):
     """Test fsdp2 weight update context for weight update -> only value changed"""
-    from torch.distributed._composable.fsdp import fully_shard
-
     with patch_fsdp_mp_dtypes():
         # Define and shard model
         model = ToyModel(dims=[4, 4], bias=False).to("cuda")

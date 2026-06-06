@@ -27,7 +27,7 @@ from transformers import AutoTokenizer
 from trl import SFTTrainer
 
 import modelopt.torch.opt as mto
-from modelopt.torch.distill.plugins.huggingface import KDTrainer, LMLogitsLoss
+from modelopt.torch.distill.plugins.huggingface import KDTrainer
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -115,12 +115,6 @@ def train():
         model_args.teacher_name_or_path, dtype=torch.bfloat16 if training_args.bf16 else None
     )
 
-    # Distillation configuration
-    kd_config = {
-        "teacher_model": teacher_model,
-        "criterion": LMLogitsLoss(),
-    }
-
     # Fix problematic settings that logger.info excessive warnings
     model.generation_config.temperature = None
     model.generation_config.top_p = None
@@ -129,7 +123,7 @@ def train():
     trainer = KDSFTTrainer(
         model,
         training_args,
-        distill_config=kd_config,
+        distill_args={"teacher_model": teacher_model},
         train_dataset=dset_train,
         eval_dataset=dset_eval,
         formatting_func=lambda sample: _format_smoltalk_chat_template(sample, tokenizer),

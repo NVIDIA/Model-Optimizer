@@ -143,7 +143,7 @@ Loss balancers:
 
 ## Knowledge Distillation (KD) in NVIDIA Megatron-Bridge Framework
 
-Checkout the stand-alone distillation script in the [examples/megatron_bridge/](../megatron_bridge/README.md).
+Checkout the stand-alone distillation script in the [examples/megatron_bridge/](../megatron_bridge/README.md) for example scripts for KD with Megatron-Bridge which is generally more performant than the Hugging Face scripts.
 
 ## Knowledge Distillation (KD) in NVIDIA Megatron-LM Framework
 

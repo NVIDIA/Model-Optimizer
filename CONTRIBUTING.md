@@ -146,6 +146,7 @@ We use [pytest](https://docs.pytest.org/) for all tests. For any new features / 
 - `tests/gpu`: Fast GPU-based unit tests for the core ModelOpt library. In most cases, they should not take more than a few seconds to run.
 - `tests/gpu_megatron`: Fast GPU-based unit tests for the core ModelOpt library for Megatron-Core features. In most cases, they should not take more than a few seconds to run.
 - `tests/gpu_trtllm`: Fast GPU-based unit tests for the core ModelOpt library for TensorRT-LLM features. In most cases, they should not take more than a few seconds to run.
+- `tests/gpu_vllm`: Fast GPU-based unit tests for the core ModelOpt library for vLLM features. In most cases, they should not take more than a few seconds to run.
 - `tests/examples`: Integration tests for ModelOpt examples. They should not take more than a few minutes to run. Please refer to [example test README](./tests/examples/README.md) for more details.
 
 For lightweight focused local validation, run `pytest` directly on the relevant test path. For example:
@@ -162,14 +163,20 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 
 ### Test design principles
 
-- **Develop with focused tests.** During development, write as many focused
-  tests as needed, including lower-level unit tests or internal probes, to
-  understand and harden behavior.
-- **Curate production tests and keep them lean.** Before staging or committing,
-  decide which tests should be checked in. Checked-in tests should document
-  expected behavior, protect against regressions, or flag backward-incompatible
-  behavior changes. Remove redundant lower-level tests when a higher-level test
-  already covers the same behavior, keeping CI/CD fast and lean.
+- **Develop with focused tests.** During development, write as many focused tests as needed, including lower-level
+  unit tests or internal probes, to understand and harden behavior.
+- **Curate production tests and keep them lean.** Before staging or committing, decide which tests should be checked
+  in. Checked-in tests should document expected behavior, protect against regressions, or flag backward-incompatible
+  behavior changes. Remove redundant lower-level tests when a higher-level test already covers the same behavior,
+  keeping CI/CD fast and lean.
+- **Keep `tests/unit` offline — no HuggingFace Hub access.** Unit tests must be hermetic so they never flake on
+  network/timeout issues. Do not call `from_pretrained("<org>/<model>")`, `load_dataset("<hub-id>")`,
+  `snapshot_download(...)`, etc. with Hub IDs. Instead build dummy models, tokenizers, configs, and datasets locally —
+  e.g. the `create_tiny_*` helpers and `get_tiny_tokenizer()` in `tests/_test_utils/`, or a small on-disk dataset
+  directory written with `datasets.Dataset.from_dict(...).to_parquet(...)`.
+- **Respect the per-test timeout.** `tests/conftest.py` applies a default per-test call timeout by directory; override a
+  single slow test with `@pytest.mark.timeout(<seconds>)`, and register any new top-level `tests/<group>/` in that
+  mapping (collection errors until you do).
 
 ## ✍️ Signing your work
 

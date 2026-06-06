@@ -22,8 +22,20 @@ from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
+from huggingface_hub.errors import LocalEntryNotFoundError
 from safetensors.torch import safe_open
 from tqdm import tqdm
+
+_HF_HUB_OFFLINE_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
+
+
+def _is_hf_hub_offline() -> bool:
+    return os.environ.get("HF_HUB_OFFLINE", "").strip().upper() in _HF_HUB_OFFLINE_TRUE_VALUES
+
+
+def _copy_python_files(source_dir: Path, save_dir: Path) -> None:
+    for py_file in source_dir.glob("*.py"):
+        shutil.copy2(py_file, save_dir / py_file.name)
 
 
 def copy_hf_ckpt_remote_code(
@@ -36,7 +48,10 @@ def copy_hf_ckpt_remote_code(
     frameworks.
 
     If ``pretrained_model_path`` is a local directory, Python files are copied directly.
-    If it's a HF Hub model ID (e.g. ``nvidia/NVIDIA-Nemotron-Nano-12B-v2``), files are downloaded from the Hub.
+    If it's a HF Hub model ID (e.g. ``nvidia/NVIDIA-Nemotron-Nano-12B-v2``), the Hub
+    snapshot is resolved first and Python files are copied from that snapshot. When
+    ``HF_HUB_OFFLINE`` is set, the snapshot must already be available in the local
+    Hugging Face cache.
 
     Args:
         pretrained_model_path: Local path to the pretrained model or HuggingFace Hub model ID.
@@ -47,23 +62,41 @@ def copy_hf_ckpt_remote_code(
     save_dir.mkdir(parents=True, exist_ok=True)
 
     if hf_checkpoint_path.is_dir():
-        for py_file in hf_checkpoint_path.glob("*.py"):
-            shutil.copy2(py_file, save_dir / py_file.name)
+        _copy_python_files(hf_checkpoint_path, save_dir)
     else:
-        snapshot_download(
-            repo_id=str(pretrained_model_path),
-            local_dir=str(save_dir),
-            allow_patterns=["*.py"],
-        )
+        local_files_only = _is_hf_hub_offline()
+        try:
+            source_dir = Path(
+                snapshot_download(
+                    repo_id=str(pretrained_model_path),
+                    allow_patterns=["*.py"],
+                    local_files_only=local_files_only,
+                )
+            )
+        except LocalEntryNotFoundError as exc:
+            if local_files_only:
+                raise RuntimeError(
+                    f"Could not copy Python sidecar files for {pretrained_model_path!r} because "
+                    "HF_HUB_OFFLINE is enabled and the files are not available in the local "
+                    "Hugging Face cache. Populate the cache with the model's *.py files or pass "
+                    "a local pretrained model directory."
+                ) from exc
+            raise
+
+        _copy_python_files(source_dir, save_dir)
 
 
 def load_multimodal_components(
     pretrained_model_path: str | os.PathLike,
+    prefixes: tuple[str, ...] = ("multi_modal_projector", "vision_model"),
 ) -> dict[str, torch.Tensor]:
     """Load multimodal components from safetensors file.
 
     Args:
         pretrained_model_path: Path to the pretrained model.
+        prefixes: Tensor key prefixes to select.  Defaults to the LLaVA-style
+            ``multi_modal_projector`` / ``vision_model`` prefixes.  Pass
+            ``("model.visual.",)`` for Qwen3-VL checkpoints.
 
     Returns:
         A dictionary of multimodal components.
@@ -85,7 +118,7 @@ def load_multimodal_components(
             multimodal_keys = [
                 key
                 for key in f.keys()  # noqa: SIM118
-                if key.startswith(("multi_modal_projector", "vision_model"))
+                if key.startswith(prefixes)
             ]
             for key in tqdm(multimodal_keys, desc="Loading multimodal tensors"):
                 multimodal_state_dict[key] = f.get_tensor(key)
@@ -95,31 +128,40 @@ def load_multimodal_components(
         with open(safetensors_index_file) as f:
             safetensors_index = json.load(f)
 
-        # For multimodal models, vision_model and multi_modal_projector are in the first shard
         all_shard_files = sorted(set(safetensors_index["weight_map"].values()))
-        first_shard_file = all_shard_files[0]  # e.g., "model-00001-of-00050.safetensors"
-
-        # Load multimodal components from the first shard file
-        safetensors_filepath = Path(hf_checkpoint_path) / first_shard_file
-        print(f"Loading multimodal components from {first_shard_file}")
-
-        with safe_open(safetensors_filepath, framework="pt") as f:
-            shard_keys = list(f.keys())
-            multimodal_keys_in_shard = [
-                k for k in shard_keys if k.startswith(("multi_modal_projector", "vision_model"))
-            ]
-
-            if multimodal_keys_in_shard:
-                print(
-                    f"Found {len(multimodal_keys_in_shard)} multimodal tensors in {first_shard_file}"
-                )
-                for key in tqdm(multimodal_keys_in_shard, desc="Loading multimodal tensors"):
-                    multimodal_state_dict[key] = f.get_tensor(key)
-            else:
-                print(f"No multimodal components found in {first_shard_file}")
+        for shard_file in all_shard_files:
+            safetensors_filepath = Path(hf_checkpoint_path) / shard_file
+            with safe_open(safetensors_filepath, framework="pt") as f:
+                for key in f.keys():  # noqa: SIM118
+                    if key.startswith(prefixes):
+                        multimodal_state_dict[key] = f.get_tensor(key)
 
     else:
         print(f"Warning: No safetensors files found in {hf_checkpoint_path}")
 
     print(f"Successfully loaded {len(multimodal_state_dict)} multimodal tensors")
     return multimodal_state_dict
+
+
+def copy_non_safetensor_files_from_ckpt(src: str | os.PathLike, dst: str | os.PathLike):
+    """Copy every non-safetensors file from a local HF checkpoint dir verbatim.
+
+    Use as a baseline so tokenizer files, remote_code ``*.py``, README, LICENSE, etc.
+    are preserved from the source. The caller is expected to overwrite the files
+    modelopt owns (``config.json``, ``generation_config.json``, ``hf_quant_config.json``,
+    ``preprocessor_config.json``) after this step.
+
+    Args:
+        src: Source HF checkpoint directory. Must be a local path.
+        dst: Destination directory; created if missing.
+    """
+    if not os.path.isdir(src):
+        raise ValueError(f"Invalid source path: {src}. It should be a directory.")
+    os.makedirs(dst, exist_ok=True)
+    for entry in os.listdir(src):
+        sp = os.path.join(src, entry)
+        if not os.path.isfile(sp):
+            continue
+        if entry.endswith(".safetensors") or entry == "model.safetensors.index.json":
+            continue
+        shutil.copy2(sp, dst)
