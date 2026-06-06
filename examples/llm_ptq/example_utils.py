@@ -312,13 +312,13 @@ def get_inlined_mtp_prefixes(config: Any) -> list[str]:
 def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
     """Invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
     ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
-    ``{"mtp", "mtp.layers.0"}``. Caller must filter out inlined keys; otherwise
-    ``"model.layers.78.eh_proj.weight"`` would emit ``"model"`` as a prefix.
+    ``{"mtp", "mtp.layers.0"}``. ``"model"`` top-level is dropped to avoid the
+    ``"model*"`` wildcard covering the whole backbone.
     """
     prefixes: set[str] = set()
     for key in keys:
         parts = key.split(".")
-        if parts:
+        if parts and parts[0] != "model":
             prefixes.add(parts[0])
         for i, part in enumerate(parts):
             if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():

@@ -23,12 +23,13 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from warnings import warn
 
 import requests
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+from .logging import print_rank_0, warn_rank_0
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -447,7 +448,7 @@ def get_dataset_samples(
 
         if apply_chat_template:
             if "chat_key" not in dataset_config:
-                warn(
+                warn_rank_0(
                     f"Dataset {dataset_name} does not support chat template."
                     " Chat template will not be applied."
                 )
@@ -466,7 +467,7 @@ def get_dataset_samples(
             return dataset_config["preprocess"](sample)
 
     else:
-        print(
+        print_rank_0(
             f"Dataset '{dataset_name}' is not in SUPPORTED_DATASET_CONFIG. "
             "Auto-detecting format from column names."
         )
@@ -506,7 +507,7 @@ def get_dataset_samples(
         pass
 
     # load_dataset does not support a list of splits while streaming, so load each separately.
-    print(f"Loading dataset with {config=} and {splits=}")
+    print_rank_0(f"Loading dataset with {config=} and {splits=}")
     try:
         dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
 
@@ -536,7 +537,7 @@ def get_dataset_samples(
             # Fallback can't help either — surface the original HF error.
             raise e from None
         safe_name = Path(local_dataset_path).name
-        warn(
+        warn_rank_0(
             f"Failed to load JSONL file '{safe_name}' via the HF 'json' builder "
             f"({type(e).__name__}); fell back to legacy text-field reader."
         )
@@ -667,7 +668,7 @@ def get_dataset_dataloader(
     tokenizer = copy.deepcopy(tokenizer)
 
     if tokenizer.padding_side != "left":
-        warn(
+        warn_rank_0(
             "Tokenizer with the right padding_side may impact calibration accuracy. Recommend set to left"
         )
 
@@ -735,7 +736,7 @@ def get_dataset_dataloader(
             all_samples, tokenizer, max_sample_length, total_rows
         )
         if input_ids.shape[0] < total_rows:
-            warn(
+            warn_rank_0(
                 f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} "
                 f"requested — raw text exhausted before filling all rows (8x oversample "
                 f"of num_samples was insufficient). Increase `num_samples` or shorten "
@@ -797,7 +798,7 @@ def get_supported_datasets() -> list[str]:
 
             from modelopt.torch.utils import get_supported_datasets
 
-            print("Supported datasets:", get_supported_datasets())
+            print_rank_0("Supported datasets:", get_supported_datasets())
     """
     return list(SUPPORTED_DATASET_CONFIG.keys()) + list(DATASET_COMBOS.keys())
 
@@ -876,7 +877,7 @@ def get_max_batch_size(
             * sample_memory_usage_ratio
         )
         if mem_diff_per_data_batch <= 0:  # pragma: no cover - GPU memory probe edge case
-            print(  # pragma: no cover
+            print_rank_0(  # pragma: no cover
                 "Warning: No measurable memory usage found for a single batch. "
                 "Falling back to batch_size=1."
             )
@@ -975,7 +976,7 @@ def _process_batch(
 
     # Split the batch in half
     mid = (batch_size + 1) // 2
-    warn(f"CUDA out of memory with batch size {batch_size}, trying with batch size {mid}")
+    warn_rank_0(f"CUDA out of memory with batch size {batch_size}, trying with batch size {mid}")
     split_data_1 = {key: batch_data[key][:mid, ...] for key in batch_data}
     split_data_2 = {key: batch_data[key][mid:, ...] for key in batch_data}
 
@@ -1074,7 +1075,7 @@ def create_forward_loop(
         if batch_size == 0:
             # We let the system to determine the max data batch for each forward.
             batch_size = get_max_batch_size(model, max_sample_length)
-            print(f"Update calib batch {batch_size}")
+            print_rank_0(f"Update calib batch {batch_size}")
 
         dataloader = get_dataset_dataloader(
             dataset_name=dataset_name,
@@ -1120,7 +1121,7 @@ def download_hf_dataset_as_jsonl(
     from datasets import load_dataset
     from huggingface_hub.utils import build_hf_headers
 
-    print(f"Downloading dataset {dataset_name} from Hugging Face")
+    print_rank_0(f"Downloading dataset {dataset_name} from Hugging Face")
     if isinstance(json_keys, str):
         json_keys = [json_keys]
     jsonl_paths: list[str] = []
@@ -1136,9 +1137,9 @@ def download_hf_dataset_as_jsonl(
         raise RuntimeError(f"Failed to fetch dataset splits for {dataset_name}: {e}") from e
 
     response_json = response.json()
-    print(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")
+    print_rank_0(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")
     for entry in response_json["splits"]:
-        print(f"\t{entry}")
+        print_rank_0(f"\t{entry}")
 
     splits_to_process = []
     for entry in response_json["splits"]:
@@ -1148,9 +1149,9 @@ def download_hf_dataset_as_jsonl(
             continue
         splits_to_process.append(entry)
 
-    print(f"\nFound {len(splits_to_process)} splits to process:")
+    print_rank_0(f"\nFound {len(splits_to_process)} splits to process:")
     for entry in splits_to_process:
-        print(f"\t{entry}")
+        print_rank_0(f"\t{entry}")
 
     for entry in splits_to_process:
         path = entry["dataset"]
@@ -1160,10 +1161,10 @@ def download_hf_dataset_as_jsonl(
             split = f"{split}[:{max_samples_per_split}]"
         jsonl_file_path = f"{output_dir}/{path.replace('/', '--')}_{name}_{split}.jsonl"
 
-        print(f"\nLoading HF dataset {path=}, {name=}, {split=}")
+        print_rank_0(f"\nLoading HF dataset {path=}, {name=}, {split=}")
         if os.path.exists(jsonl_file_path):
             jsonl_paths.append(jsonl_file_path)
-            print(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
+            print_rank_0(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
             continue
         ds = load_dataset(path=path, name=name, split=split)
 
@@ -1173,7 +1174,7 @@ def download_hf_dataset_as_jsonl(
                     f"{key=} not found in dataset features. Available: {list(ds.features)}"
                 )
 
-        print(f"Saving raw dataset to {jsonl_file_path}")
+        print_rank_0(f"Saving raw dataset to {jsonl_file_path}")
         ds.to_json(jsonl_file_path, num_proc=num_proc)
         jsonl_paths.append(jsonl_file_path)
 

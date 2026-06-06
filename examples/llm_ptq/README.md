@@ -262,7 +262,7 @@ This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Ne
 
 ### Megatron-Bridge Example Script
 
-Please refer to [examples/megatron_bridge/README.md](../megatron_bridge/README.md) for example scripts for PTQ with Megatron-Bridge.
+Please refer to [examples/megatron_bridge/README.md](../megatron_bridge/README.md) for example scripts for PTQ / QAD with Megatron-Bridge which is generally more performant than the Hugging Face scripts.
 
 ### Megatron-LM Example Script
 

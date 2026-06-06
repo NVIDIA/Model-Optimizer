@@ -134,6 +134,16 @@ def test_load_mtp_weights_separate_indexed_shard(tmp_path):
     assert set(orphans) == set(mtp_tensors)
 
 
+def test_keys_to_prefixes_drops_model_top_level():
+    # nvbug 6108133: inlined keys like "model.layers.92.X" must NOT emit "model"
+    # as a top-level prefix (would become "model*" excluding the whole backbone).
+    out = example_utils._keys_to_prefixes(
+        ["model.layers.92.eh_proj.weight", "mtp.fc.weight", "mtp.layers.0.q_proj.weight"]
+    )
+    assert "model" not in out
+    assert out == {"mtp", "mtp.layers.0", "model.layers.92"}
+
+
 def test_load_mtp_weights_no_mtp_returns_empty(tmp_path):
     # Also pins the ``num_nextn_predict_layers=None`` regression: some configs
     # set the field explicitly to None, which must not crash ``int(None)``.

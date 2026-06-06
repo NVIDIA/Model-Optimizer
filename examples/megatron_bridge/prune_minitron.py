@@ -51,6 +51,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.export import copy_hf_ckpt_remote_code
 from modelopt.torch.utils import get_supported_datasets, print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
@@ -469,6 +470,8 @@ def main(args: argparse.Namespace):
             args.output_hf_path, trust_remote_code=args.trust_remote_code
         )
         pruned_bridge.save_hf_weights(model, args.output_hf_path)
+
+        copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
 
     print_rank_0("Done!")
