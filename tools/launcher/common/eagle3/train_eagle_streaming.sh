@@ -157,6 +157,11 @@ launch_vllm() {
     [ -n "${SERVE_MAX_NUM_SEQS:-}" ]   && opt_args+=(--max-num-seqs "$SERVE_MAX_NUM_SEQS")
     # --no-enable-chunked-prefill / --no-enable-prefix-caching: connector captures hidden states during prefill; both skip recomputing cached/partial prefixes, yielding short/empty hidden_states. Required.
     # --no-enable-flashinfer-autotune: on NVFP4 MoE the autotuner re-tunes on the first serving step and stalls a worker past vLLM's execute-model timeout, killing EngineCore.
+    if [ "${HS_TRANSPORT:-disk}" = "rdma" ]; then
+        KVCFG="{\"kv_connector\":\"RdmaHiddenStatesConnector\",\"kv_connector_module_path\":\"modelopt.torch.speculative.plugins.rdma_hidden_states_connector\",\"kv_role\":\"kv_producer\",\"kv_connector_extra_config\":{\"sidecar_port\":\"${HS_SIDECAR_PORT:-18999}\",\"pool_slots\":\"${HS_POOL_SLOTS:-16}\",\"max_tokens\":\"${HS_MAX_TOKENS:-4096}\"}}"
+    else
+        KVCFG="{\"kv_connector\":\"ExampleHiddenStatesConnector\",\"kv_role\":\"kv_producer\",\"kv_connector_extra_config\":{\"shared_storage_path\":\"$SERVE_SCRATCH\"}}"
+    fi
     "${gpu_env[@]}" vllm serve "$HF_MODEL_CKPT" \
         --host "$bind_host" \
         --port "$SERVE_PORT" \
@@ -177,11 +182,7 @@ launch_vllm() {
                 }
             }
         }" \
-        --kv-transfer-config "{
-            \"kv_connector\":\"ExampleHiddenStatesConnector\",
-            \"kv_role\":\"kv_producer\",
-            \"kv_connector_extra_config\":{\"shared_storage_path\":\"$SERVE_SCRATCH\"}
-        }" \
+        --kv-transfer-config "$KVCFG" \
         > "$SERVE_LOG" 2>&1 &
     SERVE_PID=$!
 }
