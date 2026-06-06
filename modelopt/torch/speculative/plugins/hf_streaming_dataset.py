@@ -422,6 +422,8 @@ class EagleVllmStreamingDataset(StreamingDataset):
             self._nixl_pid = pid
             self._remote_by_host: dict = {}
             self._recv = None
+            _wi = torch.utils.data.get_worker_info()
+            self._rr = int(os.environ.get("RANK", "0")) * (_wi.num_workers if _wi else 1) + (_wi.id if _wi else 0)
             self._http_rdma = httpx.Client(
                 timeout=httpx.Timeout(self.config.request_timeout, connect=10.0))
         return self._nixl
