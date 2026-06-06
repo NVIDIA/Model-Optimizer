@@ -1,0 +1,82 @@
+# EAGLE3 streaming (RDMA, no-disk) — INTRA-NODE co-located: 1 node, 2 GPU, 1 serve + 1 trainer.
+#
+# Topology (see common/eagle3/train_eagle_streaming.sh single-node branch):
+#   1 Slurm node, 2 GPU. NNODES<=1 -> vllm serve on SERVE_GPU=0, trainer on the
+#   remaining GPU (TRAIN_GPUS=1), serve bound to 127.0.0.1. Hidden states move
+#   serve(GPU0) -> NIXL RDMA over loopback/shm -> trainer(GPU1), no disk.
+#   Tests whether the RDMA path works co-located (add_remote_agent + READ on 127.0.0.1).
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/perf_study/rdma_1n2g.yaml --yes
+
+job_name: Qwen3-8B_EAGLE3_streaming_multi_node
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  task_1:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.mode=streaming
+      - data.data_path=/scratchspace/data/train.jsonl
+      - training.output_dir=/scratchspace/eagle3
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
+      - eagle.eagle_use_torch_compile=false
+      - training.max_steps=200
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - EAGLE_CAPTURE_IDS: "[2,18,33,36]"
+      - SERVE_GPU: "0"
+      - SERVE_TP: "1"
+      - STREAMING_NUM_WORKERS: "4"
+      - HS_TRANSPORT: "rdma"
+      - HS_SIDECAR_PORT: "18999"
+      - HS_POOL_SLOTS: "16"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 2
+      container: vllm/vllm-openai:latest
+
+  task_2:
+    script: common/specdec_bench/quick_check.sh
+    args:
+      - --draft_model_dir /scratchspace/export
+      - --draft_length 3
+      - --output_length 4096
+      - --engine VLLM
+      - --tp_size 1
+      - --ep_size 1
+      - --speculative_algorithm EAGLE3
+      - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+      - --concurrency 1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:latest
