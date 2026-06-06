@@ -171,7 +171,10 @@ def _attn_fwd_calibrate(
                 other=0.0,
             )
 
-        scores = tl.dot(q, k) * qk_scale
+        # Upcast to bf16 before the matmul so fp8 (e4m3) Q/K — used by fp8-attention
+        # models — are handled; tl.dot does not accept fp8 operands. For bf16 inputs
+        # this is a no-op.
+        scores = tl.dot(q.to(tl.bfloat16), k.to(tl.bfloat16)) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
         tile_row_max = tl.max(scores, 1)
@@ -228,7 +231,7 @@ def _attn_fwd_calibrate(
                 mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                 other=0.0,
             )
-        acc = tl.dot(p.to(v.dtype), v, acc)
+        acc = tl.dot(p.to(tl.bfloat16), v.to(tl.bfloat16), acc)
         row_max = m_new
 
     # --- Write per-program counters (no atomics, just stores) ---

@@ -168,6 +168,16 @@ class _SparseCalibrationMixin:
         — the kernel offsets the query into the KV span). A mixed prefill/decode
         batch therefore contributes correctly to both phase fits.
         """
+        # FlashInfer stores the fp8 KV cache as raw uint8 bytes. Reinterpret it as
+        # fp8 (e4m3) so the kernel upcasts the true fp8 values; a plain cast of the
+        # uint8 bytes would read them as integers 0-255 and collapse the scores
+        # (over-reporting sparsity). KV/Q fp8 scales are 1.0 here, so the bitcast is
+        # the complete dequant. No-op for bf16 KV caches.
+        if key_cache.dtype == torch.uint8:
+            key_cache = key_cache.view(torch.float8_e4m3fn)
+        if value_cache.dtype == torch.uint8:
+            value_cache = value_cache.view(torch.float8_e4m3fn)
+
         trials = self._calib_threshold_trials
         batch = seq_lens.shape[0]
 
