@@ -57,8 +57,12 @@ def tensor_global_scale(tensor, scale_type: int = 2) -> float:
 
     Computed host-side and passed into the kernels as a constant. ``scale_type`` is
     accepted for signature parity; only NVFP4/SFP32 use a global (others ignore it).
+
+    Reduces in the tensor's native dtype (``abs().amax()``) rather than upcasting the
+    whole tensor to fp32 — the fp32 materialization would OOM when called on a large
+    paged KV cache. Serving passes the small per-step q/k/v here, never the cache.
     """
-    return tensor.float().abs().max().item() / (E2M1_MAX * FP8_E4M3_MAX) + 1e-30
+    return tensor.abs().amax().float().item() / (E2M1_MAX * FP8_E4M3_MAX) + 1e-30
 
 
 @triton.jit

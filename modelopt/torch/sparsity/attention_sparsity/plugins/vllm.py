@@ -42,6 +42,7 @@ from vllm.v1.attention.backends.flash_attn import (
 
 from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
+from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import tensor_global_scale
 from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
 
@@ -267,6 +268,8 @@ class _SparseCalibrationMixin:
         is_causal: bool,
         output: torch.Tensor,
         dense_fallback,
+        new_key: torch.Tensor | None = None,
+        new_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run the ModelOpt sparse Triton kernel over the paged cache, or delegate.
 
@@ -285,6 +288,34 @@ class _SparseCalibrationMixin:
         fp16_softmax = aq.get("fp16_softmax", False)
         softmax_quant = aq.get("softmax_quant")
         quant_active = bool(nvfp4) or fp16_softmax or bool(softmax_quant)
+        # Precompute NVFP4 per-tensor global scales from the small per-step q/k/v
+        # operands. The kernels otherwise derive them from the full paged K/V cache,
+        # which upcasts the whole cache to fp32 and OOMs (P is a fixed constant).
+        # Q is scaled per-step (Q rows = exactly what is quantized this launch). K/V
+        # are quantized over the *whole* cache in the kernel, but only this step's new
+        # tokens are visible here, so keep a running max on the impl — prefill seeds a
+        # representative scale and decode steps only raise it.
+        attn_global_scales = None
+        if nvfp4:
+            attn_global_scales = {}
+            if "q" in nvfp4:
+                attn_global_scales["q"] = tensor_global_scale(query[:num_actual_tokens])
+            gs_cache = getattr(self, "_nvfp4_gs_cache", None)
+            if gs_cache is None:
+                gs_cache = {}
+                self._nvfp4_gs_cache = gs_cache
+
+            def _running_max(name, tensor):
+                s = tensor_global_scale(tensor[:num_actual_tokens])
+                prev = gs_cache.get(name)
+                s = s if prev is None else max(prev, s)
+                gs_cache[name] = s
+                attn_global_scales[name] = s
+
+            if "k" in nvfp4 and new_key is not None:
+                _running_max("k", new_key)
+            if "v" in nvfp4 and new_value is not None:
+                _running_max("v", new_value)
         _resolve_skip_softmax_calibration(
             sparse_kw, is_prefill=not is_decode_only, max_seq_len=max_seq_len
         )
@@ -310,6 +341,7 @@ class _SparseCalibrationMixin:
                 nvfp4=nvfp4,
                 fp16_softmax=fp16_softmax,
                 softmax_quant=softmax_quant,
+                attn_global_scales=attn_global_scales,
                 output=output,
             )
         if not sparse_kw and not quant_active:
@@ -340,6 +372,7 @@ class _SparseCalibrationMixin:
             nvfp4=nvfp4,
             fp16_softmax=fp16_softmax,
             softmax_quant=softmax_quant,
+            attn_global_scales=attn_global_scales,
             **sparse_kw,
         )
         output[:num_actual_tokens] = triton_out
@@ -360,6 +393,7 @@ class _SparseCalibrationMixin:
         nvfp4: set[str] | None = None,
         fp16_softmax: bool = False,
         softmax_quant: dict | None = None,
+        attn_global_scales: dict | None = None,
     ) -> torch.Tensor:
         """Decode via the dedicated paged decode kernel (skip-softmax and/or NVFP4).
 
@@ -384,6 +418,7 @@ class _SparseCalibrationMixin:
             nvfp4=nvfp4,
             fp16_softmax=fp16_softmax,
             softmax_quant=softmax_quant,
+            attn_global_scales=attn_global_scales,
         )
         output[:num_actual_tokens] = decode_out
         return output
@@ -509,6 +544,8 @@ class ModelOptSparseAttentionImpl(_SparseCalibrationMixin, FlashAttentionImpl):
             is_decode_only=is_decode_only,
             is_causal=is_causal,
             output=output,
+            new_key=key,
+            new_value=value,
             dense_fallback=lambda: self._forward_vllm_flash_attn(
                 layer,
                 query,
@@ -732,6 +769,8 @@ def get_flashinfer_sparse_impl_cls() -> type:
                 is_decode_only=is_decode_only,
                 is_causal=not is_decode_only,
                 output=output,
+                new_key=key,
+                new_value=value,
                 dense_fallback=dense,
             )
 

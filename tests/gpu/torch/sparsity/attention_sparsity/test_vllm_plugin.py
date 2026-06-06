@@ -443,8 +443,24 @@ class TestModelOptSparseAttentionImpl:
             output=torch.empty_like(q),
         )
         kc, vc = kv_cache.unbind(0)
+        # The serving impl precomputes NVFP4 per-tensor global scales per-step from q/k/v
+        # (the cache-wide fp32 reduction OOMs), so the reference must use the same scales
+        # to match. Here key=value=q, so all three scales are tensor_global_scale(q).
+        from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
+            tensor_global_scale,
+        )
+
+        gs = tensor_global_scale(q)
         ref = attention_decode(
-            q, kc, vc, bt, kv_lens, softmax_scale=scale, page_size=ps, nvfp4={"q", "k", "p", "v"}
+            q,
+            kc,
+            vc,
+            bt,
+            kv_lens,
+            softmax_scale=scale,
+            page_size=ps,
+            nvfp4={"q", "k", "p", "v"},
+            attn_global_scales={"q": gs, "k": gs, "v": gs},
         )
         torch.testing.assert_close(out, ref, rtol=1e-3, atol=1e-3)
 

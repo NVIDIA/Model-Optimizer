@@ -318,6 +318,7 @@ def attention_decode(
     nvfp4: set[str] | None = None,
     fp16_softmax: bool = False,
     softmax_quant: dict | None = None,
+    attn_global_scales: dict | None = None,
 ) -> torch.Tensor:
     """Decode attention (one query token per request) over a paged KV cache.
 
@@ -374,9 +375,12 @@ def attention_decode(
     assert nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
     assert BLOCK_D % 16 == 0 and BLOCK_N % 16 == 0, "NVFP4 needs dims divisible by 16"
     # Per-tensor NVFP4 global scales (host-side amax/(6*448)), aligned with mni/attnOpt.
-    q_gs = tensor_global_scale(q) if "q" in nvfp4 else 1.0
-    k_gs = tensor_global_scale(k_cache) if "k" in nvfp4 else 1.0
-    v_gs = tensor_global_scale(v_cache) if "v" in nvfp4 else 1.0
+    # Paged serving passes precomputed scales (from the small per-step q/k/v); scanning
+    # the full paged K/V cache here would upcast it to fp32 and OOM.
+    _gs = attn_global_scales or {}
+    q_gs = (_gs["q"] if "q" in _gs else tensor_global_scale(q)) if "q" in nvfp4 else 1.0
+    k_gs = (_gs["k"] if "k" in _gs else tensor_global_scale(k_cache)) if "k" in nvfp4 else 1.0
+    v_gs = (_gs["v"] if "v" in _gs else tensor_global_scale(v_cache)) if "v" in nvfp4 else 1.0
     p_gs = (1.0 / (6.0 * 448.0) + 1e-30) if "p" in nvfp4 else 1.0  # unnormalized exp P max ~1
     # Softmax-datapath modes (DIFF/EXP2/ACC); fp16_softmax = FP16-RNE at all three.
     _sq = softmax_quant or {}

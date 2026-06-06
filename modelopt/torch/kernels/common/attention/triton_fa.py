@@ -154,7 +154,7 @@ def _load_paged_k_tile(
     # Load K values: K_cache[page_global, offset_in_page, kv_head_idx, dim]
     # K^T layout [BLOCK_D, BLOCK_N] for Q @ K^T matmul
     k_ptrs = (
-        # int64: real KV pools have >2**31/stride blocks, so page_global*stride_kc_block
+        # int64: real KV pools have >2^31/stride blocks, so page_global*stride_kc_block
         # overflows int32 at high block IDs -> negative offset -> illegal memory access.
         page_global[None, :].to(tl.int64) * stride_kc_block
         + offset_in_page[None, :] * stride_kc_pos
@@ -872,6 +872,7 @@ class _Attention(torch.autograd.Function):
         nvfp4=None,
         fp16_softmax=False,
         softmax_quant=None,
+        attn_global_scales=None,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -960,6 +961,11 @@ class _Attention(torch.autograd.Function):
         _k_src = k_cache if is_paged else k
         _v_src = v_cache if is_paged else v
         _p_global = 1.0 / (6.0 * 448.0) + 1e-30  # unnormalized exp P has per-row max ~1
+        # In paged serving the caller passes precomputed per-tensor global scales
+        # (from the small per-step q/k/v); falling back to scanning the full paged
+        # K/V cache here would upcast it to fp32 and OOM. Eager/test launches leave
+        # ``attn_global_scales`` unset and compute from the (small) q/k/v operands.
+        _gs = attn_global_scales or {}
         fwd_kwargs = {
             "N_CTX": max_input_len,
             "kv_group_num": kv_group_num,
@@ -995,10 +1001,16 @@ class _Attention(torch.autograd.Function):
             "DIFF_QUANT": _diff_q,
             "EXP2_QUANT": _exp2_q,
             "ACC_QUANT": _acc_q,
-            "q_global_scale": tensor_global_scale(q) if "q" in _nvfp4 else 1.0,
-            "k_global_scale": tensor_global_scale(_k_src) if "k" in _nvfp4 else 1.0,
+            "q_global_scale": (_gs["q"] if "q" in _gs else tensor_global_scale(q))
+            if "q" in _nvfp4
+            else 1.0,
+            "k_global_scale": (_gs["k"] if "k" in _gs else tensor_global_scale(_k_src))
+            if "k" in _nvfp4
+            else 1.0,
             "p_global_scale": _p_global if "p" in _nvfp4 else 1.0,
-            "v_global_scale": tensor_global_scale(_v_src) if "v" in _nvfp4 else 1.0,
+            "v_global_scale": (_gs["v"] if "v" in _gs else tensor_global_scale(_v_src))
+            if "v" in _nvfp4
+            else 1.0,
         }
 
         # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.
@@ -1194,6 +1206,7 @@ class _Attention(torch.autograd.Function):
             None,  # nvfp4
             None,  # fp16_softmax
             None,  # softmax_quant
+            None,  # attn_global_scales
         )
 
 
@@ -1219,6 +1232,7 @@ def attention(
     nvfp4: set[str] | None = None,
     fp16_softmax: bool = False,
     softmax_quant: dict | None = None,
+    attn_global_scales: dict | None = None,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1300,6 +1314,7 @@ def attention(
         nvfp4,
         fp16_softmax,
         softmax_quant,
+        attn_global_scales,
     )
 
 
