@@ -74,6 +74,19 @@ _FUSED_EXPERTS_QUANTIZER_ATTRS = (
     "down_proj_input_quantizer",
     "down_proj_weight_quantizers",
 )
+_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS = (
+    "gate_up_proj_input_quantizer",
+    "gate_up_proj_weight_quantizer",
+    "down_proj_input_quantizer",
+    "down_proj_weight_quantizer",
+)
+
+
+def _get_replay_quantizer_attr(attr_name: str) -> str:
+    """Return the quantizer name used by config matching/replay."""
+    if attr_name.endswith("_quantizers"):
+        return attr_name.removesuffix("s")
+    return attr_name
 
 
 def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
@@ -269,6 +282,10 @@ class QuantRecipeHparam(Hparam):
 
         self.name = name
         self.quant_module_names = quant_module_names or []
+        self.quant_module_replay_attrs = {
+            name: tuple(_get_replay_quantizer_attr(attr) for attr in _get_quantizer_attrs(module))
+            for module, name in zip(quant_modules or [], self.quant_module_names)
+        }
         assert cost_weight >= 0.0, "cost_weight must be non-negative."
         self.cost_weight = cost_weight
 
@@ -704,6 +721,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["costs"] = costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
+            self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
 
     def _run_func(self, func, num_iters=1, desc=""):
@@ -1456,6 +1474,22 @@ def _as_list(value) -> list:
     return [value]
 
 
+def _get_replay_quantizer_attrs(candidate_stat: dict, module_name: str) -> tuple[str, ...]:
+    """Return quantizer attrs that a generated config should target for a searched module."""
+    quantizer_attrs = candidate_stat.get("quantizer_attrs")
+    if isinstance(quantizer_attrs, dict):
+        attrs = quantizer_attrs.get(module_name)
+        if attrs:
+            return tuple(attrs)
+
+    # Backward-compatible fallback for search checkpoints saved before
+    # ``quantizer_attrs`` was persisted. Structural HF fused experts are searched
+    # as modules named ``...mlp.experts`` and expose gate/up + down quantizers.
+    if module_name.endswith((".mlp.experts", ".mixer.experts")):
+        return _FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS
+    return _STD_QUANTIZER_ATTRS
+
+
 def get_auto_quantize_config(search_state, constraints=None, verbose=False):
     """Build a flat quant config dict from auto_quantize search_state.
 
@@ -1490,16 +1524,17 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         for pattern in _as_list(search_state.get("disabled_layers"))
     )
     per_module_entries: list[dict] = []
-    _per_module_attrs = ("input_quantizer", "weight_quantizer", "output_quantizer")
+    _per_module_attrs = (*_STD_QUANTIZER_ATTRS, *_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS)
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}
 
     for hparam_name, recipe in best_recipe.items():
         if recipe == QuantRecipe(quant_cfg=None):
             continue
-        module_names = search_state["candidate_stats"][hparam_name]["module_names"]
+        candidate_stat = search_state["candidate_stats"][hparam_name]
+        module_names = candidate_stat["module_names"]
         for module_name in module_names:
-            for quantizer_attr in _per_module_attrs:
+            for quantizer_attr in _get_replay_quantizer_attrs(candidate_stat, module_name):
                 matched_cfg, matched_enable = _match_quantizer_cfg(
                     recipe.config.quant_cfg, quantizer_attr
                 )

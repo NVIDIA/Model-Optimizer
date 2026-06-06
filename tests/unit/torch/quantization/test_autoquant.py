@@ -720,3 +720,31 @@ def test_get_auto_quantize_config_keeps_selected_lm_head_enabled():
     assert default_disable_idx < weight_idx
     assert weight_entry["enable"] is True
     assert weight_entry["cfg"]["num_bits"] == (4, 3)
+
+
+@pytest.mark.parametrize("with_persisted_attrs", [True, False])
+def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persisted_attrs):
+    recipe = QuantRecipe(copy.deepcopy(mtq.FP8_DEFAULT_CFG), name="fp8")
+    module_name = "layers.0.mlp.experts"
+    candidate_stat = {"module_names": [module_name]}
+    if with_persisted_attrs:
+        candidate_stat["quantizer_attrs"] = {
+            module_name: [
+                "gate_up_proj_input_quantizer",
+                "gate_up_proj_weight_quantizer",
+                "down_proj_input_quantizer",
+                "down_proj_weight_quantizer",
+            ]
+        }
+    search_state = {
+        "best": {"recipe": {f"{module_name}.quant_recipe": recipe}},
+        "candidate_stats": {f"{module_name}.quant_recipe": candidate_stat},
+        "disabled_layers": [],
+    }
+
+    config = mtq.get_auto_quantize_config(search_state)
+    quantizer_names = {entry["quantizer_name"] for entry in config["quant_cfg"]}
+
+    assert f"{module_name}.gate_up_proj_weight_quantizer" in quantizer_names
+    assert f"{module_name}.down_proj_weight_quantizer" in quantizer_names
+    assert f"{module_name}.weight_quantizer" not in quantizer_names
