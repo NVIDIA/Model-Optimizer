@@ -63,8 +63,7 @@ def _patch_vllm():
 
 def test_max_model_len_forwarded_to_engine_args():
     """max_model_len from runtime_params.engine_args reaches AsyncEngineArgs."""
-    AsyncEngineArgs = _patch_vllm()
-    import importlib
+    engine_args_cls = _patch_vllm()
     import sys
     for key in list(sys.modules):
         if "specdec_bench.models.vllm" in key or key == "specdec_bench.models.vllm":
@@ -75,7 +74,7 @@ def test_max_model_len_forwarded_to_engine_args():
     kwargs = _make_minimal_kwargs(max_model_len=40960)
     VLLMModel.__init__(MagicMock(), "/model", 4, {}, **kwargs)
 
-    call_kwargs = AsyncEngineArgs.call_args[1]
+    call_kwargs = engine_args_cls.call_args[1]
     assert call_kwargs.get("max_model_len") == 40960, (
         "max_model_len was not forwarded to AsyncEngineArgs"
     )
@@ -83,7 +82,7 @@ def test_max_model_len_forwarded_to_engine_args():
 
 def test_max_model_len_absent_passes_none():
     """When max_model_len is not in kwargs, None is passed — vLLM uses its default."""
-    AsyncEngineArgs = _patch_vllm()
+    engine_args_cls = _patch_vllm()
     import sys
     for key in list(sys.modules):
         if "specdec_bench.models.vllm" in key:
@@ -94,7 +93,7 @@ def test_max_model_len_absent_passes_none():
     kwargs = _make_minimal_kwargs()
     VLLMModel.__init__(MagicMock(), "/model", 4, {}, **kwargs)
 
-    call_kwargs = AsyncEngineArgs.call_args[1]
+    call_kwargs = engine_args_cls.call_args[1]
     assert "max_model_len" in call_kwargs
     assert call_kwargs["max_model_len"] is None
 
@@ -103,7 +102,7 @@ def test_no_duplicate_keyword_argument():
     """prefix_cache / moe_expert_parallel_size are remapped — passing them plus
     their vllm names (enable_prefix_caching / enable_expert_parallel) must NOT
     raise 'got multiple values for keyword argument'."""
-    AsyncEngineArgs = _patch_vllm()
+    engine_args_cls = _patch_vllm()
     import sys
     for key in list(sys.modules):
         if "specdec_bench.models.vllm" in key:
@@ -114,6 +113,6 @@ def test_no_duplicate_keyword_argument():
     kwargs = _make_minimal_kwargs(prefix_cache=True, moe_expert_parallel_size=2)
     # Should not raise
     VLLMModel.__init__(MagicMock(), "/model", 4, {}, **kwargs)
-    call_kwargs = AsyncEngineArgs.call_args[1]
+    call_kwargs = engine_args_cls.call_args[1]
     assert call_kwargs.get("enable_prefix_caching") is True
     assert call_kwargs.get("enable_expert_parallel") is True
