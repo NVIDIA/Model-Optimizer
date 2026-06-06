@@ -154,7 +154,9 @@ def _load_paged_k_tile(
     # Load K values: K_cache[page_global, offset_in_page, kv_head_idx, dim]
     # K^T layout [BLOCK_D, BLOCK_N] for Q @ K^T matmul
     k_ptrs = (
-        page_global[None, :] * stride_kc_block
+        # int64: real KV pools have >2**31/stride blocks, so page_global*stride_kc_block
+        # overflows int32 at high block IDs -> negative offset -> illegal memory access.
+        page_global[None, :].to(tl.int64) * stride_kc_block
         + offset_in_page[None, :] * stride_kc_pos
         + kv_head_idx * stride_kc_head
         + dim_pos[:, None]
@@ -196,7 +198,8 @@ def _load_paged_v_tile(
 
     # V layout [BLOCK_N, BLOCK_D]
     v_ptrs = (
-        page_global[:, None] * stride_vc_block
+        # int64: see _load_paged_k_tile — avoid int32 overflow at high block IDs.
+        page_global[:, None].to(tl.int64) * stride_vc_block
         + offset_in_page[:, None] * stride_vc_pos
         + kv_head_idx * stride_vc_head
         + dim_pos[None, :]
