@@ -30,6 +30,7 @@ live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 import functools
 import inspect
 import math
+import os
 import warnings
 
 import torch
@@ -272,6 +273,9 @@ class _SparseCalibrationMixin:
         # Dummy K/V: paged mode reads KV from the cache via block_table; only
         # shape[1] (num_kv_heads) is consulted, for the GQA ratio.
         k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
+        # Opt-in: count skipped tiles so the realized sparsity at serve time is
+        # observable (the kernel attaches _sparsity_total / _sparsity_skipped).
+        measure = bool(os.environ.get("MODELOPT_MEASURE_SPARSITY"))
         triton_out = triton_attention(
             q,
             k=k_dummy,
@@ -288,8 +292,18 @@ class _SparseCalibrationMixin:
             v_cache=value_cache,
             block_table=block_table,
             page_size=page_size,
+            measure_sparsity=measure,
             **sparse_kw,
         )
+        if measure and hasattr(triton_out, "_sparsity_total"):
+            total = triton_out._sparsity_total
+            skipped = triton_out._sparsity_skipped
+            frac = skipped / max(total, 1)
+            phase = "decode" if is_decode_only else "prefill"
+            print(
+                f"[ModelOpt] skip-softmax {phase}: {skipped}/{total} tiles skipped "
+                f"({frac:.1%}), seqlen={max_seq_len}, threshold={sparse_kw.get('skip_softmax_threshold')}"
+            )
         output[:num_actual_tokens] = triton_out
         return output
 
