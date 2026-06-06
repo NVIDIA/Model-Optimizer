@@ -39,11 +39,10 @@ pipeline:
   # acceptance-length (AL) is concurrency-independent and is the primary
   # metric we care about for this split.
   #
-  # No --runtime_params: run.py defaults sampling_kwargs to
-  # {"temperature": 0} when none is supplied, which is exactly what this
-  # cell (t0_*) wants. Cells that need non-default temperature
-  # (t1_d3 / t1_d7) will supply --runtime_params (or take a future
-  # --temperature CLI arg).
+  # No --temperature: run.py defaults sampling_kwargs to
+  # {"temperature": 0} when --temperature is not supplied, which is
+  # exactly what this cell (t0_*) wants. Cells with non-zero temperature
+  # (t1_d3 / t1_d7) will pass `--temperature 1` on the args list.
   task_0:
     script: common/specdec_bench/run.sh
     args:
@@ -77,9 +76,11 @@ pipeline:
   # 2 GPUs; concurrency=8 keeps 8 * 32K = 256K tokens of in-flight KV
   # under that doubled budget.
   #
-  # --runtime_params is the shared throughput_32k pin (engine_args.max_model_len=40960)
-  # mirroring specdec_bench_mtp.yaml task_1 — vLLM's auto-derivation can
-  # otherwise cap max_model_len below the 32K input we need.
+  # --max_seq_len 40960 pins the engine's sequence-length cap for the
+  # 32K input + 4K output + 4K headroom; vLLM's auto-derivation from
+  # gpu_memory_utilization can otherwise cap below the 32K input we
+  # need. Generic CLI flag (run.py maps it to engine-specific kwarg —
+  # max_model_len for vLLM here).
   task_1:
     script: common/specdec_bench/run.sh
     args:
@@ -89,7 +90,7 @@ pipeline:
       - --speculative_algorithm DFLASH
       - --draft_model_dir /hf-local/z-lab/Qwen3.5-4B-DFlash
       - --block_size 4
-      - --runtime_params common/specdec_bench/runtime_params_throughput_32k.yaml
+      - --max_seq_len 40960
       - --tp_size 2
       - --ep_size 1
       - --concurrency 8
