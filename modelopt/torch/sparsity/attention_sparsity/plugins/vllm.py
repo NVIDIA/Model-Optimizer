@@ -40,6 +40,7 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
 )
 
+from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
 from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
@@ -257,13 +258,26 @@ class _SparseCalibrationMixin:
             sparse_kw, is_prefill=not is_decode_only, max_seq_len=max_seq_len
         )
         if is_decode_only:
-            # N:M sparse softmax is prefill-only.
+            # N:M sparse softmax is prefill-only; decode keeps only skip-softmax.
             for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
                 sparse_kw.pop(name, None)
-            if set(sparse_kw) <= {"skip_softmax_threshold"}:
-                # Decode-only skip-softmax is not validated on the paged kernel
-                # yet; keep decode on the backend's native attention.
+            threshold = sparse_kw.get("skip_softmax_threshold")
+            if threshold is None:
+                # No decode sparsity active for this launch.
                 return dense_fallback()
+            # Decode-only skip-softmax runs on the dedicated decode kernel
+            # (one query vector per request, split-K), not the prefill kernel.
+            return self._forward_sparse_decode(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                page_size=page_size,
+                seq_lens=seq_lens,
+                block_table=block_table,
+                num_actual_tokens=num_actual_tokens,
+                skip_softmax_threshold=threshold,
+                output=output,
+            )
         if not sparse_kw:
             # Dynamic calibration can disable sparse work for a launch (e.g. a
             # short-prefill threshold outside the valid lambda range).
@@ -305,6 +319,43 @@ class _SparseCalibrationMixin:
                 f"({frac:.1%}), seqlen={max_seq_len}, threshold={sparse_kw.get('skip_softmax_threshold')}"
             )
         output[:num_actual_tokens] = triton_out
+        return output
+
+    def _forward_sparse_decode(
+        self,
+        *,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        page_size: int,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        num_actual_tokens: int,
+        skip_softmax_threshold: float,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode-only skip-softmax via the dedicated paged decode kernel.
+
+        Standard decode schedules exactly one query token per request, so the
+        ``num_actual_tokens`` query rows are the per-request decode queries. The
+        decode kernel computes one query vector per ``(request, head)`` over the
+        paged cache (split-K over the KV sequence) and applies the same prefix-max
+        skip criterion as the prefill kernel, so realized decode sparsity matches
+        the calibrated ``(a, b)``. The prefill kernel would tile this single query
+        token into ``BLOCK_M`` rows, wasting ~127/128 of the work.
+        """
+        q = query[:num_actual_tokens].contiguous()  # [batch, num_q_heads, head_dim]
+        decode_out = attention_decode(
+            q,
+            key_cache,
+            value_cache,
+            block_table[:num_actual_tokens],
+            seq_lens[:num_actual_tokens],
+            softmax_scale=self.scale,
+            skip_softmax_threshold=skip_softmax_threshold,
+            page_size=page_size,
+        )
+        output[:num_actual_tokens] = decode_out
         return output
 
 

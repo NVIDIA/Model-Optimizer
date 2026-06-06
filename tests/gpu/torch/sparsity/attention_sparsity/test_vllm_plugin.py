@@ -92,6 +92,20 @@ def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page
     return kv_cache, block_table
 
 
+def _dense_decode_ref(q, k, v, kv_start, kv_lens, num_heads, num_kv_heads, scale):
+    """Reference decode attention per request. q [batch, H, D]; k/v [total_kv, KVH, D]."""
+    g = num_heads // num_kv_heads
+    outs = []
+    for b in range(q.shape[0]):
+        s, length = int(kv_start[b].item()), int(kv_lens[b].item())
+        kb = k[s : s + length].transpose(0, 1).repeat_interleave(g, dim=0)  # [H, L, D]
+        vb = v[s : s + length].transpose(0, 1).repeat_interleave(g, dim=0)
+        scores = (q[b].unsqueeze(1) @ kb.transpose(-1, -2)).squeeze(1) * scale  # [H, L]
+        p = scores.float().softmax(dim=-1).to(v.dtype)
+        outs.append((p.unsqueeze(1) @ vb).squeeze(1))  # [H, D]
+    return torch.stack(outs, dim=0)
+
+
 def _make_impl(num_heads, head_dim, num_kv_heads):
     """Construct ModelOptSparseAttentionImpl with minimal valid kwargs."""
     return ModelOptSparseAttentionImpl(
@@ -244,8 +258,13 @@ class TestModelOptSparseAttentionImpl:
 
         assert torch.isfinite(out).all()
 
-    def test_decode_delegates_to_vllm(self, monkeypatch):
-        """Decode-only sparse work is not routed through the ModelOpt paged kernel."""
+    def test_decode_nm_only_delegates_to_vllm(self, monkeypatch):
+        """Decode with N:M-only sparsity (no skip threshold) delegates to the backend.
+
+        N:M sparse softmax is prefill-only, so a decode-only launch whose sparse
+        config has no ``skip_softmax_threshold`` falls back to vLLM's native
+        attention rather than the ModelOpt decode kernel.
+        """
         batch = 2
         q_len = 1
         kv_lens = torch.tensor([17, 33], device="cuda", dtype=torch.int32)
@@ -311,6 +330,58 @@ class TestModelOptSparseAttentionImpl:
         assert called["attn_metadata"] is attn_metadata
         assert result is output
         assert torch.all(result == 9)
+
+    def test_decode_skip_softmax_uses_decode_kernel(self, monkeypatch):
+        """Decode-only skip-softmax routes through the ModelOpt decode kernel.
+
+        With a near-zero threshold (skips almost nothing) the paged decode kernel
+        must reproduce dense decode attention, and must NOT fall back to vLLM's
+        native attention.
+        """
+        batch = 2
+        kv_lens = torch.tensor([130, 200], device="cuda", dtype=torch.int32)  # multi-tile
+        num_heads, num_kv_heads, head_dim = 4, 2, 64
+        page_size = 16
+        dtype = torch.float16
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(3)
+        q = torch.randn(batch, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.randn(int(kv_lens.sum()), num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        v = torch.randn_like(k)
+        kv_start = torch.tensor([0, int(kv_lens[0].item())], device="cuda", dtype=torch.int32)
+        kv_cache, block_table = _make_paged_cache(
+            k, v, kv_start, kv_lens, num_kv_heads, head_dim, page_size
+        )
+        attn_metadata = SimpleNamespace(
+            num_actual_tokens=batch,
+            max_query_len=1,
+            max_seq_len=int(kv_lens.max().item()),
+            query_start_loc=torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32),
+            seq_lens=kv_lens,
+            block_table=block_table,
+        )
+
+        # Native attention must NOT be reached for a skip-softmax decode launch.
+        def _fail_fallback(*args, **kwargs):
+            raise AssertionError("decode skip-softmax should not delegate to vLLM")
+
+        monkeypatch.setattr(FlashAttentionImpl, "forward", _fail_fallback)
+
+        impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = {"skip_softmax_threshold": 2**-20}  # ~dense
+        out = impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=torch.empty_like(q),
+        )
+
+        ref = _dense_decode_ref(q, k, v, kv_start, kv_lens, num_heads, num_kv_heads, scale)
+        torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
 
     def test_profiling_run_returns_zeros(self):
         """attn_metadata=None (vLLM profiling pass) must zero-fill output and return."""
