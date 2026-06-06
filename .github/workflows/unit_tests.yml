@@ -13,6 +13,7 @@ on:
       - "pyproject.toml"
       - "tests/unit/**"
       - "tools/launcher/**"
+      - ".claude/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -55,6 +56,7 @@ jobs:
             pyproject.toml
             tests/unit/**
             tools/launcher/**
+            .claude/skills/**
   linux:
     needs: [check-dco]
     runs-on: ubuntu-latest
@@ -142,10 +144,27 @@ jobs:
           uv venv .venv
           uv pip install -e . pytest
           uv run python3 -m pytest -v
+  skills:
+    if: needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Run skill gate tests
+        # Skill gate tests are stdlib-only and hermetic (no GPU/cluster/network),
+        # so they run in their own lightweight job rather than the main unit lane.
+        # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
+        run: |
+          pip install pytest
+          python -m pytest .claude/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher]
+    needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher, skills]
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
@@ -154,6 +173,7 @@ jobs:
             needs.windows.result != 'success' ||
             needs.multi-version.result != 'success' ||
             needs.partial-install.result != 'success' ||
-            needs.launcher.result != 'success'
+            needs.launcher.result != 'success' ||
+            needs.skills.result != 'success'
           )) }}
         run: exit 1
