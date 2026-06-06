@@ -39,9 +39,11 @@ pipeline:
   # acceptance-length (AL) is concurrency-independent and is the primary
   # metric we care about for this split.
   #
-  # --runtime_params is the per-cell file (sampling_kwargs.temperature
-  # for this cell + the throughput_32k engine_args pin that task_1
-  # needs — harmless on qualitative since prompts top out at ~8K).
+  # No --runtime_params: run.py defaults sampling_kwargs to
+  # {"temperature": 0} when none is supplied, which is exactly what this
+  # cell (t0_*) wants. Cells that need non-default temperature
+  # (t1_d3 / t1_d7) will supply --runtime_params (or take a future
+  # --temperature CLI arg).
   task_0:
     script: common/specdec_bench/run.sh
     args:
@@ -51,7 +53,6 @@ pipeline:
       - --speculative_algorithm DFLASH
       - --draft_model_dir /hf-local/z-lab/Qwen3.5-4B-DFlash
       - --block_size 4
-      - --runtime_params common/specdec_bench/_cells/qwen35_4b_dflash_vllm_t0_d3.yaml
       - --tp_size 2
       - --ep_size 1
       - --concurrency 32
@@ -74,9 +75,11 @@ pipeline:
   # has 1,536) so it fits in the 4h Slurm time-limit; each 32K-input
   # sample takes ~60-90s. tp_size=2 doubles the KV-cache budget across
   # 2 GPUs; concurrency=8 keeps 8 * 32K = 256K tokens of in-flight KV
-  # under that doubled budget. Same per-cell --runtime_params file as
-  # task_0 — its max_model_len=40960 pin is what this split actually
-  # needs.
+  # under that doubled budget.
+  #
+  # --runtime_params is the shared throughput_32k pin (engine_args.max_model_len=40960)
+  # mirroring specdec_bench_mtp.yaml task_1 — vLLM's auto-derivation can
+  # otherwise cap max_model_len below the 32K input we need.
   task_1:
     script: common/specdec_bench/run.sh
     args:
@@ -86,7 +89,7 @@ pipeline:
       - --speculative_algorithm DFLASH
       - --draft_model_dir /hf-local/z-lab/Qwen3.5-4B-DFlash
       - --block_size 4
-      - --runtime_params common/specdec_bench/_cells/qwen35_4b_dflash_vllm_t0_d3.yaml
+      - --runtime_params common/specdec_bench/runtime_params_throughput_32k.yaml
       - --tp_size 2
       - --ep_size 1
       - --concurrency 8
