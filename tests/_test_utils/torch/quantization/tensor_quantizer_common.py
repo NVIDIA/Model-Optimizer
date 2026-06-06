@@ -15,13 +15,18 @@
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from _test_utils.torch.quantization.quant_utils import quant
 
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization import utils as quant_utils
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.model_calib import max_calibrate
+from modelopt.torch.quantization.model_calib import (
+    enable_stats_collection,
+    finish_stats_collection,
+    max_calibrate,
+)
 from modelopt.torch.quantization.nn import QuantLinear, SequentialQuantizer, TensorQuantizer
 
 
@@ -148,6 +153,10 @@ class TensorQuantizerTester:
         """Don't really have a good way to test it."""
         quant_attr_cfg1 = QuantizerAttributeConfig(calibrator="histogram")
         quantizer1 = TensorQuantizer(quant_attr_cfg1, if_calib=True, if_quant=False).to(self.device)
+        # Reduce histogram bins (default 2048) before the first collect to keep the
+        # entropy KL-divergence search ~8x cheaper; the assertion compares two equal
+        # computes so the result stays valid.
+        quantizer1._calibrator._num_bins = 512
 
         x_1 = torch.rand(3, 6, 7, 7).to(self.device)
         x_2 = torch.rand(3, 6, 7, 7).to(self.device)
@@ -230,13 +239,6 @@ class TensorQuantizerTester:
 
     def test_use_constant_amax_skips_calibration(self):
         """Test that use_constant_amax quantizers are disabled during calibration and re-enabled after."""
-        import torch.nn as nn
-
-        from modelopt.torch.quantization.model_calib import (
-            enable_stats_collection,
-            finish_stats_collection,
-        )
-
         # Build a small model with one use_constant_amax quantizer and one normal quantizer
         model = nn.ModuleDict(
             {

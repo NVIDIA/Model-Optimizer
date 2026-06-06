@@ -627,7 +627,6 @@ class GPTModelExporter:
                     return mtp_state_dict
 
         if safetensors_index_file is not None and safetensors_index_file.exists():
-            print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
             with open(safetensors_index_file) as f:
                 safetensors_index = json.load(f)
             model_dir = safetensors_index_file.parent
@@ -635,13 +634,16 @@ class GPTModelExporter:
                 if key.startswith("mtp.") and key not in self._state_dict:
                     mtp_state_dict[key] = get_safetensor(model_dir, key)
                     mtp_exists = True
+            if mtp_exists:
+                print(f"Exported MTP using {safetensors_index_file=}")
         elif single_safetensors_file is not None and single_safetensors_file.exists():
-            print(f"Exporting MTP: using single safetensors file: {single_safetensors_file}")
             with safe_open(str(single_safetensors_file), framework="pt", device="cpu") as f:
                 for key in f.keys():  # noqa: SIM118
                     if key.startswith("mtp.") and key not in self._state_dict:
                         mtp_state_dict[key] = f.get_tensor(key)
                         mtp_exists = True
+            if mtp_exists:
+                print(f"Exported MTP using {single_safetensors_file=}")
 
         if mtp_exists:
             self.exclude_modules.append("mtp*")

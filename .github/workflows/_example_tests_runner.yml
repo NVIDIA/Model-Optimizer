@@ -47,8 +47,12 @@ jobs:
           echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
       - name: Install dependencies
         run: |
-          # use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
-          python -m pip install ".${{ inputs.pip_install_extras }}"
+          # Uninstall conflicting system-wide installed modelopt in nemo containers
+          pip uninstall -y nvidia-modelopt || true
+
+          # Use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
+          # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
+          python -m pip install -e ".${{ inputs.pip_install_extras }}"
 
           if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
             echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"

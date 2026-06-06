@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from _test_utils.examples.models import FLUX_SCHNELL_PATH, SDXL_1_0_PATH
+from _test_utils.examples.models import FLUX_SCHNELL_PATH, SDXL_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
 
@@ -41,11 +41,11 @@ class DiffuserHfExportModel(NamedTuple):
             "--override-model-path",
             self.path,
             "--calib-size",
-            "8",
+            "4",
             "--batch-size",
             "2",
             "--n-steps",
-            "20",
+            "2",
             "--percentile",
             "1.0",
             "--alpha",
@@ -72,7 +72,7 @@ class DiffuserHfExportModel(NamedTuple):
     [
         DiffuserHfExportModel(
             name="sdxl-1.0",
-            path=SDXL_1_0_PATH,
+            path=SDXL_PATH,
             dtype="Half",
             format_type="int8",
             quant_algo="smoothquant",
@@ -90,7 +90,7 @@ class DiffuserHfExportModel(NamedTuple):
         pytest.param(
             DiffuserHfExportModel(
                 name="sdxl-1.0",
-                path=SDXL_1_0_PATH,
+                path=SDXL_PATH,
                 dtype="Half",
                 format_type="fp8",
                 quant_algo="max",

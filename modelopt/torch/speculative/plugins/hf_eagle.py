@@ -216,10 +216,36 @@ class HFEagleModel(EagleModel):
 
     def _inject_base_lora(self):
         """Inject HF PEFT LoRA adapters into the base model in-place and unfreeze them."""
+        import re
+
         from peft import LoraConfig
         from peft.mapping import inject_adapter_in_model
 
         target_modules = self.eagle_base_lora_target_modules or None
+
+        # If start_layer is set, enumerate matching modules explicitly so only
+        # the desired layers get LoRA adapters.
+        if self.eagle_base_lora_start_layer is not None:
+            if target_modules is None:
+                raise ValueError(
+                    "eagle_base_lora_start_layer requires eagle_base_lora_target_modules "
+                    "to be set explicitly (the start-layer filter matches module-name "
+                    "suffixes, so it cannot be combined with PEFT's default/regex targeting)."
+                )
+            explicit_targets = []
+            for name, _ in self._base_model.named_modules():
+                m = re.search(r"layers\.(\d+)\.", name)
+                if m and int(m.group(1)) >= self.eagle_base_lora_start_layer:
+                    if any(name.endswith(mod) for mod in target_modules):
+                        explicit_targets.append(name)
+            if not explicit_targets:
+                raise ValueError(
+                    f"No base model modules matched eagle_base_lora_target_modules="
+                    f"{target_modules} at or beyond layer {self.eagle_base_lora_start_layer}. "
+                    "Check the start layer index and target module names."
+                )
+            target_modules = explicit_targets
+
         lora_config = LoraConfig(
             r=self.eagle_base_lora_rank,
             lora_alpha=self.eagle_base_lora_alpha,
@@ -227,11 +253,16 @@ class HFEagleModel(EagleModel):
             bias="none",
         )
         inject_adapter_in_model(lora_config, self._base_model, adapter_name="default")
-        # Unfreeze LoRA parameters unless we have a warmup phase
-        freeze_lora = self.eagle_base_lora_warmup_steps > 0
+
+        # Always mark LoRA params as trainable so they are included in the
+        # optimizer from the start.  During warmup, _lora_cotraining_active
+        # stays False which prevents any gradient from flowing to LoRA via the
+        # forward path (hidden states detached, logits detached, preservation
+        # loss skipped).  This keeps the optimizer param-group count constant
+        # across checkpoints, avoiding the mismatch on resume.
         for name, param in self._base_model.named_parameters():
             if "lora_" in name:
-                param.requires_grad = not freeze_lora
+                param.requires_grad = True
 
     def _set_base_lora_enabled(self, enabled: bool) -> None:
         """Enable or disable LoRA adapters in the base model."""

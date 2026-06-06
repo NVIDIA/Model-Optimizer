@@ -13,7 +13,7 @@ on:
       - "pyproject.toml"
       - "tests/unit/**"
       - "tools/launcher/**"
-      - ".claude/skills/**"
+      - ".agents/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -56,11 +56,11 @@ jobs:
             pyproject.toml
             tests/unit/**
             tools/launcher/**
-            .claude/skills/**
+            .agents/skills/**
   linux:
     needs: [check-dco]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
@@ -80,7 +80,7 @@ jobs:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -92,7 +92,7 @@ jobs:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -117,7 +117,7 @@ jobs:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -160,7 +160,7 @@ jobs:
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
           pip install pytest
-          python -m pytest .claude/skills/ -o addopts="" -p no:cacheprovider -v
+          python -m pytest .agents/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+from contextlib import nullcontext
 from functools import partial
 
 import pytest
@@ -251,8 +252,6 @@ def _gpt_model_provider(
     hybrid_override_pattern=None,
     mamba_head_dim=16,
 ):
-    from contextlib import nullcontext
-
     device_ctx = torch.device("meta") if meta_device else nullcontext()
 
     with device_ctx:

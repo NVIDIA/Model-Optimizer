@@ -121,8 +121,12 @@ def load_and_shard_model(
     checkpoint_path: str | Path,
     owned_block_indexes: set[int] | Literal["auto"] = "auto",
     model_config: PretrainedConfig | None = None,
+    trust_remote_code: bool | None = None,
 ):
     checkpoint_path = Path(checkpoint_path)
+    effective_trust_remote_code = (
+        descriptor.requires_trust_remote_code() if trust_remote_code is None else trust_remote_code
+    )
     runtime = SimpleNamespace(
         device=torch.device(dist.local_rank()),
         dtype=torch.bfloat16,
@@ -135,8 +139,9 @@ def load_and_shard_model(
 
     with runtime.device:
         if model_config is None:
-            trust_remote_code = descriptor.requires_trust_remote_code()
-            model_config = load_model_config(checkpoint_path, trust_remote_code=trust_remote_code)
+            model_config = load_model_config(
+                checkpoint_path, trust_remote_code=effective_trust_remote_code
+            )
 
         num_hidden_layers = descriptor.get_language_model_config(model_config).num_hidden_layers
         if owned_block_indexes == "auto":
@@ -159,6 +164,7 @@ def load_and_shard_model(
                 descriptor=descriptor,
                 model_config=model_config,
                 owned_block_indexes=owned_block_indexes,
+                trust_remote_code=effective_trust_remote_code,
             )
 
         if (checkpoint_path / SAFE_WEIGHTS_NAME).exists() or (
@@ -231,6 +237,7 @@ def create_sharded_model(
     owned_block_indexes: set[int],
     device: str | torch.device | None = "meta",
     dtype: torch.dtype | None = torch.float32,
+    trust_remote_code: bool | None = None,
 ):
     if isinstance(device, str):
         device = torch.device(device)
@@ -240,10 +247,16 @@ def create_sharded_model(
     with EmptyInitOnDevice(device="meta", dtype=dtype):
         # Get model class from config.architectures (works for CausalLM, VL models, etc.)
         model_class = _get_model_class_from_config(model_config)
-        trust_remote_code = descriptor.requires_trust_remote_code()
-        if trust_remote_code:
+        effective_trust_remote_code = (
+            descriptor.requires_trust_remote_code()
+            if trust_remote_code is None
+            else trust_remote_code
+        )
+        if effective_trust_remote_code:
             auto_cls = _get_auto_class_for_trust_remote_code(model_config)
-            model = auto_cls.from_config(model_config, trust_remote_code=trust_remote_code)
+            model = auto_cls.from_config(
+                model_config, trust_remote_code=effective_trust_remote_code
+            )
         elif model_class is AutoModelForCausalLM:
             model = AutoModelForCausalLM.from_config(model_config)
         else:

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import os
 import warnings
 from contextlib import nullcontext
@@ -204,8 +205,6 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
     tiny_llama_dir = create_tiny_llama_dir(tmp_path, dtype=torch.float32)
     # update config to fit test cases
     if quant_config == mtq.INT4_AWQ_CFG:
-        import copy
-
         quant_config = copy.deepcopy(quant_config)
         for entry in quant_config["quant_cfg"]:
             if entry["quantizer_name"] == "*weight_quantizer":
