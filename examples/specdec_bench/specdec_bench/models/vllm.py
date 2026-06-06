@@ -28,7 +28,6 @@ except ImportError:
     vllm = None
 
 
-
 class VLLMModel(Model):
     def __init__(self, model_dir, max_concurrent_requests, sampling_kwargs, **kwargs):
         specdec = None

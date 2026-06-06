@@ -77,7 +77,7 @@ def _reload_vllm_module():
     for key in list(sys.modules):
         if "specdec_bench.models.vllm" in key:
             del sys.modules[key]
-    from specdec_bench.models.vllm import VLLMModel  # noqa: PLC0415
+    from specdec_bench.models.vllm import VLLMModel
 
     return VLLMModel
 
@@ -91,7 +91,9 @@ def test_max_model_len_forwarded_to_engine_args():
     vllm_model.__init__(MagicMock(), "/model", 4, {}, **kwargs)
 
     call_kwargs = engine_args_cls.call_args[1]
-    assert call_kwargs.get("max_model_len") == 40960, "max_model_len was not forwarded to AsyncEngineArgs"
+    assert call_kwargs.get("max_model_len") == 40960, (
+        "max_model_len was not forwarded to AsyncEngineArgs"
+    )
 
 
 def test_max_model_len_absent_passes_none():
