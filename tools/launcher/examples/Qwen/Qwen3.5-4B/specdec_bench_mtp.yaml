@@ -87,7 +87,7 @@ pipeline:
       - --concurrency 8
       - --num_requests 80
       - --output_length 4096
-      - --runtime_params common/specdec_bench/runtime_params_throughput_32k.yaml
+      - --max_seq_len 40960
       - --aa_timing
       - --show_progress
       - --save_dir /scratchspace/qwen35_4b_mtp_vllm/throughput_32k

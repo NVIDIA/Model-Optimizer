@@ -29,6 +29,10 @@ except ImportError:
 
 
 class VLLMModel(Model):
+    # Cross-engine ``--max_seq_len`` (run.py) lands in kwargs under the
+    # vLLM-native name ``max_model_len`` (see run.py's ``_MAX_SEQ_LEN_KEY``)
+    # and is read at line ~92 below into AsyncEngineArgs.
+
     def __init__(self, model_dir, max_concurrent_requests, sampling_kwargs, **kwargs):
         specdec = None
         if kwargs.get("speculative_algorithm") == "EAGLE3":
