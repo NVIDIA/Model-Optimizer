@@ -183,7 +183,7 @@ python hf_ptq.py \
   --export_path <quantized_ckpt_path>
 ```
 
-Built-in recipes are located in `modelopt_recipes/general/ptq/` for model-agnostic recipes and in `modelopt_recipes/huggingface/<model_type>/ptq/` for recipes tuned to a specific Hugging Face `model_type` (see [`modelopt_recipes/huggingface/README.md`](../../modelopt_recipes/huggingface/README.md)). You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
+Built-in recipes are located in `modelopt_recipes/general/ptq/` for model-agnostic recipes and in `modelopt_recipes/huggingface/<model_type>/ptq/` for recipes tuned to a specific Hugging Face `model_type` (see [`modelopt_recipes/huggingface/README.md`](../../modelopt_recipes/huggingface/README.md)). For Llama 3.x NVFP4, start with `huggingface/llama/ptq/nvfp4_mlp_only-kv_fp8_cast`. You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
 
 > *When `--recipe` is specified, `--qformat` and `--kv_cache_qformat` are ignored. The recipe fully defines the quantization configuration.*
 

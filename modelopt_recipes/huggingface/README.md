@@ -14,7 +14,8 @@ ones. When deciding which to use:
    `<specific_model>/` folder if the recipe is tuned for one released
    checkpoint rather than every checkpoint of that `model_type`. The
    presence of a folder here signals that there is a recommended recipe
-   for that `model_type` or model instance.
+   for that `model_type` or model instance. For example, see
+   `huggingface/llama/ptq/` for Llama 3.x NVFP4 recipes.
 2. **Fall back to `general/`** if no `<model_type>/` folder applies. The
    general recipes are a good starting point for any model — and the
    recommended starting point for a model architecture that does not yet
