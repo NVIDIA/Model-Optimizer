@@ -41,7 +41,8 @@ setup ─▶ PTQ ─▶ baseline-eval ─▶ quantized-eval ─▶ compare ─�
 
 The **evaluation** skill deploys the model it evaluates (it stands up its own
 endpoint per run), so there is no separate deploy stage — a serving failure
-surfaces through the eval stage's gate (`DEPLOYMENT_HEALTH_FAILED`).
+surfaces through the eval stage's gate (`DEPLOYMENT_HEALTH_FAILED`) and triages
+to the **deployment** skill to debug serving in isolation (see Step 4).
 
 Run each stage by invoking the domain skill, then run its gate before
 proceeding. **Do not advance past a failed gate.** Copy this checklist and track
@@ -91,9 +92,14 @@ model itself). Gate with `gate_run.py`.
 
 Invoke the **evaluation** skill on the quantized checkpoint, matching the
 baseline's task set and sampling params. The evaluation skill stands up the
-serving endpoint itself; a serving failure surfaces here as a failed
-`gate_run.py` with `DEPLOYMENT_HEALTH_FAILED` (triage: PATCH serving flags /
-image / TP, or `POINT_INFEASIBLE`). Gate:
+serving endpoint itself (it builds the `deployment.command`, e.g. a
+`vllm serve …`), so a serving failure surfaces here as a failed `gate_run.py`
+with `DEPLOYMENT_HEALTH_FAILED`. When that happens, **drop to the deployment
+skill** to reproduce and debug serving in isolation (serve the checkpoint
+standalone, confirm `/health` + one generation, iterate on flags / TP / image /
+env vars) rather than burning full eval cycles on a broken endpoint — then carry
+the working command back into NEL's `deployment.command` and resume the eval. If
+the checkpoint genuinely can't serve, `POINT_INFEASIBLE`. Gate:
 
 ```bash
 python .claude/skills/day0-release/scripts/gate_run.py --run <run-summary.json>
@@ -145,7 +151,7 @@ Map a gate's `failure_class` to the next action:
 | `INFRA_TRANSIENT` | Retry the stage once; if it recurs, `SYSTEMIC`. |
 | `MODEL_UNSUPPORTED` | PATCH: fix the recipe pattern / add model support (ptq skill owns the patch loop), then retry. If unpatchable, `POINT_INFEASIBLE`. |
 | `QUANT_COVERAGE_FAILURE` | PATCH: fix the recipe wildcard so intended layers are covered; re-run PTQ. |
-| `DEPLOYMENT_HEALTH_FAILED` | PATCH: serving flags / image / TP; if the checkpoint can't serve, `POINT_INFEASIBLE`. |
+| `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
 | `EVAL_JUDGE_FAILED` | Usually transient (auth / rate limit) — wait and retry. |
 | `SAMPLE_ACCOUNTING_FAILED` | Investigate dropped/failed samples before trusting scores. |
 | `USER_CONFIG_ERROR` | Stop and ask the user. |
