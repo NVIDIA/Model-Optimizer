@@ -463,7 +463,10 @@ class EagleVllmStreamingDataset(StreamingDataset):
         feat = shape[1:]
         maxtok = self.config.max_seq_len
         if self._recv is None or self._recv.dtype != dtype or tuple(self._recv.shape[1:]) != feat:
-            self._recv = torch.empty((maxtok, *feat), dtype=dtype).pin_memory()
+            # plain (pageable) host tensor: NIXL/ibv_reg_mr pins the pages itself.
+            # Do NOT call .pin_memory() here — dataloader workers are forked and have no
+            # valid CUDA context (cudaHostAlloc -> CUDA initialization error).
+            self._recv = torch.empty((maxtok, *feat), dtype=dtype)
             agent.register_memory([self._recv])
         view = self._recv[:shape[0]]
         ldescs = agent.get_xfer_descs([view])
