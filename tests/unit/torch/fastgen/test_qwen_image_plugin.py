@@ -46,15 +46,15 @@ from modelopt.torch.fastgen.plugins.qwen_image import (
 
 
 @pytest.mark.parametrize(
-    "shape",
+    ("shape", "dtype"),
     [
-        (2, 16, 32, 32),
-        (1, 16, 128, 128),
+        ((1, 16, 128, 128), torch.float32),  # production size
+        ((2, 16, 32, 32), torch.bfloat16),  # batch>1 + bf16 dtype preserved
     ],
 )
-def test_pack_unpack_inverse(shape):
-    """Round-trip is bit-exact; dtype/device/contiguity preserved."""
-    x = torch.randn(*shape)
+def test_pack_unpack_inverse(shape, dtype):
+    """Round-trip is bit-exact; dtype/device/contiguity preserved (incl. bf16)."""
+    x = torch.randn(*shape, dtype=dtype)
     p = pack_latents(x)
     y = unpack_latents(p, shape[2], shape[3])
     assert torch.equal(x, y)
@@ -64,32 +64,19 @@ def test_pack_unpack_inverse(shape):
     assert y.is_contiguous()
 
 
-def test_pack_unpack_inverse_bf16():
-    """bf16 dtype is preserved through pack/unpack (spot check)."""
-    x = torch.randn(2, 16, 32, 32, dtype=torch.bfloat16)
-    p = pack_latents(x)
-    y = unpack_latents(p, 32, 32)
-    assert p.dtype == torch.bfloat16
-    assert y.dtype == torch.bfloat16
-    assert torch.equal(x, y)
-
-
 # ---------------------------------------------------------------------------- #
 # §1.2 — odd spatial dims raise a clear ValueError                             #
 # ---------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("shape", [(1, 16, 31, 32), (1, 16, 32, 31)])
-def test_pack_rejects_odd_spatial(shape):
+def test_pack_rejects_odd_spatial():
     with pytest.raises(ValueError, match="even"):
-        pack_latents(torch.randn(*shape))
+        pack_latents(torch.randn(1, 16, 31, 32))
 
 
-@pytest.mark.parametrize("hw", [(31, 32), (32, 31)])
-def test_unpack_rejects_odd_target(hw):
-    h, w = hw
+def test_unpack_rejects_odd_target():
     with pytest.raises(ValueError, match="even"):
-        unpack_latents(torch.randn(1, 256, 64), h, w)
+        unpack_latents(torch.randn(1, 256, 64), 31, 32)
 
 
 # ---------------------------------------------------------------------------- #

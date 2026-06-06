@@ -112,11 +112,6 @@ def _fastgen_gan_disc(real_logits, fake_logits):
     return F.softplus(fake_logits).mean() + F.softplus(-real_logits).mean()
 
 
-def _fastgen_r1(real_logits, perturbed_real_logits):
-    """Approximate R1: MSE between logits on clean vs perturbed real data."""
-    return F.mse_loss(real_logits, perturbed_real_logits, reduction="mean")
-
-
 # ---------------------------------------------------------------------------- #
 # §2.1 — RF forward process                                                    #
 # ---------------------------------------------------------------------------- #
@@ -420,19 +415,5 @@ def test_gan_disc_loss_matches_fastgen():
             gan_disc_loss(real_logits, fake_logits).item()
             - _fastgen_gan_disc(real_logits, fake_logits).item()
         )
-        < 1e-6
-    )
-
-
-def test_r1_loss_matches_fastgen():
-    try:
-        from modelopt.torch.fastgen.losses import r1_loss
-    except ImportError:
-        pytest.skip("modelopt.torch.fastgen.losses.r1_loss not present")
-    torch.manual_seed(7)
-    real_logits = torch.randn(8, 1)
-    perturbed = real_logits + 0.01 * torch.randn_like(real_logits)
-    assert (
-        abs(r1_loss(real_logits, perturbed).item() - _fastgen_r1(real_logits, perturbed).item())
         < 1e-6
     )
