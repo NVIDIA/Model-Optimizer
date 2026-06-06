@@ -17,7 +17,7 @@
 
 The full :meth:`DMD2DiffusionRecipe.setup()` runs :meth:`super().setup()` which
 requires NCCL/FSDP2 + real Qwen weights, so we can't call it directly on CPU.
-Instead we exercise the four helpers it consumes — ``_load_frozen_teacher``,
+Instead we exercise the helpers it consumes — ``_load_frozen_teacher``,
 ``_load_fake_score``, ``_resolve_dmd_config``, ``_resolve_pipeline_cls``,
 ``_build_fake_score_optimizer`` — after monkeypatching
 ``NeMoAutoDiffusionPipeline.from_pretrained`` to return a tiny
@@ -29,6 +29,8 @@ Instead we exercise the four helpers it consumes — ``_load_frozen_teacher``,
 - ``_dmd_pipeline`` resolves to ``QwenImageDMDPipeline`` (§7.d).
 - ``_fake_score_optimizer`` has trainable fake-score params (§7.e).
 
+§7.a + §7.b are covered by the single ``test_fake_score_initializes_with_teacher_weights``
+test (it asserts frozen teacher, trainable fake_score, and copied weights at once).
 The YAML-parse and mock-dataloader bullets stay self-contained at the top.
 """
 
@@ -140,8 +142,8 @@ def test_mock_dataloader_yields_one_batch(cfg):
 
 
 # ---------------------------------------------------------------------------- #
-# Helper: build a recipe instance + patch ``from_pretrained`` to return tiny  #
-# transformer copies. We deliberately don't call ``setup()`` (which would     #
+# Helper: build a recipe instance + patch ``from_pretrained`` to return tiny   #
+# transformer copies. We deliberately don't call ``setup()`` (which would      #
 # run the parent's FSDP2 path and need NCCL).                                  #
 # ---------------------------------------------------------------------------- #
 
@@ -166,25 +168,10 @@ def stub_recipe(cfg, dmd2_recipe_module, monkeypatch):
 
 
 # ---------------------------------------------------------------------------- #
-# §7.a — _load_frozen_teacher returns a frozen + eval module                  #
+# §7.a + §7.b — teacher frozen+eval, fake_score trainable+train, weights copied #
+# (one test covers all three: the standalone frozen/trainable checks were a     #
+#  strict subset of this and were removed.)                                     #
 # ---------------------------------------------------------------------------- #
-
-
-def test_load_frozen_teacher_eval_and_no_grad(stub_recipe):
-    teacher = stub_recipe._load_frozen_teacher()
-    assert teacher.training is False
-    assert not any(p.requires_grad for p in teacher.parameters())
-
-
-# ---------------------------------------------------------------------------- #
-# §7.b — _load_fake_score returns a trainable + train-mode module             #
-# ---------------------------------------------------------------------------- #
-
-
-def test_load_fake_score_trainable_and_train_mode(stub_recipe):
-    fake_score = stub_recipe._load_fake_score()
-    assert fake_score.training is True
-    assert all(p.requires_grad for p in fake_score.parameters())
 
 
 def test_fake_score_initializes_with_teacher_weights(stub_recipe, dmd2_recipe_module, monkeypatch):
@@ -230,7 +217,7 @@ def test_teacher_stays_frozen_across_phase_toggles(stub_recipe):
 
 
 # ---------------------------------------------------------------------------- #
-# §7.c — _resolve_dmd_config returns DMDConfig with num_train_timesteps=None  #
+# §7.c — _resolve_dmd_config returns DMDConfig with num_train_timesteps=None    #
 # ---------------------------------------------------------------------------- #
 
 
@@ -240,7 +227,7 @@ def test_resolve_dmd_config_num_train_timesteps_none(stub_recipe):
 
 
 # ---------------------------------------------------------------------------- #
-# §7.d — _resolve_pipeline_cls returns QwenImageDMDPipeline                   #
+# §7.d — _resolve_pipeline_cls returns QwenImageDMDPipeline                     #
 # ---------------------------------------------------------------------------- #
 
 
@@ -250,7 +237,7 @@ def test_resolve_pipeline_cls_is_qwen_image(stub_recipe):
 
 
 # ---------------------------------------------------------------------------- #
-# §7.e — _build_fake_score_optimizer has trainable fake-score params          #
+# §7.e — _build_fake_score_optimizer has trainable fake-score params           #
 # ---------------------------------------------------------------------------- #
 
 

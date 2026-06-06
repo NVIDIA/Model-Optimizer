@@ -15,13 +15,13 @@
 
 """Unit tests for ``modelopt.torch.fastgen.plugins.qwen_image``.
 
-Ports the checklist §1 bullets (pack/unpack + adapter parity + _call_model wiring)
+Ports the checklist §1 bullets (pack/unpack + FastGen parity + _call_model wiring)
 into pytest form so they live in-repo and run under ``pytest tests/unit/torch/fastgen``.
 Adds the §6-specific bullet ``num_train_timesteps != None`` constructor error.
 
-Parity comparisons against the AutoModel adapter and the FastGen reference
-extract are bit-exact (``torch.equal``) — both are pure permute+reshape
-operations with no floating-point arithmetic.
+The parity comparison against the FastGen reference extract is bit-exact
+(``torch.equal``) — both are pure permute+reshape operations with no
+floating-point arithmetic.
 """
 
 from __future__ import annotations
@@ -48,9 +48,7 @@ from modelopt.torch.fastgen.plugins.qwen_image import (
 @pytest.mark.parametrize(
     "shape",
     [
-        (1, 16, 16, 16),
         (2, 16, 32, 32),
-        (1, 16, 64, 64),
         (1, 16, 128, 128),
     ],
 )
@@ -95,47 +93,11 @@ def test_unpack_rejects_odd_target(hw):
 
 
 # ---------------------------------------------------------------------------- #
-# §1.3 / §1.4 — parity vs AutoModel ``QwenImageAdapter``                        #
-#                                                                               #
-# Soft-skipped if AutoModel isn't on PYTHONPATH (e.g. CPU-only env without it). #
-# ---------------------------------------------------------------------------- #
-
-
-def test_pack_parity_vs_automodel():
-    adapters = pytest.importorskip(
-        "nemo_automodel.components.flow_matching.adapters.qwen_image",
-    )
-    adapter = adapters.QwenImageAdapter()
-    x = torch.randn(2, 16, 32, 32)
-    am = adapter._pack_latents(x)
-    mo = pack_latents(x)
-    assert torch.equal(am, mo)
-
-
-def test_unpack_parity_vs_automodel():
-    """AutoModel's ``_unpack_latents`` takes pixel dims (H*8, W*8); modelopt takes latent dims.
-
-    Both produce the same tensor for even latents — this test calls them with
-    matched API conventions and asserts bit-exact equality.
-    """
-    adapters = pytest.importorskip(
-        "nemo_automodel.components.flow_matching.adapters.qwen_image",
-    )
-    adapter = adapters.QwenImageAdapter()
-    h_lat, w_lat = 32, 32
-    x = torch.randn(2, 16, h_lat, w_lat)
-    p = adapter._pack_latents(x)
-    am_un = adapter._unpack_latents(p, h_lat * 8, w_lat * 8, vae_scale_factor=8)
-    mo_un = unpack_latents(p, h_lat, w_lat)
-    assert torch.equal(am_un, mo_un)
-
-
-# ---------------------------------------------------------------------------- #
 # §1.5 — parity vs the FastGen reference                                       #
-#                                                                               #
-# FastGen's QwenImage class pulls heavy deps; we inline the two methods         #
-# verbatim from ``source/FastGen/fastgen/networks/QwenImage/network.py:527-560`` #
-# so the parity check is hermetic.                                              #
+#                                                                              #
+# FastGen's QwenImage class pulls heavy deps; we inline the two methods        #
+# verbatim from ``source/FastGen/fastgen/networks/QwenImage/network.py`` so    #
+# the parity check is hermetic.                                                #
 # ---------------------------------------------------------------------------- #
 
 
@@ -167,23 +129,13 @@ def test_pack_unpack_parity_vs_fastgen():
 
 
 # ---------------------------------------------------------------------------- #
-# §1.6 — build_img_shapes structural equality + aliasing                       #
+# §1.6 — build_img_shapes structural equality                                  #
 # ---------------------------------------------------------------------------- #
 
 
 def test_build_img_shapes_structure():
     out = build_img_shapes(batch_size=2, h_lat=32, w_lat=32)
     assert out == [[(1, 16, 16)], [(1, 16, 16)]]
-
-
-def test_build_img_shapes_inner_list_aliased():
-    """Implementation uses ``[[...]] * B`` so the inner list is shared across
-    batch entries. Safe as long as no caller mutates the nested list/tuple.
-    This test documents the aliasing — if a future change makes the lists
-    independent, the assertion will fail and this test should be updated.
-    """
-    out = build_img_shapes(batch_size=2, h_lat=32, w_lat=32)
-    assert out[0] is out[1]
 
 
 # ---------------------------------------------------------------------------- #

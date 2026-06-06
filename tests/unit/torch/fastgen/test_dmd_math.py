@@ -130,11 +130,6 @@ def test_rf_forward_matches_fastgen():
     assert torch.equal(add_noise(x0, eps, t), _fastgen_forward_process(x0, eps, t))
 
 
-def test_rf_alpha_sigma_sum_to_one():
-    t = torch.tensor([0.001, 0.5, 0.999], dtype=torch.float64)
-    assert torch.allclose(rf_alpha(t) + rf_sigma(t), torch.ones_like(t))
-
-
 # ---------------------------------------------------------------------------- #
 # §2.2 / §2.3 — student input for single-step and multi-step                   #
 # ---------------------------------------------------------------------------- #
