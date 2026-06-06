@@ -1,138 +1,119 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for VLLMModel's runtime_params engine_args forwarding.
+"""Tests for VLLMModel's max_model_len forwarding.
 
-The bug being guarded against: prior to the fix, `runtime_params.engine_args`
-keys (e.g. `max_model_len`) were unpacked into `VLLMModel.__init__`'s `**kwargs`
-but then silently dropped because the explicit `AsyncEngineArgs(...)` call only
-read a hardcoded subset of kwargs. PR #1564 review caught this.
-
-These tests don't require vllm to be installed — they exercise the pure-Python
-kwarg-filter logic against a fake `AsyncEngineArgs` dataclass.
+Guards against the bug where runtime_params.engine_args values (e.g.
+max_model_len) were unpacked into VLLMModel.__init__'s **kwargs but then
+silently dropped because AsyncEngineArgs was constructed with a hardcoded
+subset of kwargs. PR #1564 review caught this; the fix passes max_model_len
+explicitly.
 """
 
-import dataclasses
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 
-# Minimal stub mimicking vllm.engine.arg_utils.AsyncEngineArgs's relevant fields.
-# Real AsyncEngineArgs has ~80 fields; we only need the ones referenced by the
-# forwarding logic.
-@dataclasses.dataclass
-class _FakeAsyncEngineArgs:
-    model: str = ""
-    tokenizer: str = ""
-    trust_remote_code: bool = False
-    tensor_parallel_size: int = 1
-    enable_expert_parallel: bool = False
-    enable_prefix_caching: bool = False
-    speculative_config: object = None
-    max_num_seqs: int = 256
-    skip_tokenizer_init: bool = False
-    async_scheduling: bool = True
-    enforce_eager: bool = False
-    max_model_len: int = 0
-    dtype: str = "auto"
-    gpu_memory_utilization: float = 0.9
-
-
-def _compute_forwarded_engine_kwargs(kwargs, consumed_kwargs):
-    """Mirror of the dict-comprehension in vllm.py:VLLMModel.__init__."""
-    engine_arg_fields = {f.name for f in dataclasses.fields(_FakeAsyncEngineArgs)}
-    return {
-        k: v
-        for k, v in kwargs.items()
-        if k in engine_arg_fields and k not in consumed_kwargs
+def _make_minimal_kwargs(**overrides):
+    base = {
+        "speculative_algorithm": "NONE",
+        "tokenizer_path": "/tmp/model",
+        "tensor_parallel_size": 1,
+        "moe_expert_parallel_size": 1,
+        "prefix_cache": False,
+        "async_scheduling": True,
     }
+    base.update(overrides)
+    return base
 
 
-# Match the constant defined in specdec_bench/models/vllm.py
-_VLLM_CONSUMED_KWARGS = frozenset({
-    "tokenizer_path",
-    "trust_remote_code",
-    "tensor_parallel_size",
-    "moe_expert_parallel_size",
-    "prefix_cache",
-    "speculative_algorithm",
-    "speculative_num_steps",
-    "speculative_num_draft_tokens",
-    "draft_model_dir",
-    "parallel_draft_block_sizes",
-    "max_matching_ngram_size",
-    "async_scheduling",
-})
+def _patch_vllm():
+    """Return a context-manager stack that stubs out vllm imports."""
+    import sys
+    import types
 
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.SamplingParams = MagicMock(return_value=MagicMock())
 
-def test_max_model_len_is_forwarded():
-    """`max_model_len` from runtime_params.engine_args reaches AsyncEngineArgs."""
-    kwargs = {
-        "tokenizer_path": "/foo",
-        "tensor_parallel_size": 2,
-        "speculative_algorithm": "MTP",
-        "max_model_len": 40960,
+    fake_engine = types.ModuleType("vllm.engine")
+    fake_arg_utils = types.ModuleType("vllm.engine.arg_utils")
+    fake_arg_utils.AsyncEngineArgs = MagicMock()
+
+    fake_inputs = types.ModuleType("vllm.inputs")
+    fake_inputs.TokensPrompt = MagicMock()
+
+    fake_v1 = types.ModuleType("vllm.v1")
+    fake_v1_engine = types.ModuleType("vllm.v1.engine")
+    fake_async_llm = types.ModuleType("vllm.v1.engine.async_llm")
+    fake_async_llm.AsyncLLM = MagicMock()
+    fake_async_llm.AsyncLLM.from_engine_args = MagicMock(return_value=MagicMock())
+
+    mods = {
+        "vllm": fake_vllm,
+        "vllm.engine": fake_engine,
+        "vllm.engine.arg_utils": fake_arg_utils,
+        "vllm.inputs": fake_inputs,
+        "vllm.v1": fake_v1,
+        "vllm.v1.engine": fake_v1_engine,
+        "vllm.v1.engine.async_llm": fake_async_llm,
     }
-    forwarded = _compute_forwarded_engine_kwargs(kwargs, _VLLM_CONSUMED_KWARGS)
-    assert forwarded == {"max_model_len": 40960}
+    for name, mod in mods.items():
+        sys.modules[name] = mod
+    return fake_arg_utils.AsyncEngineArgs
 
 
-def test_multiple_engine_args_are_forwarded():
-    """Other AsyncEngineArgs fields beyond max_model_len pass through."""
-    kwargs = {
-        "max_model_len": 40960,
-        "dtype": "bfloat16",
-        "gpu_memory_utilization": 0.85,
-    }
-    forwarded = _compute_forwarded_engine_kwargs(kwargs, _VLLM_CONSUMED_KWARGS)
-    assert forwarded == {
-        "max_model_len": 40960,
-        "dtype": "bfloat16",
-        "gpu_memory_utilization": 0.85,
-    }
+def test_max_model_len_forwarded_to_engine_args():
+    """max_model_len from runtime_params.engine_args reaches AsyncEngineArgs."""
+    AsyncEngineArgs = _patch_vllm()
+    import importlib
+    import sys
+    for key in list(sys.modules):
+        if "specdec_bench.models.vllm" in key or key == "specdec_bench.models.vllm":
+            del sys.modules[key]
 
+    from specdec_bench.models.vllm import VLLMModel
 
-def test_consumed_kwargs_are_not_double_forwarded():
-    """Kwargs VLLMModel reads itself must NOT also flow through `**`, or
-    AsyncEngineArgs would raise `got multiple values for keyword argument`."""
-    # `tensor_parallel_size` IS a real AsyncEngineArgs field AND is consumed
-    # explicitly by VLLMModel — exactly the dangerous case.
-    kwargs = {
-        "tensor_parallel_size": 4,
-        "trust_remote_code": True,
-        "max_model_len": 32768,
-    }
-    forwarded = _compute_forwarded_engine_kwargs(kwargs, _VLLM_CONSUMED_KWARGS)
-    # Only max_model_len passes through; the other two are caller-consumed.
-    assert forwarded == {"max_model_len": 32768}
-    assert "tensor_parallel_size" not in forwarded
-    assert "trust_remote_code" not in forwarded
+    kwargs = _make_minimal_kwargs(max_model_len=40960)
+    VLLMModel.__init__(MagicMock(), "/model", 4, {}, **kwargs)
 
-
-def test_unknown_kwargs_are_dropped():
-    """A kwarg that's neither consumed nor an AsyncEngineArgs field is dropped
-    silently — matches the original behaviour for typos / outdated configs."""
-    kwargs = {
-        "max_model_len": 1024,
-        "completely_made_up_field": "ignored",
-    }
-    forwarded = _compute_forwarded_engine_kwargs(kwargs, _VLLM_CONSUMED_KWARGS)
-    assert forwarded == {"max_model_len": 1024}
-
-
-def test_module_constant_matches_test_expectations():
-    """Pin the consumed-kwargs set defined in the module against this test's
-    copy, so adding a new consumed kwarg without updating tests fails loudly.
-
-    Skipped in environments without torch/vllm — the module's imports pull in
-    `from .base import Model` which transitively requires torch.
-    """
-    try:
-        from specdec_bench.models import vllm as vllm_module
-    except ImportError as e:
-        pytest.skip(f"specdec_bench.models.vllm not importable: {e}")
-
-    assert vllm_module._VLLM_CONSUMED_KWARGS == _VLLM_CONSUMED_KWARGS, (
-        "Update _VLLM_CONSUMED_KWARGS in tests/examples/specdec_bench/"
-        "test_vllm_kwargs_forwarding.py to match the module's definition."
+    call_kwargs = AsyncEngineArgs.call_args[1]
+    assert call_kwargs.get("max_model_len") == 40960, (
+        "max_model_len was not forwarded to AsyncEngineArgs"
     )
+
+
+def test_max_model_len_absent_passes_none():
+    """When max_model_len is not in kwargs, None is passed — vLLM uses its default."""
+    AsyncEngineArgs = _patch_vllm()
+    import sys
+    for key in list(sys.modules):
+        if "specdec_bench.models.vllm" in key:
+            del sys.modules[key]
+
+    from specdec_bench.models.vllm import VLLMModel
+
+    kwargs = _make_minimal_kwargs()
+    VLLMModel.__init__(MagicMock(), "/model", 4, {}, **kwargs)
+
+    call_kwargs = AsyncEngineArgs.call_args[1]
+    assert "max_model_len" in call_kwargs
+    assert call_kwargs["max_model_len"] is None
+
+
+def test_no_duplicate_keyword_argument():
+    """prefix_cache / moe_expert_parallel_size are remapped — passing them plus
+    their vllm names (enable_prefix_caching / enable_expert_parallel) must NOT
+    raise 'got multiple values for keyword argument'."""
+    AsyncEngineArgs = _patch_vllm()
+    import sys
+    for key in list(sys.modules):
+        if "specdec_bench.models.vllm" in key:
+            del sys.modules[key]
+
+    from specdec_bench.models.vllm import VLLMModel
+
+    kwargs = _make_minimal_kwargs(prefix_cache=True, moe_expert_parallel_size=2)
+    # Should not raise
+    VLLMModel.__init__(MagicMock(), "/model", 4, {}, **kwargs)
+    call_kwargs = AsyncEngineArgs.call_args[1]
+    assert call_kwargs.get("enable_prefix_caching") is True
+    assert call_kwargs.get("enable_expert_parallel") is True
