@@ -1,6 +1,6 @@
 ---
 name: day0-release
-description: Deterministic end-to-end driver for day-0 quantized-checkpoint releases — chains PTQ → deployment → evaluation → comparison with enforced gates between stages, and returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE). Use when the user asks to "release a model at day-0", "quantize and validate model X is within N% of baseline and tell me if it's publishable", or "run the full day-0 workflow". Do NOT use for single-stage requests — quantizing only (use ptq), serving only (use deployment), evaluating only (use evaluation), or comparing two existing runs (use compare-results).
+description: Deterministic end-to-end driver for day-0 quantized-checkpoint releases — chains PTQ → evaluation → comparison with enforced gates between stages (the evaluation stage deploys the checkpoint itself), and returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE). Use when the user asks to "release a model at day-0", "quantize and validate model X is within N% of baseline and tell me if it's publishable", or "run the full day-0 workflow". Do NOT use for single-stage requests — quantizing only (use ptq), serving only (use deployment), evaluating only (use evaluation), or comparing two existing runs (use compare-results).
 license: Apache-2.0
 ---
 
@@ -34,10 +34,14 @@ Resolve these before starting (ask the user for anything missing):
 ## The chain
 
 ```text
-setup ─▶ PTQ ─▶ deploy ─▶ baseline-eval ─▶ quantized-eval ─▶ compare ─▶ closeout
-          │       │            │                │              │
-       gate_ptq  health     gate_run         gate_run      gate_compare
+setup ─▶ PTQ ─▶ baseline-eval ─▶ quantized-eval ─▶ compare ─▶ closeout
+          │          │                │               │
+       gate_ptq   gate_run         gate_run       gate_compare
 ```
+
+The **evaluation** skill deploys the model it evaluates (it stands up its own
+endpoint per run), so there is no separate deploy stage — a serving failure
+surfaces through the eval stage's gate (`DEPLOYMENT_HEALTH_FAILED`).
 
 Run each stage by invoking the domain skill, then run its gate before
 proceeding. **Do not advance past a failed gate.** Copy this checklist and track
@@ -47,11 +51,10 @@ progress:
 - [ ] Step 0: Resolve inputs; confirm threshold and eval set
 - [ ] Step 1: Setup gate — creds present, cluster reachable
 - [ ] Step 2: PTQ (ptq skill) → gate_ptq.py
-- [ ] Step 3: Deploy (deployment skill) → health gate
-- [ ] Step 4: Baseline eval (evaluation skill) → gate_run.py   [skip if cached, see below]
-- [ ] Step 5: Quantized eval (evaluation skill) → gate_run.py
-- [ ] Step 6: Compare (compare-results skill) → gate_compare.py → decision
-- [ ] Step 7: Closeout — report + publish recommendation
+- [ ] Step 3: Baseline eval (evaluation skill, deploys source) → gate_run.py   [skip if cached, see below]
+- [ ] Step 4: Quantized eval (evaluation skill, deploys candidate) → gate_run.py
+- [ ] Step 5: Compare (compare-results skill) → gate_compare.py → decision
+- [ ] Step 6: Closeout — report + publish recommendation
 ```
 
 ### Step 1 — Setup gate
@@ -73,26 +76,24 @@ python .claude/skills/day0-release/scripts/gate_ptq.py --summary <validation-sum
 ```
 
 `gate_ptq.py` returns JSON `{pass, failure_class, detail}`. On `pass: false`,
-branch on `failure_class` (see **Triage** below). Do not deploy an
+branch on `failure_class` (see **Triage** below). Do not evaluate an
 unvalidated checkpoint.
 
-### Step 3 — Deploy
-
-Invoke the **deployment** skill to serve the checkpoint. Gate on the skill's own
-health check: the endpoint must be up and return one successful generation. On
-failure, triage (PATCH serving flags / image / TP, or POINT_INFEASIBLE).
-
-### Step 4 — Baseline eval
+### Step 3 — Baseline eval
 
 The baseline is the **source** (pre-quantization) model on the same task set and
 sampling params. **Look it up first** — if a matching baseline run already
 exists in MLflow (same model, task set, sampling params), reuse it and skip this
-stage. Otherwise run it via the **evaluation** skill. Gate with `gate_run.py`.
+stage. Otherwise run it via the **evaluation** skill (which deploys the source
+model itself). Gate with `gate_run.py`.
 
-### Step 5 — Quantized eval
+### Step 4 — Quantized eval
 
-Invoke the **evaluation** skill on the deployed quantized checkpoint, matching
-the baseline's task set and sampling params. Gate:
+Invoke the **evaluation** skill on the quantized checkpoint, matching the
+baseline's task set and sampling params. The evaluation skill stands up the
+serving endpoint itself; a serving failure surfaces here as a failed
+`gate_run.py` with `DEPLOYMENT_HEALTH_FAILED` (triage: PATCH serving flags /
+image / TP, or `POINT_INFEASIBLE`). Gate:
 
 ```bash
 python .claude/skills/day0-release/scripts/gate_run.py --run <run-summary.json>
@@ -101,7 +102,7 @@ python .claude/skills/day0-release/scripts/gate_run.py --run <run-summary.json>
 A `pass: false` here means the run is incomplete or invalid (judge/parse error,
 dropped samples) — do **not** compare scores from it.
 
-### Step 6 — Compare
+### Step 5 — Compare
 
 Invoke the **compare-results** skill to produce per-task deltas, then gate:
 
@@ -120,7 +121,7 @@ override inference if a task's scores happen to fall in an ambiguous range.
 
 Decision from `gate_compare.py`:
 
-- **ACCEPT** — every task within threshold → go to Step 7.
+- **ACCEPT** — every task within threshold → go to Step 6.
 - **REGRESSION** — one or more tasks exceed threshold. **v1 stops here and
   reports** which tasks regressed by how much. (Picking the next recipe and
   re-running is deferred — see Scope.)
@@ -128,7 +129,7 @@ Decision from `gate_compare.py`:
   candidate by a large margin, or a task score outside its valid range) →
   surface to the user.
 
-### Step 7 — Closeout
+### Step 6 — Closeout
 
 Report the decision with: source vs output size + ratio, per-task baseline /
 candidate / delta / within-threshold, MLflow run IDs, and a publish

@@ -1,21 +1,25 @@
 [
   {
     "name": "full-day0-release-triggers",
-    "skills": ["day0-release"],
-    "query": "Release nvidia/Some-New-Model at day-0: quantize to NVFP4, validate it's within 1% of the BF16 baseline on the AA suite, and tell me if it's publishable. Run on my cluster.",
+    "skills": [
+      "day0-release"
+    ],
+    "query": "Release org/PLACEHOLDER-MODEL at day-0: quantize to NVFP4, validate it's within 1% of the BF16 baseline on the AA suite, and tell me if it's publishable. Run on my cluster.",
     "files": [],
     "expected_behavior": [
       "Selects the day0-release skill for the full goal-driven release",
       "Resolves model, recipe/qformat, cluster, eval set, and threshold before starting",
-      "Runs stages in fixed order: setup, PTQ, deploy, baseline eval, quantized eval, compare, closeout",
+      "Runs stages in fixed order: setup, PTQ, baseline eval, quantized eval, compare, closeout",
       "Runs the gate after each stage and does not advance past a failed gate",
       "Returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE), not just raw scores"
     ]
   },
   {
     "name": "quantize-only-does-not-trigger-day0",
-    "skills": ["ptq"],
-    "query": "Quantize nvidia/Some-New-Model to NVFP4 and save the checkpoint.",
+    "skills": [
+      "ptq"
+    ],
+    "query": "Quantize org/PLACEHOLDER-MODEL to NVFP4 and save the checkpoint.",
     "files": [],
     "expected_behavior": [
       "Selects the ptq skill, not day0-release",
@@ -25,7 +29,9 @@
   },
   {
     "name": "evaluate-only-does-not-trigger-day0",
-    "skills": ["evaluation"],
+    "skills": [
+      "evaluation"
+    ],
     "query": "Run MMLU-Pro on the endpoint I already have serving at http://host:8000.",
     "files": [],
     "expected_behavior": [
@@ -35,20 +41,25 @@
   },
   {
     "name": "ptq-gate-blocks-on-coverage-miss",
-    "skills": ["day0-release"],
-    "query": "Run the day-0 workflow for nvidia/Some-New-Model with nvfp4, but the PTQ checkpoint came out the same size as the source.",
+    "skills": [
+      "day0-release"
+    ],
+    "query": "Run the day-0 workflow for org/PLACEHOLDER-MODEL with nvfp4, but the PTQ checkpoint came out the same size as the source.",
     "files": [],
     "expected_behavior": [
-      "Runs gate_ptq.py on the exported checkpoint before deploying",
+      "Runs gate_ptq.py on the exported checkpoint before evaluating",
       "Treats a size ratio >= 1.0 or zero quantized-layer coverage as a gate failure",
-      "Does not deploy or evaluate a checkpoint that failed the PTQ gate",
+      "Does not evaluate a checkpoint that failed the PTQ gate",
       "Branches on the failure_class (e.g. MODEL_UNSUPPORTED or QUANT_COVERAGE_FAILURE) rather than silently continuing"
     ]
   },
   {
     "name": "regression-reports-and-stops-in-v1",
-    "skills": ["day0-release", "compare-results"],
-    "query": "Day-0 release for nvidia/Some-New-Model nvfp4; the quantized GPQA score is 3 points below baseline.",
+    "skills": [
+      "day0-release",
+      "compare-results"
+    ],
+    "query": "Day-0 release for org/PLACEHOLDER-MODEL nvfp4; the quantized GPQA score is 3 points below baseline.",
     "files": [],
     "expected_behavior": [
       "Runs gate_compare.py with the accuracy threshold",
