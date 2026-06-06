@@ -1,0 +1,87 @@
+# EAGLE3 streaming (RDMA, no-disk) — MULTI-NODE validation: 2 serve + 1 trainer(8 rank).
+#
+# Topology (see common/eagle3/train_eagle_streaming.sh dispatch):
+#   3 Slurm nodes, 8 GPU each. SERVE_NODES=2 -> nodes 0,1 = independent serve replicas
+#   (each SERVE_TP=1, uses 1 of 8 GPUs; sidecar 18999, no collision across nodes).
+#   node 2 = single trainer node, 8 DDP ranks (all 8 GPUs). Trainer round-robins its
+#   fetches across the 2 serve URLs (data.streaming_server_url = comma-joined list),
+#   pulling hidden states over NIXL RDMA (no disk).
+#
+# Validates: DP serve fan-out + per-host add_remote_agent + per-(rank,worker) NIXL
+# agents/buffers. HS_POOL_SLOTS=64 >> peak in-flight per serve (8x4/2=16) to stay
+# clear of the ring-slot reuse race.
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/perf_study/rdma_2s1t.yaml --yes
+
+job_name: Qwen3-8B_EAGLE3_streaming_multi_node
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  task_1:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.mode=streaming
+      - data.data_path=/scratchspace/data/train.jsonl
+      - training.output_dir=/scratchspace/eagle3
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
+      - eagle.eagle_use_torch_compile=false
+      - training.max_steps=200
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - EAGLE_CAPTURE_IDS: "[2,18,33,36]"
+      - SERVE_TP: "1"
+      - SERVE_NODES: "2"
+      - STREAMING_NUM_WORKERS: "4"
+      - HS_TRANSPORT: "rdma"
+      - HS_SIDECAR_PORT: "18999"
+      - HS_POOL_SLOTS: "64"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 3
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:latest
+
+  task_2:
+    script: common/specdec_bench/quick_check.sh
+    args:
+      - --draft_model_dir /scratchspace/export
+      - --draft_length 3
+      - --output_length 4096
+      - --engine VLLM
+      - --tp_size 1
+      - --ep_size 1
+      - --speculative_algorithm EAGLE3
+      - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+      - --concurrency 1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:latest
