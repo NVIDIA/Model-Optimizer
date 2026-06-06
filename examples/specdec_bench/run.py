@@ -155,6 +155,7 @@ def run_simple(args):
         speculative_algorithm=args.speculative_algorithm,
         draft_model_dir=args.draft_model_dir,
         speculative_num_steps=args.draft_length,
+        speculative_num_draft_tokens=args.block_size,
         tensor_parallel_size=args.tp_size,
         moe_expert_parallel_size=args.ep_size,
         trust_remote_code=args.trust_remote_code,
@@ -292,6 +293,16 @@ if __name__ == "__main__":
         "--output_length", type=int, required=False, default=4096, help="Output length"
     )
     parser.add_argument("--draft_length", type=int, required=False, default=3, help="Draft length")
+    parser.add_argument(
+        "--block_size",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "DFlash block size (num_speculative_tokens). Use instead of --draft_length "
+            "for DFLASH: block_size = draft_length + 1."
+        ),
+    )
     parser.add_argument(
         "--tp_size", type=int, required=False, default=4, help="Tensor parallel size"
     )
