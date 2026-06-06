@@ -1,9 +1,47 @@
+# SPEED-bench DFlash speculative-decoding run for Qwen3.5-4B via vLLM,
+# matrix cell t0_d3 (temperature=0, draft_length=3 → block_size=4).
+#
+# Companion to specdec_bench_mtp.yaml. This variant exercises the
+# z-lab/Qwen3.5-4B-DFlash external draft model. DFlash ignores
+# --draft_length (which maps to vLLM's speculative_num_steps); it reads
+# `speculative_num_draft_tokens` instead, which we pass via --block_size
+# = draft_length + 1.
+#
+# Two-task pipeline:
+#   task_0  Quantitative quality split (nvidia/SPEED-Bench-Internal/qualitative)
+#   task_1  Long-context throughput split (nvidia/SPEED-Bench-Internal/throughput_32k)
+#
+# Results write to /scratchspace/qwen35_4b_dflash_vllm_t0_d3/<split>/.
+# The pensieve-intern `specdec_bench` workflow's wrap_up stage owns
+# publishing these to s3://team-specdec-workgroup/results/qwen35_4b_dflash_vllm_t0_d3/<split>/
+# with provenance stamps (jira_ticket + huggingface_model_id).
+# Sweep-name convention: <model>_<algorithm>_<engine>_<cell_tag> so
+# multi-model / multi-engine / multi-cell records don't collide in S3.
+#
+# Container: vllm/vllm-openai:v0.22.1+ is required. The `dflash`
+# speculative method landed in vLLM v0.22.0; the qwen3_5-cu130 image
+# used by sibling MTP/NONE YAMLs predates this and rejects
+# `--speculative_algorithm DFLASH` with "Input should be 'ngram', ...,
+# 'mtp'".
+#
+# Slurm run on cw_dfw:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3.5-4B/specdec_bench_dflash_vllm_t0_d3.yaml --yes
+
 job_name: Qwen3.5-4B_specdec_bench_dflash_vllm_t0_d3
 
 pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3.5-4B
 
+  # Step 1: qualitative split — quality / acceptance-rate numbers with
+  # DFlash block_size=4 (draft_length=3 + 1). tp_size=2 + concurrency=32
+  # trades aa_timing fidelity for ~30x wall-clock speedup;
+  # acceptance-length (AL) is concurrency-independent and is the primary
+  # metric we care about for this split.
+  #
+  # --runtime_params is the per-cell file (sampling_kwargs.temperature
+  # for this cell + the throughput_32k engine_args pin that task_1
+  # needs — harmless on qualitative since prompts top out at ~8K).
   task_0:
     script: common/specdec_bench/run.sh
     args:
@@ -12,15 +50,15 @@ pipeline:
       - --engine VLLM
       - --speculative_algorithm DFLASH
       - --draft_model_dir /hf-local/z-lab/Qwen3.5-4B-DFlash
-      - --draft_length 3
-      - --runtime_params common/specdec_bench/_cells/qwen3.5-4b_dflash_vllm_t0_d3.yaml
+      - --block_size 4
+      - --runtime_params common/specdec_bench/_cells/qwen35_4b_dflash_vllm_t0_d3.yaml
       - --tp_size 2
       - --ep_size 1
       - --concurrency 32
       - --output_length 4096
       - --aa_timing
       - --show_progress
-      - --save_dir /scratchspace/qwen3.5-4b_dflash_vllm_t0_d3/qualitative
+      - --save_dir /scratchspace/qwen35_4b_dflash_vllm_t0_d3/qualitative
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
@@ -31,6 +69,14 @@ pipeline:
       gpus_per_node: 2
       container: vllm/vllm-openai:v0.22.1
 
+  # Step 2: throughput_32k split — long-context throughput with DFlash
+  # block_size=4. `--num_requests 80` caps the run at 80 samples (split
+  # has 1,536) so it fits in the 4h Slurm time-limit; each 32K-input
+  # sample takes ~60-90s. tp_size=2 doubles the KV-cache budget across
+  # 2 GPUs; concurrency=8 keeps 8 * 32K = 256K tokens of in-flight KV
+  # under that doubled budget. Same per-cell --runtime_params file as
+  # task_0 — its max_model_len=40960 pin is what this split actually
+  # needs.
   task_1:
     script: common/specdec_bench/run.sh
     args:
@@ -39,8 +85,8 @@ pipeline:
       - --engine VLLM
       - --speculative_algorithm DFLASH
       - --draft_model_dir /hf-local/z-lab/Qwen3.5-4B-DFlash
-      - --draft_length 3
-      - --runtime_params common/specdec_bench/_cells/qwen3.5-4b_dflash_vllm_t0_d3.yaml
+      - --block_size 4
+      - --runtime_params common/specdec_bench/_cells/qwen35_4b_dflash_vllm_t0_d3.yaml
       - --tp_size 2
       - --ep_size 1
       - --concurrency 8
@@ -48,7 +94,7 @@ pipeline:
       - --output_length 4096
       - --aa_timing
       - --show_progress
-      - --save_dir /scratchspace/qwen3.5-4b_dflash_vllm_t0_d3/throughput_32k
+      - --save_dir /scratchspace/qwen35_4b_dflash_vllm_t0_d3/throughput_32k
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
@@ -58,3 +104,11 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 2
       container: vllm/vllm-openai:v0.22.1
+
+
+# S3 upload is intentionally not a task in this YAML — the bench
+# pipeline only writes results to /scratchspace/qwen35_4b_dflash_vllm_t0_d3/<split>/.
+# The pensieve-intern specdec_bench workflow's wrap_up stage owns
+# harvesting these from lustre and publishing them to the team S3 vault
+# with provenance stamps (jira_ticket + huggingface_model_id) for the
+# "official record" tracking.

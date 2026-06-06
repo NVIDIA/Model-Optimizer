@@ -1,0 +1,16 @@
+# Per-cell runtime_params for the SPEED-Bench DFlash cell
+# qwen35_4b_dflash_vllm_t0_d3 (temperature=0, draft_length=3 →
+# block_size=4). Companion to
+# tools/launcher/examples/Qwen/Qwen3.5-4B/specdec_bench_dflash_vllm_t0_d3.yaml.
+#
+# Both pipeline tasks (qualitative + throughput_32k) load this file via
+# `--runtime_params`. The temperature override is cell-specific. The
+# `max_model_len: 40960` mirrors common/specdec_bench/runtime_params_throughput_32k.yaml
+# for task_1 (32K input + 4K output + 4K headroom) — harmless on task_0
+# where prompts top out at ~8K. We duplicate it here instead of chaining
+# two `--runtime_params` files because run.py takes a single path.
+
+sampling_kwargs:
+  temperature: 0
+engine_args:
+  max_model_len: 40960
