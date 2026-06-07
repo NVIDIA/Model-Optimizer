@@ -13,8 +13,9 @@ Load out-of-tree:
      "kv_role":"kv_producer",
      "kv_connector_extra_config":{"sidecar_port":"18999","pool_slots":"64","max_tokens":"512"}}'
 
-Scope: TP=1, host(pinned) memory (container UCX has no CUDA), ring-slot reuse
-(fine when in-flight requests < pool_slots; no credit protocol yet).
+Scope: TP>=1 (hidden states are replicated across TP ranks; only rank 0 owns the
+pool + sidecar and serves them), host(pinned) memory (container UCX has no CUDA),
+ring-slot reuse (fine when in-flight requests < pool_slots; no credit protocol yet).
 """
 import base64
 import json
@@ -135,6 +136,11 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._pool_slots = int(ex("pool_slots", "64"))
         self._max_tokens = int(ex("max_tokens", "512"))
         self.cache_layers: list[str] = []
+        # TP: hidden states are replicated across ranks, so only rank 0 owns the
+        # pool + sidecar (set for real in register_kv_caches). Default True so the
+        # scheduler-side instance and TP=1 behave exactly as before.
+        self._tp_rank = 0
+        self._owner = True
         # worker state
         self._copy_stream = None
         self._nixl = None
@@ -161,11 +167,26 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             CacheOnlyAttentionLayer,
         )
         from nixl._api import nixl_agent, nixl_agent_config
+        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+
+        # TP: the captured hidden states are REPLICATED across TP ranks
+        # (CacheOnlyAttentionLayer is sized to the full hidden_size, never
+        # hidden_size/tp; the residual stream is all-reduced). So only TP rank 0
+        # registers the pool + runs the sidecar and serves the (identical) hidden
+        # states; other ranks no-op. This avoids the sidecar TCP-port collision
+        # and the TPx pinned-memory waste, and needs no trainer-side change.
+        self._tp_rank = get_tensor_model_parallel_rank()
+        self._owner = self._tp_rank == 0
 
         layers = get_layers_from_vllm_config(
             self._vllm_config, CacheOnlyAttentionLayer, list(kv_caches.keys()))
         self.cache_layers = list(layers.keys())
         assert len(self.cache_layers) == 1
+        if not self._owner:
+            logger.info("RdmaHiddenStatesConnector tp_rank=%d: non-owner, skipping "
+                        "pool/sidecar (hidden states are replicated on rank 0).",
+                        self._tp_rank)
+            return
         kv = kv_caches[self.cache_layers[0]]
         # per-token feature = everything past [num_blocks, block_size]
         self._per_token_elems = int(prod(kv.shape[2:]))
@@ -206,6 +227,8 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_save(self): pass
 
     def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        if not self._owner:
+            return  # non-owner TP ranks hold an identical copy; rank 0 serves it
         if layer_name not in self.cache_layers:
             return
         from vllm.model_executor.models.extract_hidden_states import (
@@ -263,7 +286,19 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     def request_finished_all_groups(self, request, block_ids):
         return self.request_finished(request, block_ids[0])
 
+    def get_finished_count(self):
+        # Override KVOutputAggregator's default (world_size): only TP rank 0 (the
+        # owner) reports finished_sending, so a single completion frees a request.
+        # Without this the aggregator would wait for all TP workers and never free.
+        return 1
+
     def get_finished(self, finished_req_ids):
+        # Only the owner gates completion on its copy event. Non-owners have no
+        # _bufs and MUST report nothing — else (with get_finished_count==1) they
+        # would mark a request done before rank 0's DtoH copy lands, and the
+        # trainer would RDMA-read a stale/empty slot.
+        if not self._owner:
+            return None, None
         self._accum_finished.update(finished_req_ids)
         done = set()
         for rid in list(self._accum_finished):
