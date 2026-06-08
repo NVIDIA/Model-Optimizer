@@ -37,10 +37,10 @@ from .config import (
     normalize_quant_cfg_list,
 )
 from .nn import (
-    NVFP4StaticQuantizer,
     QuantModule,
     QuantModuleRegistry,
     SequentialQuantizer,
+    StaticBlockScaleQuantizer,
     SVDQuantLinear,
     TensorQuantizer,
 )
@@ -99,10 +99,11 @@ def restore_quantized_model(
 
 
 def maybe_promote_nvfp4_static_quantizer(module: nn.Module, quantizer_state: dict) -> None:
-    if quantizer_state.get("_is_nvfp4_static_quantizer") and not isinstance(
-        module, NVFP4StaticQuantizer
-    ):
-        NVFP4StaticQuantizer.from_tensor_quantizer(module)
+    if (
+        quantizer_state.get("_is_static_block_scale_quantizer")
+        or quantizer_state.get("_is_nvfp4_static_quantizer")
+    ) and not isinstance(module, StaticBlockScaleQuantizer):
+        StaticBlockScaleQuantizer.from_tensor_quantizer(module)
 
 
 def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: MetadataDict):
@@ -138,6 +139,7 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         if isinstance(module, TensorQuantizer):
             name = get_unwrapped_name(name, model)
             state = quantizer_state_dict[name]
+            # TODO: Add a registry for TensorQuantizers and avoid this manual conversion.
             maybe_promote_nvfp4_static_quantizer(module, state)
             module.set_from_modelopt_state(state)
 
