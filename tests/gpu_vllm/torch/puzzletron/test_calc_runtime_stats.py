@@ -33,6 +33,7 @@ from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import calc_run
 pytest.importorskip("vllm", reason="vLLM is required for calc_runtime_for_subblocks")
 
 
+@pytest.mark.skip(reason="AnyModel is not supported in vLLM yet")
 def test_calc_runtime_for_subblocks(tmp_path: Path):
     """End-to-end: a tiny subblock set yields a runtime dict + positive no-block overhead."""
     tokenizer = get_tiny_tokenizer()
