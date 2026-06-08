@@ -90,6 +90,17 @@ def evaluate_comparison(baseline, candidate, threshold=0.01, relative=False, sca
         dict ``{pass, decision, failure_class, detail, per_task}``.
     """
     scales = scales or {}
+    if not isinstance(scales, dict) or any(
+        not (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0)
+        for v in scales.values()
+    ):
+        return {
+            "pass": False,
+            "decision": ANOMALOUS,
+            "failure_class": "USER_CONFIG_ERROR",
+            "detail": f"invalid scales: expected {{task: positive finite number}}, got {scales!r}",
+            "per_task": {},
+        }
     missing = sorted((set(baseline) | set(candidate)) - (set(baseline) & set(candidate)))
     if missing:
         return {

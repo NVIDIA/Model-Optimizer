@@ -155,9 +155,7 @@ def main(argv=None):
     """CLI entry point: read a validation-summary JSON and print the verdict."""
     p = argparse.ArgumentParser(description="Day-0 post-quantization checkpoint gate")
     p.add_argument("--summary", help="validation-summary JSON (see module docstring)")
-    p.add_argument("--checkpoint", help="(reserved) checkpoint dir; v1 expects --summary")
-    p.add_argument("--source", help="(reserved) source model id/path")
-    p.add_argument("--recipe", help="(reserved) qformat; overrides summary.recipe if given")
+    p.add_argument("--recipe", help="qformat; overrides the recipe recorded in the summary")
     args = p.parse_args(argv)
 
     if not args.summary:

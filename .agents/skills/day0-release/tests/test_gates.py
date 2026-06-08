@@ -101,6 +101,21 @@ def test_compare_mixed_scales_in_one_suite():
     assert "tau2_bench_telecom" in r["detail"] and "gpqa" not in r["detail"]
 
 
+def test_compare_invalid_scales_rejected():
+    # Non-dict, or non-positive / non-numeric scale values must be rejected
+    # (USER_CONFIG_ERROR) rather than crashing the arithmetic.
+    for bad in ([1, 2], 5, {"t": "100"}, {"t": 0}, {"t": -5}, {"t": float("nan")}):
+        r = evaluate_comparison({"t": 50.0}, {"t": 49.5}, threshold=0.01, scales=bad)
+        assert not r["pass"] and r["failure_class"] == "USER_CONFIG_ERROR", bad
+
+
+def test_compare_empty_or_none_scales_ok():
+    # Empty/None scales are valid (fall back to per-task inference).
+    for ok in (None, {}, []):
+        r = evaluate_comparison({"t": 50.0}, {"t": 49.5}, threshold=0.01, scales=ok)
+        assert r["pass"], ok
+
+
 # ── gate_run ──────────────────────────────────────────────────────────
 
 
