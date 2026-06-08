@@ -16,7 +16,7 @@
 """Unit tests for ``modelopt.torch.fastgen.plugins.qwen_image``.
 
 Ports the checklist §1 bullets (pack/unpack + FastGen parity + _call_model wiring)
-into pytest form so they live in-repo and run under ``pytest tests/unit/torch/fastgen``.
+into pytest form so they live in-repo and run under ``pytest tests/examples/diffusers``.
 Adds the §6-specific bullet ``num_train_timesteps != None`` constructor error.
 
 The parity comparison against the FastGen reference extract is bit-exact

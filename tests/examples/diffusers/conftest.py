@@ -29,3 +29,20 @@ def tiny_wan22_path(tmp_path_factory):
 
     tmp_path = tmp_path_factory.mktemp("wan22")
     return str(create_tiny_wan22_pipeline_dir(tmp_path))
+
+
+@pytest.fixture(scope="session")
+def tiny_qwen_image_path(tmp_path_factory):
+    """Create a tiny Qwen-Image pipeline and return its path (built once per session).
+
+    SKETCH fixture for the recipe-level DMD2 e2e (``test_fastgen_recipe_e2e.py``).
+    See ``create_tiny_qwen_image_pipeline_dir`` for caveats — notably the tiny
+    Qwen2.5-VL text encoder, which needs in-container validation.
+    """
+    try:
+        from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
+    except ImportError:
+        pytest.skip("Qwen-Image diffusers models not available")
+
+    tmp_path = tmp_path_factory.mktemp("qwen_image")
+    return str(create_tiny_qwen_image_pipeline_dir(tmp_path))
