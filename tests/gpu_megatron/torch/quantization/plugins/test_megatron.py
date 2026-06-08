@@ -694,6 +694,48 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
     )
 
 
+# OMNIML-4998: per-expert weight amax (axis=0) on TEGroupedLinear should round-trip
+# through sharded_state_dict / dist-checkpoint with bit-for-bit equality across EP.
+TE_GROUPED_PER_EXPERT_CFG = {
+    "algorithm": "max",
+    "quant_cfg": [
+        # Disable everything (attention, embeddings, non-MoE MLP) so the test
+        # isolates the per-expert path on TEGroupedMLP experts.
+        {"quantizer_name": "*", "enable": False},
+        # Re-enable axis=0 on TEGrouped MoE experts only -- this triggers the
+        # per-expert path inside _QuantTEGroupedLinear.
+        {
+            "quantizer_name": "*experts.linear_fc*.weight_quantizer",
+            "cfg": {"num_bits": 8, "axis": 0, "enable": True},
+        },
+    ],
+}
+
+
+def test_te_grouped_per_expert_sharded_state_dict(dist_workers_size_4, need_4_gpus, tmp_path):
+    """Per-expert (axis=0) weight amax round-trips through dist-checkpoint on TEGroupedMLP."""
+    moe_config = {
+        "tp_size": 1,
+        "ep_size": 2,
+        "etp_size": 1,
+        "num_moe_experts": 4,
+        "moe_grouped_gemm": True,
+        "transformer_impl": "transformer_engine",
+    }
+    dist_workers_size_4.run(
+        partial(
+            _test_sharded_state_dict,
+            tmp_path,
+            copy.deepcopy(TE_GROUPED_PER_EXPERT_CFG),
+            32,
+            None,
+            False,
+            False,
+            moe_config,
+        ),
+    )
+
+
 @pytest.mark.parametrize("ep_size", [1, 2])
 @pytest.mark.parametrize("sync_weight_amax", [True, False])
 def test_layer_sync_moe_local_experts_amax(dist_workers, ep_size, sync_weight_amax):

@@ -680,6 +680,18 @@ if HAS_TE:
 
     # Quantized subclasses to support TEGroupedMLP quantization
     class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
+        def _ep_group(self):
+            # Return the expert_model_parallel_group iff it's initialized AND has >1 rank.
+            # _MegatronTEGroupedMLP._setup populates parallel_state with the EP group;
+            # outside that wrapping it may be unset (e.g. ad-hoc unit tests).
+            ps = getattr(self, "parallel_state", None)
+            if ps is None:
+                return None
+            ep = ps.expert_model_parallel_group
+            if not ep.is_initialized() or ep.world_size() <= 1:
+                return None
+            return ep
+
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             # _sharded_state_dict_grouped adds _extra_state{gemm_idx} for gemm_idx:[1, num_gemms] in
             # sharded_state_dict which is same as _extra_state. The _extra_state{gemm_idx} is used for
@@ -690,7 +702,40 @@ if HAS_TE:
                 for k, v in state_dict.items()
                 if not any(k.endswith(f"_extra_state{num}") for num in range(1, self.num_gemms))
             }
+            # Per-expert amax is gathered to [num_gemms_global] at save time (see
+            # _process_quantizer_amax). On load each EP rank narrows it back to its
+            # local [num_gemms] slice before the base class's view_as() reshape.
+            ep = self._ep_group()
+            if ep is not None:
+                global_size = self.num_gemms * ep.world_size()
+                offset = ep.rank() * self.num_gemms
+                for k in list(filtered_state_dict.keys()):
+                    if (
+                        "weight_quantizer" in k
+                        and k.endswith("_amax")
+                        and filtered_state_dict[k].numel() == global_size
+                    ):
+                        filtered_state_dict[k] = (
+                            filtered_state_dict[k]
+                            .view(global_size)
+                            .narrow(0, offset, self.num_gemms)
+                        )
             return super()._load_from_state_dict(filtered_state_dict, prefix, *args, **kwargs)
+
+        def _get_shard_axis_dict(self, state_dict):
+            # The column-parallel parent marks weight_quantizer._amax as TP-sharded
+            # along axis 0 whenever weight_quantizer.axis is not None — correct for
+            # per-channel-along-output, but wrong for our per-expert path: the
+            # post-gather amax is [num_gemms_global], not output-channel-sharded.
+            # Strip the marker so the dist-checkpoint framework treats it as
+            # replicated across TP. EP-aware handling lives in _process_quantizer_amax
+            # (gather on save) and _load_from_state_dict (narrow on load).
+            shard_axis_dict = super()._get_shard_axis_dict(state_dict)
+            if self._is_per_expert_weight_quant():
+                for k in list(shard_axis_dict):
+                    if "weight_quantizer" in k and k.endswith("_amax"):
+                        del shard_axis_dict[k]
+            return shard_axis_dict
 
         def _process_quantizer_amax(self, k, v, quantizer_state_dict):
             # numel == 1: per-tensor (legacy).
@@ -700,13 +745,25 @@ if HAS_TE:
             # not yet supported on TEGroupedLinear.
             if v.numel() == 1:
                 quantizer_state_dict[k] = v.view(-1)
-            elif v.numel() == self.num_gemms:
-                quantizer_state_dict[k] = v.view(self.num_gemms)
-            else:
+                return
+            if v.numel() != self.num_gemms:
                 raise AssertionError(
                     f"TEGroupedLinear quantizer state {k} has numel {v.numel()}; "
                     f"expected 1 (per-tensor) or {self.num_gemms} (per-expert)."
                 )
+            # Per-expert path. Each EP rank holds the amax for its local experts
+            # only; we all-gather across EP so the saved tensor is the global
+            # [num_gemms * ep_world_size] view. Every rank then writes the same
+            # tensor and the dist-checkpoint framework can safely replicate it
+            # across DP/TP. _load_from_state_dict slices it back to local.
+            v_local = v.view(self.num_gemms)
+            ep = self._ep_group()
+            if ep is None:
+                quantizer_state_dict[k] = v_local
+                return
+            gathered = [torch.empty_like(v_local) for _ in range(ep.world_size())]
+            torch.distributed.all_gather(gathered, v_local, group=ep.group)
+            quantizer_state_dict[k] = torch.cat(gathered, dim=0)
 
     @QuantModuleRegistry.register(
         {TEColumnParallelGroupedLinear: "megatron_TEColumnParallelGroupedLinear"}
