@@ -148,6 +148,8 @@ def compile_with_torch_tensorrt(model: torch.nn.Module, example_input: torch.Ten
     Q/DQ + matmul subgraphs become TRT precision layers. `export_torch_mode`
     makes modelopt emit Q/DQ in the TRT-friendly form during `torch.export`.
     """
+    # Imported here (not at module scope) so the quantize-only `--skip_trt` path
+    # still runs on hosts without torch_tensorrt installed.
     import torch_tensorrt
 
     print("Compiling with torch_tensorrt.compile (Dynamo IR)...")
