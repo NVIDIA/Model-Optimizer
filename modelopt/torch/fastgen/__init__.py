@@ -54,32 +54,15 @@ Typical usage with a YAML-driven config::
 """
 
 from . import flow_matching, losses, utils
-from .config import DistillationConfig, DMDConfig, EMAConfig, SampleTimestepConfig
-from .ema import ExponentialMovingAverage
-from .factory import create_fake_score
-from .loader import load_config, load_dmd_config
-from .methods.dmd import DMDPipeline
-from .pipeline import DistillationPipeline
+from .config import *
+from .ema import *
+from .factory import *
+from .loader import *
+from .methods.dmd import *
+from .pipeline import *
 
 # isort: off
 # Plugins must be imported after the core exports so the plugin hooks can reference
 # DMDPipeline if needed in the future; also matches the ordering used by
 # modelopt.torch.distill.
 from . import plugins
-
-__all__ = [
-    "DMDConfig",
-    "DMDPipeline",
-    "DistillationConfig",
-    "DistillationPipeline",
-    "EMAConfig",
-    "ExponentialMovingAverage",
-    "SampleTimestepConfig",
-    "create_fake_score",
-    "flow_matching",
-    "load_config",
-    "load_dmd_config",
-    "losses",
-    "plugins",
-    "utils",
-]
