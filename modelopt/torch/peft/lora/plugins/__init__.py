@@ -19,3 +19,4 @@ from modelopt.torch.utils import import_plugin
 
 with import_plugin("megatron"):
     from .megatron import *
+    from .megatron_moe import *
