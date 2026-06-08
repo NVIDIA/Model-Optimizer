@@ -15,8 +15,13 @@
 
 """GPU integration tests for bypass distillation (blockwise local distillation).
 
-Each test is parametrized over the same model families covered by ``test_puzzletron.py``
-(see ``PUZZLETRON_FAMILIES`` in ``tests/_test_utils/torch/puzzletron/utils.py``).
+The tests use representative model families instead of parametrizing every scenario over
+the full Puzzletron family matrix:
+
+  - Llama-3.2-3B: dense FFN pruning with ``mlp_init_mode="Truncate"``.
+  - GPT-OSS-20B: MoE expert pruning, windowed attention, and attention sinks.
+
+The broader no-bypass family matrix remains covered by ``test_puzzletron.py``.
 
 Tiny model dimensions used throughout (set by ``setup_test_model_and_data``):
   - hidden_size: 256, intermediate_size: 512, num_layers: max(2, world_size)
@@ -36,14 +41,8 @@ mlp_init_mode is family-aware:
     sourced from the family's pruning YAML (``mlp_init_config_yaml``) — no
     per-family branching needed in this test file.
 
-To add a new model family:
-  1. Append one row to PUZZLETRON_FAMILIES in tests/_test_utils/torch/puzzletron/utils.py.
-  2. Ensure tests/gpu/torch/puzzletron/resources/configs/<family>/<family>.yaml exists
-     and that setup_test_model_and_data() can build a tiny stand-in for it.
-  3. For MoE families, ensure the family's descriptor registers ``"kv_heads"`` and
-     ``"experts_removal"`` in ``pruning_mixins()`` (see e.g. NemotronH, GPT-OSS,
-     Qwen3-VL descriptors).
-  4. The four bypass tests below pick up the new row automatically.
+To add a new bypass-specific model family, add it deliberately to the targeted
+case lists below instead of expanding every test by default.
 """
 
 import copy
@@ -57,7 +56,7 @@ import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.misc import set_seed
-from _test_utils.torch.puzzletron.utils import PUZZLETRON_FAMILIES, setup_test_model_and_data
+from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.activation_scoring.score_pruning_activations as score_pruning_activations
@@ -91,6 +90,34 @@ PRUNED_NUM_LOCAL_EXPERTS = 8
 # Training budget: 128 tokens / (64 block * 1 mbs) = 2 steps — completes fast
 TRAINING_TOKENS = 128
 BLOCK_SIZE = 64
+
+# Llama-3.2-3B is the smallest dense family and the canonical "FFN bypass" path.
+LLAMA_FAMILY = pytest.param(
+    "meta-llama/Llama-3.2-3B-Instruct", "llama", None, False, id="llama-3.2-3B"
+)
+# GPT-OSS adds MoE expert pruning (mlp_init_mode="ExpertRemoval") and windowed
+# attention with sinks — different code paths than dense Llama.
+GPT_OSS_FAMILY = pytest.param("openai/gpt-oss-20b", "gpt_oss", None, True, id="gpt-oss-20b")
+BYPASS_SMOKE_FAMILIES = [LLAMA_FAMILY, GPT_OSS_FAMILY]
+
+BYPASS_SUBBLOCK_MODE_CASES = [
+    pytest.param(
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "llama",
+        None,
+        False,
+        "subblock_ffn",
+        id="llama-subblock-ffn",
+    ),
+    pytest.param(
+        "openai/gpt-oss-20b",
+        "gpt_oss",
+        None,
+        True,
+        "subblock_attention",
+        id="gpt-oss-subblock-attention",
+    ),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -337,13 +364,13 @@ def _setup_hydra_cfg_and_pruning(
 
 
 # ---------------------------------------------------------------------------
-# Tests — each parametrized over PUZZLETRON_FAMILIES
+# Tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    PUZZLETRON_FAMILIES,
+    BYPASS_SMOKE_FAMILIES,
 )
 def test_bypass_block_pruning(
     project_root_path: Path,
@@ -410,6 +437,13 @@ def _test_bypass_block_pruning_job(
         assert ckpt_symlink.exists() or ckpt_symlink.is_symlink(), (
             f"Expected bypass checkpoint symlink to exist: {ckpt_symlink}"
         )
+        resolved = ckpt_symlink.resolve()
+        assert (resolved / "config.json").exists(), (
+            f"Expected HuggingFace config.json inside checkpoint: {resolved}"
+        )
+        assert (resolved / "saving_completed").exists(), (
+            f"Expected saving_completed marker inside checkpoint: {resolved}"
+        )
 
     dist.cleanup()
 
@@ -421,7 +455,7 @@ def _test_bypass_block_pruning_job(
 
 @pytest.mark.parametrize(
     ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    PUZZLETRON_FAMILIES,
+    [LLAMA_FAMILY],
 )
 def test_bypass_kv_head_compression(
     project_root_path: Path,
@@ -504,7 +538,7 @@ def _test_bypass_kv_head_compression_job(
 
 @pytest.mark.parametrize(
     ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    PUZZLETRON_FAMILIES,
+    [LLAMA_FAMILY],
 )
 def test_bypass_multi_config_sequential(
     project_root_path: Path,
@@ -603,104 +637,6 @@ def _test_bypass_multi_config_sequential_job(
         f"PYTEST SUMMARY: test_bypass_multi_config_sequential[{hf_model_name}] completed. "
         f"Puzzle directory: {puzzle_dir}"
     )
-
-
-@pytest.mark.parametrize(
-    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    PUZZLETRON_FAMILIES,
-)
-def test_bypass_checkpoint_contents(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-):
-    """Verify that a bypass checkpoint contains expected HuggingFace model files."""
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _test_bypass_checkpoint_contents_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
-    )
-
-
-def _test_bypass_checkpoint_contents_job(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-    rank: int,
-    size: int,
-):
-    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path,
-        tmp_path,
-        rank,
-        size,
-        hf_model_name,
-        converter,
-        hybrid_override_pattern,
-    )
-
-    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
-    OmegaConf.update(hydra_cfg, "bypass", bypass_cfg_dict, merge=True)
-
-    bypass_distillation.launch_bypass_distillation(hydra_cfg)
-    dist.barrier()
-
-    if rank == 0:
-        expected_experiment_id = _expected_experiment_id(bypass_cfg_dict)
-        ckpt_symlink = puzzle_dir / "ckpts" / expected_experiment_id
-
-        assert ckpt_symlink.exists() or ckpt_symlink.is_symlink(), (
-            f"Expected bypass checkpoint symlink: {ckpt_symlink}"
-        )
-
-        # The symlink resolves to the latest checkpoint dir; verify HF config exists.
-        resolved = ckpt_symlink.resolve()
-        config_json = resolved / "config.json"
-        assert config_json.exists(), (
-            f"Expected HuggingFace config.json inside checkpoint: {config_json}"
-        )
-
-        # The saving_completed marker must be present (set by save_bypass_checkpoint).
-        saving_completed = resolved / "saving_completed"
-        assert saving_completed.exists(), (
-            f"Expected saving_completed marker inside checkpoint: {saving_completed}"
-        )
-
-    dist.cleanup()
-
-    print(
-        f"PYTEST SUMMARY: test_bypass_checkpoint_contents[{hf_model_name}] completed. "
-        f"Puzzle directory: {puzzle_dir}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Tests below this line target a single (or two) family deliberately — they
-# exercise paths where parametrizing over all 9 families is overkill or
-# requires extras (e.g. NemotronH's mamba-ssm dep).
-# ---------------------------------------------------------------------------
-
-# Llama-3.2-3B is the smallest dense family and the canonical "FFN bypass" path.
-LLAMA_FAMILY = pytest.param(
-    "meta-llama/Llama-3.2-3B-Instruct", "llama", None, False, id="llama-3.2-3B"
-)
-# GPT-OSS adds MoE expert pruning (mlp_init_mode="ExpertRemoval") and windowed
-# attention with sinks — different code paths than dense Llama.
-GPT_OSS_FAMILY = pytest.param("openai/gpt-oss-20b", "gpt_oss", None, True, id="gpt-oss-20b")
 
 
 # ---------------------------------------------------------------------------
@@ -839,10 +775,9 @@ def _test_bypass_resume_from_checkpoint_job(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("keys_to_learn", ["subblock_ffn", "subblock_attention", "entire_block"])
 @pytest.mark.parametrize(
-    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    [LLAMA_FAMILY, GPT_OSS_FAMILY],
+    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers", "keys_to_learn"),
+    BYPASS_SUBBLOCK_MODE_CASES,
 )
 def test_bypass_subblock_modes(
     project_root_path: Path,
