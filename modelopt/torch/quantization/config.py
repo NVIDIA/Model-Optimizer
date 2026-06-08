@@ -716,6 +716,64 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
+class NVFP4ActMaxCalibConfig(QuantizeAlgorithmConfig):
+    """Config for the ``nvfp4_act_max`` calibration algorithm.
+
+    Weights (and all non-NVFP4 quantizers) are calibrated with plain ``max``. For NVFP4
+    dynamic-block *input* quantizers, the per-tensor global amax (``g_amax``) is instead
+    derived from the per-block amax distribution using the ``B_min``-anchored recipe:
+    ``g_amax = rho * B_min`` (clamped to a ``margin * B_max`` sanity floor), spending the
+    format's normal-FP8 window as upward headroom against unseen activation outliers.
+    See ``experimental/nvfp4_global_scale_study/`` for the derivation.
+    """
+
+    method: Literal["nvfp4_act_max"] = ModeloptField("nvfp4_act_max")
+
+    rho: float = ModeloptField(
+        default=16384.0,
+        gt=0.0,
+        lt=28672.0,
+        title="Window-split factor for the NVFP4 activation global scale (g_amax = rho * B_min).",
+        description=(
+            "Larger rho gives more upward (saturation) headroom but less downward (subnormal) "
+            "cushion. Must stay below 28672 (FP8-E4M3's normal dynamic range — the cliff where "
+            "B_min sits exactly on the subnormal edge). Recommended ~16384 (a ~1.75x cushion)."
+        ),
+    )
+
+    b_min_percentile: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        le=100.0,
+        title="Low percentile of represented (non-dead) per-block amaxes used as B_min.",
+        description="B_min anchors the bottom of the normal-FP8 window; it is the stable end.",
+    )
+
+    b_max_percentile: float = ModeloptField(
+        default=99.99,
+        gt=0.0,
+        le=100.0,
+        title="High percentile of per-block amaxes used as B_max (100 => literal running max).",
+        description=(
+            "B_max feeds the sanity floor and the range-exceeds-format guardrail. Set to 100 to "
+            "use the literal max and guarantee g_amax >= the plain-max value (no calibration clip)."
+        ),
+    )
+
+    margin: float = ModeloptField(
+        default=1.0,
+        gt=0.0,
+        title="Sanity-floor multiplier: g_amax >= margin * B_max.",
+        description="With margin=1 the global scale never sits below the calibrated B_max.",
+    )
+
+    distributed_sync: bool | None = ModeloptField(
+        default=True,
+        title="Whether to sync the amax across the distributed processes.",
+        description="If True, the amax will be synced across the distributed processes.",
+    )
+
+
 class MseCalibConfig(QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
 

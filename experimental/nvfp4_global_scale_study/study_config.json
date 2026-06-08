@@ -1,0 +1,31 @@
+[
+  {
+    "model": "Nemotron-3-Nano-30B-A3B (mlp_only)",
+    "checkpoints": [
+      {"label": "ref-max", "path": "/models3/Nemotron-3-Nano-30B-A3B-nvfp4-ref-max", "recipe": "general/ptq/nvfp4_mlp_only-kv_fp8_cast", "dataset": "cnn_nemotron_v2_mix (default)", "samples": 1024, "seq": 512},
+      {"label": "act-max-p5", "path": "/models3/Nemotron-3-Nano-30B-A3B-nvfp4-act-max", "recipe": "general/ptq/nvfp4_act_max_mlp_only-kv_fp8_cast", "dataset": "cnn_nemotron_v2_mix (default)", "samples": 1024, "seq": 512},
+      {"label": "ref-code", "path": "/models3/Nemotron-3-Nano-30B-A3B-nvfp4-ref-code", "recipe": "general/ptq/nvfp4_mlp_only-kv_fp8_cast", "dataset": "coding1K_very_hard...merged_shuf_2K.jsonl", "samples": 1024, "seq": 8192},
+      {"label": "ref-reasoning", "path": "/models3/Nemotron-3-Nano-30B-A3B-nvfp4-ref-reasoning", "recipe": "general/ptq/nvfp4_mlp_only-kv_fp8_cast", "dataset": "packed_w_lc_v2.shuf_1K (chat->text)", "samples": 966, "seq": 8192}
+    ]
+  },
+  {
+    "model": "Qwen3.6-27B (lm_mlp_only)",
+    "checkpoints": [
+      {"label": "ref-max", "path": "/models/algo_study/Qwen3.6-27B-nvfp4-ref-max", "recipe": "general/ptq/nvfp4_lm_mlp_only-kv_fp8_cast", "dataset": "cnn_nemotron_v2_mix (default)", "samples": 1024, "seq": 512},
+      {"label": "act-max-p5", "path": "/models/algo_study/Qwen3.6-27B-nvfp4-act-max", "recipe": "general/ptq/nvfp4_act_max_lm_mlp_only-kv_fp8_cast", "dataset": "cnn_nemotron_v2_mix (default)", "samples": 1024, "seq": 512},
+      {"label": "act-max-p1", "path": "/models/algo_study/Qwen3.6-27B-nvfp4-act-max-p1", "recipe": "general/ptq/nvfp4_act_max_p1_lm_mlp_only-kv_fp8_cast", "dataset": "cnn_nemotron_v2_mix (default)", "samples": 1024, "seq": 512},
+      {"label": "ref-code", "path": "/models/algo_study/Qwen3.6-27B-nvfp4-ref-code", "recipe": "general/ptq/nvfp4_lm_mlp_only-kv_fp8_cast", "dataset": "coding1K_very_hard...merged_shuf_2K.jsonl", "samples": 1024, "seq": 8192},
+      {"label": "ref-reasoning", "path": "/models/algo_study/Qwen3.6-27B-nvfp4-ref-reasoning", "recipe": "general/ptq/nvfp4_lm_mlp_only-kv_fp8_cast", "dataset": "packed_w_lc_v2.shuf_1K (chat->text)", "samples": 966, "seq": 8192}
+    ]
+  },
+  {
+    "model": "Qwen3.6-35B-A3B (lm_experts_only)",
+    "checkpoints": [
+      {"label": "ref-max", "path": "/models/algo_study/Qwen3.6-35B-A3B-nvfp4-ref-max", "recipe": "general/ptq/nvfp4_lm_experts_only-kv_fp8_cast", "dataset": "cnn_nemotron_v2_mix (default)", "samples": 1024, "seq": 512},
+      {"label": "act-max-p5", "path": "/models/algo_study/Qwen3.6-35B-A3B-nvfp4-act-max", "recipe": "general/ptq/nvfp4_act_max_lm_experts_only-kv_fp8_cast", "dataset": "cnn_nemotron_v2_mix (default)", "samples": 1024, "seq": 512},
+      {"label": "act-max-p1", "path": "/models/algo_study/Qwen3.6-35B-A3B-nvfp4-act-max-p1", "recipe": "general/ptq/nvfp4_act_max_p1_lm_experts_only-kv_fp8_cast", "dataset": "cnn_nemotron_v2_mix (default)", "samples": 1024, "seq": 512},
+      {"label": "ref-code", "path": "/models/algo_study/Qwen3.6-35B-A3B-nvfp4-ref-code", "recipe": "general/ptq/nvfp4_lm_experts_only-kv_fp8_cast", "dataset": "coding1K_very_hard...merged_shuf_2K.jsonl", "samples": 1024, "seq": 8192},
+      {"label": "ref-reasoning", "path": "/models/algo_study/Qwen3.6-35B-A3B-nvfp4-ref-reasoning", "recipe": "general/ptq/nvfp4_lm_experts_only-kv_fp8_cast", "dataset": "packed_w_lc_v2.shuf_1K (chat->text)", "samples": 966, "seq": 8192}
+    ]
+  }
+]

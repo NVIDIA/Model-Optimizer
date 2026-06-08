@@ -15,7 +15,9 @@
 
 """Calibration utilities."""
 
+import json
 import math
+import os
 import time
 import warnings
 from collections.abc import Callable
@@ -39,7 +41,7 @@ from modelopt.torch.utils.distributed import is_initialized as dist_is_initializ
 from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib import MseCalibrator, NVFP4ActMaxCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -70,6 +72,7 @@ __all__ = [
     "layerwise_calibrate",
     "local_hessian_calibrate",
     "max_calibrate",
+    "nvfp4_act_max_calibrate",
     "smoothquant",
     "svdquant",
 ]
@@ -404,6 +407,115 @@ def max_calibrate(
                     quantizer.sync_amax_across_distributed_group(
                         module.parallel_state.tensor_parallel_group
                     )
+
+
+def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
+    """True for an enabled NVFP4 (E2M1 + E4M3 scale) dynamic-block *input* quantizer.
+
+    These carry their per-tensor global scale in ``_amax`` (calibrated like plain max,
+    since the quantizer is not ``_dynamic`` — only its per-block scales are). The
+    ``nvfp4_act_max`` recipe applies only to activation (input) quantizers; weights stay
+    on plain max.
+    """
+    if not isinstance(module, TensorQuantizer) or not name.endswith("input_quantizer"):
+        return False
+    if getattr(module, "_disabled", False) or getattr(module, "_dynamic", False):
+        return False
+    block_sizes = module.block_sizes
+    return (
+        block_sizes is not None
+        and block_sizes.get("type", None) == "dynamic"
+        and module.num_bits == (2, 1)
+        and block_sizes.get("scale_bits", None) == (4, 3)
+    )
+
+
+def _swap_in_nvfp4_act_max_calibrators(
+    model: nn.Module, *, rho, b_min_percentile, b_max_percentile, margin
+) -> int:
+    """Swap in an :class:`NVFP4ActMaxCalibrator` for each qualifying NVFP4 input quantizer.
+
+    Returns the number of quantizers swapped.
+    """
+    count = 0
+    for name, module in model.named_modules():
+        if not _is_nvfp4_dynamic_input_quantizer(name, module):
+            continue
+        block_size = module.block_sizes.get(-1, 16)
+        module._calibrator = NVFP4ActMaxCalibrator(
+            module.num_bits,
+            None,
+            module._unsigned,
+            block_size=block_size,
+            rho=rho,
+            b_min_percentile=b_min_percentile,
+            b_max_percentile=b_max_percentile,
+            margin=margin,
+        )
+        count += 1
+    return count
+
+
+@torch.no_grad()
+def nvfp4_act_max_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    *,
+    rho: float = 16384.0,
+    b_min_percentile: float = 1.0,
+    b_max_percentile: float = 99.99,
+    margin: float = 1.0,
+    distributed_sync: bool = True,
+):
+    """Calibrate using max for weights, and the ``B_min``-anchored recipe for NVFP4 activations.
+
+    Weights and every non-NVFP4 quantizer are calibrated exactly as in :func:`max_calibrate`.
+    For NVFP4 dynamic-block *input* quantizers, the per-tensor global amax (``g_amax``) is
+    instead derived from the per-block amax distribution as ``g_amax = rho * B_min`` (clamped
+    to the ``margin * B_max`` sanity floor), spending the format's normal-FP8 window as upward
+    headroom against unseen activation outliers. See
+    :class:`NVFP4ActMaxCalibrator <modelopt.torch.quantization.calib.NVFP4ActMaxCalibrator>`
+    and ``experimental/nvfp4_global_scale_study/`` for details.
+
+    Args:
+        model: model to be calibrated.
+        forward_loop: callable that runs calibration data through the model.
+        rho: window-split factor for the NVFP4 activation global scale; must be in ``(0, 28672)``.
+        b_min_percentile: low percentile (over represented blocks) used for ``B_min``.
+        b_max_percentile: high percentile used for ``B_max`` (``100`` => literal max).
+        margin: sanity-floor multiplier; ``g_amax >= margin * B_max``.
+        distributed_sync: whether to sync amax across distributed processes (see :func:`max_calibrate`).
+    """
+    n = _swap_in_nvfp4_act_max_calibrators(
+        model,
+        rho=rho,
+        b_min_percentile=b_min_percentile,
+        b_max_percentile=b_max_percentile,
+        margin=margin,
+    )
+    print_rank_0(
+        f"nvfp4_act_max: calibrating {n} NVFP4 activation quantizer(s) with the B_min-anchored "
+        f"recipe (rho={rho}); weights use max calibration."
+    )
+    # max_calibrate runs the forward loop once: it collects weights + per-tensor amax for all
+    # quantizers, while our swapped-in calibrators accumulate the per-block histogram in the
+    # same pass. finish_stats_collection -> load_calib_amax -> NVFP4ActMaxCalibrator.compute_amax
+    # then writes the recipe g_amax into _amax for the NVFP4 input quantizers.
+    max_calibrate(model, forward_loop, distributed_sync=distributed_sync)
+
+    # Optional diagnostic dump of per-quantizer stats (literal max, p1, p99.99, chosen g_amax,
+    # which term won). Enables offline analysis of why g_amax landed where it did.
+    stats_path = os.environ.get("NVFP4_ACT_MAX_STATS_PATH")
+    if stats_path and (not dist.is_initialized() or dist.get_rank() == 0):
+        stats = {
+            name: module._calibrator._stats
+            for name, module in model.named_modules()
+            if isinstance(getattr(module, "_calibrator", None), NVFP4ActMaxCalibrator)
+            and getattr(module._calibrator, "_stats", None) is not None
+        }
+        with open(stats_path, "w") as f:
+            json.dump(stats, f, indent=2)
+        print_rank_0(f"nvfp4_act_max: wrote stats for {len(stats)} quantizers to {stats_path}")
 
 
 def _mse_quant_func(x, amax, quantizer):

@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# MLP-only dynamic NVFP4 for the LANGUAGE MODEL of a VLM (decoder MLP under
+# model.language_model.*), plus FP8 KV-cache cast mode. The vision tower and MTP head
+# (model.visual.*, mtp.*) are left in BF16. Uses max calibration.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Dynamic NVFP4 on the language-model MLP weight and input quantizers only
+    (*language_model*mlp*), plus FP8 KV-cache cast mode; max calibration. Vision tower and
+    MTP head stay BF16.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*language_model*mlp*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*language_model*mlp*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - $import: kv_fp8_cast
+    - $import: default_disabled_quantizers
