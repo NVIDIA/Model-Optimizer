@@ -6,7 +6,7 @@ A minimal end-to-end demonstration that **bypass distillation improves quality**
 
 The teacher has 6 attention layers (each with `num_key_value_heads=2`) interleaved between Mamba and MoE-FFN blocks — **12 KV heads total** across the whole model. We compress to **9 KV heads (75% of teacher)** in two ways and compare:
 
-1. **Without bypass** — replacement library uses Truncate-init weights (KV heads sliced from teacher; no further training).
+1. **Without bypass** — replacement library uses the `PruneKVHeads` initialization from activation scoring (selected KV heads copied from the teacher; no further training).
 2. **With bypass** — the bypass step runs ~50M tokens of per-block knowledge distillation, training a 1-KV-head variant per attention layer against the teacher.
 
 Both runs use the same MIP solver and the same constraint (`target_num_kv_heads: 9`), so MIP picks per attention layer from `{teacher 2-head, 1-head}`. FFN/MoE/Mamba blocks are copied verbatim from the teacher in both runs — only attention weights change.
@@ -35,7 +35,7 @@ torchrun --nproc_per_node=8 examples/puzzletron/main.py \
     --config examples/puzzletron/configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b.yaml
 ```
 
-This runs the 8-step puzzletron pipeline (convert → score pruning activations → prune → build replacement library → score replacements → MIP → realize). With `bypass:` added in Step B the pipeline grows to 9 steps; without it, the bypass step is skipped and progress prints `N/8`. Wall-clock: roughly **1h on 8×H100** for this KV-heads-only task (KV-head importance scoring is one forward pass via `IndependentKvHeadContributionHook`, much cheaper than iterative FFN-channel scoring).
+This runs the no-bypass puzzletron pipeline (convert → score pruning activations → prune → build replacement library → score replacements → MIP → realize). The progress counter includes start/complete messages and prints `N/8`. With `bypass:` added in Step B the pipeline grows to 9 steps. Wall-clock: roughly **1h on 8×H100** for this KV-heads-only task (KV-head importance scoring is one forward pass via `IndependentKvHeadContributionHook`, much cheaper than iterative FFN-channel scoring).
 
 When the realize-model step finishes, the log lines at `${puzzle_dir}/log.txt` contain:
 
@@ -80,7 +80,7 @@ Reducing total KV heads from 12 → 9 (75% of teacher) at fixed FFN/MoE/Mamba on
 | Run | `target_num_kv_heads` | `lm_loss` | `token_accuracy_top_1` |
 |------------------------------|----------------------:|----------:|-----------------------:|
 | Teacher                      | 12                    | 0.5950    | 0.8468                 |
-| Pruned, **no bypass** (Truncate-init) | 9            | 0.6347    | 0.8373                 |
+| Pruned, **no bypass** (`PruneKVHeads` init) | 9        | 0.6347    | 0.8373                 |
 | Pruned, **with bypass** (50M-token BLD) | 9          | **0.6055**| **0.8441**             |
 
 **Bypass closes ~74% of the regression gap** at this compression budget:

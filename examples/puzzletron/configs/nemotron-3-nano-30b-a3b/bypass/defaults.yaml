@@ -4,10 +4,11 @@
 # Trains a single 1-KV-head variant per attention layer using per-block knowledge
 # distillation against the teacher (`subblock_attention` keys only — FFN/MoE/Mamba
 # blocks are frozen). The trained weights are saved into the replacement library
-# and consumed by the MIP solver alongside the no_op variant.
+# and consumed by the MIP solver alongside the teacher/no-op variant.
 #
-# Tutorial budget: ~10M tokens (quick sanity, ~30 min on 4×H100). Increase
-# `training_tokens` for a stronger bypass effect.
+# Tutorial budget: 50M tokens for the bypass run used in the tutorial. Lower
+# `training_tokens` for a quick sanity check, or increase it for a stronger
+# bypass effect.
 
 # Runtime Configuration
 dtype: "bf16"

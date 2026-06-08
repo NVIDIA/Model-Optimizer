@@ -214,7 +214,7 @@ def _build_subblocks_df(
     )
 
     # Order the non-teacher checkpoints so that downstream `drop_duplicates(keep="first")`
-    # deterministically prefers bypass-trained subblocks over Truncate-init pruned ones
+    # deterministically prefers bypass-trained subblocks over untrained pruned ones
     # when both produce a row with the same architectural identifier. Without this,
     # `set` iteration order makes the choice random (hash-of-path) and we'd sometimes
     # discard the BLD-trained weights we just paid 30+ min to compute.
