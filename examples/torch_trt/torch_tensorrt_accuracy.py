@@ -144,7 +144,9 @@ def main():
     parser.add_argument(
         "--baseline",
         action="store_true",
-        help="Also score the un-quantized BF16 model for a reference point.",
+        help="Also score the unquantized model as a reference. It is "
+        "Torch-TensorRT-compiled like the quantized model (or run eager under "
+        "--skip_trt) so the comparison is apples-to-apples.",
     )
     parser.add_argument(
         "--skip_trt",
@@ -207,15 +209,38 @@ def main():
         )
         return top1, top5
 
+    image_size = model.config.image_size
+    num_channels = model.config.num_channels
+    example_input = torch.randn(
+        args.batch_size, num_channels, image_size, image_size, device=device, dtype=dtype
+    )
+    runtime = "fake-quant" if args.skip_trt else "torch-trt"
+
+    def to_eval_model(m: torch.nn.Module, what: str) -> torch.nn.Module:
+        """Logits-wrap and (unless --skip_trt) Torch-TensorRT-compile ``m`` for eval.
+
+        The baseline is compiled the same way as the quantized model so all
+        reported numbers come from the same Torch-TRT runtime.
+        """
+        wrapped = ttptq.ViTLogitsWrapper(m).to(device).eval()
+        if args.skip_trt:
+            return wrapped
+        print(f"\nCompiling {what} with Torch-TensorRT ...")
+        return ttptq.compile_with_torch_tensorrt(wrapped, example_input)
+
     results: list[list[str | float]] = [["Metric", "Top1 (%)", "Top5 (%)"]]
 
-    # Baseline must run before in-place quantization mutates `model`.
+    # Baseline must be built + scored before in-place quantization mutates `model`.
     if args.baseline:
         prec = str(dtype).rsplit(".", 1)[-1]  # e.g. "float16"
-        print(f"\n=== Baseline ({prec}) ===")
-        top1, top5 = run_eval(model)
-        print(f"baseline ({prec})   top1={top1:.2f}%  top5={top5:.2f}%")
-        results.append([f"baseline_{prec}", top1, top5])
+        base_tag = f"baseline-{prec} ({runtime})"
+        base_eval = to_eval_model(model, "unquantized baseline")
+        print(f"\n=== {base_tag} ===")
+        top1, top5 = run_eval(base_eval)
+        print(f"{base_tag}   top1={top1:.2f}%  top5={top5:.2f}%")
+        results.append([base_tag, top1, top5])
+        del base_eval
+        torch.cuda.empty_cache()
 
     calib_batches = ttptq.build_calibration_loader(
         processor, args.calib_samples, args.batch_size, device, dtype
@@ -223,20 +248,8 @@ def main():
     recipe_path = args.recipe or ttptq.PRECISION_TO_RECIPE[args.precision]
     ttptq.quantize_with_recipe(model, recipe_path, calib_batches)
 
-    wrapped = ttptq.ViTLogitsWrapper(model).to(device).eval()
-    if args.skip_trt:
-        print("\n--skip_trt set; scoring the fake-quant model (no Torch-TensorRT compile).")
-        eval_model: torch.nn.Module = wrapped
-        tag = f"{args.precision} (fake-quant)"
-    else:
-        image_size = model.config.image_size
-        num_channels = model.config.num_channels
-        example_input = torch.randn(
-            args.batch_size, num_channels, image_size, image_size, device=device, dtype=dtype
-        )
-        eval_model = ttptq.compile_with_torch_tensorrt(wrapped, example_input)
-        tag = f"{args.precision} (torch-trt)"
-
+    tag = f"{args.precision} ({runtime})"
+    eval_model = to_eval_model(model, f"{args.precision} model")
     print(f"\n=== {tag} ===")
     top1, top5 = run_eval(eval_model)
     print(f"{tag}   top1={top1:.2f}%  top5={top5:.2f}%")

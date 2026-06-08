@@ -57,20 +57,43 @@ python examples/torch_trt/torch_tensorrt_ptq.py \
    that the compiled-model argmax matches the fake-quant argmax on a sample
    input.
 
+## Measuring ImageNet accuracy
+
+`torch_tensorrt_accuracy.py` reuses the pipeline above and reports ImageNet-1k
+top-1 / top-5 accuracy via the `onnx_ptq` example's `evaluate()` harness
+([`examples/onnx_ptq/evaluation.py`](../onnx_ptq/evaluation.py)):
+
+```bash
+python examples/torch_trt/torch_tensorrt_accuracy.py \
+    --precision fp8 \
+    --baseline \
+    --eval_data_size 5000
+```
+
+- `--baseline` also scores the unquantized model. It is Torch-TensorRT-compiled
+  the same way as the quantized model, so every reported number comes from the
+  same TRT runtime (pass `--skip_trt` to score the eager / fake-quant models).
+- The Torch-TRT engine is compiled for one static batch shape, so the eval path
+  requires `--batch_size 1`.
+- Validation uses the gated `ILSVRC/imagenet-1k` split (accept its license / set
+  `HF_TOKEN`), or point `--imagenet_path` at a local copy. `evaluate()` shuffles
+  the split, so a partial `--eval_data_size` draws a different random subset each
+  run — omit it (full set) for a stable, comparable score.
+- `--results_path results.csv` writes the metrics table to CSV.
+
 ## ViT-specific recipes shipped with the example
 
-These are the recipes the CLI selects by default when `--model_id` points
-at a HF ViT classifier. They are **not** thin wrappers around the modelopt
-defaults — they're tuned for the HF ViT module layout.
+These are the recipes the CLI selects by default when `--model_id` points at a
+HF ViT classifier. They are tuned for the HF ViT module layout and are composed
+from the shared `$import` building blocks under
+[`modelopt_recipes/configs/`](../../modelopt_recipes/configs/)
+(`numerics/{fp8,nvfp4}`, `ptq/units/{w8a8_fp8_fp8,attention_qkv_fp8}`) rather
+than spelling out each `quant_cfg` entry.
 
-| Flag | Recipe path | Key differences from the default |
-|------|-------------|----------------------------------|
-| `--precision fp8` | `huggingface/vit/ptq/fp8` | W8A8 FP8 **plus** MHA-aware FP8 on every per-block `nn.LayerNorm` output (shared Q/DQ feeds Q/K/V + MLP), FP8 attention Q/K/V BMM + softmax slots, patch-embedding `nn.Conv2d` left FP16, `classifier` head left in FP16, final `vit.layernorm` left FP16. |
-| `--precision nvfp4` | `huggingface/vit/ptq/nvfp4` | Same skip list as the FP8 recipe; encoder Linear weights/inputs run NVFP4 W4A4 (E2M1, block 16, FP8 scales). Attention BMMs, softmax, and per-block LayerNorm outputs stay at FP8 — NVFP4 is too aggressive there. Uses `awq_lite` calibration. |
-
-Each recipe is self-contained (no `$import` of shared snippets) and uses
-the "specific-enable" style: narrow `parent_class` + path scoping on the
-enable rules means no `enable: false` carve-outs are needed.
+| Flag | Recipe path | What it quantizes |
+|------|-------------|-------------------|
+| `--precision fp8` | `huggingface/vit/ptq/fp8` | W8A8 FP8 (E4M3) on every weight + input quantizer — encoder Linears, the patch-embed `nn.Conv2d`, the `classifier` head, and per-block `nn.LayerNorm` inputs — plus FP8 on the attention Q/K/V BMMs and softmax. Output quantizers disabled. |
+| `--precision nvfp4` | `huggingface/vit/ptq/nvfp4` | NVFP4 W4A4 (E2M1, block 16, FP8 scales) on the encoder `nn.Linear` weights/inputs, with the patch-embed `nn.Conv2d`, the `classifier` head, and the attention Q/K/V BMMs + softmax held at FP8. Uses `awq_lite` calibration. |
 
 ## Hardware requirements
 
