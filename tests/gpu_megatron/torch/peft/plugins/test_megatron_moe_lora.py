@@ -31,6 +31,7 @@ from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import initialize_for_megatron
 
 import modelopt.torch.peft as mtpeft
+import modelopt.torch.quantization as mtq
 from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.peft.lora.plugins.megatron_moe import HAVE_TE_GROUPED
 from modelopt.torch.utils.plugins import megatron_prefill
@@ -84,6 +85,44 @@ BF16_SIDECAR_LORA_CFG = {
         },
         "*output_layer*": {"enable": False},
     },
+}
+
+SVDQUANT_LORA_CFG = {
+    "adapter_type": "lora",
+    "adapter_name": "svdquant",
+    "adapter_cfg": {
+        # SVDQuant init only on MoE expert grouped linears (matches the OMNIML-4944
+        # spec: "LoRA adapters placed one per up_proj/down_proj across all MoE expert
+        # layers"). Patterns are applied in order, last match wins. This also avoids
+        # a pre-existing modelopt bug in the quantize -> LoRA path for TE plain linears
+        # (LoRAQuantTERowParallelLinear lacks `input_size`).
+        "*": {"enable": False},
+        "*experts*linear_fc*": {
+            "rank": 8,
+            "scale": 1.0,
+            "lora_init_method": "svdquant",
+            "enable": True,
+        },
+        "*output_layer*": {"enable": False},
+    },
+}
+
+# Per-tensor INT8 weight quantization. Compatible with TEGroupedLinear which restricts
+# weight quantization to per-tensor (assertion at quantization/plugins/megatron.py:696
+# in _process_quantizer_amax). A meaningful but small residual lets us check that
+# the SVDQuant init produces non-trivial, residual-correlated LoRA factors. Matches
+# the list-of-dicts shape used by NVFP4_DEFAULT_CONFIG in tests/.../test_megatron_peft.py.
+INT8_PER_TENSOR_QUANT_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": 8, "axis": None},
+            "enable": True,
+        },
+        {"quantizer_name": "*output_layer*", "enable": False},
+    ],
+    "algorithm": "max",
 }
 
 
@@ -234,3 +273,95 @@ def _test_gradient_flow(rank, size):
 
 def test_gradient_flow(dist_workers):
     dist_workers.run(_test_gradient_flow)
+
+
+def _test_svdquant_init_recovers_residual(rank, size):
+    """After mtq.quantize -> mtpeft.update_model(svdquant), per-expert B @ A is a
+    rank-r approximation of the quantization residual W_e - quant(W_e).
+
+    Verifies (a) the LoRA factors are populated non-trivially when there's a real
+    residual, and (b) the reconstruction error is bounded by the residual norm
+    (i.e. SVD recovered some structure, not random/zero factors).
+    """
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model = _moe_model_provider(tp_size=size)
+    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+
+    def forward_func(mod):
+        _ = megatron_prefill(model, prompt_tokens)
+
+    # Quantize first so weight_quantizer exists on each TE-grouped linear.
+    mtq.quantize(model, INT8_PER_TENSOR_QUANT_CFG, forward_func)
+    # Then add LoRA: update_layer_lora reads weight_quantizer per module to compute residuals.
+    mtpeft.update_model(model, SVDQUANT_LORA_CFG)
+
+    found = False
+    for name, module in _grouped_lora_modules(model):
+        quantizer = getattr(module, "weight_quantizer", None)
+        if quantizer is None or not getattr(quantizer, "is_enabled", True):
+            continue
+        adapter = module._lora_adapters["svdquant"]
+        a = adapter["lora_a"].weight  # [E, r, in]
+        b = adapter["lora_b"].weight  # [E, out, r]
+
+        with torch.no_grad():
+            for e in range(module.num_gemms):
+                w_e = getattr(module, f"weight{e}")
+                w_q = quantizer(w_e)
+                expected_residual = (w_e - w_q).detach().float()
+                reconstructed = b[e].float() @ a[e].float()  # [out, in]
+
+                ref = expected_residual.norm()
+                err = (reconstructed - expected_residual).norm()
+
+                # When the residual is non-trivial, rank-r SVD should:
+                # (1) produce non-zero factors
+                # (2) reduce reconstruction error below the residual norm.
+                if ref > 0:
+                    assert a[e].abs().sum() > 0, (
+                        f"{name} expert {e}: lora_a is all zeros despite non-zero residual"
+                    )
+                    assert b[e].abs().sum() > 0, (
+                        f"{name} expert {e}: lora_b is all zeros despite non-zero residual"
+                    )
+                    assert err < ref, (
+                        f"{name} expert {e}: reconstruction err {err.item():.4g} "
+                        f">= residual norm {ref.item():.4g} -- SVDQuant init didn't recover "
+                        f"any structure"
+                    )
+                found = True
+
+    assert found, "no TE-grouped LoRA modules with svdquant adapter found"
+
+
+def test_svdquant_init_recovers_residual(dist_workers):
+    dist_workers.run(_test_svdquant_init_recovers_residual)
+
+
+def _test_svdquant_init_no_quantizer_falls_back(rank, size):
+    """Without a prior mtq.quantize call, lora_init_method='svdquant' has no residual
+    to SVD; it must fall back to zero-init on both factors (with a warning).
+    """
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model = _moe_model_provider(tp_size=size)
+
+    # Deliberately skip mtq.quantize -- no weight_quantizer attached to grouped linears.
+    mtpeft.update_model(model, SVDQUANT_LORA_CFG)
+
+    found = False
+    for _, module in _grouped_lora_modules(model):
+        adapter = module._lora_adapters["svdquant"]
+        a = adapter["lora_a"].weight
+        b = adapter["lora_b"].weight
+        assert torch.all(a == 0), (
+            "lora_a should be zero-init when svdquant runs without a weight_quantizer"
+        )
+        assert torch.all(b == 0), (
+            "lora_b should be zero-init when svdquant runs without a weight_quantizer"
+        )
+        found = True
+    assert found, "no TE-grouped LoRA modules with svdquant adapter found"
+
+
+def test_svdquant_init_no_quantizer_falls_back(dist_workers):
+    dist_workers.run(_test_svdquant_init_no_quantizer_falls_back)
