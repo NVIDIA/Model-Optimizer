@@ -15,6 +15,27 @@
 
 
 class Model:
+    """Base class for inference-engine wrappers.
+
+    Cross-engine kwarg conventions (read by run.py, set on **kwargs):
+
+    - ``sampling_kwargs``: dict-shaped sampling config (``temperature``,
+      etc.). Universal; every engine consumes it.
+    - ``max_model_len`` / ``max_seq_len`` / ``context_length``: max
+      input+output sequence length the engine should reserve. The CLI
+      flag ``--max_seq_len`` in run.py is generic; it is translated to
+      one of these three engine-specific kwargs at the run_simple()
+      seam based on ``--engine``. New engine wrappers should read one
+      of these names and add the mapping in run.py's
+      ``_MAX_SEQ_LEN_KEY``.
+
+    Engine-specific kwargs (``mem_fraction_static`` for SGLang,
+    ``enable_chunked_prefill`` for TRT-LLM, etc.) are passed through
+    ``**kwargs`` from ``--runtime_params engine_args`` without
+    translation — those are the engine's own surface, not part of the
+    cross-engine contract.
+    """
+
     def __init__(self, model_dir, tokenizer, max_draft_length):
         raise NotImplementedError
 
