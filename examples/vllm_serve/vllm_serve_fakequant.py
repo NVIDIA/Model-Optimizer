@@ -93,6 +93,10 @@ except (ImportError, AttributeError):
     os.environ[extra_env_var] = ",".join(sorted(merged_env_vars))
 
 
+def _parser_has_argument(parser, dest: str) -> bool:
+    return any(action.dest == dest for action in parser._actions)
+
+
 def main():
     # Create parser that handles both quant and serve arguments
     parser = FlexibleArgumentParser(description="vLLM model server with quantization support")
@@ -105,7 +109,10 @@ def main():
     os.environ["PYTHONPATH"] = os.environ.get("PYTHONPATH", "") + ":" + f"{repo_root}"
 
     # Default to our FakeQuantWorker if user doesn't specify a worker class
-    parser.set_defaults(worker_cls="fakequant_worker.FakeQuantWorker")
+    defaults = {"worker_cls": "fakequant_worker.FakeQuantWorker"}
+    if _parser_has_argument(parser, "moe_backend"):
+        defaults["moe_backend"] = "triton"
+    parser.set_defaults(**defaults)
 
     # Parse arguments
     args = parser.parse_args()

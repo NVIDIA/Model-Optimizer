@@ -58,7 +58,8 @@ def run_llm_sparsity_ft_command(
 def data_path(tmp_path_factory):
     data_path = tmp_path_factory.mktemp("data")
     run_example_command(
-        ["python", "data_prep.py", "--save_path", data_path], "llm_sparsity/weight_sparsity"
+        ["python", "data_prep.py", "--save_path", data_path, "--max_samples", "64"],
+        "llm_sparsity/weight_sparsity",
     )
 
     # Copy eval data to train path for faster test
@@ -82,7 +83,7 @@ def test_llama_sparsity(tiny_llama_path, tmp_path, sparsity_fmt, dtype):
         sparsity_fmt=sparsity_fmt,
         dtype=dtype,
         calib_size=8,
-        model_max_length=128,
+        model_max_length=64,
     )
 
 
@@ -97,7 +98,7 @@ def _test_llama_sparsity_finetune(tiny_llama_path, tmp_path, data_path, sparsity
         sparsity_fmt=sparsity_fmt,
         dtype=dtype,
         calib_size=8,
-        model_max_length=128,
+        model_max_length=64,
     )
 
     # Then do finetuning using the sparsified model
@@ -108,7 +109,7 @@ def _test_llama_sparsity_finetune(tiny_llama_path, tmp_path, data_path, sparsity
         output_dir=finetune_output,
         data_path=data_path,
         num_epochs=0.001,
-        max_length=128,
+        max_length=64,
     )
 
 

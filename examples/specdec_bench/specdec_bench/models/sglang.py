@@ -26,6 +26,12 @@ except ImportError:
 
 
 class SGLANGModel(Model):
+    # Cross-engine ``--max_seq_len`` (run.py) lands in kwargs under the
+    # SGLang-native name ``context_length`` (see run.py's
+    # ``_MAX_SEQ_LEN_KEY``) and is forwarded into ``sgl.Engine(...)``
+    # via ``engine_kwargs["context_length"]`` below. ``None`` lets
+    # SGLang auto-derive from the model config.
+
     def __init__(
         self,
         model_dir,
@@ -58,6 +64,11 @@ class SGLANGModel(Model):
             "enable_torch_compile": kwargs.get("enable_torch_compile", False),
             "cuda_graph_max_bs": max_concurrent_requests,
             "disable_cuda_graph": False,
+            # Cross-engine `--max_seq_len` from run.py lands here as
+            # `context_length` (sgl.Engine's spelling). None lets SGLang
+            # auto-derive from the model config — same auto-default
+            # behavior as vLLM's max_model_len=None.
+            "context_length": kwargs.get("context_length"),
         }
         if speculative_algorithm is not None:
             # https://github.com/sgl-project/sglang/pull/3582
