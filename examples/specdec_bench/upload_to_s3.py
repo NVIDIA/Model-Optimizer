@@ -72,8 +72,10 @@ def _check_provenance(run_dir: Path) -> list[str]:
 
 # ── S3 helpers ────────────────────────────────────────────────────────────────
 # Endpoint, key id, and secret default to empty and are taken from --endpoint /
-# --key-id / --secret (or the corresponding S3_ENDPOINT / S3_KEY_ID / S3_SECRET
-# env vars).
+# --key-id / --secret (or the corresponding SPECDEC_BENCH_S3_ENDPOINT /
+# SPECDEC_BENCH_S3_KEY_ID / SPECDEC_BENCH_S3_SECRET env vars). The prefix
+# disambiguates from any other S3 credentials a CI runner or user shell might
+# carry — only specdec_bench result uploads use this set.
 
 
 def parse_s3_path(path: str) -> tuple[str, str]:
@@ -175,19 +177,19 @@ def main():
     )
     parser.add_argument(
         "--endpoint",
-        default=os.environ.get("S3_ENDPOINT", ""),
-        help="S3 endpoint URL",
+        default=os.environ.get("SPECDEC_BENCH_S3_ENDPOINT", ""),
+        help="S3 endpoint URL (default: $SPECDEC_BENCH_S3_ENDPOINT)",
     )
     parser.add_argument(
         "--key-id",
-        default=os.environ.get("S3_KEY_ID", ""),
+        default=os.environ.get("SPECDEC_BENCH_S3_KEY_ID", ""),
         dest="key_id",
-        help="S3 access key ID",
+        help="S3 access key ID (default: $SPECDEC_BENCH_S3_KEY_ID)",
     )
     parser.add_argument(
         "--secret",
-        default=os.environ.get("S3_SECRET", ""),
-        help="S3 secret access key",
+        default=os.environ.get("SPECDEC_BENCH_S3_SECRET", ""),
+        help="S3 secret access key (default: $SPECDEC_BENCH_S3_SECRET)",
     )
     parser.add_argument(
         "--skip-existing",

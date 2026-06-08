@@ -387,9 +387,6 @@ For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_br
 
 The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job (with tool calling enabled via `--enable-auto-tool-choice --tool-call-parser qwen3_coder`) and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
 
-> [!NOTE]
-> If you are evaluating a pruned, distilled, or quantized checkpoint with tool calling, copy `nano_v3_reasoning_parser.py` from the original HuggingFace checkpoint into the checkpoint directory — `prune_minitron.py` and `hf_ptq.py` do not propagate custom-code Python files at the moment.
-
 Before running, update the following fields in the yaml or overwrite them in the command line with `-o <option>=<value>`:
 
 - `execution.hostname` — your Slurm login node hostname
