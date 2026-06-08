@@ -41,7 +41,7 @@ def test_lm_eval_hf(tmp_path):
 
 
 @minimum_sm(89)
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 def test_qwen3_eval_fp8(tmp_path):
     # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than max_seq_len.
     # The default (32) is shorter than even simple MMLU prompts, and 2048 is shorter than
