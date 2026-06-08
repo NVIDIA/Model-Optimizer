@@ -24,8 +24,7 @@ and cannot use this path.
 This module is a small registry of per-model fallbacks that recover the mask
 directly from token ids, keyed by a ``detect`` predicate. Data paths consult
 :func:`get_loss_mask_recovery` and stay free of any single model's chat-format
-details. It is intentionally minimal and is meant to seed a broader model-specific
-patch registry.
+details.
 """
 
 from collections.abc import Callable

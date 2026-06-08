@@ -81,7 +81,7 @@ class DFlashConfig(ModeloptBaseConfig):
         default=False,
         description=(
             "Whether the DFlash module consumes pre-computed hidden states (offline from "
-            "dumped .pt files, or streaming over HTTP from a vLLM serve) instead of running "
+            "dumped .pt files, or streaming via NIXL RDMA from a vLLM serve) instead of running "
             "the base model. Derived by ModelOptDFlashRecipe from data.mode (True unless "
             "online); not user-configurable."
         ),

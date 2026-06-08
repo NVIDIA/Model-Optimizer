@@ -23,7 +23,7 @@ the pool is registered).
 
 Load out-of-tree:
   --kv-transfer-config '{"kv_connector":"RdmaHiddenStatesConnector",
-     "kv_connector_module_path":"rdma_hidden_states_connector",
+     "kv_connector_module_path":"modelopt.torch.speculative.plugins.rdma_hidden_states_connector",
      "kv_role":"kv_producer",
      "kv_connector_extra_config":{"sidecar_port":"18999","pool_slots":"64","max_tokens":"512"}}'
 

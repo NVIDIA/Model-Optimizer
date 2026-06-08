@@ -13,8 +13,8 @@
 # `--dataset speed` + `--dataset_path .../data/speed/<split>`.
 #
 # NOTE on container: vllm/vllm-openai:latest is x86 and may lack DFLASH; on
-# GB200/aarch64 use an aarch64 DFLASH-capable image (e.g. a 0511 nightly), via
-# pipeline.task_0.slurm_config.container=<image>. UNRESOLVED.
+# GB200/aarch64 use an aarch64 DFLASH-capable image via
+# pipeline.task_0.slurm_config.container=<image>.
 #
 # Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
 #   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \

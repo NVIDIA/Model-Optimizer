@@ -2,7 +2,7 @@
 #
 # 3-step pipeline:
 #   task_0: Build input conversations (jsonl)
-#   task_1: Streaming train — vllm serve + trainer; hidden states fetched over HTTP
+#   task_1: Streaming train — vllm serve + trainer; hidden states over NIXL RDMA
 #   task_2: Benchmark — speculative decoding speedup via VLLM
 #
 # task_1 uses nodes=2: node 0 runs vllm serve, node 1 the trainer. Tasks share

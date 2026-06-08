@@ -27,23 +27,14 @@ scales with the number of trainer ranks.
 
 Fetch concurrency comes from the DataLoader's ``num_workers`` (each worker process
 issues one blocking request at a time); there is no in-process producer thread.
-Keep ``num_workers`` modest and bounded so the per-server in-flight request count
-(``ranks-hitting-a-server x num_workers``) stays near the server's ``max_num_seqs``
--- flooding a cold NVFP4 MoE server can stall a worker past vLLM's execute-model
-timeout and kill EngineCore.
+Keep ``num_workers`` modest so the per-server in-flight request count
+(``ranks-hitting-a-server x num_workers``) stays near the server's ``max_num_seqs``;
+flooding a cold server can stall a worker past vLLM's execute-model timeout.
 
 The base class :class:`StreamingDataset` owns the backend-/algorithm-agnostic
-plumbing: tokenization, the resample-on-failure ``__getitem__`` loop, the
-consecutive-failure circuit breaker, and loss_mask alignment. Concrete subclasses
-specialize along two axes:
-
-- **Backend** (how to talk to the server, how to decode the response): override
-  :meth:`_fetch`.
-- **Algorithm** (how to shape the per-sample dict for the trainer): override
-  :meth:`_format`.
-
-:class:`EagleVllmStreamingDataset` is currently the only concrete combination
-(Eagle algorithm x vLLM backend); future combinations live as sibling subclasses.
+plumbing (tokenization, the resample-on-failure ``__getitem__`` loop, the
+consecutive-failure circuit breaker, loss_mask alignment); subclasses override
+:meth:`_fetch` (backend) and :meth:`_format` (algorithm).
 """
 
 from __future__ import annotations
