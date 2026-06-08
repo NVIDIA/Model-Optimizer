@@ -38,6 +38,12 @@ try:
         TEColumnParallelGroupedLinear,
         TERowParallelGroupedLinear,
     )
+    from megatron.core.utils import (
+        get_pg_rank,
+        get_pg_size,
+        make_sharded_tensor_for_checkpoint,
+        make_tp_sharded_tensor_for_checkpoint,
+    )
 
     HAVE_TE_GROUPED = (
         TEColumnParallelGroupedLinear is not None and TERowParallelGroupedLinear is not None
@@ -45,6 +51,9 @@ try:
 except ImportError:
     TEColumnParallelGroupedLinear = None  # type: ignore[assignment]
     TERowParallelGroupedLinear = None  # type: ignore[assignment]
+    get_pg_rank = get_pg_size = None  # type: ignore[assignment]
+    make_sharded_tensor_for_checkpoint = None  # type: ignore[assignment]
+    make_tp_sharded_tensor_for_checkpoint = None  # type: ignore[assignment]
     HAVE_TE_GROUPED = False
 
 # Quantized TE-grouped classes registered by modelopt.torch.quantization.plugins.megatron.
@@ -275,6 +284,118 @@ if HAVE_TE_GROUPED:
 
             return result, base_bias
 
+        def _factor_tp_axis(self, factor_name: str) -> int | None:
+            """Return the TP-sharded axis of a per-expert factor slice, or None if replicated.
+
+            Subclasses override. The axis is relative to the 2-D per-expert SLICE
+            (``[rank, in]`` for ``lora_a``, ``[out, rank]`` for ``lora_b``), not the 3-D
+            stacked tensor; ``make_tp_sharded_tensor_for_checkpoint`` adds the prepended
+            EP axis on top.
+            """
+            raise NotImplementedError("Subclasses must implement _factor_tp_axis")
+
+        def _ep_rank_size_tp_group(self):
+            """Resolve (ep_rank, ep_size, tp_group), preferring ``self._pg_collection`` and
+            falling back to Megatron's global ``parallel_state`` when the attribute isn't
+            populated on the wrapped instance. Both paths return the same groups; the
+            fallback is necessary because some construction paths (notably the small test
+            factory) don't reliably set ``_pg_collection`` on the per-rank linear instance.
+            """
+            from megatron.core import parallel_state
+
+            try:
+                ep_group = self._pg_collection.ep
+                tp_group = self._tp_group
+                return get_pg_rank(ep_group), get_pg_size(ep_group), tp_group
+            except AttributeError:
+                # EP info — use the expert-parallel group from global state.
+                ep_rank = parallel_state.get_expert_model_parallel_rank()
+                ep_size = parallel_state.get_expert_model_parallel_world_size()
+                # Pass None to the sharded helpers; they fall back to parallel_state.
+                return ep_rank, ep_size, None
+
+        def sharded_state_dict(self, prefix: str = "", sharded_offsets: tuple = (), metadata=None):
+            """Megatron dist-checkpoint sharding for the per-expert stacked LoRA factors.
+
+            Splits each stacked factor (``[E_local, ...]``) into per-global-expert entries
+            keyed ``{prefix}{factor}_{adapter}.weight{global_idx}`` -- mirroring TE's
+            ``_sharded_state_dict_grouped`` convention (``transformer_engine.py:1981``).
+            EP is encoded as a prepended sharded axis; the TP axis (if any) is the
+            per-expert slice's own axis returned by ``_factor_tp_axis``.
+
+            Load path is handled in ``_load_from_state_dict`` below, which stacks the
+            per-expert entries back into a single ``weight`` tensor that matches the
+            carrier's regular ``state_dict`` shape.
+            """
+            sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
+
+            if not getattr(self, "_lora_adapters", None):
+                return sharded_state_dict
+
+            ep_rank, ep_size, tp_group = self._ep_rank_size_tp_group()
+            num_global_experts = ep_size * self.num_gemms
+            local_expert_indices_offset = ep_rank * self.num_gemms
+            ep_axis = len(sharded_offsets)
+
+            for adapter_name, adapter in self._lora_adapters.items():
+                for factor_name in ("lora_a", "lora_b"):
+                    stacked = adapter[factor_name].weight  # [E_local, ...]
+                    tp_axis = self._factor_tp_axis(factor_name)
+                    for gemm_idx in range(self.num_gemms):
+                        global_expert_idx = local_expert_indices_offset + gemm_idx
+                        slice_ = stacked[gemm_idx]
+                        key = (
+                            f"{prefix}{factor_name}_{adapter_name}.weight{global_expert_idx}"
+                        )
+                        prepend = (
+                            *sharded_offsets,
+                            (ep_axis, global_expert_idx, num_global_experts),
+                        )
+                        if tp_axis is None:
+                            sharded_state_dict[key] = make_sharded_tensor_for_checkpoint(
+                                slice_, key, prepend_offsets=prepend, tp_group=tp_group
+                            )
+                        else:
+                            sharded_state_dict[key] = make_tp_sharded_tensor_for_checkpoint(
+                                slice_,
+                                key,
+                                tp_axis,
+                                prepend_offsets=prepend,
+                                tp_group=tp_group,
+                            )
+            return sharded_state_dict
+
+        def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+            """Stack per-global-expert ``weight{i}`` entries back into a single ``weight``.
+
+            Inverse of ``sharded_state_dict``'s per-expert split. When Megatron's dist
+            checkpoint loader feeds us per-expert keys, collect them, stack on dim 0
+            to reconstruct the carrier's stacked ``[E_local, ...]`` layout, then let
+            ``super()._load_from_state_dict`` proceed as normal. No-op when the stacked
+            ``weight`` key is already present (plain ``torch.save/load`` path) -- the
+            EP-rank lookup only runs when stacking is actually needed.
+            """
+            for adapter_name in getattr(self, "_lora_adapters", None) or {}:
+                for factor_name in ("lora_a", "lora_b"):
+                    stacked_key = f"{prefix}{factor_name}_{adapter_name}.weight"
+                    if stacked_key in state_dict:
+                        continue  # plain torch.save/load: already stacked
+                    ep_rank, _, _ = self._ep_rank_size_tp_group()
+                    local_expert_indices_offset = ep_rank * self.num_gemms
+                    per_expert = []
+                    for gemm_idx in range(self.num_gemms):
+                        global_expert_idx = local_expert_indices_offset + gemm_idx
+                        expert_key = (
+                            f"{prefix}{factor_name}_{adapter_name}.weight{global_expert_idx}"
+                        )
+                        if expert_key not in state_dict:
+                            per_expert = None
+                            break
+                        per_expert.append(state_dict.pop(expert_key))
+                    if per_expert is not None and len(per_expert) == self.num_gemms:
+                        state_dict[stacked_key] = torch.stack(per_expert, dim=0)
+            return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     @LoRAModuleRegistry.register(
         {TEColumnParallelGroupedLinear: "megatron_TEColumnParallelGroupedLinear"}
     )
@@ -285,6 +406,12 @@ if HAVE_TE_GROUPED:
         ``in_features`` is the full hidden size.
         """
 
+        def _factor_tp_axis(self, factor_name: str) -> int | None:
+            # Per-expert slice shapes:
+            #   lora_a: [rank, in_features]   -- in is full (TP-replicated)  -> None
+            #   lora_b: [out_features, rank]  -- out is TP-sharded along axis 0
+            return {"lora_a": None, "lora_b": 0}[factor_name]
+
     @LoRAModuleRegistry.register(
         {TERowParallelGroupedLinear: "megatron_TERowParallelGroupedLinear"}
     )
@@ -294,6 +421,12 @@ if HAVE_TE_GROUPED:
         ``in_features`` is the per-rank TP-sharded value;
         ``out_features`` is the full hidden size.
         """
+
+        def _factor_tp_axis(self, factor_name: str) -> int | None:
+            # Per-expert slice shapes:
+            #   lora_a: [rank, in_features]   -- in is TP-sharded along axis 1
+            #   lora_b: [out_features, rank]  -- out is full (TP-replicated) -> None
+            return {"lora_a": 1, "lora_b": None}[factor_name]
 
     # Register the LoRA classes against the *quantized* TE-grouped classes too, so the
     # ``mtq.quantize`` then ``mtpeft.update_model`` flow finds them on the grouped path.
