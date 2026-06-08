@@ -16,7 +16,7 @@ TensorRT precision layers.
 # From the NVIDIA TensorRT docker image (recommended):
 docker run --gpus all -it --rm -v $(pwd):/workspace -w /workspace nvcr.io/nvidia/tensorrt:26.02-py3 bash
 
-pip install -U "nvidia-modelopt[torch]"
+pip install -U "nvidia-modelopt"
 pip install -r examples/torch_trt/requirements.txt
 ```
 
@@ -30,7 +30,7 @@ the version pulled by `pip` must match your installed PyTorch.
 # FP8 / NVFP4 default model is google/vit-large-patch16-224
 python examples/torch_trt/torch_tensorrt_ptq.py \
     --precision fp8/nvfp4 \
-    --calib_samples 128 \
+    --calib_samples 512 \
     --batch_size 1
 
 # Quantize but don't TRT-compile (handy on a non-TRT host)

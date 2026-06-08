@@ -118,7 +118,7 @@ def main():
     parser.add_argument(
         "--calib_samples",
         type=int,
-        default=128,
+        default=512,
         help="Number of tiny-imagenet samples to use for calibration.",
     )
     parser.add_argument(

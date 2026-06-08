@@ -98,7 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [diffusers, torch_onnx]
+        example: [diffusers, torch_onnx, torch_trt]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
