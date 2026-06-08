@@ -1128,6 +1128,19 @@ def _export_diffusers_checkpoint(
         else:
             _save_component_state_dict_safetensors(component, component_export_dir)
 
+        # Step 9: Update config.json with sparse attention info (both quantized and non-quantized)
+        if export_sparse_attention_config is not None:
+            sparse_attn_config = export_sparse_attention_config(component)
+            if sparse_attn_config is not None:
+                config_path = component_export_dir / "config.json"
+                if config_path.exists():
+                    with open(config_path) as file:
+                        config_data = json.load(file)
+                    config_data["sparse_attention_config"] = sparse_attn_config
+                    with open(config_path, "w") as file:
+                        json.dump(config_data, file, indent=4)
+                    print(f"  Added sparse_attention_config to {config_path.name}")
+
         print(f"  Saved to: {component_export_dir}")
 
     # Step 4: Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)

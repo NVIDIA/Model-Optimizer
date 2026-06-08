@@ -48,9 +48,10 @@ If extra deps are needed:
 
 ```bash
 ls modelopt_recipes/models/ 2>/dev/null
+ls modelopt_recipes/huggingface/<model_type>/ptq/ 2>/dev/null  # per-arch; <model_type> from local config.json (Hub ID: AutoConfig.from_pretrained)
 ```
 
-If a model-specific recipe exists, use `--recipe <path>` — it may contain tuned settings.
+If a model-specific recipe exists, prefer `--recipe <path>` — but **inspect its include/exclude patterns** rather than assuming (e.g. for VLMs, confirm the vision tower is actually excluded).
 
 **If no model-specific recipe**, choose a format based on GPU (details in `examples/llm_ptq/README.md`):
 
@@ -60,6 +61,8 @@ If a model-specific recipe exists, use `--recipe <path>` — it may contain tune
 Use `--qformat <name>` (e.g., `--qformat nvfp4`). Format definitions: `modelopt/torch/quantization/config.py`. General PTQ recipes in `modelopt_recipes/general/ptq/` correspond to the same formats — `--qformat` is the simpler way to use them.
 
 Before running PTQ, sanity-check the selected qformat/recipe against the model structure. Inspect the recipe's include/exclude patterns and summarize which layer groups will be quantized and approximately how many modules/layers match (attention projections, MLP projections, experts, etc.). If the match count is 0, or far smaller than expected for the model, stop and fix the recipe or ask the user before launching calibration.
+
+**VLMs:** generic `*mlp*`/`*experts*` recipes also match the vision tower (`model.visual.*`); quantizing the ViT silently breaks image benchmarks. Use the `huggingface/<model_type>/ptq/` recipe or add `*visual*`/`*vision_tower*` excludes, then verify in Step 5 — see `references/checkpoint-validation.md`.
 
 If the source checkpoint is already quantized and the requested recipe/config reduces quantization coverage, confirm that intent with the user before running. For example, if an FP8 checkpoint is used as input and the recipe excludes some layers so they would fall back to BF16 instead of staying quantized, call out the affected layer groups and ask whether that FP8-to-BF16 fallback is intended.
 

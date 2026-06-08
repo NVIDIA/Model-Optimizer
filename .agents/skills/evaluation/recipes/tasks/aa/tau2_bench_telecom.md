@@ -24,6 +24,18 @@ errors from the judger/user endpoints, and ramp up if stable. The hard
 upper bound is 512. After choosing a value, recompute the deployment's
 `--max-num-seqs` per the rule in SKILL.md Step 3.
 
+## Deployment requirement — tool calling (mandatory)
+
+Tau2 is agentic tool use, so the served model MUST launch with
+`--enable-auto-tool-choice --tool-call-parser <parser>` — without it every trial
+returns `avg_reward 0.0` with zero `tool_calls`. Pick `<parser>` from the
+checkpoint's `chat_template.jinja`: XML `<tool_call><function=…>` → `qwen3_coder`
+(Qwen3/3.5); JSON `<tool_call>{"name":…}` → `hermes`.
+
+> With `--reasoning-parser` on, some turns emit only `<think>…</think>` and no
+> tool call → empty-response failures that depress the score; if frequent,
+> disable thinking for Tau2 (`enable_thinking: false`).
+
 ## YAML Fragment
 
 Use this inside the top-level `evaluation.tasks` list:

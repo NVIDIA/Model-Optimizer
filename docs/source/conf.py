@@ -124,7 +124,7 @@ html_permalinks_icon = "#"  # default icon not rendering properly
 
 
 # Mock imports for autodoc
-autodoc_mock_imports = ["mpi4py", "tensorrt_llm", "triton"]
+autodoc_mock_imports = ["mpi4py", "tensorrt_llm", "triton", "vllm"]
 
 autosummary_generate = True
 autosummary_imported_members = False
