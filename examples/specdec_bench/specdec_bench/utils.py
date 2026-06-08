@@ -209,6 +209,8 @@ def _checkpoint_provenance(model_dir):
 
 
 def _is_sensitive_key(key):
+    # Engine configs can carry non-string dict keys (e.g. int layer ids in a
+    # serving_config); those are never sensitive field *names*, so skip them.
     if not isinstance(key, str):
         return False
     klow = key.lower()

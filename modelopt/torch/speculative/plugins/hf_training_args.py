@@ -31,7 +31,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+__all__ = ["DataArguments", "ModelArguments", "TrainingArguments"]
 
 
 class ModelArguments(BaseModel):
@@ -62,9 +64,6 @@ class DataArguments(BaseModel):
     sample_size: int = -1
     streaming_server_url: str | None = None
     streaming_model_name: str | None = None
-    streaming_prefetch: int = Field(default=64, ge=1)
-    # Mirror of the vLLM connector's ``shared_storage_path``; trainer-side allowlist.
-    streaming_shared_storage_path: str | None = None
 
     @field_validator("sample_size")
     @classmethod
@@ -85,13 +84,10 @@ class DataArguments(BaseModel):
                 "ambiguous: set only one of data.offline_data_path / data.streaming_server_url"
             )
         self.mode = "offline" if has_offline else "streaming" if has_streaming else "online"
-        if self.mode == "streaming" and not (
-            self.streaming_model_name and self.streaming_shared_storage_path
-        ):
+        if self.mode == "streaming" and not self.streaming_model_name:
             raise ValueError(
-                "data.mode='streaming' requires data.streaming_server_url, "
-                "data.streaming_model_name, and data.streaming_shared_storage_path "
-                "(the trainer-side allowlist for paths returned by the vLLM server)"
+                "data.mode='streaming' requires data.streaming_server_url and "
+                "data.streaming_model_name"
             )
         return self
 

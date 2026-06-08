@@ -1,0 +1,63 @@
+# DFLASH speculative-decoding benchmark for Kimi-K2.5-NVFP4 via vLLM (in-process
+# AsyncLLM, TP=4 + EP), benchmarking on MT-Bench. Outputs to /scratchspace/specdec_bench/.
+#
+# Requires GB200: native NVFP4 + 192 GB/GPU fits ~551 GB Kimi-K2.5-NVFP4 at TP=4
+# on one 4-GPU node.
+#
+# DFLASH: draft tokens default to 8 (=block_size); --draft_length does NOT apply.
+# To override sampling/engine args, add `- --runtime_params <yaml>` (see
+# examples/specdec_bench/README.md).
+#
+# NOTE on dataset: MT-Bench needs no data-prep. For SPEED-Bench instead, first run
+# `prepare_data.py --dataset speed --config all`, then replace --mtbench with
+# `--dataset speed` + `--dataset_path .../data/speed/<split>`.
+#
+# NOTE on container: vllm/vllm-openai:latest is x86 and may lack DFLASH; on
+# GB200/aarch64 use an aarch64 DFLASH-capable image (e.g. a 0511 nightly), via
+# pipeline.task_0.slurm_config.container=<image>. UNRESOLVED.
+#
+# Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
+#          SLURM_PARTITION=batch \
+#          SLURM_HF_LOCAL=<hf_models_dir> \
+#          SLURM_JOB_DIR=<experiments_dir> \
+#          NEMORUN_HOME=$PWD
+#   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/specdec_bench.yaml \
+#          identity=$HOME/.ssh/id_ecdsa detach=True --yes
+
+job_name: Kimi-K2.5-NVFP4_DFLASH_specdec_bench
+
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4
+    # Trained+exported DFLASH draft; override: pipeline.global_vars.draft_model_dir=<path>
+    draft_model_dir: /hf-local/nvidia/Kimi-K2.5-DFlash
+
+  task_0:
+    script: common/specdec_bench/run.sh
+    args:
+      - --draft_model_dir <<global_vars.draft_model_dir>>
+      - --speculative_algorithm DFLASH
+      - --engine VLLM
+      - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+      - --tp_size 4
+      - --ep_size 4
+      - --concurrency 32
+      - --output_length 1024
+      - --trust_remote_code
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/specdec_bench
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      container: vllm/vllm-openai:latest

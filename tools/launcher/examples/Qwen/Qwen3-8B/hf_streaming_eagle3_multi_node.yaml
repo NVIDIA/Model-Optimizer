@@ -1,17 +1,17 @@
-# EAGLE3 streaming speculative decoding pipeline for Qwen3-8B.
+# EAGLE3 streaming speculative decoding pipeline for Qwen3-8B — MULTI-NODE.
+#
+# task_1 splits N nodes into K serve replicas + (N-K) DDP trainers via SERVE_NODES;
+# see common/eagle3/train_eagle_streaming.sh for dispatch, rendezvous, and sharding.
 #
 # 3-step pipeline:
 #   task_0: Build input conversations (jsonl)
-#   task_1: Streaming train — vllm serve + trainer; hidden states fetched over HTTP
-#   task_2: Benchmark — speculative decoding speedup via VLLM
-#
-# task_1 uses nodes=2: node 0 runs vllm serve, node 1 the trainer. Tasks share
-# /scratchspace to pass artifacts.
+#   task_1: Streaming train — 2 serve nodes (2 GPU, TP=2) + 2 trainer nodes (2 GPU)
+#   task_2: Benchmark — evaluate speculative decoding speedup via VLLM
 #
 # Usage:
-#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_eagle3.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_eagle3_multi_node.yaml --yes
 
-job_name: Qwen3-8B_EAGLE3_streaming
+job_name: Qwen3-8B_EAGLE3_streaming_multi_node
 pipeline:
   allow_to_fail: false
   skip: false
@@ -20,6 +20,7 @@ pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3-8B
 
+  # Step 1: Build input conversations
   task_0:
     script: common/eagle3/make_dataset.sh
     args:
@@ -32,8 +33,8 @@ pipeline:
       gpus_per_node: 1
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
-  # capture ids = default_eagle_aux_layer_ids(36)=[1,17,32] shifted +1, plus final
-  # layer 36 -> [2,18,33,36].
+  # Step 2: Streaming EAGLE3 training — 2 serve replicas (TP=2) + 2 trainer nodes (2 GPU each).
+  # Capture ids: default_eagle_aux_layer_ids(36)=[1,17,32] +1, plus final layer 36.
   task_1:
     script: common/eagle3/train_eagle_streaming.sh
     args:
@@ -49,16 +50,21 @@ pipeline:
       - eagle.eagle_use_torch_compile=false
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
-      # No spaces: nemo_run emits unquoted `export FOO=value`, so spaces would split.
+      # No spaces: nemo_run emits `export FOO=value` unquoted.
       - EAGLE_CAPTURE_IDS: "[2,18,33,36]"
-      - SERVE_TP: "1"
+      - SERVE_TP: "2"
+      # K serve replica nodes (Slurm nodes 0..K-1); the rest are trainers.
+      - SERVE_NODES: "2"
+      # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
+      - STREAMING_NUM_WORKERS: "4"
     slurm_config:
       _factory_: "slurm_factory"
-      nodes: 2
+      nodes: 4
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: 2
       container: vllm/vllm-openai:latest
 
+  # Step 3: Benchmark speculative decoding (VLLM backend)
   task_2:
     script: common/specdec_bench/quick_check.sh
     args:
