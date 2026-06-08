@@ -135,6 +135,27 @@ def _rz_fp16_ftz(x):
 
 
 @triton.jit
+def ex2_fp16(x):
+    """Native fp16 base-2 exp — the hardware ``MUFU.ex2.fp16`` (PTX ``ex2.approx.f16``).
+
+    Converts the fp32 input to fp16, runs the fp16 transcendental, and returns fp32, so the
+    exponential itself uses the fp16 unit's polynomial (not an fp32 ``exp2`` rounded afterward)
+    while the surrounding fp32 reductions are unaffected. This is the reference mixed-precision
+    softmax: used for both ``exp2(scores - max)`` and the online correction ``exp2(old_max - new_max)``.
+    The ``cvt.rn.f16.f32`` is also the exp2-input fp16 conversion (the deck's ``FHADD2 → fp16`` step).
+    (``.ftz`` is not a legal modifier on the f16 ``ex2`` — the fp16 unit handles subnormals itself.)
+    """
+    return tl.inline_asm_elementwise(
+        "{ .reg .b16 h; cvt.rn.f16.f32 h, $1; ex2.approx.f16 h, h; cvt.f32.f16 $0, h; }",
+        "=r,r",
+        args=[x],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
 def softmax_round(x, MODE: tl.constexpr):
     """Round ``x`` per the softmax-datapath MODE (no-op for MODE==0/NONE)."""
     if MODE == SMQUANT_FP16_RNE:

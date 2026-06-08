@@ -63,6 +63,7 @@ from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
     tensor_global_scale_device,
 )
 from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
+    ex2_fp16,
     resolve_softmax_mode,
     softmax_round,
 )
@@ -115,6 +116,7 @@ def _attn_decode_split_fwd(
     DIFF_QUANT: tl.constexpr,  # softmax-datapath modes: DIFF (pre-exp2), EXP2, ACC (sum)
     EXP2_QUANT: tl.constexpr,
     ACC_QUANT: tl.constexpr,
+    MIXED_FP16: tl.constexpr,  # reference mixed-precision softmax (native fp16 MUFU)
     # Per-tensor NVFP4 global scales (amax/(6*448)) as device 0-d tensors (pointers);
     # read via tl.load so no host .item() sync is needed (CUDA-graph-safe).
     q_global_scale,
@@ -206,11 +208,18 @@ def _attn_decode_split_fwd(
 
         if not skip:
             m_new = tl.maximum(m_i, tile_max)
-            s_shift = softmax_round(scores - m_new, DIFF_QUANT)  # DIFF: input to exp2
-            p = softmax_round(tl.math.exp2(s_shift), EXP2_QUANT)  # EXP2: output of exp2
-            p = tl.where(kv_valid, p, 0.0)
-            correction = tl.math.exp2(m_i - m_new)
-            l_i = l_i * correction + softmax_round(tl.sum(p, axis=0), ACC_QUANT)  # ACC: sum
+            if MIXED_FP16:
+                # Reference mixed-precision softmax: native fp16 MUFU exp + fp32 unrounded sum.
+                p = ex2_fp16(scores - m_new)  # FHADD2 -> fp16 ; MUFU.ex2.fp16 -> P fp16
+                p = tl.where(kv_valid, p, 0.0)
+                correction = ex2_fp16(m_i - m_new)  # fp16 correction factor
+                l_i = l_i * correction + tl.sum(p, axis=0)  # row_sum in fp32 (unrounded)
+            else:
+                s_shift = softmax_round(scores - m_new, DIFF_QUANT)  # DIFF: input to exp2
+                p = softmax_round(tl.math.exp2(s_shift), EXP2_QUANT)  # EXP2: output of exp2
+                p = tl.where(kv_valid, p, 0.0)
+                correction = tl.math.exp2(m_i - m_new)
+                l_i = l_i * correction + softmax_round(tl.sum(p, axis=0), ACC_QUANT)  # ACC: sum
             acc = acc * correction
             # P operand of BMM2 -> NVFP4. NVFP4 is homogeneous (NVFP4(c*x)=c*NVFP4(x)),
             # so quantizing the unnormalized exp here equals quantizing normalized P,
@@ -350,7 +359,13 @@ def attention_decode(
             to NVFP4 (E2M1) before the dot. ``{"k", "v"}`` == NVFP4 KV$; the full set
             == NVFP4 BMM1+BMM2. ``None`` disables (exact). Accuracy sim only — the dot
             still runs in fp32.
-        fp16_softmax: compute the softmax exp in fp16 (mixed precision) instead of fp32.
+        fp16_softmax: engage the reference mixed-precision softmax — both exp2s (the softmax exp
+            and the online correction) run in native fp16 (``ex2.approx.ftz.f16``) with the
+            denominator accumulated in fp32 (P fp16-in, sum unrounded). The matmul accumulators
+            stay fp32. Ignored when ``softmax_quant`` is given (that selects per-point round-based
+            datapath quant instead).
+        softmax_quant: optional per-point datapath quant ``{"diff"/"exp2"/"acc": mode}`` for the
+            round-based experiments (fp8/bf16/fp16-round); takes precedence over ``fp16_softmax``.
 
     Returns:
         ``[batch, num_q_heads, head_dim]`` attention output.
@@ -396,8 +411,11 @@ def attention_decode(
     # uniformity. Built copy-free with new_full (device-side fill) — torch.tensor(const,
     # device=cuda) does a host->device copy that is illegal during CUDA-graph capture.
     p_gs = q.new_full((), 1.0 / (6.0 * 448.0) + 1e-30, dtype=torch.float32) if "p" in nvfp4 else 1.0
-    # Softmax-datapath modes (DIFF/EXP2/ACC); fp16_softmax = FP16-RNE at all three.
+    # Softmax-datapath modes. ``fp16_softmax`` (with no per-point override) engages the reference
+    # mixed-precision design (native fp16 MUFU exp + fp32 unrounded sum); a ``softmax_quant`` dict
+    # instead selects per-point round-based datapath quant and takes precedence.
     _sq = softmax_quant or {}
+    _mixed_fp16 = bool(fp16_softmax) and not _sq
     _sm_default = "fp16_rne" if fp16_softmax else None
     diff_q = resolve_softmax_mode(_sq.get("diff", _sm_default))
     exp2_q = resolve_softmax_mode(_sq.get("exp2", _sm_default))
@@ -461,6 +479,7 @@ def attention_decode(
             DIFF_QUANT=diff_q,
             EXP2_QUANT=exp2_q,
             ACC_QUANT=acc_q,
+            MIXED_FP16=_mixed_fp16,
             q_global_scale=q_gs,
             k_global_scale=k_gs,
             p_global_scale=p_gs,

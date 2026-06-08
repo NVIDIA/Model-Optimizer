@@ -37,23 +37,30 @@ from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
     tensor_global_scale_device,
 )
 from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
+    ex2_fp16,
     resolve_softmax_mode,
     softmax_round,
 )
 
 
 def _resolve_softmax_modes(fp16_softmax, softmax_quant):
-    """(fp16_softmax bool, per-point dict) -> (DIFF, EXP2, ACC) integer modes.
+    """(fp16_softmax bool, per-point dict) -> (DIFF, EXP2, ACC, MIXED_FP16).
 
-    ``fp16_softmax=True`` is a shortcut for FP16-RNE at all three points; the optional
-    ``softmax_quant`` dict ({"diff"/"exp2"/"acc": mode}) overrides per point.
+    ``fp16_softmax=True`` engages the reference mixed-precision softmax design: both exp2s (the
+    softmax exp and the online correction) run in native fp16 (``ex2.approx.ftz.f16``) and the
+    denominator accumulates the fp16 P in fp32 (unrounded). The optional ``softmax_quant`` dict
+    ({"diff"/"exp2"/"acc": mode}) instead selects per-point round-based datapath quant (the
+    fp8/bf16/fp16-round experiments) and takes precedence when given.
     """
     sq = softmax_quant or {}
+    if fp16_softmax and not sq:
+        return (0, 0, 0, True)
     default = "fp16_rne" if fp16_softmax else None
     return (
         resolve_softmax_mode(sq.get("diff", default)),
         resolve_softmax_mode(sq.get("exp2", default)),
         resolve_softmax_mode(sq.get("acc", default)),
+        False,
     )
 
 
@@ -298,6 +305,7 @@ def _attn_fwd(
     DIFF_QUANT: tl.constexpr = 0,  # softmax-datapath modes: DIFF (pre-exp2), EXP2, ACC (sum)
     EXP2_QUANT: tl.constexpr = 0,
     ACC_QUANT: tl.constexpr = 0,
+    MIXED_FP16: tl.constexpr = False,  # reference mixed-precision softmax (native fp16 MUFU)
     # Per-tensor NVFP4 global scales (amax/(6*448)). When the matching NVFP4_* flag is
     # set these are device 0-d tensors (pointers), read via ``tl.load`` so no host
     # ``.item()`` sync is needed (CUDA-graph-safe); otherwise an unused float default.
@@ -434,10 +442,19 @@ def _attn_fwd(
         if not skip_tile:
             # --- Online softmax update (with optional mixed-precision datapath quant) ---
             m_new = tl.maximum(row_max, tl.max(scores, 1))
-            s_shift = softmax_round(scores - m_new[:, None], DIFF_QUANT)  # DIFF: input to exp2
-            p = softmax_round(tl.math.exp2(s_shift), EXP2_QUANT)  # EXP2: output of exp2
-            l_new = softmax_round(tl.sum(p, 1), ACC_QUANT)  # ACC: running softmax denom
-            correction = tl.math.exp2(row_max - m_new)
+            if MIXED_FP16:
+                # Reference mixed-precision softmax: fp16 datapath, fp32 reductions. The exp2
+                # input (scores - max) and the correction delta are converted to fp16 inside
+                # ex2_fp16 (cvt.rn.f16.f32) and exponentiated by the native fp16 MUFU; P comes
+                # out fp16-valued, and the denominator sums it in fp32 (unrounded).
+                p = ex2_fp16(scores - m_new[:, None])  # FHADD2 -> fp16 ; MUFU.ex2.fp16 -> P fp16
+                l_new = tl.sum(p, 1)  # row_sum accumulates fp16 P in fp32 (unrounded)
+                correction = ex2_fp16(row_max - m_new)  # fp16 correction factor
+            else:
+                s_shift = softmax_round(scores - m_new[:, None], DIFF_QUANT)  # DIFF: input to exp2
+                p = softmax_round(tl.math.exp2(s_shift), EXP2_QUANT)  # EXP2: output of exp2
+                l_new = softmax_round(tl.sum(p, 1), ACC_QUANT)  # ACC: running softmax denom
+                correction = tl.math.exp2(row_max - m_new)
             row_sum = row_sum * correction + l_new
             acc = acc * correction[:, None]
 
@@ -962,7 +979,7 @@ class _Attention(torch.autograd.Function):
         )
         _nvfp4 = nvfp4 or set()
         assert _nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
-        _diff_q, _exp2_q, _acc_q = _resolve_softmax_modes(fp16_softmax, softmax_quant)
+        _diff_q, _exp2_q, _acc_q, _mixed_fp16 = _resolve_softmax_modes(fp16_softmax, softmax_quant)
         # Per-tensor NVFP4 global scales (host-side amax/(6*448)), aligned with the
         # mni/attnOpt convention (tensor_scale). K/V are read from the paged cache.
         _k_src = k_cache if is_paged else k
@@ -1012,6 +1029,7 @@ class _Attention(torch.autograd.Function):
             "DIFF_QUANT": _diff_q,
             "EXP2_QUANT": _exp2_q,
             "ACC_QUANT": _acc_q,
+            "MIXED_FP16": _mixed_fp16,
             # Device 0-d tensors (pointers) when quantized — read via tl.load in-kernel,
             # no host .item(). The caller's precomputed scales (paged serving) are also
             # device tensors; the fallback computes from the small q/k/v operands.
@@ -1291,6 +1309,12 @@ def attention(
         block_table: Page table [batch, max_blocks_per_seq] mapping sequence
             block indices to global page IDs.
         page_size: Number of tokens per page in the KV cache.
+        fp16_softmax: Engage the reference mixed-precision softmax — both exp2s (the softmax
+            exp and the online correction) run in native fp16 (``ex2.approx.ftz.f16``) and the
+            denominator accumulates the fp16 P in fp32 (P fp16-in, sum unrounded). The matmul
+            accumulators stay fp32. Ignored when ``softmax_quant`` is given.
+        softmax_quant: Optional per-point datapath quant ``{"diff"/"exp2"/"acc": mode}`` for the
+            round-based experiments (fp8/bf16/fp16-round); takes precedence over ``fp16_softmax``.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
