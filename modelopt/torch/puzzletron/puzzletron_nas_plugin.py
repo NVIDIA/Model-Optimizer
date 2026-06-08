@@ -20,9 +20,11 @@ It is used by mtn.convert() to convert a model from HF format to Puzzletron hete
 and save pruned checkpoints, and by mtn.search() to perform the MIP-based NAS search.
 """
 
+import json
 from pathlib import Path
 
 import hydra
+from safetensors import safe_open
 from torch import nn
 
 import modelopt.torch.utils.distributed as dist
@@ -160,6 +162,68 @@ def _find_incomplete_bypass_runs(hydra_cfg, puzzle_dir: str | Path) -> list[str]
     return incomplete_runs
 
 
+def _is_readable_safetensors_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with safe_open(str(path), framework="pt", device="cpu") as tensors:
+            list(tensors.keys())
+    except Exception:
+        return False
+    return True
+
+
+def _is_complete_anymodel_checkpoint(checkpoint_dir: Path) -> bool:
+    config_path = checkpoint_dir / "config.json"
+    index_path = checkpoint_dir / "model.safetensors.index.json"
+    if not config_path.is_file() or not index_path.is_file():
+        return False
+
+    try:
+        index = json.loads(index_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        return False
+
+    for relative_weight_path in set(weight_map.values()):
+        if not isinstance(relative_weight_path, str):
+            return False
+        if not _is_readable_safetensors_file(checkpoint_dir / relative_weight_path):
+            return False
+    return True
+
+
+def _scoring_output_dir(hydra_cfg) -> Path:
+    output_dir = getattr(hydra_cfg.scoring, "output_dir", None)
+    if output_dir is not None:
+        return Path(output_dir)
+    solutions_path = Path(hydra_cfg.scoring.solutions_path)
+    return solutions_path.with_name(f"{solutions_path.stem}--validation")
+
+
+def _invalidate_scoring_cache(hydra_cfg) -> None:
+    scoring_output_dir = _scoring_output_dir(hydra_cfg)
+    if not scoring_output_dir.exists():
+        return
+
+    stale_paths = [scoring_output_dir / "teacher.json"]
+    stale_paths.extend(scoring_output_dir.glob("solution_*.json"))
+    stale_paths = [path for path in stale_paths if path.exists()]
+    for path in stale_paths:
+        path.unlink()
+
+    if stale_paths:
+        mprint(f"Invalidated {len(stale_paths)} cached scoring result(s) in {scoring_output_dir}")
+
+
+def _force_scoring_revalidation(hydra_cfg) -> None:
+    hydra_cfg.scoring.skip_existing_solutions = False
+    hydra_cfg.scoring.solutions_to_validate = None
+
+
 def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> ConvertReturnType:
     """1. Convert the model from HF format to AnyModel format.
     2. Score the pruning activations.
@@ -195,7 +259,7 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
     hf_ckpt_teacher_dir = "ckpts/teacher"  # TODO: make it configurable
     teacher_dir = Path(config.puzzle_dir) / hf_ckpt_teacher_dir
     if dist.is_master():
-        if (teacher_dir / "config.json").exists():
+        if _is_complete_anymodel_checkpoint(teacher_dir):
             mprint(
                 f"Puzzletron Progress {convert_step}/{N}: teacher checkpoint already exists, skipping conversion"
             )
@@ -233,32 +297,15 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
     dist.barrier()
 
     # Step 3: Score pruning activations (distributed processing)
-    activations_log_dir = Path(hydra_cfg.pruning.activations_log_dir)
-    if activations_log_dir.exists() and any(activations_log_dir.glob("rank_*.pth")):
-        mprint(
-            f"Puzzletron Progress {score_step}/{N}: pruning activation scores already "
-            f"exist at {activations_log_dir} — delete this directory to re-score with "
-            f"the current config."
-        )
-        dist.barrier()
-    else:
-        mprint(f"Puzzletron Progress {score_step}/{N}: scoring pruning activations (multi-gpu)")
-        launch_score_activations(hydra_cfg)
+    mprint(f"Puzzletron Progress {score_step}/{N}: scoring pruning activations (multi-gpu)")
+    launch_score_activations(hydra_cfg)
 
     # Step 4: Prune the model and save pruned checkpoints (single process)
-    pruned_ckpts_dir = Path(hydra_cfg.pruning.pruned_ckpts_output_dir)
     if dist.is_master():
-        if pruned_ckpts_dir.exists() and any(pruned_ckpts_dir.iterdir()):
-            mprint(
-                f"Puzzletron Progress {prune_step}/{N}: pruned checkpoints already "
-                f"exist at {pruned_ckpts_dir} — delete this directory to re-prune with "
-                f"the current config."
-            )
-        else:
-            mprint(
-                f"Puzzletron Progress {prune_step}/{N}: pruning the model and saving pruned checkpoints (single-gpu)"
-            )
-            launch_prune_ckpt(hydra_cfg)
+        mprint(
+            f"Puzzletron Progress {prune_step}/{N}: pruning the model and saving pruned checkpoints (single-gpu)"
+        )
+        launch_prune_ckpt(hydra_cfg)
     dist.barrier()
 
     # Step 5: Bypass distillation (optional, distributed processing)
@@ -400,6 +447,7 @@ class PuzzletronSearcher(BaseSearcher):
                         f"Replacement library is stale: '{entry.name}/config.json' is newer than the existing library, will rebuild."
                     )
                     break
+        library_was_built = False
         if dist.is_master():
             if (
                 replacement_library_path.exists()
@@ -414,7 +462,15 @@ class PuzzletronSearcher(BaseSearcher):
                     f"Puzzletron Progress {library_step}/{N}: building replacement library and subblock statistics (single-gpu)"
                 )
                 launch_build_library_and_stats(hydra_cfg)
+                library_was_built = True
         dist.barrier()
+        library_was_built = dist.broadcast(library_was_built if dist.is_master() else None, src=0)
+
+        if library_was_built:
+            if dist.is_master():
+                _invalidate_scoring_cache(hydra_cfg)
+            dist.barrier()
+            _force_scoring_revalidation(hydra_cfg)
 
         # Calculate one block scores (distributed processing)
         mprint(f"Puzzletron Progress {scoring_step}/{N}: calculating one block scores (multi-gpu)")

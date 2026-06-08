@@ -291,12 +291,14 @@ def _make_bypass_cfg_dict(
     return cfg
 
 
-def _expected_experiment_id(bypass_cfg_dict: dict) -> str:
+def _expected_experiment_id(hydra_cfg, bypass_cfg_dict: dict) -> str:
     """Compute the experiment_id that ``set_experiment_id`` will assign.
 
-    Avoids duplicating the formula in tests — uses the same function the runtime uses.
+    Avoids duplicating the formula in tests while preserving the top-level
+    teacher identity that the runtime includes in the hash.
     """
-    cfg = OmegaConf.create({"bypass": copy.deepcopy(bypass_cfg_dict)})
+    cfg = copy.deepcopy(hydra_cfg)
+    OmegaConf.update(cfg, "bypass", copy.deepcopy(bypass_cfg_dict), merge=False)
     set_experiment_id(cfg)
     return cfg.bypass.experiment_id
 
@@ -427,7 +429,7 @@ def _test_bypass_block_pruning_job(
     dist.barrier()
 
     if rank == 0:
-        expected_experiment_id = _expected_experiment_id(bypass_cfg_dict)
+        expected_experiment_id = _expected_experiment_id(hydra_cfg, bypass_cfg_dict)
         experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
         ckpt_symlink = puzzle_dir / "ckpts" / expected_experiment_id
 
@@ -517,7 +519,7 @@ def _test_bypass_kv_head_compression_job(
     dist.barrier()
 
     if rank == 0:
-        expected_experiment_id = _expected_experiment_id(bypass_cfg_dict)
+        expected_experiment_id = _expected_experiment_id(hydra_cfg, bypass_cfg_dict)
         experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
         ckpt_symlink = puzzle_dir / "ckpts" / expected_experiment_id
 
@@ -618,7 +620,7 @@ def _test_bypass_multi_config_sequential_job(
             sub_cfg = copy.deepcopy(bypass_cfg_dict)
             sub_cfg["model"]["model_config_overrides"] = sub["model_config_overrides"]
             sub_cfg["experiment_id"] = None
-            expected_ids.append(_expected_experiment_id(sub_cfg))
+            expected_ids.append(_expected_experiment_id(hydra_cfg, sub_cfg))
 
         for experiment_id in expected_ids:
             experiment_dir = puzzle_dir / "bypass/bypass_runs" / experiment_id
@@ -715,7 +717,7 @@ def _test_bypass_resume_from_checkpoint_job(
     bypass_distillation.launch_bypass_distillation(hydra_cfg)
     dist.barrier()
 
-    expected_experiment_id = _expected_experiment_id(phase1_cfg)
+    expected_experiment_id = _expected_experiment_id(hydra_cfg, phase1_cfg)
     experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
 
     if rank == 0:
@@ -851,7 +853,7 @@ def _test_bypass_subblock_modes_job(
     dist.barrier()
 
     if rank == 0:
-        expected_experiment_id = _expected_experiment_id(bypass_cfg_dict)
+        expected_experiment_id = _expected_experiment_id(hydra_cfg, bypass_cfg_dict)
         experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
         # `start-step-*` is the pre-training snapshot (saved when
         # save_checkpoint_before_training=True). The post-training snapshot
@@ -997,7 +999,7 @@ def _test_bypass_then_build_library_job(
     dist.barrier()
 
     if rank == 0:
-        expected_experiment_id = _expected_experiment_id(bypass_cfg_dict)
+        expected_experiment_id = _expected_experiment_id(hydra_cfg, bypass_cfg_dict)
         ckpts_dir = puzzle_dir / "ckpts"
 
         # 1. The realize step must have created a symlink for this bypass run.
