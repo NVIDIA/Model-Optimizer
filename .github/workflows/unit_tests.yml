@@ -1,4 +1,3 @@
-# NOTE: Make sure this file is consistent with .gitlab/tests.yml
 name: Unit tests
 
 on:
@@ -73,6 +72,10 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
           fail_ci_if_error: true
+          # Skip GPG/SHASUM integrity check of the Codecov CLI: its key import
+          # intermittently fails (codecov/codecov-action#1876), which would
+          # otherwise hard-fail this required job on a transient infra blip.
+          skip_validation: true
           verbose: true
   windows:
     if: needs.check-file-changes.outputs.any_changed == 'true'

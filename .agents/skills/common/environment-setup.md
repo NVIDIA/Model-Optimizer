@@ -24,7 +24,7 @@ If previous runs left patches in `modelopt/` (from 4C unlisted model work), chec
 2. **User doesn't specify** → check for cluster config:
 
 ```bash
-cat ~/.config/modelopt/clusters.yaml 2>/dev/null || cat .claude/clusters.yaml 2>/dev/null
+cat ~/.config/modelopt/clusters.yaml 2>/dev/null || cat .agents/clusters.yaml 2>/dev/null || cat .claude/clusters.yaml 2>/dev/null
 ```
 
 If a cluster config exists with content → **use the remote cluster** (do not fall back to local even if local GPUs are available — the cluster config indicates the user's preferred execution environment). Otherwise → **local execution**.

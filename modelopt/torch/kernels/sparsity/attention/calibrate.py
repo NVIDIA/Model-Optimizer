@@ -200,17 +200,18 @@ def attention_calibrate(
     measuring how many KV tiles would be skipped at each threshold in
     ``threshold_trials``. No autograd — forward only.
 
+    All arguments except ``threshold_trials`` match
+    :func:`modelopt.torch.kernels.common.attention.attention`.
+
     Args:
-        q, k, v, b_start_loc, b_seq_len, max_input_len, is_causal,
-        softmax_scale, b_start_loc_k, b_seq_len_k, max_input_len_k:
-            Same as :func:`modelopt.torch.kernels.common.attention.attention`.
         threshold_trials: List of threshold values to measure sparsity for.
             Each value is converted to log2-scaled space for the kernel.
 
     Returns:
-        Tuple of (output, sparsity_counters):
-        - output: ``[total_q_tokens, num_q_heads, head_dim]``
-        - sparsity_counters: ``[num_thresholds, 2]`` int64 tensor where
+        Tuple of ``(output, sparsity_counters)``:
+
+        - ``output``: ``[total_q_tokens, num_q_heads, head_dim]``
+        - ``sparsity_counters``: ``[num_thresholds, 2]`` int64 tensor where
           ``[:, 0]`` = total tile evaluations, ``[:, 1]`` = skipped tiles.
           Sparsity per threshold = ``counters[:, 1] / counters[:, 0]``.
     """
