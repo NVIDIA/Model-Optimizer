@@ -692,6 +692,52 @@ if HAS_TE:
                 return None
             return ep
 
+        def _gather_global_per_expert_amax(self):
+            # Return the global [num_gemms_global] per-expert amax, gathered across
+            # the EP group, without mutating the live weight_quantizer._amax buffer
+            # (the forward path indexes _amax by local expert position and would
+            # break if we replaced it with the global shape).
+            #
+            # Returns None when the layer isn't per-expert (per-tensor stays the
+            # legacy scalar path) or when EP == 1 (local == global, caller can
+            # reshape the live buffer directly).
+            if not self._is_per_expert_weight_quant():
+                return None
+            quantizer = self.weight_quantizer
+            amax = getattr(quantizer, "_amax", None)
+            if amax is None:
+                return None
+            ep = self._ep_group()
+            if ep is None:
+                return amax.view(self.num_gemms)  # EP=1: local IS global.
+
+            global_size = self.num_gemms * ep.world_size()
+            if amax.numel() != self.num_gemms:
+                raise AssertionError(
+                    f"TEGroupedLinear weight_quantizer._amax numel {amax.numel()}; "
+                    f"expected {self.num_gemms} (local per-expert) or "
+                    f"{global_size} (global per-expert)."
+                )
+            v_local = amax.view(self.num_gemms)
+            gathered = [torch.empty_like(v_local) for _ in range(ep.world_size())]
+            torch.distributed.all_gather(gathered, v_local, group=ep.group)
+            return torch.cat(gathered, dim=0)
+
+        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+            # Gather the global per-expert amax ONCE before Megatron's save traversal.
+            # Stash on a temporary attribute that _process_quantizer_amax consumes; the
+            # live weight_quantizer._amax buffer stays local so forward keeps working.
+            #
+            # Done at the top of sharded_state_dict (not inside _process_quantizer_amax)
+            # so the EP collective completes BEFORE Megatron's dist-checkpoint save
+            # kicks off its own default-PG ALLGATHER metadata exchanges. Interleaving
+            # EP gathers with default-PG collectives deadlocks NCCL.
+            self._cached_global_per_expert_amax = self._gather_global_per_expert_amax()
+            try:
+                return super().sharded_state_dict(prefix, sharded_offsets, metadata)
+            finally:
+                self._cached_global_per_expert_amax = None
+
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             # _sharded_state_dict_grouped adds _extra_state{gemm_idx} for gemm_idx:[1, num_gemms] in
             # sharded_state_dict which is same as _extra_state. The _extra_state{gemm_idx} is used for
@@ -702,9 +748,9 @@ if HAS_TE:
                 for k, v in state_dict.items()
                 if not any(k.endswith(f"_extra_state{num}") for num in range(1, self.num_gemms))
             }
-            # Per-expert amax is gathered to [num_gemms_global] at save time (see
-            # _process_quantizer_amax). On load each EP rank narrows it back to its
-            # local [num_gemms] slice before the base class's view_as() reshape.
+            # Per-expert amax was saved as the gathered global [num_gemms_global]
+            # tensor. On restore each EP rank narrows it back to its local
+            # [num_gemms] slice before the base class's view_as() reshape.
             ep = self._ep_group()
             if ep is not None:
                 global_size = self.num_gemms * ep.world_size()
@@ -726,10 +772,11 @@ if HAS_TE:
             # The column-parallel parent marks weight_quantizer._amax as TP-sharded
             # along axis 0 whenever weight_quantizer.axis is not None — correct for
             # per-channel-along-output, but wrong for our per-expert path: the
-            # post-gather amax is [num_gemms_global], not output-channel-sharded.
+            # gathered amax is [num_gemms_global], not output-channel-sharded.
             # Strip the marker so the dist-checkpoint framework treats it as
-            # replicated across TP. EP-aware handling lives in _process_quantizer_amax
-            # (gather on save) and _load_from_state_dict (narrow on load).
+            # replicated across TP. EP-aware handling lives in
+            # _gather_global_per_expert_amax (called from sharded_state_dict on
+            # save) and _load_from_state_dict (narrow on load).
             shard_axis_dict = super()._get_shard_axis_dict(state_dict)
             if self._is_per_expert_weight_quant():
                 for k in list(shard_axis_dict):
@@ -738,32 +785,15 @@ if HAS_TE:
             return shard_axis_dict
 
         def _process_quantizer_amax(self, k, v, quantizer_state_dict):
-            # numel == 1: per-tensor (legacy).
-            # numel == num_gemms: per-expert (axis=0 on the stacked weight quantizer);
-            # the raw _amax has shape [num_gemms, 1, 1] from axis-0 reduction.
-            # Higher granularity (per-channel-within-expert, NVFP4 block scales) is
-            # not yet supported on TEGroupedLinear.
-            if v.numel() == 1:
-                quantizer_state_dict[k] = v.view(-1)
+            # Per-expert weight amax: emit the gathered global tensor cached by
+            # sharded_state_dict's pre-pass. No collective fires here, so this
+            # call is safe to run inside Megatron's save traversal.
+            # Per-tensor (or non-weight) amax: just reshape the local value.
+            cached = getattr(self, "_cached_global_per_expert_amax", None)
+            if cached is not None and "weight_quantizer" in k and k.endswith("_amax"):
+                quantizer_state_dict[k] = cached.view(cached.numel())
                 return
-            if v.numel() != self.num_gemms:
-                raise AssertionError(
-                    f"TEGroupedLinear quantizer state {k} has numel {v.numel()}; "
-                    f"expected 1 (per-tensor) or {self.num_gemms} (per-expert)."
-                )
-            # Per-expert path. Each EP rank holds the amax for its local experts
-            # only; we all-gather across EP so the saved tensor is the global
-            # [num_gemms * ep_world_size] view. Every rank then writes the same
-            # tensor and the dist-checkpoint framework can safely replicate it
-            # across DP/TP. _load_from_state_dict slices it back to local.
-            v_local = v.view(self.num_gemms)
-            ep = self._ep_group()
-            if ep is None:
-                quantizer_state_dict[k] = v_local
-                return
-            gathered = [torch.empty_like(v_local) for _ in range(ep.world_size())]
-            torch.distributed.all_gather(gathered, v_local, group=ep.group)
-            quantizer_state_dict[k] = torch.cat(gathered, dim=0)
+            quantizer_state_dict[k] = v.view(v.numel())
 
     @QuantModuleRegistry.register(
         {TEColumnParallelGroupedLinear: "megatron_TEColumnParallelGroupedLinear"}
