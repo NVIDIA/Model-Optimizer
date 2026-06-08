@@ -221,7 +221,11 @@ def evaluate(args, subject, model: EvalModel | LLM, dev_df, test_df):
         cors.append(cor)
         all_probs.append(probs)
 
-    acc = np.mean(cors)
+    if not cors:
+        # Every example was skipped (all prompts exceeded max_seq_len). Surface it instead of
+        # silently producing a nan accuracy downstream.
+        print(f"WARNING: all {subject} examples were skipped; reporting accuracy as nan.")
+    acc = np.mean(cors) if cors else float("nan")
     cors = np.array(cors)
 
     all_probs = np.array(all_probs)
@@ -245,6 +249,9 @@ def main(
     limit: int | None = None,
     **kwargs,
 ):
+    if limit is not None and limit <= 0:
+        raise ValueError(f"limit must be a positive integer when provided, got {limit}.")
+
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 

@@ -26,9 +26,12 @@ NUM_EXAMPLES=${5:-}  # optional: limit examples per eval (default: full eval)
 
 if [ ! -d "human-eval" ]; then
     git clone https://github.com/openai/human-eval.git
-    # Pin to a known commit for reproducibility (and so the entry-point patch below matches).
-    git -C human-eval checkout -q 6d43fb980f9fee3c892a914eda09951f772ad10d
 fi
+
+# Pin to a known commit for reproducibility (and so the entry-point patch below matches), forcing
+# it every run so a reused checkout cannot drift to an arbitrary revision. -f discards the patch
+# applied to setup.py on a previous run before re-applying it below.
+git -C human-eval checkout -q -f 6d43fb980f9fee3c892a914eda09951f772ad10d
 
 # human-eval's console_scripts entry point lacks the ":callable" suffix, which newer pip/setuptools
 # reject ("A callable suffix is required"). The target module defines main(), so point at it.

@@ -130,6 +130,7 @@ class LLM(TRTLLM):
             max_batch_size if max_batch_size > 0 else 8
         )
         trt_kv_cache_config.enable_block_reuse = enable_kv_cache_reuse
+        self._enable_kv_cache_reuse = enable_kv_cache_reuse
 
         cuda_graph_config = None
         if max_batch_size > 0:
@@ -286,6 +287,11 @@ class LLM(TRTLLM):
         """
         assert self._support_context_logits_and_stop_words, (
             "Context logits are not supported with the current tensorrt_llm version."
+        )
+        assert not self._enable_kv_cache_reuse, (
+            "Context logits require enable_kv_cache_reuse=False: with KV cache prefix reuse, "
+            "shared-prefix requests only return logits for the recomputed suffix, producing "
+            "truncated (and silently incorrect) context logits."
         )
         assert temperature >= 0.0, "Temperature must be greater than 0.0."
 
