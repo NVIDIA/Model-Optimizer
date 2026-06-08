@@ -61,8 +61,25 @@ def tensor_global_scale(tensor, scale_type: int = 2) -> float:
     Reduces in the tensor's native dtype (``abs().amax()``) rather than upcasting the
     whole tensor to fp32 — the fp32 materialization would OOM when called on a large
     paged KV cache. Serving passes the small per-step q/k/v here, never the cache.
+
+    Prefer :func:`tensor_global_scale_device` on the serving hot path — the ``.item()``
+    here is a blocking host sync that both stalls decode and forces ``--enforce-eager``.
     """
     return tensor.abs().amax().float().item() / (E2M1_MAX * FP8_E4M3_MAX) + 1e-30
+
+
+def tensor_global_scale_device(tensor):
+    """Per-tensor NVFP4 global scale ``amax/(6*448)`` as a 0-d **device** tensor.
+
+    Identical value to :func:`tensor_global_scale` but kept on-device — no ``.item()``
+    host sync. The kernels read it via ``tl.load`` (pointer arg), so the whole
+    amax → scale → quant chain stays on the GPU. That removes the per-step CPU↔GPU
+    serialization (~3 syncs × every attention layer × every decode step) and, because
+    no data-dependent host value is produced mid-forward, lets vLLM capture CUDA graphs
+    (drop ``--enforce-eager``). Numerically equivalent: the value ``tl.load`` reads is
+    exactly what the host float used to be.
+    """
+    return tensor.abs().amax().float() / (E2M1_MAX * FP8_E4M3_MAX) + 1e-30
 
 
 @triton.jit

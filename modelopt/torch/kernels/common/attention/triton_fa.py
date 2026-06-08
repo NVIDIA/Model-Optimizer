@@ -34,7 +34,7 @@ from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
     QUANT_NVFP4,
     fake_quant_fp4_k0,
     fake_quant_fp4_k1,
-    tensor_global_scale,
+    tensor_global_scale_device,
 )
 from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
     resolve_softmax_mode,
@@ -298,7 +298,10 @@ def _attn_fwd(
     DIFF_QUANT: tl.constexpr = 0,  # softmax-datapath modes: DIFF (pre-exp2), EXP2, ACC (sum)
     EXP2_QUANT: tl.constexpr = 0,
     ACC_QUANT: tl.constexpr = 0,
-    q_global_scale=1.0,  # per-tensor NVFP4 global scales (amax/(6*448)), computed host-side
+    # Per-tensor NVFP4 global scales (amax/(6*448)). When the matching NVFP4_* flag is
+    # set these are device 0-d tensors (pointers), read via ``tl.load`` so no host
+    # ``.item()`` sync is needed (CUDA-graph-safe); otherwise an unused float default.
+    q_global_scale=1.0,
     k_global_scale=1.0,
     p_global_scale=1.0,
     v_global_scale=1.0,
@@ -327,11 +330,19 @@ def _attn_fwd(
     dim_pos = tl.arange(0, BLOCK_D)  # Head dimension positions
     d_mask = dim_pos < HEAD_DIM  # Mask for non-power-of-2 head dims
 
+    # --- NVFP4 global scales: read on-device (no host sync) once, reuse in the KV loop.
+    # The matching constexpr guard means the arg is only dereferenced when that operand
+    # is actually quantized; otherwise it is an unused scalar default.
+    q_gs = tl.load(q_global_scale) if NVFP4_Q else 1.0
+    k_gs = tl.load(k_global_scale) if NVFP4_K else 1.0
+    p_gs = tl.load(p_global_scale) if NVFP4_P else 1.0
+    v_gs = tl.load(v_global_scale) if NVFP4_V else 1.0
+
     # --- Load Q tile [BLOCK_M, BLOCK_D]: stays in SRAM for the entire KV loop ---
     q_ptrs = (q_offset + q_pos[:, None]) * stride_qbs + head_idx * stride_qh + dim_pos[None, :]
     q = tl.load(Q + q_ptrs, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :], other=0.0)
     if NVFP4_Q:  # BMM1 query operand (A-side, GEMM-K = head dim = axis 1)
-        q = fake_quant_fp4_k1(q, BLOCK_M, BLOCK_D, 16, q_global_scale, QUANT_NVFP4)
+        q = fake_quant_fp4_k1(q, BLOCK_M, BLOCK_D, 16, q_gs, QUANT_NVFP4)
 
     # Base pointers for K and V at this KV head (per-tile offset added in loop)
     k_base = K + kv_head_idx * stride_kh
@@ -383,7 +394,7 @@ def _attn_fwd(
             )
 
         if NVFP4_K:  # BMM1 key operand (B-side, K^T [BLOCK_D, BLOCK_N], GEMM-K = axis 0)
-            k = fake_quant_fp4_k0(k, BLOCK_D, BLOCK_N, 16, 1, k_global_scale, QUANT_NVFP4)
+            k = fake_quant_fp4_k0(k, BLOCK_D, BLOCK_N, 16, 1, k_gs, QUANT_NVFP4)
 
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
         scores = tl.dot(q, k) * qk_scale
@@ -458,17 +469,13 @@ def _attn_fwd(
                     other=0.0,
                 )
             if NVFP4_V:  # BMM2 value operand (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = keys = axis 0)
-                v = fake_quant_fp4_k0(v, BLOCK_N, BLOCK_D, 16, 1, v_global_scale, QUANT_NVFP4)
+                v = fake_quant_fp4_k0(v, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
             # BMM2 prob operand (A-side, P [BLOCK_M, BLOCK_N], GEMM-K = keys = axis 1) with a
             # per-tensor p_global_scale, matching mni/attnOpt: quantize the *unnormalized* exp
             # P tile, accumulate, normalize acc by row_sum after the loop. (Across KV tiles the
             # online-softmax rescaling makes this an approximation of full-P NVFP4 — same as
             # their flash kernel; the materialized/eager path is the exact reference.)
-            p_dot = (
-                fake_quant_fp4_k1(p, BLOCK_M, BLOCK_N, 16, p_global_scale, QUANT_NVFP4)
-                if NVFP4_P
-                else p
-            )
+            p_dot = fake_quant_fp4_k1(p, BLOCK_M, BLOCK_N, 16, p_gs, QUANT_NVFP4) if NVFP4_P else p
             acc = tl.dot(p_dot.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
@@ -960,7 +967,11 @@ class _Attention(torch.autograd.Function):
         # mni/attnOpt convention (tensor_scale). K/V are read from the paged cache.
         _k_src = k_cache if is_paged else k
         _v_src = v_cache if is_paged else v
-        _p_global = 1.0 / (6.0 * 448.0) + 1e-30  # unnormalized exp P has per-row max ~1
+        # P global is a fixed constant (unnormalized exp P has per-row max ~1); keep it
+        # as a 0-d device tensor so every scale enters the kernel uniformly by pointer.
+        # Built copy-free with new_full (device-side fill) — torch.tensor(const,
+        # device=cuda) does a host->device copy that is illegal during CUDA-graph capture.
+        _p_global = q.new_full((), 1.0 / (6.0 * 448.0) + 1e-30, dtype=torch.float32)
         # In paged serving the caller passes precomputed per-tensor global scales
         # (from the small per-step q/k/v); falling back to scanning the full paged
         # K/V cache here would upcast it to fp32 and OOM. Eager/test launches leave
@@ -1001,14 +1012,17 @@ class _Attention(torch.autograd.Function):
             "DIFF_QUANT": _diff_q,
             "EXP2_QUANT": _exp2_q,
             "ACC_QUANT": _acc_q,
-            "q_global_scale": (_gs["q"] if "q" in _gs else tensor_global_scale(q))
+            # Device 0-d tensors (pointers) when quantized — read via tl.load in-kernel,
+            # no host .item(). The caller's precomputed scales (paged serving) are also
+            # device tensors; the fallback computes from the small q/k/v operands.
+            "q_global_scale": (_gs["q"] if "q" in _gs else tensor_global_scale_device(q))
             if "q" in _nvfp4
             else 1.0,
-            "k_global_scale": (_gs["k"] if "k" in _gs else tensor_global_scale(_k_src))
+            "k_global_scale": (_gs["k"] if "k" in _gs else tensor_global_scale_device(_k_src))
             if "k" in _nvfp4
             else 1.0,
             "p_global_scale": _p_global if "p" in _nvfp4 else 1.0,
-            "v_global_scale": (_gs["v"] if "v" in _gs else tensor_global_scale(_v_src))
+            "v_global_scale": (_gs["v"] if "v" in _gs else tensor_global_scale_device(_v_src))
             if "v" in _nvfp4
             else 1.0,
         }

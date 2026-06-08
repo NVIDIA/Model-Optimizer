@@ -60,7 +60,7 @@ from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
     QUANT_NVFP4,
     fake_quant_fp4_k0,
     fake_quant_fp4_k1,
-    tensor_global_scale,
+    tensor_global_scale_device,
 )
 from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
     resolve_softmax_mode,
@@ -115,7 +115,9 @@ def _attn_decode_split_fwd(
     DIFF_QUANT: tl.constexpr,  # softmax-datapath modes: DIFF (pre-exp2), EXP2, ACC (sum)
     EXP2_QUANT: tl.constexpr,
     ACC_QUANT: tl.constexpr,
-    q_global_scale,  # per-tensor NVFP4 global scales (amax/(6*448)), computed host-side
+    # Per-tensor NVFP4 global scales (amax/(6*448)) as device 0-d tensors (pointers);
+    # read via tl.load so no host .item() sync is needed (CUDA-graph-safe).
+    q_global_scale,
     k_global_scale,
     p_global_scale,
     v_global_scale,
@@ -140,6 +142,13 @@ def _attn_decode_split_fwd(
     d_mask = dim_pos < HEAD_DIM
     kv_pos = tl.arange(0, BLOCK_N)
 
+    # NVFP4 global scales: read on-device once (no host sync); only dereferenced when
+    # the matching operand is quantized, else an unused scalar.
+    q_gs = tl.load(q_global_scale) if NVFP4_Q else 1.0
+    k_gs = tl.load(k_global_scale) if NVFP4_K else 1.0
+    p_gs = tl.load(p_global_scale) if NVFP4_P else 1.0
+    v_gs = tl.load(v_global_scale) if NVFP4_V else 1.0
+
     # Single query vector [BLOCK_D] for this (request, head); stays in registers.
     # Upcast to fp32 so the QK dot product accumulates in fp32 (matches torch matmul).
     q = tl.load(
@@ -147,9 +156,7 @@ def _attn_decode_split_fwd(
     ).to(tl.float32)
     if NVFP4_Q:  # BMM1 query (A-side, single row, GEMM-K = head dim)
         q = tl.reshape(
-            fake_quant_fp4_k1(
-                tl.reshape(q, (1, BLOCK_D)), 1, BLOCK_D, 16, q_global_scale, QUANT_NVFP4
-            ),
+            fake_quant_fp4_k1(tl.reshape(q, (1, BLOCK_D)), 1, BLOCK_D, 16, q_gs, QUANT_NVFP4),
             (BLOCK_D,),
         )
 
@@ -182,7 +189,7 @@ def _attn_decode_split_fwd(
         )
         kt_f = kt.to(tl.float32)
         if NVFP4_K:  # BMM1 key (B-side, K^T [BLOCK_D, BLOCK_N], GEMM-K = head dim = axis 0)
-            kt_f = fake_quant_fp4_k0(kt_f, BLOCK_D, BLOCK_N, 16, 1, k_global_scale, QUANT_NVFP4)
+            kt_f = fake_quant_fp4_k0(kt_f, BLOCK_D, BLOCK_N, 16, 1, k_gs, QUANT_NVFP4)
         scores = tl.sum(q[:, None] * kt_f, axis=0) * qk_scale  # [BLOCK_N], fp32 accum
         scores = tl.where(kv_valid, scores, -float("inf"))
 
@@ -211,7 +218,7 @@ def _attn_decode_split_fwd(
             p_bmm = (
                 tl.reshape(
                     fake_quant_fp4_k1(
-                        tl.reshape(p, (1, BLOCK_N)), 1, BLOCK_N, 16, p_global_scale, QUANT_NVFP4
+                        tl.reshape(p, (1, BLOCK_N)), 1, BLOCK_N, 16, p_gs, QUANT_NVFP4
                     ),
                     (BLOCK_N,),
                 )
@@ -238,7 +245,7 @@ def _attn_decode_split_fwd(
             )
             vt_f = vt.to(tl.float32)
             if NVFP4_V:  # BMM2 value (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = keys = axis 0)
-                vt_f = fake_quant_fp4_k0(vt_f, BLOCK_N, BLOCK_D, 16, 1, v_global_scale, QUANT_NVFP4)
+                vt_f = fake_quant_fp4_k0(vt_f, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
             acc += tl.sum(p_bmm[:, None] * vt_f, axis=0)  # [BLOCK_D], fp32 accum
             m_i = m_new
 
@@ -374,14 +381,21 @@ def attention_decode(
     nvfp4 = nvfp4 or set()
     assert nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
     assert BLOCK_D % 16 == 0 and BLOCK_N % 16 == 0, "NVFP4 needs dims divisible by 16"
-    # Per-tensor NVFP4 global scales (host-side amax/(6*448)), aligned with mni/attnOpt.
-    # Paged serving passes precomputed scales (from the small per-step q/k/v); scanning
-    # the full paged K/V cache here would upcast it to fp32 and OOM.
+    # Per-tensor NVFP4 global scales (amax/(6*448)) as 0-d device tensors, read in-kernel
+    # via tl.load (no host .item()). Paged serving passes precomputed scales (from the
+    # small per-step q/k/v); scanning the full paged K/V cache here would OOM.
     _gs = attn_global_scales or {}
-    q_gs = (_gs["q"] if "q" in _gs else tensor_global_scale(q)) if "q" in nvfp4 else 1.0
-    k_gs = (_gs["k"] if "k" in _gs else tensor_global_scale(k_cache)) if "k" in nvfp4 else 1.0
-    v_gs = (_gs["v"] if "v" in _gs else tensor_global_scale(v_cache)) if "v" in nvfp4 else 1.0
-    p_gs = (1.0 / (6.0 * 448.0) + 1e-30) if "p" in nvfp4 else 1.0  # unnormalized exp P max ~1
+    q_gs = (_gs["q"] if "q" in _gs else tensor_global_scale_device(q)) if "q" in nvfp4 else 1.0
+    k_gs = (
+        (_gs["k"] if "k" in _gs else tensor_global_scale_device(k_cache)) if "k" in nvfp4 else 1.0
+    )
+    v_gs = (
+        (_gs["v"] if "v" in _gs else tensor_global_scale_device(v_cache)) if "v" in nvfp4 else 1.0
+    )
+    # P global is a fixed constant (unnormalized exp P max ~1); 0-d device tensor for
+    # uniformity. Built copy-free with new_full (device-side fill) — torch.tensor(const,
+    # device=cuda) does a host->device copy that is illegal during CUDA-graph capture.
+    p_gs = q.new_full((), 1.0 / (6.0 * 448.0) + 1e-30, dtype=torch.float32) if "p" in nvfp4 else 1.0
     # Softmax-datapath modes (DIFF/EXP2/ACC); fp16_softmax = FP16-RNE at all three.
     _sq = softmax_quant or {}
     _sm_default = "fp16_rne" if fp16_softmax else None

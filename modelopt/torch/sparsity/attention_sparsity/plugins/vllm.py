@@ -42,7 +42,7 @@ from vllm.v1.attention.backends.flash_attn import (
 
 from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
-from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import tensor_global_scale
+from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import tensor_global_scale_device
 from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
 
@@ -289,28 +289,34 @@ class _SparseCalibrationMixin:
         softmax_quant = aq.get("softmax_quant")
         quant_active = bool(nvfp4) or fp16_softmax or bool(softmax_quant)
         # Precompute NVFP4 per-tensor global scales from the small per-step q/k/v
-        # operands. The kernels otherwise derive them from the full paged K/V cache,
-        # which upcasts the whole cache to fp32 and OOMs (P is a fixed constant).
+        # operands, kept as 0-d *device* tensors so the kernels read them via tl.load
+        # (no host .item()). The kernels otherwise derive them from the full paged K/V
+        # cache, which materializes the whole cache and OOMs (P is a fixed constant).
         # Q is scaled per-step (Q rows = exactly what is quantized this launch). K/V
         # are quantized over the *whole* cache in the kernel, but only this step's new
         # tokens are visible here, so keep a running max on the impl — prefill seeds a
-        # representative scale and decode steps only raise it.
+        # representative scale and decode steps only raise it. The running max is an
+        # in-place update of a persistent device buffer (stable address, no host sync),
+        # so it is safe to capture in a CUDA graph and accumulates across replays.
         attn_global_scales = None
         if nvfp4:
             attn_global_scales = {}
             if "q" in nvfp4:
-                attn_global_scales["q"] = tensor_global_scale(query[:num_actual_tokens])
+                attn_global_scales["q"] = tensor_global_scale_device(query[:num_actual_tokens])
             gs_cache = getattr(self, "_nvfp4_gs_cache", None)
             if gs_cache is None:
                 gs_cache = {}
                 self._nvfp4_gs_cache = gs_cache
 
             def _running_max(name, tensor):
-                s = tensor_global_scale(tensor[:num_actual_tokens])
-                prev = gs_cache.get(name)
-                s = s if prev is None else max(prev, s)
-                gs_cache[name] = s
-                attn_global_scales[name] = s
+                s = tensor_global_scale_device(tensor[:num_actual_tokens])  # 0-d device tensor
+                buf = gs_cache.get(name)
+                if buf is None:
+                    buf = s.detach().clone()  # persistent buffer, allocated on first call
+                    gs_cache[name] = buf
+                else:
+                    torch.maximum(buf, s, out=buf)  # in-place running max — graph-safe
+                attn_global_scales[name] = buf
 
             if "k" in nvfp4 and new_key is not None:
                 _running_max("k", new_key)
