@@ -18,7 +18,7 @@
 import importlib
 import inspect
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import torch.nn.init as init
 from pydantic import PlainSerializer, WithJsonSchema, field_validator
@@ -97,6 +97,22 @@ class PEFTAttributeConfig(ModeloptBaseConfig):
             "One of ``'bf16'``, ``'fp16'``, ``'fp32'``, or the equivalent long forms "
             "``'bfloat16'``, ``'float16'``, ``'float32'``. "
             "``None`` (default) inherits from the wrapped layer's parameter dtype."
+        ),
+    )
+
+    lora_init_method: Literal["kaiming_zeros", "svdquant"] = ModeloptField(
+        default="kaiming_zeros",
+        title="LoRA initialization method",
+        description=(
+            "How to seed the LoRA factor tensors. "
+            "``'kaiming_zeros'`` (default) honors ``lora_a_init`` / ``lora_b_init`` and "
+            "matches the legacy behavior. "
+            "``'svdquant'`` seeds the factors from a rank-r SVD of the quantization residual "
+            "``W_fp - quant(W_fp)``, requiring the wrapped layer to have an attached "
+            "``weight_quantizer`` (i.e. ``mtq.quantize`` must run first). If no quantizer is "
+            "present, ``'svdquant'`` falls back to zero-init on both factors and emits a "
+            "warning. Currently honored by the TE-grouped MoE plugin "
+            "(``modelopt/torch/peft/lora/plugins/megatron_moe.py``)."
         ),
     )
 

@@ -27,6 +27,7 @@ sidecar can be pinned to BF16 independently of the base layer's storage
 dtype (e.g. on top of a fake-quantized low-bit base for QAD).
 """
 
+import warnings
 from typing import Any
 
 import torch
@@ -45,6 +46,26 @@ except ImportError:
     TEColumnParallelGroupedLinear = None  # type: ignore[assignment]
     TERowParallelGroupedLinear = None  # type: ignore[assignment]
     HAVE_TE_GROUPED = False
+
+# Quantized TE-grouped classes registered by modelopt.torch.quantization.plugins.megatron.
+# Used at module bottom to register the LoRA class against the quantized base too, so the
+# quantize -> LoRA flow ("mtq.quantize then mtpeft.update_model") works on the grouped path.
+try:
+    from modelopt.torch.quantization.plugins.megatron import (
+        _MegatronTEGroupedColumnParallelLinear as _QuantTEColumnParallelGroupedLinear,
+    )
+    from modelopt.torch.quantization.plugins.megatron import (
+        _MegatronTEGroupedRowParallelLinear as _QuantTERowParallelGroupedLinear,
+    )
+
+    HAVE_QUANT_TE_GROUPED = (
+        _QuantTEColumnParallelGroupedLinear is not None
+        and _QuantTERowParallelGroupedLinear is not None
+    )
+except ImportError:
+    _QuantTEColumnParallelGroupedLinear = None  # type: ignore[assignment]
+    _QuantTERowParallelGroupedLinear = None  # type: ignore[assignment]
+    HAVE_QUANT_TE_GROUPED = False
 
 from ...config import PEFTAttributeConfig
 from ..layer import LoRAModule, LoRAModuleRegistry
@@ -147,12 +168,65 @@ if HAVE_TE_GROUPED:
             lora_b = _StackedLoRAFactor(num_experts, self.out_features, rank, dtype=dtype)
 
             with torch.no_grad():
-                attr_config.lora_a_init(lora_a.weight)
-                attr_config.lora_b_init(lora_b.weight)
+                if attr_config.lora_init_method == "svdquant":
+                    self._init_factors_svdquant(lora_a.weight, lora_b.weight, rank)
+                else:
+                    # "kaiming_zeros" (default): honor the user's lora_a_init / lora_b_init
+                    # initializers (defaults: Kaiming on A, zeros on B).
+                    attr_config.lora_a_init(lora_a.weight)
+                    attr_config.lora_b_init(lora_b.weight)
 
             self._register_stacked_adapter(
                 adapter_name, lora_a, lora_b, rank, attr_config.scale, attr_config.enable
             )
+
+        def _init_factors_svdquant(
+            self,
+            lora_a_weight: torch.Tensor,
+            lora_b_weight: torch.Tensor,
+            rank: int,
+        ) -> None:
+            """Per-expert SVD of the quantization residual ``W - quant(W)``.
+
+            For each expert ``e`` in range(num_gemms): compute the residual between the
+            full-precision per-expert weight and its fake-quantized image, run rank-``r``
+            SVD via ``modelopt.torch.quantization.model_calib.svd``, then write the
+            factors into the stacked carrier tensors:
+
+            - ``lora_a_weight[e]`` <- ``vt`` (shape ``[r, in_features]``)
+            - ``lora_b_weight[e]`` <- ``us`` (shape ``[out_features, r]``)
+
+            so that ``B_e @ A_e == us @ vt`` approximates the quantization residual at
+            init time. Falls back to zero-init on both factors (with a warning) if the
+            wrapped layer has no attached/enabled ``weight_quantizer`` -- in that case the
+            residual is undefined and ``mtq.quantize`` must run before ``mtpeft.update_model``.
+            """
+            quantizer = getattr(self, "weight_quantizer", None)
+            quant_enabled = quantizer is not None and getattr(quantizer, "is_enabled", True)
+            if not quant_enabled:
+                warnings.warn(
+                    "lora_init_method='svdquant' requested but no enabled weight_quantizer "
+                    "is attached to this TE-grouped linear. The quantization residual is "
+                    "undefined; falling back to zero-init on both LoRA factors. To get a "
+                    "meaningful SVDQuant init, run mtq.quantize() before mtpeft.update_model().",
+                    stacklevel=2,
+                )
+                lora_a_weight.zero_()
+                lora_b_weight.zero_()
+                return
+
+            # Local import keeps the dependency on quantization optional at module-load
+            # time -- only callers using lora_init_method='svdquant' pay the import cost.
+            from modelopt.torch.quantization.model_calib import svd as _svd_helper
+
+            for e in range(self.num_gemms):
+                w_e = getattr(self, f"weight{e}")  # [out_features, in_features]
+                w_q = quantizer(w_e)
+                residual = (w_e - w_q).detach()
+                us, vt = _svd_helper(residual, rank)
+                # vt: [rank, in_features], us: [out_features, rank]
+                lora_a_weight[e].copy_(vt.to(lora_a_weight.dtype))
+                lora_b_weight[e].copy_(us.to(lora_b_weight.dtype))
 
         def forward(
             self, x: torch.Tensor, tokens_per_expert, *args, **kwargs
@@ -220,3 +294,23 @@ if HAVE_TE_GROUPED:
         ``in_features`` is the per-rank TP-sharded value;
         ``out_features`` is the full hidden size.
         """
+
+    # Register the LoRA classes against the *quantized* TE-grouped classes too, so the
+    # ``mtq.quantize`` then ``mtpeft.update_model`` flow finds them on the grouped path.
+    # Mirrors the pattern in peft/lora/plugins/megatron.py:244-250 for non-grouped linears.
+    # Required for lora_init_method='svdquant' to find a weight_quantizer on self.
+    if HAVE_QUANT_TE_GROUPED:
+        LoRAModuleRegistry.register(
+            {
+                _QuantTEColumnParallelGroupedLinear: (
+                    "quant_megatron_TEColumnParallelGroupedLinear"
+                )
+            }
+        )(_LoRATEGroupedColumnParallelLinear)
+        LoRAModuleRegistry.register(
+            {
+                _QuantTERowParallelGroupedLinear: (
+                    "quant_megatron_TERowParallelGroupedLinear"
+                )
+            }
+        )(_LoRATEGroupedRowParallelLinear)
