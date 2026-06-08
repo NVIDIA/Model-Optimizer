@@ -28,10 +28,18 @@ import pytest
 import torch
 import torch.nn.init as init
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
-from _test_utils.torch.megatron.utils import initialize_for_megatron
+from _test_utils.torch.megatron.utils import (
+    initialize_for_megatron,
+    load_distributed_checkpoint,
+    save_distributed_checkpoint,
+)
 
 import modelopt.torch.peft as mtpeft
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
+    restore_sharded_modelopt_state,
+    save_sharded_modelopt_state,
+)
 from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.peft.lora.plugins.megatron_moe import HAVE_TE_GROUPED
 from modelopt.torch.utils.plugins import megatron_prefill
@@ -434,3 +442,59 @@ def _test_quantize_then_lora_svdquant_state_dict_roundtrip(rank, size):
 
 def test_quantize_then_lora_svdquant_state_dict_roundtrip(dist_workers):
     dist_workers.run(_test_quantize_then_lora_svdquant_state_dict_roundtrip)
+
+
+def _test_quantize_then_lora_svdquant_dist_checkpoint_roundtrip(tmp_path, rank, size):
+    """Megatron dist-checkpoint round-trip for the per-expert stacked LoRA factors.
+
+    Mirrors test_megatron_peft.py::test_mcore_quantize_then_lora_save_restore but for
+    the TE-grouped MoE LoRA path: build a quantized+LoRA model, save with
+    ``save_distributed_checkpoint`` + ``save_sharded_modelopt_state``, restore into a
+    fresh model with ``restore_sharded_modelopt_state`` + ``load_distributed_checkpoint``,
+    and assert the post-LoRA forward output matches the source within tolerance.
+
+    Exercises the new ``_LoRATEGroupedBase.sharded_state_dict`` and
+    ``_load_from_state_dict`` hooks end-to-end on Megatron's sharded format (the format
+    that real Nemotron-3 checkpoints use).
+    """
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model_ref = _moe_model_provider(tp_size=size)
+    model_test = _moe_model_provider(tp_size=size)
+    prompt_tokens = torch.randint(
+        0, model_ref.vocab_size, (2, model_ref.max_sequence_length)
+    ).cuda()
+
+    # Capture the pre-LoRA output of model_test for the "LoRA actually changed something"
+    # sanity assertion at the bottom.
+    pre_lora_output_test = megatron_prefill(model_test, prompt_tokens)
+
+    def forward_func(mod):
+        _ = megatron_prefill(model_ref, prompt_tokens)
+
+    mtq.quantize(model_ref, INT8_PER_TENSOR_QUANT_CFG, forward_func)
+    mtpeft.update_model(model_ref, SVDQUANT_LORA_CFG)
+    ref_output = megatron_prefill(model_ref, prompt_tokens)
+
+    # Save: ref's distributed checkpoint + sharded modelopt state (quantizers).
+    save_distributed_checkpoint(tmp_path, model_ref)
+    save_sharded_modelopt_state([model_ref], tmp_path)
+
+    # Restore: sharded modelopt state first (attaches quantizers + LoRA module shape via
+    # the saved modelopt_state), then the model parameters.
+    restore_sharded_modelopt_state([model_test], tmp_path)
+    model_test = load_distributed_checkpoint(tmp_path, model_test)
+    test_output = megatron_prefill(model_test, prompt_tokens)
+
+    assert torch.allclose(ref_output, test_output, rtol=1e-5), (
+        "dist-checkpoint round-trip changed the model output -- LoRA factors did not "
+        "fully restore"
+    )
+    assert not torch.allclose(ref_output, pre_lora_output_test, rtol=1e-5), (
+        "ref output equals the pre-LoRA baseline; LoRA may not be perturbing the model"
+    )
+
+
+def test_quantize_then_lora_svdquant_dist_checkpoint_roundtrip(dist_workers, tmp_path):
+    dist_workers.run(
+        partial(_test_quantize_then_lora_svdquant_dist_checkpoint_roundtrip, str(tmp_path))
+    )
