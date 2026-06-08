@@ -26,13 +26,22 @@ NUM_EXAMPLES=${5:-}  # optional: limit examples per eval (default: full eval)
 
 if [ ! -d "human-eval" ]; then
     git clone https://github.com/openai/human-eval.git
+    # Pin to a known commit for reproducibility (and so the entry-point patch below matches).
+    git -C human-eval checkout -q 6d43fb980f9fee3c892a914eda09951f772ad10d
 fi
+
+# human-eval's console_scripts entry point lacks the ":callable" suffix, which newer pip/setuptools
+# reject ("A callable suffix is required"). The target module defines main(), so point at it.
+sed -i 's|human_eval\.evaluate_functional_correctness"|human_eval.evaluate_functional_correctness:main"|' human-eval/setup.py
 
 if [ ! -d "simple-evals" ]; then
     git clone https://github.com/openai/simple-evals.git
 fi
 
-pip install -e human-eval
+# --no-build-isolation: human-eval's legacy setup.py imports pkg_resources at build time,
+# which pip's isolated build env does not provide with newer setuptools. Build against the
+# base environment (which has setuptools/pkg_resources) instead.
+pip install -e human-eval --no-build-isolation
 pip install openai
 
 pushd simple-evals

@@ -62,6 +62,7 @@ class LLM(TRTLLM):
         trust_remote_code: bool = False,
         max_seq_len: int = 0,
         max_batch_size: int = 0,
+        enable_kv_cache_reuse: bool = True,
     ):
         """Initializes the LLM runner class.
 
@@ -73,6 +74,10 @@ class LLM(TRTLLM):
             trust_remote_code: whether to trust the remote code (for the torch backend).
             max_seq_len: Max sequence length for the LLM backend. If 0, it is not specified.
             max_batch_size: Max batch size for the LLM backend. If 0, it is not specified.
+            enable_kv_cache_reuse: whether to enable KV cache block reuse. Must be disabled when
+                requesting context logits (e.g. lm-eval loglikelihood tasks): with prefix block
+                reuse, shared-prefix requests only return logits for the recomputed suffix, which
+                breaks per-token logprob computation.
         """
         with open(Path(checkpoint_dir) / "config.json") as config_file:
             config = json.load(config_file)
@@ -124,6 +129,7 @@ class LLM(TRTLLM):
         trt_kv_cache_config.max_tokens = self._max_seq_len * (
             max_batch_size if max_batch_size > 0 else 8
         )
+        trt_kv_cache_config.enable_block_reuse = enable_kv_cache_reuse
 
         cuda_graph_config = None
         if max_batch_size > 0:
