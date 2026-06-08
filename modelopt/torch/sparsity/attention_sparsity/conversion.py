@@ -445,6 +445,8 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
             )
         if sparse_softmax_config is None:
             sparse_softmax_config = _get_sparse_softmax_export_config(module)
+        # A single run-wide value: take it from the first enabled module that sets it
+        # (same harvesting pattern as calibration_params / target_sparse_ratio above).
         if not initial_disabled_steps:
             initial_disabled_steps = module._method_config.get("initial_disabled_steps", 0)
 

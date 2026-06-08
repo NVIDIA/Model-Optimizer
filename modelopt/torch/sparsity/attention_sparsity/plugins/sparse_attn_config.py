@@ -96,21 +96,25 @@ def _add_sparse_softmax_params(layer_cfg: dict, sparse_meta: dict, config_groups
 
 
 def _build_calibrated_softmax_skip_config(skip_group: dict) -> dict:
-    """Build a vLLM Triton sparse config from a skip_softmax config group."""
-    return {
-        "sparse_cfg": {
-            "*attn*": {
-                "method": "triton_skip_softmax",
-                "threshold_scale_factor": skip_group["threshold_scale_factor"],
-                "target_sparse_ratio": _normalize_target_sparse_ratio(
-                    skip_group.get("target_sparsity")
-                ),
-                "backend": "triton",
-                "enable": True,
-            },
-            "default": {"enable": False},
-        },
+    """Build a vLLM Triton sparse config from a skip_softmax config group.
+
+    Layers recorded under ``ignore`` (kept dense at calibration time, e.g.
+    cross-attention) are disabled first so they remain dense on load. Order
+    matters: :func:`match_sparse_config` returns the first matching pattern, so
+    the ``ignore`` entries must precede the catch-all ``*attn*`` rule.
+    """
+    sparse_cfg: dict = {}
+    for name in skip_group.get("ignore", []):
+        sparse_cfg[f"*{name}*"] = {"enable": False}
+    sparse_cfg["*attn*"] = {
+        "method": "triton_skip_softmax",
+        "threshold_scale_factor": skip_group["threshold_scale_factor"],
+        "target_sparse_ratio": _normalize_target_sparse_ratio(skip_group.get("target_sparsity")),
+        "backend": "triton",
+        "enable": True,
     }
+    sparse_cfg["default"] = {"enable": False}
+    return {"sparse_cfg": sparse_cfg}
 
 
 def _build_sparse_softmax_config(sparse_meta: dict, config_groups: dict) -> dict:

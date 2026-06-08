@@ -214,3 +214,31 @@ class TestLoadFromCheckpointMetadata:
         """Test that an empty config_groups returns None."""
         hf_config = types.SimpleNamespace(sparse_attention_config={"config_groups": {}})
         assert load_from_checkpoint_metadata(hf_config) is None
+
+    def test_calibrated_softmax_skip_honors_ignore(self):
+        """Layers recorded under ``ignore`` stay dense on load; others are sparsified."""
+        meta = {
+            "config_groups": {
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "ignore": ["blocks.0.attn1", "blocks.0.attn2"],
+                    "threshold_scale_factor": {
+                        "formula": "a * exp(b * target_sparsity)",
+                        "prefill": {"a": 2.0, "b": 3.0},
+                    },
+                    "target_sparsity": {"prefill": 0.5},
+                }
+            },
+            "producer": {"name": "modelopt", "version": "0.45.0"},
+        }
+        hf_config = types.SimpleNamespace(sparse_attention_config=meta)
+        result = load_from_checkpoint_metadata(hf_config)
+        assert result is not None
+        cfg, _ = result
+        # ``ignore``'d layers stay dense.
+        assert match_sparse_config("transformer.blocks.0.attn1", cfg) == {"enable": False}
+        assert match_sparse_config("transformer.blocks.0.attn2", cfg) == {"enable": False}
+        # A non-ignored self-attention layer is sparsified.
+        sparsified = match_sparse_config("transformer.blocks.2.attn1", cfg)
+        assert sparsified["method"] == "triton_skip_softmax"
+        assert sparsified["enable"] is True

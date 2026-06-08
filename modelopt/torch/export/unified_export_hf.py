@@ -1128,7 +1128,7 @@ def _export_diffusers_checkpoint(
         else:
             _save_component_state_dict_safetensors(component, component_export_dir)
 
-        # Step 8: Update config.json with sparse attention info (both quantized and non-quantized)
+        # Step 9: Update config.json with sparse attention info (both quantized and non-quantized)
         if export_sparse_attention_config is not None:
             sparse_attn_config = export_sparse_attention_config(component)
             if sparse_attn_config is not None:

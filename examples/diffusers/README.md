@@ -314,7 +314,7 @@ By following these steps, your PEFT LoRA model should be efficiently quantized u
 
 ## Sparse Attention (Skip-Softmax)
 
-Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration. Calibrated coefficients can be exported as a Hugging Face checkpoint (per-component `config.json` plus a top-level `sparse.yaml`) consumed directly by TRT-LLM's `SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` — no extra conversion needed downstream.
+Skip-softmax sparse attention skips KV tiles whose attention scores are negligible during the softmax computation, reducing FLOPs without retraining. An exponential model (`scale_factor = a * exp(b * target_sparsity)`) is calibrated once, then the target sparsity can be adjusted at runtime without recalibration. Calibrated coefficients can be exported as a Hugging Face checkpoint (embedded in each component's `config.json` under `sparse_attention_config`) consumed directly by TRT-LLM's `SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` — no extra conversion needed downstream.
 
 ### Getting Started
 
