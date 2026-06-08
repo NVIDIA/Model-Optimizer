@@ -196,7 +196,14 @@ def _test_gradient_flow(rank, size):
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
 
     mtpeft.update_model(model, RANDOM_INIT_LORA_CFG)
-    model.train()
+    # Intentionally keep the model in the eval mode set by _moe_model_provider.
+    # Megatron's MoELayer.forward asserts at moe_layer.py:616 when
+    # self.training AND attn_tp_group.size() > 1 AND not sequence_parallel --
+    # the test factory hardcodes sequence_parallel=False, and dist_workers
+    # runs at tp_size=4 here, so model.train() would raise before our LoRA
+    # forward dispatch is even reached. PyTorch autograd is mode-independent,
+    # so loss.backward() in eval mode still produces gradients on the LoRA
+    # factors and base weights as required by this test.
 
     batch_size, seq_len = prompt_tokens.shape
     attention_mask = (
