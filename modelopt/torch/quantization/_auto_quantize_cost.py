@@ -15,6 +15,7 @@
 
 """Cost models for AutoQuantize effective-bits accounting."""
 
+import fnmatch
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Final
 
@@ -27,6 +28,7 @@ DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS: Final = 4.8
 
 AUTO_QUANTIZE_CONSTRAINT_KEYS: Final = frozenset({"effective_bits", "cost_model", "cost"})
 ACTIVE_MOE_EXPERT_RATIO_KEY: Final = "active_moe_expert_ratio"
+EXCLUDED_MODULE_NAME_PATTERNS_KEY: Final = "excluded_module_name_patterns"
 COST_MODEL_WEIGHT: Final = "weight"
 COST_MODEL_ACTIVE_MOE: Final = "active_moe"
 
@@ -90,11 +92,31 @@ def is_routed_moe_module_name(name: str) -> bool:
     return "shared_expert" not in name and _ROUTED_MOE_EXPERT_NAME_RE.search(name) is not None
 
 
+def _get_module_weight_numel(module: nn.Module) -> int:
+    """Return the parameter count for a module's quantizable weights.
+
+    Standard quantized linear modules have a single ``weight`` parameter. Fused
+    MoE expert containers expose projection tensors directly instead, so both
+    fused projections contribute to AutoQuantize cost accounting.
+    """
+    weight = getattr(module, "weight", None)
+    if weight is not None:
+        return weight.numel()
+
+    # Fused MoE expert containers expose projection tensors directly instead of
+    # a single ``weight`` parameter.
+    return sum(
+        param.numel()
+        for attr in ("gate_up_proj", "down_proj")
+        if (param := getattr(module, attr, None)) is not None
+    )
+
+
 class AutoQuantizeCostModel:
     """Base class for AutoQuantize effective-bits cost accounting."""
 
     name: str
-    supported_cost_keys: frozenset[str] = frozenset()
+    supported_cost_keys: frozenset[str] = frozenset({EXCLUDED_MODULE_NAME_PATTERNS_KEY})
 
     def normalize_cost_constraints(
         self, model: nn.Module, cost_constraints: dict[str, Any]
@@ -103,12 +125,35 @@ class AutoQuantizeCostModel:
         unknown_cost_keys = set(cost_constraints) - self.supported_cost_keys
         if unknown_cost_keys:
             raise ValueError(f"Unsupported auto_quantize cost constraints: {unknown_cost_keys}.")
+        excluded_patterns = cost_constraints.get(EXCLUDED_MODULE_NAME_PATTERNS_KEY)
+        if excluded_patterns is None:
+            return cost_constraints
+        if isinstance(excluded_patterns, str):
+            excluded_patterns = [excluded_patterns]
+        if not isinstance(excluded_patterns, Sequence) or not all(
+            isinstance(pattern, str) for pattern in excluded_patterns
+        ):
+            raise ValueError(
+                f"constraints['cost']['{EXCLUDED_MODULE_NAME_PATTERNS_KEY}'] must be a string "
+                "or a sequence of strings."
+            )
+        cost_constraints[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = list(excluded_patterns)
         return cost_constraints
 
     def module_cost_weight(
         self, module_names: Sequence[str], cost_constraints: dict[str, Any]
     ) -> float:
         """Return the cost multiplier for a group of modules."""
+        excluded_patterns = cost_constraints.get(EXCLUDED_MODULE_NAME_PATTERNS_KEY, [])
+        if (
+            module_names
+            and excluded_patterns
+            and all(
+                any(fnmatch.fnmatch(name, pattern) for pattern in excluded_patterns)
+                for name in module_names
+            )
+        ):
+            return 0.0
         return 1.0
 
     def total_weight_size(
@@ -119,7 +164,7 @@ class AutoQuantizeCostModel:
     ) -> float:
         """Return the cost denominator for the effective-bits constraint."""
         return sum(
-            module.weight.numel() * self.module_cost_weight([name], cost_constraints)
+            _get_module_weight_numel(module) * self.module_cost_weight([name], cost_constraints)
             for name, module in named_modules
             if is_auto_quantize_module(module)
         )
@@ -135,7 +180,9 @@ class ActiveMoECostModel(AutoQuantizeCostModel):
     """Scale routed MoE expert weights by the active experts per-token ratio."""
 
     name = COST_MODEL_ACTIVE_MOE
-    supported_cost_keys = frozenset({ACTIVE_MOE_EXPERT_RATIO_KEY})
+    supported_cost_keys = frozenset(
+        {ACTIVE_MOE_EXPERT_RATIO_KEY, EXCLUDED_MODULE_NAME_PATTERNS_KEY}
+    )
 
     def normalize_cost_constraints(
         self, model: nn.Module, cost_constraints: dict[str, Any]
@@ -164,9 +211,12 @@ class ActiveMoECostModel(AutoQuantizeCostModel):
     def module_cost_weight(
         self, module_names: Sequence[str], cost_constraints: dict[str, Any]
     ) -> float:
+        base_weight = super().module_cost_weight(module_names, cost_constraints)
+        if base_weight == 0.0:
+            return 0.0
         if any(is_routed_moe_module_name(n) for n in module_names):
             return cost_constraints[ACTIVE_MOE_EXPERT_RATIO_KEY]
-        return 1.0
+        return base_weight
 
 
 _COST_MODELS: Final = {
