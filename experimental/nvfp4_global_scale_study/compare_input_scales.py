@@ -161,9 +161,9 @@ def main():
         "</head><body>",
         "<h1>NVFP4 activation global amax (g_amax) study — per-layer comparison</h1>",
         "<div class='note'>g_amax = stored <code>input_scale &times; 6 &times; 448</code>, aggregated (mean) "
-        "across MoE experts. Variants: <b>ref-max</b> (default dataset, max calib), <b>act-max-p5</b> "
-        "(nvfp4_act_max, b_min_percentile=5), <b>ref-code</b> (coding calib, max), <b>ref-reasoning</b> "
-        "(reasoning calib, max).</div>",
+        "across MoE experts. Variants: <b>ref-max</b> (default dataset, max calib), "
+        "<b>act-max-p5</b> / <b>act-max-p1</b> (nvfp4_act_max, b_min_percentile=5 / 1), "
+        "<b>ref-code</b> (coding calib, max), <b>ref-reasoning</b> (reasoning calib, max).</div>",
         "<h2>Run configuration</h2>",
         "<table><tr><th>model</th><th>checkpoint</th><th>recipe</th><th>calib dataset</th>"
         "<th>#samples</th><th>seq len</th></tr>",
