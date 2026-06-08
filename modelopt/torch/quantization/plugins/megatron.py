@@ -693,8 +693,20 @@ if HAS_TE:
             return super()._load_from_state_dict(filtered_state_dict, prefix, *args, **kwargs)
 
         def _process_quantizer_amax(self, k, v, quantizer_state_dict):
-            assert v.numel() == 1, "TEGroupedLinear only supports per-tensor quantization"
-            quantizer_state_dict[k] = v.view(-1)
+            # numel == 1: per-tensor (legacy).
+            # numel == num_gemms: per-expert (axis=0 on the stacked weight quantizer);
+            # the raw _amax has shape [num_gemms, 1, 1] from axis-0 reduction.
+            # Higher granularity (per-channel-within-expert, NVFP4 block scales) is
+            # not yet supported on TEGroupedLinear.
+            if v.numel() == 1:
+                quantizer_state_dict[k] = v.view(-1)
+            elif v.numel() == self.num_gemms:
+                quantizer_state_dict[k] = v.view(self.num_gemms)
+            else:
+                raise AssertionError(
+                    f"TEGroupedLinear quantizer state {k} has numel {v.numel()}; "
+                    f"expected 1 (per-tensor) or {self.num_gemms} (per-expert)."
+                )
 
     @QuantModuleRegistry.register(
         {TEColumnParallelGroupedLinear: "megatron_TEColumnParallelGroupedLinear"}

@@ -27,7 +27,7 @@ from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
-from ..nn import QuantModuleRegistry
+from ..nn import QuantModuleRegistry, TensorQuantizer
 from .custom import _ParallelLinear
 
 _TE_VERSION = Version(te.__version__)
@@ -137,8 +137,16 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # Remove self.weight after setup.
         delattr(self, "weight")
 
-        # TODO: GroupedLinear supports weights split by `num_gemms`, to support quantization
-        # with static parameters beyond per-tensor, we need to support a unique quantizer for each gemm.
+    def _is_per_expert_weight_quant(self) -> bool:
+        # Per-expert mode: axis=0 on the weight quantizer means the stacked
+        # [num_gemms, out, in] weight is reduced over (1, 2), producing one amax
+        # per expert. Anything else (axis=None, axis=(0, 1), ...) keeps the
+        # legacy per-tensor path.
+        quantizer = getattr(self, "weight_quantizer", None)
+        if not isinstance(quantizer, TensorQuantizer):
+            return False
+        axis = quantizer.axis
+        return axis in (0, (0,))
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
@@ -151,7 +159,22 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         delattr(self, "weight")
 
     def iter_weights_for_calibration(self):
-        """Yield ``(weight_i, weight_quantizer)`` for each of the ``num_gemms`` grouped weights."""
+        """Yield grouped weights for calibration.
+
+        Per-tensor (``axis=None``): yields ``(weight_i, weight_quantizer)`` for each
+        expert separately; the calibrator accumulates a single amax across all experts.
+
+        Per-expert (``axis=0``): yields ``(stacked, weight_quantizer)`` once, where
+        ``stacked`` has shape ``[num_gemms, out, in]``. The quantizer's axis-0 reduction
+        then produces one amax per expert (shape ``[num_gemms, 1, 1]``).
+        """
+        if self._is_per_expert_weight_quant():
+            weights = [getattr(self, f"weight{i}", None) for i in range(self.num_gemms)]
+            if any(w is None for w in weights):
+                return
+            yield torch.stack(weights, dim=0), self.weight_quantizer
+            return
+
         for i in range(self.num_gemms):
             weight_i = getattr(self, f"weight{i}", None)
             if weight_i is not None:
@@ -182,8 +205,17 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
         new_args = list(args)
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
-        for i in range(weights_start, weights_start + num_gemms):
-            new_args[i] = self.weight_quantizer(args[i])
+        if self._is_per_expert_weight_quant():
+            # Stack the N expert weights into one [N, out, in] tensor so the
+            # quantizer's axis-0 reduction sees them together; the resulting
+            # _amax of shape [N, 1, 1] broadcasts to give per-expert fake-quant.
+            stacked = torch.stack(list(args[weights_start : weights_start + num_gemms]), dim=0)
+            q_stacked = self.weight_quantizer(stacked)
+            for i in range(num_gemms):
+                new_args[weights_start + i] = q_stacked[i]
+        else:
+            for i in range(weights_start, weights_start + num_gemms):
+                new_args[i] = self.weight_quantizer(args[i])
         output = getattr(package, func_name)(*new_args)
         # TE 2.15+ returns `(out, new_workspaces)`; TE <= 2.14 returns just `out`.
         # Only the activation tensor participates in output quantization.
