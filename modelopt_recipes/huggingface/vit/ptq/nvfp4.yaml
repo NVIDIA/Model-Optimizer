@@ -15,49 +15,31 @@
 
 metadata:
   recipe_type: ptq
-  description: >-
-    HuggingFace ViT NVFP4 W4A4 PTQ recipe. Skip list mirrors modelopt.onnx
-    FP8 (patch-embed Conv2d, classifier, and final vit.layernorm stay
-    FP16). Encoder Linear weights/inputs run NVFP4; attention BMMs,
-    softmax, and per-block LayerNorm outputs stay at FP8.
-    Uses AWQ-lite calibration.
+imports:
+  nvfp4: configs/numerics/nvfp4
+  fp8: configs/numerics/fp8
+  attention_qkv_fp8: configs/ptq/units/attention_qkv_fp8
+  w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
 quantize:
   algorithm: awq_lite
   quant_cfg:
-    - quantizer_name: '*'
+    - $import: w4a4_nvfp4_nvfp4
+
+    - quantizer_name: '*output_quantizer'
       enable: false
 
-    - parent_class: 'nn.Linear'
-      quantizer_name: 'vit.encoder.layer.*.weight_quantizer'
-      cfg:
-        num_bits: e2m1
-        axis:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-    - parent_class: 'nn.Linear'
-      quantizer_name: 'vit.encoder.layer.*.input_quantizer'
-      cfg:
-        num_bits: e2m1
-        axis:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
+    - $import: attention_qkv_fp8
 
-    - quantizer_name: '*[qkv]_bmm_quantizer'
+    # Hold the patch-embed Conv2d and the classifier head at per-tensor FP8.
+    - quantizer_name: '*patch_embeddings.projection.weight_quantizer'
       cfg:
-        num_bits: e4m3
-        axis:
-
-    - quantizer_name: '*softmax_quantizer'
+        $import: fp8
+    - quantizer_name: '*patch_embeddings.projection.input_quantizer'
       cfg:
-        num_bits: e4m3
-        axis:
-
-    - parent_class: 'nn.LayerNorm'
-      quantizer_name: 'vit.encoder.layer.*.output_quantizer'
+        $import: fp8
+    - quantizer_name: '*classifier.weight_quantizer'
       cfg:
-        num_bits: e4m3
-        axis:
+        $import: fp8
+    - quantizer_name: '*classifier.input_quantizer'
+      cfg:
+        $import: fp8
