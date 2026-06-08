@@ -365,3 +365,72 @@ def _test_svdquant_init_no_quantizer_falls_back(rank, size):
 
 def test_svdquant_init_no_quantizer_falls_back(dist_workers):
     dist_workers.run(_test_svdquant_init_no_quantizer_falls_back)
+
+
+def _test_quantize_then_lora_svdquant_state_dict_roundtrip(rank, size):
+    """Disk save + load round-trips the per-expert stacked LoRA factors bitwise.
+
+    Sanity scaffold for Phase 2 plumbing (OMNIML-4944): validates that a model
+    in the quantize -> LoRA(svdquant) state can serialize its LoRA factors via
+    torch.save and restore them via torch.load + load_state_dict. Doesn't use
+    Megatron's distributed-checkpoint format (sharded_state_dict integration is
+    deferred); each rank saves to its own temp path so dist_workers ranks don't
+    collide. Confirms the LoRA-on-quant-checkpoint claim end-to-end at small
+    scale before we wire into the production trainer.
+    """
+    import os
+    import shutil
+    import tempfile
+
+    initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
+    model = _moe_model_provider(tp_size=size)
+    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+
+    def forward_func(mod):
+        _ = megatron_prefill(model, prompt_tokens)
+
+    mtq.quantize(model, INT8_PER_TENSOR_QUANT_CFG, forward_func)
+    mtpeft.update_model(model, SVDQUANT_LORA_CFG)
+
+    # Snapshot the original LoRA factors per grouped module.
+    original_factors = {}
+    for name, module in _grouped_lora_modules(model):
+        adapter = module._lora_adapters["svdquant"]
+        original_factors[name] = (
+            adapter["lora_a"].weight.detach().clone(),
+            adapter["lora_b"].weight.detach().clone(),
+        )
+    assert original_factors, "expected at least one TE-grouped LoRA module with svdquant adapter"
+
+    # Save to a per-rank temp path so dist_workers ranks don't collide.
+    tmpdir = tempfile.mkdtemp(prefix=f"omniml4944_lora_roundtrip_rank{rank}_")
+    path = os.path.join(tmpdir, "state.pt")
+    try:
+        torch.save(model.state_dict(), path)
+
+        # Mutate the LoRA factors in place so a successful load is observable.
+        with torch.no_grad():
+            for _, module in _grouped_lora_modules(model):
+                adapter = module._lora_adapters["svdquant"]
+                adapter["lora_a"].weight.zero_()
+                adapter["lora_b"].weight.zero_()
+
+        # Restore from disk and assert bitwise equality with the snapshot.
+        loaded = torch.load(path, map_location="cuda", weights_only=True)
+        model.load_state_dict(loaded, strict=True)
+
+        for name, module in _grouped_lora_modules(model):
+            adapter = module._lora_adapters["svdquant"]
+            a_orig, b_orig = original_factors[name]
+            assert torch.equal(adapter["lora_a"].weight, a_orig), (
+                f"{name}: lora_a did not bitwise round-trip through torch.save/load"
+            )
+            assert torch.equal(adapter["lora_b"].weight, b_orig), (
+                f"{name}: lora_b did not bitwise round-trip through torch.save/load"
+            )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_quantize_then_lora_svdquant_state_dict_roundtrip(dist_workers):
+    dist_workers.run(_test_quantize_then_lora_svdquant_state_dict_roundtrip)
