@@ -276,6 +276,7 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
             # Auto-download from HuggingFace if path doesn't exist locally
             input_model_path = config.input_model_path
             if not Path(input_model_path).exists():
+                # Guard optional dependency: only require huggingface_hub for HF auto-downloads.
                 from huggingface_hub import snapshot_download
 
                 if input_model_path.startswith("https://huggingface.co/"):
