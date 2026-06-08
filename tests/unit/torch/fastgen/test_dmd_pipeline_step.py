@@ -13,21 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end DMD2 training-step test (hermetic, pipeline-level).
+"""Hermetic DMD2 training-step test (pipeline-level).
 
 Exercises one full DMD2 optimizer step through the real ``QwenImageDMDPipeline``
 loss path — the student VSD phase and the fake-score DSM phase — on tiny stub
-transformers, with no real Qwen weights, NCCL, or FSDP2. This is the hermetic
-proxy for ``dmd2_recipe``'s per-step training loop: a single test transitively
-covers the plugin's pack/unpack ``_call_model`` path, the VSD/DSM loss math,
-gradient isolation between phases, an optimizer update, and a checkpoint
-round-trip — the wiring that previously took several unit tests.
-
-A full recipe-level e2e (``dmd2_finetune.py`` driving ``dmd2_recipe`` on the mock
-dataloader) additionally needs a tiny Qwen-Image pipeline fixture + single-GPU
-FSDP2/NCCL init; that's a follow-up — mirror ``create_tiny_wan22_pipeline_dir``
-in ``tests/_test_utils/torch/diffusers_models.py`` and drive the example via
-``run_example_command`` gated by ``minimum_sm``.
+transformers, with no real Qwen weights, NCCL, or FSDP2. A single test
+transitively covers the plugin's pack/unpack ``_call_model`` path, the VSD/DSM
+loss math, gradient isolation between phases, an optimizer update, and a
+checkpoint round-trip.
 """
 
 from __future__ import annotations
@@ -159,9 +152,9 @@ def test_dmd2_student_state_dict_round_trips():
     _train_only(student, _teacher, _fake)
     opt = torch.optim.Adam(student.parameters(), lr=1e-2)
     opt.zero_grad()
-    pipe.compute_student_loss(
-        latents, noise, encoder_hidden_states=text, guidance_scale=None
-    )["total"].backward()
+    pipe.compute_student_loss(latents, noise, encoder_hidden_states=text, guidance_scale=None)[
+        "total"
+    ].backward()
     opt.step()
 
     saved = copy.deepcopy(student.state_dict())
