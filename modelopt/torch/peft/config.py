@@ -88,6 +88,18 @@ class PEFTAttributeConfig(ModeloptBaseConfig):
         description="Initializer from ``torch.nn.init`` (in-place; name ends with ``\\_``).",
     )
 
+    lora_dtype: str | None = ModeloptField(
+        default=None,
+        title="LoRA factor dtype",
+        description=(
+            "Dtype string for the LoRA factor tensors, independent of the base layer "
+            "(e.g. ``'bf16'`` to pin a BF16 sidecar on top of a fake-quantized base). "
+            "One of ``'bf16'``, ``'fp16'``, ``'fp32'``, or the equivalent long forms "
+            "``'bfloat16'``, ``'float16'``, ``'float32'``. "
+            "``None`` (default) inherits from the wrapped layer's parameter dtype."
+        ),
+    )
+
     @field_validator("lora_a_init", "lora_b_init", mode="before")
     @classmethod
     def _parse_init_callable(cls, v):
@@ -142,6 +154,26 @@ class PEFTAttributeConfig(ModeloptBaseConfig):
         if v <= 0:
             raise ValueError("scale must be a positive number")
         return v
+
+    @field_validator("lora_dtype")
+    @classmethod
+    def validate_lora_dtype(cls, v):
+        """Validate and normalize lora_dtype to one of the canonical short forms."""
+        if v is None:
+            return v
+        aliases = {
+            "bf16": "bf16",
+            "bfloat16": "bf16",
+            "fp16": "fp16",
+            "float16": "fp16",
+            "fp32": "fp32",
+            "float32": "fp32",
+        }
+        if v not in aliases:
+            raise ValueError(
+                f"lora_dtype must be one of {sorted(set(aliases))} or None, got {v!r}"
+            )
+        return aliases[v]
 
 
 # Type alias for adapter configuration
