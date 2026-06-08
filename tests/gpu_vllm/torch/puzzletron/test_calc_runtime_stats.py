@@ -30,8 +30,6 @@ from omegaconf import OmegaConf
 from modelopt.torch.puzzletron.block_config import AttentionConfig, FFNConfig
 from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import calc_runtime_for_subblocks
 
-pytest.importorskip("vllm", reason="vLLM is required for calc_runtime_for_subblocks")
-
 
 @pytest.mark.skip(reason="AnyModel is not supported in vLLM yet")
 def test_calc_runtime_for_subblocks(tmp_path: Path):

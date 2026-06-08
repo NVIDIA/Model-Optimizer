@@ -79,21 +79,21 @@ def calculate_subblock_memory(
     Given its configuration and runtime dimensions, returns bytes or a detailed dict.
 
     Args:
-        subblock_config (FFNConfig | AttentionConfig): Subblock configuration dataclass.
-        batch_size (int): Batch size for memory estimate.
-        prefill_seq_len (int): Sequence length for prefill phase.
-        generation_seq_len (int): Sequence length for generation phase (token-by-token).
-        prefill_queue_size (int): Token queue size for prefill attention memory allocation.
-        n_embd (int): Embedding (hidden) dimension.
-        n_head (int): Number of attention heads (used for non-FFN).
-        weights_dtype (torch.dtype): PyTorch dtype for model weights.
-        kv_cache_dtype (torch.dtype): PyTorch dtype for KV cache.
-        allocate_prefill_query (bool): Whether to allocate query cache for prefill tokens.
-        model_config (PretrainedConfig): HuggingFace-style config instance describing the model.
-        descriptor (type[ModelDescriptor]): Model descriptor type (for puzzletron model types).
+        subblock_config: Subblock configuration dataclass.
+        batch_size: Batch size for memory estimate.
+        prefill_seq_len: Sequence length for prefill phase.
+        generation_seq_len: Sequence length for generation phase (token-by-token).
+        prefill_queue_size: Token queue size for prefill attention memory allocation.
+        n_embd: Embedding (hidden) dimension.
+        n_head: Number of attention heads (used for non-FFN).
+        weights_dtype: PyTorch dtype for model weights.
+        kv_cache_dtype: PyTorch dtype for KV cache.
+        allocate_prefill_query: Whether to allocate query cache for prefill tokens.
+        model_config: HuggingFace-style config instance describing the model.
+        descriptor: Model descriptor type (for puzzletron model types).
 
     Returns:
-        float | dict[str, float]: Memory usage in bytes (float), or a dictionary by memory type.
+        Memory usage in bytes (float), or a dictionary by memory type.
     """
     if subblock_config.no_op:
         return 0
@@ -229,7 +229,7 @@ def calc_subblock_active_params(
         block_idx: The index of the block/subblock within the network, used to index into the stats.
 
     Returns:
-        int: The expected number of "active" parameters for the given subblock.
+        The expected number of "active" parameters for the given subblock.
     """
     if not (isinstance(sublayer_config, FFNConfig) and sublayer_config.is_moe):
         return calculate_subblock_params(model_config, sublayer_config, descriptor)
@@ -245,12 +245,12 @@ def load_moe_stats(stats_file: str) -> dict:
     It returns the normalized probability distributions over experts for each block, as a list of numpy arrays.
 
     Args:
-        stats_file (str): Path to the JSON file containing expert routing statistics for each block.
+        stats_file: Path to the JSON file containing expert routing statistics for each block.
 
     Returns:
-        list[np.ndarray]: A list where each element is a numpy array containing the normalized probability
-            distribution over experts for the corresponding block. If a block's expert list is empty,
-            its entry is 0.
+        A list where each element is a numpy array containing the normalized probability
+        distribution over experts for the corresponding block. If a block's expert list is empty,
+        its entry is 0.
     """
     with open(stats_file) as f:
         stats = json.load(f)
@@ -271,12 +271,12 @@ def estimate_num_active_experts(
     expected number of active (i.e., selected at least once) experts is computed.
 
     Args:
-        dist_over_experts (np.ndarray): A 1D array of probabilities for each expert.
-        batch_size (int): The number of samples in the batch.
-        num_experts (int): The maximum number of experts to consider (fewer if `dist_over_experts` is shorter).
+        dist_over_experts: A 1D array of probabilities for each expert.
+        batch_size: The number of samples in the batch.
+        num_experts: The maximum number of experts to consider (fewer if `dist_over_experts` is shorter).
 
     Returns:
-        int: The expected number of experts selected at least once across the batch.
+        The expected number of experts selected at least once across the batch.
     """
     # cut the tail and renormalize
     dist_over_experts = np.sort(dist_over_experts)[::-1][:num_experts]
@@ -296,14 +296,14 @@ def estimate_moe_active_params(
     """Estimate the expected number of active (used) parameters for a Mixture-of-Experts (MoE) FFN subblock.
 
     Args:
-        subblock_config (FFNConfig): The FFNConfig for the MoE subblock (with .moe field configured).
-        n_embd (int): The embedding dimension (input and output size per expert).
-        moe_stats_file (Path | str): Path to the JSON file containing routing/selection probabilities for experts.
-        batch_size (int): Batch size to simulate/extrapolate expected expert use.
-        block_idx (int): The index of the block/layer whose expert routing statistics should be used.
+        subblock_config: The FFNConfig for the MoE subblock (with .moe field configured).
+        n_embd: The embedding dimension (input and output size per expert).
+        moe_stats_file: Path to the JSON file containing routing/selection probabilities for experts.
+        batch_size: Batch size to simulate/extrapolate expected expert use.
+        block_idx: The index of the block/layer whose expert routing statistics should be used.
 
     Returns:
-        int: Estimated number of parameters actively used for the current batch and expert selection statistics.
+        Estimated number of parameters actively used for the current batch and expert selection statistics.
     """
     assert Path(moe_stats_file).exists()
     # if not Path(moe_stats_file).exists(): # if path is not provided, should we assume uniform distribution?
@@ -382,16 +382,15 @@ def calculate_mamba_memory(
     """Calculate memory usage (MiB) for a Mamba attention subblock.
 
     Args:
-        attention_config (AttentionConfig): Mamba attention configuration,
-            including Mamba-specific settings.
-        model_config (PretrainedConfig): Model configuration.
-        descriptor (type[ModelDescriptor]): Model descriptor class.
-        batch_size (int): Batch size for memory estimate.
-        weights_dtype (torch.dtype): Data type for model weights.
-        kv_cache_dtype (torch.dtype): Data type for state/kv-cache.
+        attention_config: Mamba attention configuration, including Mamba-specific settings.
+        model_config: Model configuration.
+        descriptor: Model descriptor class.
+        batch_size: Batch size for memory estimate.
+        weights_dtype: Data type for model weights.
+        kv_cache_dtype: Data type for state/kv-cache.
 
     Returns:
-        int: Estimated memory usage in mebibytes (MiB) for the Mamba subblock.
+        Estimated memory usage in mebibytes (MiB) for the Mamba subblock.
     """
     assert attention_config.mamba is not None
     mamba_config = attention_config.mamba
@@ -409,11 +408,11 @@ def calculate_mamba_state_size(
     """Calculate the total state size for a Mamba attention subblock.
 
     Args:
-        mamba_config (MambaConfig): Configuration object containing Mamba subblock parameters.
-        batch_size (int): Batch size to estimate the memory/state requirements for.
+        mamba_config: Configuration object containing Mamba subblock parameters.
+        batch_size: Batch size to estimate the memory/state requirements for.
 
     Returns:
-        int: Total state size (number of elements) required for the Mamba subblock, including convolution and SSM state.
+        Total state size (number of elements) required for the Mamba subblock, including convolution and SSM state.
     """
     _, _, conv_dim, kernel_size = _calculate_mamba_intermediates(mamba_config)
     conv_state_size = math.prod((batch_size, conv_dim, kernel_size))
@@ -443,15 +442,14 @@ def calculate_ffn_memory(
     """Estimate the memory usage in MiB of a feed-forward network (FFN) subblock.
 
     Args:
-        ffn_config (FFNConfig): FFN configuration for the block.
-        model_config (PretrainedConfig): The parent model configuration.
-        descriptor (type[ModelDescriptor]): Model descriptor class.
-        weights_dtype (torch.dtype | str): Data type for FFN weights.
-        experts_dtype (torch.dtype | str | None, optional): Data type for expert weights
-            (for MoE layers, if present). Defaults to None.
+        ffn_config: FFN configuration for the block.
+        model_config: The parent model configuration.
+        descriptor: Model descriptor class.
+        weights_dtype: Data type for FFN weights.
+        experts_dtype: Data type for expert weights (for MoE layers, if present).
 
     Returns:
-        float: Estimated FFN memory usage in mebibytes (MiB).
+        Estimated FFN memory usage in mebibytes (MiB).
     """
     # TODO: How to separate between expert weights and the rest for any model (same as puzzletron).
     num_params = calculate_subblock_params(model_config, ffn_config, descriptor)
@@ -463,16 +461,7 @@ def calculate_non_block_memory(
     vocab_size: int,
     weight_dtype: torch.dtype,
 ) -> float:
-    """Estimate the memory usage in MiB of non-subblock components (e.g., embeddings, output projection).
-
-    Args:
-        n_embd (int): Embedding dimension (hidden size).
-        vocab_size (int): Vocabulary size.
-        weight_dtype (torch.dtype): Data type for model weights.
-
-    Returns:
-        float: Estimated non-subblock memory usage in mebibytes (MiB).
-    """
+    """Estimate the memory usage in MiB of non-subblock components (e.g., embeddings, output projection)."""
     return calculate_non_block_params(n_embd, vocab_size) * sizeof_dtype(weight_dtype) / 2**20
 
 
@@ -480,13 +469,5 @@ def calculate_non_block_params(
     n_embd: int,
     vocab_size: int,
 ) -> int:
-    """Calculate the number of parameters for non-subblock components (e.g., embeddings, output projection).
-
-    Args:
-        n_embd (int): Embedding dimension (hidden size).
-        vocab_size (int): Vocabulary size.
-
-    Returns:
-        int: Estimated non-subblock parameter count.
-    """
+    """Calculate the number of parameters for non-subblock components (e.g., embeddings, output projection)."""
     return vocab_size * n_embd * 2 + n_embd

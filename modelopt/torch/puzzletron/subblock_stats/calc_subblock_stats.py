@@ -414,10 +414,7 @@ def _load_subblock_configs_from_replacement_library(
     4 intermediate_size + teacher_intermediate_size + ffn_noop + att_op (teacher) + att_noop.
 
     Args:
-        master_puzzle_dir (Path): Directory with "replacement_library.json" file
-
-    Returns:
-        list[SubblockConfig]:
+        master_puzzle_dir: Directory with "replacement_library.json" file
     """
     replacement_library = json.loads((master_puzzle_dir / "replacement_library.json").read_text())
     subblock_configs = set()
