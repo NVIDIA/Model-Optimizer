@@ -946,6 +946,11 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                             delattr(q, attr_name)
 
 
+def _is_quant_fused_experts_module(module):
+    """Return True for a converted HF fused-MoE-experts quantization wrapper."""
+    return isinstance(module, _QuantFusedExperts)
+
+
 class _QuantDbrxFFN(_QuantSparseSequentialMoe):
     @property
     def num_experts(self):
