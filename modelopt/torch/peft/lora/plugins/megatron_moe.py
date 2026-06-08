@@ -49,11 +49,11 @@ try:
         TEColumnParallelGroupedLinear is not None and TERowParallelGroupedLinear is not None
     )
 except ImportError:
-    TEColumnParallelGroupedLinear = None  # type: ignore[assignment]
-    TERowParallelGroupedLinear = None  # type: ignore[assignment]
-    get_pg_rank = get_pg_size = None  # type: ignore[assignment]
-    make_sharded_tensor_for_checkpoint = None  # type: ignore[assignment]
-    make_tp_sharded_tensor_for_checkpoint = None  # type: ignore[assignment]
+    TEColumnParallelGroupedLinear = None
+    TERowParallelGroupedLinear = None
+    get_pg_rank = get_pg_size = None
+    make_sharded_tensor_for_checkpoint = None
+    make_tp_sharded_tensor_for_checkpoint = None
     HAVE_TE_GROUPED = False
 
 # Quantized TE-grouped classes registered by modelopt.torch.quantization.plugins.megatron.
@@ -72,8 +72,8 @@ try:
         and _QuantTERowParallelGroupedLinear is not None
     )
 except ImportError:
-    _QuantTEColumnParallelGroupedLinear = None  # type: ignore[assignment]
-    _QuantTERowParallelGroupedLinear = None  # type: ignore[assignment]
+    _QuantTEColumnParallelGroupedLinear = None  # type: ignore[misc]
+    _QuantTERowParallelGroupedLinear = None  # type: ignore[misc]
     HAVE_QUANT_TE_GROUPED = False
 
 from ...config import PEFTAttributeConfig
@@ -88,9 +88,7 @@ _DTYPE_MAP = {
 }
 
 
-def _resolve_lora_dtype(
-    attr_config: PEFTAttributeConfig, fallback: torch.dtype
-) -> torch.dtype:
+def _resolve_lora_dtype(attr_config: PEFTAttributeConfig, fallback: torch.dtype) -> torch.dtype:
     """Map ``attr_config.lora_dtype`` to a ``torch.dtype``; ``None`` inherits ``fallback``."""
     if attr_config.lora_dtype is None:
         return fallback
@@ -162,9 +160,7 @@ if HAVE_TE_GROUPED:
                 lora_b = lora_b.to(base_param.device)
             super()._register_adapter(adapter_name, lora_a, lora_b, rank, scale, enable)
 
-        def update_layer_lora(
-            self, adapter_name: str, attr_config: PEFTAttributeConfig
-        ) -> None:
+        def update_layer_lora(self, adapter_name: str, attr_config: PEFTAttributeConfig) -> None:
             """Allocate and initialize per-expert stacked LoRA factors."""
             num_experts = self.num_gemms
             rank = attr_config.rank
@@ -211,8 +207,7 @@ if HAVE_TE_GROUPED:
             residual is undefined and ``mtq.quantize`` must run before ``mtpeft.update_model``.
             """
             quantizer = getattr(self, "weight_quantizer", None)
-            quant_enabled = quantizer is not None and getattr(quantizer, "is_enabled", True)
-            if not quant_enabled:
+            if quantizer is None or not getattr(quantizer, "is_enabled", True):
                 warnings.warn(
                     "lora_init_method='svdquant' requested but no enabled weight_quantizer "
                     "is attached to this TE-grouped linear. The quantization residual is "
@@ -228,18 +223,25 @@ if HAVE_TE_GROUPED:
             # time -- only callers using lora_init_method='svdquant' pay the import cost.
             from modelopt.torch.quantization.model_calib import svd as _svd_helper
 
+            weights = [getattr(self, f"weight{e}") for e in range(self.num_gemms)]
+            # OMNIML-4998 per-expert mode: axis=0 weight quantizer expects the
+            # stacked ``[num_gemms, out, in]`` tensor so its ``_amax`` of shape
+            # ``[num_gemms, 1, 1]`` broadcasts across experts; calling on a single
+            # ``[out, in]`` slice would raise a shape mismatch. Legacy per-tensor
+            # configs (axis=None) keep the per-call path bit-for-bit.
+            if getattr(quantizer, "axis", None) in (0, (0,)):
+                q_stacked = quantizer(torch.stack(weights, dim=0))
+                fake_quants = [q_stacked[e] for e in range(self.num_gemms)]
+            else:
+                fake_quants = [quantizer(w) for w in weights]
             for e in range(self.num_gemms):
-                w_e = getattr(self, f"weight{e}")  # [out_features, in_features]
-                w_q = quantizer(w_e)
-                residual = (w_e - w_q).detach()
-                us, vt = _svd_helper(residual, rank)
                 # vt: [rank, in_features], us: [out_features, rank]
+                residual = (weights[e] - fake_quants[e]).detach()
+                us, vt = _svd_helper(residual, rank)
                 lora_a_weight[e].copy_(vt.to(lora_a_weight.dtype))
                 lora_b_weight[e].copy_(us.to(lora_b_weight.dtype))
 
-        def forward(
-            self, x: torch.Tensor, tokens_per_expert, *args, **kwargs
-        ) -> Any:
+        def forward(self, x: torch.Tensor, tokens_per_expert, *args, **kwargs) -> Any:
             """Add per-expert LoRA outputs to the grouped GEMM's base output.
 
             Bypasses ``LoRAModule.forward`` via ``super(LoRAModule, self)`` because
@@ -295,11 +297,13 @@ if HAVE_TE_GROUPED:
             raise NotImplementedError("Subclasses must implement _factor_tp_axis")
 
         def _ep_rank_size_tp_group(self):
-            """Resolve (ep_rank, ep_size, tp_group), preferring ``self._pg_collection`` and
-            falling back to Megatron's global ``parallel_state`` when the attribute isn't
-            populated on the wrapped instance. Both paths return the same groups; the
-            fallback is necessary because some construction paths (notably the small test
-            factory) don't reliably set ``_pg_collection`` on the per-rank linear instance.
+            """Resolve ``(ep_rank, ep_size, tp_group)`` with a fallback to global parallel_state.
+
+            Prefers ``self._pg_collection.ep`` / ``self._tp_group`` when populated;
+            falls back to ``parallel_state.get_expert_model_parallel_*`` when not.
+            Both paths return the same groups; the fallback is necessary because some
+            construction paths (notably the small test factory) don't reliably set
+            ``_pg_collection`` on the per-rank linear instance.
             """
             from megatron.core import parallel_state
 
@@ -344,9 +348,7 @@ if HAVE_TE_GROUPED:
                     for gemm_idx in range(self.num_gemms):
                         global_expert_idx = local_expert_indices_offset + gemm_idx
                         slice_ = stacked[gemm_idx]
-                        key = (
-                            f"{prefix}{factor_name}_{adapter_name}.weight{global_expert_idx}"
-                        )
+                        key = f"{prefix}{factor_name}_{adapter_name}.weight{global_expert_idx}"
                         prepend = (
                             *sharded_offsets,
                             (ep_axis, global_expert_idx, num_global_experts),
@@ -434,16 +436,8 @@ if HAVE_TE_GROUPED:
     # Required for lora_init_method='svdquant' to find a weight_quantizer on self.
     if HAVE_QUANT_TE_GROUPED:
         LoRAModuleRegistry.register(
-            {
-                _QuantTEColumnParallelGroupedLinear: (
-                    "quant_megatron_TEColumnParallelGroupedLinear"
-                )
-            }
+            {_QuantTEColumnParallelGroupedLinear: ("quant_megatron_TEColumnParallelGroupedLinear")}
         )(_LoRATEGroupedColumnParallelLinear)
         LoRAModuleRegistry.register(
-            {
-                _QuantTERowParallelGroupedLinear: (
-                    "quant_megatron_TERowParallelGroupedLinear"
-                )
-            }
+            {_QuantTERowParallelGroupedLinear: ("quant_megatron_TERowParallelGroupedLinear")}
         )(_LoRATEGroupedRowParallelLinear)
