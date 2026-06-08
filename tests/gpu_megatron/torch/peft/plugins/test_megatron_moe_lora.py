@@ -22,6 +22,7 @@ verify registration, the zero-init forward identity, random-init
 divergence from base, ``lora_dtype`` pinning, and gradient flow.
 """
 
+import copy
 from functools import partial
 
 import pytest
@@ -40,7 +41,6 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
-from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.peft.lora.plugins.megatron_moe import HAVE_TE_GROUPED
 from modelopt.torch.utils.plugins import megatron_prefill
 
@@ -254,7 +254,9 @@ def _test_gradient_flow(rank, size):
 
     batch_size, seq_len = prompt_tokens.shape
     attention_mask = (
-        torch.triu(torch.ones((batch_size, seq_len, seq_len), device=prompt_tokens.device), diagonal=1)
+        torch.triu(
+            torch.ones((batch_size, seq_len, seq_len), device=prompt_tokens.device), diagonal=1
+        )
         .bool()
         .view(batch_size, 1, seq_len, seq_len)
     )
@@ -486,8 +488,7 @@ def _test_quantize_then_lora_svdquant_dist_checkpoint_roundtrip(tmp_path, rank, 
     test_output = megatron_prefill(model_test, prompt_tokens)
 
     assert torch.allclose(ref_output, test_output, rtol=1e-5), (
-        "dist-checkpoint round-trip changed the model output -- LoRA factors did not "
-        "fully restore"
+        "dist-checkpoint round-trip changed the model output -- LoRA factors did not fully restore"
     )
     assert not torch.allclose(ref_output, pre_lora_output_test, rtol=1e-5), (
         "ref output equals the pre-LoRA baseline; LoRA may not be perturbing the model"
@@ -497,4 +498,117 @@ def _test_quantize_then_lora_svdquant_dist_checkpoint_roundtrip(tmp_path, rank, 
 def test_quantize_then_lora_svdquant_dist_checkpoint_roundtrip(dist_workers, tmp_path):
     dist_workers.run(
         partial(_test_quantize_then_lora_svdquant_dist_checkpoint_roundtrip, str(tmp_path))
+    )
+
+
+# OMNIML-4998 AC-3: per-expert axis=0 weight quantization composed with the PR #3
+# TE-grouped MoE LoRA plugin.
+PER_EXPERT_QUANT_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*experts.linear_fc*.weight_quantizer",
+            "cfg": {"num_bits": 8, "axis": 0},
+            "enable": True,
+        },
+        {"quantizer_name": "*output_layer*", "enable": False},
+    ],
+    "algorithm": "max",
+}
+
+
+def _test_per_expert_quant_then_lora_dist_checkpoint_roundtrip(
+    tmp_path, lora_init_method, rank, size
+):
+    """Per-expert weight amax + PR #3 LoRA composed through Megatron dist-checkpoint.
+
+    Builds a TE-grouped MoE GPT with ep=2 so the per-expert path actually exercises
+    the OMNIML-4998 EP all-gather / narrow on save+restore. Quantizes with axis=0
+    on the expert weight quantizers, then attaches LoRA via mtpeft.update_model.
+    Saves to dist-checkpoint, reloads into a fresh model, and asserts the post-LoRA
+    forward output matches the source within tolerance for both lora_init_method
+    variants: ``zeros`` (no quantizer call in init -- pure composition) and
+    ``svdquant`` (exercises the per-expert stack-then-quantize branch in
+    _init_factors_svdquant).
+    """
+    initialize_for_megatron(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        expert_model_parallel_size=2,
+    )
+
+    def _make_model():
+        return (
+            get_mcore_gpt_model(
+                tensor_model_parallel_size=1,
+                expert_model_parallel_size=2,
+                num_layers=2,
+                hidden_size=256,
+                num_attention_heads=4,
+                activation_func="swiglu",
+                transformer_impl="transformer_engine",
+                vocab_size=64,
+                moe_grouped_gemm=True,
+                num_moe_experts=NUM_EXPERTS,
+                moe_ffn_hidden_size=512,
+            )
+            .cuda()
+            .eval()
+        )
+
+    model_ref = _make_model()
+    model_test = _make_model()
+    prompt_tokens = torch.randint(
+        0, model_ref.vocab_size, (2, model_ref.max_sequence_length)
+    ).cuda()
+    pre_lora_output = megatron_prefill(model_test, prompt_tokens)
+
+    def forward_func(_mod):
+        _ = megatron_prefill(model_ref, prompt_tokens)
+
+    mtq.quantize(model_ref, copy.deepcopy(PER_EXPERT_QUANT_CFG), forward_func)
+    lora_cfg = {
+        "adapter_type": "lora",
+        "adapter_name": f"compose_{lora_init_method}",
+        "adapter_cfg": {
+            "*": {"enable": False},
+            "*experts*linear_fc*": {
+                "rank": 8,
+                "scale": 1.0,
+                "lora_init_method": lora_init_method,
+                "enable": True,
+            },
+            "*output_layer*": {"enable": False},
+        },
+    }
+    mtpeft.update_model(model_ref, lora_cfg)
+    ref_output = megatron_prefill(model_ref, prompt_tokens)
+
+    save_distributed_checkpoint(tmp_path, model_ref)
+    save_sharded_modelopt_state([model_ref], tmp_path)
+    restore_sharded_modelopt_state([model_test], tmp_path)
+    model_test = load_distributed_checkpoint(tmp_path, model_test)
+    test_output = megatron_prefill(model_test, prompt_tokens)
+
+    assert torch.allclose(ref_output, test_output, rtol=1e-5), (
+        f"per-expert quant + LoRA ({lora_init_method}) dist-checkpoint round-trip "
+        "changed the model output"
+    )
+    if lora_init_method != "zeros":
+        assert not torch.allclose(ref_output, pre_lora_output, rtol=1e-5), (
+            f"{lora_init_method} init failed to perturb the model output"
+        )
+
+
+@pytest.mark.parametrize("lora_init_method", ["zeros", "svdquant"])
+def test_per_expert_quant_then_lora_dist_checkpoint_roundtrip(
+    dist_workers_size_4, tmp_path, lora_init_method
+):
+    """OMNIML-4998 AC-3: per-expert quant + PR #3 LoRA + dist-checkpoint round-trip."""
+    dist_workers_size_4.run(
+        partial(
+            _test_per_expert_quant_then_lora_dist_checkpoint_roundtrip,
+            str(tmp_path),
+            lora_init_method,
+        )
     )
