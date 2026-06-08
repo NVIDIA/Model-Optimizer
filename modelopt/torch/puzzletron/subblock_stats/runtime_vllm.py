@@ -30,6 +30,8 @@ import json
 import subprocess  # nosec B404
 from pathlib import Path
 
+from ..tools.logger import mprint
+from ..utils.vllm_adapter import convert_block_configs_to_per_layer_config
 from .runtime_utils import RuntimeConfig
 
 
@@ -42,6 +44,16 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
     """
     output_json_path = model_path / "vllm_latency_benchmark.json"
     max_model_len = runtime_config.prefill_seq_len + runtime_config.generation_seq_len
+
+    with open(model_path / "config.json") as f:
+        config = json.load(f)
+
+    if convert_block_configs_to_per_layer_config(config):
+        mprint("Converted block configs to per-layer config")
+        with open(model_path / "config.json", "w") as f:
+            json.dump(config, f, indent=2)
+    else:
+        mprint("No block configs to convert")
 
     cmd = [
         "vllm",
