@@ -82,8 +82,6 @@ deployment:
   # image tag — the default cu12 build has no sm_103 FP4 kernel, so the deploy
   # dies at engine init with CUDA "no kernel image is available". e.g.:
   #   image: vllm/vllm-openai:v0.19.1-cu130
-  # If a pinned release predates your model's arch, use the nightly instead
-  # (Qwen3.5-9B's qwen3_5 needed vllm/vllm-openai:cu130-nightly-x86_64, 0.19.2rc1.dev134).
   # Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`
   # (ViT flash-attn workaround; drop if the encoder loads without it).
   #

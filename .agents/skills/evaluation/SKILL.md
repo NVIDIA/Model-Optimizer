@@ -144,7 +144,7 @@ For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipelin
 
 **Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
 
-> **NVFP4 on Blackwell B300/GB300 (sm_103): append `-cu130` to the image tag** (e.g. `vllm/vllm-openai:v0.19.1-cu130` — release tags are multi-arch). The default cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. If a pinned release predates the model's arch, use `cu130-nightly-<arch>` (Qwen3.5-9B's `qwen3_5` needed it, vLLM 0.19.2rc1.dev134). Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
+> **NVFP4 on Blackwell B300/GB300 (sm_103): append `-cu130` to the image tag** (e.g. `vllm/vllm-openai:v0.19.1-cu130` — release tags are multi-arch). The default cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 
@@ -297,7 +297,7 @@ Default images:
 | Framework | Image | Registry |
 | --- | --- | --- |
 | vLLM | `vllm/vllm-openai:v0.19.1` (bump per recipe; never `:latest`) | DockerHub |
-| vLLM (NVFP4 on B300/GB300) | `vllm/vllm-openai:v0.19.1-cu130` (bump to `cu130-nightly-<arch>` for new archs) | DockerHub |
+| vLLM (NVFP4 on B300/GB300) | `vllm/vllm-openai:v0.19.1-cu130` | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
