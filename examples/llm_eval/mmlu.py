@@ -183,7 +183,10 @@ def gen_prompt(train_df, subject, k=-1):
 def evaluate(args, subject, model: EvalModel | LLM, dev_df, test_df):
     cors = []
     all_probs = []
-    for i in range(test_df.shape[0]):
+    num_examples = test_df.shape[0]
+    if args.limit is not None:
+        num_examples = min(num_examples, args.limit)
+    for i in range(num_examples):
         # get prompt and make sure it fits
         k = args.ntrain
         prompt_end = format_example(test_df, i, include_answer=False)
@@ -201,6 +204,12 @@ def evaluate(args, subject, model: EvalModel | LLM, dev_df, test_df):
             train_prompt = gen_prompt(dev_df, subject, k)
             prompt = train_prompt + prompt_end
 
+        # Skip examples that do not fit even at zero-shot, otherwise the backend rejects
+        # prompts longer than max_seq_len and aborts the whole evaluation.
+        if not check_valid_length(model, prompt):
+            print(f"Skipping {subject} example {i}: prompt exceeds max_seq_len even at 0-shot.")
+            continue
+
         label = test_df.iloc[i, test_df.shape[1] - 1]
         if isinstance(model, EvalModel):
             pred = model.run(prompt)
@@ -212,7 +221,11 @@ def evaluate(args, subject, model: EvalModel | LLM, dev_df, test_df):
         cors.append(cor)
         all_probs.append(probs)
 
-    acc = np.mean(cors)
+    if not cors:
+        # Every example was skipped (all prompts exceeded max_seq_len). Surface it instead of
+        # silently producing a nan accuracy downstream.
+        print(f"WARNING: all {subject} examples were skipped; reporting accuracy as nan.")
+    acc = np.mean(cors) if cors else float("nan")
     cors = np.array(cors)
 
     all_probs = np.array(all_probs)
@@ -233,8 +246,12 @@ def main(
     auto_quantize_score_size: int = 128,
     auto_quantize_checkpoint: str | None = None,
     sparse_cfg: str | None = None,
+    limit: int | None = None,
     **kwargs,
 ):
+    if limit is not None and limit <= 0:
+        raise ValueError(f"limit must be a positive integer when provided, got {limit}.")
+
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
