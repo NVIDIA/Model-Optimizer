@@ -66,16 +66,16 @@ jobs:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
-      # TODO: Re-enable once Codecov uploader GPG signature verification is fixed.
-      # The uploader currently fails with "Can't check signature: No public key", so we
-      # skip the upload and let Codecov carry forward coverage from the last successful run.
       - name: Upload coverage reports to Codecov
-        if: false
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
           fail_ci_if_error: true
+          # Skip GPG/SHASUM integrity check of the Codecov CLI: its key import
+          # intermittently fails (codecov/codecov-action#1876), which would
+          # otherwise hard-fail this required job on a transient infra blip.
+          skip_validation: true
           verbose: true
   windows:
     if: needs.check-file-changes.outputs.any_changed == 'true'
