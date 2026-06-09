@@ -6,7 +6,7 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 2. **[Pruning](#2-pruning)** — Minitron structured pruning
 3. **[Distillation](#3-distillation)** — recovering accuracy via Megatron-Bridge knowledge distillation
 4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
-5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/llm_ptq/hf_ptq.py` script
+5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/megatron_bridge/quantize.py` script
 6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
 
 ## Results
@@ -16,26 +16,26 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 | Model | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pruned 22B/A3.0B (no distillation) | 47.1 | 33.5 | 27.4 | 15.5 | 36.9 | 12.1 | 28.8 |
-| Distill @ 2.5B tokens (100 iters at 8K Seq Length) | 73.3 | 63.7 | 55.3 | 77.6 | 59.1 | 25.1 | 59.0 |
-| Distill @ 20B tokens (800 iters at 8K Seq Length) | 74.8 | 66.0 | 62.3 | 79.6 | 65.4 | 26.1 | 62.4 |
-| Distill @ 40B tokens (1600 iters at 8K Seq Length) | 76.4 | 67.2 | 62.3 | 79.8 | 66.0 | 26.6 | 63.1 |
-| Distill @ 60B tokens (2400 iters at 8K Seq Length) | 76.1 | 68.1 | 63.6 | 78.8 | 67.3 | 27.0 | 63.5 |
-| Distill @ 80B tokens (3200 iters at 8K Seq Length) | 76.5 | 69.1 | 63.9 | 80.7 | 66.5 | 29.0 | 64.3 |
-| Distill @ 82.5B tokens (+100 iters at 32K Seq Length) | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 65.5 |
-| Distill @ 100B tokens (+800 iters at 32K Seq Length) - **BF16** | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 66.2 |
-| Distill @ 100B tokens + **FP8 Quantize** | 76.3 | 69.8 | 65.5 | 86.0 | 69.7 | 27.9 | 65.9 |
-| NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 67.4 |
+| Distill @ 2.5B tokens (100 iters at 8K SeqLen) | 73.3 | 63.7 | 55.3 | 77.6 | 59.1 | 25.1 | 59.0 |
+| Distill @ 20B tokens (800 iters at 8K SeqLen) | 74.8 | 66.0 | 62.3 | 79.6 | 65.4 | 26.1 | 62.4 |
+| Distill @ 40B tokens (1600 iters at 8K SeqLen) | 76.4 | 67.2 | 62.3 | 79.8 | 66.0 | 26.6 | 63.1 |
+| Distill @ 60B tokens (2400 iters at 8K SeqLen) | 76.1 | 68.1 | 63.6 | 78.8 | 67.3 | 27.0 | 63.5 |
+| Distill @ 80B tokens (3200 iters at 8K SeqLen) | 76.5 | 69.1 | 63.9 | 80.7 | 66.5 | 29.0 | 64.3 |
+| Distill @ 82.5B tokens (+100 iters at 32K SeqLen) | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 65.5 |
+| Distill @ 100B tokens (+800 iters at 32K SeqLen) - **BF16** | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 66.2 |
+| Distill @ 100B tokens + **FP8 Quantize** | 76.7 | 70.7 | 65.5 | 87.3 | 69.0 | 28.5 | 66.3 |
+| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 67.4 |
 
 ### vLLM Throughput (single H100, ISL=32768, OSL=1024)
 
-| Checkpoint | Model loading memory | Output tokens/s | Speedup vs Nemotron-3-Nano-30B-A3B BF16 |
+| Checkpoint | Model loading memory | Output tokens/s | Speedup vs Nemotron-3-Nano-30B-A3B-BF16 |
 | --- | --- | --- | --- |
-| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 58.9 GiB | 1,006 | 1.00× |
-| Nemotron-3-Nano-30B-A3B-FP8 (official) | 31.4 GiB | 1,404 | 1.40× |
-| Nemotron-3-Nano-30B-A3B-Pruned-A3.0B (22B/A3.0B) | 41.5 GiB | 1,301 | 1.29× |
-| Nemotron-3-Nano-30B-A3B-Pruned-A3.0B-FP8 | 22.8 GiB | 1,653 | 1.64× |
+| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 58.9 GiB | 598 | 1.0× |
+| Nemotron-3-Nano-30B-A3B-FP8 (official) | 31.4 GiB | 1,323 | 2.2× |
+| Nemotron-3-Nano-Pruned-22B-A3.0B-BF16 | 41.5 GiB | 1,190 | 2.0× |
+| Nemotron-3-Nano-Pruned-22B-A3.0B-FP8 | 22.8 GiB | 1,576 | 2.6× |
 
-Pruning alone (BF16 → Pruned-A3.0B BF16) gives a **1.29×** throughput speedup with a 30% memory reduction (58.9 → 41.5 GiB), and FP8 quantization alone (BF16 → FP8) gives a **1.40×** speedup with a 47% memory reduction. Stacking both — pruning + FP8 — compounds to a **1.64×** throughput speedup and a **2.6× memory reduction** (58.9 → 22.8 GiB) relative to the original 30B BF16 model, while preserving most of the benchmark accuracy. The NemotronH hybrid architecture (Mamba + Attention + MoE) moderates the FP8 gain relative to pure-transformer models, since Attention and Conv1d layers are not quantized. See [Section 6](#6-vllm-inference-benchmarking) for the benchmark command.
+Pruning alone (BF16 → Pruned-A3.0B BF16) gives a **2.0×** throughput speedup with a 30% memory reduction (58.9 → 41.5 GiB), and FP8 quantization alone (BF16 → FP8) gives a **2.2×** speedup with a 47% memory reduction. Stacking both — pruning + FP8 — compounds to a **2.6×** throughput speedup and a **2.6× memory reduction** (58.9 → 22.8 GiB) relative to the original 30B BF16 model, while preserving most of the benchmark accuracy. See [Section 6](#6-vllm-inference-benchmarking) for the benchmark command.
 
 Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 27, Coding 20, Science 13, IF 5, Tool calling 5)** blend (see [Data Blend](#data-blend) below) with an **80B @ 8K + 20B @ 32K = 100B token** schedule. Blend ablations and long-context phase ablations are in [ABLATIONS.md](ABLATIONS.md).
 
@@ -43,13 +43,13 @@ Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-
 > From the benchmark numbers above, the model is still learning at 100B tokens and that further training (or a higher-quality data blend) would continue to close the gap to the original 31.6B/A3.6B model.
 
 > [!NOTE]
-> Exact numbers may vary depending on deployment and evaluation setup. All models above (including the official model) were evaluated once with the same [evaluation setup](#4-evaluation) for fair comparison. These numbers may differ from those reported on the official [Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) HuggingFace model card.
+> Exact numbers may vary depending on deployment and evaluation setup. All models above (including the official model) were evaluated with the same [evaluation setup](#4-evaluation) for fair comparison. These numbers may differ from those reported on the official [Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) HuggingFace model card.
 
 ---
 
 ## Steps to Reproduce
 
-**Environment:** Container `nvcr.io/nvidia/nemo:26.04`, ModelOpt 0.45.0. See the [Megatron-Bridge README](../../../megatron_bridge/README.md) for environment setup (including ModelOpt mount path) and container usage.
+**Environment:** Container `nvcr.io/nvidia/nemo:26.04`, ModelOpt 0.45.0. See the [Megatron-Bridge README](../../README.md) for environment setup (including ModelOpt mount path) and container usage. Pruning Nemotron models requires `transformers<5` via `python -m pip install "transformers<5"` else saving pruned model as HF checkpoint may fail.
 
 ### 1. Data Preparation
 
@@ -274,6 +274,8 @@ Minimum hardware: **4 nodes × 8x H100 (32 GPUs)** for the 8K phase — required
 <details>
 <summary>Phase 1 distillation command (click to expand)</summary>
 
+> NOTE: We use `python -u` for slurm multi-node run here.
+
 ```bash
 python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --teacher_hf_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
@@ -315,10 +317,12 @@ All other arguments use defaults.
 
 #### 3b. Convert Phase 1 final checkpoint to HuggingFace format
 
-Phase 2 starts as a separate run from a fresh HuggingFace student checkpoint, so the final Phase 1 Megatron checkpoint must be exported to HF first using the Megatron-Bridge conversion script (see [Megatron-Bridge README](../../../megatron_bridge/README.md) for full details). You can also use this same script to convert any intermediate Phase 1 checkpoint to HF format for evaluation along the way.
+Phase 2 starts as a separate run from a fresh HuggingFace student checkpoint, so the final Phase 1 Megatron checkpoint must be exported to HF first using the Megatron-Bridge conversion script (see [Megatron-Bridge README](../../README.md) for full details). You can also use this same script to convert any intermediate Phase 1 checkpoint to HF format for evaluation along the way.
 
 <details>
 <summary>Checkpoint conversion command (click to expand)</summary>
+
+> NOTE: Below command only works for non-quantized checkpoints. For quantized checkpoints, we use the `export.py` script in Section 5 to directly export the quantized checkpoint to Unified HF format for deployment.
 
 ```bash
 python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
@@ -376,7 +380,7 @@ Changed arguments from Phase 1:
 
 </details>
 
-For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_bridge/README.md#slurm-usage) for details.
+For multi-node Slurm runs, see the [Megatron-Bridge README](../../README.md#slurm-usage) for details.
 
 > [!NOTE]
 > This is pure SFT-style distillation — no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
@@ -387,18 +391,21 @@ For multi-node Slurm runs, see the [Megatron-Bridge README](../../../megatron_br
 
 The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job (with tool calling enabled via `--enable-auto-tool-choice --tool-call-parser qwen3_coder`) and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
 
-Before running, update the following fields in the yaml or overwrite them in the command line with `-o <option>=<value>`:
+<details>
+<summary>Evaluation launch steps (click to expand)</summary>
+
+Before running, update the following fields in the `nemo_evaluator.yaml` file or overwrite them in the command line with `-o <option>=<value>`:
 
 - `execution.hostname` — your Slurm login node hostname
 - `execution.account` — your Slurm account
-- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned or quantized)
-- `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
+- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
 
-> [!TIP]
-> Uncomment `limit_samples` under any task to run a small subset and verify the end-to-end eval pipeline before launching full evals.
+The yaml is set up for a **BF16** checkpoint. For **FP8** checkpoints, also apply the quantization-specific vLLM deployment settings documented at the top of `nemo_evaluator.yaml`:
+- append `--kv-cache-dtype fp8` to `deployment.extra_args`
+- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8` plus `VLLM_FLASHINFER_MOE_BACKEND: throughput`)
 
 ```bash
-pip install "nemo-evaluator-launcher[all]==0.1.90"
+pip install "nemo-evaluator-launcher[all]==0.1.82"
 
 # Set required environment variables:
 export HF_TOKEN=<your_huggingface_token>
@@ -412,11 +419,13 @@ export INFERENCE_API_KEY=xxxxxx
 export OPENAI_CLIENT_ID=xxxxxx
 export OPENAI_CLIENT_SECRET=xxxxxx
 
+# Run the evaluation
+# To run a small subset and verify the end-to-end eval pipeline before launching full evals, add `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8` (applies to all tasks)
+# To restrict which tasks run, add `-t <task_name>` to the command.
 nemo-evaluator-launcher run --config nemo_evaluator.yaml
 ```
 
-> [!TIP]
-> Run same evals multiple times to get a more stable result.
+</details>
 
 **Tasks and exact metric names reported in the results table:**
 
@@ -424,8 +433,8 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 | --- | --- | --- | --- |
 | MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
 | GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
-| LiveCodeBench v6 | NeMo Evaluator | 8 | `livecodebench_pass_at_1_avg-of-8_accuracy` |
-| AIME 2025 | NeMo Evaluator | 64 | `aime25_pass_at_1_avg-of-64_symbolic_correct` |
+| LiveCodeBench v6 | NeMo Evaluator | 4 | `livecodebench_pass_at_1_avg-of-4_accuracy` |
+| AIME 2025 | NeMo Evaluator | 32 | `aime25_pass_at_1_avg-of-32_symbolic_correct` |
 | IFBench | NeMo Evaluator | 8 | `ifbench_pass_at_1_avg-of-8_average_score` |
 | SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |
 
@@ -435,30 +444,65 @@ For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVI
 
 ### 5. Quantization
 
-ModelOpt allows stacking multiple optimization techniques. Here we stack FP8 quantization on top of the pruned and distilled model to get an even more optimized model. See [examples/llm_ptq/README.md](../../../llm_ptq/README.md) for the full PTQ documentation.
+ModelOpt allows stacking multiple optimization techniques. Here we stack FP8 quantization on top of the pruned and distilled model to get an even more optimized model. See [examples/megatron_bridge/README.md](../../README.md) for the full Megatron-Bridge PTQ documentation.
 
 Similar to the official [Nemotron-3-Nano-30B-A3B-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8) model, if you want to quantize the pruned 22B/A3.0B model to FP8, the Mamba, MoE, and MLP layers are quantized to FP8, while the attention layers and the Conv1d components within the Mamba layers are kept in BF16 to avoid accuracy degradation.
 
-This is done with the `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py). To apply this, you need to modify `QUANT_CFG_CHOICES["fp8"]` in [`examples/llm_ptq/hf_ptq.py`](../../../llm_ptq/hf_ptq.py) to use `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG`. For a faster model at the cost of a larger accuracy drop, you can use `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG` instead.
+This is done with the `MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py), which you select by passing `--quant_cfg MAMBA_MOE_FP8_CONSERVATIVE_CFG` below. For a faster model at the cost of a larger accuracy drop, you can use `MAMBA_MOE_FP8_AGGRESSIVE_CFG` instead.
 
 > [!NOTE]
-> You can also quantize to NVFP4 using `mtq.MAMBA_MOE_NVFP4_CONSERVATIVE_CFG` (default) or `mtq.MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` (faster, more accuracy drop), which may require further distillation (QAD) to recover accuracy and Blackwell GPU for deployment.
+> You can also quantize to NVFP4 using `--quant_cfg MAMBA_MOE_NVFP4_CONSERVATIVE_CFG` or `MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` (faster, more accuracy drop), which may require further distillation (QAD) to recover accuracy and a Blackwell GPU for deployment.
 
-Calibrate and export the Phase 2 final HF checkpoint to FP8 (takes a few minutes on 8x H100):
+Quantization is a two-step flow: `quantize.py` calibrates and saves a Megatron checkpoint, then `export.py` converts it to a deployable HuggingFace checkpoint (the unified HF exporter loads at TP=1, so pipeline parallelism is used to shard across GPUs). Both steps take a few minutes on 8x H100.
+
+**Step 1 — calibrate and save the quantized Megatron checkpoint:**
+
+<details>
+<summary>FP8 PTQ command (click to expand)</summary>
 
 ```bash
-python /opt/Model-Optimizer/examples/llm_ptq/hf_ptq.py \
-    --pyt_ckpt_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
-    --export_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800_fp8 \
-    --qformat fp8 \
-    --calib_size 1024 \
-    --trust_remote_code
+torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
+    --hf_model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --trust_remote_code \
+    --tp_size 8 \
+    --quant_cfg MAMBA_MOE_FP8_CONSERVATIVE_CFG \
+    --calib_batch_size 32 \
+    --seq_length 512 \
+    --export_megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_fp8_megatron \
+    --skip_generate
 ```
 
-The quantized checkpoint is directly deployable with [vLLM](https://github.com/vllm-project/vllm), [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) and [SGLang](https://github.com/sgl-project/sglang).
+</details>
+
+**Step 2 — export the Megatron checkpoint to a deployable HuggingFace checkpoint:**
+
+<details>
+<summary>Export command (click to expand)</summary>
+
+```bash
+torchrun --nproc_per_node 1 /opt/Model-Optimizer/examples/megatron_bridge/export.py \
+    --hf_model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_fp8_megatron \
+    --trust_remote_code \
+    --pp_size 1 \
+    --export_unified_hf_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800_fp8
+```
+
+</details>
+
+The exported HuggingFace checkpoint is directly deployable with [vLLM](https://github.com/vllm-project/vllm), [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) and [SGLang](https://github.com/sgl-project/sglang).
 
 > [!TIP]
-> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also!
+> Run text generation on sample prompts to sanity-check the quantized checkpoint generates reasonable output:
+>
+> ```bash
+> python /opt/Model-Optimizer/examples/megatron_bridge/generate_vllm.py \
+>     --model /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800_fp8 \
+>     --trust_remote_code
+> ```
+
+> [!TIP]
+> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also — just apply the FP8 deployment tweaks documented at the top of the yaml.
 
 See FP8 vs BF16 results in the [Results](#results) section above.
 
@@ -466,14 +510,25 @@ See FP8 vs BF16 results in the [Results](#results) section above.
 
 ### 6. vLLM Inference Benchmarking
 
-Benchmark throughput using [vLLM](https://github.com/vllm-project/vllm) on a single H100 GPU. Run the command once for each HuggingFace checkpoint. vLLM automatically detects FP8 quantization from the embedded `quantization_config` in `config.json` and applies it with no extra flags needed.
+Benchmark throughput using [vLLM](https://github.com/vllm-project/vllm) on a single H100 GPU.
 
 <details>
-<summary>vLLM benchmark command on a single H100 (ISL=32768, OSL=1024) (click to expand)</summary>
+<summary>vLLM benchmark commands (ISL=32768, OSL=1024) (click to expand)</summary>
 
 ```bash
+# BF16 (original or pruned)
 vllm bench throughput \
-    --model <checkpoint_path> \
+    --model <bf16_checkpoint_path> \
+    --random-input-len 32768 \
+    --random-output-len 1024 \
+    --trust-remote-code \
+    --mamba_ssm_cache_dtype float32 \
+    --load-format safetensors
+
+# FP8 (Hopper GPU)
+VLLM_USE_FLASHINFER_MOE_FP8=1 VLLM_FLASHINFER_MOE_BACKEND=throughput \
+vllm bench throughput \
+    --model <fp8_checkpoint_path> \
     --random-input-len 32768 \
     --random-output-len 1024 \
     --trust-remote-code \
