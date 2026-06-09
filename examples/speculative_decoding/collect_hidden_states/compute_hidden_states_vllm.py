@@ -28,7 +28,14 @@ import argparse
 from pathlib import Path
 
 import torch
-from common import add_aux_layers_args, resolve_aux_layers
+from common import (
+    add_answer_only_loss_args,
+    add_aux_layers_args,
+    load_chat_template,
+    resolve_aux_layers,
+    tokenize_with_loss_mask,
+    verify_generation_tags,
+)
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoConfig, AutoTokenizer
@@ -63,6 +70,7 @@ def parse_args() -> argparse.Namespace:
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
     )
     add_aux_layers_args(parser)
+    add_answer_only_loss_args(parser)
 
     return parser.parse_args()
 
@@ -121,12 +129,18 @@ def main(args: argparse.Namespace) -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    override_template = load_chat_template(args.chat_template)
+    if override_template is not None:
+        tokenizer.chat_template = override_template
     if tokenizer.chat_template is not None:
         tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
+    if args.answer_only_loss:
+        verify_generation_tags(tokenizer.chat_template)
 
     # Prepare prompts for vLLM
     prompts = []
     conversation_ids = []
+    loss_masks = []
     num_skipped_too_long = 0
     num_invalid = 0
 
@@ -137,18 +151,13 @@ def main(args: argparse.Namespace) -> None:
             num_invalid += 1
             continue
 
-        tokenized = tokenizer.apply_chat_template(
-            conversations, return_tensors="pt", add_generation_prompt=False
+        # One apply_chat_template call yields aligned input_ids + loss_mask. With
+        # --answer-only-loss the mask comes from the template's {% generation %} tags;
+        # otherwise it is all-ones. Same tokens are sent to vLLM, so the dumped hidden
+        # states line up with this loss_mask 1:1 (prefix caching is disabled below).
+        input_ids, loss_mask = tokenize_with_loss_mask(
+            tokenizer, conversations, args.answer_only_loss
         )
-        # transformers 5.x: BatchEncoding may not inherit from dict; use .input_ids
-        if hasattr(tokenized, "input_ids"):
-            input_ids = tokenized.input_ids
-        elif hasattr(tokenized, "__getitem__") and "input_ids" in tokenized:
-            input_ids = tokenized["input_ids"]
-        else:
-            input_ids = tokenized
-        if not hasattr(input_ids, "shape"):
-            input_ids = torch.tensor(input_ids)
         input_ids = input_ids.squeeze(0)
         num_tokens = input_ids.shape[0]
         if num_tokens <= 10 or num_tokens > args.max_seq_len:
@@ -157,6 +166,7 @@ def main(args: argparse.Namespace) -> None:
 
         prompts.append(TokensPrompt(prompt_token_ids=input_ids.tolist()))
         conversation_ids.append(conversation_id)
+        loss_masks.append(loss_mask)
 
     print(
         f"Prepared {len(prompts)} prompts ({num_skipped_too_long} skipped too long, {num_invalid} invalid)"
@@ -202,10 +212,11 @@ def main(args: argparse.Namespace) -> None:
     # max_tokens=1: we only need a single forward pass over the prompt tokens.
     outputs = llm.generate(prompts, SamplingParams(max_tokens=1))
 
-    # Save in the same format as compute_hidden_states_hf.py (sans loss_mask, which the
-    # vLLM path does not compute).
+    # Save in the same format as compute_hidden_states_hf.py, including loss_mask.
     num_success = 0
-    for conv_id, output in tqdm(zip(conversation_ids, outputs), total=len(outputs), desc="Saving"):
+    for conv_id, loss_mask, output in tqdm(
+        zip(conversation_ids, loss_masks, outputs), total=len(outputs), desc="Saving"
+    ):
         hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
         if hidden_states_path is None:
             print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
@@ -232,6 +243,7 @@ def main(args: argparse.Namespace) -> None:
                     "input_ids": token_ids.cpu(),
                     "hidden_states": output_hidden_states,
                     "aux_hidden_states": aux_hidden_states,
+                    "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
                     "conversation_id": conv_id,
                 },
                 f,
