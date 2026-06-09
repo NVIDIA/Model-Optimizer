@@ -499,14 +499,22 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
      - NVFP4 W4A4, FP8 KV cache with data-driven calibration
    * - ``general/ptq/nvfp4_default-kv_nvfp4_cast``
      - NVFP4 W4A4, NVFP4 KV cache with constant amax, max calibration
+   * - ``general/ptq/nvfp4_mlp_only-kv_fp8_cast``
+     - NVFP4 for MLP layers only, FP8 KV cache with constant amax
    * - ``general/ptq/nvfp4_mlp_only-kv_fp8``
      - NVFP4 for MLP layers only, FP8 KV cache
+   * - ``general/ptq/nvfp4_experts_only-kv_fp8_cast``
+     - NVFP4 for MoE expert layers only, FP8 KV cache with constant amax
    * - ``general/ptq/nvfp4_experts_only-kv_fp8``
      - NVFP4 for MoE expert layers only, FP8 KV cache
    * - ``general/ptq/nvfp4_experts_only-kv_fp8_layerwise``
      - NVFP4 for MoE expert layers only, FP8 KV cache, layerwise calibration
+   * - ``general/ptq/nvfp4_omlp_only-kv_fp8_cast``
+     - NVFP4 for output projection + MLP layers, FP8 KV cache with constant amax
    * - ``general/ptq/nvfp4_omlp_only-kv_fp8``
      - NVFP4 for output projection + MLP layers, FP8 KV cache
+   * - ``general/ptq/nvfp4_weight_only-kv_fp8_cast``
+     - NVFP4 W4A16 weight-only, FP8 KV cache with constant amax
 
 Model-specific recipes
 ----------------------
@@ -668,10 +676,14 @@ The ``modelopt_recipes/`` package is organized as follows:
    |       +-- nvfp4_default-kv_fp8_cast.yaml
    |       +-- nvfp4_default-kv_fp8.yaml
    |       +-- nvfp4_default-kv_nvfp4_cast.yaml
+   |       +-- nvfp4_mlp_only-kv_fp8_cast.yaml
    |       +-- nvfp4_mlp_only-kv_fp8.yaml
+   |       +-- nvfp4_experts_only-kv_fp8_cast.yaml
    |       +-- nvfp4_experts_only-kv_fp8.yaml
    |       +-- nvfp4_experts_only-kv_fp8_layerwise.yaml
+   |       +-- nvfp4_omlp_only-kv_fp8_cast.yaml
    |       +-- nvfp4_omlp_only-kv_fp8.yaml
+   |       +-- nvfp4_weight_only-kv_fp8_cast.yaml
    +-- huggingface/                # Model-specific recipes
    |   +-- <model_type>/           # see modelopt_recipes/huggingface/README.md
    |       +-- <task>/

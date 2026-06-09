@@ -27,6 +27,8 @@ from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
+    _get_auto_quantize_cost_excluded_patterns,
+    _get_auto_quantize_disabled_layers,
     build_quant_cfg,
     copy_custom_model_files,
     create_vlm_calibration_loop,
@@ -72,7 +74,8 @@ from modelopt.torch.export import (
     save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
-from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
+from modelopt.torch.quantization._auto_quantize_cost import EXCLUDED_MODULE_NAME_PATTERNS_KEY
+from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.speculative.eagle.utils import (
@@ -132,6 +135,7 @@ _AUTO_QUANTIZE_QFORMATS: frozenset[str] = frozenset(
         "nvfp4_awq_lite",
         "nvfp4_w4a4_weight_mse_fp8_sweep",
         "w4a8_awq_beta",
+        "w4a16_nvfp4",
         "fp8_2d_blockwise_weight_only",
         "w4a8_mxfp4_fp8",
         "nvfp4_mlp_only",
@@ -387,10 +391,14 @@ def auto_quantize(
         "effective_bits": args.auto_quantize_bits,
         "cost_model": args.auto_quantize_cost_model,
     }
+    auto_quantize_cost = {}
     if args.auto_quantize_active_moe_expert_ratio is not None:
-        auto_quantize_constraints["cost"] = {
-            "active_moe_expert_ratio": args.auto_quantize_active_moe_expert_ratio
-        }
+        auto_quantize_cost["active_moe_expert_ratio"] = args.auto_quantize_active_moe_expert_ratio
+    cost_excluded_patterns = _get_auto_quantize_cost_excluded_patterns(language_model)
+    if cost_excluded_patterns:
+        auto_quantize_cost[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = cost_excluded_patterns
+    if auto_quantize_cost:
+        auto_quantize_constraints["cost"] = auto_quantize_cost
 
     language_model, _ = mtq.auto_quantize(
         language_model,
@@ -406,12 +414,7 @@ def auto_quantize(
             len(calib_dataloader), max(auto_quantize_score_size // args.batch_size, 1)
         ),
         verbose=True,
-        # Disable all default disabled layers such as lm_head, mlp.gate, router etc.
-        disabled_layers=[
-            entry["quantizer_name"]
-            for entry in _default_disabled_quantizer_cfg
-            if "parent_class" not in entry
-        ],
+        disabled_layers=_get_auto_quantize_disabled_layers(language_model),
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
     )
@@ -487,7 +490,7 @@ def load_model(args: argparse.Namespace):
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
     # Default to image-text calibration for VLM models
-    if is_nemotron_vl_model and not args.calib_with_images:
+    if is_nemotron_vl_model and not args.calib_with_images and args.auto_quantize_bits is None:
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
@@ -539,12 +542,10 @@ def load_model(args: argparse.Namespace):
                 : len(args.dataset)
             ]
 
-            # We only quantize the language model for VLMs other than the type supported above.
-            # Recipe mode is the exception: in Qwen3.5/3.6-MoE VLMs, lm_head sits
-            # on the outer CausalLM, not the inner language backbone. A recipe that targets
-            # lm_head must therefore quantize against the full model and explicitly keep visual
-            # and MTP siblings disabled.
-            if args.recipe is None:
+            # Plain PTQ quantizes only the extracted language model. Recipe and
+            # AutoQuantize paths keep the outer CausalLM so recipes/search can see
+            # Qwen3.5/3.6-MoE VLM lm_head.
+            if args.recipe is None and args.auto_quantize_bits is None:
                 extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
                     full_model
                 )
@@ -1070,9 +1071,16 @@ def quantize_main(
             "Auto quantization needs multiple quantization format."
         )
 
+        # For VL models, autoquant must walk submodules of the OUTER CausalLM
+        # (which carries lm_head and the LM-head forward path) — otherwise
+        # lm_head and any sibling-of-language_model modules are silently
+        # invisible to the search. ``forward_step`` also needs the outer model
+        # to produce ``CausalLMOutputWithPast`` (for ``.loss`` / ``.logits``).
+        # Visual tower and MTP siblings are auto-excluded inside
+        # ``auto_quantize()`` via *visual* / *mtp* / *vision_tower* patterns.
         auto_quantize(
             args,
-            language_model,
+            full_model,
             calib_dataloader,
             auto_quantize_method=args.auto_quantize_method,
             auto_quantize_score_size=args.auto_quantize_score_size,
@@ -1437,6 +1445,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+    if args.auto_quantize_bits is not None and args.calib_with_images:
+        parser.error("--calib_with_images is not supported with --auto_quantize_bits.")
     if args.auto_quantize_active_moe_expert_ratio is not None and not (
         0.0 < args.auto_quantize_active_moe_expert_ratio <= 1.0
     ):

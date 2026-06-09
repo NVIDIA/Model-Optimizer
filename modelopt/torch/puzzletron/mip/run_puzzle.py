@@ -79,7 +79,7 @@ class PuzzleConstraints:
     _ALLOWED_HUMAN_CONSTRAINTS = {
         "target_memory",
         "target_throughput",
-        "target_latency",
+        "target_latency_seconds",
         "target_time_to_first_token",
         "target_num_kv_heads",
         "num_params",
@@ -180,8 +180,8 @@ class PuzzleConstraints:
             throughput_constraints.append(
                 batch_size * generation_seq_len / self.constraints["target_throughput"]
             )
-        if "target_latency" in self.constraints:
-            throughput_constraints.append(self.constraints["target_latency"])
+        if "target_latency_seconds" in self.constraints:
+            throughput_constraints.append(self.constraints["target_latency_seconds"])
         if throughput_constraints:
             mip_constraints["stats.runtime_ms"] = 1000 * min(throughput_constraints)
 

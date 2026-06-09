@@ -186,6 +186,7 @@ Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling 
 2. Scan for any `max_tokens` / `max_new_tokens` / "output length" recommendation. Pick the **highest** value the card mentions (Qwen3.6: 32768 general + 81920 math-coding → use **81920**). Annotate with a citing comment.
 3. If the card is genuinely silent after a thorough read, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the silence to the user.
 4. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply, or fetch and confirm silence.
+5. **A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
 
 #### Quantization-aware benchmark defaults
 
@@ -260,7 +261,7 @@ Implications for the agent:
 
 4. Apply, show updated list, ask "Final, or more changes?" Loop until confirmed.
 
-**Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness.
+**Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness. All nemo-skills/tau2 judges + user-sims (HLE, AA-LCR, Tau2) use one `INFERENCE_API_KEY` against one OpenAI-compatible host — *not* `build.nvidia.com`'s `JUDGE_API_KEY` (that's for simple-evals, e.g. AIME). Get the `*_MODEL_ID`/`*_URL` values from the `eval-config` skill if your org ships one, rather than guessing a host.
 
 **Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks (`ns_*`) with self-deployment (vLLM/SGLang/NIM), you need **both** of these:
 
@@ -339,6 +340,8 @@ nel run --config <path> --dry-run
 ```
 
 Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, image issues, sbatch errors, obvious deployment errors before proceeding.
+
+> **Non-fatal noise:** "Failed to get manifest"/`401`/`404`, "Could not extract frame definition file", "proceeding with minimal task definition", "Found N unlisted task(s)" — expected for `ns_*`/recipe tasks and private (gitlab) containers; the task still runs in-container. Set `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1`. Real blockers: unresolved `???`, interpolation errors, bad mounts, sbatch rejections.
 
 **Step 8.2 — Canary** (limited-samples, validates everything dry-run can't):
 

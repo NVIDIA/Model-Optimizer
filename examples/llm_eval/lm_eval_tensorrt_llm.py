@@ -64,6 +64,10 @@ class TRTLLM(TemplateAPI):
             tokenizer=self.tokenizer,
             max_batch_size=int(batch_size),
             max_seq_len=max_length,
+            # Loglikelihood tasks request context logits. KV cache prefix reuse would return
+            # logits only for the recomputed suffix on shared-prefix requests (e.g. hellaswag),
+            # truncating context_logits and breaking parse_logprobs. Disable it.
+            enable_kv_cache_reuse=False,
         )
         self.max_length = max_length - 1
         logger.info("Loaded TRT-LLM")

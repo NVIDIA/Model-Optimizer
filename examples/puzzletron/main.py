@@ -67,8 +67,6 @@ def run_full_puzzletron(hydra_config_path: str):
     Args:
         config_path: Path to the YAML configuration file
     """
-    dist.setup(timeout=timedelta(minutes=10))
-
     # Register Hydra custom resolvers (needed for config resolution)
     mtpz.tools.register_hydra_resolvers()
 
@@ -87,6 +85,14 @@ def run_full_puzzletron(hydra_config_path: str):
     mtpz.tools.mprint(
         f"Puzzletron Progress {start_step}/{total_steps}: starting puzzletron pipeline"
     )
+
+    # Default timeout: 10 minutes, or extended to nccl_timeout_minutes if set in config
+    if hasattr(hydra_cfg, "nccl_timeout_minutes"):
+        timeout_minutes = hydra_cfg.nccl_timeout_minutes
+    else:
+        timeout_minutes = timedelta(minutes=10)
+
+    dist.setup(timeout=timeout_minutes)
 
     # Convert model (convert from HF to DeciLM, score pruning activations,
     # prune the model and save pruned checkpoints)

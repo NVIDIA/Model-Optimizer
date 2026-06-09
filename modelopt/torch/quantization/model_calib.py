@@ -33,8 +33,10 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
 )
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
+from modelopt.torch.utils.distributed import is_initialized as dist_is_initialized
+from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
@@ -51,7 +53,6 @@ from .utils import (
     persistent_materialization,
     promote_nvfp4_static_quantizers,
     quantizer_attr_names,
-    reduce_amax,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -437,8 +438,13 @@ def _make_weight_mse_calibrator(
     start_multiplier: float,
     stop_multiplier: float,
     fp8_scale_sweep: bool,
+    error_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
 ) -> _Calibrator | None:
-    """Create the MSE calibrator for one eligible weight quantizer."""
+    """Create the MSE calibrator for one eligible weight quantizer (``None`` if ineligible).
+
+    ``error_func`` overrides the squared-error metric (local-Hessian's per-block weighting);
+    when set, NVFP4's Triton fast path is bypassed for the reference sweep.
+    """
     if (
         not isinstance(weight_quantizer, TensorQuantizer)
         or not weight_quantizer.is_enabled
@@ -458,6 +464,13 @@ def _make_weight_mse_calibrator(
             _FP8_SWEEP_CALIBRATOR_REGISTRY.get(backend) if backend is not None else None
         )
         if backend is not None and backend_factory is not None:
+            if error_func is not None:
+                # Registered backend factories don't accept a custom error_func.
+                warnings.warn(
+                    f"backend '{backend}' does not support a custom error function; skipping "
+                    "error-function-weighted MSE calibration for this quantizer."
+                )
+                return None
             return backend_factory(initial_amax, axis, quant_func)
         if _uses_modelopt_fp8_weight_scales(weight_quantizer):
             return NVFP4MSECalibrator(
@@ -465,12 +478,12 @@ def _make_weight_mse_calibrator(
                 axis=axis,
                 global_amax=weight_quantizer.global_amax,
                 quant_func=quant_func,
+                error_func=error_func,
             )
-        # fp8_scale_sweep covers only registered backends and static NVFP4 weights;
-        # skip MSE calibration for all other quantizers (no multiplier search).
+        # fp8_scale_sweep applies only to registered backends and static NVFP4; skip others.
         return None
 
-    # fp8_scale_sweep disabled: multiplier-search MSE calibration for all quantizers.
+    # No fp8_scale_sweep: multiplier-search MSE for all quantizers.
     return MseCalibrator(
         amax=initial_amax,
         axis=axis,
@@ -478,6 +491,7 @@ def _make_weight_mse_calibrator(
         start_multiplier=start_multiplier,
         stop_multiplier=stop_multiplier,
         quant_func=quant_func,
+        error_func=error_func,
     )
 
 
@@ -517,6 +531,31 @@ def mse_calibrate(
     # max_calibrate initializes activations and weights; MSE only refines weights below.
     max_calibrate(model, forward_loop, distributed_sync)
     name_to_module = dict(model.named_modules())
+    _mse_calibrate_weights(
+        model,
+        name_to_module,
+        step_size=step_size,
+        start_multiplier=start_multiplier,
+        stop_multiplier=stop_multiplier,
+        fp8_scale_sweep=fp8_scale_sweep,
+    )
+
+
+@torch.no_grad()
+def _mse_calibrate_weights(
+    model: nn.Module,
+    name_to_module: dict[str, nn.Module],
+    step_size: float,
+    start_multiplier: float,
+    stop_multiplier: float,
+    fp8_scale_sweep: bool,
+    error_func_for: Callable[[TensorQuantizer], Callable | None] | None = None,
+):
+    """Run MSE weight calibration over all eligible quantizers (shared by mse / local-Hessian).
+
+    ``error_func_for`` maps a weight quantizer to an optional per-weight error function
+    (local-Hessian's Hessian metric); ``None`` means plain squared error.
+    """
     seen_modules: set[int] = set()
     pbar = tqdm(desc="MSE weight calibration")
     for parent_module in name_to_module.values():
@@ -525,12 +564,14 @@ def mse_calibrate(
         seen_modules.add(id(parent_module))
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
             for weight, weight_quantizer in parent_module.iter_weights_for_calibration():
+                error_func = error_func_for(weight_quantizer) if error_func_for else None
                 cal = _make_weight_mse_calibrator(
                     weight_quantizer,
                     step_size,
                     start_multiplier,
                     stop_multiplier,
                     fp8_scale_sweep,
+                    error_func=error_func,
                 )
                 if cal is None:
                     continue
@@ -545,6 +586,164 @@ def mse_calibrate(
     pbar.close()
 
 
+class _LocalHessianAccumulator:
+    """Per-block local Hessian ``H = ΣXᵀX`` for one weight quantizer.
+
+    Partitioned over ``cin`` into ``cin // block_size`` blocks to match the NVFP4 per-block
+    scale; the buffer is allocated lazily so never-routed experts cost nothing.
+    """
+
+    def __init__(self, cout: int, cin: int, block_size: int):
+        self.cout = cout
+        self.cin = cin
+        self.block_size = block_size
+        self.num_blocks_per_cin = cin // block_size
+        # Not block-divisible -> no Hessian (falls back to plain MSE).
+        self.is_enabled = cin % block_size == 0
+        self.hessian_per_block: torch.Tensor | None = None
+        self.num_samples = 0
+
+    @torch.no_grad()
+    def accumulate(self, input_tensor: torch.Tensor) -> None:
+        """Accumulate ``XᵀX`` per block from an activation of shape ``(..., cin)``."""
+        if not self.is_enabled:
+            return
+        # fp32 GEMM avoids bf16/fp16 precision loss; (cin, tokens) -> (n_blocks, bs, tokens).
+        x = input_tensor.reshape(-1, self.cin).to(torch.float32).T
+        x = x.reshape(self.num_blocks_per_cin, self.block_size, -1)
+        hessian_batch = x @ x.transpose(-1, -2)
+        if self.hessian_per_block is None:
+            self.hessian_per_block = hessian_batch
+        else:
+            self.hessian_per_block += hessian_batch
+        self.num_samples += input_tensor.numel() // self.cin
+
+    def build_error_func(
+        self, keep_buffer: bool = False
+    ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None:
+        """Hessian-weighted error function (``None`` if no samples).
+
+        Frees the raw Hessian buffer unless ``keep_buffer`` (kept for debug inspection).
+        """
+        if self.hessian_per_block is None or self.num_samples == 0:
+            return None
+        cout = self.cout
+        bs = self.block_size
+        hessian = self.hessian_per_block / self.num_samples
+        if not keep_buffer:
+            self.hessian_per_block = None
+
+        def local_hessian_error(x: torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
+            original_shape = x.shape
+            # Per-block weighted error: dw (cout,n,bs) · H (n,bs,bs) -> (cout,n).
+            dw = (x - xq).view(cout, -1, bs)
+            block_loss = torch.einsum("cnb,nbd,cnd->cn", dw, hessian, dw).reshape(-1)
+            return block_loss.unsqueeze(-1).expand(-1, bs).reshape(original_shape)
+
+        return local_hessian_error
+
+
+def _warn_if_block_size_mismatch(weight_quantizer: TensorQuantizer, block_size: int, name: str):
+    """Warn if the Hessian block_size differs from the quantizer's scale block (misaligns)."""
+    block_sizes = getattr(weight_quantizer, "block_sizes", None)
+    quant_block = block_sizes.get(-1) if block_sizes else None
+    if quant_block is not None and quant_block != block_size:
+        warn_rank_0(
+            f"local_hessian: block_size ({block_size}) != quantizer scale block "
+            f"({quant_block}) for {name}; Hessian weighting will not align with the scale blocks."
+        )
+
+
+def _warn_local_hessian_fallback(name, weight, weight_quantizer, block_size, warned: set):
+    """Warn once per ``(name, cin)`` when a captured layer falls back to plain MSE."""
+    if weight.dim() < 2:
+        return
+    cin = weight.shape[1]
+    if (name, cin) in warned:
+        return
+    warned.add((name, cin))
+    if cin % block_size != 0:
+        warn_rank_0(
+            f"local_hessian: {name} input features ({cin}) not divisible by block_size "
+            f"({block_size}); falling back to plain MSE for these weights."
+        )
+    _warn_if_block_size_mismatch(weight_quantizer, block_size, name)
+
+
+def _is_quant_fused_experts(module: nn.Module) -> bool:
+    """Whether ``module`` is a converted HF fused-MoE-experts wrapper with per-expert quantizers."""
+    return hasattr(module, "_current_expert_idx") and hasattr(
+        module, "gate_up_proj_weight_quantizers"
+    )
+
+
+def _register_local_hessian_input_hooks(model, name_to_module, capture, block_size, warned):
+    """Register forward hooks feeding each weight's input activations to ``capture``.
+
+    Local-Hessian-specific (kept here rather than as a general ``QuantModule`` API): dense
+    quantized linears hook the layer input; HF fused-MoE experts hook the shared input quantizers,
+    keyed by the active expert (``_current_expert_idx``). Weights without a hook (conv,
+    SequentialQuantizer, non-eager experts) fall back to plain MSE. Returns removable handles.
+    """
+    handles: list = []
+
+    def _make_expert_hook(expert_module, weight_name, quantizers, enabled):
+        def _expert_hook(_input_quantizer, args):
+            if not args:
+                return
+            idx = expert_module._current_expert_idx
+            if idx in enabled:
+                # Read the weight fresh (valid under accelerate/FSDP re-materialization).
+                capture(quantizers[idx], getattr(expert_module, weight_name)[idx], args[0])
+
+        return _expert_hook
+
+    for name, module in name_to_module.items():
+        if is_quantized_linear(module) and isinstance(module.weight_quantizer, TensorQuantizer):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
+                # ``weight`` may be absent (e.g. TE GroupedLinear exposes weight0..N, not weight);
+                # such modules have no single 2-D weight to pair and fall back to plain MSE.
+                weight = getattr(module, "weight", None)
+                if weight is None or weight.dim() != 2 or not module.weight_quantizer.is_enabled:
+                    continue
+                _warn_local_hessian_fallback(
+                    name, weight, module.weight_quantizer, block_size, warned
+                )
+
+            def _dense_hook(linear, args):
+                if args:
+                    capture(linear.weight_quantizer, linear.weight, args[0])
+
+            handles.append(module.register_forward_pre_hook(_dense_hook))
+        elif _is_quant_fused_experts(module):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
+                for weight_name, quantizers_name, input_q_name in (
+                    (
+                        "gate_up_proj",
+                        "gate_up_proj_weight_quantizers",
+                        "gate_up_proj_input_quantizer",
+                    ),
+                    ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
+                ):
+                    weight = getattr(module, weight_name, None)
+                    quantizers = getattr(module, quantizers_name, None)
+                    input_quantizer = getattr(module, input_q_name, None)
+                    if weight is None or quantizers is None or input_quantizer is None:
+                        continue
+                    _warn_local_hessian_fallback(
+                        f"{name}.{weight_name}", weight[0], quantizers[0], block_size, warned
+                    )
+                    # Snapshot which experts are enabled now, before the caching forward silences
+                    # all weight quantizers — so we don't capture (and discard) disabled experts.
+                    enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
+                    handles.append(
+                        input_quantizer.register_forward_pre_hook(
+                            _make_expert_hook(module, weight_name, quantizers, enabled)
+                        )
+                    )
+    return handles
+
+
 @torch.no_grad()
 def local_hessian_calibrate(
     model: nn.Module,
@@ -557,14 +756,16 @@ def local_hessian_calibrate(
     block_size: int = 16,
     debug: bool = False,
 ):
-    """Calibrate the model using local Hessian-weighted MSE search.
+    """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
-    Instead of minimizing weight error ``||W - Wq||²``, this minimizes Hessian-weighted error
-    ``loss = (W - Wq)ᵀ H (W - Wq)`` where ``H = X @ X.T`` approximates output reconstruction
-    error ``||WX - WqX||²``.
+    Minimizes ``(W - Wq)ᵀ H (W - Wq)`` with per-block Hessian ``H = ΣXᵀX`` (approximating the
+    output error ``||WX - WqX||²``), built from a forward with weight fake-quant disabled
+    (input quantizers untouched) and fed to :func:`mse_calibrate`'s weight search via ``error_func``.
 
-    Per-block Hessians of shape ``(cin // block_size, block_size, block_size)`` are accumulated
-    during forward pass and used to weight the MSE loss during scale search.
+    Like :func:`mse_calibrate`, TensorQuantizer weights are calibrated — with the Hessian
+    metric where a weight pairs with its input activations (dense linears and HF fused-MoE
+    experts), plain MSE otherwise. Other quantizer types (e.g. SequentialQuantizer) are
+    unsupported and left at their max-calibrated scale.
 
     Args:
         model: Model to be calibrated.
@@ -577,7 +778,8 @@ def local_hessian_calibrate(
         fp8_scale_sweep: If True, sweep over all 128 possible FP8 E4M3 scale values
             for NVFP4 per-block quantization (default: True).
         block_size: Block size for local Hessian computation (default: 16).
-        debug: If True, keep the local Hessian metadata on modules.
+        debug: If True, retain the per-quantizer Hessian accumulators on the model
+            (``model._local_hessian_accumulators``) for inspection.
 
     See :class:`LocalHessianCalibConfig <modelopt.torch.quantization.config.LocalHessianCalibConfig>`
     for details on the configuration options.
@@ -586,221 +788,73 @@ def local_hessian_calibrate(
         warnings.warn("forward_loop must be provided for local_hessian; skipping local_hessian")
         return
 
-    class LocalHessianHelper:
-        """Helper class to collect activations and compute local Hessian per module."""
-
-        cache_mode: bool = False
-
-        def __init__(self, module, name):
-            self.name = name
-            self.module = module
-            self.weight_shape = module.weight.shape  # (cout, cin)
-            self.cout, self.cin = self.weight_shape
-            self.block_size = block_size
-            self.num_blocks_per_cin = self.cin // block_size
-            self.is_enabled = True
-
-            # Accumulated Hessian per block: (cin // block_size, block_size, block_size)
-            self.hessian_per_block = torch.zeros(
-                self.num_blocks_per_cin,
-                block_size,
-                block_size,
-                dtype=torch.float32,
-                device=module.weight.device,
-            )
-            self.num_samples = 0
-
-        def setup(self):
-            """Set up the forward hook to collect activations."""
-            module = self.module
-            bind_forward_method(module, forward, "_forward_no_local_hessian")
-
-            # Check if cin is divisible by block_size
-            if self.cin % self.block_size != 0:
-                warnings.warn(
-                    f"Module {self.name}: input features ({self.cin}) not divisible by "
-                    f"block_size ({self.block_size}). Skipping local Hessian for this module."
-                )
-                self.is_enabled = False
-
-        def cleanup(self):
-            """Clean up the forward hook."""
-            unpatch_forward_method(self.module, "_forward_no_local_hessian")
-            if not debug:
-                if hasattr(self.module, "hessian_helper"):
-                    delattr(self.module, "hessian_helper")
-
-        def accumulate_hessian(self, input_tensor: torch.Tensor):
-            """Accumulate local Hessian from input activations.
-
-            Args:
-                input_tensor: Input tensor of shape (..., cin)
-            """
-            if not self.is_enabled:
-                return
-
-            # Flatten to (num_tokens, cin)
-            x = input_tensor.reshape(-1, self.cin).T  # (cin, num_tokens)
-            x = x.reshape(self.num_blocks_per_cin, self.block_size, -1)  # (num_blocks, bs, n)
-
-            # Compute H = X @ X.T for each block and accumulate
-            hessian_batch = (x @ x.transpose(-1, -2)).to(torch.float32)
-            self.hessian_per_block += hessian_batch
-            self.num_samples += input_tensor.numel() // self.cin
-
-        def get_error_func(self) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-            """Get the local Hessian error function for MSE calibration."""
-            cout = self.cout
-            bs = self.block_size
-            # Normalize hessian by number of samples
-            hessian = self.hessian_per_block / max(self.num_samples, 1)
-
-            def local_hessian_error(x: torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
-                """Compute local Hessian-weighted error."""
-                original_shape = x.shape
-                # Reshape to (cout, num_blocks_per_cin, block_size)
-                dw = (x - xq).view(cout, -1, bs)
-                # Use einsum to avoid materializing cout-repeated Hessian
-                # dw: (cout, n_blocks, bs), hessian: (n_blocks, bs, bs) -> (cout, n_blocks)
-                block_loss = torch.einsum("cnb,nbd,cnd->cn", dw, hessian, dw)
-                block_loss = block_loss.reshape(-1)
-                error = block_loss.unsqueeze(-1).expand(-1, bs).reshape(original_shape)
-                return error
-
-            return local_hessian_error
-
-    def forward(self, input, *args, **kwargs):
-        """Custom forward that collects activations in cache mode."""
-        if LocalHessianHelper.cache_mode and self.hessian_helper.is_enabled:
-            # Get local tensor from DTensor if applicable
-            input_local = input.to_local() if hasattr(input, "to_local") else input
-            self.hessian_helper.accumulate_hessian(input_local)
-
-        # Forward without quantization during caching
-        if LocalHessianHelper.cache_mode:
-            self.weight_quantizer.disable()
-            out = self._forward_no_local_hessian(input, *args, **kwargs)
-            self.weight_quantizer.enable()
-            return out
-
-        return self._forward_no_local_hessian(input, *args, **kwargs)
-
-    # First, run max_calibrate on the whole model to get initial amax for all quantizers
-    # This calibrates both weight_quantizer and input_quantizer with max calibration
+    # Phase 1: max-calibrate (also bootstraps dead experts + promotes/syncs NVFP4 static).
     print_rank_0("local_hessian: Running max calibration for all quantizers...")
     max_calibrate(model, forward_loop, distributed_sync)
 
-    # Setup helpers for all quantized linear modules
     name_to_module = dict(model.named_modules())
-    weight_quantizers_info = []
-    all_patched_modules = []  # Track all modules for cleanup (including disabled ones)
 
-    for name, module in name_to_module.items():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            with enable_weight_access_and_writeback(module, model, name_to_module):
-                module.hessian_helper = LocalHessianHelper(module, name)
-            module.hessian_helper.setup()
-            all_patched_modules.append((name, module))
-            if module.hessian_helper.is_enabled:
-                weight_quantizers_info.append((name, module))
+    # Hessians keyed by id(weight_quantizer); modules pair weights<->activations via the hook.
+    accumulators: dict[int, _LocalHessianAccumulator] = {}
 
-    # Cache activations by running forward loop
-    LocalHessianHelper.cache_mode = True
+    def capture(weight_quantizer, weight, input_tensor):
+        input_local = input_tensor.to_local() if hasattr(input_tensor, "to_local") else input_tensor
+        acc = accumulators.get(id(weight_quantizer))
+        if acc is None:
+            acc = _LocalHessianAccumulator(weight.shape[0], weight.shape[1], block_size)
+            accumulators[id(weight_quantizer)] = acc
+        acc.accumulate(input_local)
+
+    # Phase 2: capture each weight's input activations during a forward with weight fake-quant
+    # disabled (so H = ΣXᵀX reflects full-precision weights); input quantizers are left as-is.
+    warned: set = set()
+    handles = _register_local_hessian_input_hooks(
+        model, name_to_module, capture, block_size, warned
+    )
     print_rank_0("local_hessian: Caching activations and computing local Hessian...")
-    forward_loop(model)
+    try:
+        with set_quantizer_by_cfg_context(
+            model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+        ):
+            forward_loop(model)
+    finally:
+        for handle in handles:
+            handle.remove()
 
-    # TODO(fridah-nv): Sync Hessian across distributed processes if needed
+    # TODO(fridah-nv): the per-block Hessian is not synced across TP/DP ranks (max_calibrate's
+    # amax sync runs before this), so refined amaxes can diverge. All-reduce Hessian / re-sync.
+    if dist_is_initialized() and dist_size() > 1:
+        warn_rank_0(
+            "local_hessian: Hessian is not synced across ranks; refined weight amaxes may "
+            "diverge under tensor/data parallelism. Treat local_hessian as single-rank for now."
+        )
 
-    # Replace calibrators with MseCalibrator using local Hessian error function
+    # Phase 3: build error funcs and run the shared MSE weight loop.
+    error_funcs = {
+        qid: acc.build_error_func(keep_buffer=debug) for qid, acc in accumulators.items()
+    }
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
-    for name, module in weight_quantizers_info:
-        weight_quantizer = module.weight_quantizer
-        helper = module.hessian_helper
+    _mse_calibrate_weights(
+        model,
+        name_to_module,
+        step_size=step_size,
+        start_multiplier=start_multiplier,
+        stop_multiplier=stop_multiplier,
+        fp8_scale_sweep=fp8_scale_sweep,
+        error_func_for=lambda q: error_funcs.get(id(q)),
+    )
 
-        if not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None:
-            continue
-
-        initial_amax = weight_quantizer._amax.clone().detach()
-
-        def quant_func(x, amax, quantizer=weight_quantizer):
-            return _mse_quant_func(x, amax, quantizer)
-
-        is_nvfp4_static = weight_quantizer.is_nvfp4_static
-
-        if is_nvfp4_static and not isinstance(weight_quantizer, NVFP4StaticQuantizer):
-            global_amax = reduce_amax(initial_amax, axis=None)
-            NVFP4StaticQuantizer.from_tensor_quantizer(weight_quantizer, global_amax=global_amax)
-
-        error_func = helper.get_error_func()
-
-        if fp8_scale_sweep and is_nvfp4_static:
-            weight_quantizer._calibrator = NVFP4MSECalibrator(
-                amax=initial_amax,
-                axis=weight_quantizer._calibrator._axis if weight_quantizer._calibrator else None,
-                global_amax=weight_quantizer.global_amax,
-                quant_func=quant_func,
-                error_func=error_func,
-            )
-        else:
-            weight_quantizer._calibrator = MseCalibrator(
-                amax=initial_amax,
-                axis=weight_quantizer._calibrator._axis if weight_quantizer._calibrator else None,
-                step_size=step_size,
-                start_multiplier=start_multiplier,
-                stop_multiplier=stop_multiplier,
-                quant_func=quant_func,
-                error_func=error_func,
-            )
-
-    # Free cached memory before heavy calibration
+    # Free the per-block Hessians (pinned by error_func closures) and the sweep's cached
+    # allocations so export starts from a defragmented allocator.
+    error_funcs.clear()
+    for module in name_to_module.values():
+        if isinstance(module, TensorQuantizer) and isinstance(module._calibrator, MseCalibrator):
+            module._calibrator._error_func = None
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # Process weights ONE AT A TIME with immediate amax computation and cleanup
-    weight_list = [
-        (name, module)
-        for name, module in weight_quantizers_info
-        if module.weight_quantizer._calibrator is not None
-    ]
-
-    for idx, (name, module) in enumerate(weight_list):
-        weight_quantizer = module.weight_quantizer
-        cal = weight_quantizer._calibrator
-
-        # Step 1: Calibrate this weight
-        weight_quantizer.disable_quant()
-        weight_quantizer.enable_calib()
-        with enable_weight_access_and_writeback(module, model, name_to_module):
-            weight = module.weight
-            weight_quantizer(weight)
-
-        # Step 2: IMMEDIATELY compute amax (before calibration data grows)
-        if cal.compute_amax() is not None:
-            weight_quantizer.load_calib_amax()
-
-        weight_quantizer.enable_quant()
-        weight_quantizer.disable_calib()
-
-        # Step 3: Sync all devices and reset calibrator for next weight
-        if torch.cuda.is_available():
-            for dev_id in range(torch.cuda.device_count()):
-                torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
-
-        if hasattr(cal, "reset"):
-            cal.reset()
-
-        if (idx + 1) % 10 == 0 and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    if torch.cuda.is_available():
-        for dev_id in range(torch.cuda.device_count()):
-            torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
-        torch.cuda.empty_cache()
-
-    # Cleanup and free memory
-    LocalHessianHelper.cache_mode = False
-    for name, module in all_patched_modules:
-        module.hessian_helper.cleanup()
+    if debug:
+        model._local_hessian_accumulators = accumulators
 
     print_rank_0("local_hessian: Calibration complete.")
 
