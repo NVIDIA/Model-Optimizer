@@ -360,6 +360,7 @@ def quantize(
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
     direct_io_types: bool = False,
     opset: int | None = None,
+    target_dla: bool = False,
     autotune: bool = False,
     autotune_output_dir: str | None = None,
     autotune_num_schemes_per_region: int = 50,
@@ -498,6 +499,9 @@ def quantize(
             Target ONNX opset version for the quantized model. If None, uses required minimum opset
             (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
             a warning will be issued and the opset will be upgraded to the required minimum.
+        target_dla:
+            If True, enable Q/DQ nodes to be placed in all tensors for optimal DLA deployment. This only has
+            effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution.
         autotune:
             If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
             If False, use the default pattern-based quantization approach.
@@ -621,16 +625,17 @@ def quantize(
     # MatMuls in MHA pattern.
     # (3) else when quantize_mode == "fp8", if head_size > 256 or head_size <= 8
     # or mha doesn't meet fp8 fMHA v2 pattern, don't add Q/DQ layers to MatMuls in MHA pattern.
-    nodes_to_exclude = find_nodes_from_mha_to_exclude(
-        onnx_path,
-        use_external_data_format,
-        nodes_to_exclude,
-        disable_mha_qdq,
-        quantize_mode,
-        intermediate_generated_files,
-        calibration_data_reader,
-        calibration_eps,
-    )
+    if not target_dla:
+        nodes_to_exclude = find_nodes_from_mha_to_exclude(
+            onnx_path,
+            use_external_data_format,
+            nodes_to_exclude,
+            disable_mha_qdq,
+            quantize_mode,
+            intermediate_generated_files,
+            calibration_data_reader,
+            calibration_eps,
+        )
 
     if calibrate_per_node and not calibration_shapes:
         calibration_shapes = get_input_shapes(onnx_path)
@@ -665,6 +670,7 @@ def quantize(
             kwargs["no_quantize_inputs"] = no_quantize_inputs
             kwargs["op_types_needing_output_quant"] = op_types_needing_output_quant
 
+        kwargs["target_dla"] = target_dla
         quantize_func = quantize_int8 if quantize_mode == "int8" else quantize_fp8
         onnx_model = quantize_func(
             onnx_path=onnx_path,
