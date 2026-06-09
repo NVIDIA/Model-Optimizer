@@ -1,4 +1,15 @@
+# Per-cell runtime_params for the (t0, d3) cell of the
+# Nemotron-3-Super-120B-A12B / DFlash / vLLM sweep.
+#
+# Cell parameters (rendered at materialize time):
+#   temperature = 0       → sampling_kwargs.temperature
+#   draft_length = 3      → --block_size 4 (DFlash mapping: bs = d + 1) on CLI
+#
+# max_model_len 65536 because SPEED-Bench throughput_32k prompts go up to
+# ~46k tokens; the prior default 40960 was too tight and vLLM rejected the
+# longest prompts (OMNIML-4969 task_1 #12678534).
+
 sampling_kwargs:
   temperature: 0
 engine_args:
-  max_model_len: 40960
+  max_model_len: 65536
