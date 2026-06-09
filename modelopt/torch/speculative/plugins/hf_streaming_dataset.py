@@ -40,7 +40,6 @@ consecutive-failure circuit breaker, loss_mask alignment); subclasses override
 from __future__ import annotations
 
 import base64
-import contextlib
 import os
 import time
 from typing import TypedDict
@@ -451,10 +450,18 @@ class EagleVllmStreamingDataset(StreamingDataset):
                 return None
             time.sleep(0.0002)
         agent.release_xfer_handle(h)
-        # Best-effort slot release; a failed /done just leaves the ring to recycle it.
-        with contextlib.suppress(Exception):
-            self._http_rdma.get(f"http://{host}:{port}/done", params={"req_id": rid})
-        hidden_states = view.clone()
+        hidden_states = view.clone()  # copy out before /done so the gen check brackets the read
+        # /done frees the slot + reports valid; valid=False -> ring lapped us mid-read, bytes
+        # stale -> resample. A failed /done can't prove staleness, so default valid=True.
+        try:
+            valid = self._http_rdma.get(
+                f"http://{host}:{port}/done", params={"req_id": rid}
+            ).json()["valid"]
+        except Exception:
+            valid = True
+        if not valid:
+            warn_rank_0(f"[streaming] slot lapped mid-read for {sample['cid']}; resampling")
+            return None
         token_ids = torch.tensor(desc["token_ids"], dtype=torch.long)
         client_ids = torch.as_tensor(sample["token_ids"], dtype=token_ids.dtype)
         n = client_ids.shape[0]

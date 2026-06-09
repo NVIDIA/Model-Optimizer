@@ -279,10 +279,11 @@ def _tokenizer_returning(seq: int) -> MagicMock:
     return tok
 
 
-def _rdma_sidecar_handler(seq, n_layers, hidden, *, on_completion=None):
+def _rdma_sidecar_handler(seq, n_layers, hidden, *, on_completion=None, done_valid=True):
     """Build an httpx handler emulating the RdmaHiddenStatesConnector sidecar:
     POST /v1/completions -> {hs_req_id}; GET /meta -> agent metadata;
-    GET /desc -> ready descriptor (shape/dtype/token_ids); GET /done -> ack.
+    GET /desc -> ready descriptor (shape/dtype/token_ids); GET /done -> ack + ``valid``
+    (False emulates the ring lapping the slot mid-read).
     ``token_ids`` mirrors the client prompt verbatim (no drift)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -306,7 +307,7 @@ def _rdma_sidecar_handler(seq, n_layers, hidden, *, on_completion=None):
                 },
             )
         if path == "/done":
-            return httpx.Response(200, json={"freed": "req-1"})
+            return httpx.Response(200, json={"freed": "req-1", "valid": done_valid})
         return httpx.Response(404, json={"error": "not found"})
 
     return handler
@@ -391,3 +392,25 @@ def test_fetch_round_robins_across_server_urls(monkeypatch):
 
     # Per-process round-robin cursor: a, b, a, b -- one completions POST each, alternating.
     assert hosts == ["a", "b", "a", "b"]
+
+
+def test_lapped_slot_is_treated_as_miss(monkeypatch):
+    """If /done reports valid=False (the ring overwrote the slot mid-read), the fetched
+    bytes are stale and must be discarded as a miss -- not returned as training data.
+    Here every read is reported lapped, so __getitem__ exhausts and raises rather than
+    silently yielding corrupt hidden states."""
+    seq, n_layers, hidden = 8, 3, 16
+    _mock_rdma(monkeypatch, _rdma_sidecar_handler(seq, n_layers, hidden, done_valid=False))
+
+    ds = EagleVllmStreamingDataset(
+        entries=[{"conversation_id": "c-0", "messages": [{"role": "user", "content": "x"}]}],
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_urls="http://mock:8000",
+            model="mock-model",
+            max_seq_len=seq,
+            fail_after_consecutive_skips=100,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="no fetchable sample"):
+        ds[0]

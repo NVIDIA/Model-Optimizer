@@ -132,9 +132,12 @@ class _Sidecar(BaseHTTPRequestHandler):
             )
             return
         if u.path == "/done":
+            # valid=False: slot's gen moved past this req -> ring lapped it mid-read, bytes stale.
             rid = parse_qs(u.query).get("req_id", [None])[0]
-            c._bufs.pop(rid, None)  # slot recycled by the ring; pool stays registered
-            self._send(200, {"freed": rid})
+            with c._lock:
+                e = c._bufs.pop(rid, None)
+                valid = e is not None and c._slot_gen.get(e["slot"]) == e["gen"]
+            self._send(200, {"freed": rid, "valid": valid})
             return
         self._send(404, {"error": "not found"})
 
@@ -172,6 +175,8 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._slot_elems = 0
         self._per_token_elems = 0
         self._bufs: dict[str, dict] = {}
+        # slot -> write counter; a req records its gen to detect a mid-read lap (see /done).
+        self._slot_gen: dict[int, int] = {}
         self._accum_finished: set[str] = set()
         self._lock = threading.Lock()
         # scheduler state
@@ -223,6 +228,22 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._feat_shape = tuple(kv.shape[2:])
         self._dtype = kv.dtype
         self._slot_elems = self._max_tokens * self._per_token_elems
+
+        # Live slots = in-flight fetch concurrency, capped by max_num_seqs. If the ring
+        # laps an unread slot the gen check (see /done) catches it as a miss + resample,
+        # so undersizing wastes work rather than corrupting; warn to size the pool right.
+        max_num_seqs = getattr(
+            getattr(self._vllm_config, "scheduler_config", None), "max_num_seqs", None
+        )
+        if max_num_seqs is not None and self._pool_slots < max_num_seqs:
+            logger.warning(
+                "RdmaHiddenStatesConnector: pool_slots=%d < max_num_seqs=%d; the ring may "
+                "lap unread slots under high fetch concurrency (-> wasted resamples). Raise "
+                "kv_connector_extra_config.pool_slots to >= %d.",
+                self._pool_slots,
+                max_num_seqs,
+                max_num_seqs,
+            )
 
         self._nixl = nixl_agent(f"hs-producer-{uuid.uuid4()}", nixl_agent_config(backends=["UCX"]))
         # ONE-TIME pool registration (the only ibv_reg_mr).
@@ -297,6 +318,8 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             sub = self._pool[slot, :nelems]
             descs = self._nixl.get_serialized_descs(self._nixl.get_xfer_descs([sub]))
             with self._lock:
+                gen = self._slot_gen.get(slot, 0) + 1  # this write's gen
+                self._slot_gen[slot] = gen
                 self._bufs[req.req_id] = {
                     "slot": slot,
                     "descs": descs,
@@ -304,6 +327,7 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                     "dtype": str(self._dtype).split(".")[-1],
                     "token_ids": req.token_ids.tolist(),
                     "event": ev,
+                    "gen": gen,
                 }
 
     # ---------- scheduler ----------
