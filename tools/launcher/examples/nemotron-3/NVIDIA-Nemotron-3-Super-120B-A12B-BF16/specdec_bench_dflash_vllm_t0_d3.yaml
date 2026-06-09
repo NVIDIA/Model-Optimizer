@@ -26,6 +26,7 @@ pipeline:
       - --output_length 4096
       - --aa_timing
       - --show_progress
+      - --trust_remote_code
       - --save_dir /scratchspace/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_dflash_vllm_t0_d3/qualitative
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
@@ -55,6 +56,7 @@ pipeline:
       - --output_length 4096
       - --aa_timing
       - --show_progress
+      - --trust_remote_code
       - --save_dir /scratchspace/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_dflash_vllm_t0_d3/throughput_32k
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
