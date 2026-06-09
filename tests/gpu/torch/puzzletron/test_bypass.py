@@ -64,11 +64,13 @@ import modelopt.torch.puzzletron.bypass_distillation as bypass_distillation
 import modelopt.torch.puzzletron.pruning.pruning_ckpts as pruning_ckpts
 import modelopt.torch.puzzletron.replacement_library.build_replacement_library as build_lib
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.anymodel import convert_model
+from modelopt.torch.puzzletron.anymodel import ModelDescriptorFactory, convert_model
 from modelopt.torch.puzzletron.bypass_distillation.bypass_checkpoint_utils import (
     find_latest_run_dir,
 )
 from modelopt.torch.puzzletron.bypass_distillation.bypass_utils import set_experiment_id
+from modelopt.torch.puzzletron.tools.checkpoint_utils import load_state_dict
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
 from modelopt.torch.puzzletron.tools.hydra_utils import initialize_hydra_config_for_dir
 
 # ---------------------------------------------------------------------------
@@ -794,9 +796,8 @@ def test_bypass_subblock_modes(
 
     For each (family, keys_to_learn) cell:
       - Run bypass for 2 steps with that keys_to_learn.
-      - After training, load the saved stitched_module state dict.
-      - Compare against the teacher-derived initialization (``copied_dir`` of
-        the bypass experiment, which holds the post-init pre-train weights):
+      - After training, load the saved HF-format checkpoints.
+      - Compare against the start checkpoint, which holds the post-init pre-train weights:
           * subblock_ffn → only FFN keys differ from init; attention identical.
           * subblock_attention → only attention keys differ; FFN identical.
           * entire_block → both differ.
@@ -872,35 +873,35 @@ def _test_bypass_subblock_modes_job(
             "no post-training checkpoint was written."
         )
 
-        # Diff every saved stitched module's state dict between start (pre-train)
-        # and end (post-train). Block names look like ``block_0``, ``block_1``…
-        ffn_token_set = {".mlp.", ".experts."}  # Llama vs GPT-OSS naming
-        attn_token = ".self_attn."
-
-        def _key_kind(key: str) -> str:
-            if attn_token in key:
-                return "attn"
-            if any(t in key for t in ffn_token_set):
-                return "ffn"
-            return "other"
+        # Diff the HF-format checkpoint tensors. ``stitched/`` stores only
+        # optimizer/scaler state; model weights live in the checkpoint root.
+        start_state = load_state_dict(start_dir)
+        end_state = load_state_dict(end_dir)
+        descriptor = ModelDescriptorFactory.get(hydra_cfg.descriptor)
+        model_config = load_model_config(start_dir)
+        lm_config = descriptor.get_language_model_config(model_config)
+        weight_groups = descriptor.get_weight_groups(
+            start_state.keys() & end_state.keys(),
+            lm_config.num_hidden_layers,
+        )
+        key_kinds = {
+            key: "attn" if group_name.endswith("_attention") else "ffn"
+            for group_name, keys in weight_groups.items()
+            if group_name.endswith(("_attention", "_ffn"))
+            for key in keys
+        }
 
         ffn_changed = False
         attn_changed = False
-        for state_dict_path in (start_dir / "stitched").glob("block_*.state_dict.pth"):
-            end_path = end_dir / "stitched" / state_dict_path.name
-            if not end_path.exists():
+        for key in start_state.keys() & end_state.keys():
+            kind = key_kinds.get(key)
+            if kind is None:
                 continue
-            start_state = torch.load(state_dict_path, map_location="cpu", weights_only=True)
-            end_state = torch.load(end_path, map_location="cpu", weights_only=True)
-            for key in start_state.keys() & end_state.keys():
-                kind = _key_kind(key)
-                if kind == "other":
-                    continue
-                changed = not torch.equal(start_state[key], end_state[key])
-                if kind == "ffn" and changed:
-                    ffn_changed = True
-                if kind == "attn" and changed:
-                    attn_changed = True
+            changed = not torch.equal(start_state[key], end_state[key])
+            if kind == "ffn" and changed:
+                ffn_changed = True
+            if kind == "attn" and changed:
+                attn_changed = True
 
         if keys_to_learn == "subblock_ffn":
             assert ffn_changed, f"subblock_ffn should change FFN weights ({hf_model_name})"
