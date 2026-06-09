@@ -24,6 +24,33 @@ Stop instead of proceeding if:
 - Any layer group intended to be quantized has zero or unexpectedly low coverage.
 - Any layer has quantization metadata inconsistent with its declared precision.
 - Prompting, tokenizer, generation, architecture, context-length, or special-token metadata changed unexpectedly.
+- **VLM only:** any vision-tower weight (`model.visual.*`/`vision_tower.*`/`vision_model.*`) carries quantization scales (unless quantizing the ViT is intended). Generic `*mlp*`/`*experts*` recipes silently match the ViT MLPs → garbage image embeddings (~0% on MMMU-Pro) while text looks fine; the precision script above counts them as valid NVFP4, so run the VLM check below.
+
+## VLM check — vision tower must stay unquantized
+
+For multimodal checkpoints, confirm the vision branch carries no quantization scales (handles sharded and single-file exports):
+
+```bash
+python3 -c "
+import json, os, glob, struct
+output = '<output_path>'
+ix = os.path.join(output, 'model.safetensors.index.json')
+if os.path.exists(ix):
+    keys = list(json.load(open(ix))['weight_map'])
+else:  # non-sharded: read tensor names from each safetensors header
+    keys = []
+    for f in glob.glob(os.path.join(output, '*.safetensors')):
+        with open(f, 'rb') as fh:
+            n = struct.unpack('<Q', fh.read(8))[0]
+            keys += [k for k in json.loads(fh.read(n)) if k != '__metadata__']
+vis_q = [k for k in keys if any(t in k for t in ('model.visual', 'vision_tower', 'vision_model'))
+         and any(s in k for s in ('weight_scale', 'input_scale'))]
+print(f'Quantized vision-tower tensors: {len(vis_q)}  (expect 0)')
+for k in vis_q[:8]: print('  ', k)
+"
+```
+
+Nonzero → the ViT was quantized; re-quantize with the `huggingface/<model_type>/ptq/` recipe or add `*visual*`/`*vision_tower*` exclusions.
 
 ## Expected quantization patterns by recipe
 
