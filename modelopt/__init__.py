@@ -15,6 +15,14 @@
 
 """Nvidia Model Optimizer (modelopt)."""
 
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
-__version__ = _version("nvidia-modelopt")
+try:
+    __version__ = _version("nvidia-modelopt")
+except PackageNotFoundError:
+    # No dist metadata — e.g. the modelopt source tree is mounted directly into a
+    # vLLM / TRT-LLM container's site-packages (as the launcher does) instead of being
+    # pip-installed. Importing modelopt must not crash in that case; downstream tools
+    # (specdec_bench, collect_hidden_states) only need the package, not its version.
+    __version__ = "0.0.0+unknown"
