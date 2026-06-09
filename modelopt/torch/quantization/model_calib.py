@@ -463,11 +463,13 @@ def _make_weight_mse_calibrator(
     stop_multiplier: float,
     fp8_scale_sweep: bool,
     error_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+    hessian: torch.Tensor | None = None,
 ) -> _Calibrator | None:
     """Create the MSE calibrator for one eligible weight quantizer (``None`` if ineligible).
 
-    ``error_func`` overrides the squared-error metric (local-Hessian's per-block weighting);
-    when set, NVFP4's Triton fast path is bypassed for the reference sweep.
+    ``error_func`` overrides the squared-error metric (local-Hessian's per-block weighting).
+    ``hessian`` (the same per-cin-block metric as a raw tensor) enables NVFP4's Hessian-weighted
+    Triton fast path; ``error_func`` then serves only as the reference fallback.
     """
     if (
         not isinstance(weight_quantizer, TensorQuantizer)
@@ -503,6 +505,7 @@ def _make_weight_mse_calibrator(
                 global_amax=weight_quantizer.global_amax,
                 quant_func=quant_func,
                 error_func=error_func,
+                hessian=hessian,
             )
         # fp8_scale_sweep applies only to registered backends and static NVFP4; skip others.
         return None
@@ -575,11 +578,14 @@ def _mse_calibrate_weights(
     stop_multiplier: float,
     fp8_scale_sweep: bool,
     error_func_for: Callable[[TensorQuantizer], Callable | None] | None = None,
+    hessian_for: Callable[[TensorQuantizer], torch.Tensor | None] | None = None,
 ):
     """Run MSE weight calibration over all eligible quantizers (shared by mse / local-Hessian).
 
     ``error_func_for`` maps a weight quantizer to an optional per-weight error function
-    (local-Hessian's Hessian metric); ``None`` means plain squared error.
+    (local-Hessian's Hessian metric); ``None`` means plain squared error. ``hessian_for``
+    maps a weight quantizer to the same metric as a raw per-cin-block Hessian tensor,
+    enabling the Hessian-weighted Triton fast path.
     """
     seen_modules: set[int] = set()
     pbar = tqdm(desc="MSE weight calibration")
@@ -590,6 +596,7 @@ def _mse_calibrate_weights(
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
             for weight, weight_quantizer in parent_module.iter_weights_for_calibration():
                 error_func = error_func_for(weight_quantizer) if error_func_for else None
+                hessian = hessian_for(weight_quantizer) if hessian_for else None
                 cal = _make_weight_mse_calibrator(
                     weight_quantizer,
                     step_size,
@@ -597,6 +604,7 @@ def _mse_calibrate_weights(
                     stop_multiplier,
                     fp8_scale_sweep,
                     error_func=error_func,
+                    hessian=hessian,
                 )
                 if cal is None:
                     continue
@@ -626,6 +634,7 @@ class _LocalHessianAccumulator:
         # Not block-divisible -> no Hessian (falls back to plain MSE).
         self.is_enabled = cin % block_size == 0
         self.hessian_per_block: torch.Tensor | None = None
+        self._normalized_hessian: torch.Tensor | None = None
         self.num_samples = 0
 
     @torch.no_grad()
@@ -643,6 +652,20 @@ class _LocalHessianAccumulator:
             self.hessian_per_block += hessian_batch
         self.num_samples += input_tensor.numel() // self.cin
 
+    def normalized_hessian(self) -> torch.Tensor | None:
+        """Per-cin-block Hessian ``H / num_samples`` (``None`` if no samples).
+
+        Shared by both the Triton fast path and the reference ``error_func`` so the two
+        consume one tensor; cached because the accumulated buffer may be freed afterwards.
+        """
+        if (
+            self._normalized_hessian is None
+            and self.hessian_per_block is not None
+            and self.num_samples
+        ):
+            self._normalized_hessian = self.hessian_per_block / self.num_samples
+        return self._normalized_hessian
+
     def build_error_func(
         self, keep_buffer: bool = False
     ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None:
@@ -650,11 +673,11 @@ class _LocalHessianAccumulator:
 
         Frees the raw Hessian buffer unless ``keep_buffer`` (kept for debug inspection).
         """
-        if self.hessian_per_block is None or self.num_samples == 0:
+        hessian = self.normalized_hessian()
+        if hessian is None:
             return None
         cout = self.cout
         bs = self.block_size
-        hessian = self.hessian_per_block / self.num_samples
         if not keep_buffer:
             self.hessian_per_block = None
 
@@ -855,10 +878,12 @@ def local_hessian_calibrate(
             "diverge under tensor/data parallelism. Treat local_hessian as single-rank for now."
         )
 
-    # Phase 3: build error funcs and run the shared MSE weight loop.
+    # Phase 3: build the Hessian metric (raw tensor for the Triton fast path, error_func for
+    # the reference fallback) and run the shared MSE weight loop. The two share one tensor.
     error_funcs = {
         qid: acc.build_error_func(keep_buffer=debug) for qid, acc in accumulators.items()
     }
+    hessians = {qid: acc.normalized_hessian() for qid, acc in accumulators.items()}
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
     _mse_calibrate_weights(
         model,
@@ -868,19 +893,25 @@ def local_hessian_calibrate(
         stop_multiplier=stop_multiplier,
         fp8_scale_sweep=fp8_scale_sweep,
         error_func_for=lambda q: error_funcs.get(id(q)),
+        hessian_for=lambda q: hessians.get(id(q)),
     )
 
-    # Free the per-block Hessians (pinned by error_func closures) and the sweep's cached
-    # allocations so export starts from a defragmented allocator.
+    # Free the per-block Hessians (pinned by error_func closures, calibrator references, and
+    # the accumulators' own normalized-Hessian cache) and the sweep's cached allocations so
+    # export starts from a defragmented allocator. Keep the accumulators only for debug.
     error_funcs.clear()
+    hessians.clear()
     for module in name_to_module.values():
         if isinstance(module, TensorQuantizer) and isinstance(module._calibrator, MseCalibrator):
             module._calibrator._error_func = None
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
+            if isinstance(module._calibrator, NVFP4MSECalibrator):
+                module._calibrator._hessian = None
     if debug:
         model._local_hessian_accumulators = accumulators
+    else:
+        accumulators.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     print_rank_0("local_hessian: Calibration complete.")
 
