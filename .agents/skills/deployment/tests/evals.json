@@ -26,7 +26,7 @@
     "query": "deploy my quantized model on the SLURM cluster",
     "files": [],
     "expected_behavior": [
-      "Checks for cluster config at ~/.config/modelopt/clusters.yaml or .claude/clusters.yaml",
+      "Checks for cluster config at ~/.config/modelopt/clusters.yaml, .agents/clusters.yaml, or .claude/clusters.yaml",
       "Sources .agents/skills/common/remote_exec.sh",
       "Calls remote_load_cluster, remote_check_ssh, remote_detect_env",
       "Checks if checkpoint is already on remote (e.g., from prior PTQ run) before syncing; only syncs if local",

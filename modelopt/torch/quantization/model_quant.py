@@ -318,7 +318,10 @@ def auto_quantize(
                 constraints = {
                     "effective_bits": 4.8,
                     "cost_model": "active_moe",
-                    "cost": {"active_moe_expert_ratio": 0.25},
+                    "cost": {
+                        "active_moe_expert_ratio": 0.25,
+                        "excluded_module_name_patterns": ["*visual*", "*vision_tower*", "*mtp*"],
+                    },
                 }
 
         quantization_formats: A list of quantization format config dictionaries or string names to search for.

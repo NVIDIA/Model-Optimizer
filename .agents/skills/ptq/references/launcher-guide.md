@@ -36,6 +36,10 @@ pipeline:
 > rejects the job with `QOSMinGRES` or `Requested node configuration is not
 > available`. e.g. GB300 nodes have 4 GPUs and require the full node → set
 > `gpus_per_node: 4`; B300/B200 nodes have 8. Check with `sinfo -o '%P %G'`.
+>
+> Also: the launcher emits `#SBATCH --mem=0` (all node RAM) with no override, so
+> clusters that scale RAM per GPU reject a partial-GPU alloc (`requested … RAM,
+> but only <N> GPUs`). Requesting the full node fixes it.
 
 > **`EXTRA_PIP_DEPS` must avoid shell metacharacters.** It is written into an
 > unquoted `export` in the generated sbatch script, so a value like
@@ -74,6 +78,12 @@ find tools/launcher/local_experiments -name "config.json" -path "*/exported_mode
 | Local Docker | `uv run launch.py --yaml <cfg> hf_local=<cache> --yes` |
 
 The launcher SSHes to `SLURM_HOST` via `nemo_run.SSHTunnel`. If `identity` is omitted, it uses `~/.ssh/id_rsa`.
+
+> **`SLURM_HF_LOCAL` — HF cache bind-mount.** `slurm_factory` mounts the host HF
+> cache at `/hf-local` from `$SLURM_HF_LOCAL` (default `/hf-local`). If that host
+> dir is missing, pyxis fails at container start (`enroot-mount: failed to mount:
+> /hf-local`). Export a real path (`SLURM_HF_LOCAL=/lustre/.../hf-local`); `ptq.sh`
+> reuses a model already there (skips the download).
 
 **If using `clusters.yaml`**: read the cluster config and map fields to launcher args:
 

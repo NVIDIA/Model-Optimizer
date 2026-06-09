@@ -185,7 +185,7 @@ All checks must pass before reporting success to the user.
 
 ### 6. Remote deployment (SSH/SLURM)
 
-If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clusters.yaml`), or the user mentions running on a remote machine:
+If a cluster config exists (`~/.config/modelopt/clusters.yaml`, `.agents/clusters.yaml`, or `.claude/clusters.yaml`), or the user mentions running on a remote machine:
 
 0. **Check container registry auth** — before submitting any SLURM job with a container image, verify credentials exist on the cluster per `skills/common/slurm-setup.md` section 6. If credentials are missing for the image's registry, ask the user to fix auth or switch to an image on an authenticated registry (e.g., NGC). **Do not submit until auth is confirmed.**
 
