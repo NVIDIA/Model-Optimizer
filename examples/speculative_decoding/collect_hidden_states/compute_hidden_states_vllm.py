@@ -177,6 +177,11 @@ def main(args: argparse.Namespace) -> None:
         max_model_len=args.max_seq_len,
         trust_remote_code=args.trust_remote_code,
         enable_chunked_prefill=False,  # required by extract_hidden_states
+        # With prefix caching on, vLLM serves shared prefixes from cache in block-sized
+        # chunks and the hidden-state connector only emits the freshly-computed suffix, so
+        # the dumped hidden_states come out short by N*block_size vs the full input_ids /
+        # loss_mask. Disabling it forces a full prefill so every token's state is dumped.
+        enable_prefix_caching=False,
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
