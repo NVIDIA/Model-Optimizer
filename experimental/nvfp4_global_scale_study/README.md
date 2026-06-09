@@ -266,6 +266,65 @@ range, while the `B_max`-anchored choice saturates as soon as outliers grow and
 degrades by 40×+ — concrete confirmation that anchoring to the stable `B_min`
 and using the format's full window is the robust default for activations.
 
+## 5. Empirical validation: when does `act_max` help vs. plain `max`?
+
+The `B_min`-anchored recipe is implemented as the **`nvfp4_act_max`** calibration
+algorithm (`NVFP4ActMaxCalibrator` / `nvfp4_act_max_calibrate`): plain max for
+weights, `g_amax = rho · B_min` (default `rho=16384`, with `b_min_percentile` /
+`b_max_percentile` knobs) for NVFP4 activation quantizers. We PTQ-quantized three
+models (NVFP4 W4A4 on the MLP/expert linears, FP8 KV cache) with four calibration
+variants and ran the AA-Index suite (GPQA Diamond, SciCode, AA-LCR).
+
+Isolating the algorithm — **act-max vs ref-max**, identical recipe and default
+calibration dataset, the *only* difference being the activation `g_amax`
+(B_min-anchored vs. literal max):
+
+| model (MLP activation) | ΔGPQA | ΔSciCode | ΔAA-LCR |
+|---|---|---|---|
+| Nemotron-3-Nano-30B-A3B (ungated **ReLU²**) | +0.18 | +0.01 | **+0.99** |
+| Qwen3.6-35B-A3B (gated **SwiGLU**, MoE) | −0.02 | −0.03 | −0.01 |
+| Qwen3.6-27B (gated **SwiGLU**, dense) | +0.04 | −0.54 | **−0.89** |
+
+**The benefit tracks activation tail-heaviness, which is set by the MLP activation
+function — and it lives entirely on the `down_proj` (w2) input.** The `up_proj` (w1,
+MLP input) `g_amax` behaves identically across all models (~350–430× headroom over
+the literal max): it sees the post-norm residual stream, which is
+architecture-agnostic and well-conditioned. The w2 input — the gated/activated
+intermediate — is where they diverge:
+
+- **Ungated ReLU² (Nemotron-H):** w2 input is heavy-tailed (literal max ≈ 2.7× the
+  99.99th percentile) *and* extremely sparse (`B_min ≈ 4e-4`, so dynamic range
+  ≈ 120000, tripping the range guardrail on ~90% of experts). Plain `max` pins the
+  static scale to a rare outlier and quantizes the bulk coarsely; `act_max`'s robust
+  anchoring recovers bulk precision → a real win, concentrated on the hardest task
+  (AA-LCR +1.0).
+- **Gated SwiGLU (Qwen):** `SiLU(gate)·up` keeps w2 light-tailed (literal max ≈ bulk),
+  so `max` is already near-optimal. `act_max` does nothing (35B: identical to `max`)
+  or slightly *hurts* (27B: −0.9 AA-LCR) — its large upward headroom is wasted and
+  pushes part of the bulk toward the subnormal edge.
+
+### Recommendation
+
+- **Use `act_max` for heavy-tailed-activation models — ungated squared-ReLU MLPs
+  (Nemotron-H family).** Free win, concentrated on reasoning / long-context.
+- **Use plain `max` for gated-SwiGLU models (Qwen, and Llama/Mistral-style).**
+  `act_max` is neutral-to-slightly-negative there.
+- **Discriminator** (measurable during calibration; dumped via the
+  `NVFP4_ACT_MAX_STATS_PATH` env var): the w2 tail ratio `literal_max / p99.99` and
+  `B_min`. High tail / near-zero `B_min` → `act_max`; tail ≈ 1 → `max`. Shorthand:
+  *ungated ReLU² → `act_max`; gated SwiGLU → `max`.*
+- On light-tailed activations `act_max` overshoots *upward*, so a literal-max floor
+  (`b_max_percentile=100`) does **not** make it universally safe — the fix there is
+  to cap `g_amax` (or just use `max`). The smaller-percentile `act-max-p1` is
+  marginally less aggressive but does not change the conclusion.
+
+Caveat: AA-LCR is reported without a standard error and carries most of the signal
+(the GPQA/SciCode deltas are largely within ±se); the cross-model *pattern* is
+consistent and matches the w2-distribution mechanism, but individual deltas should be
+read as directional. Per-checkpoint, per-layer `g_amax` for every variant/model is in
+`input_scale_comparison.html` (built by `compare_input_scales.py` from
+`study_config.json`).
+
 ## Why this differs from INT8/FP8 per-tensor calibration
 
 For INT8/FP8 the per-tensor scale directly trades range vs. resolution, so its
@@ -282,6 +341,10 @@ remaining error is dominated by the irreducible e2m1 grid, not by `g_amax`.
 | `error_vs_gamax.png` | Signed error & relative FP8 block-scale error vs. `g_amax` (3×3 grid of `(e, b_amax)` cases) |
 | `error_vs_ratio.png` | Relative FP8 block-scale error vs. `b_amax/g_amax` (all four regimes in one curve) |
 | `calib_strategy.png` | Robustness to unseen outliers: `B_max`- vs `B_min`-anchored `g_amax` (MSE vs outlier growth) |
+| `DESIGN_nvfp4_max.md` | Design proposal for the `nvfp4_act_max` calibration algorithm |
+| `compare_input_scales.py` | Builds the multi-model per-layer `g_amax` comparison report from a JSON config |
+| `study_config.json` | Checkpoints + recipe/dataset/sample/seq metadata driving the report |
+| `input_scale_comparison.html` | Per-layer `g_amax` across calibration variants for Nemotron-Nano, Qwen3.6-27B, Qwen3.6-35B-A3B |
 
 ## References
 
