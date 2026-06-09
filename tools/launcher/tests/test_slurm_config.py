@@ -45,6 +45,8 @@ class TestSlurmConfig:
         assert cfg.container_mounts is None
         assert cfg.srun_args is None
         assert cfg.array is None
+        assert cfg.modelopt_install_path == "/usr/local/lib/python3.12/dist-packages/modelopt"
+        assert cfg.megatron_install_path == "/usr/local/lib/python3.12/dist-packages/megatron"
 
     def test_custom_values(self):
         cfg = SlurmConfig(

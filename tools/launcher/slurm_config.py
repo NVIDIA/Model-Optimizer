@@ -40,6 +40,7 @@ class SlurmConfig:
     qos: Optional[str] = None
     container: Optional[str] = None
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt"
+    megatron_install_path: str = "/usr/local/lib/python3.12/dist-packages/megatron"
     container_mounts: Optional[list[str]] = None
     srun_args: Optional[list[str]] = None
     array: Optional[str] = None
@@ -62,6 +63,7 @@ def slurm_factory(
     gpus_per_node: int = 1,
     container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8",
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt",
+    megatron_install_path: str = "/usr/local/lib/python3.12/dist-packages/megatron",
     container_mounts: list[str] = [
         "{}:/hf-local".format(os.environ.get("SLURM_HF_LOCAL", "/hf-local")),
     ],
@@ -80,6 +82,7 @@ def slurm_factory(
         gpus_per_node=gpus_per_node,
         container=container,
         modelopt_install_path=modelopt_install_path,
+        megatron_install_path=megatron_install_path,
         container_mounts=container_mounts,
         srun_args=srun_args,
         array=array,

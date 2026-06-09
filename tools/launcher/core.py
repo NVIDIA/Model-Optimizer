@@ -257,10 +257,16 @@ def build_slurm_executor(
         f"{job_dir}/{experiment_title}/{experiment_id}"
         f"/{task_name}/code/modules/Model-Optimizer/modelopt_recipes"
     )
+    megatron_dst = slurm_config.megatron_install_path
+    megatron_src = (
+        f"{job_dir}/{experiment_title}/{experiment_id}"
+        f"/{task_name}/code/modules/Megatron-LM/megatron"
+    )
     container_mounts += [
         f"{scratch_src}:{scratch_dst}",
         f"{modelopt_src}:{modelopt_dst}",
         f"{modelopt_recipes_src}:{modelopt_recipes_dst}",
+        f"{megatron_src}:{megatron_dst}",
         f"{job_dir}/{experiment_title}:/{experiment_title}",
     ]
 
@@ -309,6 +315,7 @@ def build_docker_executor(
     task_name,
     packager,
     modelopt_src_path=None,
+    megatron_src_path=None,
     experiment_title="cicd",
 ):
     """Build a DockerExecutor for local GPU jobs."""
@@ -329,12 +336,16 @@ def build_docker_executor(
         "modelopt_recipes",
     )
     modelopt_recipes_src_path = os.path.join(os.path.dirname(modelopt_src_path), "modelopt_recipes")
+    megatron_dst = slurm_config.megatron_install_path
+    if megatron_src_path is None:
+        megatron_src_path = os.path.join(os.getcwd(), "modules/Megatron-LM/megatron")
     exp_title_src = os.path.join(job_dir, experiment_title)
     os.makedirs(exp_title_src, exist_ok=True)
     container_mounts += [
         f"{scratch_src}:{scratch_dst}",
         f"{modelopt_src_path}:{modelopt_dst}",
         f"{modelopt_recipes_src_path}:{modelopt_recipes_dst}",
+        f"{megatron_src_path}:{megatron_dst}",
         f"{exp_title_src}:/{experiment_title}",
     ]
 

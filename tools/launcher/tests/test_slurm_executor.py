@@ -40,6 +40,7 @@ class TestBuildSlurmExecutor:
             partition="batch",
             container="nvcr.io/test:latest",
             modelopt_install_path="/opt/modelopt",
+            megatron_install_path="/opt/megatron",
             container_mounts=["/hf-local:/hf-local"],
             srun_args=["--no-container-mount-home"],
             nodes=1,
@@ -63,10 +64,12 @@ class TestBuildSlurmExecutor:
         mock_executor.assert_called_once()
         call_kwargs = mock_executor.call_args[1]
 
-        # Verify container mounts include scratch, modelopt, and experiment title
+        # Verify container mounts include scratch, modelopt, megatron, and experiment title
         mounts = call_kwargs["container_mounts"]
         assert any("/scratchspace" in m for m in mounts)
         assert any("/opt/modelopt" in m for m in mounts)
+        assert any(":/opt/megatron" in m for m in mounts)
+        assert any("modules/Megatron-LM/megatron:/opt/megatron" in m for m in mounts)
         assert any("/cicd" in m for m in mounts)
         # Original mount preserved
         assert any("/hf-local:/hf-local" in m for m in mounts)
@@ -83,6 +86,7 @@ class TestBuildSlurmExecutor:
             partition="batch",
             container="img",
             modelopt_install_path="/opt/mo",
+            megatron_install_path="/opt/me",
             container_mounts=[],
             srun_args=[],
             nodes=1,
@@ -118,6 +122,7 @@ class TestBuildSlurmExecutor:
             partition="batch",
             container="img",
             modelopt_install_path="/opt/mo",
+            megatron_install_path="/opt/me",
             container_mounts=[],
             srun_args=[],
             nodes=1,
@@ -156,6 +161,7 @@ class TestBuildSlurmExecutor:
             partition="gpu",
             container="nvcr.io/img:v1",
             modelopt_install_path="/opt/mo",
+            megatron_install_path="/opt/me",
             container_mounts=[],
             srun_args=["--mpi=pmix"],
             nodes=2,
@@ -201,6 +207,7 @@ class TestBuildSlurmExecutor:
             partition="b",
             container="c",
             modelopt_install_path="/m",
+            megatron_install_path="/g",
             container_mounts=None,
             srun_args=None,
             nodes=1,

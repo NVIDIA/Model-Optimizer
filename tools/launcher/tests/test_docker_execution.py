@@ -47,6 +47,7 @@ class TestBuildDockerExecutor:
                 local=False,
                 container="test:latest",
                 modelopt_install_path="/opt/modelopt",
+                megatron_install_path="/opt/megatron",
                 container_mounts=None,
                 srun_args=None,
                 array=None,
@@ -69,6 +70,7 @@ class TestBuildDockerExecutor:
                 local=False,
                 container="test:latest",
                 modelopt_install_path="/opt/modelopt",
+                megatron_install_path="/opt/megatron",
                 container_mounts=None,
                 srun_args=None,
                 array=None,
@@ -91,6 +93,7 @@ class TestBuildDockerExecutor:
                 local=False,
                 container="test:latest",
                 modelopt_install_path="/opt/modelopt",
+                megatron_install_path="/opt/megatron",
                 container_mounts=None,
                 srun_args=None,
                 array=None,
@@ -114,6 +117,7 @@ class TestBuildDockerExecutor:
                 local=False,
                 container="test:latest",
                 modelopt_install_path="/opt/modelopt",
+                megatron_install_path="/opt/megatron",
                 container_mounts=None,
                 srun_args=None,
                 array=None,
@@ -128,6 +132,30 @@ class TestBuildDockerExecutor:
         volumes = executor.volumes
         assert any("/custom/modelopt:/opt/modelopt" in v for v in volumes)
 
+    def test_megatron_mount(self, tmp_path):
+        job_dir = str(tmp_path / "experiments")
+        executor = build_docker_executor(
+            hf_local="/tmp/hf",
+            slurm_config=MagicMock(
+                local=False,
+                container="test:latest",
+                modelopt_install_path="/opt/modelopt",
+                megatron_install_path="/opt/megatron",
+                container_mounts=None,
+                srun_args=None,
+                array=None,
+            ),
+            experiment_id="exp_789",
+            job_dir=job_dir,
+            task_name="task_0",
+            packager=MagicMock(),
+            modelopt_src_path="/custom/modelopt",
+            megatron_src_path="/custom/megatron",
+            experiment_title="cicd",
+        )
+        volumes = executor.volumes
+        assert any("/custom/megatron:/opt/megatron" in v for v in volumes)
+
     def test_experiment_title_mount(self, tmp_path):
         job_dir = str(tmp_path / "experiments")
         executor = build_docker_executor(
@@ -136,6 +164,7 @@ class TestBuildDockerExecutor:
                 local=False,
                 container="test:latest",
                 modelopt_install_path="/opt/modelopt",
+                megatron_install_path="/opt/megatron",
                 container_mounts=None,
                 srun_args=None,
                 array=None,
@@ -159,6 +188,7 @@ class TestBuildDockerExecutor:
                 local=True,
                 container="test:latest",
                 modelopt_install_path="/opt/modelopt",
+                megatron_install_path="/opt/megatron",
                 container_mounts=["/data:/data", "/models:/models"],
                 srun_args=None,
                 array=None,
