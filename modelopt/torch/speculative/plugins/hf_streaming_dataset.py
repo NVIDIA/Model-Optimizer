@@ -318,6 +318,9 @@ class EagleVllmStreamingConfig(StreamingConfig):
     # (optionally comma-separated) string.
     server_urls: list[str]
     model: str
+    # Required here (the base field is optional): the RDMA recv buffer is pre-sized and
+    # registered once from max_seq_len, so it must be known before the first fetch.
+    max_seq_len: int = Field(gt=0)
 
     @field_validator("server_urls", mode="before")
     @classmethod

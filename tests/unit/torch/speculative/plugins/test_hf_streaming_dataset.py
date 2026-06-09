@@ -208,13 +208,23 @@ def test_server_urls_normalization():
     strips trailing slashes."""
 
     def _urls(v):
-        return EagleVllmStreamingConfig(server_urls=v, model="m").server_urls
+        return EagleVllmStreamingConfig(server_urls=v, model="m", max_seq_len=128).server_urls
 
     assert _urls("http://a:8000/") == ["http://a:8000"]
     assert _urls("http://a:8000, http://b:8000/") == ["http://a:8000", "http://b:8000"]
     assert _urls(["http://a:8000", "http://b:8000"]) == ["http://a:8000", "http://b:8000"]
     with pytest.raises(ValueError, match="at least one non-empty URL"):
-        EagleVllmStreamingConfig(server_urls="", model="m")
+        EagleVllmStreamingConfig(server_urls="", model="m", max_seq_len=128)
+
+
+def test_max_seq_len_is_required():
+    """max_seq_len is optional on the base config but required for the RDMA backend (it
+    pre-sizes the recv buffer), so a missing/non-positive value must fail at construction
+    rather than crashing later in _fetch."""
+    with pytest.raises(ValueError, match="max_seq_len"):
+        EagleVllmStreamingConfig(server_urls="http://a:8000", model="m")
+    with pytest.raises(ValueError, match="max_seq_len|greater than 0"):
+        EagleVllmStreamingConfig(server_urls="http://a:8000", model="m", max_seq_len=0)
 
 
 class _FakeNixlAgent:
