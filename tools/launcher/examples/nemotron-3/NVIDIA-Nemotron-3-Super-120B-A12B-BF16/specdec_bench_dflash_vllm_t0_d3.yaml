@@ -18,6 +18,7 @@ pipeline:
       - --engine VLLM
       - --speculative_algorithm DFLASH
       - --draft_length 3
+      - --block_size 4
       - --runtime_params common/specdec_bench/_cells/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_dflash_vllm_t0_d3.yaml
       - --tp_size 2
       - --ep_size 1
@@ -45,6 +46,7 @@ pipeline:
       - --engine VLLM
       - --speculative_algorithm DFLASH
       - --draft_length 3
+      - --block_size 4
       - --runtime_params common/specdec_bench/_cells/NVIDIA-Nemotron-3-Super-120B-A12B-BF16_dflash_vllm_t0_d3.yaml
       - --tp_size 2
       - --ep_size 1
