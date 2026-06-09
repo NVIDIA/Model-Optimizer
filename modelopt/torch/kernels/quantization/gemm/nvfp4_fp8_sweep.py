@@ -162,13 +162,9 @@ def nvfp4_fp8_scale_sweep(
     return best_amax
 
 
-# One program sweeps ROWS_PER_PROGRAM output rows of a single cin-block, so that block's
-# [BLOCK_SIZE, BLOCK_SIZE] Hessian is loaded once and reused (it is shared across all output
-# rows). The per-candidate quadratic form dwᵀ H dw is a ``[ROWS, BS] x [BS, BS]`` matmul run
-# on tensor cores via ``tl.dot`` — far faster than a per-block broadcast (which also spills
-# the gathered Hessian tile). A single config keeps the (already heavy) 126-way-unrolled
-# kernel to one compilation per weight shape; ROWS=32/num_warps=4 was fastest across shapes
-# on the target GPU (B300), and ROWS=32 covers any COUT via row masking.
+# Each program sweeps a tile of output rows of one cin-block, so the block's [BS, BS] Hessian
+# loads once and dwᵀ H dw runs as a [ROWS, BS] x [BS, BS] tl.dot on tensor cores. ROWS=32 was
+# fastest in a shape sweep; a single config keeps compile time to one build per weight shape.
 _FP8_SWEEP_HESSIAN_AUTOTUNE_CONFIGS = [
     triton.Config({"ROWS_PER_PROGRAM": 32}, num_warps=4),
 ]
@@ -189,15 +185,13 @@ def _fp8_scale_sweep_hessian_kernel(
     ROWS_PER_PROGRAM: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
-    # One cin-block per program; a tile of output rows shares its Hessian.
     cin_block = pid % N_CIN_BLOCKS
     rows = (pid // N_CIN_BLOCKS) * ROWS_PER_PROGRAM + tl.arange(0, ROWS_PER_PROGRAM)
     row_mask = rows < COUT
-    # NVFP4 block layout is row-major over (cout, cin // block_size): block = row*N_CIN + n.
+    # Block layout is row-major over (cout, cin // block_size): block = row*N_CIN + n.
     block_idx = rows * N_CIN_BLOCKS + cin_block
 
-    # Signed weights are required: the Hessian quadratic form has cross-terms, so unlike
-    # the plain squared-error sweep the residual sign does not cancel.
+    # Signed residual: the Hessian cross-terms mean the sign does not cancel (unlike plain MSE).
     elem = tl.arange(0, BLOCK_SIZE)
     w = tl.load(
         x_ptr + block_idx[:, None] * BLOCK_SIZE + elem[None, :], mask=row_mask[:, None], other=0.0
@@ -205,28 +199,24 @@ def _fp8_scale_sweep_hessian_kernel(
     w_abs = tl.abs(w)
     w_sign = tl.where(w >= 0, 1.0, -1.0)
 
-    # This cin-block's Hessian, loaded once and reused across rows and candidates.
-    p = tl.arange(0, BLOCK_SIZE)
-    q = tl.arange(0, BLOCK_SIZE)
+    idx = tl.arange(0, BLOCK_SIZE)
     hessian = tl.load(
-        hessian_ptr + cin_block * (BLOCK_SIZE * BLOCK_SIZE) + p[:, None] * BLOCK_SIZE + q[None, :]
+        hessian_ptr
+        + cin_block * (BLOCK_SIZE * BLOCK_SIZE)
+        + idx[:, None] * BLOCK_SIZE
+        + idx[None, :]
     ).to(tl.float32)  # [BS, BS]
 
     best_loss = tl.full([ROWS_PER_PROGRAM], float("inf"), dtype=tl.float32)
     best_idx = tl.zeros([ROWS_PER_PROGRAM], dtype=tl.int32)
 
-    # Real hardware loop (not unrolled): with a tl.dot in the body, unrolling all 126
-    # candidates explodes compile time for no runtime gain (the matmul dominates).
-    # Scales are precomputed on the host with the SAME FP8-E4M3 round-trip the reference
-    # fake-quant uses, so the kernel's per-block residual is bit-identical to the reference.
+    # Non-unrolled loop: unrolling 126 tl.dot bodies explodes compile time for no runtime gain.
     for k in tl.range(NUM_CANDIDATES):
         scale = tl.load(candidate_scales_ptr + k).to(tl.float32)
-        # scale == 0 only when global_amax == 0 (all weights zero -> dw == 0 -> loss 0).
-        scale_safe = tl.where(scale == 0.0, 1.0, scale)
+        scale_safe = tl.where(scale == 0.0, 1.0, scale)  # scale == 0 only if global_amax == 0
         q_mag = fp4_round_magnitude(w_abs / scale_safe)
         dw = w_sign * (w_abs - q_mag * scale_safe)  # = w - quant(w), [ROWS, BS]
-        # Per-row quadratic form dwᵀ H dw (H symmetric): (dw @ H) then row-wise dot with dw.
-        # allow_tf32=False keeps the matmul in true fp32 to match the reference sweep.
+        # dwᵀ H dw per row (H symmetric); allow_tf32=False keeps it true fp32 vs the reference.
         hdw = tl.dot(dw, hessian, allow_tf32=False)  # [ROWS, BS]
         loss = tl.sum(hdw * dw, axis=1)  # [ROWS]
         is_better = loss < best_loss
@@ -275,22 +265,16 @@ def nvfp4_fp8_scale_sweep_hessian(
         )
 
     cout = n_blocks // n_cin_blocks
-    global_amax_f32 = global_amax.detach().to(device=x.device, dtype=torch.float32).reshape(())
-
-    # Per-candidate block amax (= global_amax * fp8/448) and the matching FP8-E4M3-quantized
-    # block scale. Computing the scale here with the reference's ``compute_fp4_scales`` (the
-    # exact path the fake-quant uses) makes the kernel's quantization bit-identical to the
-    # reference sweep, so the only residual divergence is fp32 reduction order in tl.dot.
-    candidate_amaxes = (fp8_scale_candidates(x.device).to(dtype=torch.float32)) * global_amax_f32
-    candidate_scales = compute_fp4_scales(
-        candidate_amaxes, global_amax_f32, quantize_block_scales=True
-    ).to(dtype=torch.float32)
-
-    hessian_flat = hessian.contiguous().to(device=x.device, dtype=torch.float32).view(-1)
-
-    # One program per (row-tile, cin-block): grid = cdiv(cout, ROWS) * n_cin_blocks.
     grid = lambda meta: (triton.cdiv(cout, meta["ROWS_PER_PROGRAM"]) * n_cin_blocks,)
     with torch.cuda.device(x.device):
+        global_amax_f32 = global_amax.detach().to(device=x.device, dtype=torch.float32).reshape(())
+        # Candidate scales via the reference ``compute_fp4_scales`` (the exact fake-quant path)
+        # keep the kernel's residual bit-identical to the reference sweep.
+        candidate_amaxes = fp8_scale_candidates(x.device).to(dtype=torch.float32) * global_amax_f32
+        candidate_scales = compute_fp4_scales(
+            candidate_amaxes, global_amax_f32, quantize_block_scales=True
+        ).to(dtype=torch.float32)
+        hessian_flat = hessian.contiguous().to(device=x.device, dtype=torch.float32).view(-1)
         _fp8_scale_sweep_hessian_kernel[grid](
             x_flat,
             hessian_flat,

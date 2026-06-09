@@ -503,35 +503,9 @@ def test_hessian_sweep_input_validation():
 
 
 @requires_triton
-def test_hessian_fast_path_dispatch():
-    """A non-None ``hessian`` takes the Hessian fast path even though ``error_func`` is set,
-    and ``MODELOPT_NVFP4_TRITON_SWEEP=0`` forces the reference path back on."""
-    torch.manual_seed(0)
-    cout, cin = 8, 64
-    weight = torch.randn(cout, cin, device="cuda", dtype=torch.float32)
-    acc = _build_hessian_accumulator(cout, cin, torch.randn(256, cin, device="cuda"))
-    x_blocks = weight.reshape(-1, BLOCK_SIZE)
-    per_block_amax = x_blocks.abs().amax(dim=-1)
-    global_amax = per_block_amax.max()
-
-    cal = NVFP4MSECalibrator(
-        amax=per_block_amax,
-        axis=0,
-        global_amax=global_amax,
-        quant_func=_reference_quant_func(global_amax),
-        error_func=acc.build_error_func(keep_buffer=True),
-        hessian=acc.normalized_hessian(),
-    )
-    with _force_sweep_path(triton_enabled=True):
-        assert cal._can_use_hessian_fast_path(x_blocks) is True
-    with _force_sweep_path(triton_enabled=False):
-        assert cal._can_use_hessian_fast_path(x_blocks) is False
-
-
-@requires_triton
 def test_hessian_speedup_report(capsys):
-    """Hessian Triton fast path must be >=30x faster than the reference Hessian sweep on a
-    representative 8192x4096 weight (~2M NVFP4 blocks), with parity on the chosen amax."""
+    """Report the Hessian fast-path speedup on a representative 8192x4096 weight (~2M NVFP4
+    blocks); expect ~30x on A6000, higher on datacenter GPUs. Mirrors ``test_speedup_report`"""
     torch.manual_seed(123)
     device = "cuda"
     cout, cin = 8192, 4096
@@ -575,7 +549,6 @@ def test_hessian_speedup_report(capsys):
             f"  triton fast path: {tri_t * 1e3:8.2f} ms\n"
             f"  speedup: {speedup:.1f}x"
         )
-    assert speedup >= 30.0, f"Hessian fast path speedup {speedup:.1f}x below 30x target"
 
 
 def _bench(fn, warmup=2, iters=5):

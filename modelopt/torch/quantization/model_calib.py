@@ -878,8 +878,9 @@ def local_hessian_calibrate(
             "diverge under tensor/data parallelism. Treat local_hessian as single-rank for now."
         )
 
-    # Phase 3: build the Hessian metric (raw tensor for the Triton fast path, error_func for
-    # the reference fallback) and run the shared MSE weight loop. The two share one tensor.
+    # Phase 3: weight search. Build error_funcs first so build_error_func caches the normalized
+    # Hessian (freeing the raw buffer) before normalized_hessian() reuses it; the fast path
+    # (tensor) and reference fallback (error_func) then share that one tensor.
     error_funcs = {
         qid: acc.build_error_func(keep_buffer=debug) for qid, acc in accumulators.items()
     }
@@ -896,9 +897,8 @@ def local_hessian_calibrate(
         hessian_for=lambda q: hessians.get(id(q)),
     )
 
-    # Free the per-block Hessians (pinned by error_func closures, calibrator references, and
-    # the accumulators' own normalized-Hessian cache) and the sweep's cached allocations so
-    # export starts from a defragmented allocator. Keep the accumulators only for debug.
+    # Release the per-block Hessians (held by the error_func closures, calibrators, and the
+    # accumulators' cache) before empty_cache so export starts defragmented; keep only for debug.
     error_funcs.clear()
     hessians.clear()
     for module in name_to_module.values():
