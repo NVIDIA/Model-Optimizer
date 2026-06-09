@@ -712,14 +712,14 @@ TE_GROUPED_PER_EXPERT_CFG = {
 }
 
 
-def test_te_grouped_per_expert_sharded_state_dict(dist_workers_size_4, need_4_gpus, tmp_path):
+def test_te_grouped_per_expert_sharded_state_dict(dist_workers, need_4_gpus, tmp_path):
     """Per-expert (axis=0) weight amax round-trips through dist-checkpoint on TEGroupedMLP.
 
-    Uses the TP=2 EP=2 layout that the existing ``test_moe_sharded_state_dict`` runs
-    against for per-tensor FP8/NVFP4. TP=1 EP=2 has an unrelated MCore + TEGrouped +
-    dist-checkpoint hang at SeqNum=5 default-PG ALLGATHER that fires even at
-    axis=None; verified empirically on 2026-06-09. Stay on the known-good layout
-    here; revisit TP=1 EP=2 once the MCore-side fix lands.
+    Mirrors ``test_moe_sharded_state_dict``'s setup exactly (dist_workers fixture,
+    hidden_size=256, tp=2 ep=2 etp=1 num_moe_experts=4 moe_grouped_gemm=True), with
+    only the quant_cfg varying. The existing test is known to pass at this layout
+    for FP8_DEFAULT_CFG / NVFP4_DEFAULT_CFG; this test exercises the OMNIML-4998
+    per-expert (axis=0) path on top of the same infrastructure.
     """
     moe_config = {
         "tp_size": 2,
@@ -729,12 +729,12 @@ def test_te_grouped_per_expert_sharded_state_dict(dist_workers_size_4, need_4_gp
         "moe_grouped_gemm": True,
         "transformer_impl": "transformer_engine",
     }
-    dist_workers_size_4.run(
+    dist_workers.run(
         partial(
             _test_sharded_state_dict,
             tmp_path,
             copy.deepcopy(TE_GROUPED_PER_EXPERT_CFG),
-            32,
+            256,
             None,
             False,
             False,
