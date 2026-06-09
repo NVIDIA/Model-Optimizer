@@ -32,7 +32,6 @@ from common import (
     add_answer_only_loss_args,
     add_aux_layers_args,
     load_chat_template,
-    resolve_aux_layers,
     tokenize_with_loss_mask,
     verify_generation_tags,
 )
@@ -43,6 +42,34 @@ from transformers import AutoConfig, AutoTokenizer
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
 )
+
+
+def _resolve_aux_layers_standalone(aux_layers: str, num_hidden_layers: int) -> list[int]:
+    """Resolve aux-layer ids without importing modelopt.
+
+    This dump runs in a stock vLLM container. ``common.resolve_aux_layers`` resolves the
+    'dflash'/'eagle' presets by importing ``modelopt.torch.speculative.plugins`` — which
+    pulls in the full ``modelopt.torch`` init chain (omegaconf, etc.) that the vLLM
+    container does not have, so the import fails. Resolve the 'dflash' preset inline
+    (mirroring ``modeling_dflash.build_target_layer_ids`` with num_draft=5, the recipe
+    default) and accept an explicit comma-separated int list. Keep in sync with modelopt.
+    """
+    spec = aux_layers.strip().lower()
+    if spec == "dflash":
+        num_draft = 5
+        if num_draft == 1:
+            return [num_hidden_layers // 2]
+        start = min(1, num_hidden_layers - 1)
+        end = max(start, num_hidden_layers - 3)
+        span = end - start
+        return sorted({round(start + (i * span) / (num_draft - 1)) for i in range(num_draft)})
+    ids = sorted({int(t) for t in aux_layers.split(",") if t.strip()})
+    if not ids:
+        raise ValueError(
+            f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
+            "'dflash' preset or an explicit comma-separated layer-id list are supported."
+        )
+    return ids
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,7 +147,7 @@ def main(args: argparse.Namespace) -> None:
     num_hidden_layers = getattr(config, "num_hidden_layers", None)
     if num_hidden_layers is None:
         raise ValueError(f"model config has no 'num_hidden_layers' attribute: {config}")
-    aux_layer_ids = resolve_aux_layers(args, num_hidden_layers)
+    aux_layer_ids = _resolve_aux_layers_standalone(args.aux_layers, num_hidden_layers)
     # The trailing entry is the final output hidden state; the rest are aux layers.
     extract_layer_ids = [*aux_layer_ids, num_hidden_layers]
     print(f"Extracting hidden states from layers {extract_layer_ids} (last = final output)")
