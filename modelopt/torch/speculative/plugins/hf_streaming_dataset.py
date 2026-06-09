@@ -401,7 +401,6 @@ class EagleVllmStreamingDataset(StreamingDataset):
         agent = self._rdma()
         url = self._next_url()
         host = url.split("://", 1)[-1].split(":")[0]
-        port = int(os.environ.get("HS_SIDECAR_PORT", "18999"))
         r = self._http_rdma.post(
             f"{url}/v1/completions",
             json={
@@ -412,10 +411,14 @@ class EagleVllmStreamingDataset(StreamingDataset):
             },
         )
         r.raise_for_status()
-        rid = (r.json().get("kv_transfer_params") or {}).get("hs_req_id")
+        kv = r.json().get("kv_transfer_params") or {}
+        rid = kv.get("hs_req_id")
         if rid is None:
             warn_rank_0(f"[streaming] no hs_req_id for {sample['cid']}")
             return None
+        # The connector advertises its sidecar port per request (one source of truth);
+        # fall back to the env var only if an older server omits it.
+        port = int(str(kv.get("hs_sidecar_port") or os.environ.get("HS_SIDECAR_PORT", "18999")))
         remote = self._remote(host, port)
         desc = None
         deadline = time.time() + self.config.request_timeout
@@ -432,6 +435,14 @@ class EagleVllmStreamingDataset(StreamingDataset):
         dtype = getattr(torch, desc["hs_dtype"])
         feat = shape[1:]
         maxtok = self.config.max_seq_len
+        if shape[0] > maxtok:
+            # The server captured more tokens than the recv buffer holds (its connector
+            # max_tokens > our max_seq_len). Reading would silently truncate the slice;
+            # fail loud so the size mismatch is configured away, not trained on.
+            raise RuntimeError(
+                f"server returned {shape[0]} tokens > max_seq_len={maxtok} for "
+                f"{sample['cid']}; set max_seq_len >= the serve connector's max_tokens"
+            )
         if self._recv is None or self._recv.dtype != dtype or tuple(self._recv.shape[1:]) != feat:
             # plain (pageable) host tensor: NIXL/ibv_reg_mr pins the pages itself.
             # Do NOT call .pin_memory() here — dataloader workers are forked and have no
@@ -443,6 +454,9 @@ class EagleVllmStreamingDataset(StreamingDataset):
         rdescs = agent.deserialize_descs(base64.b64decode(desc["hs_descs"]))
         h = agent.initialize_xfer("READ", ldescs, rdescs, remote)
         agent.transfer(h)
+        # Bound the completion poll: a dead/stuck remote agent must not hang this worker
+        # forever (a single hung fetch stalls its DataLoader and, in DDP, the whole world).
+        xfer_deadline = time.time() + self.config.request_timeout
         while True:
             st = agent.check_xfer_state(h)
             if st == "DONE":
@@ -450,6 +464,10 @@ class EagleVllmStreamingDataset(StreamingDataset):
             if st == "ERR":
                 agent.release_xfer_handle(h)
                 warn_rank_0(f"[streaming] rdma xfer ERR for {sample['cid']}")
+                return None
+            if time.time() >= xfer_deadline:
+                agent.release_xfer_handle(h)
+                warn_rank_0(f"[streaming] rdma xfer timeout for {sample['cid']}")
                 return None
             time.sleep(0.0002)
         agent.release_xfer_handle(h)

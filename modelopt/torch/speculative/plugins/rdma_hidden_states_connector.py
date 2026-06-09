@@ -178,6 +178,7 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # slot -> write counter; a req records its gen to detect a mid-read lap (see /done).
         self._slot_gen: dict[int, int] = {}
         self._accum_finished: set[str] = set()
+        self._oversize_warned = False  # one-shot guard against log spam on oversized prompts
         self._lock = threading.Lock()
         # scheduler state
         self._slot_ctr = 0
@@ -306,6 +307,23 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             n = req.token_ids.shape[0]
             nelems = n * self._per_token_elems
             slot = req.slot
+            if nelems > self._slot_elems:
+                # Prompt longer than a pool slot (max_tokens). Copying would overrun the
+                # slot into the neighbour's bytes; skip capture instead. The trainer's
+                # /desc poll times out for this req and resamples. Misconfiguration, so
+                # log loudly once and tell the operator how to size the pool.
+                if not self._oversize_warned:
+                    logger.error(
+                        "RdmaHiddenStatesConnector: request with %d tokens exceeds "
+                        "max_tokens=%d (pool slot capacity); skipping capture. Raise "
+                        "kv_connector_extra_config.max_tokens to >= the trainer's "
+                        "max_seq_len. Further occurrences suppressed.",
+                        n,
+                        self._max_tokens,
+                    )
+                    self._oversize_warned = True
+                offset += n
+                continue
             with torch.cuda.stream(cs):
                 rsm = slot_mapping[offset : offset + n]
                 offset += n

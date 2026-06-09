@@ -424,3 +424,59 @@ def test_lapped_slot_is_treated_as_miss(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="no fetchable sample"):
         ds[0]
+
+
+def test_oversize_server_response_raises(monkeypatch):
+    """If the server captured more tokens than max_seq_len (its connector max_tokens >
+    our recv buffer), reading would silently truncate the slice; fail loud instead so the
+    size mismatch is configured away rather than trained on misaligned hidden states."""
+    seq, n_layers, hidden = 8, 3, 16
+    # Sidecar advertises a longer sequence than the recv buffer is sized for.
+    _mock_rdma(monkeypatch, _rdma_sidecar_handler(seq + 4, n_layers, hidden))
+
+    ds = EagleVllmStreamingDataset(
+        entries=[{"conversation_id": "c-0", "messages": [{"role": "user", "content": "x"}]}],
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_urls="http://mock:8000",
+            model="mock-model",
+            max_seq_len=seq,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="max_seq_len"):
+        ds[0]
+
+
+def test_sidecar_port_taken_from_response(monkeypatch):
+    """The connector advertises its sidecar port per completions response; the dataset
+    must address the /meta, /desc and /done sidecar calls at that port (not a hardcoded
+    default), so a non-default connector sidecar_port works without an env override."""
+    seq, n_layers, hidden = 8, 3, 16
+    advertised_port = 23456
+    seen_ports: set[int] = set()
+    base = _rdma_sidecar_handler(seq, n_layers, hidden)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/completions":
+            return httpx.Response(
+                200,
+                json={
+                    "kv_transfer_params": {"hs_req_id": "req-1", "hs_sidecar_port": advertised_port}
+                },
+            )
+        seen_ports.add(request.url.port)
+        return base(request)
+
+    _mock_rdma(monkeypatch, handler)
+
+    ds = EagleVllmStreamingDataset(
+        entries=[{"conversation_id": "c-0", "messages": [{"role": "user", "content": "x"}]}],
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_urls="http://mock:8000",
+            model="mock-model",
+            max_seq_len=seq,
+        ),
+    )
+    ds[0]
+    assert seen_ports == {advertised_port}
