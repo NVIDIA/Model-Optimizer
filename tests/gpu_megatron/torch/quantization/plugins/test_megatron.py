@@ -289,6 +289,7 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                sequence_parallel=(tp_size > 1),  # Required for MoE + TP (mirrors hybrid path)
             )
 
     if not meta_device:
