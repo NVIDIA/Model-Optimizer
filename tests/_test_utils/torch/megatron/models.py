@@ -43,6 +43,7 @@ except ImportError as e:
     HAS_TE = False
 
 try:
+    import mamba_ssm  # noqa: F401
     from megatron.core.post_training.modelopt.mamba.model_specs import get_mamba_stack_modelopt_spec
     from megatron.core.ssm.mamba_layer import MambaLayer  # noqa: F401
 

@@ -3,11 +3,15 @@
 # Before running, update the following fields in the yaml:
 # - `execution.hostname` — your Slurm login node hostname
 # - `execution.account` — your Slurm account
-# - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned or quantized)
-# - `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
+# - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
+#
+# This config is set up for a BF16 checkpoint. For an FP8 checkpoint, also apply the deployment changes below:
+# - FP8: add `--kv-cache-dtype fp8` to `deployment.extra_args`, and set in `deployment.env_vars`:
+#          VLLM_USE_FLASHINFER_MOE_FP8: "1"
+#          VLLM_FLASHINFER_MOE_BACKEND: throughput
 #
 # Usage:
-#   pip install "nemo-evaluator-launcher[all]==0.1.90"
+#   pip install "nemo-evaluator-launcher[all]==0.1.82"
 #
 #   # Set required environment variables:
 #   export HF_TOKEN=<your_huggingface_token>
@@ -31,9 +35,9 @@ defaults:
 
 execution:
   type: slurm
-  hostname: <your_slurm_hostname>
+  hostname: ???
   username: ${oc.env:USER}
-  account: <your_slurm_account>
+  account: ???
   partition: batch
   num_nodes: 1
   ntasks_per_node: 1
@@ -54,17 +58,22 @@ execution:
 # Note: Only tp=1 works for Nano (Mamba-based hybrid architecture)
 deployment:
   # Update this to your Hugging Face checkpoint path (original, pruned or quantized)
-  checkpoint_path: <hf_model_name_or_path>
+  checkpoint_path: ???
   served_model_name: Nemotron-3-Nano-30B-A3B
   port: 8000
   tensor_parallel_size: 1
   pipeline_parallel_size: 1
   data_parallel_size: 8
   gpu_memory_utilization: 0.90
-  extra_args: "--max-model-len 262144 --enable-log-requests --no-enable-prefix-caching --trust-remote-code --mamba_ssm_cache_dtype float32 --enable-auto-tool-choice\
-    \ --tool-call-parser qwen3_coder --reasoning-parser-plugin /checkpoint/nano_v3_reasoning_parser.py --reasoning-parser nano_v3"
-  env_vars:
-    VLLM_FLASHINFER_MOE_BACKEND: throughput
+  # extra_args is for the BF16 checkpoint. For an FP8 checkpoint, append `--kv-cache-dtype fp8`.
+  extra_args: "--max-model-len 262144 --max-num-seqs 8 --enable-log-requests --no-enable-prefix-caching --trust-remote-code --mamba_ssm_cache_dtype float32\
+    \ --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser-plugin /checkpoint/nano_v3_reasoning_parser.py --reasoning-parser nano_v3"
+  # env_vars is for the BF16 checkpoint (no MoE backend flags needed). For an FP8
+  # checkpoint, replace `{}` with the block below (see notes at top of file):
+  #   FP8:
+  #     VLLM_USE_FLASHINFER_MOE_FP8: "1"
+  #     VLLM_FLASHINFER_MOE_BACKEND: throughput
+  env_vars: {}
   endpoints:
     chat: /v1/chat/completions
     completions: /v1/completions
@@ -99,8 +108,8 @@ evaluation:
         max_retries: 10
         extra:
           tokenizer_backend: huggingface
-          # Update tokenizer path to match checkpoint_path above
-          tokenizer: <hf_model_name_or_path>
+          # Auto-derived from deployment.checkpoint_path below
+          tokenizer: ${deployment.checkpoint_path}
   env_vars:
     HF_TOKEN: HF_TOKEN
     HF_HOME: HF_HOME
@@ -118,7 +127,6 @@ evaluation:
       nemo_evaluator_config:
         config:
           params:
-            # limit_samples: 8
             extra:
               num_repeats: 1
               args: "++prompt_config=eval/aai/mcq-10choices-boxed"
@@ -130,7 +138,6 @@ evaluation:
       nemo_evaluator_config:
         config:
           params:
-            # limit_samples: 8
             extra:
               num_repeats: 8
               args: "++prompt_config=eval/aai/mcq-4choices"
@@ -142,9 +149,8 @@ evaluation:
       nemo_evaluator_config:
         config:
           params:
-            # limit_samples: 8
             extra:
-              num_repeats: 8
+              num_repeats: 4
               dataset_split: test_v6_2408_2505
 
     # 4. AIME 2025
@@ -154,9 +160,8 @@ evaluation:
       nemo_evaluator_config:
         config:
           params:
-            # limit_samples: 8
             extra:
-              num_repeats: 64
+              num_repeats: 32
 
     # 5. IFBench
     - name: ns_ifbench
@@ -165,7 +170,6 @@ evaluation:
       nemo_evaluator_config:
         config:
           params:
-            # limit_samples: 8
             extra:
               num_repeats: 8
 
@@ -176,6 +180,5 @@ evaluation:
       nemo_evaluator_config:
         config:
           params:
-            # limit_samples: 8
             extra:
               num_repeats: 8

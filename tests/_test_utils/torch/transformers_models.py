@@ -305,7 +305,7 @@ def get_tiny_gemma3(**config_kwargs) -> PreTrainedModel:
         "hidden_size": 32,
         "intermediate_size": 32,
         "num_hidden_layers": 2,
-        "num_attention_heads": 16,
+        "num_attention_heads": 4,
         "num_key_value_heads": 2,
         "head_dim": 8,
         "max_position_embeddings": 32,
