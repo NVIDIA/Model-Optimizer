@@ -124,9 +124,9 @@ def _teacher_dir_identity(cfg: DictConfig) -> str | None:
     if teacher_dir is None:
         return None
     teacher_dir = str(teacher_dir)
-    if teacher_dir.startswith("~"):
-        return str(Path(teacher_dir).expanduser())
-    return teacher_dir
+    if "://" in teacher_dir:
+        return teacher_dir
+    return str(Path(teacher_dir).expanduser())
 
 
 def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:

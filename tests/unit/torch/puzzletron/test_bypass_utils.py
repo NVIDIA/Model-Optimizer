@@ -192,6 +192,18 @@ def test_config_fingerprint_and_experiment_id_canonicalize_keys_to_learn():
         assert cfg_a.bypass.experiment_id == cfg_b.bypass.experiment_id
 
 
+def test_config_fingerprint_and_experiment_id_canonicalize_teacher_path():
+    cfg_a = _experiment_cfg("subblock_attention")
+    cfg_b = _experiment_cfg("subblock_attention")
+    cfg_b.teacher_dir = f"{cfg_a.teacher_dir}/"
+
+    assert get_bypass_config_fingerprint(cfg_a) == get_bypass_config_fingerprint(cfg_b)
+
+    set_experiment_id(cfg_a)
+    set_experiment_id(cfg_b)
+    assert cfg_a.bypass.experiment_id == cfg_b.bypass.experiment_id
+
+
 def test_experiment_id_uses_teacher_source_not_dataset_path():
     cfg_a = _experiment_cfg("subblock_attention")
     cfg_b = _experiment_cfg("subblock_attention")
