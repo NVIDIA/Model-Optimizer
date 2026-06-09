@@ -30,6 +30,9 @@ Load out-of-tree:
 Scope: TP>=1 (hidden states are replicated across TP ranks; only rank 0 owns the
 pool + sidecar and serves them), host(pinned) memory (container UCX has no CUDA),
 ring-slot reuse (fine when in-flight requests < pool_slots; no credit protocol yet).
+PP>1 is not supported (the capture layer lives on one PP rank; owner election only
+covers TP). The sidecar is unauthenticated and binds all interfaces, so it assumes a
+trusted cluster fabric -- any reachable peer can read descriptors / free slots.
 """
 
 import base64
@@ -302,6 +305,13 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ready.record()
         cs.wait_event(ready)
         slot_mapping = get_forward_context().slot_mapping[layer_name]
+        # Assumes new-request tokens sit contiguously at the front of slot_mapping; bound
+        # the offset walk so an unexpected layout fails loud instead of short-slicing.
+        n_capture = sum(req.token_ids.shape[0] for req in md.requests)
+        assert n_capture <= slot_mapping.shape[0], (
+            f"RdmaHiddenStatesConnector: capturing {n_capture} tokens but slot_mapping has "
+            f"only {slot_mapping.shape[0]}; unexpected batch layout (chunked prefill?)."
+        )
         offset = 0
         for req in md.requests:
             n = req.token_ids.shape[0]
@@ -358,12 +368,24 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         assert num_external_tokens == 0
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-        """Assign each newly scheduled request a ring-pool slot for this step."""
+        """Assign each newly scheduled request a ring-pool slot for this step.
+
+        ``save_kv_layer`` walks ``slot_mapping`` with a running offset, so it needs each
+        prompt computed whole in one step; assert that here (chunked prefill would split
+        it and silently misalign the capture).
+        """
         meta = RdmaConnMeta()
         for nr in scheduler_output.scheduled_new_reqs:
+            prompt = nr.prompt_token_ids or []
+            n_sched = scheduler_output.num_scheduled_tokens[nr.req_id]
+            assert n_sched == len(prompt), (
+                f"RdmaHiddenStatesConnector requires the full prompt in one step "
+                f"(disable chunked prefill): req {nr.req_id} scheduled {n_sched} of "
+                f"{len(prompt)} prompt tokens."
+            )
             slot = self._slot_ctr % self._pool_slots
             self._slot_ctr += 1
-            meta.add(nr.req_id, token_ids=nr.prompt_token_ids or [], slot=slot)
+            meta.add(nr.req_id, token_ids=prompt, slot=slot)
         return meta
 
     def request_finished(self, request, block_ids):

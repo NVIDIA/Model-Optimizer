@@ -374,6 +374,7 @@ class EagleVllmStreamingDataset(StreamingDataset):
             self._nixl_pid = pid
             self._remote_by_host: dict = {}
             self._recv = None
+            self._recv_reg = None  # NIXL registration handle for self._recv
             _wi = torch.utils.data.get_worker_info()
             self._rr = int(os.environ.get("RANK", "0")) * (_wi.num_workers if _wi else 1) + (
                 _wi.id if _wi else 0
@@ -447,8 +448,10 @@ class EagleVllmStreamingDataset(StreamingDataset):
             # plain (pageable) host tensor: NIXL/ibv_reg_mr pins the pages itself.
             # Do NOT call .pin_memory() here — dataloader workers are forked and have no
             # valid CUDA context (cudaHostAlloc -> CUDA initialization error).
+            if self._recv_reg is not None:
+                agent.deregister_memory(self._recv_reg)  # release the prior pin on reshape
             self._recv = torch.empty((maxtok, *feat), dtype=dtype)
-            agent.register_memory([self._recv])
+            self._recv_reg = agent.register_memory([self._recv])
         view = self._recv[: shape[0]]
         ldescs = agent.get_xfer_descs([view])
         rdescs = agent.deserialize_descs(base64.b64decode(desc["hs_descs"]))

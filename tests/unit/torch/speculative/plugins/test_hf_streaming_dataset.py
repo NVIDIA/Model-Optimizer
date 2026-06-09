@@ -236,6 +236,9 @@ class _FakeNixlAgent:
     def register_memory(self, tensors):
         return MagicMock()
 
+    def deregister_memory(self, reg):
+        return None
+
     def get_agent_metadata(self):
         return b"agent-meta"
 
