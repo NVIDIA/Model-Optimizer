@@ -75,7 +75,7 @@ flowchart LR
 
 - **Quantization**: reducing numerical precision (e.g. FP16 → INT8).
 - **Sparsity**: zeroing out weights while keeping the architecture.
-- **MoE and hybrid architectures**: this guide focuses on dense Transformer models. For an end-to-end Minitron pruning + distillation + FP8 PTQ + vLLM deployment example on a MoE + Mamba-Transformer hybrid, see the [Nemotron-3-Nano-30B-A3B-BF16 tutorial](../../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md).
+- **MoE and hybrid architectures**: this guide focuses on dense Transformer models. For an end-to-end Minitron pruning + distillation + NVFP4 PTQ + QAD + vLLM deployment example on a MoE + Mamba-Transformer hybrid, see the [Nemotron-3-Nano-30B-A3B-BF16 tutorial](../../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md).
 
 > **Note:** Pruning and quantization are complementary. After following this guide, you can further compress your pruned model with quantization for additional deployment gains.
 

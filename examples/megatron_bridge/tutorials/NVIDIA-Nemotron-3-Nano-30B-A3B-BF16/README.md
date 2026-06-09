@@ -1,13 +1,13 @@
 # Nemotron-3-Nano-30B-A3B: Prune + Distill + Quantize + vLLM Deployment
 
-End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) demonstrating how ModelOpt techniques stack: Minitron structured pruning → Megatron-Bridge knowledge distillation to recover accuracy → evaluation benchmarking → FP8 quantization → vLLM deployment and throughput benchmarking. This document covers:
+End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) demonstrating how ModelOpt techniques stack: Minitron structured pruning → Megatron-Bridge knowledge distillation to recover accuracy → evaluation benchmarking → NVFP4 quantization + QAD → vLLM deployment and throughput benchmarking. This document covers:
 
 1. **[Data Preparation](#1-data-preparation)** — tokenizing the training blend for distillation
 2. **[Pruning](#2-pruning)** — Minitron structured pruning
 3. **[Distillation](#3-distillation)** — recovering accuracy via Megatron-Bridge knowledge distillation
 4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
-5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/megatron_bridge/quantize.py` script
-6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
+5. **[Quantization](#5-quantization)** — NVFP4 PTQ + QAD on the distilled checkpoint using ModelOpt's `examples/megatron_bridge/quantize.py` script
+6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison across BF16, FP8, and NVFP4 on a single H100
 
 ## Results
 
@@ -24,6 +24,9 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 | Distill @ 82.5B tokens (+100 iters at 32K SeqLen) | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 65.5 |
 | Distill @ 100B tokens (+800 iters at 32K SeqLen) - **BF16** | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 66.2 |
 | Distill @ 100B tokens + **FP8 Quantize** | 76.7 | 70.7 | 65.5 | 87.3 | 69.0 | 28.5 | 66.3 |
+| Distill @ 100B tokens + **NVFP4 Quantize** | 71.9 | 60.9 | ? | 80.4 | 63.0 | 0.4 | ? |
+| Distill @ 100B tokens + **NVFP4 + QAD @ 2.5B tokens (32K SeqLen)** | 72.2 | 61.2 | ? | 80.4 | 65.5 | 22.8 | ? |
+| Distill @ 100B tokens + **NVFP4 + QAD @ 10B tokens (32K SeqLen)** | 72.3 | 61.9 | ? | 78.9 | 65.3 | 23.0 | ? |
 | Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 67.4 |
 
 ### vLLM Throughput (single H100, ISL=32768, OSL=1024)
@@ -34,6 +37,7 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 | Nemotron-3-Nano-30B-A3B-FP8 (official) | 31.4 GiB | 1,323 | 2.2× |
 | Nemotron-3-Nano-Pruned-22B-A3.0B-BF16 | 41.5 GiB | 1,190 | 2.0× |
 | Nemotron-3-Nano-Pruned-22B-A3.0B-FP8 | 22.8 GiB | 1,576 | 2.6× |
+| Nemotron-3-Nano-Pruned-22B-A3.0B-NVFP4 (+ QAD) | ? GiB | ? | ?× |
 
 Pruning alone (BF16 → Pruned-A3.0B BF16) gives a **2.0×** throughput speedup with a 30% memory reduction (58.9 → 41.5 GiB), and FP8 quantization alone (BF16 → FP8) gives a **2.2×** speedup with a 47% memory reduction. Stacking both — pruning + FP8 — compounds to a **2.6×** throughput speedup and a **2.6× memory reduction** (58.9 → 22.8 GiB) relative to the original 30B BF16 model, while preserving most of the benchmark accuracy. See [Section 6](#6-vllm-inference-benchmarking) for the benchmark command.
 
@@ -133,33 +137,34 @@ Run on **1 node with 8x H100** (~1 hour)
 
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
-  --pp_size 8 \
   --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
   --trust_remote_code \
-  --prune_target_params 28e9 \
-  --prune_target_active_params 3e9 \
-  --hparams_to_skip num_attention_heads \
-  --seq_length 8192 \
-  --output_hf_path /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B \
-  --top_k 20 \
-  --max_depth_pruning 0.15 \
-  --max_width_pruning 0.30 \
-  --prune_score_func mmlu_10pct_bs32 \
+  --pp_size 8 \
   --num_layers_in_first_pipeline_stage 5 \
-  --num_layers_in_last_pipeline_stage 5
+  --num_layers_in_last_pipeline_stage 5 \
+  --calib_batch_size 1 \
+  --seq_length 8192 \
+  --prune_target_active_params 3e9 \
+  --prune_target_params 28e9 \
+  --prune_score_func mmlu_10pct_bs32 \
+  --max_width_pruning 0.30 \
+  --max_depth_pruning 0.15 \
+  --hparams_to_skip num_attention_heads \
+  --top_k 20 \
+  --output_hf_path /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B
 ```
 
 Non-default arguments:
 
-- `--hparams_to_skip num_attention_heads` (default: none) — attention heads pruning is harder to recover, hence skipped
+- `--num_layers_in_first_pipeline_stage 5 --num_layers_in_last_pipeline_stage 5` — Uneven pipeline parallelism since 52 layers is not divisible by 8 GPUs
 - `--seq_length 8192` (default: 4096) — dataset has longer sequences
 - `--prune_target_active_params 3e9` — MoE-specific; the **primary** pruning constraint — targets active params rather than total params, which is what matters for MoE inference cost
 - `--prune_target_params 28e9` — upper bound on total params only; the actual pruned model total can range anywhere from ~20B to 28B depending on which architecture wins — see pruning logs below for the top 20 candidates. You may also skip this argument all together for simplicity.
-- `--top_k 20` (default: 10) — larger candidate pool for better architecture search
-- `--max_depth_pruning 0.15` (default: 0.20) — tighter constraint since candidates with 42–46 layers universally fail for this model
-- `--max_width_pruning 0.30` (default: 0.40) — tighter constraint to prevent head_dim≤48 and hidden=2048 dead zones
 - `--prune_score_func mmlu_10pct_bs32` (default: `mmlu_10pct_bs1`) — batch_size=32 for ~3–4× faster candidate scoring
-- `--num_layers_in_first_pipeline_stage 5 --num_layers_in_last_pipeline_stage 5` — Uneven pipeline parallelism since 52 layers is not divisible by 8 GPUs
+- `--max_width_pruning 0.30` (default: 0.40) — tighter constraint to prevent head_dim≤48 and hidden=2048 dead zones
+- `--max_depth_pruning 0.15` (default: 0.20) — tighter constraint since candidates with 42–46 layers universally fail for this model
+- `--hparams_to_skip num_attention_heads` (default: none) — attention heads pruning is harder to recover, hence skipped
+- `--top_k 20` (default: 10) — larger candidate pool for better architecture search
 
 **NOTE**: The tighter search space constraints here (`--max_depth_pruning`, `--max_width_pruning`) are specific to Nemotron hybrid models (Mamba + Attention + MoE). Unlike standard transformers which expose only layers/hidden/attention/FFN dimensions, these models add Mamba-specific dimensions (`mamba_num_heads`, `mamba_head_dim`) and MoE dimensions (`num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`), making the combined search space much larger. The default 40%/20% bounds cast too wide a net and waste compute on dead-zone architectures.
 
@@ -400,9 +405,9 @@ Before running, update the following fields in the `nemo_evaluator.yaml` file or
 - `execution.account` — your Slurm account
 - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
 
-The yaml is set up for a **BF16** checkpoint. For **FP8** checkpoints, also apply the quantization-specific vLLM deployment settings documented at the top of `nemo_evaluator.yaml`:
+The yaml is set up for a **BF16** checkpoint. For **FP8** or **NVFP4** checkpoints, also apply the quantization-specific vLLM deployment settings documented at the top of `nemo_evaluator.yaml`:
 - append `--kv-cache-dtype fp8` to `deployment.extra_args`
-- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8` plus `VLLM_FLASHINFER_MOE_BACKEND: throughput`)
+- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8` for FP8 / `VLLM_USE_FLASHINFER_MOE_FP4` for NVFP4, plus `VLLM_FLASHINFER_MOE_BACKEND: throughput`)
 
 ```bash
 pip install "nemo-evaluator-launcher[all]==0.1.82"
@@ -502,9 +507,93 @@ The exported HuggingFace checkpoint is directly deployable with [vLLM](https://g
 > ```
 
 > [!TIP]
-> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also — just apply the FP8 deployment tweaks documented at the top of the yaml.
+> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also — just apply the FP8/NVFP4 deployment tweaks documented at the top of the yaml. To evaluate an NVFP4 checkpoint, you need a Blackwell GPU.
 
 See FP8 vs BF16 results in the [Results](#results) section above.
+
+#### NVFP4 + Quantization Aware Distillation (QAD)
+
+NVFP4 (W4A4) gives a larger speedup and memory reduction than FP8, but also a larger accuracy drop. We recover that drop with **Quantization Aware Distillation (QAD)**: NVFP4 PTQ → distill the NVFP4 student from the BF16 teacher → export. See the [Quantization Aware Distillation section](../../README.md#quantization-aware-distillation-qad) of the Megatron-Bridge README for details.
+
+**Step 1 — NVFP4 PTQ** (same as FP8 Step 1, with the NVFP4 config):
+
+<details>
+<summary>NVFP4 PTQ command (click to expand)</summary>
+
+```bash
+torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
+    --hf_model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --trust_remote_code \
+    --tp_size 8 \
+    --quant_cfg MAMBA_MOE_NVFP4_CONSERVATIVE_CFG \
+    --calib_batch_size 32 \
+    --seq_length 512 \
+    --export_megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_nvfp4_megatron \
+    --skip_generate
+```
+
+</details>
+
+**Step 2 — QAD** to recover the NVFP4 accuracy drop. Load the NVFP4 student from the quantized Megatron checkpoint via `--student_megatron_path` and distill it from the original BF16 teacher; the distilled checkpoint keeps the ModelOpt quantizers, so it stays exportable as NVFP4. Reuse the same tokenized data blend as [Section 3](#3-distillation):
+
+<details>
+<summary>QAD command (click to expand)</summary>
+
+> NOTE: We use `python -u` for slurm multi-node run here.
+
+```bash
+python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
+    --teacher_hf_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --student_hf_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --student_megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_nvfp4_megatron \
+    --trust_remote_code \
+    --tp_size 4 \
+    --cp_size 2 \
+    --ep_size 8 \
+    --data_paths "${DATA_BLEND}" \
+    --data_path_to_cache /path/to/cache \
+    --seq_length 32768 \
+    --mbs 1 \
+    --gbs 768 \
+    --train_iters 400 \
+    --lr 1e-5 \
+    --min_lr 5e-6 \
+    --lr_warmup_iters 10 \
+    --recompute_granularity selective \
+    --recompute_modules moe \
+    --eval_interval 100 \
+    --eval_iters 8 \
+    --log_interval 10 \
+    --output_dir /path/to/qad_output_nvfp4
+```
+
+> NOTE: Compared to distillation in Section 3, here we use a smaller training dataset (10B tokens i.e. 400 iters) and a smaller learning rate (1e-5 to 5e-6) at 32K sequence length.
+
+</details>
+
+**Step 3 — export** the QAD checkpoint to a deployable HuggingFace checkpoint (same as FP8 Step 2, pointing at the QAD output):
+
+<details>
+<summary>Export command (click to expand)</summary>
+
+```bash
+torchrun --nproc_per_node 1 /opt/Model-Optimizer/examples/megatron_bridge/export.py \
+    --hf_model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --megatron_path /path/to/qad_output_nvfp4/checkpoints/iter_0000400 \
+    --trust_remote_code \
+    --pp_size 1 \
+    --export_unified_hf_path /path/to/qad_output_nvfp4/checkpoints/hf_iter_0000400_nvfp4_qad
+```
+
+</details>
+
+The exported NVFP4 checkpoint is deployable on Blackwell GPUs with [vLLM](https://github.com/vllm-project/vllm), [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), and [SGLang](https://github.com/sgl-project/sglang).
+
+> [!TIP]
+> Run text generation on sample prompts to sanity-check the quantized checkpoint generates reasonable output: `python /opt/Model-Optimizer/examples/megatron_bridge/generate_vllm.py --model /path/to/qad_output_nvfp4/checkpoints/hf_iter_0000400_nvfp4_qad --trust_remote_code`
+
+> [!NOTE]
+> NVFP4 PTQ vs. NVFP4 + QAD accuracy-recovery numbers will be added here with the Part 3 experiments.
 
 ---
 
@@ -529,6 +618,17 @@ vllm bench throughput \
 VLLM_USE_FLASHINFER_MOE_FP8=1 VLLM_FLASHINFER_MOE_BACKEND=throughput \
 vllm bench throughput \
     --model <fp8_checkpoint_path> \
+    --random-input-len 32768 \
+    --random-output-len 1024 \
+    --trust-remote-code \
+    --mamba_ssm_cache_dtype float32 \
+    --kv-cache-dtype fp8 \
+    --load-format safetensors
+
+# NVFP4 (Blackwell GPU)
+VLLM_USE_FLASHINFER_MOE_FP4=1 VLLM_FLASHINFER_MOE_BACKEND=throughput \
+vllm bench throughput \
+    --model <nvfp4_checkpoint_path> \
     --random-input-len 32768 \
     --random-output-len 1024 \
     --trust-remote-code \

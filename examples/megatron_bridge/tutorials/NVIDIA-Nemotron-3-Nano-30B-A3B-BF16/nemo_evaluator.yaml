@@ -5,10 +5,14 @@
 # - `execution.account` — your Slurm account
 # - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
 #
-# This config is set up for a BF16 checkpoint. For an FP8 checkpoint, also apply the deployment changes below:
-# - FP8: add `--kv-cache-dtype fp8` to `deployment.extra_args`, and set in `deployment.env_vars`:
-#          VLLM_USE_FLASHINFER_MOE_FP8: "1"
-#          VLLM_FLASHINFER_MOE_BACKEND: throughput
+# This config is set up for a BF16 checkpoint. For quantized checkpoints, also apply the deployment changes below:
+# - FP8:   add `--kv-cache-dtype fp8` to `deployment.extra_args`, and set in `deployment.env_vars`:
+#            VLLM_USE_FLASHINFER_MOE_FP8: "1"
+#            VLLM_FLASHINFER_MOE_BACKEND: throughput
+# - NVFP4: add `--kv-cache-dtype fp8` to `deployment.extra_args`, and set in `deployment.env_vars`:
+#            VLLM_USE_FLASHINFER_MOE_FP4: "1"
+#            VLLM_FLASHINFER_MOE_BACKEND: throughput
+#          (NVFP4 deployment requires a Blackwell GPU)
 #
 # Usage:
 #   pip install "nemo-evaluator-launcher[all]==0.1.82"
@@ -65,13 +69,16 @@ deployment:
   pipeline_parallel_size: 1
   data_parallel_size: 8
   gpu_memory_utilization: 0.90
-  # extra_args is for the BF16 checkpoint. For an FP8 checkpoint, append `--kv-cache-dtype fp8`.
+  # extra_args is for the BF16 checkpoint. For FP8/NVFP4 checkpoints, append `--kv-cache-dtype fp8`.
   extra_args: "--max-model-len 262144 --max-num-seqs 8 --enable-log-requests --no-enable-prefix-caching --trust-remote-code --mamba_ssm_cache_dtype float32\
     \ --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser-plugin /checkpoint/nano_v3_reasoning_parser.py --reasoning-parser nano_v3"
-  # env_vars is for the BF16 checkpoint (no MoE backend flags needed). For an FP8
-  # checkpoint, replace `{}` with the block below (see notes at top of file):
+  # env_vars is for the BF16 checkpoint (no MoE backend flags needed). For a quantized
+  # checkpoint, replace `{}` with the block matching your format (see notes at top of file):
   #   FP8:
   #     VLLM_USE_FLASHINFER_MOE_FP8: "1"
+  #     VLLM_FLASHINFER_MOE_BACKEND: throughput
+  #   NVFP4:
+  #     VLLM_USE_FLASHINFER_MOE_FP4: "1"
   #     VLLM_FLASHINFER_MOE_BACKEND: throughput
   env_vars: {}
   endpoints:

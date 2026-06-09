@@ -12,15 +12,15 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 
 <div align="center">
 
-| **Section** | **Description** | **Link** | **Docs** |
-| :------------: | :------------: | :------------: | :------------: |
-| Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
-| Getting Started | Learn how to use the pruning API | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/3_pruning.html)\] |
-| Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] | |
-| Examples | Examples of different pruning methods | \[[Link](#examples)\] | |
-| Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] | |
-| Tutorials / Results | End-to-end tutorials for Minitron and Puzzletron pruning | \[[Link](#tutorials--results)\] | |
-| Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
+| **Section** | **Description** | **Link** |
+| :------------: | :------------: | :------------: |
+| Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] |
+| Getting Started | Learn how to use the pruning API | \[[Link](#getting-started)\] |
+| Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] |
+| Examples | Examples of different pruning methods | \[[Link](#examples)\] |
+| Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] |
+| Tutorials / Results | End-to-end tutorials for Minitron and Puzzletron pruning | \[[Link](#tutorials--results)\] |
+| Resources | Extra links to relevant resources | \[[Link](#resources)\] |
 
 </div>
 
@@ -174,10 +174,17 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 | **Algorithm** | **Model** | **Pruning Constraints** |
 | :---: | :---: | :---: |
-| Minitron | Megatron-core (M-LM, M-Bridge) based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | **Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values<br>**Auto:** one or more of `params`, `active_params`, `memory_mb` (requires `score_func` in config) |
+| Minitron | Megatron-core<sup>1</sup> (M-Bridge, M-LM) based dense / MoE / hybrid Mamba-Transformer LLMs<sup>2</sup> | **Auto:** one or more of `params`, `active_params`, `memory_mb` <br>**Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values |
+| Puzzletron | Hugging Face based dense / MoE / hybrid Mamba-Transformer LLMs & VLMs<sup>3</sup> | **Target:** one or more of `target_memory`, `num_params`, `target_latency_seconds`<br>**Heterogeneous (per-layer) search dimensions:**<sup>4</sup> FFN `intermediate_size` (different sizes per layer), attention `op`/`no_op` (selective attention-layer removal) and KV heads (GQA grouping), `hidden_size`, and MoE `num_experts` (expert removal) |
 | FastNAS | Computer Vision models | `flops`, `params` |
 
-> *<sup>1.</sup>Only models in Pipeline Parallelism (PP) are supported. Hugging Face models can be imported into M-Bridge/M-LM format as long as they are [supported](https://docs.nvidia.com/nemo/megatron-bridge/latest/index.html#supported-models) by the framework.*
+> *<sup>1.</sup>Hugging Face models can be imported into M-Bridge/M-LM format as long as they are [supported](https://docs.nvidia.com/nemo/megatron-bridge/latest/index.html#supported-models) by the framework.*
+
+> *<sup>2.</sup>Language model part of VLMs can be pruned as well.*
+
+> *<sup>3.</sup>Puzzletron operates on Hugging Face checkpoints via its `AnyModel` abstraction. New architectures can be added by writing a model descriptor + converter — see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md). Available configs are in the Puzzletron [configs](../puzzletron/configs/) directory.*
+
+> *<sup>4.</sup>The MIP search produces a heterogeneous architecture (dimensions can differ per layer). Which dimensions are searched is model- and config-dependent.*
 
 ## Examples
 
@@ -294,7 +301,7 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 
 End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletron pruning:
 
-- **[Minitron — Nemotron-3-Nano-30B-A3B-BF16](../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md)** ⭐ *recommended — newer and most comprehensive*: End-to-end tutorial of structured pruning for Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B) to 22B/A3.0B active parameters followed by two-phase knowledge distillation (80B tokens @ 8K seq length + 20B tokens @ 32K seq length = 100B tokens total), quantization, and vLLM deployment. Covers MoE + Mamba-Transformer hybrid, tool-calling data, and a long-context fine-tuning phase. Achieves near-parity with the official 30B model across popular pretraining and reasoning benchmarks while delivering up to 2.6× throughput speedup and 2.6× memory reduction when combined with FP8 quantization.
+- **[Minitron — Nemotron-3-Nano-30B-A3B-BF16](../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md)** ⭐ *recommended — newer and most comprehensive*: End-to-end tutorial of structured pruning for Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B) to 22B/A3.0B active parameters followed by two-phase knowledge distillation (80B tokens @ 8K seq length + 20B tokens @ 32K seq length = 100B tokens total), quantization, and vLLM deployment. Covers MoE + Mamba-Transformer hybrid, tool-calling data, and a long-context fine-tuning phase. Achieves near-parity with the official 30B model across popular pretraining and reasoning benchmarks while delivering up to ?× throughput speedup and ?× memory reduction when combined with NVFP4 quantization + QAD.
 - **[Minitron — Nemotron-Nano-9B-v2](minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: Earlier end-to-end tutorial covering structured pruning of the dense Mamba-Transformer Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Simpler architecture, single-phase 8K seq length distillation, no tool-calling or long-context phase.
 - **[Puzzletron — Qwen3-8B and Llama-3.1-8B-Instruct](puzzletron/Llama-3.1-8B-Instruct.md)**: MIP-based compression followed by short distillation runs on WikiText-103. Shows MMLU recovery and illustrates the importance of using larger datasets to avoid overfitting.
 
