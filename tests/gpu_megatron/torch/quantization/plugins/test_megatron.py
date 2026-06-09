@@ -713,9 +713,16 @@ TE_GROUPED_PER_EXPERT_CFG = {
 
 
 def test_te_grouped_per_expert_sharded_state_dict(dist_workers_size_4, need_4_gpus, tmp_path):
-    """Per-expert (axis=0) weight amax round-trips through dist-checkpoint on TEGroupedMLP."""
+    """Per-expert (axis=0) weight amax round-trips through dist-checkpoint on TEGroupedMLP.
+
+    Uses the TP=2 EP=2 layout that the existing ``test_moe_sharded_state_dict`` runs
+    against for per-tensor FP8/NVFP4. TP=1 EP=2 has an unrelated MCore + TEGrouped +
+    dist-checkpoint hang at SeqNum=5 default-PG ALLGATHER that fires even at
+    axis=None; verified empirically on 2026-06-09. Stay on the known-good layout
+    here; revisit TP=1 EP=2 once the MCore-side fix lands.
+    """
     moe_config = {
-        "tp_size": 1,
+        "tp_size": 2,
         "ep_size": 2,
         "etp_size": 1,
         "num_moe_experts": 4,
