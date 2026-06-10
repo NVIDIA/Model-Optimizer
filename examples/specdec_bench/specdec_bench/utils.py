@@ -45,8 +45,7 @@ def get_tokenizer(path, trust_remote_code=False):
     kwargs = {"trust_remote_code": trust_remote_code}
     if isinstance(extra_special_tokens, list):
         kwargs["extra_special_tokens"] = {
-            token.strip("<|>").replace("|", "_") + "_token": token
-            for token in extra_special_tokens
+            token.strip("<|>").replace("|", "_") + "_token": token for token in extra_special_tokens
         }
 
     return AutoTokenizer.from_pretrained(path, **kwargs)
