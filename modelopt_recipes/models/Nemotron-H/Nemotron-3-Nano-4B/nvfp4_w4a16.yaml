@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Mixed-precision PTQ recipe for Nemotron-H hybrid models (Mamba-2 + MLP + Attention).
+# Mixed-precision PTQ recipe for Nemotron-3-Nano-4B model.
 #
 # Precision mirrors the GGUF Q4_K_M bit allocation (see
 # nemotron3_nano_4b_q4_k_m_layers.txt) mapped onto NVFP4 / FP8:
