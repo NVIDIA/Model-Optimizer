@@ -719,3 +719,56 @@ def test_mtq_quantize_layerwise_raises_for_unsupported_algorithm():
             config,
             forward_loop=lambda m: m(torch.randint(0, 32, (2, 8))),
         )
+
+
+# Checkpoint resume + capture-time CPU offload
+
+
+def test_collected_inputs_are_cpu_at_capture(monkeypatch):
+    """Captured inputs must be CPU-resident — the OOM-prevention invariant."""
+    _register_test_discoverer(monkeypatch)
+    model = _SimpleTwoLayerModel(dim=8)
+    collector = LayerActivationCollector(model)
+
+    def forward_loop(m):
+        m(torch.randn(2, 8))
+
+    collector._patch_all_layers()
+    try:
+        inputs = collector.get_input_activations(model.layers[0], forward_loop)
+    finally:
+        collector._unpatch_all_layers()
+
+    args, _ = inputs[0]
+    assert args[0].device.type == "cpu", "captured tensor must be CPU-resident"
+
+
+def test_layerwise_calibrate_early_returns_on_completed_checkpoint(monkeypatch, tmp_path):
+    """Fully-completed checkpoint must short-circuit calibration: no forward_loop calls.
+
+    Indirectly covers ``detect_resume_point`` returning ``(num_layers, manifest)``
+    for a completed run — if it returned ``None``, the loop would re-run and
+    forward_loop would be invoked.
+    """
+    _register_test_discoverer(monkeypatch)
+    torch.manual_seed(0)
+    ckpt_dir = str(tmp_path / "ckpt")
+    config = _int8_layerwise_config(
+        {"method": "max", "layerwise": True, "layerwise_checkpoint_dir": ckpt_dir}
+    )
+    calib_data = [torch.randint(0, 32, (2, 8))]
+
+    # First run writes a complete checkpoint.
+    model = _SimpleTransformerModel(n_layers=2, dim=16)
+    mtq.quantize(model, config, forward_loop=lambda m: [m(b) for b in calib_data])
+
+    # Second run against the same dir must skip the calibration forward loop.
+    call_count = {"n": 0}
+
+    def counting_forward(m):
+        call_count["n"] += 1
+        m(calib_data[0])
+
+    fresh = _SimpleTransformerModel(n_layers=2, dim=16)
+    mtq.quantize(fresh, config, forward_loop=counting_forward)
+    assert call_count["n"] == 0

@@ -1815,6 +1815,11 @@ def layerwise_calibrate(
     ckpt = _CheckpointState.from_folder(checkpoint_dir, num_layers)
     start_layer = ckpt.start_layer if ckpt else 0
 
+    if ckpt and start_layer >= num_layers:
+        ckpt.full_restore(transformer_layers, model)
+        print_rank_0("Layerwise calibration completed (restored from checkpoint)")
+        return
+
     input_getter = LayerActivationCollector(model)
     input_getter._patch_all_layers(decoder_layers=transformer_layers)
 
