@@ -22,7 +22,9 @@
       ->  validate sparse INT8 kernels  ->  real inference (text-in -> text-out).
 
 Sparsity (--sparsity) and QAT (--qat) are OPTIONAL and OFF by default; the default run is
-plain INT8 W8A8 SmoothQuant, which preserves accuracy (coherent generation).
+INT8 W8A8 SmoothQuant, which preserves accuracy (coherent generation). The attention math
+(q/k/v_bmm + softmax) is INT8-quantized by default in addition to the linear projections;
+pass --no-quant-attention for a linears-only graph.
 
 WARNING: one-shot 2:4 magnitude sparsity zeros half the weights and causes SEVERE accuracy
 degradation by itself -- the model produces gibberish until recovered with QAT/SAT fine-tuning.
@@ -212,7 +214,7 @@ def apply_sparsity(model):
     return model
 
 
-def apply_ptq(model, forward_loop, quant_output=False):
+def apply_ptq(model, forward_loop, quant_output=False, quant_attention=False):
     import copy
 
     import modelopt.torch.quantization as mtq
@@ -227,6 +229,17 @@ def apply_ptq(model, forward_loop, quant_output=False):
             {"quantizer_name": "*output_quantizer", "cfg": {"num_bits": 8, "axis": None}}
         )
         print("[ptq] INT8 output quantizers ENABLED (GEMMs INT8-out)", flush=True)
+    if quant_attention:
+        # Also quantize the attention math: the BMM quantizers (q/k/v_bmm) feed Q*K^T and P*V in
+        # INT8, and the softmax_quantizer quantizes the attention probabilities. These are inserted
+        # by ModelOpt's _QuantAttention plugin but disabled by INT8_SMOOTHQUANT_CFG's default.
+        cfg["quant_cfg"].append(
+            {"quantizer_name": "*_bmm_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+        )
+        cfg["quant_cfg"].append(
+            {"quantizer_name": "*softmax_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+        )
+        print("[ptq] INT8 attention quantizers ENABLED (q/k/v_bmm + softmax)", flush=True)
     model = mtq.quantize(model, cfg, forward_loop=forward_loop)
     mtq.print_quant_summary(model)
     nwq = count_enabled_weight_quantizers(model)
@@ -718,6 +731,13 @@ def main():
         default=32,
         help="number of tokens to greedily generate in the final inference step",
     )
+    ap.add_argument(
+        "--quant-attention",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="INT8-quantize the attention math (q/k/v_bmm + softmax) in addition to the linear "
+        "projections (default: on; pass --no-quant-attention for linears-only)",
+    )
     # performance comparison vs an FP16 baseline engine
     ap.add_argument(
         "--compare-baseline",
@@ -782,7 +802,9 @@ def main():
         "STAGE 4/8: INT8 W8A8 SmoothQuant PTQ"
         + (" (+INT8 output quantizers)" if sparsity_on else "")
     )
-    model = apply_ptq(model, forward_loop, quant_output=sparsity_on)
+    model = apply_ptq(
+        model, forward_loop, quant_output=sparsity_on, quant_attention=args.quant_attention
+    )
 
     if args.qat:
         log(f"STAGE 5/8: EXAMPLE QAT fine-tune ({args.qat_steps} steps, lr={args.qat_lr})")
