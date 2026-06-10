@@ -9,7 +9,7 @@
 #   - trust_remote_code model whose code requires transformers 4.57.x, so FSDP2 is
 #     configured via an accelerate config (accelerate_fsdp2_hybrid.yaml) rather than
 #     transformers-native ParallelismConfig. Hence OVERRIDE_TRANSFORMERS + ACCELERATE_CONFIG
-#     + dp_shard_size=1 (keeps main.py from building a ParallelismConfig) + PATCH_FSDP2_BUFFERS.
+#     + dp_shard_size=1 (keeps main.py from building a ParallelismConfig) + PATCH_FSDP2_BUFFERS_TF457.
 #   - 229B in FP8 needs cpu_ram_efficient_loading (set in the accelerate config) and
 #     MIXED_PRECISION=no (the recipe / checkpoint already carry the right dtypes).
 #   - The DFlash draft is Qwen3-architecture (5 layers); the target/draft architectures
@@ -76,7 +76,7 @@ pipeline:
       - NUM_NODES: "8"
       - OVERRIDE_TRANSFORMERS: "4.57.1"
       - ACCELERATE_CONFIG: examples/MiniMax/MiniMax-M2.7-DFlash/accelerate_fsdp2_hybrid.yaml
-      - PATCH_FSDP2_BUFFERS: "1"
+      - PATCH_FSDP2_BUFFERS_TF457: "1"
       - MIXED_PRECISION: "no"
     slurm_config:
       _factory_: "slurm_factory"

@@ -66,7 +66,7 @@ from modelopt.torch.utils.distributed import is_master, local_rank
 torch.manual_seed(0)
 mto.enable_huggingface_checkpointing()
 
-if os.environ.get("PATCH_FSDP2_BUFFERS") == "1":
+if os.environ.get("PATCH_FSDP2_BUFFERS_TF457") == "1":
     import fsdp2_buffer_patch
 
     fsdp2_buffer_patch.apply()
@@ -324,10 +324,10 @@ def train():
     # any single-device recipe) checkpoints are already full and the launcher script's
     # post-run export handles them, so the callback is unnecessary overhead.
     # FSDP2 is active via either route: native ParallelismConfig (dp_shard_size > 1) or
-    # the accelerate-config fallback used for transformers 4.57.x (PATCH_FSDP2_BUFFERS).
+    # the accelerate-config fallback used for transformers 4.57.x (PATCH_FSDP2_BUFFERS_TF457).
     if isinstance(recipe, ModelOptDFlashRecipe):
         uses_fsdp2 = (getattr(training_args, "dp_shard_size", 1) or 1) > 1 or os.environ.get(
-            "PATCH_FSDP2_BUFFERS"
+            "PATCH_FSDP2_BUFFERS_TF457"
         ) == "1"
         if uses_fsdp2:
             callbacks.append(DFlashExportCallback())
@@ -345,7 +345,7 @@ def train():
         **data_module,
     )
 
-    if os.environ.get("PATCH_FSDP2_BUFFERS") == "1":
+    if os.environ.get("PATCH_FSDP2_BUFFERS_TF457") == "1":
         fsdp2_buffer_patch.patch_accelerator(trainer.accelerator)
 
     # Manually enable this to return loss in eval

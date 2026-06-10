@@ -28,7 +28,7 @@ predates transformers 5.x ``ParallelismConfig`` support) **and** are too large t
 every rank — currently only **MiniMax-M2.7** (229B MoE). Models that run on transformers
 5.x (Qwen, Llama, Nemotron, ...) use native ``ParallelismConfig`` (``dp_shard_size > 1``),
 which handles buffers/dtypes correctly and never enters ``fsdp2_load_full_state_dict`` —
-they need none of this. Gated off by default; activate with ``PATCH_FSDP2_BUFFERS=1``.
+they need none of this. Gated off by default; activate with ``PATCH_FSDP2_BUFFERS_TF457=1``.
 
 Problem
 -------
@@ -105,7 +105,7 @@ transformers 4.57.x.  Models that support transformers 5.x (Qwen, Llama,
 Nemotron, etc.) use ``ParallelismConfig`` natively by setting
 ``dp_shard_size > 1`` in the training args.  That code path handles buffers
 correctly and does not go through ``fsdp2_load_full_state_dict`` at all.
-No accelerate config file, no ``PATCH_FSDP2_BUFFERS``, no
+No accelerate config file, no ``PATCH_FSDP2_BUFFERS_TF457``, no
 ``OVERRIDE_TRANSFORMERS`` needed.
 
 When to remove
@@ -119,7 +119,7 @@ This patch can be removed when EITHER of these happens:
 
 Activation
 ----------
-Set ``PATCH_FSDP2_BUFFERS=1`` in the environment to activate.  Off by default.
+Set ``PATCH_FSDP2_BUFFERS_TF457=1`` in the environment to activate.  Off by default.
 Only needed in MiniMax-M2.7 pipeline YAMLs.
 """
 
