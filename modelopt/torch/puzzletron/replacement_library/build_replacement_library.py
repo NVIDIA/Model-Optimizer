@@ -96,7 +96,7 @@ def build_replacement_library(
     )
 
     single_sequence_replacement_solutions = _build_single_sequence_replacement_solutions(
-        layer_replacements, teacher_checkpoint_dir, trust_remote_code
+        layer_replacements, teacher_checkpoint_dir, descriptor, trust_remote_code
     )
 
     json_dump(block_library_df.to_dict(orient="records"), master_puzzle_dir / "block_library.json")
@@ -591,12 +591,13 @@ def _filter_duplicate_teacher_replacements(
 def _build_single_sequence_replacement_solutions(
     layer_replacements: list[dict],
     teacher_checkpoint_dir: Path,
+    descriptor: ModelDescriptor,
     trust_remote_code: bool = False,
 ) -> list[dict]:
     teacher_model_config = load_model_config(
         teacher_checkpoint_dir, trust_remote_code=trust_remote_code
     )
-    n_layer = teacher_model_config.num_hidden_layers
+    n_layer = descriptor.get_language_model_config(teacher_model_config).num_hidden_layers
 
     teacher_replacements = dict()
     student_replacements = []

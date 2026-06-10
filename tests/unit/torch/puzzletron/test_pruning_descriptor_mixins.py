@@ -89,3 +89,25 @@ def test_qwen3_vl_descriptor_exposes_expert_removal_and_kv_heads_mixins():
         mixins["kv_heads"].layer_descriptor.attn_prefix(2)
         == "model.language_model.layers.2.self_attn"
     )
+
+
+def test_qwen3_5_descriptors_expose_ffn_mixins():
+    pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+
+    from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
+        Qwen3P5TextModelDescriptor,
+        Qwen3P5VLModelDescriptor,
+    )
+
+    text_mixins = Qwen3P5TextModelDescriptor.pruning_mixins()
+    vl_mixins = Qwen3P5VLModelDescriptor.pruning_mixins()
+
+    assert set(text_mixins) == {"ffn_intermediate"}
+    assert set(vl_mixins) == {"ffn_intermediate"}
+    assert isinstance(text_mixins["ffn_intermediate"], FFNIntermediatePruningMixIn)
+    assert isinstance(vl_mixins["ffn_intermediate"], FFNIntermediatePruningMixIn)
+    assert text_mixins["ffn_intermediate"].layer_descriptor.ffn_prefix(2) == "model.layers.2.mlp"
+    assert (
+        vl_mixins["ffn_intermediate"].layer_descriptor.ffn_prefix(2)
+        == "model.language_model.layers.2.mlp"
+    )

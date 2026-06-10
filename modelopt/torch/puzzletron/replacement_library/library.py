@@ -90,8 +90,7 @@ class ReplacementLibrary:
     def create_model_config(self, layer_replacements: list[dict]):
         block_configs, _ = extract_block_configs_and_locations(layer_replacements)
         model_config = copy.deepcopy(self.model_config)
-        model_config.block_configs = block_configs
-        model_config.num_hidden_layers = len(block_configs)
+        self.descriptor.set_block_configs(model_config, block_configs)
         return model_config
 
     def _get_arbitrary_non_block_checkpoint_paths(self):

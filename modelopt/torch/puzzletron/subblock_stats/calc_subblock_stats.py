@@ -147,7 +147,7 @@ def calculate_subblock_stats(
         parent_layer_indices = subblock_config_indexed["parent_layer_indices"]
 
         layer_model_config = copy.deepcopy(model_config)
-        ModelDescriptor.truncate_pattern_for_subblock(
+        descriptor.truncate_pattern_for_subblock(
             descriptor.get_language_model_config(layer_model_config), parent_layer_indices[0]
         )
 

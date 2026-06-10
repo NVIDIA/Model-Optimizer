@@ -22,6 +22,7 @@ import concurrent.futures
 import dataclasses
 import fcntl
 import inspect
+import json
 import os
 import re
 import shutil
@@ -34,6 +35,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 import torch
 import torch.distributed as tdist
 import transformers
+from safetensors import safe_open
 from safetensors.torch import save_file as safe_save_file
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
@@ -59,6 +61,7 @@ __all__ = [
     "save_checkpoint_from_shards",
     "save_subblocks",
     "save_model_config",
+    "load_passthrough_state_dict",
 ]
 
 SAFETENSORS_SUBBLOCKS_DIR_NAME = "subblocks_safetensors"
@@ -224,7 +227,10 @@ def save_checkpoint(
 
 
 def save_checkpoint_from_shards(
-    model: PreTrainedModel, checkpoint_dir: Path | str, descriptor: "ModelDescriptor"
+    model: PreTrainedModel,
+    checkpoint_dir: Path | str,
+    descriptor: "ModelDescriptor",
+    extra_state_dict: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """
     Save a checkpoint when the model's weights are sharded across distributed ranks.
@@ -242,11 +248,16 @@ def save_checkpoint_from_shards(
     """
 
     local_sd = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+    extra_state_dict = _normalize_extra_state_dict(extra_state_dict)
     if dist_utils.size() > 1:
-        _save_checkpoint_from_distributed_shards(model.config, local_sd, checkpoint_dir, descriptor)
+        _save_checkpoint_from_distributed_shards(
+            model.config, local_sd, checkpoint_dir, descriptor, extra_state_dict=extra_state_dict
+        )
         dist_utils.barrier()
     else:
-        _save_checkpoint(model.config, local_sd, checkpoint_dir, descriptor)
+        _save_checkpoint(
+            model.config, local_sd, checkpoint_dir, descriptor, extra_state_dict=extra_state_dict
+        )
 
 
 def _save_checkpoint_from_distributed_shards(
@@ -254,9 +265,11 @@ def _save_checkpoint_from_distributed_shards(
     local_state_dict: dict[str, torch.Tensor],
     checkpoint_dir: Path | str,
     descriptor: "ModelDescriptor",
+    extra_state_dict: dict[str, torch.Tensor] | None = None,
 ) -> None:
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
+    extra_state_dict = _normalize_extra_state_dict(extra_state_dict)
 
     local_keys = list(local_state_dict.keys())
     gathered_keys: list[list[str] | None] | None = (
@@ -298,6 +311,7 @@ def _save_checkpoint_from_distributed_shards(
                 for subblock, layer_keys in subblock_keys.items()
                 for key in layer_keys
             }
+            _add_extra_state_dict_to_weight_map(weight_map, extra_state_dict, descriptor)
 
             index = {"metadata": {"format": "pt"}, "weight_map": weight_map}
             _write_file_process_safe(json_dumps(index), checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME)
@@ -332,6 +346,14 @@ def _save_checkpoint_from_distributed_shards(
             for shard_tensors in gathered_tensors:
                 if shard_tensors:
                     file_state_dict.update(shard_tensors)
+            if extra_state_dict:
+                file_state_dict.update(
+                    {
+                        key: tensor.contiguous()
+                        for key, tensor in extra_state_dict.items()
+                        if weight_map.get(key) == relative_filename
+                    }
+                )
             file_err = None
             if file_state_dict:
                 try:
@@ -356,11 +378,13 @@ def _save_checkpoint(
     checkpoint_dir: Path | str,
     descriptor: "ModelDescriptor",
     max_workers: int | None = None,  # Now optional - will auto-calculate if None
+    extra_state_dict: dict[str, torch.Tensor] | None = None,
 ) -> None:
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    extra_state_dict = _normalize_extra_state_dict(extra_state_dict)
 
     # Phase 1: Save config
     save_model_config(model_config, checkpoint_dir)
@@ -378,12 +402,15 @@ def _save_checkpoint(
             key: f"subblocks_safetensors/{subblock}.safetensors" for key in layer_keys
         }
         weight_map.update(weight_map_entries)
+    _add_extra_state_dict_to_weight_map(weight_map, extra_state_dict, descriptor)
 
     # Handle tie_word_embeddings - remove from state_dict and weight_map BEFORE writing index
     output_emb_weight_name = f"{descriptor.output_embedding_name()}.weight"
     if getattr(model_config, "tie_word_embeddings", False) and output_emb_weight_name in state_dict:
         state_dict = {k: v for k, v in state_dict.items() if k != output_emb_weight_name}
         weight_map = {k: v for k, v in weight_map.items() if k != output_emb_weight_name}
+
+    state_dict_to_save = {**state_dict, **extra_state_dict}
 
     # Write index (now without tied embedding)
     index = {"metadata": {"format": "pt"}, "weight_map": weight_map}
@@ -393,12 +420,86 @@ def _save_checkpoint(
 
     # Phase 3: Save subblocks
     save_subblocks(
-        state_dict,
+        state_dict_to_save,
         checkpoint_dir,
         weight_map=weight_map,
         multi_threaded=True,
         max_workers=max_workers,
     )
+
+
+def _normalize_extra_state_dict(
+    extra_state_dict: dict[str, torch.Tensor] | None,
+) -> dict[str, torch.Tensor]:
+    if not extra_state_dict:
+        return {}
+    return {key: tensor.detach().cpu() for key, tensor in extra_state_dict.items()}
+
+
+def _add_extra_state_dict_to_weight_map(
+    weight_map: dict[str, str],
+    extra_state_dict: dict[str, torch.Tensor] | None,
+    descriptor: "ModelDescriptor",
+) -> None:
+    if not extra_state_dict:
+        return
+
+    overlap = set(weight_map).intersection(extra_state_dict)
+    if overlap:
+        raise ValueError(f"Extra state dict overlaps with model weights: {sorted(overlap)}")
+
+    passthrough_groups = descriptor.get_passthrough_weight_groups(extra_state_dict.keys())
+    grouped_keys = {key for keys in passthrough_groups.values() for key in keys}
+    ungrouped_keys = set(extra_state_dict) - grouped_keys
+    if ungrouped_keys:
+        raise ValueError(
+            f"Extra state dict has unsupported passthrough keys: {sorted(ungrouped_keys)}"
+        )
+
+    for group, layer_keys in passthrough_groups.items():
+        for key in layer_keys:
+            weight_map[key] = f"subblocks_safetensors/{group}.safetensors"
+
+
+def load_passthrough_state_dict(
+    checkpoint_dir: Path | str,
+    descriptor: "ModelDescriptor",
+) -> dict[str, torch.Tensor]:
+    """Load descriptor-declared passthrough tensors from a checkpoint directory."""
+    checkpoint_dir = Path(checkpoint_dir)
+    if not descriptor.passthrough_weight_name_predicates():
+        return {}
+
+    filenames_to_keys: dict[str, list[str]] = defaultdict(list)
+    index_path = checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME
+    single_file_path = checkpoint_dir / "model.safetensors"
+    subblocks_path = checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME
+
+    if index_path.exists():
+        with index_path.open("r", encoding="utf-8") as f:
+            weight_map = json.load(f)["weight_map"]
+        for key, filename in weight_map.items():
+            if descriptor.is_passthrough_weight_name(key):
+                filenames_to_keys[filename].append(key)
+    elif single_file_path.exists():
+        with safe_open(single_file_path, framework="pt", device="cpu") as f:
+            keys = [key for key in f.keys() if descriptor.is_passthrough_weight_name(key)]
+        if keys:
+            filenames_to_keys[single_file_path.name] = keys
+    elif subblocks_path.exists():
+        for subblock_file in subblocks_path.glob("*.safetensors"):
+            with safe_open(subblock_file, framework="pt", device="cpu") as f:
+                keys = [key for key in f.keys() if descriptor.is_passthrough_weight_name(key)]
+            if keys:
+                filenames_to_keys[str(subblock_file.relative_to(checkpoint_dir))] = keys
+
+    passthrough_state_dict = {}
+    for filename, keys in filenames_to_keys.items():
+        tensor_path = checkpoint_dir / filename
+        with safe_open(tensor_path, framework="pt", device="cpu") as f:
+            for key in keys:
+                passthrough_state_dict[key] = f.get_tensor(key)
+    return passthrough_state_dict
 
 
 def save_subblocks(

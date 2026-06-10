@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Type
 
 import torch.nn as nn
 
-from ...block_config import BlockConfig
+from ...block_config import BlockConfig, maybe_cast_block_configs
 from ...utils.dummy_modules import DummyBlock
 
 __all__ = ["ModelDescriptor"]
@@ -191,6 +191,64 @@ class ModelDescriptor(ABC):
         language model portion (e.g., config.text_config for Qwen-VL).
         """
         return config
+
+    @classmethod
+    def set_block_configs(cls, model_config: Any, block_configs: list[BlockConfig | dict]) -> None:
+        """Attach block configs and update the language model layer count.
+
+        Multimodal configs often store the decoder layer count on a nested text
+        config.  This helper keeps callers from writing to ``config.num_hidden_layers``
+        directly when the real language model config lives elsewhere.
+        """
+        block_configs = maybe_cast_block_configs(block_configs)
+        model_config.block_configs = block_configs
+        lm_config = cls.get_language_model_config(model_config)
+        lm_config.num_hidden_layers = len(block_configs)
+        if lm_config is not model_config and hasattr(model_config, "num_hidden_layers"):
+            model_config.num_hidden_layers = len(block_configs)
+
+    @staticmethod
+    def passthrough_weight_name_predicates() -> Dict[str, re.Pattern]:
+        """Return optional non-model weight groups that should be preserved as-is.
+
+        These tensors are not loaded into the active HF model but should survive
+        conversion and checkpoint realization, e.g. draft/MTP heads ignored by the
+        main model class.
+        """
+        return {}
+
+    @classmethod
+    def get_passthrough_weight_groups(cls, layer_names: Iterable[str]) -> Dict[str, List[str]]:
+        """Group passthrough weights using ``passthrough_weight_name_predicates``."""
+        weight_groups = defaultdict(list)
+        passthrough_predicates = cls.passthrough_weight_name_predicates()
+        for name in layer_names:
+            for group, pattern in passthrough_predicates.items():
+                if pattern.match(name):
+                    weight_groups[group].append(name)
+                    break
+        return weight_groups
+
+    @classmethod
+    def is_passthrough_weight_name(cls, name: str) -> bool:
+        """Return whether ``name`` belongs to a passthrough weight group."""
+        return any(
+            pattern.match(name) for pattern in cls.passthrough_weight_name_predicates().values()
+        )
+
+    @classmethod
+    def split_passthrough_state_dict(
+        cls, state_dict: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Split a state dict into model weights and passthrough-only weights."""
+        model_state_dict = {}
+        passthrough_state_dict = {}
+        for key, value in state_dict.items():
+            if cls.is_passthrough_weight_name(key):
+                passthrough_state_dict[key] = value
+            else:
+                model_state_dict[key] = value
+        return model_state_dict, passthrough_state_dict
 
     @staticmethod
     def truncate_pattern_for_subblock(

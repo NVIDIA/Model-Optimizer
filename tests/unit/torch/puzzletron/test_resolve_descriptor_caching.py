@@ -73,3 +73,28 @@ def test_resolve_descriptor_caches_dynamic_modules():
     print(
         f"  Descriptor: {descriptor.__name__}, decoder classes: {[c.__name__ for c in layer_classes]}"
     )
+
+
+@pytest.mark.parametrize(
+    ("model_type", "descriptor_name"),
+    [
+        ("qwen3_5_text", "Qwen3P5TextModelDescriptor"),
+        ("qwen3_5", "Qwen3P5VLModelDescriptor"),
+        ("qwen3_6_text", "Qwen3P5TextModelDescriptor"),
+        ("qwen3_6", "Qwen3P5VLModelDescriptor"),
+    ],
+)
+@patch(f"{FACTORY_MODULE}.force_cache_dynamic_modules")
+@patch(f"{FACTORY_MODULE}.AutoConfig")
+def test_resolve_qwen3_5_and_qwen3_6_model_types(
+    mock_auto_config_cls, mock_force_cache, model_type, descriptor_name
+):
+    pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+    mock_config = MagicMock()
+    mock_config.model_type = model_type
+    mock_auto_config_cls.from_pretrained.return_value = mock_config
+
+    descriptor = mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path")
+
+    assert descriptor.__name__ == descriptor_name
+    mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=False)
