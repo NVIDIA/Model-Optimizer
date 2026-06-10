@@ -18,6 +18,18 @@
 
 """Monkey-patch for accelerate's fsdp2_load_full_state_dict buffer handling.
 
+Applicability (scope of this patch)
+-----------------------------------
+This is **not** needed for FSDP2 in general. It is required only for the narrow
+combination of: **FSDP2 configured via an accelerate YAML config** (not torch-native
+``ParallelismConfig``) **with** ``cpu_ram_efficient_loading=True``. Today that path is
+forced by **models that require transformers 4.57.x** (their ``trust_remote_code`` code
+predates transformers 5.x ``ParallelismConfig`` support) **and** are too large to load on
+every rank — currently only **MiniMax-M2.7** (229B MoE). Models that run on transformers
+5.x (Qwen, Llama, Nemotron, ...) use native ``ParallelismConfig`` (``dp_shard_size > 1``),
+which handles buffers/dtypes correctly and never enters ``fsdp2_load_full_state_dict`` —
+they need none of this. Gated off by default; activate with ``PATCH_FSDP2_BUFFERS=1``.
+
 Problem
 -------
 accelerate's ``fsdp2_load_full_state_dict`` (called during model preparation
