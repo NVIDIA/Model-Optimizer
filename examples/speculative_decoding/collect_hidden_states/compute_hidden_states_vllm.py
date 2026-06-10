@@ -173,7 +173,9 @@ def main(args: argparse.Namespace) -> None:
 
     for entry in dataset:
         conversation_id = entry.get("conversation_id", entry.get("uuid"))
-        conversations = entry["conversations"]
+        # Accept either the "conversations" or OpenAI-style "messages" key (the
+        # MiniMax synthetic data uses "messages").
+        conversations = entry.get("conversations") or entry.get("messages")
         if not conversations or not isinstance(conversations, list):
             num_invalid += 1
             continue
