@@ -207,7 +207,11 @@ def main(args: argparse.Namespace) -> None:
 
     # Initialize vLLM with the native hidden-state extractor.
     tp = args.tp if args.tp is not None else torch.cuda.device_count()
-    storage_path = output_dir / ".vllm_hidden_states"
+    # Stage the connector's intermediate safetensors on local tmpfs, not the (lustre)
+    # output dir: the producer writes one file per request and the client reads it back
+    # immediately, so a fast local path avoids cross-node FS latency. Per-DP-rank dir so
+    # parallel shards don't collide.
+    storage_path = Path("/dev/shm") / f"vllm_hidden_states_dp{args.dp_rank}"
     storage_path.mkdir(parents=True, exist_ok=True)
 
     llm = LLM(
@@ -233,7 +237,10 @@ def main(args: argparse.Namespace) -> None:
             kv_role="kv_producer",
             kv_connector_extra_config={
                 "shared_storage_path": str(storage_path),
-                "use_synchronization_lock": False,  # batch generation, no concurrent readers
+                # The client reads each request's safetensors right after generation; the
+                # lock makes the producer signal completion so the reader doesn't race the
+                # writer (without it the reader looks for a .lock the producer never wrote).
+                "use_synchronization_lock": True,
             },
         ),
     )
