@@ -154,6 +154,16 @@ class GlobalVariables:
     hf_data: str = None
     hf_local: str = None
     output_dir: str = None
+    # Speculative-decoding draft / assistant model path. SPEED-bench
+    # MTP/EAGLE3/DRAFT_TARGET/DFLASH parent YAMLs reference this via
+    # ``--draft_model_dir <<global_vars.draft_model>>`` on both the
+    # qualitative + throughput_32k tasks so the path lives in one
+    # place. Surfaced on OMNIML-5024: the gemma-4-E4B-it / MTP / vLLM
+    # parent used the indirection but the launcher rejected it with
+    # ``No parameter named 'draft_model' exists`` because the
+    # dataclass schema didn't include the key; the agent worked
+    # around it inline but the canonical YAML stayed broken.
+    draft_model: str = None
 
 
 @dataclass
