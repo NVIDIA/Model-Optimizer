@@ -76,7 +76,6 @@ python pipeline.py --compare-baseline
 | --- | --- | --- |
 | `--model-dir` | `/models/Qwen2.5-1.5B-Instruct` | HF model directory |
 | `--sparsity` | off | Apply 2:4 structured sparsity before PTQ (auto-enables INT8 output quantizers) |
-| `--quant-attention` / `--no-quant-attention` | on | INT8-quantize the attention math (q/k/v_bmm + softmax) in addition to the linear projections |
 | `--qat` | off | Run the **example** QAT fine-tune after PTQ |
 | `--weights-dtype` | `fp16` | ONNX/engine weight dtype (`fp16` or `fp32`); both build strongly-typed |
 | `--calib-dataset` | `cnn_dailymail` | Calibration dataset (`cnn_dailymail` or a `nemotron-*` dataset) |
@@ -113,9 +112,8 @@ FP16 baseline. Both engines are profiled at the same fixed shape for an apples-t
    `examples/llm_ptq/hf_ptq.py`.
 3. **2:4 sparsity** *(optional)* — `mts.sparsify(model, "sparse_magnitude")`.
 4. **INT8 W8A8 SmoothQuant PTQ** — `mtq.quantize(model, mtq.INT8_SMOOTHQUANT_CFG, forward_loop)`.
-   By default the **attention math** (`q/k/v_bmm` + `softmax`) is INT8-quantized too, not just the
-   linear projections (`--no-quant-attention` for linears-only). With `--sparsity`, INT8 **output**
-   quantizers are also enabled (see below).
+   The **attention math** (`q/k/v_bmm` + `softmax`) is INT8-quantized too, not just the linear
+   projections. With `--sparsity`, INT8 **output** quantizers are also enabled (see below).
 5. **QAT** *(optional)* — a minimal **example** loop; replace it with your own dataset/training
    pipeline for real recovery.
 6. **Finalize + ONNX export** — opset 20, `dynamo=False`; for `fp16` the model is cast and exported
