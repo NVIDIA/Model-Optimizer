@@ -204,7 +204,7 @@ class ModelDescriptor(ABC):
         model_config.block_configs = block_configs
         lm_config = cls.get_language_model_config(model_config)
         lm_config.num_hidden_layers = len(block_configs)
-        if lm_config is not model_config and hasattr(model_config, "num_hidden_layers"):
+        if lm_config is not model_config:
             model_config.num_hidden_layers = len(block_configs)
 
     @staticmethod

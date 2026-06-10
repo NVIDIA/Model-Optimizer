@@ -273,7 +273,7 @@ def perform_pipeline_stitches(
     target = ModuleTarget("module", model)
     stitcher = Needle()
 
-    num_layers = model.config.num_hidden_layers
+    num_layers = descriptor.get_language_model_config(model.config).num_hidden_layers
 
     is_real_block = np.flatnonzero(
         [
