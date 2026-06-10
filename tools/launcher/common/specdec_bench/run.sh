@@ -42,22 +42,6 @@ if ! pip show boto3 >/dev/null 2>&1 || \
     fi
 fi
 
-if [ -n "${EXTRA_PIP_DEPS:-}" ]; then
-    if ! python3 - <<'PY'
-import os
-import shlex
-import subprocess
-import sys
-
-deps = shlex.split(os.environ["EXTRA_PIP_DEPS"])
-subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", *deps])
-PY
-    then
-        report_result "FAIL: specdec_bench: pip install EXTRA_PIP_DEPS failed"
-        exit 1
-    fi
-fi
-
 if ! python3 modules/Model-Optimizer/examples/specdec_bench/run.py \
     --model_dir ${HF_MODEL_CKPT} \
     --tokenizer ${HF_MODEL_CKPT} \
