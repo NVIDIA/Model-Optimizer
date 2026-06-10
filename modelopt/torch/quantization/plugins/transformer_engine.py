@@ -150,10 +150,20 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
-        # initialize the quantizer states, self.weight is used to extract shape, dtype etc. Assigning
-        # self.weight0 to self.weight to run the quantizer states initialization.
+        # initialize the quantizer states, self.weight is used to extract shape, dtype etc.
+        #
+        # Per-expert mode (axis=0) stores _amax as [num_gemms, 1, 1] — the same shape
+        # iter_weights_for_calibration and te_grouped_quantized_linear_fn produce by stacking
+        # the per-expert weights first. Mirror that here so the restore path initializes the
+        # placeholder _amax to the same shape; otherwise dist-checkpoint load builds _amax from
+        # the un-stacked [out, in] view (shape [out, 1]) and _gather_global_per_expert_amax
+        # later fails on `amax.view(num_gemms)`.
         assert not hasattr(self, "weight"), "self.weight should not exist for TEGroupedLinear"
-        self.weight = self.weight0
+        if self._is_per_expert_weight_quant():
+            weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
+            self.weight = torch.stack(weights, dim=0)
+        else:
+            self.weight = self.weight0
         super().modelopt_post_restore(prefix=prefix)
         # Remove self.weight after post_restore.
         delattr(self, "weight")
