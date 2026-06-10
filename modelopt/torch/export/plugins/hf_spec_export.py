@@ -398,22 +398,13 @@ class DFlashExporter(SpeculativeDecodingExporter):
 
         # Long-context RoPE (YaRN). The draft trains on a short window but must draft for
         # the target at long context, so — mirroring published Eagle3 drafts such as
-        # nvidia/Kimi-K2.6-Eagle3 — export a YaRN rope_scaling that extends the training
-        # window to the target's full context. Auto-enabled when the target's
-        # max_position_embeddings exceeds the draft's training window; override the window
-        # via model.dflash_export_rope_original_max (defaults to 4096, the usual seq len).
-        yarn_original_max = int(getattr(self.model, "dflash_export_rope_original_max", 4096))
-        target_max = config.get("max_position_embeddings") or 0
-        if target_max > yarn_original_max:
-            config["rope_scaling"] = {
-                "type": "yarn",
-                "factor": float(target_max) / float(yarn_original_max),
-                "original_max_position_embeddings": yarn_original_max,
-                "beta_fast": 1.0,
-                "beta_slow": 1.0,
-                "mscale": 1.0,
-                "mscale_all_dim": 1.0,
-            }
+        # nvidia/Kimi-K2.6-Eagle3 — inject a YaRN rope_scaling that extends the training
+        # window to the target's full context. Sourced from the config field
+        # dflash_export_rope_scaling (set in the recipe YAML), matching the eagle
+        # eagle_export_rope_scaling convention. Empty dict (default) disables injection.
+        export_rope_scaling = getattr(self.model, "dflash_export_rope_scaling", None)
+        if export_rope_scaling:
+            config["rope_scaling"] = export_rope_scaling
 
         return config
 
