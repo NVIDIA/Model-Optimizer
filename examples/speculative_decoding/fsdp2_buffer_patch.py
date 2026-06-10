@@ -175,7 +175,7 @@ def apply():
             # each broadcast tensor.
             if accelerator.is_main_process:
                 dtype_codes = torch.tensor(
-                    [_DTYPE_TO_CODE.get(full_sd[name].dtype, 0) for name in meta_sharded_sd.keys()],
+                    [_DTYPE_TO_CODE.get(full_sd[name].dtype, 0) for name in meta_sharded_sd],
                     dtype=torch.int32,
                     device=accelerator.device,
                 )
@@ -304,7 +304,7 @@ def _clip_grad_norm(parameters, max_norm, norm_type=2):
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
 
-    parameters = [p for p in parameters]  # materialize generator
+    parameters = list(parameters)  # materialize generator
     max_norm = float(max_norm)
     norm_type = float(norm_type)
 

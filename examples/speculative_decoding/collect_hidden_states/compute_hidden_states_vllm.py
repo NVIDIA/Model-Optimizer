@@ -290,7 +290,6 @@ def main(args: argparse.Namespace) -> None:
                 f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
                 f"states ({n_hs}); skipping to avoid misalignment"
             )
-            num_error += 1
             continue
 
         output_file = output_dir / f"{conv_id}.pt"
