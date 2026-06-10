@@ -78,8 +78,8 @@ pipeline:
       - STREAMING_NUM_WORKERS: "1"
       # DFlash on a custom-modeling base (Kimi) needs --trust_remote_code at export.
       - EXPORT_EXTRA_ARGS: "--trust_remote_code"
-      # Cap context to the train seq len; the model's native 262144 KV-cache OOMs at TP=4.
-      - SERVE_MAX_MODEL_LEN: "4096"
+      # > training_seq_len: room for prompt + the 1-token decode fetch (else vLLM 400s at the cap).
+      - SERVE_MAX_MODEL_LEN: "4160"
       - SERVE_MAX_NUM_SEQS: "4"
       - SERVE_GPU_MEM_UTIL: "0.8"
       - SERVE_READY_TIMEOUT: "2400"
@@ -94,4 +94,4 @@ pipeline:
       segment: 2
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: vllm/vllm-openai:latest
+      container: vllm/vllm-openai:v0.22.0-aarch64

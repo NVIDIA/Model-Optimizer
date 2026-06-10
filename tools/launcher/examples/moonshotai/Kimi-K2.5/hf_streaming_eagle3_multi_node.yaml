@@ -62,8 +62,8 @@ pipeline:
       - SERVE_TP: "4"
       # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
       - STREAMING_NUM_WORKERS: "1"
-      # Cap context to the train seq len; the model's native 262144 KV-cache OOMs at TP=4.
-      - SERVE_MAX_MODEL_LEN: "4096"
+      # > training_seq_len: room for prompt + the 1-token decode fetch (else vLLM 400s at the cap).
+      - SERVE_MAX_MODEL_LEN: "4160"
       - SERVE_MAX_NUM_SEQS: "4"
       - SERVE_GPU_MEM_UTIL: "0.8"
       - SERVE_READY_TIMEOUT: "2400"

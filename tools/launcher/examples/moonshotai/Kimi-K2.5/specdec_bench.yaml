@@ -12,9 +12,7 @@
 # `prepare_data.py --dataset speed --config all`, then replace --mtbench with
 # `--dataset speed` + `--dataset_path .../data/speed/<split>`.
 #
-# NOTE on container: vllm/vllm-openai:latest is x86 and may lack DFLASH; on
-# GB200/aarch64 use an aarch64 DFLASH-capable image via
-# pipeline.task_0.slurm_config.container=<image>.
+# NOTE on container: pinned to the aarch64 v0.22.0 image (GB200).
 #
 # Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
 #   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
@@ -60,4 +58,4 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: vllm/vllm-openai:latest
+      container: vllm/vllm-openai:v0.22.0-aarch64
