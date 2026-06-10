@@ -69,6 +69,38 @@ def build_target_layer_ids(num_target_layers, num_draft_layers):
     return [round(start + (i * span) / (num_draft_layers - 1)) for i in range(num_draft_layers)]
 
 
+def resolve_dflash_mask_token_id(
+    configured_id, tokenizer_mask_id, num_embedding_rows, tokenizer_len
+):
+    """Decide the DFlash mask token id, avoiding an embedding resize when possible.
+
+    The DFlash draft ships no embeddings of its own — masked positions are embedded via
+    the base/target ``embed_tokens``, and at deployment the draft reuses the target's
+    table. So the mask id must be a row that physically exists in the target embedding.
+    Appending a new ``<|mask|>`` row by resizing is unsafe in general: with the base model
+    frozen the row is never trained, it is never exported, and it is absent from the
+    target at inference. We therefore prefer, in order:
+
+    1. an explicitly configured id,
+    2. the tokenizer's own mask token id,
+    3. an existing reserved row (when the embedding is padded past the used vocab),
+
+    and only fall back to a resize as a last resort.
+
+    Returns:
+        (mask_token_id, needs_resize). When ``needs_resize`` is True, ``mask_token_id`` is
+        None and the caller must add a special token + resize the embeddings (last resort).
+    """
+    if configured_id is not None:
+        return configured_id, False
+    if tokenizer_mask_id is not None:
+        return tokenizer_mask_id, False
+    if num_embedding_rows > tokenizer_len:
+        # First unused row that already physically exists in the (padded) target embedding.
+        return tokenizer_len, False
+    return None, True
+
+
 def apply_rotary_pos_emb(q, k, cos, sin):
     """Apply RoPE. Q uses last q_len positions, K uses all positions."""
     cos = cos.unsqueeze(1)  # [B, 1, seq, dim]

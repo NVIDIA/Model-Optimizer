@@ -40,6 +40,7 @@ from modelopt.torch.speculative.plugins.hf_dflash import (
     HFDFlashModel,
     build_target_layer_ids,
 )
+from modelopt.torch.speculative.plugins.modeling_dflash import resolve_dflash_mask_token_id
 from modelopt.torch.speculative.utils import AcceptanceRateValidation
 from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
@@ -467,3 +468,45 @@ class TestEnsureGenerationTags:
         # User/system content should NOT appear in unmasked tokens
         assert "You are helpful" not in decoded
         assert "How are you?" not in decoded
+
+
+class TestResolveMaskTokenId:
+    """Mask-token-id resolution: avoid resizing embeddings when possible.
+
+    The DFlash draft ships no embeddings — masked positions are embedded via the
+    base/target embed_tokens and reused at deploy — so the mask id must already exist
+    in the target embedding. resolve_dflash_mask_token_id encodes that preference order.
+    """
+
+    def test_explicit_configured_id_wins(self):
+        mask_id, needs_resize = resolve_dflash_mask_token_id(
+            configured_id=200054,
+            tokenizer_mask_id=7,
+            num_embedding_rows=200064,
+            tokenizer_len=200054,
+        )
+        assert (mask_id, needs_resize) == (200054, False)
+
+    def test_tokenizer_mask_id_used_when_unconfigured(self):
+        mask_id, needs_resize = resolve_dflash_mask_token_id(
+            configured_id=None, tokenizer_mask_id=42, num_embedding_rows=1000, tokenizer_len=999
+        )
+        assert (mask_id, needs_resize) == (42, False)
+
+    def test_reuses_existing_reserved_row_when_padded(self):
+        # Embedding padded past the used vocab (e.g. MiniMax-M2.7: 200064 rows, 200054 used)
+        # -> reuse the first reserved row instead of resizing.
+        mask_id, needs_resize = resolve_dflash_mask_token_id(
+            configured_id=None,
+            tokenizer_mask_id=None,
+            num_embedding_rows=200064,
+            tokenizer_len=200054,
+        )
+        assert (mask_id, needs_resize) == (200054, False)
+
+    def test_needs_resize_when_not_padded(self):
+        # No spare rows -> caller must add a token + resize (last resort).
+        mask_id, needs_resize = resolve_dflash_mask_token_id(
+            configured_id=None, tokenizer_mask_id=None, num_embedding_rows=1000, tokenizer_len=1000
+        )
+        assert (mask_id, needs_resize) == (None, True)
