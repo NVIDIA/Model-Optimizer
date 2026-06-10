@@ -203,8 +203,16 @@ def restore_sharded_modelopt_state(
     ):
         return
 
-    # Loading the common modelopt_state (replicated on all ranks)
-    common_modelopt_state = safe_load(modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME)
+    # Loading the common modelopt_state (replicated on all ranks).
+    # Detect format: legacy checkpoints store common state in a standalone common.pt file;
+    # newer sharded checkpoints store it as a ShardedObject inside the torch_dist checkpoint.
+    legacy_common_path = os.path.join(modelopt_checkpoint_name, COMMON_STATE_FNAME)
+    if os.path.exists(legacy_common_path):
+        common_modelopt_state = safe_load(legacy_common_path)
+    else:
+        common_modelopt_state = dist_checkpointing.load_common_state_dict(
+            modelopt_checkpoint_name
+        )
 
     modelopt_load_version = common_modelopt_state["modelopt_version"]
 
