@@ -80,7 +80,10 @@ if "PYTEST_VERSION" in __import__("os").environ:
     _FWD_CONFIGS = [triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1, num_warps=4)]
 
 _MEASURE_BLOCK_M = 128
-_MEASURE_BLOCK_N = 64
+# 128 so the kernel sparsity-measurement block matches the PyTorch
+# flash_skip_softmax calibration block (br = bc = 128) and the Triton
+# calibration kernel; otherwise the two measure at different granularities.
+_MEASURE_BLOCK_N = 128
 _MEASURE_NUM_STAGES = 1
 _MEASURE_NUM_WARPS = 4
 
@@ -363,6 +366,8 @@ def _attn_fwd(
             skip_tile = _skip_softmax_decision(
                 scores,
                 row_max,
+                q_pos,
+                seq_len_q,
                 SKIP_THRESHOLD_LOG2,
                 Sparsity_total,
                 Sparsity_skipped,
@@ -919,23 +924,29 @@ class _Attention(torch.autograd.Function):
         def grid(META):
             return (batch, num_q_heads, triton.cdiv(max_input_len, META["BLOCK_M"]))
 
-        if do_measure:
-            # Runtime counters mutate global tensors, so do not run them through
-            # autotune candidate trials. Use one stable config for measurement.
-            _attn_fwd.fn[grid](
-                *fwd_args,
-                **fwd_kwargs,
-                BLOCK_M=_MEASURE_BLOCK_M,
-                BLOCK_N=_MEASURE_BLOCK_N,
-                num_warps=_MEASURE_NUM_WARPS,
-                num_stages=_MEASURE_NUM_STAGES,
-            )
-        else:
-            _attn_fwd[grid](
-                *fwd_args,
-                **fwd_kwargs,
-                # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
-            )
+        # Triton launches on torch.cuda.current_device(), which is not
+        # necessarily the device the tensors live on (e.g. under accelerate
+        # device_map="auto" sharding). Activate the tensor's device so the
+        # kernel dereferences the right pointers instead of triggering an
+        # illegal memory access.
+        with torch.cuda.device(q.device):
+            if do_measure:
+                # Runtime counters mutate global tensors, so do not run them through
+                # autotune candidate trials. Use one stable config for measurement.
+                _attn_fwd.fn[grid](
+                    *fwd_args,
+                    **fwd_kwargs,
+                    BLOCK_M=_MEASURE_BLOCK_M,
+                    BLOCK_N=_MEASURE_BLOCK_N,
+                    num_warps=_MEASURE_NUM_WARPS,
+                    num_stages=_MEASURE_NUM_STAGES,
+                )
+            else:
+                _attn_fwd[grid](
+                    *fwd_args,
+                    **fwd_kwargs,
+                    # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
+                )
 
         # Store sparsity counters on the output tensor for retrieval by callers
         if do_measure:
@@ -970,23 +981,30 @@ class _Attention(torch.autograd.Function):
         do = grad_output.contiguous()
         num_warps = 4
 
+        # Triton launches on torch.cuda.current_device(), which is not
+        # necessarily the device the tensors live on (e.g. under accelerate
+        # device_map="auto" sharding). Activate the tensor's device for each
+        # launch so the kernels dereference the right pointers instead of
+        # triggering an illegal memory access.
+
         # Phase 1: delta = rowsum(O * dO)
         delta = torch.empty_like(lse)
-        _attn_bwd_preprocess[(ctx.num_q_heads, triton.cdiv(q.shape[0], BLOCK))](
-            o,
-            do,
-            delta,
-            o.stride(0),
-            o.stride(1),
-            do.stride(0),
-            do.stride(1),
-            delta.stride(0),
-            delta.stride(1),
-            q.shape[0],
-            HEAD_DIM=HEAD_DIM,
-            BLOCK_D=BLOCK_D,
-            BLOCK_M=BLOCK,
-        )
+        with torch.cuda.device(q.device):
+            _attn_bwd_preprocess[(ctx.num_q_heads, triton.cdiv(q.shape[0], BLOCK))](
+                o,
+                do,
+                delta,
+                o.stride(0),
+                o.stride(1),
+                do.stride(0),
+                do.stride(1),
+                delta.stride(0),
+                delta.stride(1),
+                q.shape[0],
+                HEAD_DIM=HEAD_DIM,
+                BLOCK_D=BLOCK_D,
+                BLOCK_M=BLOCK,
+            )
 
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
@@ -1016,57 +1034,59 @@ class _Attention(torch.autograd.Function):
         )
 
         # Phase 2: dK, dV
-        _attn_bwd_dkdv[(ctx.batch, ctx.num_kv_heads, triton.cdiv(ctx.max_input_len_k, BLOCK))](
-            *bwd_args[:4],
-            dk,
-            dv,
-            *bwd_args[4:],
-            dk.stride(0),
-            dk.stride(1),
-            dv.stride(0),
-            dv.stride(1),
-            lse.stride(0),
-            lse.stride(1),
-            kv_group_num=ctx.kv_group_num,
-            BLOCK_M=BLOCK,
-            BLOCK_D=BLOCK_D,
-            BLOCK_N=BLOCK,
-            IS_CAUSAL=ctx.is_causal,
-            HEAD_DIM=HEAD_DIM,
-            SPARSITY_N=ctx.sparsity_n,
-            SPARSITY_M=ctx.sparsity_m,
-            DENSE_SINK_TOKENS=ctx.dense_sink_tokens,
-            DENSE_RECENT_TOKENS=ctx.dense_recent_tokens,
-            APPLY_SKIP_SOFTMAX=ctx.apply_skip,
-            SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
-            num_warps=num_warps,
-            num_stages=1,
-        )
+        with torch.cuda.device(q.device):
+            _attn_bwd_dkdv[(ctx.batch, ctx.num_kv_heads, triton.cdiv(ctx.max_input_len_k, BLOCK))](
+                *bwd_args[:4],
+                dk,
+                dv,
+                *bwd_args[4:],
+                dk.stride(0),
+                dk.stride(1),
+                dv.stride(0),
+                dv.stride(1),
+                lse.stride(0),
+                lse.stride(1),
+                kv_group_num=ctx.kv_group_num,
+                BLOCK_M=BLOCK,
+                BLOCK_D=BLOCK_D,
+                BLOCK_N=BLOCK,
+                IS_CAUSAL=ctx.is_causal,
+                HEAD_DIM=HEAD_DIM,
+                SPARSITY_N=ctx.sparsity_n,
+                SPARSITY_M=ctx.sparsity_m,
+                DENSE_SINK_TOKENS=ctx.dense_sink_tokens,
+                DENSE_RECENT_TOKENS=ctx.dense_recent_tokens,
+                APPLY_SKIP_SOFTMAX=ctx.apply_skip,
+                SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
+                num_warps=num_warps,
+                num_stages=1,
+            )
 
         # Phase 3: dQ
-        _attn_bwd_dq[(ctx.batch, ctx.num_q_heads, triton.cdiv(ctx.max_input_len, BLOCK))](
-            *bwd_args[:4],
-            dq,
-            *bwd_args[4:],
-            dq.stride(0),
-            dq.stride(1),
-            lse.stride(0),
-            lse.stride(1),
-            kv_group_num=ctx.kv_group_num,
-            BLOCK_M=BLOCK,
-            BLOCK_D=BLOCK_D,
-            BLOCK_N=BLOCK,
-            IS_CAUSAL=ctx.is_causal,
-            HEAD_DIM=HEAD_DIM,
-            SPARSITY_N=ctx.sparsity_n,
-            SPARSITY_M=ctx.sparsity_m,
-            DENSE_SINK_TOKENS=ctx.dense_sink_tokens,
-            DENSE_RECENT_TOKENS=ctx.dense_recent_tokens,
-            APPLY_SKIP_SOFTMAX=ctx.apply_skip,
-            SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
-            num_warps=num_warps,
-            num_stages=1,
-        )
+        with torch.cuda.device(q.device):
+            _attn_bwd_dq[(ctx.batch, ctx.num_q_heads, triton.cdiv(ctx.max_input_len, BLOCK))](
+                *bwd_args[:4],
+                dq,
+                *bwd_args[4:],
+                dq.stride(0),
+                dq.stride(1),
+                lse.stride(0),
+                lse.stride(1),
+                kv_group_num=ctx.kv_group_num,
+                BLOCK_M=BLOCK,
+                BLOCK_D=BLOCK_D,
+                BLOCK_N=BLOCK,
+                IS_CAUSAL=ctx.is_causal,
+                HEAD_DIM=HEAD_DIM,
+                SPARSITY_N=ctx.sparsity_n,
+                SPARSITY_M=ctx.sparsity_m,
+                DENSE_SINK_TOKENS=ctx.dense_sink_tokens,
+                DENSE_RECENT_TOKENS=ctx.dense_recent_tokens,
+                APPLY_SKIP_SOFTMAX=ctx.apply_skip,
+                SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
+                num_warps=num_warps,
+                num_stages=1,
+            )
 
         return (
             dq,

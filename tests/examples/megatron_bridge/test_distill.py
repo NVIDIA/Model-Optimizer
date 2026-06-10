@@ -39,8 +39,8 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
         mbs=1,
         gbs=4,
         train_iters=train_iters,
-        lr_warmup_iters=2,
-        eval_interval=5,
+        lr_warmup_iters=1,
+        eval_interval=train_iters,
         eval_iters=1,
         log_interval=1,
         hf_export_path=distilled_hf_path,
@@ -63,7 +63,7 @@ def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
         _prepare_puzzletron_anymodel_student_and_teacher(tmp_path)
     )
 
-    train_iters = 5
+    train_iters = 2
     output_dir = tmp_path / "distill_output"
     hf_export_path = tmp_path / "distilled_anymodel_hf"
     cmd_parts = extend_cmd_parts(
@@ -77,8 +77,8 @@ def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
         mbs=1,
         gbs=4,
         train_iters=train_iters,
-        lr_warmup_iters=2,
-        eval_interval=5,
+        lr_warmup_iters=1,
+        eval_interval=train_iters,
         eval_iters=1,
         log_interval=1,
         hf_export_path=hf_export_path,

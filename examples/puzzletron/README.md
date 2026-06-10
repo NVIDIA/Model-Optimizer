@@ -343,6 +343,46 @@ See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) fo
 
 For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
 
+## Runtime-Based Latency Optimization
+
+You can enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints.
+
+A ready-to-run example config is included at [`configs/llama-3_1-8B_pruneffn_runtime/`](./configs/llama-3_1-8B_pruneffn_runtime/llama-3_1-8B_pruneffn_runtime.yaml). The following key fields enable and control execution of the runtime statistics in the `llama-3_1-8B_pruneffn_runtime.yaml` config file:
+
+```yaml
+calc_subblock_stats:
+  runtime_stats:
+    enabled: true
+    num_warmup_iters: 2
+    num_iters: 10
+```
+
+The runtime constraint is specified in the `human_constraints` section of the config `Llama-3_1-8B.yaml`:
+
+```yaml
+human_constraints:
+  target_latency_seconds: 21
+```
+
+Run the pipeline against this config the same way as the memory-constrained variant:
+
+```bash
+torchrun --nproc_per_node 2 examples/puzzletron/main.py \
+   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_runtime/llama-3_1-8B_pruneffn_runtime.yaml 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+```
+
+The MIP solver will now search for a heterogeneous architecture whose measured end-to-end latency is at or below `target_latency_seconds`, instead of optimizing for a memory budget.
+
+Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly (already included in the example config):
+
+```yaml
+nccl_timeout_minutes: 90  # default is 10 if omitted
+```
+
+This field is supported in any Puzzletron YAML config and overrides the default 10-minute distributed timeout.
+
+Due to non-linear extension of the runtime stats of single subblocks to the total runtime of the model, the `target_latency_seconds` value should be set to a value that is slightly lower than the desired latency. For example, in our experiments, the `target_latency_seconds` value of 5 resulted in a final model latency of 5.4 seconds.
+
 ## Advanced Usage
 
 Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenarios.

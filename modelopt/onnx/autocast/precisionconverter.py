@@ -970,7 +970,15 @@ class PrecisionConverter:
         """
         # Empty tensors may have special handling in ONNX (e.g. for Resize scales) which can break when redundant casts
         # are injected. Since there's no data, it's safe to only update the metadata.
-        if self._is_empty_tensor(tensor_name):
+        # Exception: a network input/output whose original type must be preserved (keep_io_types=True) must not be
+        # retyped in place, since value_info_map aliases the graph.input/graph.output ValueInfoProto and this would
+        # silently change the model's I/O type. For those we fall through and insert a real Cast node instead.
+        must_preserve_io_type = (
+            self.keep_io_types
+            and tensor_name in self.original_network_io
+            and cast_to.onnx_type != self.original_network_io[tensor_name]
+        )
+        if self._is_empty_tensor(tensor_name) and not must_preserve_io_type:
             logger.debug(f"Fake-casting empty tensor: {tensor_name}")
             if tensor_name in self.value_info_map:
                 tensor_info = self.value_info_map[tensor_name]

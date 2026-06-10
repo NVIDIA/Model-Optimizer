@@ -7,6 +7,12 @@ These instructions apply to AI-assisted work in this repository.
 - Start with `README.md` for project overview and install.
 - Use `modelopt/` for source, `tests/` for focused test coverage, and
   `examples/` or `docs/` for usage patterns.
+- **Agent skills and shared config live under `.agents/`** — the canonical,
+  agent-agnostic source of truth (`.agents/skills/<name>/SKILL.md`,
+  `.agents/scripts/`, `.agents/clusters.yaml.example`). Claude Code's
+  `.claude/skills`, `.claude/scripts`, and `.claude/clusters.yaml.example` are
+  relative symlinks into `.agents/`. Always edit files under `.agents/`, not the
+  symlink path. See `.agents/README.md` for the convention.
 
 ## Coding guidelines
 

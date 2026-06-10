@@ -150,6 +150,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 """
 
+import re
 import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
@@ -688,7 +689,56 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         return self
 
 
-class MaxCalibConfig(QuantizeAlgorithmConfig):
+class _SharedStatesConfig(ModeloptBaseConfig):
+    """The ``shared_states`` grouping knob, shared by max / mse / local_hessian calibration."""
+
+    shared_states: dict[str, dict[str, list[str]]] | None = ModeloptField(
+        default=None,
+        title="Concrete shared quantization states and their grouping patterns",
+        description=(
+            "Optional dict keyed by shared-state name. ``'weight_global_amax'`` is implemented "
+            "today and accepts ``{'patterns': [...]}``, where patterns are full-match regexes "
+            "against module fully-qualified names. Omitted patterns use the state's defaults; "
+            "an empty pattern list disables that state."
+        ),
+    )
+
+    @field_validator("shared_states")
+    @classmethod
+    def validate_shared_states(cls, v):
+        """Reject unknown shared-state names, fields, and invalid regexes."""
+        if v is None:
+            return v
+        supported = {"weight_global_amax"}
+        unknown = set(v) - supported
+        if unknown:
+            raise ValueError(
+                f"shared_states has unsupported state(s) {sorted(unknown)}; "
+                f"expected keys from {sorted(supported)}."
+            )
+
+        offending = ("", "")
+        try:
+            for name, state_cfg in v.items():
+                unknown_fields = set(state_cfg) - {"patterns"}
+                if unknown_fields:
+                    raise ValueError(
+                        f"shared_states[{name!r}] has unsupported field(s) "
+                        f"{sorted(unknown_fields)}; expected ['patterns']."
+                    )
+                for pattern in state_cfg.get("patterns", []):
+                    offending = (name, pattern)
+                    re.compile(pattern)
+        except re.error as e:
+            bad_state, bad_pattern = offending
+            raise ValueError(
+                f"shared_states[{bad_state!r}]['patterns'] has an invalid regex "
+                f"{bad_pattern!r}: {e}"
+            ) from e
+        return v
+
+
+class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.
 
     Max calibration estimates max values of activations or weights and use this max values
@@ -716,7 +766,7 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class MseCalibConfig(QuantizeAlgorithmConfig):
+class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
 
     Finds a scale s (via amax a, with s = a / q_max) that minimizes the
@@ -766,7 +816,7 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
+class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for local Hessian-weighted MSE calibration.
 
     This algorithm uses activation information to optimize per-block scales for weight

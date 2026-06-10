@@ -481,6 +481,22 @@ class TestMatchQuantizerCfg:
         matched, _ = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
         assert matched.model_dump(exclude_unset=True) == {"num_bits": 4}
 
+    def test_parent_class_scoped_entries_are_ignored_for_bare_autoquant_lookup(self):
+        """parent_class-scoped globals should not override AutoQuantize bare-name lookup."""
+        quant_cfg = normalize_quant_cfg_list(
+            [
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
+                {
+                    "parent_class": "nn.BatchNorm1d",
+                    "quantizer_name": "*",
+                    "enable": False,
+                },
+            ]
+        )
+        matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 8}
+        assert enable is True
+
     def test_no_match_returns_none(self):
         """No matching entry returns (None, None)."""
         quant_cfg = normalize_quant_cfg_list(

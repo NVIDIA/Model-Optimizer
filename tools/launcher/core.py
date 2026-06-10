@@ -38,18 +38,29 @@ DEFAULT_EXPERIMENT_TITLE = "cicd"
 def get_default_env(experiment_title=None):
     """Return (slurm_env, local_env) dicts for the given experiment title."""
     title = experiment_title or DEFAULT_EXPERIMENT_TITLE
+    # specdec_bench upload credentials — forwarded so that the YAML pipeline
+    # step `common/specdec_bench/upload_to_s3.sh` can publish to the team
+    # S3 bucket without baking secrets into committed YAMLs. The prefix
+    # disambiguates from any other S3 creds a CI runner might carry.
+    specdec_s3 = {
+        "SPECDEC_BENCH_S3_ENDPOINT": os.getenv("SPECDEC_BENCH_S3_ENDPOINT", ""),
+        "SPECDEC_BENCH_S3_KEY_ID": os.getenv("SPECDEC_BENCH_S3_KEY_ID", ""),
+        "SPECDEC_BENCH_S3_SECRET": os.getenv("SPECDEC_BENCH_S3_SECRET", ""),
+    }
     slurm_env = {
         "TRITON_CACHE_DIR": f"/{title}/triton-cache",
         "HF_HOME": f"/{title}/hf-cache",
         "HF_TOKEN": os.getenv("HF_TOKEN", ""),
         "MLM_SKIP_INSTALL": "1",
         "LAUNCH_SCRIPT": "python",
+        **specdec_s3,
     }
     local_env = {
         "TRITON_CACHE_DIR": f"/{title}/triton-cache",
         "HF_HOME": f"/{title}/hf-cache",
         "HF_TOKEN": os.getenv("HF_TOKEN", ""),
         "MLM_SKIP_INSTALL": "1",
+        **specdec_s3,
     }
     return slurm_env, local_env
 
