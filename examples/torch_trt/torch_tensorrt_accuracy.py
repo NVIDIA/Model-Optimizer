@@ -30,7 +30,7 @@ compute dtype and unwraps HF ``ImageClassifierOutput`` to a plain logits tensor.
 
 Example::
 
-    python torch_tensorrt_accuracy.py --precision fp8 --eval_data_size 5000 --baseline
+    python torch_tensorrt_accuracy.py --batch_size 128 --eval_data_size 5000 --baseline
 
 ``--imagenet_path`` defaults to the gated ``ILSVRC/imagenet-1k`` HF dataset
 (accept its license / set ``HF_TOKEN``), or point it at a local copy. Note the
@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sys
 from pathlib import Path
 
@@ -104,31 +103,24 @@ def main():
         help="HuggingFace model id of the ViT classifier to quantize and score.",
     )
     parser.add_argument(
-        "--precision",
-        choices=sorted(ttptq.PRECISION_TO_RECIPE),
-        default="fp8",
-        help="Which ViT recipe variant to apply.",
-    )
-    parser.add_argument(
         "--recipe",
-        default=None,
-        help="Override the recipe path (relative to modelopt_recipes/ or absolute). "
-        "If unset, the recipe is picked by --precision.",
+        default=ttptq.DEFAULT_RECIPE,
+        help="Recipe path (relative to modelopt_recipes/ or an absolute YAML). "
+        "Defaults to the ViT FP8 recipe; pass huggingface/vit/ptq/nvfp4 for NVFP4.",
     )
     parser.add_argument(
         "--calib_samples",
         type=int,
-        default=512,
+        default=1024,
         help="Number of tiny-imagenet samples to use for calibration.",
     )
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=1,
+        default=128,
         help="Calibration / compile / eval batch size. The Torch-TRT engine is "
-        "compiled for this single static batch shape and the onnx_ptq evaluate() "
-        "dataloader keeps the trailing partial batch, so the Torch-TRT path "
-        "requires --batch_size 1; larger batches are only allowed with --skip_trt.",
+        "dynamic (min=1, opt=--batch_size, max=1024) and handles any batch incl. "
+        "the trailing partial batch, so any --batch_size (e.g. 128) works.",
     )
     parser.add_argument(
         "--eval_data_size",
@@ -155,47 +147,20 @@ def main():
         "Useful for environments without torch_tensorrt installed.",
     )
     parser.add_argument(
-        "--no_pretrained",
-        action="store_true",
-        help="Build the model from config with random weights (fast smoke test).",
-    )
-    parser.add_argument(
-        "--model_kwargs",
-        default=None,
-        help="JSON string of ViTConfig overrides applied when --no_pretrained is set.",
-    )
-    parser.add_argument(
         "--results_path",
         default=None,
         help="If set, write the accuracy results to this CSV path.",
     )
     args = parser.parse_args()
 
-    # The Torch-TRT engine is compiled for one static batch shape, and the reused
-    # onnx_ptq evaluate() dataloader does not drop the trailing partial batch, so a
-    # batch size that doesn't divide the validation set would crash the static
-    # engine mid-run. Fail fast. The fake-quant (--skip_trt) path is a plain eager
-    # module and tolerates any batch size.
-    if not args.skip_trt and args.batch_size != 1:
-        raise SystemExit(
-            "The Torch-TensorRT path requires --batch_size 1 (the engine is compiled "
-            "for a single static batch shape). Use --skip_trt to score the fake-quant "
-            "model at a larger batch size."
-        )
+    dynamic = True
 
     if not torch.cuda.is_available():
         raise SystemExit("This example requires a CUDA-capable GPU.")
     device = torch.device("cuda")
     dtype = torch.float16
 
-    config_overrides = json.loads(args.model_kwargs) if args.model_kwargs else None
-    model, processor = ttptq.load_model_and_processor(
-        args.model_id,
-        device,
-        dtype,
-        pretrained=not args.no_pretrained,
-        config_overrides=config_overrides,
-    )
+    model, processor = ttptq.load_model_and_processor(args.model_id, device, dtype)
     transform = build_processor_transform(processor)
 
     def run_eval(m: torch.nn.Module) -> tuple[float, float]:
@@ -225,8 +190,8 @@ def main():
         wrapped = ttptq.ViTLogitsWrapper(m).to(device).eval()
         if args.skip_trt:
             return wrapped
-        print(f"\nCompiling {what} with Torch-TensorRT ...")
-        return ttptq.compile_with_torch_tensorrt(wrapped, example_input)
+        print(f"\nCompiling {what} with Torch-TensorRT (dynamic={dynamic}) ...")
+        return ttptq.compile_with_torch_tensorrt(wrapped, example_input, dynamic=dynamic)
 
     results: list[list[str | float]] = [["Metric", "Top1 (%)", "Top5 (%)"]]
 
@@ -245,11 +210,11 @@ def main():
     calib_batches = ttptq.build_calibration_loader(
         processor, args.calib_samples, args.batch_size, device, dtype
     )
-    recipe_path = args.recipe or ttptq.PRECISION_TO_RECIPE[args.precision]
-    ttptq.quantize_with_recipe(model, recipe_path, calib_batches)
+    ttptq.quantize_with_recipe(model, args.recipe, calib_batches)
 
-    tag = f"{args.precision} ({runtime})"
-    eval_model = to_eval_model(model, f"{args.precision} model")
+    label = Path(args.recipe).stem  # e.g. "fp8" / "nvfp4"
+    tag = f"{label} ({runtime})"
+    eval_model = to_eval_model(model, f"{label} model")
     print(f"\n=== {tag} ===")
     top1, top5 = run_eval(eval_model)
     print(f"{tag}   top1={top1:.2f}%  top5={top5:.2f}%")

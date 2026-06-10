@@ -33,7 +33,6 @@ them into TRT precision layers.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import torch
@@ -45,13 +44,10 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.torch.quantization.utils import export_torch_mode
 
-# Maps the user-facing precision flag to the ViT-specific recipe under
-# `modelopt_recipes/huggingface/vit/ptq/`. The recipe loader resolves this
-# relative path against the built-in recipe library.
-PRECISION_TO_RECIPE: dict[str, str] = {
-    "fp8": "huggingface/vit/ptq/fp8",
-    "nvfp4": "huggingface/vit/ptq/nvfp4",
-}
+# Default ViT PTQ recipe under `modelopt_recipes/huggingface/vit/ptq/`. The
+# recipe loader resolves this relative path against the built-in recipe library;
+# pass `--recipe` for a different one (e.g. `huggingface/vit/ptq/nvfp4`).
+DEFAULT_RECIPE = "huggingface/vit/ptq/fp8"
 
 
 def load_model_and_processor(
@@ -71,10 +67,14 @@ def load_model_and_processor(
     """
     print(f"Loading {model_id} (dtype={dtype}, pretrained={pretrained})...")
     processor = AutoImageProcessor.from_pretrained(model_id)
+    # tanh-approximation GELU rather than the erf-based default.
     if pretrained:
-        model = ViTForImageClassification.from_pretrained(model_id, torch_dtype=dtype)
+        model = ViTForImageClassification.from_pretrained(
+            model_id, torch_dtype=dtype, hidden_act="gelu_fast"
+        )
     else:
         config = ViTConfig.from_pretrained(model_id)
+        config.hidden_act = "gelu_fast"
         for k, v in (config_overrides or {}).items():
             setattr(config, k, v)
         model = ViTForImageClassification(config).to(dtype)
@@ -141,35 +141,82 @@ class ViTLogitsWrapper(torch.nn.Module):
         return self.vit(pixel_values=pixel_values).logits
 
 
-def compile_with_torch_tensorrt(model: torch.nn.Module, example_input: torch.Tensor):
+def compile_with_torch_tensorrt(
+    model: torch.nn.Module, example_input: torch.Tensor, dynamic: bool = True
+):
     """Compile the quantized model with Torch-TensorRT (Dynamo IR, strongly-typed).
 
     `min_block_size=1` follows the Torch-TRT quantization guide so single-node
     Q/DQ + matmul subgraphs become TRT precision layers. `export_torch_mode`
     makes modelopt emit Q/DQ in the TRT-friendly form during `torch.export`.
+
+    ``dynamic`` builds a dynamic-batch engine (min=1, opt=``example_input``'s
+    batch, max=1024); otherwise the engine is specialized to ``example_input``.
+    Dynamic keeps the model in one engine and fuses far more FP8 (see the `cat`
+    comment below), so it is the default.
     """
     # Imported here (not at module scope) so the quantize-only `--skip_trt` path
     # still runs on hosts without torch_tensorrt installed.
     import torch_tensorrt
 
-    print("Compiling with torch_tensorrt.compile (Dynamo IR)...")
-    # `aten.cat.default` is force-executed in PyTorch because torch_tensorrt
-    # 2.10's cat converter chokes on the cls-token + patch-embedding concat
-    # in HF ViT (BFloat16 path: `TypeError: Got unsupported ScalarType
-    # BFloat16`; FP16 path: rank-(-1) TRT tensor that trips the downstream
-    # `embeddings + position_embeddings` add). The cat is a tiny [1,1,H]
-    # + [1,N,H] concat that runs once per forward, so falling back to
-    # PyTorch costs essentially nothing.
-    with export_torch_mode():
+    print(f"Compiling with torch_tensorrt.compile (Dynamo IR, dynamic={dynamic})...")
+    if dynamic:
+        n, c, h, w = example_input.shape
+        # torch.export specializes a size-1 dynamic dim to a constant, so trace at
+        # opt batch >= 2; min=1 still serves batch 1 at runtime.
+        opt_n = max(int(n), 2)
+        compile_inputs = {
+            "inputs": [
+                torch_tensorrt.Input(
+                    min_shape=(1, c, h, w),
+                    opt_shape=(opt_n, c, h, w),
+                    max_shape=(1024, c, h, w),
+                    dtype=example_input.dtype,
+                )
+            ]
+        }
+    else:
+        compile_inputs = {"arg_inputs": [example_input]}
+
+    # The cls-token `cat` decides how much FP8 TRT can fuse. Static: the bf16 cat
+    # converter materializes a constant via numpy (no bf16 dtype), so we run
+    # `aten.cat` in PyTorch -> the graph splits into two engines and FP8 fusion is
+    # capped (~24 GEMMs). Dynamic: the cat operands are symbolic, so it stays one
+    # engine (~121 FP8 GEMMs); forcing it to PyTorch there also breaks the engine
+    # at runtime. The Debugger keeps per-layer info for dump_trt_layer_info().
+    cat_fallback = {} if dynamic else {"torch_executed_ops": {torch.ops.aten.cat.default}}
+    with export_torch_mode(), torch_tensorrt.dynamo.Debugger(log_level="error"):
         trt_model = torch_tensorrt.compile(
             model,
             ir="dynamo",
-            arg_inputs=[example_input],
             min_block_size=1,
             truncate_double=True,
-            torch_executed_ops={torch.ops.aten.cat.default},
+            **cat_fallback,
+            **compile_inputs,
         )
     return trt_model
+
+
+def dump_trt_layer_info(trt_model: torch.nn.Module, path: Path) -> None:
+    """Write the per-layer engine info of every TRT submodule to ``path``.
+
+    A Dynamo-compiled module can hold several ``TorchTensorRTModule`` subgraphs
+    (the parts that fell back to PyTorch sit between them), so we concatenate the
+    ``get_layer_info()`` JSON of each.
+    """
+    import torch_tensorrt
+
+    infos = [
+        mod.get_layer_info()
+        for _, mod in trt_model.named_modules()
+        if isinstance(mod, torch_tensorrt.dynamo.runtime.TorchTensorRTModule)
+    ]
+    if not infos:
+        print("No TorchTensorRTModule found; nothing to dump (whole graph fell back to PyTorch?).")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(infos))
+    print(f"Wrote TRT layer info ({len(infos)} engine(s)) to {path}")
 
 
 def _argmax_logits(out) -> torch.Tensor:
@@ -186,34 +233,28 @@ def main():
         help="HuggingFace model id of the ViT classifier to quantize.",
     )
     parser.add_argument(
-        "--precision",
-        choices=sorted(PRECISION_TO_RECIPE),
-        default="fp8",
-        help="Which ViT recipe variant to apply.",
-    )
-    parser.add_argument(
         "--recipe",
-        default=None,
-        help="Override the recipe path (relative to modelopt_recipes/ or absolute). "
-        "If unset, the recipe is picked by --precision.",
+        default=DEFAULT_RECIPE,
+        help="Recipe path (relative to modelopt_recipes/ or an absolute YAML). "
+        "Defaults to the ViT FP8 recipe; pass huggingface/vit/ptq/nvfp4 for NVFP4.",
     )
     parser.add_argument(
         "--calib_samples",
         type=int,
-        default=128,
+        default=1024,
         help="Number of tiny-imagenet samples to use for calibration.",
     )
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=1,
+        default=128,
         help="Batch size for calibration / TRT compile.",
     )
     parser.add_argument(
         "--save_dir",
         type=str,
-        default=None,
-        help="If set, save the quantized modelopt state-dict here (BF16 weights "
+        default="./modelopt_quantized",
+        help="Directory to save the quantized modelopt state-dict (BF16 weights "
         "+ Q/DQ metadata) — re-usable across runs without recalibration.",
     )
     parser.add_argument(
@@ -223,18 +264,10 @@ def main():
         "Useful for environments without torch_tensorrt installed.",
     )
     parser.add_argument(
-        "--no_pretrained",
-        action="store_true",
-        help="Build the model from config with random weights instead of "
-        "downloading pretrained weights. Useful for fast e2e tests.",
-    )
-    parser.add_argument(
-        "--model_kwargs",
-        type=str,
+        "--layer_info_path",
         default=None,
-        help="JSON string of ViTConfig overrides applied when --no_pretrained "
-        'is set (e.g. \'{"num_hidden_layers": 1, "hidden_size": 64, '
-        '"intermediate_size": 128, "num_attention_heads": 2}\').',
+        help="If set, write the compiled TRT engine's per-layer info "
+        "(get_layer_info()) to this file.",
     )
     args = parser.parse_args()
 
@@ -243,14 +276,7 @@ def main():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    config_overrides = json.loads(args.model_kwargs) if args.model_kwargs else None
-    model, processor = load_model_and_processor(
-        args.model_id,
-        device,
-        dtype,
-        pretrained=not args.no_pretrained,
-        config_overrides=config_overrides,
-    )
+    model, processor = load_model_and_processor(args.model_id, device, dtype)
     image_size = model.config.image_size
     num_channels = model.config.num_channels
     example_input = torch.randn(
@@ -266,15 +292,13 @@ def main():
         processor, args.calib_samples, args.batch_size, device, dtype
     )
 
-    recipe_path = args.recipe or PRECISION_TO_RECIPE[args.precision]
-    quantize_with_recipe(model, recipe_path, calib_batches)
+    quantize_with_recipe(model, args.recipe, calib_batches)
 
-    if args.save_dir:
-        save_path = Path(args.save_dir)
-        save_path.mkdir(parents=True, exist_ok=True)
-        ckpt = save_path / "vit_modelopt_state.pt"
-        mto.save(model, ckpt)
-        print(f"Saved quantized modelopt state to {ckpt}")
+    save_path = Path(args.save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+    ckpt = save_path / "vit_modelopt_state.pt"
+    mto.save(model, ckpt)
+    print(f"Saved quantized modelopt state to {ckpt}")
 
     print("\n=== Fake-quant (modelopt) ===")
     with torch.no_grad():
@@ -287,7 +311,10 @@ def main():
         return
 
     wrapped = ViTLogitsWrapper(model).to(device).eval()
-    trt_model = compile_with_torch_tensorrt(wrapped, example_input)
+    trt_model = compile_with_torch_tensorrt(wrapped, example_input, dynamic=True)
+
+    if args.layer_info_path:
+        dump_trt_layer_info(trt_model, Path(args.layer_info_path))
 
     print("\n=== Torch-TensorRT compiled ===")
     with torch.no_grad():

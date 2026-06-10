@@ -51,16 +51,18 @@ the version pulled by `pip` must match your installed PyTorch.
 ## Usage
 
 ```bash
-# FP8 / NVFP4 default model is google/vit-large-patch16-224
+# Default model is google/vit-large-patch16-224, default recipe is the ViT FP8 recipe
 python examples/torch_trt/torch_tensorrt_ptq.py \
-    --precision fp8/nvfp4 \
-    --calib_samples 512 \
-    --batch_size 1
+    --recipe huggingface/vit/ptq/fp8 \
+    --calib_samples 1024 \
+    --batch_size 128
+
+# NVFP4 instead of FP8
+python examples/torch_trt/torch_tensorrt_ptq.py \
+    --recipe huggingface/vit/ptq/nvfp4
 
 # Quantize but don't TRT-compile (handy on a non-TRT host)
-python examples/torch_trt/torch_tensorrt_ptq.py \
-    --precision fp8/nvfp4 \
-    --skip_trt
+python examples/torch_trt/torch_tensorrt_ptq.py --skip_trt
 
 # Custom model + custom recipe
 python examples/torch_trt/torch_tensorrt_ptq.py \
@@ -81,6 +83,23 @@ python examples/torch_trt/torch_tensorrt_ptq.py \
    that the compiled-model argmax matches the fake-quant argmax on a sample
    input.
 
+## Dynamic vs static engine (and why FP8 cares)
+
+HF ViT concatenates a cls token onto the patch embeddings. In a **static**
+compile, Torch-TensorRT's `cat` converter constant-folds that token through
+numpy — which has no bfloat16 dtype — so the bf16 graph must run `aten.cat` in
+PyTorch. That graph break splits the model into **two** TRT engines and stops
+TRT from fusing the Q/DQ nodes into FP8 across the boundary, so only ~24 FP8
+GEMMs survive for ViT-large (one per layer).
+
+In a **dynamic** compile the `cat` operands are symbolic tensors (no numpy
+materialization), so the model stays a **single** engine and TRT fuses Q/DQ into
+~121 FP8 GEMMs — including bias+GELU epilogue-fused `e4m3` kernels — a ~5× jump
+in FP8 coverage. The example therefore uses a **dynamic engine** for both fp8
+and nvfp4, built for `min=1, opt=--batch_size, max=1024` and serving any batch in
+that range. (nvfp4's low-precision kernels require Blackwell — see *Hardware
+requirements*.)
+
 ## Measuring ImageNet accuracy
 
 `torch_tensorrt_accuracy.py` reuses the pipeline above and reports ImageNet-1k
@@ -89,7 +108,8 @@ top-1 / top-5 accuracy via the `onnx_ptq` example's `evaluate()` harness
 
 ```bash
 python examples/torch_trt/torch_tensorrt_accuracy.py \
-    --precision fp8 \
+    --recipe huggingface/vit/ptq/fp8 \
+    --batch_size 128 \
     --baseline \
     --eval_data_size 5000
 ```
@@ -97,8 +117,9 @@ python examples/torch_trt/torch_tensorrt_accuracy.py \
 - `--baseline` also scores the unquantized model. It is Torch-TensorRT-compiled
   the same way as the quantized model, so every reported number comes from the
   same TRT runtime (pass `--skip_trt` to score the eager / fake-quant models).
-- The Torch-TRT engine is compiled for one static batch shape, so the eval path
-  requires `--batch_size 1`.
+- The eval uses a **dynamic** engine (default `--batch_size 128`) for both
+  precisions, so it serves the trailing partial batch at any batch size — see
+  *Dynamic vs static engine*.
 - Validation uses the gated `ILSVRC/imagenet-1k` split (accept its license / set
   `HF_TOKEN`), or point `--imagenet_path` at a local copy. `evaluate()` shuffles
   the split, so a partial `--eval_data_size` draws a different random subset each
@@ -114,10 +135,10 @@ from the shared `$import` building blocks under
 (`numerics/{fp8,nvfp4}`, `ptq/units/{w8a8_fp8_fp8,attention_qkv_fp8}`) rather
 than spelling out each `quant_cfg` entry.
 
-| Flag | Recipe path | What it quantizes |
-|------|-------------|-------------------|
-| `--precision fp8` | `huggingface/vit/ptq/fp8` | W8A8 FP8 (E4M3) on every weight + input quantizer — encoder Linears, the patch-embed `nn.Conv2d`, the `classifier` head, and per-block `nn.LayerNorm` inputs — plus FP8 on the attention Q/K/V BMMs and softmax. Output quantizers disabled. |
-| `--precision nvfp4` | `huggingface/vit/ptq/nvfp4` | NVFP4 W4A4 (E2M1, block 16, FP8 scales) on the encoder `nn.Linear` weights/inputs, with the patch-embed `nn.Conv2d`, the `classifier` head, and the attention Q/K/V BMMs + softmax held at FP8. Uses `awq_lite` calibration. |
+| `--recipe` value | What it quantizes |
+|------------------|-------------------|
+| `huggingface/vit/ptq/fp8` (default) | W8A8 FP8 (E4M3) on every weight + input quantizer — encoder Linears, the patch-embed `nn.Conv2d`, the `classifier` head, and per-block `nn.LayerNorm` inputs — plus FP8 on the attention Q/K/V BMMs and softmax. Output quantizers disabled. |
+| `huggingface/vit/ptq/nvfp4` | NVFP4 W4A4 (E2M1, block 16, FP8 scales) on the encoder `nn.Linear` weights/inputs, with the patch-embed `nn.Conv2d`, the `classifier` head, and the attention Q/K/V BMMs + softmax held at FP8. Uses `awq_lite` calibration. |
 
 ## Hardware requirements
 
@@ -132,9 +153,9 @@ low-precision kernel.
 
 ### Resuming from a saved checkpoint
 
-Pass `--save_dir <path>` to persist the modelopt-quantized model
-(`vit_modelopt_state.pt`). To reload without recalibrating, restore it
-before the TRT compile step with:
+The quantized modelopt model is saved to `--save_dir` (default
+`./modelopt_quantized`) as `vit_modelopt_state.pt`. To reload without
+recalibrating, restore it before the TRT compile step with:
 
 ```python
 import modelopt.torch.opt as mto
