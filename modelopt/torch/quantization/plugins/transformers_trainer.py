@@ -32,7 +32,6 @@ from modelopt.torch.opt.plugins import ModelOptHFTrainer
 from modelopt.torch.opt.plugins.transformers import ModelOptHFArguments
 from modelopt.torch.utils import get_module_device, print_rank_0
 
-from ..config import QuantizeConfig
 from ..nn import TensorQuantizer
 from ..utils import (
     calibrate_with_adapters,
