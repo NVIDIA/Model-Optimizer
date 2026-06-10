@@ -95,4 +95,6 @@ pipeline:
       segment: 4
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: vllm/vllm-openai:v0.17.0-aarch64
+      # Pin 0.22.0: 0.22.1 regressed Kimi serve (profile_run runs the ViT and hits
+      # a `fmax()` crash in kimi_k25_vit.py); 0.17.0 fails SpeculativeConfig validation.
+      container: vllm/vllm-openai:v0.22.0-aarch64
