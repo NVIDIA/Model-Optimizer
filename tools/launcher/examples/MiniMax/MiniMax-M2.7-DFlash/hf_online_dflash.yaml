@@ -55,6 +55,13 @@ pipeline:
       - dflash.dflash_num_anchors=512
       - dflash.dflash_loss_decay_factor=4.0
       - dflash.dflash_architecture_config.num_hidden_layers=5
+      # Mask token for block-diffusion. The DFlash draft ships no embeddings — it reuses
+      # the target's embed_tokens at deploy — so the mask id MUST be a token that already
+      # physically exists in the target embedding (not one added via resize, which would
+      # neither be trained, with the base frozen, nor exported). MiniMax-M2.7's embedding
+      # is 200064 rows while only 0..200053 are real tokens, so 200054 is an existing
+      # reserved row: using it makes train==deploy by construction and avoids resizing.
+      - dflash.dflash_mask_token_id=200054
       # Long-context RoPE injected at export (YaRN). DFlash trains on a short window
       # (~4096) but drafts for MiniMax-M2.7 at up to 196608 tokens; factor = 196608/4096
       # = 48. Mirrors nvidia/Kimi-K2.6-Eagle3. Validated: 32k AL 1.17 -> 2.62.

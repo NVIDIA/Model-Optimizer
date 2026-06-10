@@ -164,8 +164,19 @@ See [`modelopt_recipes/general/speculative_decoding/dflash.yaml`](../../../model
 | `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables, see below) |
 | `dflash.dflash_self_logit_distillation` | true | Use target model logits as soft labels (vs hard CE) |
 | `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
-| `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
+| `dflash.dflash_mask_token_id` | auto | Token ID for masked positions (see note below) |
+| `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
 | `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
+
+> **Note on `dflash_mask_token_id`:** masked positions are embedded with the **base/target
+> model's** `embed_tokens` (the draft ships no embeddings — it reuses the target's at
+> deployment). So the mask id must be a token that **physically exists in the target
+> embedding**. If left unset and the tokenizer has no mask token, training prefers an
+> existing reserved row (when the embedding is padded past the used vocab) over resizing,
+> because a resized-in row would be neither trained (the base is frozen) nor exported, and
+> absent from the target at inference. For production models, pin `dflash_mask_token_id` to
+> an existing reserved token id — e.g. MiniMax-M2.7 uses `200054` (its embedding has 200064
+> rows; tokens 0..200053 are real, 200054+ are reserved).
 
 > **Note on `answer_only_loss` and chat templates:** When `answer_only_loss=true`, the
 > tokenizer's chat template must include `{% generation %}` / `{% endgeneration %}` tags

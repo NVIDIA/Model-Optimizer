@@ -241,17 +241,43 @@ def train():
             if recipe.dflash.dflash_mask_token_id is None:
                 recipe.dflash.dflash_mask_token_id = getattr(tokenizer, "mask_token_id", None)
             if recipe.dflash.dflash_mask_token_id is None:
-                mask_token = "<|mask|>"
-                tokenizer.add_special_tokens({"mask_token": mask_token})
-                orig_dtype = model.dtype
-                model.resize_token_embeddings(len(tokenizer))
-                if model.dtype != orig_dtype:
-                    model.to(orig_dtype)
-                recipe.dflash.dflash_mask_token_id = tokenizer.mask_token_id
-                print_rank_0(
-                    f"Added {mask_token} (ID={tokenizer.mask_token_id}), "
-                    f"resized embeddings to {len(tokenizer)}"
-                )
+                # The DFlash draft ships NO embeddings — masked positions are embedded via
+                # the base/target embed_tokens at mask_token_id, and at deployment vLLM
+                # reuses the *target's* embed table. So the mask id must be a row that
+                # physically exists in the target embedding. Resizing to append a new
+                # "<|mask|>" row is unsafe: with the base model frozen the row is never
+                # trained, it is never exported (the draft has no embeddings), and it is
+                # absent from the target at inference. Prefer an existing reserved row —
+                # many tokenizers leave the embedding padded past the used vocab — so that
+                # train and deploy resolve the identical frozen embedding by construction.
+                embed = model.get_input_embeddings()
+                n_phys = embed.weight.shape[0]
+                n_used = len(tokenizer)
+                if n_phys > n_used:
+                    recipe.dflash.dflash_mask_token_id = n_used
+                    print_rank_0(
+                        f"DFlash: no mask token configured; reusing existing reserved "
+                        f"embedding row {n_used} as mask_token_id (embedding has {n_phys} "
+                        f"rows, tokenizer vocab {n_used}). No resize — the row already "
+                        f"exists in the target and is frozen, so train==deploy."
+                    )
+                else:
+                    mask_token = "<|mask|>"
+                    tokenizer.add_special_tokens({"mask_token": mask_token})
+                    orig_dtype = model.dtype
+                    model.resize_token_embeddings(len(tokenizer))
+                    if model.dtype != orig_dtype:
+                        model.to(orig_dtype)
+                    recipe.dflash.dflash_mask_token_id = tokenizer.mask_token_id
+                    print_rank_0(
+                        f"WARNING: DFlash added {mask_token} (ID={tokenizer.mask_token_id}) "
+                        f"and resized embeddings to {len(tokenizer)}. The DFlash draft does "
+                        f"NOT export embeddings and the base model is frozen, so this new "
+                        f"row is neither trained nor shipped. At deployment vLLM must find "
+                        f"this id in the TARGET model's embed_tokens — ensure the target "
+                        f"vocab physically contains index {tokenizer.mask_token_id}, or pin "
+                        f"dflash.dflash_mask_token_id to an existing reserved token id."
+                    )
             dflash_cfg: dict = recipe.dflash.model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
