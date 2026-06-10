@@ -267,7 +267,10 @@ def _clip_grad_norm(parameters, max_norm, norm_type=2):
 
     grads = [p.grad for p in parameters if p.grad is not None]
     if len(grads) == 0:
-        return torch.tensor(0.0)
+        # Match the device of the normal return path (GPU when training on CUDA) so
+        # callers don't hit a device mismatch on the empty-grad case.
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        return torch.tensor(0.0, device=dev)
 
     # Shard DTensors hold partial data — need all_reduce for global norm.
     # Replicate DTensors and regular tensors already hold full data.

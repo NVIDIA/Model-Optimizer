@@ -297,7 +297,9 @@ def build_slurm_executor(
         retries=0,
         packager=packager,
         srun_args=slurm_config.srun_args,
-        additional_parameters=getattr(slurm_config, "additional_parameters", None) or {},
+        # Copy into a fresh dict so the requeue mutation below doesn't leak back into
+        # the shared slurm_config.additional_parameters.
+        additional_parameters=dict(getattr(slurm_config, "additional_parameters", None) or {}),
     )
     if getattr(slurm_config, "requeue", False):
         executor.additional_parameters["requeue"] = True

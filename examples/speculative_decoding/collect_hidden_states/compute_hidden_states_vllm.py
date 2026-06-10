@@ -53,6 +53,9 @@ def _resolve_aux_layers_standalone(aux_layers: str, num_hidden_layers: int) -> l
     container does not have, so the import fails. Resolve the 'dflash' preset inline
     (mirroring ``modeling_dflash.build_target_layer_ids`` with num_draft=5, the recipe
     default) and accept an explicit comma-separated int list. Keep in sync with modelopt.
+
+    TODO: drop this once ``common.resolve_aux_layers`` is decoupled from the heavy
+    ``modelopt.torch`` import chain so it can be reused directly in a vLLM container.
     """
     spec = aux_layers.strip().lower()
     if spec == "dflash":
@@ -64,6 +67,13 @@ def _resolve_aux_layers_standalone(aux_layers: str, num_hidden_layers: int) -> l
         span = end - start
         return sorted({round(start + (i * span) / (num_draft - 1)) for i in range(num_draft)})
     ids = sorted({int(t) for t in aux_layers.split(",") if t.strip()})
+    # Match the shared helper's contract: ids must be valid layer indices.
+    out_of_range = [i for i in ids if not 0 <= i < num_hidden_layers]
+    if out_of_range:
+        raise ValueError(
+            f"--aux-layers ids {out_of_range} out of range [0, {num_hidden_layers}) "
+            f"for a {num_hidden_layers}-layer model."
+        )
     if not ids:
         raise ValueError(
             f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
@@ -271,6 +281,17 @@ def main(args: argparse.Namespace) -> None:
             aux_hidden_states = aux.reshape(aux.shape[0], -1)
         else:
             aux_hidden_states = torch.empty(0)
+
+        # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
+        # to itself and silently misalign with the hidden states, so guard explicitly.
+        n_hs = output_hidden_states.shape[0]
+        if loss_mask.shape[0] < n_hs:
+            print(
+                f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
+                f"states ({n_hs}); skipping to avoid misalignment"
+            )
+            num_error += 1
+            continue
 
         output_file = output_dir / f"{conv_id}.pt"
         with open(output_file, "wb") as f:
