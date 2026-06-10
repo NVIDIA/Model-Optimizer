@@ -587,6 +587,25 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
         module.__dict__.pop("weight", None)
 
 
+def get_original_hf_quant_method(config) -> str | None:
+    """Return the checkpoint's original ``quantization_config.quant_method``, if any.
+
+    Returns e.g. ``"mxfp4"`` for native MXFP4 checkpoints (OpenAI's gpt-oss family), or
+    ``None`` for unquantized models. Handles ``quantization_config`` stored as a dict or a
+    config object, and the nested ``text_config`` of multi-modal models.
+    """
+    for cfg in (config, getattr(config, "text_config", None)):
+        quant_cfg = getattr(cfg, "quantization_config", None)
+        method = (
+            quant_cfg.get("quant_method")
+            if isinstance(quant_cfg, dict)
+            else getattr(quant_cfg, "quant_method", None)
+        )
+        if method:
+            return str(method)
+    return None
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -690,6 +709,29 @@ def get_model(
                     trust_remote_code=trust_remote_code,
                     dtype="auto",
                 )
+        elif get_original_hf_quant_method(hf_config) == "mxfp4":
+            # Native MXFP4 checkpoints (e.g. openai/gpt-oss-*) must be dequantized to
+            # plain BF16 experts (``GptOssExperts``) so ModelOpt can insert and export
+            # quantizers: the packed-kernel experts wrapper (``Mxfp4GptOssExperts``,
+            # used when the optional ``kernels`` package is present) is not supported by
+            # the unified HF export. Force dequantization regardless of whether
+            # ``kernels`` is installed.
+            # Local import: ``Mxfp4Config`` only exists in newer Transformers (gpt-oss support);
+            # importing it at module scope would break example_utils for users on older
+            # Transformers running unrelated (non-MXFP4) models.
+            from transformers import Mxfp4Config
+
+            # Load with a *sequential* device map (not "auto"): the MXFP4->BF16 dequant
+            # runs inside Transformers' threaded weight loader, and an "auto"/balanced
+            # split across multiple GPUs trips a CUDA illegal-memory access during dequant
+            # materialization. Sequential keeps each shard's dequant on a single device
+            # (the whole model lands on one GPU when it fits there).
+            model_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path,
+                device_map="cpu" if device == "cpu" else "sequential",
+                **model_kwargs,
+            )
         else:
             architecture = hf_config.architectures[0]
 
