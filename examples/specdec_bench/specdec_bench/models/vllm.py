@@ -63,27 +63,51 @@ class VLLMModel(Model):
                 specdec["disable_padded_drafter_batch"] = True
                 specdec["parallel_draft_block_sizes"] = kwargs.get("parallel_draft_block_sizes")
         elif kwargs.get("speculative_algorithm") == "MTP":
+            # vLLM's ``SpeculativeConfig.__post_init__`` (vllm/config/
+            # speculative.py:529-602) does method auto-detection ONLY
+            # when ``method`` is unset — when ``model`` is provided and
+            # ``method`` is None, the default branch sets
+            # ``method = "draft_model"`` (the generic same-architecture
+            # draft path), NOT MTP. That path enforces equal num_heads
+            # between target and draft and raises
+            # ``AssertionError: All layers in one attention group must
+            # share num_heads`` on heterogeneous-head models like
+            # Gemma 4 (target=8 heads, assistant=4).
+            #
+            # The canonical config for ALL MTP variants is to ALWAYS
+            # pass ``method="mtp"`` AND ADD ``model=<assistant>`` only
+            # when the family uses a separate assistant model. vLLM's
+            # own test at ``tests/v1/e2e/spec_decode/test_spec_decode.py``
+            # (lines 818-823) does exactly this for the gemma4-e4b
+            # parametrization:
+            #
+            #     speculative_config = {
+            #         "method": "mtp",
+            #         "num_speculative_tokens": ...,
+            #     }
+            #     if draft_model is not None:        # Gemma 4 case
+            #         speculative_config["model"] = draft_model
+            #
+            # Surfaced on OMNIML-5024 pipeline #54356795: dropping the
+            # ``method`` key when ``draft_model_dir`` was provided sent
+            # the call into the generic draft_model path, hitting the
+            # num_heads assertion. Restored both keys.
+            specdec = {
+                "method": "mtp",
+                "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
+            }
             draft_model_dir = kwargs.get("draft_model_dir")
             if draft_model_dir:
-                # Assistant-model MTP (e.g. Gemma 4): vLLM's Gemma4 MTP
-                # support (vllm-project/vllm#41745) expects
-                # ``speculative_config={"model": <assistant>, ...}`` with
-                # no ``method`` key — vLLM auto-detects Gemma4 from the
-                # assistant model. Passing ``method: "mtp"`` here triggers
-                # ``NotImplementedError: Unsupported speculative method:
-                # 'mtp'`` on Gemma4 even on a container that has the
-                # support (e.g. ``vllm/vllm-openai:v0.22.1``+).
-                specdec = {
-                    "model": draft_model_dir,
-                    "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
-                }
-            else:
-                # Generic MTP path (Qwen3.5 etc.) — model carries its
-                # own MTP layer; no separate draft / assistant model.
-                specdec = {
-                    "method": "mtp",
-                    "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
-                }
+                # Gemma 4 family (E2B / E4B / 26B-A4B / 31B) uses a
+                # separate assistant checkpoint as the MTP draft.
+                # vLLM auto-detects Gemma4 MTP from the assistant
+                # ``model_type=gemma4_assistant`` and rewrites it to
+                # ``gemma4_mtp`` (speculative.py:511-522). For
+                # families where the MTP layer ships inside the
+                # target (Qwen 3.5 etc.), omit ``--draft_model_dir``
+                # and let vLLM use the target model as its own draft
+                # (handled in speculative.py:562-573).
+                specdec["model"] = draft_model_dir
         elif kwargs.get("speculative_algorithm") == "DFLASH":
             specdec = {
                 "method": "dflash",
