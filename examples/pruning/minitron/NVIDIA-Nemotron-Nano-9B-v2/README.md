@@ -266,18 +266,17 @@ python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
 
 The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
 
-Before running, update the following fields in the yaml or overwrite them in the command line with `-o <option>=<value>`:
+<details>
+<summary>Evaluation launch steps (click to expand)</summary>
+
+Before running, update the following fields in the `nemo_evaluator.yaml` file or overwrite them in the command line with `-o <option>=<value>`:
 
 - `execution.hostname` — your Slurm login node hostname
 - `execution.account` — your Slurm account
-- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned or quantized)
-- `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
-
-> [!TIP]
-> Uncomment `limit_samples` under any task to run a small subset and verify the end-to-end eval pipeline before launching full evals.
+- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
 
 ```bash
-pip install "nemo-evaluator-launcher[all]==0.1.90"
+pip install "nemo-evaluator-launcher[all]==0.1.82"
 
 # Set required environment variables:
 export HF_TOKEN=<your_huggingface_token>
@@ -291,11 +290,13 @@ export INFERENCE_API_KEY=xxxxxx
 export OPENAI_CLIENT_ID=xxxxxx
 export OPENAI_CLIENT_SECRET=xxxxxx
 
+# Run the evaluation
+# To run a small subset and verify the end-to-end eval pipeline before launching full evals, add `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8` (applies to all tasks)
+# To restrict which tasks run, add `-t <task_name>` to the command.
 nemo-evaluator-launcher run --config nemo_evaluator.yaml
 ```
 
-> [!TIP]
-> Run same evals multiple times to get a more stable result.
+</details>
 
 **Tasks and exact metric names reported in the results table:**
 
@@ -304,8 +305,8 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 | MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | N/A | `mmlu` |
 | MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
 | GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
-| LiveCodeBench v6 | NeMo Evaluator | 8 | `livecodebench_pass_at_1_avg-of-8_accuracy` |
-| AIME 2025 | NeMo Evaluator | 64 | `aime25_pass_at_1_avg-of-64_symbolic_correct` |
+| LiveCodeBench v6 | NeMo Evaluator | 4 | `livecodebench_pass_at_1_avg-of-4_accuracy` |
+| AIME 2025 | NeMo Evaluator | 32 | `aime25_pass_at_1_avg-of-32_symbolic_correct` |
 | Math 500 | NeMo Evaluator | 5 | `AA_math_test_500_score_micro_avg_of_5` |
 | IFEval | NeMo Evaluator | 1 | `ifeval_pass_at_1_average_score` |
 | SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |

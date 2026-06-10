@@ -1,0 +1,24 @@
+name: Cache extensions
+description: Cache and reuse JIT-compiled extensions (e.g. CUDA extensions) across runs.
+
+inputs:
+  cache-key:
+    description: Environment discriminator for the cache key (e.g. GPU arch + container image).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
+    - id: cache
+      uses: actions/cache@v4
+      with:
+        path: /root/.cache/torch_extensions
+        key: torch-ext-${{ inputs.cache-key }}-${{ hashFiles('modelopt/torch/kernels/quantization/**', 'modelopt/torch/quantization/extensions.py', 'modelopt/torch/utils/cpp_extension.py')
+          }}
+    # On a cache hit, backdate sources below the cached objects so ninja reuses them (touching
+    # the objects instead would desync ninja's .ninja_deps and force a rebuild).
+    - if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: find modelopt/torch/kernels/quantization -exec touch -d '2000-01-01' {} +

@@ -26,7 +26,7 @@ on:
         description: "GitHub runner to use"
         required: false
         type: string
-        default: "linux-amd64-gpu-h100-latest-1"
+        default: "linux-amd64-gpu-rtxpro6000-latest-1"
 
 jobs:
   run-test:
@@ -41,6 +41,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
+      - uses: ./.github/actions/cache-extensions
+        with:
+          cache-key: rtxpro6000-${{ inputs.docker_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV

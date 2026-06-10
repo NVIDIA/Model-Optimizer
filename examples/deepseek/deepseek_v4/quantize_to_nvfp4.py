@@ -63,6 +63,20 @@ calibration (common in V4's first ``n_hash_layers`` with deterministic
     for the same projection. If no calibrated expert exists for that
     projection, export fails.
 
+Lossless weight cast (``--cast_mxfp4_to_nvfp4``): the source routed experts are
+already MXFP4 (E2M1 nibbles + a power-of-two E8M0 scale per 32-element block).
+By default this script dequantizes them to BF16 and re-quantizes to NVFP4 with
+the calibrated per-tensor weight amax, which re-derives per-block scales from
+the data and is therefore lossy. With ``--cast_mxfp4_to_nvfp4`` we instead pin
+``scale_2 = 2^(k_max - 8)`` and the per-block E4M3 scale to ``2^(k_j - m)``
+straight from the source E8M0 scales, so ``per_block_scale * scale_2 = 2^k_j``
+and the NVFP4 nibbles equal the source MXFP4 nibbles bit-for-bit (for every
+block whose ``k_j`` lands in E4M3's representable window). The flag only affects
+routed-expert *weights*; activation ``input_scale`` still comes from
+``--amax_path`` calibration. This mirrors the GPTOSS cast in
+``examples/llm_ptq/cast_mxfp4_to_nvfp4.py`` (PR #1372); the V4 twist is that
+w1/w3 share one ``scale_2`` (fused GEMM1), so ``k_max`` is taken over both.
+
 Usage (single compute node, CPU-default; dequant+requant math is cheap
 relative to shard I/O):
 
@@ -90,6 +104,17 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
+
+# Closed-form MXFP4 -> NVFP4 numerics shared with the GPT-OSS cast (PR #1372).
+from modelopt.torch.quantization.utils.numeric_utils import (
+    E2M1_MAX,
+    E4M3_KMAX,
+    E4M3_KMIN,
+    E4M3_MAX,
+    E8M0_BIAS,
+    mxfp4_to_nvfp4_global_amax,
+    mxfp4_to_nvfp4_per_block_amax,
+)
 
 # Routed-expert weights in regular MoE layers. MTP experts remain in source format.
 _EXPERT_WEIGHT_RE = re.compile(r"^layers\.\d+\.ffn\.experts\.\d+\.w[123]\.weight$")
@@ -233,6 +258,98 @@ def _quantize_weight_nvfp4(
     return q_tensor._quantized_data, weight_scale, weight_scale_2, synthesized
 
 
+# ---------------------------------------------------------------------------
+# Lossless MXFP4 -> NVFP4 weight cast (``--cast_mxfp4_to_nvfp4``).
+#
+# NVFP4 uses the same E2M1 nibble grid as MXFP4 with 16-element blocks and a
+# two-level scale ``per_block_scale (E4M3) * scale_2 (fp32)``. Pinning
+# ``scale_2 = 2^m`` (``m = k_max - 8``) and ``per_block_scale = 2^(k_j - m)``
+# makes ``per_block_scale * scale_2 = 2^k_j`` exactly, so each NVFP4 nibble
+# equals the source MXFP4 nibble verbatim — bit-exact for every block whose
+# ``k_j`` lands in E4M3's window (``k_max - k_j <= 17``). The closed-form
+# per-block amax and the format constants are reused from the GPT-OSS cast
+# (``cast_mxfp4_to_nvfp4``, PR #1372); the V4 twist is that w1/w3 share one
+# ``scale_2`` (fused GEMM1), so ``k_max`` is taken over both projections.
+# ---------------------------------------------------------------------------
+_NVFP4_BLOCK = 16  # NVFP4 block size (elements)
+_MXFP4_BYTES_PER_BLOCK = 16  # 32 E2M1 nibbles packed 2-per-byte
+
+
+def _kmax_from_mxfp4_scale(mxfp4_scale: torch.Tensor, device: str = "cpu") -> int:
+    """Largest non-zero E8M0 exponent ``k_j = e8m0 - 127`` (0 if all-zero).
+
+    Delegates to the GPT-OSS cast's ``k_max`` logic, which excludes the
+    all-zero sentinel (``e8m0 == 0`` => ``k == -127``).
+    """
+    e8m0 = mxfp4_scale.to(device).contiguous().view(torch.uint8)
+    return mxfp4_to_nvfp4_global_amax(e8m0)[1]["k_max"]
+
+
+def _build_w13_kmax_overrides(f, expert_weight_keys: list[str], device: str) -> dict[str, int]:
+    """Shared ``k_max`` per w1/w3 pair so the fused GEMM1 gets one ``scale_2``."""
+    groups: dict[str, dict[str, str]] = defaultdict(dict)
+    for key in expert_weight_keys:
+        expert_path = key[: -len(".weight")]
+        base, proj = expert_path.rsplit(".", 1)
+        if proj in {"w1", "w3"}:
+            groups[base][proj] = expert_path
+
+    overrides: dict[str, int] = {}
+    for paths in groups.values():
+        if "w1" not in paths or "w3" not in paths:
+            continue
+        k1 = _kmax_from_mxfp4_scale(f.get_tensor(paths["w1"] + ".scale"), device)
+        k3 = _kmax_from_mxfp4_scale(f.get_tensor(paths["w3"] + ".scale"), device)
+        shared = max(k1, k3)
+        overrides[paths["w1"]] = shared
+        overrides[paths["w3"]] = shared
+    return overrides
+
+
+def _quantize_weight_nvfp4_lossless(
+    mxfp4_weight: torch.Tensor,
+    mxfp4_scale: torch.Tensor,
+    k_max: int,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+    """Closed-form bit-exact MXFP4 -> NVFP4 weight conversion.
+
+    Pins ``scale_2 = 2^(k_max - 8)`` and the per-block E4M3 scale to
+    ``2^(k_j - m)`` so the NVFP4 nibbles equal the source MXFP4 nibbles for
+    every in-range block. ``k_max`` is shared across w1/w3 (fused GEMM1), so it
+    is passed in rather than derived per tensor. The closed-form per-block amax
+    (``6 * 2^k_j`` in range, data-derived out of range) is independent of
+    ``k_max``, so we reuse the GPT-OSS helper directly. Returns
+    ``(packed, weight_scale, weight_scale_2, n_blocks, n_lossless)``.
+    """
+    bf16 = _dequantize_mxfp4_to_bf16(mxfp4_weight, mxfp4_scale, device)
+    e8m0 = mxfp4_scale.to(bf16.device).contiguous().view(torch.uint8)  # (out, nblk32)
+    packed = mxfp4_weight.to(bf16.device).contiguous().view(torch.uint8)  # (out, nblk32*16)
+    blocks = packed.view(*packed.shape[:-1], e8m0.shape[-1], _MXFP4_BYTES_PER_BLOCK)
+    per_block_amax = mxfp4_to_nvfp4_per_block_amax(blocks, e8m0)  # (out, nblk16) fp32
+
+    m = k_max - E4M3_KMAX
+    weight_scale_2 = torch.tensor(2.0**m, dtype=torch.float32, device=bf16.device).reshape(())
+    per_block_scale = (
+        (per_block_amax / (E2M1_MAX * weight_scale_2))
+        .clamp(min=2**-9, max=E4M3_MAX)
+        .to(torch.float8_e4m3fn)
+    )
+
+    # Lossless accounting against the (possibly shared) k_max. A block is lossy
+    # only if k_max - k_j > 17; all-zero blocks (e8m0 == 0) reconstruct to 0
+    # regardless of scale and so are always lossless.
+    k = e8m0.to(torch.int32) - E8M0_BIAS
+    lossless = (k >= (k_max - (E4M3_KMAX - E4M3_KMIN))) | (e8m0 == 0)
+    n_blocks = k.numel()
+    n_lossless = int(lossless.sum().item())
+
+    q_tensor, weight_scale, _ = NVFP4QTensor.quantize(
+        bf16, _NVFP4_BLOCK, per_block_scale, weight_scale_2, try_tensorrt=False
+    )
+    return q_tensor._quantized_data, weight_scale, weight_scale_2, n_blocks, n_lossless
+
+
 def _build_w13_weight_amax_overrides(
     f,
     expert_weight_keys: list[str],
@@ -279,6 +396,7 @@ def convert_shard(
     input_fallback: dict[str, torch.Tensor],
     device: str,
     stats: dict[str, int],
+    cast: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Rewrite one HF-style shard and return index deltas."""
     out: dict[str, torch.Tensor] = {}
@@ -289,9 +407,16 @@ def convert_shard(
         all_keys = list(f.keys())
         expert_weight_keys = [k for k in all_keys if _EXPERT_WEIGHT_RE.match(k)]
         expert_weight_key_set = set(expert_weight_keys)
-        w13_weight_amax, w13_synth_paths = _build_w13_weight_amax_overrides(
-            f, expert_weight_keys, amax, device
-        )
+        if cast:
+            # Closed-form weight cast derives scales from the source E8M0
+            # exponents, not from calibrated weight amax. w1/w3 share k_max.
+            w13_kmax = _build_w13_kmax_overrides(f, expert_weight_keys, device)
+            w13_weight_amax, w13_synth_paths = {}, set()
+        else:
+            w13_kmax = {}
+            w13_weight_amax, w13_synth_paths = _build_w13_weight_amax_overrides(
+                f, expert_weight_keys, amax, device
+            )
         scale_siblings = {
             k[: -len(".weight")] + ".scale"
             for k in expert_weight_keys
@@ -335,9 +460,22 @@ def convert_shard(
 
                 w = f.get_tensor(key)
                 s = f.get_tensor(scale_key)
-                packed, weight_scale, weight_scale_2, weight_synth = _quantize_weight_nvfp4(
-                    w, s, weight_amax, device=device
-                )
+                if cast:
+                    k_max = w13_kmax.get(expert_path)
+                    if k_max is None:
+                        k_max = _kmax_from_mxfp4_scale(s, device)
+                    packed, weight_scale, weight_scale_2, n_blk, n_lossless = (
+                        _quantize_weight_nvfp4_lossless(w, s, k_max, device)
+                    )
+                    weight_synth = False
+                    stats["cast_blocks_total"] += n_blk
+                    stats["cast_blocks_lossless"] += n_lossless
+                    if n_lossless < n_blk:
+                        stats[f"cast_oor_tensors_{block_kind}"] += 1
+                else:
+                    packed, weight_scale, weight_scale_2, weight_synth = _quantize_weight_nvfp4(
+                        w, s, weight_amax, device=device
+                    )
                 input_scale = _amax_to_nvfp4_scale_2(input_amax).to(weight_scale_2.device)
 
                 out[key] = packed.cpu()
@@ -607,6 +745,17 @@ def main():
         action="store_true",
         help="replace an existing non-empty output checkpoint directory",
     )
+    p.add_argument(
+        "--cast_mxfp4_to_nvfp4",
+        action="store_true",
+        help=(
+            "losslessly cast the source MXFP4 routed-expert weights to NVFP4 "
+            "(pin scale_2 = 2^(k_max-8) and per-block scale = 2^(k_j-m) from the "
+            "source E8M0 scales) instead of dequant + re-quant with calibrated "
+            "weight amax. Only affects weights; input_scale still comes from "
+            "--amax_path calibration."
+        ),
+    )
     args = p.parse_args()
 
     _validate_paths(args.source_ckpt, args.output_ckpt)
@@ -639,6 +788,7 @@ def main():
             input_fallback,
             args.device,
             stats,
+            args.cast_mxfp4_to_nvfp4,
         )
         shard_updates[src.name] = (added, removed)
 
@@ -646,6 +796,12 @@ def main():
     _log("[stats]")
     for k in sorted(stats.keys()):
         _log(f"  {k:40s} {stats[k]}")
+
+    if args.cast_mxfp4_to_nvfp4:
+        tot = stats.get("cast_blocks_total", 0)
+        loss = stats.get("cast_blocks_lossless", 0)
+        pct = 100.0 * loss / tot if tot else 100.0
+        _log(f"[cast] lossless MXFP4->NVFP4 blocks: {loss}/{tot} ({pct:.4f}%)")
 
     quantized: set[str] = set()
     for _added, _removed in shard_updates.values():
