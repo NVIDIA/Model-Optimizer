@@ -89,7 +89,7 @@ def _replace_attention_impl(worker):
             "sparsity_n": env_q["sparsity_n"],
             "sparsity_m": env_q["sparsity_m"],
             "dense_sink_tokens": 0,
-            "dense_recent_tokens": 0,
+            "dense_recent_tokens": 128,
         }
         if "sparsity_n" in env_q
         else {}

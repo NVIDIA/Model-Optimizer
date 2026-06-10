@@ -141,7 +141,7 @@ def _build_sparse_kw(layer_cfg: dict) -> dict:
         sparse_kw["sparsity_n"] = sparsity_n
         sparse_kw["sparsity_m"] = layer_cfg.get("sparsity_m", 4)
         sparse_kw["dense_sink_tokens"] = layer_cfg.get("dense_sink_tokens", 0)
-        sparse_kw["dense_recent_tokens"] = layer_cfg.get("dense_recent_tokens", 64)
+        sparse_kw["dense_recent_tokens"] = layer_cfg.get("dense_recent_tokens", 128)
 
     threshold = layer_cfg.get("skip_softmax_threshold")
     if threshold is not None:

@@ -280,7 +280,7 @@ def _attn_fwd(
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
     DENSE_SINK_TOKENS: tl.constexpr = 0,  # Leading KV tokens kept dense (attention sinks)
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,  # Recent KV tokens kept dense (BLOCK_N-independent)
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,  # Recent KV tokens kept dense (BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
@@ -597,7 +597,7 @@ def _attn_bwd_dq(
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
     DENSE_SINK_TOKENS: tl.constexpr = 0,
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
@@ -748,7 +748,7 @@ def _attn_bwd_dkdv(
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
     DENSE_SINK_TOKENS: tl.constexpr = 0,
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
@@ -1258,7 +1258,7 @@ def attention(
     sparsity_n: int = 0,
     sparsity_m: int = 4,
     dense_sink_tokens: int = 0,
-    dense_recent_tokens: int = 64,
+    dense_recent_tokens: int = 128,
     skip_softmax_threshold: float | None = None,
     measure_sparsity: bool = False,
     nvfp4: set[str] | None = None,
