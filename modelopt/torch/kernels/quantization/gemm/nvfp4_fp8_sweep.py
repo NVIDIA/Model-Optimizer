@@ -163,14 +163,13 @@ def nvfp4_fp8_scale_sweep(
 
 
 # Each program sweeps a tile of output rows of one cin-block, so the block's [BS, BS] Hessian
-# loads once and dwᵀ H dw runs as a [ROWS, BS] x [BS, BS] tl.dot on tensor cores. ROWS=32 was
-# fastest in a shape sweep; a single config keeps compile time to one build per weight shape.
-_FP8_SWEEP_HESSIAN_AUTOTUNE_CONFIGS = [
-    triton.Config({"ROWS_PER_PROGRAM": 32}, num_warps=4),
-]
+# loads once and dwᵀ H dw runs as a [ROWS, BS] x [BS, BS] tl.dot on tensor cores.
+# ROWS_PER_PROGRAM=32 / num_warps=4 was fastest in a shape sweep; hard-coded (not autotuned)
+# since there is no second config to tune over.
+_HESSIAN_ROWS_PER_PROGRAM = 32
+_HESSIAN_NUM_WARPS = 4
 
 
-@triton.autotune(configs=_FP8_SWEEP_HESSIAN_AUTOTUNE_CONFIGS, key=["COUT", "N_CIN_BLOCKS"])
 @triton.jit
 def _fp8_scale_sweep_hessian_kernel(
     x_ptr,  # [COUT * N_CIN_BLOCKS * BLOCK_SIZE], any float dtype (loaded as fp32)
@@ -265,7 +264,7 @@ def nvfp4_fp8_scale_sweep_hessian(
         )
 
     cout = n_blocks // n_cin_blocks
-    grid = lambda meta: (triton.cdiv(cout, meta["ROWS_PER_PROGRAM"]) * n_cin_blocks,)
+    grid = (triton.cdiv(cout, _HESSIAN_ROWS_PER_PROGRAM) * n_cin_blocks,)
     with torch.cuda.device(x.device):
         global_amax_f32 = global_amax.detach().to(device=x.device, dtype=torch.float32).reshape(())
         # Candidate scales via the reference ``compute_fp4_scales`` (the exact fake-quant path)
@@ -285,5 +284,7 @@ def nvfp4_fp8_scale_sweep_hessian(
             n_cin_blocks,
             BLOCK_SIZE=block_size,
             NUM_CANDIDATES=int(candidate_amaxes.numel()),
+            ROWS_PER_PROGRAM=_HESSIAN_ROWS_PER_PROGRAM,
+            num_warps=_HESSIAN_NUM_WARPS,
         )
     return best_amax
