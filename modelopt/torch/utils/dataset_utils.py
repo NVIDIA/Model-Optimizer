@@ -211,6 +211,12 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-SFT-Agentic-v2",
             "split": ["search"],
         },
+        # ``datasets>=4`` strictly casts each JSONL chunk to the repo's declared
+        # ``dataset_info`` features, which don't match the raw rows (extra ``uuid`` /
+        # ``used_in`` columns, different ``metadata`` / ``tools`` structs) -> ``CastError``.
+        # Reading the raw files through the generic ``json`` builder infers the schema
+        # from the actual data and sidesteps the cast.  ``{split}`` is substituted per split.
+        "data_files": "data/{split}*.jsonl",
         "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
@@ -531,11 +537,19 @@ def get_dataset_samples(
 
     is_registered = not is_jsonl and dataset_name in SUPPORTED_DATASET_CONFIG
 
+    # Optional per-dataset ``data_files`` template (e.g. ``"data/{split}*.jsonl"``).  When
+    # set, the split is loaded from the repo's raw files via the generic ``json`` builder
+    # instead of the declared ``dataset_info`` schema, sidestepping ``datasets>=4`` casts.
+    # Only applies to remote registered datasets (not local-path overrides).
+    data_files_tmpl: str | None = None
+
     if is_registered:
         dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
         config = dataset_config["config"].copy()
         if local_dataset_path:
             config["path"] = local_dataset_path
+        else:
+            data_files_tmpl = dataset_config.get("data_files")
         splits = requested_splits if requested_splits is not None else config.pop("split", [None])
         if split is not None:
             config.pop("split", None)
@@ -597,9 +611,22 @@ def get_dataset_samples(
         pass
 
     # load_dataset does not support a list of splits while streaming, so load each separately.
-    print_rank_0(f"Loading dataset with {config=} and {splits=}")
+    print_rank_0(f"Loading dataset with {config=} and {splits=} {data_files_tmpl=}")
+
+    def _load_split(s: str):
+        if data_files_tmpl:
+            # Raw files via the ``json`` builder: schema is inferred from data, and the
+            # file-based builder labels everything as the ``train`` split.
+            return load_dataset(
+                config["path"],
+                data_files=data_files_tmpl.format(split=s),
+                split="train",
+                streaming=True,
+            )
+        return load_dataset(streaming=True, **config, split=s)
+
     try:
-        dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
+        dataset_splits = [_load_split(s) for s in splits]
 
         num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
         num_per_split[-1] += num_samples - sum(num_per_split)
