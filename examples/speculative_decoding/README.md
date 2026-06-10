@@ -18,6 +18,7 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 | Simplified Workflow | Train, evaluate, and export EAGLE model with one-line command | \[[Link](#getting-started-simplified-workflow)\] |
 | Online Training | Train draft model alongside base model in GPU memory | \[[Link](#training-draft-model-with-online-base-model)\] |
 | Offline Training | Train draft model using pre-computed hidden states | \[[Link](#training-draft-model-with-offline-base-model)\] |
+| Streaming Training | Train draft on hidden states streamed from a live vLLM serve (no disk dump) | \[[Link](#training-draft-model-with-streaming-base-model)\] |
 | After Training | Evaluation, export and deployment | \[[Link](#model-validation)\] |
 | Advanced Usage | Data synthesis, vocab compression, and configuration | \[[Link](#advanced-usage)\] |
 | Support Matrix | Supported models for speculative decoding training | \[[Link](#support-matrix)\] |
@@ -126,6 +127,10 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
     data.offline_data_path=$HIDDEN_STATES_DIR \
     training.output_dir=ckpts/llama-3.2-1b-offline
 ```
+
+## Training Draft Model with Streaming Base Model
+
+For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
 
 ## Model Validation
 
@@ -334,6 +339,7 @@ See `main.py` for the full example including tokenizer setup, dataset loading, a
 | Mistral | ✅ | ✅ | ✅ |
 | Phi 3 | ✅ | ✅ | ✅ |
 | QWen 1.5,2,2.5,3 | ✅ | ✅ | ✅ |
+| Kimi-K2.5, K2.6 |  |  | ✅ |
 
 ## Speculation Module Checkpoints
 
