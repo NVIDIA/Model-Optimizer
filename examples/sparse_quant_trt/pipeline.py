@@ -718,6 +718,19 @@ def main():
         default=32,
         help="number of tokens to greedily generate in the final inference step",
     )
+    # performance comparison vs an FP16 baseline engine
+    ap.add_argument(
+        "--compare-baseline",
+        action="store_true",
+        help="also build an FP16 (unquantized, dense) engine and profile both with trtexec, "
+        "reporting the optimized engine's throughput/latency speedup",
+    )
+    ap.add_argument(
+        "--profiling-runs",
+        type=int,
+        default=1,
+        help="trtexec profiling runs for --compare-baseline (each run = 500 inferences)",
+    )
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -732,7 +745,10 @@ def main():
     if args.reuse_onnx:
         log("REUSE: skipping stages 1-7, building TRT from existing ONNX")
         assert os.path.isfile(onnx_path), f"--reuse-onnx but {onnx_path} not found"
-        return _build_validate_infer(args, onnx_path, t0)
+        opt_engine = _build_validate_infer(args, onnx_path, t0)
+        if args.compare_baseline:
+            compare_engines(args, opt_engine)
+        return
 
     log("STAGE 1/8: load Qwen2.5-1.5B-Instruct (fp32, eager attention)")
     model, tok = load_model(args.model_dir)
@@ -790,7 +806,9 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    return _build_validate_infer(args, onnx_path, t0)
+    opt_engine = _build_validate_infer(args, onnx_path, t0)
+    if args.compare_baseline:
+        compare_engines(args, opt_engine)
 
 
 def _build_validate_infer(args, onnx_path, t0):
@@ -846,6 +864,113 @@ def _build_validate_infer(args, onnx_path, t0):
             flush=True,
         )
     print(f"total wall time: {time.time() - t0:.1f}s", flush=True)
+    return engine_path
+
+
+def profile_engine(engine_path, seq_len, profiling_runs=1, timeout_s=900):
+    """Profile a built TensorRT engine with trtexec and return its throughput/latency.
+
+    Uses the same profiling parameters as ModelOpt's
+    modelopt/torch/_deploy/_runtime/tensorrt/engine_builder.py (_get_profiling_params):
+      --warmUp=500 --avgRuns=500 --iterations=500*runs --noDataTransfers --useCudaGraph --useSpinWait
+    (WARMUP_TIME_MS=500, DEFAULT_NUM_INFERENCE_PER_RUN=500). The engine is loaded with --loadEngine
+    and profiled at a fixed shape so the baseline and optimized engines are compared apples-to-apples.
+    """
+    trtexec = "/usr/src/tensorrt/bin/trtexec"
+    if not os.path.isfile(trtexec):
+        trtexec = (
+            subprocess.run(
+                ["bash", "-lc", "command -v trtexec"], capture_output=True, text=True
+            ).stdout.strip()
+            or "trtexec"
+        )
+    warmup_ms, n_inf = 500, 500  # engine_builder.py: WARMUP_TIME_MS, DEFAULT_NUM_INFERENCE_PER_RUN
+    cmd = [
+        trtexec,
+        f"--loadEngine={engine_path}",
+        f"--shapes=input_ids:1x{seq_len}",
+        f"--warmUp={warmup_ms}",
+        f"--avgRuns={n_inf}",
+        f"--iterations={profiling_runs * n_inf}",
+        "--noDataTransfers",
+        "--useCudaGraph",
+        "--useSpinWait",
+    ]
+    print(f"[profile] {' '.join(cmd)}", flush=True)
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s).stdout
+
+    def _grab(pat):
+        m = re.search(pat, out)
+        return float(m.group(1)) if m else None
+
+    return {
+        "throughput_qps": _grab(r"Throughput:\s*([\d.]+)\s*qps"),
+        "gpu_compute_ms": _grab(r"GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"),
+        "latency_ms": _grab(r"Latency:.*?median\s*=\s*([\d.]+)\s*ms"),
+    }
+
+
+def build_fp16_baseline(args):
+    """Build an FP16 (unquantized, dense) TensorRT engine from the same model, as a perf baseline."""
+    log("BASELINE: build FP16 unquantized/dense TensorRT engine for comparison")
+    model, _ = load_model(args.model_dir)
+    vocab = model.config.vocab_size
+    name = f"{args.model_name}_fp16_baseline"
+    # export_onnx with weights_dtype="fp16" casts to fp16 and exports natively; the model has no
+    # quantizers, so the ONNX is a plain fp16 graph (no QDQ). Build it strongly-typed, sparsity off.
+    onnx_path = export_onnx(model, args.out_dir, name, args.seq_len, vocab, weights_dtype="fp16")
+    del model
+    torch.cuda.empty_cache()
+    engine_path = os.path.join(args.out_dir, f"{name}.engine")
+    rc = build_trt(
+        onnx_path,
+        engine_path,
+        os.path.join(args.out_dir, f"{name}_build.log"),
+        os.path.join(args.out_dir, f"{name}_layer_info.json"),
+        args.seq_len,
+        args.trt_timeout,
+        strongly_typed=True,
+        sparsity="disable",
+    )
+    assert rc == 0, f"FP16 baseline engine build failed (rc={rc})"
+    print(f"[baseline] FP16 engine built OK: {engine_path}", flush=True)
+    return engine_path
+
+
+def compare_engines(args, optimized_engine_path):
+    """Build an FP16 baseline engine and profile it against the optimized engine with trtexec."""
+    baseline_engine = build_fp16_baseline(args)
+    log(f"COMPARE: profiling FP16 baseline vs optimized engine (trtexec, shape 1x{args.seq_len})")
+    base = profile_engine(baseline_engine, args.seq_len, args.profiling_runs)
+    opt = profile_engine(optimized_engine_path, args.seq_len, args.profiling_runs)
+
+    def _fmt(v):
+        return f"{v:.3f}" if isinstance(v, float) else "n/a"
+
+    log("PERFORMANCE COMPARISON (FP16 baseline vs optimized)")
+    print(f"  {'metric':<26}{'fp16-baseline':>16}{'optimized':>16}", flush=True)
+    print(
+        f"  {'throughput (qps)':<26}{_fmt(base['throughput_qps']):>16}{_fmt(opt['throughput_qps']):>16}",
+        flush=True,
+    )
+    print(
+        f"  {'GPU compute median (ms)':<26}{_fmt(base['gpu_compute_ms']):>16}{_fmt(opt['gpu_compute_ms']):>16}",
+        flush=True,
+    )
+    print(
+        f"  {'latency median (ms)':<26}{_fmt(base['latency_ms']):>16}{_fmt(opt['latency_ms']):>16}",
+        flush=True,
+    )
+    if base["gpu_compute_ms"] and opt["gpu_compute_ms"]:
+        print(
+            f"  => optimized GPU-compute speedup: {base['gpu_compute_ms'] / opt['gpu_compute_ms']:.2f}x",
+            flush=True,
+        )
+    if base["throughput_qps"] and opt["throughput_qps"]:
+        print(
+            f"  => optimized throughput gain:     {opt['throughput_qps'] / base['throughput_qps']:.2f}x",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

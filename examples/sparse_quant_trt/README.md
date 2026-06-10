@@ -65,6 +65,9 @@ python pipeline.py --sparsity [--qat]
 
 # Iterate on the TensorRT build/inference only, reusing an already-exported ONNX
 python pipeline.py --reuse-onnx
+
+# Also build an FP16 (unquantized, dense) baseline engine and compare performance
+python pipeline.py --compare-baseline
 ```
 
 ### Key options
@@ -80,8 +83,26 @@ python pipeline.py --reuse-onnx
 | `--seq-len` | `128` | Representative sequence length for ONNX export + trtexec optimization profile |
 | `--prompt` / `--max-new-tokens` | *"What is the capital of France? ..."* / `32` | Final real-inference prompt and length |
 | `--reuse-onnx` | off | Skip the torch stages and build TensorRT from an existing ONNX |
+| `--compare-baseline` | off | Also build an FP16 (unquantized, dense) engine and profile both with trtexec |
+| `--profiling-runs` | `1` | trtexec profiling runs for `--compare-baseline` (each run = 500 inferences) |
 
 Run `python pipeline.py --help` for the full list.
+
+## Performance comparison (`--compare-baseline`)
+
+With `--compare-baseline`, the script additionally builds an **FP16 (unquantized, dense)** engine
+from the same model and profiles both engines with `trtexec`, using the same profiling parameters
+as ModelOpt's `modelopt/torch/_deploy/_runtime/tensorrt/engine_builder.py`:
+
+```text
+trtexec --loadEngine=<engine> --shapes=input_ids:1x<seq_len> \
+        --warmUp=500 --avgRuns=500 --iterations=500*<profiling-runs> \
+        --noDataTransfers --useCudaGraph --useSpinWait
+```
+
+It parses `Throughput` (qps) and the median `GPU Compute Time` / `Latency` from the trtexec output
+and prints a side-by-side table plus the optimized engine's throughput/latency speedup over the
+FP16 baseline. Both engines are profiled at the same fixed shape for an apples-to-apples comparison.
 
 ## What each stage does
 
