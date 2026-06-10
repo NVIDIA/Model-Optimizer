@@ -1,7 +1,15 @@
 # SPEED-bench MTP speculative-decoding run for gemma-4-E4B-it via vLLM.
 #
-# MTP support is not available in vllm/vllm-openai:latest on this cluster; use
-# the qwen3_5-cu130 tag matching the existing MTP/vLLM SPEED-bench template.
+# Gemma 4 MTP support landed in vLLM PR vllm-project/vllm#41745 (2026-05-06)
+# and is in the ``vllm/vllm-openai:v0.22.1`` container (and later). Gemma 4
+# MTP uses a separate assistant model passed via ``--draft_model_dir``;
+# vLLM auto-detects Gemma 4 from the assistant and does NOT take a
+# ``method`` key in ``speculative_config``. The wrapper at
+# ``examples/specdec_bench/specdec_bench/models/vllm.py`` routes to the
+# assistant-model config shape when ``--speculative_algorithm MTP`` is
+# paired with ``--draft_model_dir``.
+#
+# Assistant model: ``google/gemma-4-E4B-it-assistant`` (public, ungated).
 #
 # Slurm run on cw_dfw:
 #   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/gemma-4/gemma-4-E4B-it/specdec_bench_mtp_vllm.yaml --yes
@@ -11,6 +19,7 @@ job_name: gemma-4-E4B-it_specdec_bench_mtp_vllm
 pipeline:
   global_vars:
     hf_model: /hf-local/google/gemma-4-E4B-it
+    draft_model: /hf-local/google/gemma-4-E4B-it-assistant
 
   # task_0: SPEED qualitative split
   task_0:
@@ -20,6 +29,7 @@ pipeline:
       - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
       - --engine VLLM
       - --speculative_algorithm MTP
+      - --draft_model_dir <<global_vars.draft_model>>
       - --draft_length 3
       - --tp_size 1
       - --ep_size 1
@@ -37,7 +47,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
-      container: vllm/vllm-openai:qwen3_5-cu130
+      container: vllm/vllm-openai:v0.22.1
 
   # task_1: SPEED throughput_32k split
   task_1:
@@ -47,6 +57,7 @@ pipeline:
       - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
       - --engine VLLM
       - --speculative_algorithm MTP
+      - --draft_model_dir <<global_vars.draft_model>>
       - --draft_length 3
       - --tp_size 1
       - --ep_size 1
@@ -65,4 +76,4 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
-      container: vllm/vllm-openai:qwen3_5-cu130
+      container: vllm/vllm-openai:v0.22.1

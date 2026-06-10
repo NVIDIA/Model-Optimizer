@@ -63,10 +63,27 @@ class VLLMModel(Model):
                 specdec["disable_padded_drafter_batch"] = True
                 specdec["parallel_draft_block_sizes"] = kwargs.get("parallel_draft_block_sizes")
         elif kwargs.get("speculative_algorithm") == "MTP":
-            specdec = {
-                "method": "mtp",
-                "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
-            }
+            draft_model_dir = kwargs.get("draft_model_dir")
+            if draft_model_dir:
+                # Assistant-model MTP (e.g. Gemma 4): vLLM's Gemma4 MTP
+                # support (vllm-project/vllm#41745) expects
+                # ``speculative_config={"model": <assistant>, ...}`` with
+                # no ``method`` key — vLLM auto-detects Gemma4 from the
+                # assistant model. Passing ``method: "mtp"`` here triggers
+                # ``NotImplementedError: Unsupported speculative method:
+                # 'mtp'`` on Gemma4 even on a container that has the
+                # support (e.g. ``vllm/vllm-openai:v0.22.1``+).
+                specdec = {
+                    "model": draft_model_dir,
+                    "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
+                }
+            else:
+                # Generic MTP path (Qwen3.5 etc.) — model carries its
+                # own MTP layer; no separate draft / assistant model.
+                specdec = {
+                    "method": "mtp",
+                    "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
+                }
         elif kwargs.get("speculative_algorithm") == "DFLASH":
             specdec = {
                 "method": "dflash",
