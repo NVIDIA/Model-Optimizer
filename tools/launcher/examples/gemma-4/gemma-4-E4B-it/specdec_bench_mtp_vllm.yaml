@@ -32,6 +32,7 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
+      - EXTRA_PIP_DEPS: "transformers>=4.58.0"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
@@ -60,6 +61,7 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
+      - EXTRA_PIP_DEPS: "transformers>=4.58.0"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1

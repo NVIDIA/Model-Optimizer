@@ -42,6 +42,14 @@ if ! pip show boto3 >/dev/null 2>&1 || \
     fi
 fi
 
+if [ -n "${EXTRA_PIP_DEPS:-}" ]; then
+    read -r -a extra_pip_deps <<< "${EXTRA_PIP_DEPS}"
+    if ! pip install --upgrade "${extra_pip_deps[@]}"; then
+        report_result "FAIL: specdec_bench: pip install EXTRA_PIP_DEPS failed"
+        exit 1
+    fi
+fi
+
 if ! python3 modules/Model-Optimizer/examples/specdec_bench/run.py \
     --model_dir ${HF_MODEL_CKPT} \
     --tokenizer ${HF_MODEL_CKPT} \
