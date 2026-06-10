@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -98,7 +113,6 @@ Only needed in MiniMax-M2.7 pipeline YAMLs.
 
 import torch
 
-
 # Dtype encoding for the broadcast dtype-sync step.
 _DTYPE_TO_CODE = {
     torch.float32: 0,
@@ -115,10 +129,11 @@ def apply():
         import accelerate.utils.fsdp_utils as fsdp_utils
         from torch.distributed.tensor import DTensor
 
-        _orig = fsdp_utils.fsdp2_load_full_state_dict  # noqa: F841
+        _orig = fsdp_utils.fsdp2_load_full_state_dict
 
         def _patched(accelerator, model, full_sd, cpu_offload=False):
             import time
+
             import torch.distributed as dist
             from torch.distributed.tensor import distribute_tensor
 
@@ -129,11 +144,15 @@ def apply():
             n_buffer = n_total - n_dtensor
 
             if accelerator.is_main_process:
-                print(f"[fsdp2_buffer_patch] State dict: {n_total} entries "
-                      f"({n_dtensor} DTensor, {n_buffer} buffer), full_sd: {len(full_sd)}")
+                print(
+                    f"[fsdp2_buffer_patch] State dict: {n_total} entries "
+                    f"({n_dtensor} DTensor, {n_buffer} buffer), full_sd: {len(full_sd)}"
+                )
             else:
-                print(f"[fsdp2_buffer_patch] State dict: {n_total} entries "
-                      f"({n_dtensor} DTensor, {n_buffer} buffer)")
+                print(
+                    f"[fsdp2_buffer_patch] State dict: {n_total} entries "
+                    f"({n_dtensor} DTensor, {n_buffer} buffer)"
+                )
             t0 = time.time()
 
             # --- Step 0: broadcast dtype codes from rank 0 ---
@@ -144,13 +163,15 @@ def apply():
             # each broadcast tensor.
             if accelerator.is_main_process:
                 dtype_codes = torch.tensor(
-                    [_DTYPE_TO_CODE.get(full_sd[name].dtype, 0)
-                     for name in meta_sharded_sd.keys()],
-                    dtype=torch.int32, device=accelerator.device,
+                    [_DTYPE_TO_CODE.get(full_sd[name].dtype, 0) for name in meta_sharded_sd.keys()],
+                    dtype=torch.int32,
+                    device=accelerator.device,
                 )
             else:
                 dtype_codes = torch.empty(
-                    n_total, dtype=torch.int32, device=accelerator.device,
+                    n_total,
+                    dtype=torch.int32,
+                    device=accelerator.device,
                 )
             dist.broadcast(dtype_codes, src=0, group=dist.group.WORLD)
             broadcast_dtypes = [_CODE_TO_DTYPE[c.item()] for c in dtype_codes]
@@ -191,8 +212,11 @@ def apply():
                 if not is_dtensor:
                     # Persistent buffer — broadcast raw, no distribute_tensor
                     if accelerator.is_main_process:
-                        t = full_sd[param_name].detach().to(
-                            device=accelerator.device, dtype=bcast_dtype)
+                        t = (
+                            full_sd[param_name]
+                            .detach()
+                            .to(device=accelerator.device, dtype=bcast_dtype)
+                        )
                     else:
                         t = torch.empty(
                             sharded_param.size(),
@@ -205,8 +229,11 @@ def apply():
 
                 device_mesh = sharded_param.device_mesh
                 if accelerator.is_main_process:
-                    ft = full_sd[param_name].detach().to(
-                        device=device_mesh.device_type, dtype=bcast_dtype)
+                    ft = (
+                        full_sd[param_name]
+                        .detach()
+                        .to(device=device_mesh.device_type, dtype=bcast_dtype)
+                    )
                     if isinstance(ft, DTensor):
                         ft = ft.to_local()
                 else:
@@ -227,11 +254,15 @@ def apply():
                 sharded_sd[param_name] = _finish(st, contig, final_dtype, cpu_offload)
 
             elapsed = time.time() - t0
-            print(f"[fsdp2_buffer_patch] Broadcast done in {elapsed:.1f}s, "
-                  f"loading {len(sharded_sd)} entries into model...")
+            print(
+                f"[fsdp2_buffer_patch] Broadcast done in {elapsed:.1f}s, "
+                f"loading {len(sharded_sd)} entries into model..."
+            )
             model.load_state_dict(sharded_sd, assign=True)
-            print(f"[fsdp2_buffer_patch] State dict loaded successfully "
-                  f"({time.time() - t0:.1f}s total)")
+            print(
+                f"[fsdp2_buffer_patch] State dict loaded successfully "
+                f"({time.time() - t0:.1f}s total)"
+            )
             return model
 
         fsdp_utils.fsdp2_load_full_state_dict = _patched
@@ -325,5 +356,6 @@ def _clip_grad_norm(parameters, max_norm, norm_type=2):
 def patch_accelerator(accelerator):
     """Replace accelerator's clip_grad_norm_ with FSDP2-safe version."""
     accelerator.clip_grad_norm_ = _clip_grad_norm
-    print("[fsdp2_buffer_patch] Patched accelerator.clip_grad_norm_ "
-          "for FSDP2 DTensor compatibility")
+    print(
+        "[fsdp2_buffer_patch] Patched accelerator.clip_grad_norm_ for FSDP2 DTensor compatibility"
+    )
