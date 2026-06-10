@@ -43,8 +43,16 @@ if ! pip show boto3 >/dev/null 2>&1 || \
 fi
 
 if [ -n "${EXTRA_PIP_DEPS:-}" ]; then
-    read -r -a extra_pip_deps <<< "${EXTRA_PIP_DEPS}"
-    if ! pip install --upgrade "${extra_pip_deps[@]}"; then
+    if ! python3 - <<'PY'
+import os
+import shlex
+import subprocess
+import sys
+
+deps = shlex.split(os.environ["EXTRA_PIP_DEPS"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", *deps])
+PY
+    then
         report_result "FAIL: specdec_bench: pip install EXTRA_PIP_DEPS failed"
         exit 1
     fi
