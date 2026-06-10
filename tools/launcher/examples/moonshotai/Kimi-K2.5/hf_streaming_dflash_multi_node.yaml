@@ -95,4 +95,4 @@ pipeline:
       segment: 4
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: vllm/vllm-openai:latest
+      container: vllm/vllm-openai:v0.17.0-aarch64
