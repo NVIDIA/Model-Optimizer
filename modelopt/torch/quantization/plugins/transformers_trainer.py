@@ -58,7 +58,7 @@ class QuantizationArguments(ModelOptHFArguments):
             ),
         },
     )
-    quant_cfg: str | QuantizeConfig | None = field(
+    quant_cfg: str | None = field(
         default=None,
         metadata={
             "help": (
