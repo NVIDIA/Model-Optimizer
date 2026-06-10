@@ -117,6 +117,8 @@ def _attn_decode_split_fwd(
     EXP2_QUANT: tl.constexpr,
     ACC_QUANT: tl.constexpr,
     MIXED_FP16: tl.constexpr,  # reference mixed-precision softmax (native fp16 MUFU)
+    K_CACHE_QUANTIZED: tl.constexpr,  # K cache pre-quantized (skip in-kernel K FQ entirely)
+    V_CACHE_QUANTIZED: tl.constexpr,  # V cache pre-quantized for COMPLETE 16-key blocks (FQ only tail)
     # Per-tensor NVFP4 global scales (amax/(6*448)) as device 0-d tensors (pointers);
     # read via tl.load so no host .item() sync is needed (CUDA-graph-safe).
     q_global_scale,
@@ -131,6 +133,11 @@ def _attn_decode_split_fwd(
     kv_head_idx = head_idx // kv_group_num
 
     seq_len_kv = tl.load(B_seq_len_k + batch_idx)
+
+    # Quantize-on-write: K is fully fake-quantized in the cache and V is fake-quantized for
+    # every COMPLETE 16-key NVFP4 block; only the in-progress tail block (the last
+    # ``seq_len_kv % 16`` keys) is still raw and must be fakequantized in-kernel.
+    v_dense_boundary = (seq_len_kv // 16) * 16
 
     # Partition whole BLOCK_N tiles (calibration-aligned) evenly across splits.
     num_tiles = (seq_len_kv + BLOCK_N - 1) // BLOCK_N
@@ -190,7 +197,8 @@ def _attn_decode_split_fwd(
             max_blocks_per_seq,
         )
         kt_f = kt.to(tl.float32)
-        if NVFP4_K:  # BMM1 key (B-side, K^T [BLOCK_D, BLOCK_N], GEMM-K = head dim = axis 0)
+        if NVFP4_K and not K_CACHE_QUANTIZED:  # pre-quantized K read as-is (every key's
+            # head-dim block is complete at write time, so the whole cache is already on-grid)
             kt_f = fake_quant_fp4_k0(kt_f, BLOCK_D, BLOCK_N, 16, 1, k_gs, QUANT_NVFP4)
         scores = tl.sum(q[:, None] * kt_f, axis=0) * qk_scale  # [BLOCK_N], fp32 accum
         scores = tl.where(kv_valid, scores, -float("inf"))
@@ -254,7 +262,10 @@ def _attn_decode_split_fwd(
             )
             vt_f = vt.to(tl.float32)
             if NVFP4_V:  # BMM2 value (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = keys = axis 0)
-                vt_f = fake_quant_fp4_k0(vt_f, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
+                # Pre-quantized completed V blocks read as-is; only tiles reaching the raw tail
+                # (kv_start+BLOCK_N > boundary) are fakequantized. Without on-write, FQ every tile.
+                if (not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_dense_boundary):
+                    vt_f = fake_quant_fp4_k0(vt_f, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
             acc += tl.sum(p_bmm[:, None] * vt_f, axis=0)  # [BLOCK_D], fp32 accum
             m_i = m_new
 
@@ -335,6 +346,8 @@ def attention_decode(
     fp16_softmax: bool = False,
     softmax_quant: dict | None = None,
     attn_global_scales: dict | None = None,
+    k_cache_quantized: bool = False,  # K cache holds fake-quantized values (skip in-kernel K FQ)
+    v_cache_quantized: bool = False,  # V cache pre-quantized for complete 16-key blocks (FQ tail only)
 ) -> torch.Tensor:
     """Decode attention (one query token per request) over a paged KV cache.
 
@@ -480,6 +493,8 @@ def attention_decode(
             EXP2_QUANT=exp2_q,
             ACC_QUANT=acc_q,
             MIXED_FP16=_mixed_fp16,
+            K_CACHE_QUANTIZED=k_cache_quantized,
+            V_CACHE_QUANTIZED=v_cache_quantized,
             q_global_scale=q_gs,
             k_global_scale=k_gs,
             p_global_scale=p_gs,
@@ -511,4 +526,104 @@ def attention_decode(
     return out
 
 
-__all__ = ["attention_decode"]
+@triton.jit
+def _prequant_kv_kernel(
+    K,  # flat [total_keys, n_kv_heads, head_dim] (head_dim contiguous)
+    V,
+    seq_len,  # per-request KV length (uniform across requests here)
+    stride_req,  # element stride between consecutive requests' key blocks
+    stride_key,
+    stride_head,
+    k_global_scale,
+    v_global_scale,
+    NVFP4_K: tl.constexpr,
+    NVFP4_V: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+):
+    """Fake-quantize a (contiguous) paged KV cache in place = the quantize-on-write op.
+
+    K: every key's head-dim 16-block is complete at write time → fakequant ALL keys.
+    V: NVFP4 blocks span 16 keys → fakequant only tiles whose keys are all in COMPLETE blocks
+    (``kv_start + BLOCK_N <= (seq_len // 16) * 16``); the in-progress tail tile is left raw for the
+    decode kernel to fakequant on read. This partitions the cache so the decode kernel with
+    ``KV_CACHE_QUANTIZED=True`` reproduces fakequant-on-read exactly (same op, same global scale).
+    """
+    r = tl.program_id(0)
+    h = tl.program_id(1)
+    t = tl.program_id(2)
+    kv_start = t * BLOCK_N
+    key_off = tl.arange(0, BLOCK_N)
+    dim_off = tl.arange(0, BLOCK_D)
+    d_mask = dim_off < HEAD_DIM
+    key_valid = (kv_start + key_off) < seq_len
+    mask = key_valid[:, None] & d_mask[None, :]
+    base = r * stride_req + kv_start * stride_key + h * stride_head
+    ptr = base + key_off[:, None] * stride_key + dim_off[None, :]
+    if NVFP4_K:
+        k_gs = tl.load(k_global_scale)
+        kt = tl.load(K + ptr, mask=mask, other=0.0).to(tl.float32)
+        kq = fake_quant_fp4_k1(
+            kt, BLOCK_N, BLOCK_D, 16, k_gs, QUANT_NVFP4
+        )  # per-key head-dim blocks
+        tl.store(K + ptr, kq.to(K.dtype.element_ty), mask=mask)
+    if NVFP4_V:
+        v_dense_boundary = (seq_len // 16) * 16
+        if kv_start + BLOCK_N <= v_dense_boundary:  # whole tile is complete 16-key blocks
+            v_gs = tl.load(v_global_scale)
+            vt = tl.load(V + ptr, mask=mask, other=0.0).to(tl.float32)
+            vq = fake_quant_fp4_k0(vt, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
+            tl.store(V + ptr, vq.to(V.dtype.element_ty), mask=mask)
+
+
+def fake_quant_kv_cache(
+    k_cache: torch.Tensor,  # [num_blocks, page_size, n_kv_heads, head_dim]
+    v_cache: torch.Tensor,
+    seq_len: int,  # uniform per-request KV length
+    num_requests: int,
+    blocks_per_req: int,
+    *,
+    page_size: int = 16,
+    k_global_scale=None,
+    v_global_scale=None,
+    nvfp4: set[str] | None = None,
+) -> None:
+    """In-place quantize-on-write over a *contiguous* paged cache (block_table = arange).
+
+    The serving path performs this incrementally per token; this batch form is the reference /
+    test entrypoint. K is fully fake-quantized; V only for complete 16-key blocks (tail left raw).
+    """
+    nvfp4 = nvfp4 or set()
+    if not ({"k", "v"} & nvfp4):
+        return
+    nb, ps, nkv, hd = k_cache.shape
+    assert ps == page_size
+    kf = k_cache.view(nb * ps, nkv, hd)
+    vf = v_cache.view(nb * ps, nkv, hd)
+    BLOCK_D = triton.next_power_of_2(hd)
+    BLOCK_N = 128
+    stride_req = blocks_per_req * ps * kf.stride(0)
+    n_tiles = (seq_len + BLOCK_N - 1) // BLOCK_N
+    kgs = k_global_scale if k_global_scale is not None else kf.new_full((), 1.0)
+    vgs = v_global_scale if v_global_scale is not None else kf.new_full((), 1.0)
+    with torch.cuda.device(kf.device):
+        _prequant_kv_kernel[(num_requests, nkv, n_tiles)](
+            kf,
+            vf,
+            seq_len,
+            stride_req,
+            kf.stride(0),
+            kf.stride(1),
+            kgs,
+            vgs,
+            NVFP4_K="k" in nvfp4,
+            NVFP4_V="v" in nvfp4,
+            BLOCK_N=BLOCK_N,
+            BLOCK_D=BLOCK_D,
+            HEAD_DIM=hd,
+            num_warps=4,
+        )
+
+
+__all__ = ["attention_decode", "fake_quant_kv_cache"]
