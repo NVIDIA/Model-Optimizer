@@ -10,6 +10,30 @@ ModelOpt inserts Q/DQ nodes into the eager PyTorch graph, then
 `torch_tensorrt.compile(ir="dynamo")` converts those Q/DQ nodes into native
 TensorRT precision layers.
 
+## How this differs from the ONNX examples
+
+All three of these examples reach the same destination — a low-precision
+TensorRT engine — but quantize at a different point in the pipeline and emit a
+different artifact, so they suit different deployment stacks:
+
+| | Torch-TensorRT (this example) | [`torch_onnx`](../torch_onnx/) | [`onnx_ptq`](../onnx_ptq/) |
+|---|---|---|---|
+| Starting point | a PyTorch / HF model | a PyTorch / timm model | an already-exported ONNX model |
+| Quantize on | the eager PyTorch graph (`mtq.quantize`) | the eager PyTorch graph (`mtq.quantize`) | the ONNX graph directly (ModelOpt ONNX PTQ) |
+| Export step | none — the FX/Dynamo graph stays in-process | `torch.onnx.export` of the Q/DQ graph, postprocessed for TRT | none — Q/DQ inserted straight into the ONNX graph |
+| Intermediate artifact | none | a Q/DQ ONNX file | a Q/DQ ONNX file |
+| Compiler + runtime | `torch_tensorrt.compile(ir="dynamo")` → a `torch.nn.Module` you call from PyTorch | TensorRT builds a standalone engine from the ONNX | TensorRT builds a standalone engine from the ONNX |
+| Best when | PyTorch-native serving; you want a drop-in compiled module | you quantize in PyTorch but deploy via a portable ONNX → TRT engine | you only have an ONNX model and never touch PyTorch |
+
+This example and [`torch_onnx`](../torch_onnx/) share the same PyTorch front end
+(`mtq.quantize`), so the numerics are identical — they differ only in the back
+end: this one keeps the graph in-process and hands it to Torch-TensorRT, while
+`torch_onnx` exports a portable ONNX artifact for the standalone TensorRT
+runtime. [`onnx_ptq`](../onnx_ptq/) instead quantizes the ONNX graph directly,
+for when you start from an ONNX model rather than PyTorch. Pick this example
+when your serving stack is PyTorch-native and you'd rather avoid an ONNX export
+step.
+
 ## Setup
 
 ```bash
