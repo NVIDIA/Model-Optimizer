@@ -817,13 +817,15 @@ def pre_quantize(
     """
     # Offline specdec models skip pre-quantize preview (no tokenizer or standard dataloader)
     if args.specdec_offline_dataset is not None:
-        return None, None
+        return None, None, None
 
     # Only run single sample for preview
     assert calib_dataloader is not None, "calib_dataloader is required for pre-quantize preview"
-    preview_input_ids = next(iter(calib_dataloader))[
-        "input_features" if model_type == "whisper" else "input_ids"
-    ][0:1]
+    batch = next(iter(calib_dataloader))
+    input_key = "input_features" if model_type == "whisper" else "input_ids"
+    preview_input_ids = batch[input_key][0:1]
+    # Pass attention_mask to generate(): HF cannot infer it when pad_token == eos_token.
+    preview_attention_mask = batch["attention_mask"][0:1] if "attention_mask" in batch else None
 
     # Generate preview before quantization
     if args.skip_generate:
@@ -847,9 +849,13 @@ def pre_quantize(
             trust_remote_code=args.trust_remote_code,
         )
     else:
-        generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
+        generated_ids_before_ptq = full_model.generate(
+            preview_input_ids,
+            attention_mask=preview_attention_mask,
+            max_new_tokens=100,
+        )
 
-    return preview_input_ids, generated_ids_before_ptq
+    return preview_input_ids, preview_attention_mask, generated_ids_before_ptq
 
 
 def post_quantize(
@@ -860,6 +866,7 @@ def post_quantize(
     tokenizer: PreTrainedTokenizerBase | None,
     processor: ProcessorMixin | None,
     preview_input_ids,
+    preview_attention_mask,
     generated_ids_before_ptq,
     is_nemotron_vl_model,
     first_text_speech_dataset,
@@ -904,7 +911,11 @@ def post_quantize(
         pass
     elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
-        generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
+        generated_ids_after_ptq = full_model.generate(
+            preview_input_ids,
+            attention_mask=preview_attention_mask,
+            max_new_tokens=100,
+        )
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
             full_model,
@@ -1062,7 +1073,7 @@ def quantize_main(
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    preview_input_ids, generated_ids_before_ptq = pre_quantize(
+    preview_input_ids, preview_attention_mask, generated_ids_before_ptq = pre_quantize(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
     )
 
@@ -1173,6 +1184,7 @@ def quantize_main(
         tokenizer,
         processor,
         preview_input_ids,
+        preview_attention_mask,
         generated_ids_before_ptq,
         is_nemotron_vl_model,
         first_text_speech_dataset,
