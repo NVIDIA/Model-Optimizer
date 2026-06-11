@@ -625,7 +625,7 @@ def quantize(
     # MatMuls in MHA pattern.
     # (3) else when quantize_mode == "fp8", if head_size > 256 or head_size <= 8
     # or mha doesn't meet fp8 fMHA v2 pattern, don't add Q/DQ layers to MatMuls in MHA pattern.
-    if not target_dla:
+    if not (target_dla and quantize_mode == "int8"):
         nodes_to_exclude = find_nodes_from_mha_to_exclude(
             onnx_path,
             use_external_data_format,

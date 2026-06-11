@@ -1223,18 +1223,19 @@ def build_small_grouped_conv_model():
         ),
     ]
 
+    rng = np.random.default_rng(0)
     initializers = [
         helper.make_tensor(
             "conv1_weights",
             onnx.TensorProto.FLOAT,
             [channels, 256, 3, 3],
-            np.random.randn(channels * 256 * 3 * 3).astype(np.float32).tolist(),
+            rng.standard_normal(channels * 256 * 3 * 3).astype(np.float32).tolist(),
         ),
         helper.make_tensor(
             "conv1_bias",
             onnx.TensorProto.FLOAT,
             [channels],
-            np.random.randn(channels).astype(np.float32).tolist(),
+            rng.standard_normal(channels).astype(np.float32).tolist(),
         ),
         helper.make_tensor(
             "resize1_roi",
@@ -1252,7 +1253,7 @@ def build_small_grouped_conv_model():
             "dw_conv1_weights",
             onnx.TensorProto.FLOAT,
             [channels, 1, 2, 2],
-            np.random.randn(channels * 1 * 2 * 2).astype(np.float32).tolist(),
+            rng.standard_normal(channels * 1 * 2 * 2).astype(np.float32).tolist(),
         ),
         helper.make_tensor(
             "dw_conv2_weights",
@@ -1264,19 +1265,78 @@ def build_small_grouped_conv_model():
             "dw_conv2_bias",
             onnx.TensorProto.FLOAT,
             [channels],
-            np.random.randn(channels).astype(np.float32).tolist(),
+            rng.standard_normal(channels).astype(np.float32).tolist(),
         ),
         helper.make_tensor(
             "dw_conv3_weights",
             onnx.TensorProto.FLOAT,
             [channels, 1, 2, 2],
-            np.random.randn(channels * 1 * 2 * 2).astype(np.float32).tolist(),
+            rng.standard_normal(channels * 1 * 2 * 2).astype(np.float32).tolist(),
         ),
     ]
 
     graph = helper.make_graph(
         nodes, "small_grouped_conv", inputs, outputs, initializer=initializers
     )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 10
+
+    model_inferred = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model_inferred)
+
+    return model_inferred
+
+
+def build_matmul_1xn_model():
+    """A minimal MatMul-1xN (GEMV) graph.
+
+    The MatMul has m=1 (2D input), making it a GEMV that is excluded from int8
+    quantization by the GEMV detection in int8.py (line 168) when target_dla=False.
+    The exclusion is bypassed when target_dla=True.
+
+    Using a 2D input [m, k] so the 2D output [m, n] satisfies the
+    ``len(dims) < 3 and any(dim == 1)`` branch in _exclude_matmuls_by_shape_inference
+    (the weight is a Constant initializer, not a Variable, so the dims[-2] == 1
+    branch does not apply).
+
+    Topology:
+      input [1, 32] -> MatMul([32, 64]) -> output [1, 64]
+    """
+    m, k, n = 1, 32, 64
+    input_names = ["input_0"]
+    output_names = ["output_0"]
+    input_shapes = [(m, k)]
+    output_shapes = [(m, n)]
+
+    inputs = [
+        helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
+        for input_name, input_shape in zip(input_names, input_shapes)
+    ]
+    outputs = [
+        helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, output_shape)
+        for output_name, output_shape in zip(output_names, output_shapes)
+    ]
+
+    nodes = [
+        helper.make_node(
+            op_type="MatMul",
+            inputs=["input_0", "matmul_weights"],
+            outputs=["output_0"],
+            name="matmul1",
+        ),
+    ]
+
+    rng = np.random.default_rng(0)
+    initializers = [
+        helper.make_tensor(
+            "matmul_weights",
+            onnx.TensorProto.FLOAT,
+            [k, n],
+            rng.standard_normal(k * n).astype(np.float32).tolist(),
+        ),
+    ]
+
+    graph = helper.make_graph(nodes, "matmul_1xn", inputs, outputs, initializer=initializers)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
     model.ir_version = 10
 
