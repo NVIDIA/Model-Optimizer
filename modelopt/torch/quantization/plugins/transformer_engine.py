@@ -103,6 +103,43 @@ class _QuantTELinear(_ParallelLinear):
     _quantized_linear_fn = te_quantized_linear_fn
 
 
+def _reshape_loaded_amax_to_buffer_shape(
+    module,
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+):
+    """Reshape a loaded `_amax` tensor to match the live buffer shape on this rank.
+
+    PyTorch's `load_state_dict` enforces an exact-shape check at the leaf module
+    level. For per-expert TEGroupedLinear quantization, the dist-checkpoint tensor
+    is saved flat as `[num_gemms]` (the legacy `_process_quantizer_amax` flatten)
+    while the live buffer is registered as `[num_gemms, 1, 1]` from the metadata
+    path (axis=0 calibration with keepdims). Reshape the loaded tensor in the
+    state_dict the strict check is about to read.
+
+    The hook is leaf-level and rank-local — it only touches the local
+    `state_dict[prefix + "_amax"]` and the local buffer's shape, and only acts
+    when shapes differ but numel matches. EP>1 narrowing happens in the outer
+    `_QuantMegatronTEGroupedLinear._load_from_state_dict` before this hook runs.
+    """
+    key = prefix + "_amax"
+    if key not in state_dict:
+        return
+    buf = getattr(module, "_amax", None)
+    if buf is None:
+        return
+    loaded = state_dict[key]
+    if loaded.shape == buf.shape:
+        return
+    if loaded.numel() == buf.numel():
+        state_dict[key] = loaded.reshape(buf.shape).contiguous()
+
+
 # Register the public te.pytorch.GroupedLinear class
 @QuantModuleRegistry.register({te_grouped_linear.GroupedLinear: "te_GroupedLinear"})
 class _QuantTEGroupedLinear(_ParallelLinear):
@@ -136,6 +173,24 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         super()._setup()
         # Remove self.weight after setup.
         delattr(self, "weight")
+
+        # Reconcile the per-expert _amax storage shape on restore. The save path keeps
+        # the dist-checkpoint tensor as flat [num_gemms_global] (legacy convention for
+        # quantizer amax) while _pytorch_state_metadata records the live multi-dim
+        # buffer shape [num_gemms, 1, 1] (axis=0 calibration + keepdims). On restore,
+        # the metadata path registers an [num_gemms, 1, 1] buffer first; load_state_dict
+        # then tries to copy the flat tensor into it and raises a size mismatch.
+        #
+        # Reshape inside a pre-hook at the leaf quantizer level so it fires AFTER
+        # PyTorch has narrowed state_dict to this submodule's prefix but BEFORE the
+        # strict size check. The hook is pure-CPU and rank-local — no per-rank state
+        # queries beyond the leaf's own buffer shape, so it doesn't introduce the
+        # rank-asymmetric collective ordering that the parent-level state_dict
+        # mutation approach did. EP>1 still relies on the outer narrow path.
+        if hasattr(self, "weight_quantizer") and isinstance(self.weight_quantizer, TensorQuantizer):
+            self.weight_quantizer._register_load_state_dict_pre_hook(
+                _reshape_loaded_amax_to_buffer_shape, with_module=True
+            )
 
     def _is_per_expert_weight_quant(self) -> bool:
         # Per-expert mode: axis=0 on the weight quantizer means the stacked
