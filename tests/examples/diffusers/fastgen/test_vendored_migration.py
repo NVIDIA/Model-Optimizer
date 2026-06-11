@@ -66,12 +66,22 @@ STAGED_AUTOMODEL_DISPOSITION = {
 # --------------------------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("cfg_name", ["dmd2_qwen_image.yaml", "dmd2_qwen_image_smoke.yaml"])
-def test_published_configs_repointed_to_vendored_builders(cfg_name):
-    """Published configs target ``fastgen_data.*``, not the upstream registry."""
-    text = (_FASTGEN_DIR / "configs" / cfg_name).read_text()
-    assert "_target_: fastgen_data.build_" in text
-    assert "nemo_automodel.components.datasets.diffusion.build_" not in text
+def test_all_configs_target_vendored_builders():
+    """EVERY config in configs/ targets a fastgen_data.* dataloader, never the upstream registry.
+
+    Enumerates all YAMLs so a newly added config cannot silently reintroduce the upstream
+    dependence (which would break on stock nemo_automodel).
+    """
+    configs = sorted((_FASTGEN_DIR / "configs").glob("*.yaml"))
+    assert configs, "no configs found under configs/"
+    for cfg in configs:
+        text = cfg.read_text()
+        assert "nemo_automodel.components.datasets.diffusion.build_" not in text, (
+            f"{cfg.name} still targets the upstream dataloader builder (breaks on stock upstream)"
+        )
+        assert "_target_: fastgen_data.build_" in text, (
+            f"{cfg.name} does not target a vendored fastgen_data builder"
+        )
 
 
 def test_no_tools_star_imports_in_vendored_code():
@@ -153,6 +163,8 @@ def test_data_builders_importable_and_accept_negative_prompt_path():
     assert callable(fastgen_data.build_mock_t2i_dataloader)
     sig = inspect.signature(fastgen_data.build_text_to_image_multiresolution_dataloader)
     assert "negative_prompt_embedding_path" in sig.parameters
+    # Default None => CFG-less construction works without the negative embedding (it is optional).
+    assert sig.parameters["negative_prompt_embedding_path"].default is None
 
 
 def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
