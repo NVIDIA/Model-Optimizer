@@ -267,7 +267,6 @@ def train():
         train_len=training_args.training_seq_len,
         answer_only_loss=training_args.answer_only_loss,
         shift_labels=not is_dflash,
-        seed=training_args.seed,
     )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
@@ -277,13 +276,10 @@ def train():
         and recipe.eagle.eagle_base_lora_warmup_steps > 0
     ):
         callbacks.append(LoRAWarmupCallback(recipe.eagle.eagle_base_lora_warmup_steps))
-    if recipe.data.mode == "streaming":
-        # Skip-on-resume happens inside the dataset (no re-fetch from server);
-        # disable HF Trainer's own data skip so the offset isn't applied twice.
-        from modelopt.torch.speculative.plugins.hf_streaming_dataset import StreamingResumeCallback
-
-        training_args.ignore_data_skip = True
-        callbacks.append(StreamingResumeCallback())
+    # Leave training_args.ignore_data_skip at its default (False). The dataset is
+    # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
+    # level (accelerate.skip_first_batches) without re-fetching them, landing at the
+    # exact data position. Setting it True would restart the data order from the top.
 
     trainer = EagleTrainerWithAccLog(
         model=model,

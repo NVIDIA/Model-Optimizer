@@ -27,22 +27,26 @@ The process is as follows:
 Tensor / pipeline / expert parallelism are all supported here — the Megatron checkpoint is saved
 sharded and can be re-sharded on load (e.g. `export.py` reloads it at TP=1 for the HF export).
 
-Example usage to quantize Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2):
-    1024 samples from nemotron-post-training-dataset-v2 are used for calibration.
+Example usage to quantize Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2):
+    1024 samples from default dataset are used for calibration (sequence length = 4096).
 
     torchrun --nproc_per_node 2 quantize.py \
         --hf_model_name_or_path Qwen/Qwen3-8B \
-        --quant_cfg fp8 \
+        --quant_cfg nvfp4 \
         --tp_size 2 \
-        --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
+        --calib_batch_size 1 \
+        --seq_length 4096 \
+        --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 
 Equivalent run using a YAML recipe (authoritative for quant_cfg + algorithm + KV-cache config):
 
     torchrun --nproc_per_node 2 quantize.py \
         --hf_model_name_or_path Qwen/Qwen3-8B \
-        --recipe general/ptq/fp8_default-kv_fp8 \
+        --recipe general/ptq/nvfp4_default-kv_fp8 \
         --tp_size 2 \
-        --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
+        --calib_batch_size 1 \
+        --seq_length 4096 \
+        --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 
 To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, run `export.py`.
 
@@ -54,37 +58,24 @@ See `README.md` in this directory for more details.
 
 import argparse
 import copy
+import gc
 
 import torch
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
+from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
 from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
 
-# Curated short-name aliases for the most common quantization configs. Any other config exposed by
-# ``mtq.config.choices`` (e.g. ``FP8_DEFAULT_CFG``) can also be passed by its full name.
-QUANT_CFG_CHOICES = {
-    "int8": mtq.INT8_DEFAULT_CFG,
-    "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
-    "fp8": mtq.FP8_DEFAULT_CFG,
-    "fp8_blockwise": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
-    "int4_awq": mtq.INT4_AWQ_CFG,
-    "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
-    "nvfp4": mtq.NVFP4_DEFAULT_CFG,
-    "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
-}
-
-# KV-cache quantization configs (applied on top of the weight/activation quant config).
-KV_QUANT_CFG_CHOICES = {
-    "none": "none",
-    "fp8": "FP8_KV_CFG",
-    "nvfp4": "NVFP4_KV_CFG",
-    "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
-}
+# The --quant_cfg / --kv_cache_quant CLI vocabularies are discovered from the preset
+# YAMLs (shared with the llm_ptq examples via modelopt.recipe.presets). --quant_cfg
+# additionally accepts any full config name from ``mtq.config.choices`` (e.g.
+# ``FP8_DEFAULT_CFG``); see get_quant_config below.
 
 # TODO: Add AutoQuantize (mtq.auto_quantize) support to automatically search a per-layer mix of
 # quantization formats that meets a target compression / accuracy constraint, instead of applying a
@@ -123,7 +114,7 @@ def get_args() -> argparse.Namespace:
         type=str,
         default="fp8",
         help=(
-            f"Quantization config. Short aliases: {', '.join(QUANT_CFG_CHOICES)}. "
+            f"Quantization config. Preset names / short aliases: {', '.join(QUANT_CFG_CHOICES)}. "
             "You can also pass any full config name exposed by modelopt (e.g. FP8_DEFAULT_CFG). "
             "Ignored when --recipe is set."
         ),
@@ -131,8 +122,8 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv_cache_quant",
         type=str,
-        default="none",
-        choices=list(KV_QUANT_CFG_CHOICES),
+        default=KV_CACHE_NONE,
+        choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
         help="KV-cache quantization config to apply on top of --quant_cfg. Ignored when --recipe is set.",
     )
     parser.add_argument(
@@ -155,12 +146,15 @@ def get_args() -> argparse.Namespace:
         ),
     )
 
-    # Calibration dataset arguments
+    # Calibration dataset arguments (matched to hf_ptq.py)
     parser.add_argument(
         "--calib_dataset_name",
         type=str,
-        default="nemotron-post-training-dataset-v2",
-        help="HF Dataset name or local path used for calibration.",
+        default="cnn_nemotron_v2_mix",  # cnn_dailymail + nemotron-post-training-dataset-v2
+        help=(
+            f"HF Dataset name or local path for calibration (supported options: {', '.join(get_supported_datasets())}. "
+            "You can also pass any other dataset and see if auto-detection for your dataset works."
+        ),
     )
     parser.add_argument(
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
@@ -205,7 +199,7 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         # customizations below are skipped.
         print_rank_0(f"Using recipe {args.recipe} for quantization")
         if (
-            args.kv_cache_quant != "none"
+            args.kv_cache_quant != KV_CACHE_NONE
             or args.weight_only
             or args.moe_calib_experts_ratio is not None
         ):
@@ -226,20 +220,21 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         mtq_config = getattr(mtq, args.quant_cfg)
     else:
         raise ValueError(
-            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose one of the short aliases "
+            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose a preset name / short alias "
             f"({', '.join(QUANT_CFG_CHOICES)}) or a full config name from {mtq.config.choices}."
         )
 
-    # Deepcopy so we don't mutate the shared module-level config, and normalize the inner quant_cfg
-    # to the list format so we can safely append customizations below.
+    # Deepcopy so we don't mutate a shared module-level config (the ``mtq.config.choices``
+    # full-name branch returns one; QUANT_CFG_CHOICES already hands back a fresh copy), and
+    # normalize the inner quant_cfg to the list format so we can safely append customizations below.
     mtq_config = copy.deepcopy(mtq_config)
     mtq_config["quant_cfg"] = mtq.normalize_quant_cfg_list(mtq_config["quant_cfg"])
 
     if args.weight_only:
         mtq_config["quant_cfg"].append({"quantizer_name": "*input_quantizer", "enable": False})
 
-    if args.kv_cache_quant != "none":
-        kv_cache_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_quant])["quant_cfg"]
+    if args.kv_cache_quant != KV_CACHE_NONE:
+        kv_cache_quant_cfg = KV_QUANT_CFG_CHOICES[args.kv_cache_quant]["quant_cfg"]
         mtq_config = mtq.utils.update_quant_cfg_with_kv_cache_quant(mtq_config, kv_cache_quant_cfg)
 
     # For MoE models, optionally calibrate only a fraction of experts per forward pass for speed.
@@ -271,10 +266,9 @@ def main(args: argparse.Namespace):
             "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
+            "gradient_accumulation_fusion": False,  # not supported
         },
         init_model_parallel=True,
-        # Grouped GEMM is not supported for PTQ + export; use the per-expert (sequential) MLP.
-        moe_grouped_gemm=False,
     )
 
     mtq_config = get_quant_config(args)
@@ -314,15 +308,15 @@ def main(args: argparse.Namespace):
 
     if hasattr(unwrapped_model, "calibration_mode"):
         # Some model wrappers (e.g. distillation/speculative) gate calibration behind a flag.
-        # Reset it in a finally so a failure mid-calibration doesn't leave the flag set for the
-        # subsequent compress / save calls.
         unwrapped_model.calibration_mode = True
-        try:
-            mtq.quantize(unwrapped_model, mtq_config, forward_loop)
-        finally:
-            unwrapped_model.calibration_mode = False
+        mtq.quantize(unwrapped_model, mtq_config, forward_loop)
+        unwrapped_model.calibration_mode = False
     else:
         mtq.quantize(unwrapped_model, mtq_config, forward_loop)
+
+    # Free calibration/quantization memory before generate
+    gc.collect()
+    torch.cuda.empty_cache()
 
     if args.compress:
         mtq.compress(unwrapped_model)
@@ -333,21 +327,16 @@ def main(args: argparse.Namespace):
     if dist.is_master():
         mtq.print_quant_summary(unwrapped_model, args.export_megatron_path)
 
-    print_rank_0(f"Saving quantized model to {args.export_megatron_path} in Megatron format...")
+    print_rank_0(f"\nSaving quantized model to {args.export_megatron_path} in Megatron format...")
     bridge.save_megatron_model(
         model,
         args.export_megatron_path,
         hf_tokenizer_path=args.hf_model_name_or_path,
         hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
     )
-    print_rank_0(f"Saved quantized model to {args.export_megatron_path} in Megatron format")
     print_rank_0(
-        "To deploy this model (TensorRT-LLM / vLLM / SGLang), convert it to a HuggingFace "
-        f"checkpoint with export.py:\n"
-        f"    torchrun --nproc_per_node <N> export.py "
-        f"--hf_model_name_or_path {args.hf_model_name_or_path} "
-        f"--megatron_path {args.export_megatron_path} "
-        f"--export_unified_hf_path {args.export_megatron_path}_hf"
+        f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. "
+        "To deploy this model (TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export.py"
     )
 
     # Sanity-check generation with the fake-quantized model. Skipped when --compress is set: the
@@ -358,21 +347,19 @@ def main(args: argparse.Namespace):
             "Skipping the post-quantization generation sanity check because --compress is set."
         )
     if not args.skip_generate and not args.compress:
-        print_rank_0("Testing quantized model with custom prompts...")
+        print_rank_0("\nTesting quantized model with custom prompts...")
         unwrapped_model.eval()
         for idx, prompt in enumerate(args.prompts.split("|")):
             tokens = tokenizer(prompt, return_tensors="pt")
-            # enable_kv_cache=False avoids pre-allocating the static KV cache: this is a short
-            # sanity-check generation and the KV-cache allocation can OOM tight quantization runs
-            # on large MoE models.
+            # enable_kv_cache=False avoids pre-allocating the static KV cache: this is a short sanity-check
+            # generation and the KV-cache allocation can OOM tight quantization runs on large MoE models.
             generated_ids = megatron_generate(
                 unwrapped_model, tokens.input_ids.cuda(), osl=args.osl, enable_kv_cache=False
             )
             generated_texts = tokenizer.batch_decode(generated_ids)
-            print_rank_0(f"Prompt {idx + 1}: {prompt}")
-            print_rank_0(f"Generated: {generated_texts}")
+            print_rank_0(f"\nPrompt {idx + 1}: {prompt}\nGenerated: {generated_texts}")
 
-    print_rank_0("Done!")
+    print_rank_0("\nDone!")
 
 
 if __name__ == "__main__":

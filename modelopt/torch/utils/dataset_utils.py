@@ -22,20 +22,114 @@ import random
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from warnings import warn
+from typing import TYPE_CHECKING, Any, Literal
 
 import requests
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from .logging import print_rank_0, warn_rank_0
+
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
+
+ReasoningContentMode = Literal["strip", "inline", "native"]
+REASONING_CONTENT_MODES: frozenset[ReasoningContentMode] = frozenset(("strip", "inline", "native"))
 
 
 def _join_messages_content(sample: dict) -> str:
     return "\n".join(turn["content"] for turn in sample["messages"])
+
+
+def _fix_tool_call_arguments(args: Any) -> dict:
+    """Ensure tool_call.arguments is a dict for Jinja2 ``|items`` compatibility."""
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def prepare_messages_for_chat_template(
+    messages: list[dict],
+    *,
+    reasoning_content: ReasoningContentMode = "strip",
+    normalize_tool_calls: bool = True,
+) -> list[dict]:
+    """Prepare OpenAI-style messages before ``apply_chat_template``.
+
+    Args:
+        messages: Conversation turns.
+        reasoning_content: How to handle ``reasoning_content`` on assistant turns:
+            ``"strip"`` (default) removes the field, ``"inline"`` prepends a
+            ``<think>…</think>`` block to ``content``, and
+            ``"native"`` leaves the field intact for the tokenizer chat template.
+        normalize_tool_calls: Parse JSON-string ``tool_calls`` arguments to dicts
+            so Nemotron v3 chat templates can iterate them with Jinja2 ``|items``.
+    """
+    if reasoning_content not in REASONING_CONTENT_MODES:
+        raise ValueError(
+            f"reasoning_content must be one of {sorted(REASONING_CONTENT_MODES)!r}, "
+            f"got {reasoning_content!r}."
+        )
+    if reasoning_content == "native" and not normalize_tool_calls:
+        return messages
+
+    processed: list[dict] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            processed.append(msg)
+            continue
+        has_tool_calls = "tool_calls" in msg and isinstance(msg.get("tool_calls"), list)
+        needs_copy = (reasoning_content != "native" and "reasoning_content" in msg) or (
+            normalize_tool_calls and has_tool_calls
+        )
+        if not needs_copy:
+            processed.append(msg)
+            continue
+        msg = dict(msg)
+        if reasoning_content != "native":
+            rc = msg.pop("reasoning_content", None)
+            if reasoning_content == "inline" and rc:
+                msg["content"] = f"<think>\n{rc}\n</think>\n{msg.get('content', '')}"
+        if normalize_tool_calls and has_tool_calls:
+            fixed_tool_calls = []
+            for tc in msg["tool_calls"]:
+                if not isinstance(tc, dict):
+                    fixed_tool_calls.append(tc)
+                    continue
+                tc = dict(tc)
+                if "arguments" in tc and not isinstance(tc["arguments"], dict):
+                    tc["arguments"] = _fix_tool_call_arguments(tc["arguments"])
+                if isinstance(tc.get("function"), dict):
+                    fn = dict(tc["function"])
+                    if "arguments" in fn and not isinstance(fn["arguments"], dict):
+                        fn["arguments"] = _fix_tool_call_arguments(fn["arguments"])
+                    tc["function"] = fn
+                fixed_tool_calls.append(tc)
+            msg["tool_calls"] = fixed_tool_calls
+        processed.append(msg)
+    return processed
+
+
+def _apply_chat_template_to_messages(
+    tokenizer: "PreTrainedTokenizerBase",
+    messages: list[dict],
+    *,
+    tools: Any | None = None,
+) -> str:
+    kwargs: dict[str, Any] = {}
+    if tools is not None:
+        kwargs["tools"] = tools
+    prepared = prepare_messages_for_chat_template(
+        messages, reasoning_content="native", normalize_tool_calls=True
+    )
+    return tokenizer.apply_chat_template(prepared, tokenize=False, **kwargs)
 
 
 # Use dict to store the config for each dataset.
@@ -117,6 +211,12 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "path": "nvidia/Nemotron-SFT-Agentic-v2",
             "split": ["search"],
         },
+        # ``datasets>=4`` strictly casts each JSONL chunk to the repo's declared
+        # ``dataset_info`` features, which don't match the raw rows (extra ``uuid`` /
+        # ``used_in`` columns, different ``metadata`` / ``tools`` structs) -> ``CastError``.
+        # Reading the raw files through the generic ``json`` builder infers the schema
+        # from the actual data and sidesteps the cast.  ``{split}`` is substituted per split.
+        "data_files": "data/{split}*.jsonl",
         "preprocess": _join_messages_content,
         "chat_key": "messages",
     },
@@ -235,6 +335,8 @@ def _validate_dataset_combos() -> None:
 _validate_dataset_combos()
 
 __all__ = [
+    "REASONING_CONTENT_MODES",
+    "ReasoningContentMode",
     "create_forward_loop",
     "download_hf_dataset_as_jsonl",
     "get_dataset_dataloader",
@@ -242,6 +344,7 @@ __all__ = [
     "get_jsonl_text_samples",
     "get_max_batch_size",
     "get_supported_datasets",
+    "prepare_messages_for_chat_template",
 ]
 
 
@@ -317,11 +420,9 @@ def _auto_preprocess_sample(
                 f"Dataset '{dataset_name}' has a '{chat_key}' column but no tokenizer with "
                 "apply_chat_template was provided."
             )
-        kwargs: dict[str, Any] = {}
-        tools = sample.get("tools")
-        if tools is not None:
-            kwargs["tools"] = tools
-        return tokenizer.apply_chat_template(sample[chat_key], tokenize=False, **kwargs)
+        return _apply_chat_template_to_messages(
+            tokenizer, sample[chat_key], tools=sample.get("tools")
+        )
 
     if _has_non_null_value("prompt"):
         parts = [sample["prompt"]]
@@ -436,18 +537,26 @@ def get_dataset_samples(
 
     is_registered = not is_jsonl and dataset_name in SUPPORTED_DATASET_CONFIG
 
+    # Optional per-dataset ``data_files`` template (e.g. ``"data/{split}*.jsonl"``).  When
+    # set, the split is loaded from the repo's raw files via the generic ``json`` builder
+    # instead of the declared ``dataset_info`` schema, sidestepping ``datasets>=4`` casts.
+    # Only applies to remote registered datasets (not local-path overrides).
+    data_files_tmpl: str | None = None
+
     if is_registered:
         dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
         config = dataset_config["config"].copy()
         if local_dataset_path:
             config["path"] = local_dataset_path
+        else:
+            data_files_tmpl = dataset_config.get("data_files")
         splits = requested_splits if requested_splits is not None else config.pop("split", [None])
         if split is not None:
             config.pop("split", None)
 
         if apply_chat_template:
             if "chat_key" not in dataset_config:
-                warn(
+                warn_rank_0(
                     f"Dataset {dataset_name} does not support chat template."
                     " Chat template will not be applied."
                 )
@@ -456,17 +565,13 @@ def get_dataset_samples(
 
         def _preprocess(sample: dict) -> str:
             if apply_chat_template and "chat_key" in dataset_config:
-                kwargs: dict[str, Any] = {}
-                tools = sample.get("tools")
-                if tools is not None:
-                    kwargs["tools"] = tools
-                return tokenizer.apply_chat_template(  # type: ignore[union-attr]
-                    sample[dataset_config["chat_key"]], tokenize=False, **kwargs
+                return _apply_chat_template_to_messages(
+                    tokenizer, sample[dataset_config["chat_key"]], tools=sample.get("tools")
                 )
             return dataset_config["preprocess"](sample)
 
     else:
-        print(
+        print_rank_0(
             f"Dataset '{dataset_name}' is not in SUPPORTED_DATASET_CONFIG. "
             "Auto-detecting format from column names."
         )
@@ -506,9 +611,22 @@ def get_dataset_samples(
         pass
 
     # load_dataset does not support a list of splits while streaming, so load each separately.
-    print(f"Loading dataset with {config=} and {splits=}")
+    print_rank_0(f"Loading dataset with {config=} and {splits=} {data_files_tmpl=}")
+
+    def _load_split(s: str):
+        if data_files_tmpl:
+            # Raw files via the ``json`` builder: schema is inferred from data, and the
+            # file-based builder labels everything as the ``train`` split.
+            return load_dataset(
+                config["path"],
+                data_files=data_files_tmpl.format(split=s),
+                split="train",
+                streaming=True,
+            )
+        return load_dataset(streaming=True, **config, split=s)
+
     try:
-        dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
+        dataset_splits = [_load_split(s) for s in splits]
 
         num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
         num_per_split[-1] += num_samples - sum(num_per_split)
@@ -536,7 +654,7 @@ def get_dataset_samples(
             # Fallback can't help either — surface the original HF error.
             raise e from None
         safe_name = Path(local_dataset_path).name
-        warn(
+        warn_rank_0(
             f"Failed to load JSONL file '{safe_name}' via the HF 'json' builder "
             f"({type(e).__name__}); fell back to legacy text-field reader."
         )
@@ -667,7 +785,7 @@ def get_dataset_dataloader(
     tokenizer = copy.deepcopy(tokenizer)
 
     if tokenizer.padding_side != "left":
-        warn(
+        warn_rank_0(
             "Tokenizer with the right padding_side may impact calibration accuracy. Recommend set to left"
         )
 
@@ -735,7 +853,7 @@ def get_dataset_dataloader(
             all_samples, tokenizer, max_sample_length, total_rows
         )
         if input_ids.shape[0] < total_rows:
-            warn(
+            warn_rank_0(
                 f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} "
                 f"requested — raw text exhausted before filling all rows (8x oversample "
                 f"of num_samples was insufficient). Increase `num_samples` or shorten "
@@ -797,7 +915,7 @@ def get_supported_datasets() -> list[str]:
 
             from modelopt.torch.utils import get_supported_datasets
 
-            print("Supported datasets:", get_supported_datasets())
+            print_rank_0("Supported datasets:", get_supported_datasets())
     """
     return list(SUPPORTED_DATASET_CONFIG.keys()) + list(DATASET_COMBOS.keys())
 
@@ -876,7 +994,7 @@ def get_max_batch_size(
             * sample_memory_usage_ratio
         )
         if mem_diff_per_data_batch <= 0:  # pragma: no cover - GPU memory probe edge case
-            print(  # pragma: no cover
+            print_rank_0(  # pragma: no cover
                 "Warning: No measurable memory usage found for a single batch. "
                 "Falling back to batch_size=1."
             )
@@ -975,7 +1093,7 @@ def _process_batch(
 
     # Split the batch in half
     mid = (batch_size + 1) // 2
-    warn(f"CUDA out of memory with batch size {batch_size}, trying with batch size {mid}")
+    warn_rank_0(f"CUDA out of memory with batch size {batch_size}, trying with batch size {mid}")
     split_data_1 = {key: batch_data[key][:mid, ...] for key in batch_data}
     split_data_2 = {key: batch_data[key][mid:, ...] for key in batch_data}
 
@@ -1074,7 +1192,7 @@ def create_forward_loop(
         if batch_size == 0:
             # We let the system to determine the max data batch for each forward.
             batch_size = get_max_batch_size(model, max_sample_length)
-            print(f"Update calib batch {batch_size}")
+            print_rank_0(f"Update calib batch {batch_size}")
 
         dataloader = get_dataset_dataloader(
             dataset_name=dataset_name,
@@ -1120,7 +1238,7 @@ def download_hf_dataset_as_jsonl(
     from datasets import load_dataset
     from huggingface_hub.utils import build_hf_headers
 
-    print(f"Downloading dataset {dataset_name} from Hugging Face")
+    print_rank_0(f"Downloading dataset {dataset_name} from Hugging Face")
     if isinstance(json_keys, str):
         json_keys = [json_keys]
     jsonl_paths: list[str] = []
@@ -1136,9 +1254,9 @@ def download_hf_dataset_as_jsonl(
         raise RuntimeError(f"Failed to fetch dataset splits for {dataset_name}: {e}") from e
 
     response_json = response.json()
-    print(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")
+    print_rank_0(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")
     for entry in response_json["splits"]:
-        print(f"\t{entry}")
+        print_rank_0(f"\t{entry}")
 
     splits_to_process = []
     for entry in response_json["splits"]:
@@ -1148,9 +1266,9 @@ def download_hf_dataset_as_jsonl(
             continue
         splits_to_process.append(entry)
 
-    print(f"\nFound {len(splits_to_process)} splits to process:")
+    print_rank_0(f"\nFound {len(splits_to_process)} splits to process:")
     for entry in splits_to_process:
-        print(f"\t{entry}")
+        print_rank_0(f"\t{entry}")
 
     for entry in splits_to_process:
         path = entry["dataset"]
@@ -1160,10 +1278,10 @@ def download_hf_dataset_as_jsonl(
             split = f"{split}[:{max_samples_per_split}]"
         jsonl_file_path = f"{output_dir}/{path.replace('/', '--')}_{name}_{split}.jsonl"
 
-        print(f"\nLoading HF dataset {path=}, {name=}, {split=}")
+        print_rank_0(f"\nLoading HF dataset {path=}, {name=}, {split=}")
         if os.path.exists(jsonl_file_path):
             jsonl_paths.append(jsonl_file_path)
-            print(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
+            print_rank_0(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
             continue
         ds = load_dataset(path=path, name=name, split=split)
 
@@ -1173,7 +1291,7 @@ def download_hf_dataset_as_jsonl(
                     f"{key=} not found in dataset features. Available: {list(ds.features)}"
                 )
 
-        print(f"Saving raw dataset to {jsonl_file_path}")
+        print_rank_0(f"Saving raw dataset to {jsonl_file_path}")
         ds.to_json(jsonl_file_path, num_proc=num_proc)
         jsonl_paths.append(jsonl_file_path)
 

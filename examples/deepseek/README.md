@@ -174,3 +174,25 @@ python deepseek_v4/quantize_to_nvfp4.py \
 The output includes an updated `model.safetensors.index.json`, a `config.json`
 with `quantization_config.moe_quant_algo = "NVFP4"`, and `hf_quant_config.json`
 describing the mixed NVFP4 expert layers.
+
+When the source routed experts are MXFP4 (as in the V4 release), add
+`--cast_mxfp4_to_nvfp4` for a lossless weight conversion — recommended over the
+default lossy dequant/re-quant path. See below.
+
+#### Lossless MXFP4 → NVFP4 weight cast (`--cast_mxfp4_to_nvfp4`)
+
+The routed experts in the source checkpoint are already MXFP4 (E2M1 nibbles +
+a power-of-two E8M0 scale per 32-element block). Without the flag, the export
+dequantizes them to BF16 and re-quantizes to NVFP4 using the calibrated
+per-tensor weight amax, which re-derives the per-block scales from the data and
+is therefore lossy. With `--cast_mxfp4_to_nvfp4`, the per-tensor `scale_2` is
+pinned to `2^(k_max - 8)` and each per-block E4M3 scale to `2^(k_j - m)` straight
+from the source E8M0 scales, so `per_block_scale * scale_2 = 2^k_j` and the NVFP4
+nibbles equal the source MXFP4 nibbles bit-for-bit (for every block whose `k_j`
+lands in E4M3's representable window; the rare out-of-range block falls back to a
+data-derived scale). The flag only affects routed-expert **weights** — activation
+`input_scale` still comes from `${AMAX}` calibration — and the run prints a
+`[cast] lossless MXFP4->NVFP4 blocks: …` summary. This mirrors the GPTOSS cast in
+[`examples/llm_ptq/cast_mxfp4_to_nvfp4.py`](../llm_ptq/cast_mxfp4_to_nvfp4.py); the
+V4 twist is that w1/w3 share one `scale_2` (fused GEMM1), so `k_max` is taken over
+both projections.

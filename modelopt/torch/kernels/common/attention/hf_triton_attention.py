@@ -27,6 +27,10 @@ import torch.nn as nn
 
 from modelopt.torch.kernels.common.attention.triton_fa import attention
 
+# Skip-softmax calibration config and counters live on the module's
+# ``_sparse_method_instance`` (HF passes the owning module to
+# ``triton_attention_forward``), so no separate thread-local state is needed.
+
 
 def _seq_lens_from_mask(
     attention_mask: torch.Tensor | None,
@@ -105,8 +109,34 @@ def triton_attention_forward(
         kw["b_seq_len_k"] = torch.full((batch,), seq_k, device=device, dtype=torch.int32)
         kw["max_input_len_k"] = seq_k
 
-    # Sparse attention params
+    # Sparse-attention method instance. It carries the inference threshold and,
+    # during calibration, both the calibration config and the accumulated
+    # tile-skip counters. Available here because HF passes the owning module.
     method = getattr(module, "_sparse_method_instance", None)
+
+    # Calibration mode: run the calibration kernel, which computes full attention
+    # while counting, per candidate threshold, how many KV tiles would be skipped.
+    # The sparse-attention kwargs below are intentionally not added in this branch.
+    if method is not None and getattr(method, "_calibration_mode", False):
+        trials = getattr(method, "_threshold_trials", None)
+        # Deferred: the package __init__ imports this module, so importing
+        # attention_calibrate at module top would be circular.
+        from modelopt.torch.kernels.common.attention import attention_calibrate
+
+        if trials and attention_calibrate is not None:
+            o, counters = attention_calibrate(q, k, v, **kw, threshold_trials=trials)
+
+            # Accumulate counters across all attention calls in this forward pass.
+            # The method instance is per-module so the accumulator stays on one
+            # device, but guard the add against a device mismatch just in case.
+            prev = getattr(method, "_hf_calibration_counters", None)
+            method._hf_calibration_counters = (
+                counters if prev is None else prev + counters.to(prev.device)
+            )
+            method._hf_calibration_seq_k = seq_k
+            method._hf_calibration_is_decode = is_decode
+
+            return (o.view(batch, seq_len, num_heads, head_dim), None)
 
     # N:M sparse softmax: prefill only (no perf benefit for decode)
     if method is not None and not is_decode and getattr(module, "_apply_sparse_nm", False):
@@ -115,10 +145,13 @@ def triton_attention_forward(
         kw["dense_sink_tokens"] = method.dense_sink_tokens
         kw["dense_recent_tokens"] = method.dense_recent_tokens
 
-    # Skip-softmax: applies to both prefill and decode
+    # Skip-softmax: applies to both prefill and decode. Prefer the method's
+    # per-phase calibrated dynamic threshold (scale_factor / seq_k); fall back
+    # to the static threshold when uncalibrated.
     if method is not None and getattr(module, "_apply_skip_softmax", False):
-        if method.skip_softmax_threshold:
-            kw["skip_softmax_threshold"] = method.skip_softmax_threshold
+        threshold = method.get_inference_threshold(seq_len, seq_k)
+        if threshold:
+            kw["skip_softmax_threshold"] = threshold
 
     o = attention(q, k, v, **kw)
 

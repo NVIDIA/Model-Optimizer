@@ -27,6 +27,8 @@ from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
+    _get_auto_quantize_cost_excluded_patterns,
+    _get_auto_quantize_disabled_layers,
     build_quant_cfg,
     copy_custom_model_files,
     create_vlm_calibration_loop,
@@ -56,6 +58,12 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.recipe.presets import (
+    KV_CACHE_NONE,
+    KV_QUANT_CFG_CHOICES,
+    QFORMAT_ALIASES,
+    QUANT_CFG_CHOICES,
+)
 from modelopt.torch.export import (
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
@@ -66,7 +74,8 @@ from modelopt.torch.export import (
     save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
-from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
+from modelopt.torch.quantization._auto_quantize_cost import EXCLUDED_MODULE_NAME_PATTERNS_KEY
+from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.speculative.eagle.utils import (
@@ -86,56 +95,68 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 
 
-def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
-    """Set use_constant_amax on KV cache quantizers.
+def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
+    """Return True if this KV cfg pins ``use_constant_amax`` on the bmm quantizer.
 
-    Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
+    Cast-style KV presets (e.g. ``fp8_cast`` / ``nvfp4_cast``) set
+    ``use_constant_amax: true`` on the ``*[kv]_bmm_quantizer`` entry; that flag
+    means there is no data-driven calibration to run, so callers should skip
+    the KV-only calibration pass. Detect the property from the YAML contents
+    rather than from the preset name so new cast-style presets work
+    automatically.
     """
-    for i, entry in enumerate(quant_cfg):
+    for entry in kv_quant_cfg:
         if entry.get("quantizer_name") != "*[kv]_bmm_quantizer":
             continue
         cfg = entry.get("cfg") or {}
-        assert isinstance(cfg, dict)
-        quant_cfg[i] = {**entry, "cfg": {**cfg, "use_constant_amax": True}}
-        break
+        return bool(cfg.get("use_constant_amax"))
+    return False
 
 
-QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
-    "int8": mtq.INT8_DEFAULT_CFG,
-    "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
-    "int8_wo": mtq.INT8_WEIGHT_ONLY_CFG,
-    "fp8": mtq.FP8_DEFAULT_CFG,
-    "int4_awq": mtq.INT4_AWQ_CFG,
-    "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
-    "nvfp4": mtq.NVFP4_DEFAULT_CFG,
-    "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
-    "nvfp4_mse": mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
-    "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
-    "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
-    "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
-    "w4a16_nvfp4": mtq.W4A16_NVFP4_CFG,
-    "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
-    "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
-    "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
-    "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
-    "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
-    "mxfp8": mtq.MXFP8_DEFAULT_CFG,
-    "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
-}
+# Formats supported by mtq.auto_quantize unified-checkpoint export.
+#
+# This stays hardcoded — and intentionally not derived from the preset directory —
+# because auto_quantize compatibility is a property of the export path (the unified
+# HF checkpoint writer, TRT-LLM consumer constraints, layer-wise mixing rules), not
+# of the YAML itself. A preset can exist and be valid for plain PTQ while not being
+# safe to mix into an auto_quantize search. Update this set when adding/removing a
+# format from auto_quantize support.
+#
+# NOTE: auto_quantize is being refactored/reimplemented; this table and the
+# _canonical_qformat helper below are expected to be removed in the near future, so
+# deliberately not invested in deriving them from the presets.
+_AUTO_QUANTIZE_QFORMATS: frozenset[str] = frozenset(
+    {
+        "fp8",
+        "int8_smoothquant",
+        "int8_weight_only",
+        "int4_awq",
+        "nvfp4",
+        "nvfp4_awq_lite",
+        "nvfp4_w4a4_weight_mse_fp8_sweep",
+        "w4a8_awq_beta",
+        "w4a16_nvfp4",
+        "fp8_2d_blockwise_weight_only",
+        "w4a8_mxfp4_fp8",
+        "nvfp4_mlp_only",
+        "nvfp4_experts_only",
+        "nvfp4_omlp_only",
+        "nvfp4_w4a4_weight_local_hessian",
+        "mxfp8",
+    }
+)
 
-KV_QUANT_CFG_CHOICES = {
-    "none": "none",
-    "fp8_cast": "FP8_KV_CFG",
-    "fp8": "FP8_KV_CFG",
-    "fp8_affine": "FP8_AFFINE_KV_CFG",
-    "nvfp4_cast": "NVFP4_KV_CFG",
-    "nvfp4": "NVFP4_KV_CFG",
-    "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
-    "nvfp4_rotate": "NVFP4_KV_ROTATE_CFG",
-}
 
-# Formats that use use_constant_amax (no calibration needed).
-_KV_CAST_FORMATS = {"fp8_cast", "nvfp4_cast"}
+def _canonical_qformat(name: str) -> str:
+    """Resolve a user-provided qformat token to its canonical preset basename.
+
+    Lets membership checks (e.g. against :data:`_AUTO_QUANTIZE_QFORMATS`) accept
+    either the short alias (``int8_sq``) or the canonical YAML basename
+    (``int8_smoothquant``). Unknown tokens pass through unchanged so the existing
+    error paths still fire.
+    """
+    return QFORMAT_ALIASES.get(name, name)
+
 
 mto.enable_huggingface_checkpointing()
 
@@ -311,27 +332,11 @@ def auto_quantize(
 
     qformat_list = args.qformat.split(",")
     assert qformat_list, "No quantization formats provided"
-    # Check if all provided quantization formats are supported
+    # Check if all provided quantization formats are supported. Canonicalize first so
+    # callers may pass either the short alias (``int8_sq``) or the canonical YAML
+    # basename (``int8_smoothquant``).
     assert all(
-        qformat
-        in [
-            "fp8",
-            "int8_sq",
-            "int8_wo",
-            "int4_awq",
-            "nvfp4",
-            "nvfp4_awq",
-            "nvfp4_mse",
-            "w4a8_awq",
-            "fp8_pb_wo",
-            "w4a8_mxfp4_fp8",
-            "nvfp4_mlp_only",
-            "nvfp4_experts_only",
-            "nvfp4_omlp_only",
-            "nvfp4_local_hessian",
-            "mxfp8",
-        ]
-        for qformat in qformat_list
+        _canonical_qformat(qformat) in _AUTO_QUANTIZE_QFORMATS for qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
 
     # When language_model is a base text model without lm_head (e.g. Gemma4TextModel),
@@ -386,10 +391,14 @@ def auto_quantize(
         "effective_bits": args.auto_quantize_bits,
         "cost_model": args.auto_quantize_cost_model,
     }
+    auto_quantize_cost = {}
     if args.auto_quantize_active_moe_expert_ratio is not None:
-        auto_quantize_constraints["cost"] = {
-            "active_moe_expert_ratio": args.auto_quantize_active_moe_expert_ratio
-        }
+        auto_quantize_cost["active_moe_expert_ratio"] = args.auto_quantize_active_moe_expert_ratio
+    cost_excluded_patterns = _get_auto_quantize_cost_excluded_patterns(language_model)
+    if cost_excluded_patterns:
+        auto_quantize_cost[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = cost_excluded_patterns
+    if auto_quantize_cost:
+        auto_quantize_constraints["cost"] = auto_quantize_cost
 
     language_model, _ = mtq.auto_quantize(
         language_model,
@@ -405,33 +414,23 @@ def auto_quantize(
             len(calib_dataloader), max(auto_quantize_score_size // args.batch_size, 1)
         ),
         verbose=True,
-        # Disable all default disabled layers such as lm_head, mlp.gate, router etc.
-        disabled_layers=[
-            entry["quantizer_name"]
-            for entry in _default_disabled_quantizer_cfg
-            if "parent_class" not in entry
-        ],
+        disabled_layers=_get_auto_quantize_disabled_layers(language_model),
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
     )
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     # We need to explicitly set up KV cache quantization after auto_quantize
-    enable_quant_kv_cache = args.kv_cache_qformat != "none"
+    enable_quant_kv_cache = args.kv_cache_qformat != KV_CACHE_NONE
     print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
     if enable_quant_kv_cache:
-        kv_cache_quant_cfg = copy.deepcopy(
-            getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
-        )
+        kv_cache_quant_cfg = copy.deepcopy(KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"])
         kv_cache_quant_cfg = [
             e for e in kv_cache_quant_cfg if e["quantizer_name"] != "*"
         ]  # keep other quantizers from auto_quantize
 
-        if args.kv_cache_qformat in _KV_CAST_FORMATS:
-            _set_kv_cache_constant_amax(kv_cache_quant_cfg)
-
         mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
-        if args.kv_cache_qformat not in _KV_CAST_FORMATS:
+        if not _kv_cfg_uses_constant_amax(kv_cache_quant_cfg):
             # Calibrate only the KV cache quantizers; disable all others.
             with mtq.set_quantizer_by_cfg_context(
                 language_model,
@@ -455,21 +454,14 @@ def load_model(args: argparse.Namespace):
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
-            f"Quantization format is not supported for low memory mode. Supported formats: {QUANT_CFG_CHOICES.keys()}"
+            f"Quantization format is not supported for low memory mode. Supported formats: {list(QUANT_CFG_CHOICES)}"
         )
         quant_cfg = QUANT_CFG_CHOICES[args.qformat]
-        if args.kv_cache_qformat != "none":
+        if args.kv_cache_qformat != KV_CACHE_NONE:
             quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
                 quant_cfg,
-                getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
+                KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
             )
-            # Mirror the use_constant_amax logic from quantize_main so that init_quantized_weights
-            # builds the KV quantizers with use_constant_amax already set. In calibration_only mode
-            # mtq.calibrate() does not re-apply quant_cfg, so this must happen before
-            # init_quantized_weights runs.
-            if args.kv_cache_qformat in _KV_CAST_FORMATS:
-                quant_cfg = copy.deepcopy(quant_cfg)
-                _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         # Do not use real quant GEMM so the calibration can be more accurate.
         with init_quantized_weights(
@@ -498,7 +490,7 @@ def load_model(args: argparse.Namespace):
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
     # Default to image-text calibration for VLM models
-    if is_nemotron_vl_model and not args.calib_with_images:
+    if is_nemotron_vl_model and not args.calib_with_images and args.auto_quantize_bits is None:
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
@@ -550,12 +542,10 @@ def load_model(args: argparse.Namespace):
                 : len(args.dataset)
             ]
 
-            # We only quantize the language model for VLMs other than the type supported above.
-            # Recipe mode is the exception: in Qwen3.5/3.6-MoE VLMs, lm_head sits
-            # on the outer CausalLM, not the inner language backbone. A recipe that targets
-            # lm_head must therefore quantize against the full model and explicitly keep visual
-            # and MTP siblings disabled.
-            if args.recipe is None:
+            # Plain PTQ quantizes only the extracted language model. Recipe and
+            # AutoQuantize paths keep the outer CausalLM so recipes/search can see
+            # Qwen3.5/3.6-MoE VLM lm_head.
+            if args.recipe is None and args.auto_quantize_bits is None:
                 extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
                     full_model
                 )
@@ -1081,9 +1071,16 @@ def quantize_main(
             "Auto quantization needs multiple quantization format."
         )
 
+        # For VL models, autoquant must walk submodules of the OUTER CausalLM
+        # (which carries lm_head and the LM-head forward path) — otherwise
+        # lm_head and any sibling-of-language_model modules are silently
+        # invisible to the search. ``forward_step`` also needs the outer model
+        # to produce ``CausalLMOutputWithPast`` (for ``.loss`` / ``.logits``).
+        # Visual tower and MTP siblings are auto-excluded inside
+        # ``auto_quantize()`` via *visual* / *mtp* / *vision_tower* patterns.
         auto_quantize(
             args,
-            language_model,
+            full_model,
             calib_dataloader,
             auto_quantize_method=args.auto_quantize_method,
             auto_quantize_score_size=args.auto_quantize_score_size,
@@ -1103,7 +1100,7 @@ def quantize_main(
             )
 
             assert args.qformat in QUANT_CFG_CHOICES, (
-                f"Unsupported quantization format: {args.qformat}, choices are: {list(QUANT_CFG_CHOICES.keys())}"
+                f"Unsupported quantization format: {args.qformat}, choices are: {list(QUANT_CFG_CHOICES)}"
             )
             quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
@@ -1113,14 +1110,14 @@ def quantize_main(
                 args.moe_calib_experts_ratio,
             )
 
-            enable_quant_kv_cache = args.kv_cache_qformat != "none"
+            enable_quant_kv_cache = args.kv_cache_qformat != KV_CACHE_NONE
             print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
 
             # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
             if enable_quant_kv_cache:
                 quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
                     quant_cfg,
-                    getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
+                    KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
                 )
 
         # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92).
@@ -1134,14 +1131,6 @@ def quantize_main(
                 pattern = f"*{prefix}*"
                 quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
                 print(f"Excluding MTP layer from quantization: {pattern}")
-
-        # Use constant amax for KV quantizers when a cast format is selected.
-        # Recipes are authoritative for KV cache config (including use_constant_amax),
-        # so skip this post-hoc override when --recipe is used; rely on the YAML instead
-        # (see modelopt_recipes/general/ptq/*_cast_kv.yaml).
-        if args.recipe is None and args.kv_cache_qformat in _KV_CAST_FORMATS:
-            quant_cfg = copy.deepcopy(quant_cfg)
-            _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         if needs_checkpoint_path_update(quant_cfg):
             quant_cfg = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
@@ -1293,12 +1282,12 @@ def parse_args() -> argparse.Namespace:
         "--kv_cache_qformat",
         required=False,
         default="fp8_cast",
-        choices=KV_QUANT_CFG_CHOICES.keys(),
+        choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
         help=(
             "Specify KV cache quantization format. Default: fp8_cast. "
-            "Formats ending in '_cast' (fp8_cast, nvfp4_cast) set the amax to FP8 range "
-            "without data-driven calibration. "
-            "Other formats (fp8, nvfp4, etc.) use data-driven calibration. "
+            "Formats whose preset pins use_constant_amax on the KV bmm quantizer "
+            "(e.g. fp8_cast, nvfp4_cast) set the amax to FP8 range without data-driven "
+            "calibration; all other formats (fp8, nvfp4, ...) use data-driven calibration. "
             "Ignored when --recipe is given: the recipe YAML is authoritative for KV "
             "cache config (use the *_cast_kv.yaml recipes for the cast variants)."
         ),
@@ -1456,6 +1445,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+    if args.auto_quantize_bits is not None and args.calib_with_images:
+        parser.error("--calib_with_images is not supported with --auto_quantize_bits.")
     if args.auto_quantize_active_moe_expert_ratio is not None and not (
         0.0 < args.auto_quantize_active_moe_expert_ratio <= 1.0
     ):
@@ -1474,6 +1465,16 @@ def parse_args() -> argparse.Namespace:
 
     if args.specdec_offline_dataset is not None and args.low_memory_mode:
         parser.error("--specdec_offline_dataset is not compatible with --low_memory_mode.")
+
+    # The low-memory loader pre-instruments quantizers from --qformat/--kv_cache_qformat
+    # via init_quantized_weights(), so it cannot honor a --recipe (which is authoritative
+    # for the quant layout in quantize_main). Reject the combination rather than silently
+    # instrumenting a layout that diverges from the recipe.
+    if args.low_memory_mode and args.recipe is not None:
+        parser.error(
+            "--low_memory_mode does not yet support --recipe; the low-memory loader still "
+            "initializes quantizers from --qformat/--kv_cache_qformat."
+        )
 
     return args
 

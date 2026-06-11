@@ -1,0 +1,83 @@
+# SPEED-bench MTP speculative-decoding run for gemma-4-E4B-it via vLLM.
+#
+# Gemma 4 MTP support landed in vLLM PR vllm-project/vllm#41745 (2026-05-06)
+# and is in ``vllm/vllm-openai:v0.22.1`` (and later). Gemma 4 MTP uses a
+# separate assistant model passed via ``--draft_model_dir``; vLLM
+# auto-detects Gemma 4 from the assistant and does NOT take a ``method``
+# key in ``speculative_config``. The wrapper at
+# ``examples/specdec_bench/specdec_bench/models/vllm.py`` routes to the
+# assistant-model config shape when ``--speculative_algorithm MTP`` is
+# paired with ``--draft_model_dir``.
+#
+# Assistant model: ``google/gemma-4-E4B-it-assistant`` (public, ungated).
+#
+# Slurm run on cw_dfw — cells override per-cell knobs via
+# pipeline.task_N.args+=[...]:
+#
+#   uv run slurm.py \
+#     --yaml modules/Model-Optimizer/tools/launcher/examples/gemma-4/gemma-4-E4B-it/specdec_bench_mtp_vllm.yaml \
+#     --yes detach=true \
+#     pipeline.task_0.args+=["--temperature 0","--max_seq_len 65536","--save_dir /scratchspace/<sweep>/qualitative","--draft_length 3"] \
+#     pipeline.task_1.args+=["--temperature 0","--max_seq_len 65536","--save_dir /scratchspace/<sweep>/throughput_32k","--num_requests 80","--draft_length 3"]
+
+job_name: gemma-4-E4B-it_specdec_bench_mtp_vllm
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/google/gemma-4-E4B-it
+    draft_model: /hf-local/google/gemma-4-E4B-it-assistant
+
+  # task_0: SPEED qualitative split
+  task_0:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_model_dir <<global_vars.draft_model>>
+      - --draft_length 3
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/{sweep_name_default}/qualitative
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:v0.22.1
+
+  # task_1: SPEED throughput_32k split
+  task_1:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_model_dir <<global_vars.draft_model>>
+      - --draft_length 3
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 8
+      - --num_requests 80
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/{sweep_name_default}/throughput_32k
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:v0.22.1

@@ -12,7 +12,7 @@ config:
   MD059: false # no-hard-tabs
 
 # Vendored upstream skills — kept byte-identical to upstream via
-# .claude/scripts/sync-upstream-skills.sh; do not reformat.
+# .agents/scripts/sync-upstream-skills.sh; do not reformat.
 ignores:
-  - ".claude/skills/launching-evals/**"
-  - ".claude/skills/accessing-mlflow/**"
+  - ".agents/skills/launching-evals/**"
+  - ".agents/skills/accessing-mlflow/**"

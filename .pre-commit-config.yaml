@@ -71,6 +71,13 @@ repos:
         # configs/ contains reusable snippets (not full recipes) — skip recipe validation
         exclude: ^modelopt_recipes/configs/
 
+      - id: sync-claude-skills
+        name: sync .claude/skills/ symlinks from .agents/skills/
+        entry: bash tools/precommit/sync_claude_skills.sh
+        language: system
+        files: ^\.agents/skills/
+        pass_filenames: false
+
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
   - repo: https://github.com/Lucas-C/pre-commit-hooks

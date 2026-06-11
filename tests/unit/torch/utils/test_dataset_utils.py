@@ -30,7 +30,32 @@ from modelopt.torch.utils.dataset_utils import (
     get_dataset_dataloader,
     get_dataset_samples,
     get_max_batch_size,
+    prepare_messages_for_chat_template,
 )
+
+
+def test_prepare_messages_for_chat_template():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "think",
+            "tool_calls": [
+                {"function": {"name": "search", "arguments": '{"q": "x"}'}},
+            ],
+        },
+    ]
+    prepared = prepare_messages_for_chat_template(
+        messages, reasoning_content="native", normalize_tool_calls=True
+    )
+    assert prepared[0]["reasoning_content"] == "think"
+    assert prepared[0]["tool_calls"][0]["function"]["arguments"] == {"q": "x"}
+    assert (
+        prepare_messages_for_chat_template(
+            messages, reasoning_content="native", normalize_tool_calls=False
+        )
+        is messages
+    )
 
 
 def setup_test_data():
