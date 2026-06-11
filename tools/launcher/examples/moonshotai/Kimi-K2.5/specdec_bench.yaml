@@ -32,13 +32,13 @@ pipeline:
 
   global_vars:
     hf_model: /hf-local/nvidia/Kimi-K2.5-NVFP4
-    # Trained+exported DFLASH draft; override: pipeline.global_vars.draft_model_dir=<path>
-    draft_model_dir: /hf-local/nvidia/Kimi-K2.5-DFlash
+    # Trained+exported DFLASH draft; override: pipeline.global_vars.draft_model=<path>
+    draft_model: /hf-local/nvidia/Kimi-K2.5-DFlash
 
   task_0:
     script: common/specdec_bench/run.sh
     args:
-      - --draft_model_dir <<global_vars.draft_model_dir>>
+      - --draft_model_dir <<global_vars.draft_model>>
       - --speculative_algorithm DFLASH
       - --engine VLLM
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl

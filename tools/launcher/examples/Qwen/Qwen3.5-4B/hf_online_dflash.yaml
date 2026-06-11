@@ -45,7 +45,6 @@ pipeline:
       - dflash.dflash_architecture_config.head_dim=128
       - dflash.dflash_architecture_config.intermediate_size=9728
       - dflash.dflash_architecture_config.rope_theta=10000000
-    environment:
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
