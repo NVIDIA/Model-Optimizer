@@ -40,7 +40,10 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
 )
 
-from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
+from modelopt.torch.kernels.common.attention.decode_attention import (
+    attention_decode,
+    fake_quant_kv_onwrite,
+)
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
 from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import tensor_global_scale_device
 from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
@@ -309,19 +312,39 @@ class _SparseCalibrationMixin:
                 self._nvfp4_gs_cache = gs_cache
 
             def _running_max(name, tensor):
-                s = tensor_global_scale_device(tensor[:num_actual_tokens])  # 0-d device tensor
+                # FROZEN scale: quantize-on-write requires a fixed per-tensor scale (write-time ==
+                # read-time), else previously-written cache entries drift. The first prefill seeds a
+                # representative scale and it is reused thereafter (graph-safe persistent buffer).
                 buf = gs_cache.get(name)
                 if buf is None:
-                    buf = s.detach().clone()  # persistent buffer, allocated on first call
+                    buf = tensor_global_scale_device(tensor[:num_actual_tokens]).detach().clone()
                     gs_cache[name] = buf
-                else:
-                    torch.maximum(buf, s, out=buf)  # in-place running max — graph-safe
                 attn_global_scales[name] = buf
 
             if "k" in nvfp4 and new_key is not None:
                 _running_max("k", new_key)
             if "v" in nvfp4 and new_value is not None:
                 _running_max("v", new_value)
+            # Quantize-KV-on-write: fake-quantize the newly-written K/V in the paged cache once
+            # (frozen scale) so the decode kernel reads them pre-quantized instead of re-FQ'ing the
+            # whole cache every step. K = new keys [prev, seq); V = newly-complete 128-tiles. Prefill
+            # re-FQ's idempotently on read; decode (flags below) skips it -> the 8-18x decode speedup.
+            if {"k", "v"} & nvfp4:
+                prev = (seq_lens - b_seq_len).to(torch.int32)
+                seqk32 = seq_lens.to(torch.int32)
+                fake_quant_kv_onwrite(
+                    key_cache,
+                    value_cache,
+                    block_table,
+                    prev,
+                    seqk32,
+                    (prev // 128) * 128,
+                    (seqk32 // 128) * 128,
+                    page_size=page_size,
+                    k_global_scale=attn_global_scales.get("k"),
+                    v_global_scale=attn_global_scales.get("v"),
+                    nvfp4=nvfp4,
+                )
         _resolve_skip_softmax_calibration(
             sparse_kw, is_prefill=not is_decode_only, max_seq_len=max_seq_len
         )
@@ -348,6 +371,8 @@ class _SparseCalibrationMixin:
                 fp16_softmax=fp16_softmax,
                 softmax_quant=softmax_quant,
                 attn_global_scales=attn_global_scales,
+                k_cache_quantized=("k" in nvfp4),
+                v_cache_quantized=("v" in nvfp4),
                 output=output,
             )
         if not sparse_kw and not quant_active:
@@ -400,6 +425,8 @@ class _SparseCalibrationMixin:
         fp16_softmax: bool = False,
         softmax_quant: dict | None = None,
         attn_global_scales: dict | None = None,
+        k_cache_quantized: bool = False,
+        v_cache_quantized: bool = False,
     ) -> torch.Tensor:
         """Decode via the dedicated paged decode kernel (skip-softmax and/or NVFP4).
 
@@ -425,6 +452,8 @@ class _SparseCalibrationMixin:
             fp16_softmax=fp16_softmax,
             softmax_quant=softmax_quant,
             attn_global_scales=attn_global_scales,
+            k_cache_quantized=k_cache_quantized,
+            v_cache_quantized=v_cache_quantized,
         )
         output[:num_actual_tokens] = decode_out
         return output

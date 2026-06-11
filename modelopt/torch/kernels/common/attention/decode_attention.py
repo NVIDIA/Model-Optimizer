@@ -626,4 +626,151 @@ def fake_quant_kv_cache(
         )
 
 
-__all__ = ["attention_decode", "fake_quant_kv_cache"]
+@triton.jit
+def _onwrite_fq_paged_kernel(
+    K_cache,
+    V_cache,
+    Block_table,
+    K_lo,  # [batch] per-request K quant range [lo, hi) in logical key positions
+    K_hi,
+    V_lo,  # [batch] per-request V quant range (block-aligned, complete 16-key blocks)
+    V_hi,
+    stride_kc_block,
+    stride_kc_pos,
+    stride_kc_head,
+    stride_vc_block,
+    stride_vc_pos,
+    stride_vc_head,
+    tile0,  # first tile index covered by the grid (keys >= tile0*BLOCK_N)
+    k_global_scale,
+    v_global_scale,
+    NVFP4_K: tl.constexpr,
+    NVFP4_V: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    max_blocks_per_seq,
+):
+    """In-place fake-quant of a paged KV cache over per-request key ranges (quantize-on-write).
+
+    K range = newly-written keys (head-dim 16-blocks, per key). V range = newly-COMPLETE 16-key
+    blocks (keys 16-blocks). Reads the tile, fakequants with the SAME ``fake_quant_fp4_k0`` the
+    decode kernel would use, and stores back only the in-range valid keys via the block table.
+    """
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    tile = tile0 + tl.program_id(2)
+    kv_start = tile * BLOCK_N
+    kv_pos = tl.arange(0, BLOCK_N)
+    dim_pos = tl.arange(0, BLOCK_D)
+    d_mask = dim_pos < HEAD_DIM
+    kv_abs = kv_start + kv_pos
+
+    klo = tl.load(K_lo + batch_idx)
+    khi = tl.load(K_hi + batch_idx)
+    vlo = tl.load(V_lo + batch_idx)
+    vhi = tl.load(V_hi + batch_idx)
+
+    page_local = kv_abs // PAGE_SIZE
+    offset_in_page = kv_abs % PAGE_SIZE
+    in_any = ((kv_abs >= klo) & (kv_abs < khi)) | ((kv_abs >= vlo) & (kv_abs < vhi))
+    page_global = tl.load(
+        Block_table + batch_idx * max_blocks_per_seq + page_local, mask=in_any, other=0
+    )
+
+    if NVFP4_K:
+        k_gs = tl.load(k_global_scale)
+        k_ptrs = (
+            page_global[None, :].to(tl.int64) * stride_kc_block
+            + offset_in_page[None, :] * stride_kc_pos
+            + head_idx * stride_kc_head
+            + dim_pos[:, None]
+        )
+        k_in = (kv_abs >= klo) & (kv_abs < khi)
+        kt = tl.load(K_cache + k_ptrs, mask=k_in[None, :] & d_mask[:, None], other=0.0).to(
+            tl.float32
+        )
+        kq = fake_quant_fp4_k0(kt, BLOCK_D, BLOCK_N, 16, 1, k_gs, QUANT_NVFP4)
+        tl.store(
+            K_cache + k_ptrs, kq.to(K_cache.dtype.element_ty), mask=k_in[None, :] & d_mask[:, None]
+        )
+
+    if NVFP4_V:
+        v_gs = tl.load(v_global_scale)
+        v_ptrs = (
+            page_global[:, None].to(tl.int64) * stride_vc_block
+            + offset_in_page[:, None] * stride_vc_pos
+            + head_idx * stride_vc_head
+            + dim_pos[None, :]
+        )
+        v_in = (kv_abs >= vlo) & (kv_abs < vhi)
+        vt = tl.load(V_cache + v_ptrs, mask=v_in[:, None] & d_mask[None, :], other=0.0).to(
+            tl.float32
+        )
+        vq = fake_quant_fp4_k0(vt, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
+        tl.store(
+            V_cache + v_ptrs, vq.to(V_cache.dtype.element_ty), mask=v_in[:, None] & d_mask[None, :]
+        )
+
+
+def fake_quant_kv_onwrite(
+    k_cache,  # [num_blocks, page_size, n_kv_heads, head_dim]
+    v_cache,
+    block_table,  # [batch, max_blocks_per_seq]
+    k_lo,  # [batch] int32 per-request K range [lo, hi)
+    k_hi,
+    v_lo,  # [batch] int32 per-request V range (16-block-aligned)
+    v_hi,
+    *,
+    page_size: int = 16,
+    k_global_scale=None,
+    v_global_scale=None,
+    nvfp4: set[str] | None = None,
+) -> None:
+    """Paged quantize-on-write: fakequant K (k_lo:k_hi) and V (v_lo:v_hi) per request in place."""
+    nvfp4 = nvfp4 or set()
+    if not ({"k", "v"} & nvfp4):
+        return
+    batch, max_blocks = block_table.shape
+    nkv, hd = k_cache.shape[2], k_cache.shape[3]
+    BLOCK_D = triton.next_power_of_2(hd)
+    BLOCK_N = 128
+    hi = int(max(int(k_hi.max().item()), int(v_hi.max().item())))
+    lo = int(min(int(k_lo.min().item()), int(v_lo.min().item())))
+    if hi <= lo:
+        return
+    tile0 = lo // BLOCK_N
+    n_tiles = (hi + BLOCK_N - 1) // BLOCK_N - tile0
+    kgs = k_global_scale if k_global_scale is not None else k_cache.new_full((), 1.0)
+    vgs = v_global_scale if v_global_scale is not None else k_cache.new_full((), 1.0)
+    with torch.cuda.device(k_cache.device):
+        _onwrite_fq_paged_kernel[(batch, nkv, n_tiles)](
+            k_cache,
+            v_cache,
+            block_table,
+            k_lo,
+            k_hi,
+            v_lo,
+            v_hi,
+            k_cache.stride(0),
+            k_cache.stride(1),
+            k_cache.stride(2),
+            v_cache.stride(0),
+            v_cache.stride(1),
+            v_cache.stride(2),
+            tile0,
+            kgs,
+            vgs,
+            NVFP4_K="k" in nvfp4,
+            NVFP4_V="v" in nvfp4,
+            PAGE_SIZE=page_size,
+            BLOCK_N=BLOCK_N,
+            BLOCK_D=BLOCK_D,
+            HEAD_DIM=hd,
+            max_blocks_per_seq=max_blocks,
+            num_warps=4,
+        )
+
+
+__all__ = ["attention_decode", "fake_quant_kv_cache", "fake_quant_kv_onwrite"]
