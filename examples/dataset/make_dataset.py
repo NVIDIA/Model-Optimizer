@@ -276,14 +276,14 @@ async def _load_ultrachat_conversations(
     ds = ds.shuffle(seed=42)
     yield len(ds)
     for i in range(len(ds)):
-        prompt = ds[i]["prompt"].strip()
         prompt_id = ds[i]["prompt_id"].strip()
-        if prompt:
-            msgs = [{"role": "user", "content": prompt}]
-            if not prompt_id:
-                prompt_id = id_for_conversation(msgs)
-            prompt_id = f"ultrachat-{split_name}-{prompt_id}"
-            yield {"conversation_id": prompt_id, "conversations": msgs}
+        msgs = ds[i]["messages"]
+        if not msgs:
+            continue
+        if not prompt_id:
+            prompt_id = id_for_conversation(msgs)
+        prompt_id = f"ultrachat-{split_name}-{prompt_id}"
+        yield {"conversation_id": prompt_id, "conversations": msgs}
     logger.info(f"Finished loading UltraChat {split_name} conversations.")
 
 
