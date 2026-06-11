@@ -35,9 +35,12 @@ import sys
 
 import pytest
 
-# examples/diffusers/fastgen — put it on sys.path so ``fastgen_data`` / ``fastgen_checkpoint`` /
-# ``preprocess`` import as top-level modules, exactly as dmd2_finetune.py / preprocess_qwen_image.py do.
-_FASTGEN_DIR = pathlib.Path(__file__).resolve().parents[1]
+# Resolve the example dir (examples/diffusers/fastgen) from this test's location
+# (tests/examples/diffusers/fastgen/) and put it on sys.path so ``fastgen_data`` /
+# ``fastgen_checkpoint`` / ``preprocess`` import as top-level modules, exactly as
+# dmd2_finetune.py / preprocess_qwen_image.py do.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
+_FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
@@ -116,10 +119,21 @@ VENDORED_WITH_HEADER = [
 
 
 def test_vendored_files_have_provenance_headers():
-    """Each verbatim-vendored file references its AutoModel source + commit."""
+    """Each verbatim-vendored file has the source/commit note AND the NVIDIA SPDX header, in order.
+
+    Per CONTRIBUTING "Copying code from other sources": (1) source link + commit, (2) original
+    copyright/license, (3) the NVIDIA SPDX header after the original.
+    """
     for target in VENDORED_WITH_HEADER:
-        head = (_FASTGEN_DIR / target).read_text()[:800]
-        assert "Vendored from NVIDIA-NeMo/Automodel" in head, f"{target}: missing provenance header"
+        text = (_FASTGEN_DIR / target).read_text()
+        prov_idx = text.find("Vendored from NVIDIA-NeMo/Automodel")
+        spdx_idx = text.find("SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION")
+        assert prov_idx != -1, f"{target}: missing 'Vendored from' provenance note"
+        assert prov_idx < 800, f"{target}: provenance note not at the top"
+        assert spdx_idx != -1, f"{target}: missing NVIDIA SPDX-FileCopyrightText header"
+        assert "SPDX-License-Identifier: Apache-2.0" in text, f"{target}: missing SPDX license id"
+        # Order: the source/commit note precedes the NVIDIA SPDX header (which follows the original license).
+        assert prov_idx < spdx_idx, f"{target}: NVIDIA SPDX header must come after the provenance note"
 
 
 # --------------------------------------------------------------------------------------------- #

@@ -35,7 +35,16 @@ python examples/diffusers/fastgen/preprocess_qwen_image.py image \
     --caption_format meta_json
 ```
 
-Then point the config's `data.dataloader.cache_dir` at `<cache dir>` and train (below).
+The CFG negative-prompt embedding (the config's `negative_prompt_embedding_path`) is generated
+once from the same Qwen text encoder:
+
+```bash
+python examples/diffusers/fastgen/make_negative_prompt_embedding.py \
+    --output <cache dir>/negative_prompt_embedding.pt
+```
+
+Then point the config's `data.dataloader.cache_dir` at `<cache dir>` and its
+`negative_prompt_embedding_path` at `<cache dir>/negative_prompt_embedding.pt`, and train (below).
 
 ## How DMD2 works
 

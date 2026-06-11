@@ -40,20 +40,20 @@ Supports:
 
 Usage:
     # Image preprocessing
-    python -m tools.diffusion.preprocessing_multiprocess image \\
+    python examples/diffusers/fastgen/preprocess_qwen_image.py image \\
         --image_dir /path/to/images \\
         --output_dir /path/to/cache \\
         --processor flux
 
     # Video preprocessing
-    python -m tools.diffusion.preprocessing_multiprocess video \\
+    python examples/diffusers/fastgen/preprocess_qwen_image.py video \\
         --video_dir /path/to/videos \\
         --output_dir /path/to/cache \\
         --processor wan \\
         --resolution_preset 512p
 
     # List available processors
-    python -m tools.diffusion.preprocessing_multiprocess --list_processors
+    python examples/diffusers/fastgen/preprocess_qwen_image.py --list_processors
 """
 
 import argparse
@@ -1061,16 +1061,16 @@ def main():
         epilog="""
 Examples:
   # Image preprocessing with FLUX
-  python -m tools.diffusion.preprocessing_multiprocess image \\
+  python examples/diffusers/fastgen/preprocess_qwen_image.py image \\
       --image_dir /data/images --output_dir /cache --processor flux
 
   # Video preprocessing with Wan2.1
-  python -m tools.diffusion.preprocessing_multiprocess video \\
+  python examples/diffusers/fastgen/preprocess_qwen_image.py video \\
       --video_dir /data/videos --output_dir /cache --processor wan \\
       --resolution_preset 512p --caption_format sidecar
 
   # Video preprocessing with HunyuanVideo
-  python -m tools.diffusion.preprocessing_multiprocess video \\
+  python examples/diffusers/fastgen/preprocess_qwen_image.py video \\
       --video_dir /data/videos --output_dir /cache --processor hunyuan \\
       --target_frames 121 --caption_format meta_json
         """,
