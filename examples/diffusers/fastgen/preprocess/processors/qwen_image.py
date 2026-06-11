@@ -44,7 +44,6 @@ import logging
 from typing import Any
 
 import torch
-from torch import autocast
 
 from .base import BaseModelProcessor
 from .registry import ProcessorRegistry
@@ -209,12 +208,11 @@ class QwenImageProcessor(BaseModelProcessor):
         """
         try:
             vae = models["vae"]
-            device_type = "cuda" if "cuda" in device else "cpu"
 
             # (C, H, W) → (B, C, T, H, W) for Qwen-Image VAE
             latent = latent.unsqueeze(0).unsqueeze(2).to(device).float()
 
-            with torch.no_grad(), autocast(device_type=device_type, dtype=torch.float32):
+            with torch.no_grad():
                 # Denormalize: reverse (latent - mean) / std
                 latents_mean = (
                     torch.tensor(vae.config.latents_mean)

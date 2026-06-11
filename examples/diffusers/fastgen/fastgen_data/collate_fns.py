@@ -100,7 +100,7 @@ def _load_negative_prompt_embedding(path: str) -> tuple[torch.Tensor, torch.Tens
     ``prompt_embeds_mask`` / ``text_mask``) or a bare embedding tensor; a missing mask
     defaults to all-ones.
     """
-    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
     neg_embed = payload["embed"] if isinstance(payload, dict) else payload
     if not torch.is_tensor(neg_embed):
         raise TypeError(

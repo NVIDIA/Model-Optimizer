@@ -44,6 +44,7 @@ Provides multiple ways to load captions for media files:
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -422,8 +423,6 @@ class JSONLCaptionLoader(CaptionLoader):
         Returns:
             Tuple of (captions dict, loading statistics)
         """
-        from collections import defaultdict
-
         captions = {}
         stats = CaptionLoadingStats()
 

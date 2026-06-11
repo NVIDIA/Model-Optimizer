@@ -29,6 +29,7 @@ images) are exercised via SLURM, not here; see ``round-*-summary`` / the run doc
 
 from __future__ import annotations
 
+import inspect
 import pathlib
 import re
 import sys
@@ -158,7 +159,6 @@ def test_data_builders_importable_and_accept_negative_prompt_path():
     """The real-data builder exists and accepts ``negative_prompt_embedding_path``."""
     pytest.importorskip("nemo_automodel")
     pytest.importorskip("torch")
-    import inspect
 
     import fastgen_data
 
