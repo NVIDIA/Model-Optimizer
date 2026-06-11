@@ -74,6 +74,11 @@ from modelopt.torch.fastgen.discriminators import Discriminator_ImageDiT
 from modelopt.torch.fastgen.methods.dmd import DMDPipeline
 from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
 
+# Local sibling module (this example directory is on ``sys.path`` — see ``dmd2_finetune.py``).
+# Provides the FSDP2 partial-load-tolerant optimizer restore so the example does not depend
+# on a patched ``nemo_automodel.components.checkpoint.checkpointing``.
+from fastgen_checkpoint import make_optimizer_partial_load_tolerant
+
 # Keys under the ``dmd2:`` YAML block that shadow fields on :class:`DMDConfig`. The
 # recipe deep-merges these on top of the loaded built-in recipe so users can tweak DMD2
 # hyperparameters without editing the shared
@@ -475,6 +480,14 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         so this method only resolves the path and delegates the student restore to the
         parent. The sidecars are restored later by ``_restore_dmd_extras``.
         """
+        # Upgrade our checkpointer instance in place so optimizer restores tolerate FSDP2
+        # partial shards. This single seam covers BOTH the parent student-optimizer restore
+        # (``super().load_checkpoint`` below) and the later fake-score restore in
+        # ``_restore_dmd_extras``. Instance-scoped; model-state load stays strict. Replaces the
+        # upstream ``Checkpointer.load_optimizer`` ``allow_partial_load`` patch so stock
+        # ``nemo_automodel`` can be used unmodified.
+        make_optimizer_partial_load_tolerant(self.checkpointer)
+
         resolved = self._resolve_complete_dmd_checkpoint(restore_from)
         self.__dict__["_dmd2_resolved_restore_from"] = resolved
 

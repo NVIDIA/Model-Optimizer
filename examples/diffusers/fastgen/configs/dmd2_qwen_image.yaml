@@ -148,7 +148,7 @@ fsdp:
 # CFG is loaded inside the dataloader via ``negative_prompt_embedding_path``.
 data:
   dataloader:
-    _target_: nemo_automodel.components.datasets.diffusion.build_text_to_image_multiresolution_dataloader
+    _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: /path/to/preprocessed/qwen_image_1024p
     base_resolution: [1024, 1024]
     batch_size: 1

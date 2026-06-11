@@ -86,7 +86,7 @@ fsdp:
 # preprocessed cache is available.
 data:
   dataloader:
-    _target_: nemo_automodel.components.datasets.diffusion.build_mock_t2i_dataloader
+    _target_: fastgen_data.build_mock_t2i_dataloader
     # Qwen-Image VAE: 16 latent channels, 8x spatial downsample.
     # 256x256 image -> 32x32 latent. Must be even (2x2 patch packing).
     num_channels: 16
