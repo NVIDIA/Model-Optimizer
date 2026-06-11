@@ -11,6 +11,32 @@ output distribution. Built on `modelopt.torch.fastgen` and NeMo AutoModel's
 > [Qwen-Image model card](https://huggingface.co/Qwen/Qwen-Image) before downloading or
 > redistributing weights or derivatives.
 
+## Requirements & self-contained data path
+
+This example runs against **stock upstream `nemo_automodel`** (`>=0.4.0,<1.0`; see
+`requirements.txt`) from a **source checkout** of Model-Optimizer — the `examples/` tree is not
+shipped in the `nvidia-modelopt` pip package. Install the example dependencies with:
+
+```bash
+pip install -r examples/diffusers/fastgen/requirements.txt
+```
+
+The DMD2 data loading (`fastgen_data/`) and raw-image preprocessing (`preprocess/`) are
+**vendored into this example** (from NeMo-AutoModel, Apache-2.0) so that **no modifications to
+`nemo_automodel` are required**. The entry points put this directory on `sys.path`, so the
+configs reference the vendored builders as `_target_: fastgen_data.build_*`. The DMD2 math in
+`modelopt/torch/fastgen/` is unchanged.
+
+**Build the training cache from raw images** (Qwen-Image VAE latents + text embeddings):
+
+```bash
+python examples/diffusers/fastgen/preprocess_qwen_image.py image \
+    --image_dir <raw images> --output_dir <cache dir> --processor qwen_image \
+    --caption_format meta_json
+```
+
+Then point the config's `data.dataloader.cache_dir` at `<cache dir>` and train (below).
+
 ## How DMD2 works
 
 DMD2 trains three networks together:
