@@ -73,14 +73,9 @@ pipeline:
       - dflash.dflash_num_anchors=512
       - dflash.dflash_loss_decay_factor=4.0
       - dflash.dflash_architecture_config.num_hidden_layers=5
-      # Mask token for block-diffusion — an existing reserved row in MiniMax-M2.7's
-      # 200064-row embedding (real tokens are 0..200053). The draft ships no embeddings,
-      # so the mask id must already exist in the target embed_tokens; 200054 makes
-      # train==deploy by construction and avoids resizing. See the online recipe.
+      # Mask token id (an existing reserved row in MiniMax-M2.7's embedding).
       - dflash.dflash_mask_token_id=200054
-      # Long-context RoPE injected at export (YaRN), same as the online recipe — the
-      # offline path also exports a draft and must match the target's long context.
-      # factor = 196608/4096 = 48. Mirrors nvidia/Kimi-K2.6-Eagle3.
+      # YaRN rope_scaling injected at export for long context (factor = 196608/4096 = 48).
       - dflash.dflash_export_rope_scaling.type=yarn
       - dflash.dflash_export_rope_scaling.factor=48.0
       - dflash.dflash_export_rope_scaling.original_max_position_embeddings=4096
@@ -90,11 +85,9 @@ pipeline:
       - dflash.dflash_export_rope_scaling.mscale_all_dim=1.0
     environment:
       - NUM_NODES: "8"
-      # Offline training uses a lightweight FakeBaseModel (embeddings + lm_head only,
-      # not the 229B base), so it fits comfortably under plain DDP — no FSDP needed.
-      # Leaving ACCELERATE_CONFIG unset makes the launcher fall back to DDP, which also
-      # bypasses the FSDP2 buffer/dtype patches entirely. OVERRIDE_TRANSFORMERS is still
-      # required: the MiniMax config (loaded for the fake base's dims) needs 4.57.1.
+      # Offline training uses a lightweight FakeBaseModel, so plain DDP suffices (no
+      # ACCELERATE_CONFIG / FSDP2 patches). OVERRIDE_TRANSFORMERS pins 4.57.1 for the
+      # MiniMax config load.
       - OVERRIDE_TRANSFORMERS: "4.57.1"
       - MIXED_PRECISION: "no"
     slurm_config:
