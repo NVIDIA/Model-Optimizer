@@ -117,6 +117,16 @@ repos:
               examples/speculative_decoding/scripts/server_generate.py|
               experimental/dms/models/qwen3/configuration_qwen3_dms.py|
               experimental/dms/models/qwen3/modeling_qwen3_dms.py|
+              examples/diffusers/fastgen/fastgen_data/collate_fns.py|
+              examples/diffusers/fastgen/fastgen_data/text_to_image_dataset.py|
+              examples/diffusers/fastgen/fastgen_data/mock_dataloader.py|
+              examples/diffusers/fastgen/preprocess/preprocessing_multiprocess.py|
+              examples/diffusers/fastgen/preprocess/processors/__init__.py|
+              examples/diffusers/fastgen/preprocess/processors/base.py|
+              examples/diffusers/fastgen/preprocess/processors/base_video.py|
+              examples/diffusers/fastgen/preprocess/processors/registry.py|
+              examples/diffusers/fastgen/preprocess/processors/caption_loaders.py|
+              examples/diffusers/fastgen/preprocess/processors/qwen_image.py|
           )$
 
       # Default hook for Apache 2.0 in c/c++/cuda files
