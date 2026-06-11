@@ -357,6 +357,21 @@ def max_calibrate(
             quantizer.sync_amax_across_distributed_group(parallel_state.tensor_parallel_group)
 
     # Step 2: Sync amax across relevant parallelism (such as TP / EP)
+    def _weight_axes_for_sync(module, base_axes):
+        # For column-parallel TEGroupedLinear in per-expert mode (axis=0), the
+        # expert weights are NOT TP-sharded (etp=1 case) — axis=0 indexes experts,
+        # not output channels. Per-rank reductions still produce slightly
+        # divergent amax across TP (BF16/FP16 sums are not bit-identical across
+        # ranks even with the same input), and dist-checkpoint save treats
+        # _amax as replicated and captures only one rank's view. Without this
+        # sync, model_ref's per-rank-different amax mismatches the loaded
+        # model_test on every TP rank except the one whose value was saved.
+        if hasattr(module, "weight0"):
+            quantizer = getattr(module, "weight_quantizer", None)
+            if isinstance(quantizer, TensorQuantizer) and quantizer.axis in (0, (0,)):
+                return list(base_axes) + [0]
+        return base_axes
+
     for name, module in model.named_modules():
         if getattr(module, "_parallel_state", None) is None:
             continue
@@ -373,7 +388,7 @@ def max_calibrate(
                 module.weight_quantizer,
                 name,
                 "weight_quantizer",
-                axes_for_sync=[None, -1],
+                axes_for_sync=_weight_axes_for_sync(module, [None, -1]),
                 parallel_state=module.parallel_state,
             )
 
