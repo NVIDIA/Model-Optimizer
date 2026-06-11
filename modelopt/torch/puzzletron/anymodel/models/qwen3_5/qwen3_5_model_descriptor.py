@@ -354,6 +354,10 @@ class Qwen3P5VLModelDescriptor(_Qwen3P5BaseModelDescriptor):
     def get_language_model_config(config):
         return config.text_config if hasattr(config, "text_config") else config
 
+    @classmethod
+    def runtime_benchmark_export_descriptor(cls) -> Type[ModelDescriptor]:
+        return Qwen3P5TextModelDescriptor
+
     @staticmethod
     def pruning_mixins() -> Dict[str, PruningMixIn]:
         return {

@@ -240,6 +240,11 @@ class ModelDescriptor(ABC):
         raise NotImplementedError(f"Runtime benchmarking is not supported for {cls.__name__}")
 
     @classmethod
+    def runtime_benchmark_export_descriptor(cls) -> type["ModelDescriptor"]:
+        """Return the descriptor that matches the temporary benchmark checkpoint layout."""
+        return cls
+
+    @classmethod
     def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
         """Return extra ``vllm bench latency`` args for this descriptor."""
         return []

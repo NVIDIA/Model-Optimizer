@@ -61,7 +61,7 @@ def save_model(
 ) -> None:
     """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
     model = model.to(dtype=torch.bfloat16)
-    save_model_as_anymodel(model, output_path, descriptor)
+    save_model_as_anymodel(model, output_path, descriptor.runtime_benchmark_export_descriptor())
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     tokenizer.save_pretrained(output_path)

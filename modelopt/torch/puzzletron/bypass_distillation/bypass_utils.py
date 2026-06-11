@@ -24,6 +24,7 @@ from typing import Any
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
 from modelopt.torch.utils.robust_json import json_dump, json_load
 
 __all__ = [
@@ -129,6 +130,14 @@ def _teacher_dir_identity(cfg: DictConfig) -> str | None:
     return str(Path(teacher_dir).expanduser())
 
 
+def _descriptor_identity(cfg: DictConfig) -> str | None:
+    descriptor = cfg.get("descriptor", None)
+    if descriptor is None:
+        return None
+    resolved_descriptor = ModelDescriptorFactory.get(descriptor)
+    return getattr(resolved_descriptor, "__name__", str(resolved_descriptor))
+
+
 def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
     """Return the config subset that defines a bypass output.
 
@@ -146,7 +155,7 @@ def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
     return {
         "teacher": {
             "teacher_dir": _teacher_dir_identity(cfg),
-            "descriptor": cfg.get("descriptor", None),
+            "descriptor": _descriptor_identity(cfg),
         },
         "model": {
             "student_weights_dtype": model.get("student_weights_dtype"),
@@ -370,7 +379,7 @@ def expected_bypass_runs(cfg: DictConfig) -> list[dict[str, Any]]:
     """Return expected run metadata for the current bypass config or sweep."""
     runs: list[dict[str, Any]] = []
     configs_list = cfg.bypass.get("configs", None)
-    overrides = configs_list if configs_list else [None]
+    overrides = configs_list or [None]
 
     for override in overrides:
         run_cfg = OmegaConf.create(
@@ -378,7 +387,7 @@ def expected_bypass_runs(cfg: DictConfig) -> list[dict[str, Any]]:
                 "puzzle_dir": cfg.puzzle_dir,
                 "teacher_dir": cfg.get("teacher_dir", None),
                 "dataset_path": cfg.get("dataset_path", None),
-                "descriptor": cfg.get("descriptor", None),
+                "descriptor": _descriptor_identity(cfg),
                 "bypass": OmegaConf.to_container(cfg.bypass, resolve=True),
             }
         )

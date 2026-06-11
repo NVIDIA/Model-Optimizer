@@ -18,7 +18,7 @@ data:
   fim_spm_rate: 0
   source_datasets_to_discard: []
   load_from_disk: true
-  keep_in_memory: false
+  keep_in_memory: true
   val_dataset_name: valid
   max_eval_samples: 4
   eval_samples_per_process:
