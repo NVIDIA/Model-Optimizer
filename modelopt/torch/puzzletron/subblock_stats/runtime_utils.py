@@ -61,13 +61,18 @@ def save_model(
 ) -> None:
     """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
     model = model.to(dtype=torch.bfloat16)
-    save_model_as_anymodel(model, output_path, descriptor.runtime_benchmark_export_descriptor())
+    save_model_as_anymodel(
+        model,
+        output_path,
+        descriptor.runtime_benchmark_export_descriptor(),
+        runtime_descriptor=descriptor,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     tokenizer.save_pretrained(output_path)
 
 
-def save_model_as_anymodel(model, output_dir: Path, descriptor):
+def save_model_as_anymodel(model, output_dir: Path, descriptor, runtime_descriptor=None):
     """Save a model checkpoint in AnyModel subblock-safetensors format."""
     # Save standard model checkpoint (as safetensors, HF format)
     model.save_pretrained(output_dir, safe_serialization=True)
@@ -86,5 +91,6 @@ def save_model_as_anymodel(model, output_dir: Path, descriptor):
         with open(config_path) as f:
             config_data = json.load(f)
         config_data["architectures"] = ["AnyModel"]
+        (runtime_descriptor or descriptor).update_runtime_benchmark_config(config_data)
         with open(config_path, "w") as f:
             json.dump(config_data, f, indent=2)

@@ -245,6 +245,10 @@ class ModelDescriptor(ABC):
         return cls
 
     @classmethod
+    def update_runtime_benchmark_config(cls, config_data: dict[str, Any]) -> None:
+        """Adjust the temporary benchmark config before vLLM loads it."""
+
+    @classmethod
     def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
         """Return extra ``vllm bench latency`` args for this descriptor."""
         return []

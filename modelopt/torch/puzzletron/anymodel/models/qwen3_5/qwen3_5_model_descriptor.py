@@ -220,6 +220,11 @@ class _Qwen3P5BaseModelDescriptor(ModelDescriptor):
         return model
 
     @classmethod
+    def update_runtime_benchmark_config(cls, config_data: dict[str, Any]) -> None:
+        if config_data.get("model_type") in {"qwen3_5_text", "qwen3_6_text"}:
+            config_data["model_type"] = "qwen3"
+
+    @classmethod
     def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
         text_config = config.get("text_config", config)
         layer_types = text_config.get("layer_types", [])
