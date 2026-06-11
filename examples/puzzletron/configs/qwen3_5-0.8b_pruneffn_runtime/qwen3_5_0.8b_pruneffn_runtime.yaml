@@ -48,7 +48,7 @@ calc_subblock_stats:
   allocate_prefill_query: false
   runtime_stats:
     backend: vllm
-    enabled: true
+    enabled: false
     num_warmup_iters: 1
     num_iters: 3
   benchmark_iterations:
@@ -90,7 +90,6 @@ mip:
   report_additional_costs:
     - stats.memory_mib
     - stats.num_params
-    - stats.runtime_ms
     - stats.num_kv_heads
     - stats.has_attention
     - stats.has_ffn

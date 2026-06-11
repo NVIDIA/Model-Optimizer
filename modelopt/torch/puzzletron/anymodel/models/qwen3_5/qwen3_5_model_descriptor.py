@@ -59,6 +59,52 @@ __all__ = [
 ]
 
 
+_QWEN3P5_ANYMODEL_ARCH_INFO = {
+    "decoder_layer_module": ".qwen3_5",
+    "decoder_layer_class": "Qwen3_5DecoderLayer",
+    "base_model_module": ".qwen3_5",
+    "layers_path": "model.layers",
+    "layer_hf_config": "text_config",
+}
+
+_QWEN3P5_TEXT_RUNTIME_CONFIG_KEYS = {
+    "architectures",
+    "anymodel_arch_info",
+    "base_architecture",
+    "block_configs",
+}
+
+
+def _wrap_qwen3p5_text_runtime_config(config_data: dict[str, Any]) -> None:
+    """Wrap a flat Qwen3.5 text config for vLLM AnyModel.
+
+    vLLM has Qwen3.5 support through the top-level qwen3_5 config, while the
+    temporary runtime benchmark model is saved from the text-only HF class.
+    """
+    text_config = {
+        key: value
+        for key, value in config_data.items()
+        if key not in _QWEN3P5_TEXT_RUNTIME_CONFIG_KEYS
+    }
+    block_configs = config_data.get("block_configs")
+    architectures = config_data.get("architectures", ["AnyModel"])
+    base_architecture = config_data.get("base_architecture", "Qwen3_5ForCausalLM")
+
+    config_data.clear()
+    config_data.update(
+        {
+            "architectures": architectures,
+            "anymodel_arch_info": dict(_QWEN3P5_ANYMODEL_ARCH_INFO),
+            "base_architecture": base_architecture,
+            "model_type": "qwen3_5",
+            "text_config": text_config,
+            "tie_word_embeddings": text_config.get("tie_word_embeddings", False),
+        }
+    )
+    if block_configs is not None:
+        config_data["block_configs"] = block_configs
+
+
 class _Qwen3P5BaseModelDescriptor(ModelDescriptor):
     @staticmethod
     def decoder_layer_cls():
@@ -222,7 +268,7 @@ class _Qwen3P5BaseModelDescriptor(ModelDescriptor):
     @classmethod
     def update_runtime_benchmark_config(cls, config_data: dict[str, Any]) -> None:
         if config_data.get("model_type") in {"qwen3_5_text", "qwen3_6_text"}:
-            config_data["model_type"] = "qwen3"
+            _wrap_qwen3p5_text_runtime_config(config_data)
 
     @classmethod
     def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:

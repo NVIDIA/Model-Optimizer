@@ -6,3 +6,7 @@ mip:
   output_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions_latency75}
   human_constraints:
     - target_latency_ratio: 0.75
+
+calc_subblock_stats:
+  runtime_stats:
+    enabled: true
