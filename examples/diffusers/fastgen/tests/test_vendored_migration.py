@@ -17,7 +17,7 @@
 
 Two tiers:
 
-* **Environment-independent** tests (config repoint, no ``tools.*`` imports, and the AC-8
+* **Environment-independent** tests (config repoint, no ``tools.*`` imports, and the
   removability coverage audit) run anywhere — they only read files in this example.
 * **Dependency-guarded** tests (data builders, collate broadcast, checkpointer subclass,
   preprocessing registry) use ``pytest.importorskip`` so they skip where ``nemo_automodel`` /
@@ -65,14 +65,14 @@ STAGED_AUTOMODEL_DISPOSITION = {
 
 @pytest.mark.parametrize("cfg_name", ["dmd2_qwen_image.yaml", "dmd2_qwen_image_smoke.yaml"])
 def test_published_configs_repointed_to_vendored_builders(cfg_name):
-    """AC-1/AC-2: published configs target ``fastgen_data.*``, not the upstream registry."""
+    """Published configs target ``fastgen_data.*``, not the upstream registry."""
     text = (_FASTGEN_DIR / "configs" / cfg_name).read_text()
     assert "_target_: fastgen_data.build_" in text
     assert "nemo_automodel.components.datasets.diffusion.build_" not in text
 
 
 def test_no_tools_star_imports_in_vendored_code():
-    """AC-5: nothing under the vendored packages imports the un-packaged AutoModel ``tools/`` tree."""
+    """Nothing under the vendored packages imports the un-packaged AutoModel ``tools/`` tree."""
     pat = re.compile(r"^\s*(?:from|import)\s+tools\.", re.MULTILINE)
     offenders = []
     for sub in ("fastgen_data", "preprocess"):
@@ -83,7 +83,7 @@ def test_no_tools_star_imports_in_vendored_code():
 
 
 def test_all_staged_automodel_files_are_removable():
-    """AC-8: each of the nine staged AutoModel files is vendored or a documented exclusion."""
+    """Each of the nine staged AutoModel files is vendored or a documented exclusion."""
     assert len(STAGED_AUTOMODEL_DISPOSITION) == 9
     # Vendored targets must exist in the example tree.
     for src, target in STAGED_AUTOMODEL_DISPOSITION.items():
@@ -116,7 +116,7 @@ VENDORED_WITH_HEADER = [
 
 
 def test_vendored_files_have_provenance_headers():
-    """AC-7: each verbatim-vendored file references its AutoModel source + commit."""
+    """Each verbatim-vendored file references its AutoModel source + commit."""
     for target in VENDORED_WITH_HEADER:
         head = (_FASTGEN_DIR / target).read_text()[:800]
         assert "Vendored from NVIDIA-NeMo/Automodel" in head, f"{target}: missing provenance header"
@@ -128,7 +128,7 @@ def test_vendored_files_have_provenance_headers():
 
 
 def test_data_builders_importable_and_accept_negative_prompt_path():
-    """AC-2: both builders exist and the real-data builder accepts ``negative_prompt_embedding_path``."""
+    """Both builders exist and the real-data builder accepts ``negative_prompt_embedding_path``."""
     pytest.importorskip("nemo_automodel")
     pytest.importorskip("torch")
     import inspect
@@ -142,7 +142,7 @@ def test_data_builders_importable_and_accept_negative_prompt_path():
 
 
 def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
-    """AC-3: collate maps prompt_embeds_mask -> text_embeddings_mask and broadcasts the neg embed."""
+    """Collate maps prompt_embeds_mask -> text_embeddings_mask and broadcasts the neg embed."""
     pytest.importorskip("nemo_automodel")
     torch = pytest.importorskip("torch")
 
@@ -166,7 +166,7 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
 
 
 def test_partial_load_checkpointer_overrides_only_load_optimizer():
-    """AC-4: the subclass relaxes only optimizer load; model-state load stays strict (inherited)."""
+    """The subclass relaxes only optimizer load; model-state load stays strict (inherited)."""
     pytest.importorskip("nemo_automodel")
     from nemo_automodel.components.checkpoint.checkpointing import Checkpointer
 
@@ -186,14 +186,14 @@ def test_partial_load_checkpointer_overrides_only_load_optimizer():
 
 
 def test_recipe_injects_partial_load_checkpointer_in_load_checkpoint():
-    """AC-4: the recipe upgrades self.checkpointer in load_checkpoint (before the parent restore)."""
+    """The recipe upgrades self.checkpointer in load_checkpoint (before the parent restore)."""
     src = (_FASTGEN_DIR / "dmd2_recipe.py").read_text()
     assert "from fastgen_checkpoint import make_optimizer_partial_load_tolerant" in src
     assert "make_optimizer_partial_load_tolerant(self.checkpointer)" in src
 
 
 def test_qwen_image_processor_registered():
-    """AC-5: importing the vendored preprocessing package registers the qwen_image processor."""
+    """Importing the vendored preprocessing package registers the qwen_image processor."""
     pytest.importorskip("torch")
     pytest.importorskip("nemo_automodel")
     from preprocess.processors import ProcessorRegistry  # noqa: F401  (import registers processors)

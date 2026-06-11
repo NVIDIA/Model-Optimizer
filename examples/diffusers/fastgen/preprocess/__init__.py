@@ -23,3 +23,20 @@ processor; ``MultiTierBucketCalculator`` is imported from the stock ``nemo_autom
 Produces ``.pt`` cache items byte-compatible with what the training dataloader
 (``fastgen_data``) reads. Run via the ``preprocess_qwen_image.py`` launcher one directory up.
 """
+
+# Runtime soft-guard: the vendored driver imports the UNPATCHED upstream bucketing helper
+# ``nemo_automodel.components.datasets.diffusion.multi_tier_bucketing.MultiTierBucketCalculator``.
+# Surface a missing/moved helper as an actionable message (named version range) rather than a
+# raw ImportError deep inside the driver.
+try:
+    from nemo_automodel.components.datasets.diffusion.multi_tier_bucketing import (  # noqa: F401
+        MultiTierBucketCalculator,
+    )
+except ImportError as exc:  # pragma: no cover - environment guard
+    raise ImportError(
+        "fastgen preprocessing requires a stock nemo_automodel>=0.4.0,<1.0 install providing "
+        "nemo_automodel.components.datasets.diffusion.multi_tier_bucketing. Install the example "
+        "dependencies with:\n"
+        "    pip install -r examples/diffusers/fastgen/requirements.txt\n"
+        f"Underlying import error: {exc!r}"
+    ) from exc

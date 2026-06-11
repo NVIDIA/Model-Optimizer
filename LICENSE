@@ -223,6 +223,9 @@ the following copyright holders, licensed under the Apache License, Version 2.0
   Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
   Copyright (c) 2024 Heming Xia
   Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team
+  Copyright (c) 2025 NVIDIA CORPORATION — portions of examples/diffusers/fastgen/ are
+    vendored from NVIDIA-NeMo/Automodel (https://github.com/NVIDIA-NeMo/Automodel); see the
+    per-file "Vendored from" headers for the exact source paths and commit.
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not
 use these files except in compliance with the License. You may obtain a copy
