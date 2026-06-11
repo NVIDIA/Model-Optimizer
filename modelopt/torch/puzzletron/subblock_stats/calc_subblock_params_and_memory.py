@@ -428,7 +428,7 @@ def _calculate_mamba_intermediates(mamba_config: MambaConfig) -> tuple[int, ...]
         d_inner * 2 + 2 * mamba_config.num_groups * mamba_config.state_dim + mamba_config.num_heads
     )
     conv_dim = d_inner + 2 * mamba_config.num_groups * mamba_config.state_dim
-    kernel_size = 4
+    kernel_size = mamba_config.conv_kernel_size
     return d_inner, in_proj_dim, conv_dim, kernel_size
 
 

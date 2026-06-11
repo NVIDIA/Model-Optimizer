@@ -17,9 +17,11 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, Type
 
+import torch
 from torch import nn
+from transformers import PretrainedConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5TextRotaryEmbedding,
@@ -31,7 +33,14 @@ from ....pruning.ffn_intermediate_pruning_mixin import (
     FFNIntermediateLayerDescriptor,
     FFNIntermediatePruningMixIn,
 )
+from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor, KVHeadsPruningMixIn
 from ....pruning.pruning_mixin import PruningMixIn
+from ....pruning.pruning_utils import (
+    GQAInitMode,
+    _init_attention_biases,
+    _init_attention_weights,
+    _lm_head_dim,
+)
 from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
@@ -41,6 +50,9 @@ __all__ = [
     "Qwen3P5VLModelDescriptor",
     "Qwen3P5TextFFNIntermediateLayerDescriptor",
     "Qwen3P5VLFFNIntermediateLayerDescriptor",
+    "Qwen3P5TextKVHeadsLayerDescriptor",
+    "Qwen3P5VLKVHeadsLayerDescriptor",
+    "Qwen3P5KVHeadsPruningMixIn",
 ]
 
 
@@ -54,7 +66,8 @@ class _Qwen3P5BaseModelDescriptor(ModelDescriptor):
         return {
             "ffn_intermediate": FFNIntermediatePruningMixIn(
                 Qwen3P5TextFFNIntermediateLayerDescriptor()
-            )
+            ),
+            "kv_heads": Qwen3P5KVHeadsPruningMixIn(Qwen3P5TextKVHeadsLayerDescriptor()),
         }
 
     @staticmethod
@@ -158,7 +171,8 @@ class Qwen3P5TextModelDescriptor(_Qwen3P5BaseModelDescriptor):
         return {
             "ffn_intermediate": FFNIntermediatePruningMixIn(
                 Qwen3P5TextFFNIntermediateLayerDescriptor()
-            )
+            ),
+            "kv_heads": Qwen3P5KVHeadsPruningMixIn(Qwen3P5TextKVHeadsLayerDescriptor()),
         }
 
     @staticmethod
@@ -218,7 +232,8 @@ class Qwen3P5VLModelDescriptor(_Qwen3P5BaseModelDescriptor):
         return {
             "ffn_intermediate": FFNIntermediatePruningMixIn(
                 Qwen3P5VLFFNIntermediateLayerDescriptor()
-            )
+            ),
+            "kv_heads": Qwen3P5KVHeadsPruningMixIn(Qwen3P5VLKVHeadsLayerDescriptor()),
         }
 
     @staticmethod
@@ -292,3 +307,268 @@ class Qwen3P5VLFFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
     linear_weight_names: List[str] = field(
         default_factory=lambda: ["down_proj", "gate_proj", "up_proj"]
     )
+
+
+@dataclass
+class Qwen3P5TextKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
+    o_proj_name: str = "self_attn.o_proj"
+    attn_prefix_name: str = "model.layers.{layer_idx}.self_attn"
+    qkvo_weight_names: List[str] = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    )
+
+
+@dataclass
+class Qwen3P5VLKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
+    o_proj_name: str = "self_attn.o_proj"
+    attn_prefix_name: str = "model.language_model.layers.{layer_idx}.self_attn"
+    qkvo_weight_names: List[str] = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    )
+
+
+def _split_qwen3p5_q_proj(
+    tensor: torch.Tensor, num_q_heads: int, head_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    q_proj = tensor.reshape(num_q_heads, 2 * head_size, *tensor.shape[1:])
+    query = q_proj[:, :head_size].reshape(num_q_heads * head_size, *tensor.shape[1:])
+    gate = q_proj[:, head_size:].reshape(num_q_heads * head_size, *tensor.shape[1:])
+    return query, gate
+
+
+def _merge_qwen3p5_q_proj(
+    query: torch.Tensor, gate: torch.Tensor, num_q_heads: int, head_size: int
+) -> torch.Tensor:
+    trailing_shape = query.shape[1:]
+    query = query.reshape(num_q_heads, head_size, *trailing_shape)
+    gate = gate.reshape(num_q_heads, head_size, *trailing_shape)
+    return torch.cat([query, gate], dim=1).reshape(
+        num_q_heads * 2 * head_size, *trailing_shape
+    )
+
+
+def _state_dict_with_tensor(
+    state_dict: dict[str, torch.Tensor], key: str, value: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    patched_state_dict = dict(state_dict)
+    patched_state_dict[key] = value
+    return patched_state_dict
+
+
+class Qwen3P5KVHeadsPruningMixIn(KVHeadsPruningMixIn):
+    """KV-head pruning for Qwen3.5 gated full-attention layers."""
+
+    def __init__(self, layer_descriptor: KVHeadsLayerDescriptor):
+        assert isinstance(layer_descriptor, KVHeadsLayerDescriptor)
+        super().__init__(layer_descriptor)
+
+    def _init_gated_attention_weights(
+        self,
+        *,
+        layer_idx: int,
+        parent_state_dict: dict,
+        new_state_dict: dict,
+        original_config: PretrainedConfig,
+        new_config: PretrainedConfig,
+        descriptor: Type[_Qwen3P5BaseModelDescriptor],
+        q_key: str,
+        k_key: str,
+        v_key: str,
+        o_key: str,
+        gqa_init_mode: GQAInitMode,
+        mlp_init_config: Optional[dict[str, Any]],
+        is_original_mha: bool,
+        head_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_q_heads = descriptor.get_language_model_config(new_config).num_attention_heads
+        orig_query, orig_gate = _split_qwen3p5_q_proj(
+            parent_state_dict[q_key], num_q_heads, head_size
+        )
+        new_query, new_gate = _split_qwen3p5_q_proj(new_state_dict[q_key], num_q_heads, head_size)
+
+        query_state_dict = _state_dict_with_tensor(parent_state_dict, q_key, orig_query)
+        query_new_state_dict = _state_dict_with_tensor(new_state_dict, q_key, new_query)
+        wq, wk, wv, wo = _init_attention_weights(
+            gqa_init_mode=gqa_init_mode,
+            layer_idx=layer_idx,
+            new_state_dict=query_new_state_dict,
+            new_config=new_config,
+            descriptor=descriptor,
+            original_state_dict=query_state_dict,
+            original_config=original_config,
+            q_key=q_key,
+            k_key=k_key,
+            v_key=v_key,
+            o_key=o_key,
+            is_original_mha=is_original_mha,
+            head_size=head_size,
+            mlp_init_config=mlp_init_config,
+        )
+
+        gate_state_dict = _state_dict_with_tensor(parent_state_dict, q_key, orig_gate)
+        gate_new_state_dict = _state_dict_with_tensor(new_state_dict, q_key, new_gate)
+        wg, _, _, _ = _init_attention_weights(
+            gqa_init_mode=gqa_init_mode,
+            layer_idx=layer_idx,
+            new_state_dict=gate_new_state_dict,
+            new_config=new_config,
+            descriptor=descriptor,
+            original_state_dict=gate_state_dict,
+            original_config=original_config,
+            q_key=q_key,
+            k_key=k_key,
+            v_key=v_key,
+            o_key=o_key,
+            is_original_mha=is_original_mha,
+            head_size=head_size,
+            mlp_init_config=mlp_init_config,
+        )
+        wq = _merge_qwen3p5_q_proj(wq, wg, num_q_heads, head_size)
+        return wq, wk, wv, wo
+
+    def _init_gated_attention_biases(
+        self,
+        *,
+        layer_idx: int,
+        parent_state_dict: dict,
+        new_state_dict: dict,
+        original_config: PretrainedConfig,
+        new_config: PretrainedConfig,
+        descriptor: Type[_Qwen3P5BaseModelDescriptor],
+        q_key: str,
+        k_key: str,
+        v_key: str,
+        o_key: str,
+        gqa_init_mode: GQAInitMode,
+        mlp_init_config: Optional[dict[str, Any]],
+        is_original_mha: bool,
+        head_size: int,
+    ) -> dict[str, torch.Tensor]:
+        num_q_heads = descriptor.get_language_model_config(new_config).num_attention_heads
+        orig_query, orig_gate = _split_qwen3p5_q_proj(
+            parent_state_dict[q_key], num_q_heads, head_size
+        )
+        new_query, new_gate = _split_qwen3p5_q_proj(new_state_dict[q_key], num_q_heads, head_size)
+
+        query_state_dict = _state_dict_with_tensor(parent_state_dict, q_key, orig_query)
+        query_new_state_dict = _state_dict_with_tensor(new_state_dict, q_key, new_query)
+        bias_sd = _init_attention_biases(
+            gqa_init_mode=gqa_init_mode,
+            layer_idx=layer_idx,
+            new_state_dict=query_new_state_dict,
+            new_config=new_config,
+            descriptor=descriptor,
+            original_state_dict=query_state_dict,
+            original_config=original_config,
+            q_key=q_key,
+            k_key=k_key,
+            v_key=v_key,
+            o_key=o_key,
+            is_original_mha=is_original_mha,
+            head_size=head_size,
+            mlp_init_config=mlp_init_config,
+        )
+
+        gate_state_dict = _state_dict_with_tensor(parent_state_dict, q_key, orig_gate)
+        gate_new_state_dict = _state_dict_with_tensor(new_state_dict, q_key, new_gate)
+        gate_bias_sd = _init_attention_biases(
+            gqa_init_mode=gqa_init_mode,
+            layer_idx=layer_idx,
+            new_state_dict=gate_new_state_dict,
+            new_config=new_config,
+            descriptor=descriptor,
+            original_state_dict=gate_state_dict,
+            original_config=original_config,
+            q_key=q_key,
+            k_key=k_key,
+            v_key=v_key,
+            o_key=o_key,
+            is_original_mha=is_original_mha,
+            head_size=head_size,
+            mlp_init_config=mlp_init_config,
+        )
+        if "q" in bias_sd:
+            bias_sd["q"] = _merge_qwen3p5_q_proj(
+                bias_sd["q"], gate_bias_sd["q"], num_q_heads, head_size
+            )
+        return bias_sd
+
+    def prune_single_layer(
+        self,
+        layer_idx: int,
+        parent_state_dict: dict,
+        new_state_dict: dict,
+        original_config: PretrainedConfig,
+        new_config: PretrainedConfig,
+        descriptor,
+        gqa_init_mode: GQAInitMode,
+        mlp_init_config: Optional[dict[str, Any]],
+        is_original_mha: bool,
+        keys: dict,
+        keys_to_remove: dict,
+        **kwargs,
+    ):
+        layer_out_state_dict = {}
+        attn_prefix = self.layer_descriptor.attn_prefix(layer_idx)
+        q_name, k_name, v_name, o_name = [
+            f"{attn_prefix}.{proj_name}" for proj_name in self.layer_descriptor.qkvo_weight_names
+        ]
+
+        head_size = _lm_head_dim(new_config, descriptor)
+        for part in ["weight", "bias"]:
+            attn_keys = [f"{name}.{part}" for name in [q_name, k_name, v_name, o_name]]
+            q_key, k_key, v_key, o_key = attn_keys
+            attn_keys = [key for key in attn_keys if key in new_state_dict]
+            if not attn_keys or not all(key in keys for key in attn_keys):
+                continue
+
+            for key in attn_keys:
+                keys_to_remove[key] = keys[key]
+
+            if not all(key in new_state_dict for key in attn_keys):
+                continue
+
+            if q_key not in new_state_dict:
+                continue
+
+            if part == "weight":
+                wq, wk, wv, wo = self._init_gated_attention_weights(
+                    layer_idx=layer_idx,
+                    parent_state_dict=parent_state_dict,
+                    new_state_dict=new_state_dict,
+                    original_config=original_config,
+                    new_config=new_config,
+                    descriptor=descriptor,
+                    q_key=q_key,
+                    k_key=k_key,
+                    v_key=v_key,
+                    o_key=o_key,
+                    gqa_init_mode=gqa_init_mode,
+                    mlp_init_config=mlp_init_config,
+                    is_original_mha=is_original_mha,
+                    head_size=head_size,
+                )
+                layer_out_state_dict[q_key], layer_out_state_dict[k_key] = wq, wk
+                layer_out_state_dict[v_key], layer_out_state_dict[o_key] = wv, wo
+            else:
+                bias_sd = self._init_gated_attention_biases(
+                    layer_idx=layer_idx,
+                    parent_state_dict=parent_state_dict,
+                    new_state_dict=new_state_dict,
+                    original_config=original_config,
+                    new_config=new_config,
+                    descriptor=descriptor,
+                    q_key=q_key,
+                    k_key=k_key,
+                    v_key=v_key,
+                    o_key=o_key,
+                    gqa_init_mode=gqa_init_mode,
+                    mlp_init_config=mlp_init_config,
+                    is_original_mha=is_original_mha,
+                    head_size=head_size,
+                )
+                for bias_key, sd_key in zip("qkvo", [q_key, k_key, v_key, o_key]):
+                    if bias_key in bias_sd:
+                        layer_out_state_dict[sd_key] = bias_sd[bias_key]
+
+        return layer_out_state_dict

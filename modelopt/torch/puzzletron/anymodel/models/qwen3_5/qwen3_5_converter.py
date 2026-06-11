@@ -55,6 +55,7 @@ class Qwen3P5Converter(Converter):
                         num_heads=text_config.linear_num_value_heads,
                         head_dim=text_config.linear_value_head_dim,
                         num_groups=text_config.linear_num_key_heads,
+                        conv_kernel_size=text_config.linear_conv_kernel_dim,
                     )
                 )
             elif layer_type == "full_attention":

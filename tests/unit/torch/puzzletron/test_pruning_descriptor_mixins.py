@@ -91,7 +91,7 @@ def test_qwen3_vl_descriptor_exposes_expert_removal_and_kv_heads_mixins():
     )
 
 
-def test_qwen3_5_descriptors_expose_ffn_mixins():
+def test_qwen3_5_descriptors_expose_ffn_and_kv_heads_mixins():
     pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
 
     from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
@@ -102,12 +102,19 @@ def test_qwen3_5_descriptors_expose_ffn_mixins():
     text_mixins = Qwen3P5TextModelDescriptor.pruning_mixins()
     vl_mixins = Qwen3P5VLModelDescriptor.pruning_mixins()
 
-    assert set(text_mixins) == {"ffn_intermediate"}
-    assert set(vl_mixins) == {"ffn_intermediate"}
+    assert set(text_mixins) == {"ffn_intermediate", "kv_heads"}
+    assert set(vl_mixins) == {"ffn_intermediate", "kv_heads"}
     assert isinstance(text_mixins["ffn_intermediate"], FFNIntermediatePruningMixIn)
     assert isinstance(vl_mixins["ffn_intermediate"], FFNIntermediatePruningMixIn)
+    assert isinstance(text_mixins["kv_heads"], KVHeadsPruningMixIn)
+    assert isinstance(vl_mixins["kv_heads"], KVHeadsPruningMixIn)
     assert text_mixins["ffn_intermediate"].layer_descriptor.ffn_prefix(2) == "model.layers.2.mlp"
     assert (
         vl_mixins["ffn_intermediate"].layer_descriptor.ffn_prefix(2)
         == "model.language_model.layers.2.mlp"
+    )
+    assert text_mixins["kv_heads"].layer_descriptor.attn_prefix(2) == "model.layers.2.self_attn"
+    assert (
+        vl_mixins["kv_heads"].layer_descriptor.attn_prefix(2)
+        == "model.language_model.layers.2.self_attn"
     )
