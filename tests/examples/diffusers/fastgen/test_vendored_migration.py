@@ -46,13 +46,14 @@ if str(_FASTGEN_DIR) not in sys.path:
 
 
 # Maps each of the nine staged AutoModel files (the changes the user must be able to delete) to
-# its disposition in modelopt: a vendored target path (relative to this example dir) or ``None``
-# when the patch is intentionally excluded as unused on the DMD2 path.
+# its disposition in modelopt: a target path (a vendored copy or a thin wrapper over stock,
+# relative to this example dir) or ``None`` when the patch is intentionally excluded (unused on
+# the DMD2 path, or not needed for real training).
 STAGED_AUTOMODEL_DISPOSITION = {
-    "components/checkpoint/checkpointing.py": "fastgen_checkpoint.py",
+    "components/checkpoint/checkpointing.py": "fastgen_checkpoint.py",  # subclass override
     "components/datasets/diffusion/__init__.py": "fastgen_data/__init__.py",
-    "components/datasets/diffusion/collate_fns.py": "fastgen_data/collate_fns.py",
-    "components/datasets/diffusion/mock_dataloader.py": "fastgen_data/mock_dataloader.py",
+    "components/datasets/diffusion/collate_fns.py": "fastgen_data/collate_fns.py",  # thin wrapper
+    "components/datasets/diffusion/mock_dataloader.py": None,  # excluded: mock smoke (not real training)
     "components/datasets/diffusion/text_to_image_dataset.py": "fastgen_data/text_to_image_dataset.py",
     "components/flow_matching/adapters/qwen_image.py": None,  # excluded: dead on the DMD2 path
     "tools/diffusion/preprocessing_multiprocess.py": "preprocess/preprocessing_multiprocess.py",
@@ -103,9 +104,11 @@ def test_all_staged_automodel_files_are_removable():
     for src, target in STAGED_AUTOMODEL_DISPOSITION.items():
         if target is not None:
             assert (_FASTGEN_DIR / target).is_file(), f"{src}: missing vendored target {target}"
-    # Only the flow-matching adapter and its unit test may be 'excluded as unused'.
+    # Excluded: the flow-matching adapter + its unit test (dead on the DMD2 path) and the mock
+    # smoke loader (not needed for real training).
     excluded = {src for src, target in STAGED_AUTOMODEL_DISPOSITION.items() if target is None}
     assert excluded == {
+        "components/datasets/diffusion/mock_dataloader.py",
         "components/flow_matching/adapters/qwen_image.py",
         "tests/unit_tests/flow_matching/test_qwen_image_adapter.py",
     }
@@ -113,16 +116,13 @@ def test_all_staged_automodel_files_are_removable():
 
 # Files vendored verbatim-with-modifications from AutoModel — these carry the provenance header
 # and are excluded from the insert-license pre-commit hook. Authored modelopt files
-# (fastgen_checkpoint.py, the package __init__.py's, the launcher) are NOT in this list: they
-# carry the standard NVIDIA SPDX header instead.
+# (fastgen_checkpoint.py, fastgen_data/{__init__,collate_fns}.py, the package __init__.py's, the
+# launcher) are NOT in this list: they carry the standard NVIDIA SPDX header instead.
 VENDORED_WITH_HEADER = [
-    "fastgen_data/collate_fns.py",
     "fastgen_data/text_to_image_dataset.py",
-    "fastgen_data/mock_dataloader.py",
     "preprocess/preprocessing_multiprocess.py",
     "preprocess/processors/__init__.py",
     "preprocess/processors/base.py",
-    "preprocess/processors/base_video.py",
     "preprocess/processors/registry.py",
     "preprocess/processors/caption_loaders.py",
     "preprocess/processors/qwen_image.py",
@@ -155,7 +155,7 @@ def test_vendored_files_have_provenance_headers():
 
 
 def test_data_builders_importable_and_accept_negative_prompt_path():
-    """Both builders exist and the real-data builder accepts ``negative_prompt_embedding_path``."""
+    """The real-data builder exists and accepts ``negative_prompt_embedding_path``."""
     pytest.importorskip("nemo_automodel")
     pytest.importorskip("torch")
     import inspect
@@ -163,7 +163,6 @@ def test_data_builders_importable_and_accept_negative_prompt_path():
     import fastgen_data
 
     assert callable(fastgen_data.build_text_to_image_multiresolution_dataloader)
-    assert callable(fastgen_data.build_mock_t2i_dataloader)
     sig = inspect.signature(fastgen_data.build_text_to_image_multiresolution_dataloader)
     assert "negative_prompt_embedding_path" in sig.parameters
     # Default None => CFG-less construction works without the negative embedding (it is optional).

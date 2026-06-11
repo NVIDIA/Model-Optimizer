@@ -35,7 +35,6 @@
 # limitations under the License.
 
 from .base import BaseModelProcessor
-from .base_video import BaseVideoProcessor
 from .caption_loaders import (
     CaptionLoader,
     CaptionLoadingStats,
@@ -49,7 +48,6 @@ from .registry import ProcessorRegistry
 
 __all__ = [
     "BaseModelProcessor",
-    "BaseVideoProcessor",
     "CaptionLoader",
     "CaptionLoadingStats",
     "JSONLCaptionLoader",

@@ -77,12 +77,7 @@ from nemo_automodel.components.datasets.diffusion.multi_tier_bucketing import (
 from PIL import Image
 from tqdm import tqdm
 
-from .processors import (
-    BaseModelProcessor,
-    BaseVideoProcessor,
-    ProcessorRegistry,
-    get_caption_loader,
-)
+from .processors import BaseModelProcessor, ProcessorRegistry, get_caption_loader
 
 logger = logging.getLogger(__name__)
 
@@ -1267,15 +1262,11 @@ Examples:
         logger.info("Available processors:")
         for name in ProcessorRegistry.list_available():
             proc = ProcessorRegistry.get(name)
-            media_type = "video" if isinstance(proc, BaseVideoProcessor) else "image"
             quantization = getattr(proc, "quantization", 64)
-            frame_constraint = getattr(proc, "frame_constraint", None) or "none"
             logger.info("  %s:", name)
             logger.info("    type: %s", proc.model_type)
-            logger.info("    media: %s", media_type)
+            logger.info("    media: image")
             logger.info("    quantization: %d", quantization)
-            if media_type == "video":
-                logger.info("    frame_constraint: %s", frame_constraint)
         return
 
     # Handle subcommands

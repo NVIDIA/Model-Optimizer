@@ -84,24 +84,6 @@ pip install -r examples/diffusers/fastgen/requirements.txt   # nemo_automodel
 `nemo_automodel[diffusion]` pulls in diffusers, accelerate, and the `TrainDiffusionRecipe`
 this example subclasses.
 
-## Quick start — mock data (no dataset needed)
-
-The smoke config feeds random tensors at Qwen-Image's shapes, so it runs end-to-end with
-**no dataset to prepare** — it exercises the full training loop (FSDP2 sharding, phase
-alternation, checkpoint save/restore). Use it to validate your environment:
-
-```bash
-torchrun --nproc-per-node=8 \
-    examples/diffusers/fastgen/dmd2_finetune.py \
-    --config examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml
-```
-
-Scale `--fsdp.dp_size` to your GPU count. You'll see alternating `phase=student` /
-`phase=fake_score` log lines and a checkpoint written at the last step.
-
-> The mock loop validates wiring only — it does **not** produce meaningful images. For
-> that, train on real data (below).
-
 ## Real-data training
 
 `configs/dmd2_qwen_image.yaml` is the canonical config: 4-step student, CFG, and the
@@ -187,14 +169,14 @@ student).
 | `dmd2` | `sample_t_cfg`, `ema` | Timestep sampling + student EMA settings. |
 | `optim` | `learning_rate`, `optimizer.*` | Student AdamW knobs. |
 | `fsdp` | `dp_size`, `tp_size`, `activation_checkpointing`, … | FSDP2 parallelism (set `dp_size` to your GPU count). |
-| `data` | `dataloader._target_`, `cache_dir`, `negative_prompt_embedding_path` | Real latent cache vs. `build_mock_t2i_dataloader`. |
+| `data` | `dataloader._target_`, `cache_dir`, `negative_prompt_embedding_path` | Latent cache dir + optional CFG negative-prompt embedding. |
 | `checkpoint` | `checkpoint_dir`, `model_save_format`, `restore_from` | Output dir, save format, resume behavior. |
 
 ## Troubleshooting
 
 **`CUDA out of memory`.** Training holds three Qwen-Image transformers (student + teacher
 - fake-score) plus optimizer state. Shard across more GPUs (raise `--fsdp.dp_size`),
-enable `--fsdp.activation_checkpointing=true`, or use the mock smoke for wiring checks.
+or enable `--fsdp.activation_checkpointing=true`.
 
 **Loss is `NaN` on step 0.** Almost always an out-of-range timestep — confirm you haven't
 overridden `dmd2.pred_type` away from `flow` (Qwen-Image is a rectified-flow model) or

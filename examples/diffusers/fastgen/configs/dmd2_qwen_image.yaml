@@ -1,8 +1,7 @@
 # Qwen-Image DMD2 — canonical real-data training config.
 #
 # Enables the full Qwen-Image DMD2 setup: 4-step student, CFG, and the GAN + R1
-# branch. This is the real-data training config; the mock-data wiring smoke
-# (no dataset required) lives in ``dmd2_qwen_image_smoke.yaml``.
+# branch. This is the real-data training config.
 #
 # Launch with torchrun, scaling ``--fsdp.dp_size`` to your GPU count:
 #

@@ -39,7 +39,7 @@ from nemo_automodel.components.config._arg_parser import parse_args_and_load_con
 
 
 def main(
-    default_config_path: str = "examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml",
+    default_config_path: str = "examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml",
 ) -> None:
     cfg = parse_args_and_load_config(default_config_path)
 

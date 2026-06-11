@@ -22,17 +22,11 @@ three-phase DMD2 alternation (student update / fake-score update / EMA step).
 
 Backbone: **Qwen-Image** (``Qwen/Qwen-Image``) — 4D ``image_latents``,
 :class:`QwenImageDMDPipeline` handles 2x2 patch packing / img_shapes /
-unpacking. Configs: ``configs/dmd2_qwen_image.yaml`` for the canonical
-real-data run (4-step + CFG + GAN); ``configs/dmd2_qwen_image_smoke.yaml``
-for the mock-data wiring smoke (no dataset required).
+unpacking. Config: ``configs/dmd2_qwen_image.yaml`` — the canonical
+real-data run (4-step + CFG + GAN).
 
 Launch::
 
-    # Mock-data wiring smoke (no real cache required).
-    torchrun --nproc-per-node=8 \\
-        examples/diffusers/fastgen/dmd2_finetune.py \\
-        --config examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml
-    # Real-data formal training (canonical).
     torchrun --nproc-per-node=8 \\
         examples/diffusers/fastgen/dmd2_finetune.py \\
         --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml
@@ -143,7 +137,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
     Classifier-free guidance, the GAN discriminator branch, and real-data training are
     configurable via the ``dmd2:`` / ``data:`` YAML blocks — all enabled in the canonical
-    ``configs/dmd2_qwen_image.yaml`` and off in the mock-data smoke. See
+    ``configs/dmd2_qwen_image.yaml``. See
     ``examples/diffusers/fastgen/README.md`` for details.
     """
 
@@ -164,10 +158,6 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         #    self.dataloader / self.step_scheduler / self.checkpointer / etc. The parent's
         #    trailing call to self.load_checkpoint(self.restore_from) runs BEFORE our
         #    extras exist, so it only restores the student — that is intentional and safe.
-        #
-        #    For the mock-data smoke, ``data.dataloader._target_`` in the YAML points at
-        #    ``nemo_automodel.components.datasets.diffusion.build_mock_dataloader`` so the
-        #    parent wires up the mock dataloader for us — no swap needed.
         super().setup()
 
         # 2. Load the frozen teacher. Same from_pretrained path, same parallel_scheme, but
