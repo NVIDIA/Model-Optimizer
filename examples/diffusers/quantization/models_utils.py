@@ -30,11 +30,19 @@ try:
     from diffusers import Flux2Pipeline
 except ImportError:
     Flux2Pipeline = None
+
+# Qwen-Image classes were added in a recent diffusers release; import lazily so
+# this example still imports on older diffusers versions.
+try:
+    from diffusers import QwenImagePipeline
+except ImportError:
+    QwenImagePipeline = None
 from utils import (
     filter_func_default,
     filter_func_flux_dev,
     filter_func_ltx2_vae,
     filter_func_ltx_video,
+    filter_func_qwen_image,
     filter_func_wan_vae,
     filter_func_wan_video,
 )
@@ -54,6 +62,7 @@ class ModelType(str, Enum):
     LTX2 = "ltx-2"
     WAN22_T2V_14b = "wan2.2-t2v-14b"
     WAN22_T2V_5b = "wan2.2-t2v-5b"
+    QWEN_IMAGE = "qwen-image"
 
 
 _FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
@@ -63,6 +72,7 @@ _FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
     ModelType.LTX2: filter_func_ltx_video,
     ModelType.WAN22_T2V_14b: filter_func_wan_video,
     ModelType.WAN22_T2V_5b: filter_func_wan_video,
+    ModelType.QWEN_IMAGE: filter_func_qwen_image,
 }
 
 _VAE_FILTER_FUNC_MAP: dict[tuple[ModelType, str], Callable[[str], bool]] = {
@@ -95,6 +105,7 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.LTX2: "Lightricks/LTX-2",
     ModelType.WAN22_T2V_14b: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     ModelType.WAN22_T2V_5b: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    ModelType.QWEN_IMAGE: "Qwen/Qwen-Image",
 }
 
 MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
@@ -109,6 +120,7 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
     ModelType.LTX2: None,
     ModelType.WAN22_T2V_14b: WanPipeline,
     ModelType.WAN22_T2V_5b: WanPipeline,
+    ModelType.QWEN_IMAGE: QwenImagePipeline,
 }
 
 # Shared dataset configurations
@@ -224,6 +236,14 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
                 "，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，"  # noqa: RUF001
                 "手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"  # noqa: RUF001
             ),
+        },
+    },
+    ModelType.QWEN_IMAGE: {
+        "backbone": "transformer",
+        "dataset": _SD_PROMPTS_DATASET,
+        "inference_extra_args": {
+            "height": 1024,
+            "width": 1024,
         },
     },
 }

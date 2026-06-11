@@ -99,6 +99,12 @@ class PipelineManager:
 
             pipeline_cls = MODEL_PIPELINE[self.config.model_type]
             if pipeline_cls is None:
+                if self.config.model_type == ModelType.QWEN_IMAGE:
+                    raise ImportError(
+                        "Qwen-Image requires a diffusers version that provides "
+                        "QwenImagePipeline. Please upgrade diffusers (e.g. "
+                        "`pip install -U diffusers`) to a release that includes Qwen-Image."
+                    )
                 raise ValueError(
                     f"Model type {self.config.model_type.value} does not use diffusers pipelines."
                 )
