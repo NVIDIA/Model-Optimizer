@@ -152,8 +152,6 @@ def quantize(
 
     # Take the onnx graph
     onnx_model = onnx.load(onnx_path, load_external_data=True)
-    if kwargs.get("target_dla", False):
-        op_types_to_quantize = list({node.op_type for node in onnx_model.graph.node})
 
     graph = gs.import_onnx(onnx_model)
     graph.toposort()
@@ -190,6 +188,8 @@ def quantize(
 
     # Change the default configuration of ORT quantization
     op_types_to_quantize = op_types_to_quantize or []
+    if kwargs.get("target_dla", False) and not op_types_to_quantize:
+        op_types_to_quantize = list({node.op_type for node in onnx_model.graph.node})
     if op_types_to_quantize:
         op_types_to_quantize.extend(custom_ops_to_quantize)
     op_types = {node.op for node in graph.nodes}
