@@ -6,15 +6,18 @@ outputs:
         splits:
           all: 0
       - name: "ultrachat"
+        # UltraChat's loader yields prompt-only turns (no assistant completions),
+        # which makes answer_only_loss=true mask nothing. Use daring-anteater below.
         splits:
-          train_gen: 25000
-          train_sft: 25000
+          train_gen: 0
+          train_sft: 0
       - name: "mtbench"
         splits:
           all: 0
       - name: "daring-anteater"
+        # Multi-turn SFT conversations WITH assistant completions (real split: train).
         splits:
-          all: 0
+          train: 50000
       - name: "magpie"
         splits:
           300k: 0

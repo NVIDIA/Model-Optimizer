@@ -59,7 +59,6 @@ def make_speculative_data_module(
     train_len=None,
     answer_only_loss=False,
     shift_labels=True,
-    seed: int = 0,
 ) -> dict:
     """Create data module for speculative decoding training.
 
@@ -88,14 +87,15 @@ def make_speculative_data_module(
         ds = load_dataset("json", data_files=data_args.data_path, split="train")
         if data_args.sample_size > 0:
             ds = ds.select(range(data_args.sample_size))
+        # Map-style dataset: each rank fetches its own DistributedSampler shard.
+        # Fetch concurrency comes from the DataLoader's num_workers, not a config knob;
+        # shuffling/order is the sampler's job (seeded by training_args.seed).
+        # ``server_urls`` accepts a comma-separated string for multi-server fan-out.
         streaming_cfg = EagleVllmStreamingConfig(
-            server_url=data_args.streaming_server_url,
+            server_urls=data_args.streaming_server_url,
             model=data_args.streaming_model_name,
-            shared_storage_root=data_args.streaming_shared_storage_path,
             max_seq_len=train_len,
             answer_only_loss=answer_only_loss,
-            prefetch=data_args.streaming_prefetch,
-            seed=seed,
         )
         train_dataset = EagleVllmStreamingDataset(
             entries=ds,
@@ -138,7 +138,9 @@ def make_speculative_data_module(
             raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
-        train_dataset = OfflineSupervisedDataset(dumped_files, answer_only_loss=answer_only_loss)
+        train_dataset = OfflineSupervisedDataset(
+            dumped_files, answer_only_loss=answer_only_loss, tokenizer=tokenizer
+        )
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
     return {

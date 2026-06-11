@@ -16,7 +16,7 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 </div>
 
 > [!TIP]
-> Checkout the [Nemotron-3-Nano-30B-A3B pruning + distillation (with data blend prep) + quantization tutorial](../pruning/minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) for a complete end-to-end workflow using Megatron-Bridge!
+> Checkout the [Nemotron-3-Nano-30B-A3B pruning + distillation (with data blend prep) + quantization tutorial](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) for a complete end-to-end workflow using Megatron-Bridge!
 
 ## Pre-Requisites
 
@@ -46,12 +46,6 @@ docker run \
 
 > [!WARNING]
 > Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers. You may also refer to this [doc](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docker/common/README.md#installing-packages-inside-the-container) on how to correctly install packages in the NeMo containers without breaking existing torch installation.
-
-Also install additional dependencies from the [requirements.txt](./requirements.txt) file.
-
-```bash
-python -m pip install -r requirements.txt
-```
 
 You also need to login with your HuggingFace token to download gated datasets / models.
 Note that the default dataset for pruning and quantization is [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), which is gated.
@@ -306,6 +300,9 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 > If number of layers in the model is not divisible by number of GPUs i.e. pipeline parallel (PP) size, you can configure
 > uneven PP by setting `--num_layers_in_first_pipeline_stage` and `--num_layers_in_last_pipeline_stage`.
 > E.g. for Qwen3-8B with 36 layers and 8 GPUs, you can set both to 3 to get 3-5-5-5-5-5-5-3 layers per GPU.
+
+> [!NOTE]
+> If pruning a Nemotron model and you want to save the pruned model back in HF format, please downgrade to `transformers<5` via `python -m pip install "transformers<5"` before pruning.
 
 ## Resources
 

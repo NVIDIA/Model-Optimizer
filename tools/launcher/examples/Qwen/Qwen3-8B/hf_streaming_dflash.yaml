@@ -1,0 +1,96 @@
+# DFlash streaming speculative decoding pipeline for Qwen3-8B.
+#
+# Same streaming transport as the EAGLE3 example (hf_streaming_eagle3.yaml): a live
+# `vllm serve` captures the target model's hidden states and moves them to the trainer
+# over NIXL RDMA (no disk round-trip). DFlash just consumes a different set of captured
+# layers and trains a block-diffusion draft instead of an autoregressive one.
+#
+# 3-step pipeline:
+#   task_0: Build input conversations (jsonl)
+#   task_1: Streaming train — vllm serve + DFlash trainer; hidden states over NIXL RDMA
+#   task_2: vLLM smoke test with DFlash speculative decoding
+#
+# task_1 uses nodes=2: node 0 runs vllm serve, node 1 the trainer. Tasks share
+# /scratchspace to pass artifacts.
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_dflash.yaml --yes
+
+job_name: Qwen3-8B_DFlash_streaming
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  # Step 1: Build input conversations
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  # Step 2: Streaming DFlash training — node 0 vllm serve, node 1 trainer.
+  # DFlash extracts 5 target layers (build_target_layer_ids(36,5)=[1,9,17,25,33], the
+  # draft's fc input) plus the final layer for self-logit distillation. vLLM's capture
+  # ids are those +1 -> [2,10,18,26,34], plus final layer 36.
+  task_1:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.mode=streaming
+      - data.data_path=/scratchspace/data/train.jsonl
+      - training.output_dir=/scratchspace/dflash
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      # Streaming corpus is prompt-only (the serve generates the response and we
+      # capture its hidden states), so there is no assistant span to mask -> train
+      # over the full sequence, same as the EAGLE3 streaming example.
+      - training.answer_only_loss=false
+      - training.num_train_epochs=1
+      # dflash.yaml sets report_to=tensorboard, which hard-fails if tensorboard
+      # isn't in the serve container; the streaming trainer doesn't need it.
+      - training.report_to=none
+      - dflash.dflash_block_size=16
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=7
+      - dflash.dflash_mask_token_id=151669
+      - dflash.dflash_architecture_config.num_hidden_layers=5
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # No spaces: nemo_run emits unquoted `export FOO=value`, so spaces would split.
+      - EAGLE_CAPTURE_IDS: "[2,10,18,26,34,36]"
+      - SERVE_TP: "1"
+      # DFlash uses a custom modeling file; export must trust remote code.
+      - EXPORT_EXTRA_ARGS: "--trust_remote_code"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 2
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:latest
+
+  # Step 3: vLLM smoke test (DFlash, uses exported checkpoint from training)
+  task_2:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_MODEL: /scratchspace/export
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "7"
+      - MIN_ACCEPTANCE_LENGTH: "1.2"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: "vllm/vllm-openai:nightly"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
