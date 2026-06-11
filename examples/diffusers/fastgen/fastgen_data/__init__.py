@@ -25,12 +25,25 @@ The training configs reference these builders via ``_target_: fastgen_data.build
 ``dmd2_finetune.py`` has put this directory on ``sys.path`` (source-checkout flow).
 """
 
-from .collate_fns import (
-    build_text_to_image_multiresolution_dataloader,
-    collate_fn_text_to_image,
-)
-from .mock_dataloader import build_mock_t2i_dataloader
-from .text_to_image_dataset import TextToImageDataset
+# Runtime soft-guard: the vendored modules import UNPATCHED upstream helpers
+# (``nemo_automodel.components.datasets.diffusion.{sampler,base_dataset,text_to_video_dataset}``).
+# Convert a missing-helper ImportError into an actionable message naming the supported range.
+try:
+    from .collate_fns import (
+        build_text_to_image_multiresolution_dataloader,
+        collate_fn_text_to_image,
+    )
+    from .mock_dataloader import build_mock_t2i_dataloader
+    from .text_to_image_dataset import TextToImageDataset
+except ImportError as exc:  # pragma: no cover - environment guard
+    raise ImportError(
+        "fastgen_data could not import its dependencies. It requires a stock "
+        "nemo_automodel>=0.4.0,<1.0 install (it imports the unpatched upstream helpers "
+        "nemo_automodel.components.datasets.diffusion.{sampler,base_dataset,text_to_video_dataset}). "
+        "Install the example dependencies with:\n"
+        "    pip install -r examples/diffusers/fastgen/requirements.txt\n"
+        f"Underlying import error: {exc!r}"
+    ) from exc
 
 __all__ = [
     "TextToImageDataset",
