@@ -18,7 +18,9 @@
 import json
 import os
 import shutil
+import warnings
 from pathlib import Path
+from typing import Any
 
 import torch
 from huggingface_hub import snapshot_download
@@ -27,6 +29,111 @@ from safetensors.torch import safe_open
 from tqdm import tqdm
 
 _HF_HUB_OFFLINE_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
+
+
+def _as_nonnegative_int(value: Any) -> int | None:
+    """Return ``value`` as an int when it is a non-negative integer."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _count_mtp_layer_prefixes(prefixes: list[Any] | tuple[Any, ...]) -> int | None:
+    """Count actual MTP layer prefixes, excluding broad prefixes like ``mtp``."""
+    layer_prefixes = {
+        prefix
+        for prefix in prefixes
+        if isinstance(prefix, str)
+        and (parts := prefix.split("."))
+        and len(parts) >= 2
+        and parts[-2] == "layers"
+        and parts[-1].isdigit()
+    }
+    return len(layer_prefixes) or None
+
+
+def _get_num_nextn_predict_layers(config_data: dict[str, Any], model: Any) -> int | None:
+    """Get the number of next-token-prediction layers from config metadata."""
+    num_nextn_predict_layers = _as_nonnegative_int(config_data.get("num_nextn_predict_layers"))
+    if num_nextn_predict_layers is not None:
+        return num_nextn_predict_layers
+
+    model_config = getattr(model, "config", None)
+    if model_config is not None:
+        num_nextn_predict_layers = _as_nonnegative_int(
+            getattr(model_config, "num_nextn_predict_layers", None)
+        )
+        if num_nextn_predict_layers is not None:
+            return num_nextn_predict_layers
+
+    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
+    if isinstance(mtp_layer_prefixes, (list, tuple)):
+        return _count_mtp_layer_prefixes(mtp_layer_prefixes)
+
+    return None
+
+
+def _get_rope_theta(config_data: dict[str, Any], model: Any) -> Any:
+    rope_theta = config_data.get("rope_theta")
+    if rope_theta is not None:
+        return rope_theta
+
+    model_config = getattr(model, "config", None)
+    if model_config is None:
+        return None
+
+    return getattr(model_config, "rope_theta", None)
+
+
+def _sanitize_llama3_rope_config(config_data: dict[str, Any], model: Any) -> None:
+    rope_theta = _get_rope_theta(config_data, model)
+    if rope_theta is None:
+        return
+
+    for key in ("rope_parameters", "rope_scaling"):
+        rope_config = config_data.get(key)
+        if not isinstance(rope_config, dict):
+            continue
+
+        rope_type = rope_config.get("rope_type", rope_config.get("type"))
+        if rope_type == "llama3" and "rope_theta" not in rope_config:
+            rope_config["rope_theta"] = rope_theta
+
+
+def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -> None:
+    """Sanitize exported Hugging Face config metadata for deployment runtimes.
+
+    Transformers 5.x validates that ``len(layer_types) == num_hidden_layers``.
+    Some checkpoints include MTP/next-token-prediction layer entries after the
+    main decoder layer entries. Those extra entries are not part of
+    ``num_hidden_layers`` and make deployment stacks fail while loading config.
+    """
+    _sanitize_llama3_rope_config(config_data, model)
+
+    num_hidden_layers = _as_nonnegative_int(config_data.get("num_hidden_layers"))
+    layer_types = config_data.get("layer_types")
+    if num_hidden_layers is None or not isinstance(layer_types, list):
+        return
+
+    num_layer_types = len(layer_types)
+    if num_layer_types == num_hidden_layers:
+        return
+
+    num_nextn_predict_layers = _get_num_nextn_predict_layers(config_data, model)
+    if (
+        num_layer_types > num_hidden_layers
+        and num_nextn_predict_layers == num_layer_types - num_hidden_layers
+    ):
+        warnings.warn(
+            "Trimming config.layer_types from "
+            f"{num_layer_types} to {num_hidden_layers} entries so it matches "
+            "num_hidden_layers; the removed entries correspond to "
+            "num_nextn_predict_layers.",
+            stacklevel=2,
+        )
+        config_data["layer_types"] = layer_types[:num_hidden_layers]
 
 
 def _is_hf_hub_offline() -> bool:
