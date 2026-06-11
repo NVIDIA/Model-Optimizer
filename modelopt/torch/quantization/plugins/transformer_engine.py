@@ -274,10 +274,15 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             # Stack the N expert weights into one [N, out, in] tensor so the
             # quantizer's axis-0 reduction sees them together; the resulting
             # _amax of shape [N, 1, 1] broadcasts to give per-expert fake-quant.
+            #
+            # Use unbind(0) (not q_stacked[i]) for the unpacking — unbind's
+            # backward is a single fused stack op, vs N SelectBackward nodes
+            # that each allocate an intermediate grad buffer per slice. At
+            # high N (hundreds of experts), this collapses backward latency
+            # by orders of magnitude. Measured under OMNIML-5064.
             stacked = torch.stack(list(args[weights_start : weights_start + num_gemms]), dim=0)
             q_stacked = self.weight_quantizer(stacked)
-            for i in range(num_gemms):
-                new_args[weights_start + i] = q_stacked[i]
+            new_args[weights_start : weights_start + num_gemms] = q_stacked.unbind(0)
         else:
             for i in range(weights_start, weights_start + num_gemms):
                 new_args[i] = self.weight_quantizer(args[i])
