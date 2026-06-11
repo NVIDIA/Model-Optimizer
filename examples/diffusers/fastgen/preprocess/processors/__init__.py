@@ -48,18 +48,14 @@ from .qwen_image import QwenImageProcessor
 from .registry import ProcessorRegistry
 
 __all__ = [
-    # Base classes
     "BaseModelProcessor",
     "BaseVideoProcessor",
-    # Registry
-    "ProcessorRegistry",
-    # Image processors
-    "QwenImageProcessor",
-    # Caption loaders
     "CaptionLoader",
     "CaptionLoadingStats",
+    "JSONLCaptionLoader",
     "JSONSidecarCaptionLoader",
     "MetaJSONCaptionLoader",
-    "JSONLCaptionLoader",
+    "ProcessorRegistry",
+    "QwenImageProcessor",
     "get_caption_loader",
 ]

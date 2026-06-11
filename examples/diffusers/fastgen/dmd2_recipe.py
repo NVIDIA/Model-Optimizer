@@ -66,6 +66,10 @@ except ImportError as exc:
         "dependencies with:\n"
         "    pip install -r examples/diffusers/fastgen/requirements.txt"
     ) from exc
+# Local sibling module (this example directory is on ``sys.path`` — see ``dmd2_finetune.py``).
+# Provides the FSDP2 partial-load-tolerant optimizer restore so the example does not depend
+# on a patched ``nemo_automodel.components.checkpoint.checkpointing``.
+from fastgen_checkpoint import make_optimizer_partial_load_tolerant
 from torch import nn
 
 import modelopt.torch.fastgen as mtf
@@ -73,11 +77,6 @@ from modelopt.torch.fastgen.config import DMDConfig
 from modelopt.torch.fastgen.discriminators import Discriminator_ImageDiT
 from modelopt.torch.fastgen.methods.dmd import DMDPipeline
 from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
-
-# Local sibling module (this example directory is on ``sys.path`` — see ``dmd2_finetune.py``).
-# Provides the FSDP2 partial-load-tolerant optimizer restore so the example does not depend
-# on a patched ``nemo_automodel.components.checkpoint.checkpointing``.
-from fastgen_checkpoint import make_optimizer_partial_load_tolerant
 
 # Keys under the ``dmd2:`` YAML block that shadow fields on :class:`DMDConfig`. The
 # recipe deep-merges these on top of the loaded built-in recipe so users can tweak DMD2

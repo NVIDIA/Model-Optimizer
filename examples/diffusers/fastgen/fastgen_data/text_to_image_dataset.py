@@ -33,10 +33,8 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Dict
 
 import torch
-
 from nemo_automodel.components.datasets.diffusion.base_dataset import BaseMultiresolutionDataset
 
 
@@ -56,7 +54,7 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         self.train_text_encoder = train_text_encoder
         super().__init__(cache_dir, quantization=64)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Load a single sample."""
         item = self.metadata[idx]
         cache_file = Path(item["cache_file"]).resolve()
@@ -65,7 +63,9 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         try:
             cache_file.relative_to(cache_dir)
         except ValueError as e:
-            raise ValueError(f"Cache file {cache_file} is outside cache directory {cache_dir}") from e
+            raise ValueError(
+                f"Cache file {cache_file} is outside cache directory {cache_dir}"
+            ) from e
 
         # Load cached data
         data = torch.load(cache_file, map_location="cpu", weights_only=True)

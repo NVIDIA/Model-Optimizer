@@ -1,7 +1,8 @@
 # Vendored from NVIDIA-NeMo/Automodel @ e42584e3 (Apache-2.0):
 #   https://github.com/NVIDIA-NeMo/Automodel/blob/e42584e303397e9bd34643407b8a57d7def88ce9/tools/diffusion/processors/qwen_image.py
 # Vendored into the fastgen example so preprocessing runs against stock nemo_automodel
-# without the un-packaged AutoModel ``tools/`` tree. Self-contained (relative ``.base``/``.registry`` imports). Original license below.
+# without the un-packaged AutoModel ``tools/`` tree. Self-contained (relative ``.base``/``.registry``
+# imports). Original license below.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,7 +41,7 @@ Handles Qwen/Qwen-Image T2I models with:
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 import torch
 from torch import autocast
@@ -68,7 +69,7 @@ class QwenImageProcessor(BaseModelProcessor):
     def default_model_name(self) -> str:
         return "Qwen/Qwen-Image"
 
-    def load_models(self, model_name: str, device: str) -> Dict[str, Any]:
+    def load_models(self, model_name: str, device: str) -> dict[str, Any]:
         """
         Load Qwen-Image models.
 
@@ -115,7 +116,7 @@ class QwenImageProcessor(BaseModelProcessor):
     def encode_image(
         self,
         image_tensor: torch.Tensor,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
     ) -> torch.Tensor:
         """
@@ -140,8 +141,16 @@ class QwenImageProcessor(BaseModelProcessor):
             latent = vae.encode(image_tensor).latent_dist.sample()
 
         # Normalize using per-channel latents_mean / latents_std
-        latents_mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1).to(latent.device, latent.dtype)
-        latents_std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1).to(latent.device, latent.dtype)
+        latents_mean = (
+            torch.tensor(vae.config.latents_mean)
+            .view(1, -1, 1, 1, 1)
+            .to(latent.device, latent.dtype)
+        )
+        latents_std = (
+            torch.tensor(vae.config.latents_std)
+            .view(1, -1, 1, 1, 1)
+            .to(latent.device, latent.dtype)
+        )
         latent = (latent - latents_mean) / latents_std
 
         # Remove frame dim if added, then batch dim → (C, H, W)
@@ -150,9 +159,9 @@ class QwenImageProcessor(BaseModelProcessor):
     def encode_text(
         self,
         prompt: str,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
         Encode text using the QwenImagePipeline's encode_prompt.
 
@@ -184,7 +193,7 @@ class QwenImageProcessor(BaseModelProcessor):
     def verify_latent(
         self,
         latent: torch.Tensor,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
     ) -> bool:
         """
@@ -207,8 +216,16 @@ class QwenImageProcessor(BaseModelProcessor):
 
             with torch.no_grad(), autocast(device_type=device_type, dtype=torch.float32):
                 # Denormalize: reverse (latent - mean) / std
-                latents_mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1).to(device, latent.dtype)
-                latents_std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1).to(device, latent.dtype)
+                latents_mean = (
+                    torch.tensor(vae.config.latents_mean)
+                    .view(1, -1, 1, 1, 1)
+                    .to(device, latent.dtype)
+                )
+                latents_std = (
+                    torch.tensor(vae.config.latents_std)
+                    .view(1, -1, 1, 1, 1)
+                    .to(device, latent.dtype)
+                )
                 latent = latent * latents_std + latents_mean
                 decoded = vae.decode(latent).sample
 
@@ -218,10 +235,7 @@ class QwenImageProcessor(BaseModelProcessor):
             if c != 3:
                 return False
 
-            if torch.isnan(decoded).any() or torch.isinf(decoded).any():
-                return False
-
-            return True
+            return not (torch.isnan(decoded).any() or torch.isinf(decoded).any())
 
         except Exception as e:
             logger.warning("[Qwen-Image] Verification failed: %s", e)
@@ -230,9 +244,9 @@ class QwenImageProcessor(BaseModelProcessor):
     def get_cache_data(
         self,
         latent: torch.Tensor,
-        text_encodings: Dict[str, torch.Tensor],
-        metadata: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        text_encodings: dict[str, torch.Tensor],
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
         """
         Construct cache dictionary for Qwen-Image.
 

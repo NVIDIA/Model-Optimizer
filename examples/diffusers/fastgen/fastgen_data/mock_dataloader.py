@@ -38,8 +38,6 @@ tensors with the correct shapes for WAN 2.1 training, allowing functional
 tests to run without requiring real data.
 """
 
-from typing import Dict, Optional, Tuple
-
 import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
@@ -81,7 +79,7 @@ class MockWanDataset(Dataset):
     def __len__(self) -> int:
         return self.length
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Generate a mock sample with random data.
 
         Returns:
@@ -154,7 +152,7 @@ def build_mock_dataloader(
     text_seq_len: int = 77,
     text_embed_dim: int = 4096,
     shuffle: bool = True,
-) -> Tuple[DataLoader, Optional[DistributedSampler]]:
+) -> tuple[DataLoader, DistributedSampler | None]:
     """Build a mock dataloader for WAN training tests.
 
     This function follows the same interface as build_dataloader but generates
@@ -256,7 +254,7 @@ class MockTextToImageDataset(Dataset):
     def __len__(self) -> int:
         return self.length
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Generate a mock sample with random data.
 
         Returns:
@@ -359,7 +357,7 @@ def build_mock_t2i_dataloader(
     text_seq_len: int = 512,
     text_embed_dim: int = 3584,
     shuffle: bool = True,
-) -> Tuple[DataLoader, Optional[DistributedSampler]]:
+) -> tuple[DataLoader, DistributedSampler | None]:
     """Build a mock dataloader for text-to-image training tests.
 
     Sibling of :func:`build_mock_dataloader` for diffusion examples that operate on 4D

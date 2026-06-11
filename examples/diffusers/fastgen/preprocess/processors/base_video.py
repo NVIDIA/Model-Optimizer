@@ -39,7 +39,7 @@ Wan2.1 and HunyuanVideo.
 """
 
 from abc import abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import torch
@@ -60,17 +60,16 @@ class BaseVideoProcessor(BaseModelProcessor):
 
     @property
     @abstractmethod
-    def supported_modes(self) -> List[str]:
+    def supported_modes(self) -> list[str]:
         """
         Return supported input modes.
 
         Returns:
             List of supported modes: 'video' for video files, 'frames' for image sequences
         """
-        pass
 
     @property
-    def frame_constraint(self) -> Optional[str]:
+    def frame_constraint(self) -> str | None:
         """
         Return frame count constraint.
 
@@ -96,7 +95,7 @@ class BaseVideoProcessor(BaseModelProcessor):
     def encode_video(
         self,
         video_tensor: torch.Tensor,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
         deterministic: bool = True,
         **kwargs,
@@ -114,16 +113,15 @@ class BaseVideoProcessor(BaseModelProcessor):
         Returns:
             Latent tensor (shape varies by model, typically (1, C, T', H', W'))
         """
-        pass
 
     @abstractmethod
     def load_video(
         self,
         video_path: str,
-        target_size: Tuple[int, int],
-        num_frames: Optional[int] = None,
+        target_size: tuple[int, int],
+        num_frames: int | None = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, np.ndarray]:
+    ) -> tuple[torch.Tensor, np.ndarray]:
         """
         Load video from file and preprocess.
 
@@ -138,7 +136,6 @@ class BaseVideoProcessor(BaseModelProcessor):
                 - video_tensor: Tensor of shape (1, C, T, H, W), normalized to [-1, 1]
                 - first_frame: First frame as numpy array (H, W, C) in uint8 for caching
         """
-        pass
 
     def adjust_frame_count(self, frames: np.ndarray, target_frames: int) -> np.ndarray:
         """
@@ -165,7 +162,7 @@ class BaseVideoProcessor(BaseModelProcessor):
     def encode_image(
         self,
         image_tensor: torch.Tensor,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
     ) -> torch.Tensor:
         """
@@ -188,7 +185,7 @@ class BaseVideoProcessor(BaseModelProcessor):
     def verify_latent(
         self,
         latent: torch.Tensor,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
     ) -> bool:
         """
@@ -209,9 +206,7 @@ class BaseVideoProcessor(BaseModelProcessor):
             # Basic sanity checks
             if torch.isnan(latent).any():
                 return False
-            if torch.isinf(latent).any():
-                return False
-            return True
+            return not torch.isinf(latent).any()
         except Exception:
             return False
 
@@ -221,8 +216,8 @@ class BaseVideoProcessor(BaseModelProcessor):
         expected_channels: int,
         spatial_downscale: int = 8,
         temporal_downscale: int = 4,
-        input_shape: Optional[Tuple[int, int, int, int, int]] = None,
-    ) -> Tuple[bool, Optional[str]]:
+        input_shape: tuple[int, int, int, int, int] | None = None,
+    ) -> tuple[bool, str | None]:
         """
         Validate latent tensor shape based on expected dimensions.
 
@@ -245,11 +240,11 @@ class BaseVideoProcessor(BaseModelProcessor):
         if latent.ndim != 5:
             return False, f"Expected 5D tensor (B, C, T, H, W), got {latent.ndim}D"
 
-        B, C, T, H, W = latent.shape
+        _b, c, t, h, w = latent.shape
 
         # Check channel count
-        if C != expected_channels:
-            return False, f"Expected {expected_channels} channels, got {C}"
+        if expected_channels != c:
+            return False, f"Expected {expected_channels} channels, got {c}"
 
         # Check for invalid values
         if torch.isnan(latent).any():
@@ -259,28 +254,28 @@ class BaseVideoProcessor(BaseModelProcessor):
 
         # Validate dimensions against input shape if provided
         if input_shape is not None:
-            _, _, in_T, in_H, in_W = input_shape
-            expected_T = max(1, (in_T + temporal_downscale - 1) // temporal_downscale)
-            expected_H = in_H // spatial_downscale
-            expected_W = in_W // spatial_downscale
+            _, _, in_t, in_h, in_w = input_shape
+            expected_t = max(1, (in_t + temporal_downscale - 1) // temporal_downscale)
+            expected_h = in_h // spatial_downscale
+            expected_w = in_w // spatial_downscale
 
-            if T != expected_T:
-                return False, f"Expected temporal dim {expected_T}, got {T}"
-            if H != expected_H:
-                return False, f"Expected height {expected_H}, got {H}"
-            if W != expected_W:
-                return False, f"Expected width {expected_W}, got {W}"
+            if expected_t != t:
+                return False, f"Expected temporal dim {expected_t}, got {t}"
+            if expected_h != h:
+                return False, f"Expected height {expected_h}, got {h}"
+            if expected_w != w:
+                return False, f"Expected width {expected_w}, got {w}"
 
         return True, None
 
     def load_video_frames(
         self,
         video_path: str,
-        target_size: Tuple[int, int],
-        num_frames: Optional[int] = None,
+        target_size: tuple[int, int],
+        num_frames: int | None = None,
         resize_mode: str = "bilinear",
         center_crop: bool = True,
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         """
         Load video frames using OpenCV with resizing and optional center crop.
 
@@ -359,7 +354,9 @@ class BaseVideoProcessor(BaseModelProcessor):
                 frame = frame[start_y : start_y + target_height, start_x : start_x + target_width]
             else:
                 # Direct resize (may change aspect ratio)
-                frame = cv2.resize(frame, (target_width, target_height), interpolation=interpolation)
+                frame = cv2.resize(
+                    frame, (target_width, target_height), interpolation=interpolation
+                )
 
             frames.append(frame)
             current_idx = target_idx + 1

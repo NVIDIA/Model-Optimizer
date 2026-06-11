@@ -38,8 +38,6 @@ This module provides a registry pattern for discovering and instantiating
 model-specific processors at runtime.
 """
 
-from typing import Dict, List, Type
-
 from .base import BaseModelProcessor
 
 
@@ -59,7 +57,7 @@ class ProcessorRegistry:
         processor = ProcessorRegistry.get("flux")
     """
 
-    _processors: Dict[str, Type[BaseModelProcessor]] = {}
+    _processors: dict[str, type[BaseModelProcessor]] = {}
 
     @classmethod
     def register(cls, name: str):
@@ -78,9 +76,11 @@ class ProcessorRegistry:
                 ...
         """
 
-        def decorator(processor_class: Type[BaseModelProcessor]):
+        def decorator(processor_class: type[BaseModelProcessor]):
             if not issubclass(processor_class, BaseModelProcessor):
-                raise TypeError(f"Processor {processor_class.__name__} must inherit from BaseModelProcessor")
+                raise TypeError(
+                    f"Processor {processor_class.__name__} must inherit from BaseModelProcessor"
+                )
             cls._processors[name] = processor_class
             return processor_class
 
@@ -106,7 +106,7 @@ class ProcessorRegistry:
         return cls._processors[name]()
 
     @classmethod
-    def get_class(cls, name: str) -> Type[BaseModelProcessor]:
+    def get_class(cls, name: str) -> type[BaseModelProcessor]:
         """
         Get a processor class by name (without instantiating).
 
@@ -125,7 +125,7 @@ class ProcessorRegistry:
         return cls._processors[name]
 
     @classmethod
-    def list_available(cls) -> List[str]:
+    def list_available(cls) -> list[str]:
         """
         List all registered processor names.
 

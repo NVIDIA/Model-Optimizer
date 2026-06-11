@@ -29,7 +29,7 @@ Produces ``.pt`` cache items byte-compatible with what the training dataloader
 # Surface a missing/moved helper as an actionable message (named version range) rather than a
 # raw ImportError deep inside the driver.
 try:
-    from nemo_automodel.components.datasets.diffusion.multi_tier_bucketing import (  # noqa: F401
+    from nemo_automodel.components.datasets.diffusion.multi_tier_bucketing import (
         MultiTierBucketCalculator,
     )
 except ImportError as exc:  # pragma: no cover - environment guard

@@ -1,7 +1,8 @@
 # Vendored from NVIDIA-NeMo/Automodel @ e42584e3 (Apache-2.0):
 #   https://github.com/NVIDIA-NeMo/Automodel/blob/e42584e303397e9bd34643407b8a57d7def88ce9/tools/diffusion/processors/base.py
 # Vendored into the fastgen example so preprocessing runs against stock nemo_automodel
-# without the un-packaged AutoModel ``tools/`` tree. Self-contained (no internal import changes). Original license below.
+# without the un-packaged AutoModel ``tools/`` tree. Self-contained (no internal import changes).
+# Original license below.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,7 +33,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any
 
 import torch
 from PIL import Image
@@ -60,7 +61,6 @@ class BaseModelProcessor(ABC):
         Returns:
             str: Model type (e.g., 'flux', 'sdxl', 'sd15', 'sd3')
         """
-        pass
 
     @property
     def default_model_name(self) -> str:
@@ -70,10 +70,12 @@ class BaseModelProcessor(ABC):
         Returns:
             str: Default model name/path
         """
-        raise NotImplementedError(f"{self.__class__.__name__} does not specify a default model name")
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not specify a default model name"
+        )
 
     @abstractmethod
-    def load_models(self, model_name: str, device: str) -> Dict[str, Any]:
+    def load_models(self, model_name: str, device: str) -> dict[str, Any]:
         """
         Load all required models for this architecture.
 
@@ -84,13 +86,12 @@ class BaseModelProcessor(ABC):
         Returns:
             Dict containing all loaded models and tokenizers
         """
-        pass
 
     @abstractmethod
     def encode_image(
         self,
         image_tensor: torch.Tensor,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
     ) -> torch.Tensor:
         """
@@ -104,15 +105,14 @@ class BaseModelProcessor(ABC):
         Returns:
             Latent tensor (typically shape (C, H//8, W//8) for most VAEs)
         """
-        pass
 
     @abstractmethod
     def encode_text(
         self,
         prompt: str,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
         Encode text prompt to embeddings.
 
@@ -124,13 +124,12 @@ class BaseModelProcessor(ABC):
         Returns:
             Dict containing all text embeddings (keys vary by model type)
         """
-        pass
 
     @abstractmethod
     def verify_latent(
         self,
         latent: torch.Tensor,
-        models: Dict[str, Any],
+        models: dict[str, Any],
         device: str,
     ) -> bool:
         """
@@ -144,15 +143,14 @@ class BaseModelProcessor(ABC):
         Returns:
             True if verification passes, False otherwise
         """
-        pass
 
     @abstractmethod
     def get_cache_data(
         self,
         latent: torch.Tensor,
-        text_encodings: Dict[str, torch.Tensor],
-        metadata: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        text_encodings: dict[str, torch.Tensor],
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
         """
         Construct the cache dictionary to save.
 
@@ -172,7 +170,6 @@ class BaseModelProcessor(ABC):
         Returns:
             Dict to be saved with torch.save()
         """
-        pass
 
     def preprocess_image(self, image: Image.Image) -> torch.Tensor:
         """
@@ -198,7 +195,7 @@ class BaseModelProcessor(ABC):
         image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0)
         return image_tensor
 
-    def get_vae_scaling_factor(self, models: Dict[str, Any]) -> float:
+    def get_vae_scaling_factor(self, models: dict[str, Any]) -> float:
         """
         Get the VAE scaling factor for this model.
 

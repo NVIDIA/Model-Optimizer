@@ -1,7 +1,9 @@
 # Vendored from NVIDIA-NeMo/Automodel @ e42584e3 (Apache-2.0):
 #   https://github.com/NVIDIA-NeMo/Automodel/blob/e42584e303397e9bd34643407b8a57d7def88ce9/tools/diffusion/preprocessing_multiprocess.py
 # Vendored into the fastgen example so preprocessing runs against stock nemo_automodel
-# without the un-packaged AutoModel ``tools/`` tree. The processors import is rewritten to the vendored ``.processors`` package; ``MultiTierBucketCalculator`` is imported from stock upstream. Original license below.
+# without the un-packaged AutoModel ``tools/`` tree. The processors import is rewritten to the
+# vendored ``.processors`` package; ``MultiTierBucketCalculator`` is imported from stock upstream.
+# Original license below.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -64,23 +66,25 @@ import os
 import traceback
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-logger = logging.getLogger(__name__)
+from typing import Any
 
 import cv2
 import numpy as np
 import torch
+from nemo_automodel.components.datasets.diffusion.multi_tier_bucketing import (
+    MultiTierBucketCalculator,
+)
 from PIL import Image
 from tqdm import tqdm
 
-from nemo_automodel.components.datasets.diffusion.multi_tier_bucketing import MultiTierBucketCalculator
 from .processors import (
     BaseModelProcessor,
     BaseVideoProcessor,
     ProcessorRegistry,
     get_caption_loader,
 )
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Constants
@@ -91,11 +95,11 @@ VIDEO_EXTENSIONS = {"mp4", "avi", "mov", "mkv", "webm"}
 # =============================================================================
 # Global worker state (initialized once per process)
 # =============================================================================
-_worker_models: Optional[Dict[str, Any]] = None
-_worker_processor: Optional[BaseModelProcessor] = None
-_worker_calculator: Optional[MultiTierBucketCalculator] = None
-_worker_device: Optional[str] = None
-_worker_config: Optional[Dict[str, Any]] = None
+_worker_models: dict[str, Any] | None = None
+_worker_processor: BaseModelProcessor | None = None
+_worker_calculator: MultiTierBucketCalculator | None = None
+_worker_device: str | None = None
+_worker_config: dict[str, Any] | None = None
 
 
 # =============================================================================
@@ -103,7 +107,7 @@ _worker_config: Optional[Dict[str, Any]] = None
 # =============================================================================
 
 
-def _get_media_files(media_dir: Path, extensions: set) -> List[Path]:
+def _get_media_files(media_dir: Path, extensions: set) -> list[Path]:
     """Recursively get all media files with given extensions using os.walk()."""
     media_files = []
     for root, dirs, files in os.walk(media_dir):
@@ -117,13 +121,13 @@ def _get_media_files(media_dir: Path, extensions: set) -> List[Path]:
 
 
 def _save_metadata_shards(
-    all_metadata: List[Dict],
+    all_metadata: list[dict],
     output_dir: Path,
     processor_name: str,
     model_name: str,
     model_type: str,
     shard_size: int,
-    extra_fields: Dict[str, Any],
+    extra_fields: dict[str, Any],
     shard_rank: int = 0,
     shard_world: int = 1,
 ) -> None:
@@ -165,9 +169,9 @@ def _save_metadata_shards(
         json.dump(metadata, f, indent=2)
 
 
-def _print_bucket_distribution(all_metadata: List[Dict]) -> None:
+def _print_bucket_distribution(all_metadata: list[dict]) -> None:
     """Print bucket resolution distribution."""
-    bucket_counts: Dict[str, int] = {}
+    bucket_counts: dict[str, int] = {}
     for item in all_metadata:
         res = f"{item['bucket_resolution'][0]}x{item['bucket_resolution'][1]}"
         bucket_counts[res] = bucket_counts.get(res, 0) + 1
@@ -199,11 +203,11 @@ def _init_worker(processor_name: str, model_name: str, gpu_id: int, max_pixels: 
 
 
 def _load_all_captions(
-    image_files: List[Path],
+    image_files: list[Path],
     caption_field: str = "internvl",
     caption_format: str = "jsonl",
     verbose: bool = True,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Pre-load all captions from caption files. Returns filename->caption dict.
 
     Args:
@@ -223,14 +227,16 @@ def _load_all_captions(
             caption_format,
         )
         if stats.files_missing > 0:
-            logger.info("  %d caption files not found (will use filename fallback)", stats.files_missing)
+            logger.info(
+                "  %d caption files not found (will use filename fallback)", stats.files_missing
+            )
         if stats.captions_missing > 0:
             logger.info("  %d images will use filename as caption", stats.captions_missing)
 
     return captions
 
 
-def _process_image(args: Tuple) -> Optional[Dict]:
+def _process_image(args: tuple) -> dict | None:
     """Process a single image using pre-initialized worker state."""
     image_path, output_dir, verify, caption = args
 
@@ -299,14 +305,14 @@ def _process_image(args: Tuple) -> Optional[Dict]:
 
 def _process_shard_on_gpu(
     gpu_id: int,
-    image_files: List[Path],
+    image_files: list[Path],
     output_dir: str,
     processor_name: str,
     model_name: str,
     verify: bool,
-    caption_cache: Dict[str, str],
+    caption_cache: dict[str, str],
     max_pixels: int,
-) -> List[Dict]:
+) -> list[dict]:
     """Process a shard of images on a specific GPU."""
     _init_worker(processor_name, model_name, gpu_id, max_pixels)
 
@@ -325,12 +331,12 @@ def preprocess_dataset(
     image_dir: str,
     output_dir: str,
     processor_name: str,
-    model_name: Optional[str] = None,
+    model_name: str | None = None,
     shard_size: int = 10000,
     verify: bool = False,
     caption_field: str = "internvl",
     caption_format: str = "jsonl",
-    max_images: Optional[int] = None,
+    max_images: int | None = None,
     max_pixels: int = 256 * 256,
     shard_idx: int = 0,
     shard_count: int = 1,
@@ -387,7 +393,9 @@ def preprocess_dataset(
     if not image_files:
         return
 
-    caption_cache = _load_all_captions(image_files, caption_field, caption_format=caption_format, verbose=True)
+    caption_cache = _load_all_captions(
+        image_files, caption_field, caption_format=caption_format, verbose=True
+    )
 
     # Split images across GPUs
     chunks = [image_files[i::num_gpus] for i in range(num_gpus)]
@@ -397,7 +405,16 @@ def preprocess_dataset(
 
     with Pool(processes=num_gpus) as pool:
         args = [
-            (gpu_id, chunks[gpu_id], str(output_dir), processor_name, model_name, verify, caption_cache, max_pixels)
+            (
+                gpu_id,
+                chunks[gpu_id],
+                str(output_dir),
+                processor_name,
+                model_name,
+                verify,
+                caption_cache,
+                max_pixels,
+            )
             for gpu_id in range(num_gpus)
         ]
 
@@ -414,7 +431,11 @@ def preprocess_dataset(
         model_name,
         processor.model_type,
         shard_size,
-        {"caption_field": caption_field, "caption_format": caption_format, "max_pixels": max_pixels},
+        {
+            "caption_field": caption_field,
+            "caption_format": caption_format,
+            "max_pixels": max_pixels,
+        },
         shard_rank=shard_idx,
         shard_world=shard_count,
     )
@@ -436,7 +457,7 @@ def _init_video_worker(
     model_name: str,
     gpu_id: int,
     max_pixels: int,
-    video_config: Dict[str, Any],
+    video_config: dict[str, Any],
 ):
     """Initialize video worker process with models on assigned GPU."""
     global _worker_models, _worker_processor, _worker_calculator, _worker_device, _worker_config
@@ -456,7 +477,7 @@ def _init_video_worker(
     logger.info("Video worker initialized on GPU %d (quantization=%d)", gpu_id, quantization)
 
 
-def _get_video_dimensions(video_path: str) -> Tuple[int, int, int]:
+def _get_video_dimensions(video_path: str) -> tuple[int, int, int]:
     """Get video dimensions and frame count using OpenCV."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -473,10 +494,10 @@ def _get_video_dimensions(video_path: str) -> Tuple[int, int, int]:
 def _extract_evenly_spaced_frames(
     video_path: str,
     num_frames: int,
-    target_size: Tuple[int, int],
+    target_size: tuple[int, int],
     resize_mode: str = "bilinear",
     center_crop: bool = True,
-) -> Tuple[List[np.ndarray], List[int]]:
+) -> tuple[list[np.ndarray], list[int]]:
     """Extract evenly-spaced frames. Returns (frames, source_indices)."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -563,8 +584,8 @@ def _frame_to_video_tensor(frame: np.ndarray, dtype: torch.dtype = torch.float16
 def _resolve_video_resolution(
     orig_width: int,
     orig_height: int,
-    config: Dict[str, Any],
-) -> Tuple[int, int, Optional[str], float]:
+    config: dict[str, Any],
+) -> tuple[int, int, str | None, float]:
     """Resolve target resolution. Returns (width, height, bucket_id, aspect_ratio)."""
     target_height = config.get("target_height")
     target_width = config.get("target_width")
@@ -575,11 +596,16 @@ def _resolve_video_resolution(
     else:
         # Use bucket calculator to find best resolution
         bucket = _worker_calculator.get_bucket_for_image(orig_width, orig_height)
-        return bucket["resolution"][0], bucket["resolution"][1], bucket["id"], bucket["aspect_ratio"]
+        return (
+            bucket["resolution"][0],
+            bucket["resolution"][1],
+            bucket["id"],
+            bucket["aspect_ratio"],
+        )
 
 
 def _save_cache_file(
-    cache_data: Dict[str, Any],
+    cache_data: dict[str, Any],
     output_dir: str,
     resolution: str,
     cache_hash: str,
@@ -607,13 +633,13 @@ def _build_result_dict(
     orig_width: int,
     orig_height: int,
     caption: str,
-    bucket_id: Optional[str],
+    bucket_id: str | None,
     aspect_ratio: float,
     num_frames: int = 1,
-    frame_index: Optional[int] = None,
-    total_frames_extracted: Optional[int] = None,
-    source_frame_index: Optional[int] = None,
-) -> Dict[str, Any]:
+    frame_index: int | None = None,
+    total_frames_extracted: int | None = None,
+    source_frame_index: int | None = None,
+) -> dict[str, Any]:
     """Build a result dictionary for a processed video/frame."""
     result = {
         "cache_file": str(cache_file),
@@ -639,7 +665,7 @@ def _build_result_dict(
     return result
 
 
-def _process_video_frames_mode(args: Tuple) -> List[Dict]:
+def _process_video_frames_mode(args: tuple) -> list[dict]:
     """Process video in frames mode - each frame becomes a separate sample."""
     video_path, output_dir, caption, config = args
 
@@ -721,7 +747,9 @@ def _process_video_frames_mode(args: Tuple) -> List[Dict]:
             ).hexdigest()
 
             # Save cache file using helper
-            cache_file = _save_cache_file(cache_data, output_dir, resolution, cache_hash, output_format)
+            cache_file = _save_cache_file(
+                cache_data, output_dir, resolution, cache_hash, output_format
+            )
 
             # Build result dict using helper
             results.append(
@@ -750,7 +778,7 @@ def _process_video_frames_mode(args: Tuple) -> List[Dict]:
         return []
 
 
-def _process_video_video_mode(args: Tuple) -> Optional[Dict]:
+def _process_video_video_mode(args: tuple) -> dict | None:
     """Process video in video mode - multi-frame encoding as single sample."""
     video_path, output_dir, caption, config = args
 
@@ -796,7 +824,9 @@ def _process_video_video_mode(args: Tuple) -> Optional[Dict]:
         # Encode first frame for i2v (if processor supports it)
         image_embeds = None
         if hasattr(_worker_processor, "encode_first_frame"):
-            image_embeds = _worker_processor.encode_first_frame(first_frame, _worker_models, _worker_device)
+            image_embeds = _worker_processor.encode_first_frame(
+                first_frame, _worker_models, _worker_device
+            )
 
         # Prepare metadata
         metadata = {
@@ -820,7 +850,9 @@ def _process_video_video_mode(args: Tuple) -> Optional[Dict]:
         # Save cache file using helper
         output_format = config.get("output_format", "meta")
         resolution = f"{target_width}x{target_height}"
-        cache_hash = hashlib.md5(f"{Path(video_path).absolute()}_{resolution}_{actual_frames}".encode()).hexdigest()
+        cache_hash = hashlib.md5(
+            f"{Path(video_path).absolute()}_{resolution}_{actual_frames}".encode()
+        ).hexdigest()
         cache_file = _save_cache_file(cache_data, output_dir, resolution, cache_hash, output_format)
 
         # Build result dict using helper
@@ -843,7 +875,7 @@ def _process_video_video_mode(args: Tuple) -> Optional[Dict]:
         return None
 
 
-def _process_video(args: Tuple) -> List[Dict]:
+def _process_video(args: tuple) -> list[dict]:
     """Process a single video. Dispatches to frames or video mode based on config."""
     video_path, output_dir, caption, config = args
     mode = config.get("mode", "video")
@@ -858,14 +890,14 @@ def _process_video(args: Tuple) -> List[Dict]:
 
 def _process_video_shard_on_gpu(
     gpu_id: int,
-    video_files: List[Path],
+    video_files: list[Path],
     output_dir: str,
     processor_name: str,
     model_name: str,
-    caption_cache: Dict[str, str],
+    caption_cache: dict[str, str],
     max_pixels: int,
-    video_config: Dict[str, Any],
-) -> List[Dict]:
+    video_config: dict[str, Any],
+) -> list[dict]:
     """Process a shard of videos on a specific GPU."""
     _init_video_worker(processor_name, model_name, gpu_id, max_pixels, video_config)
 
@@ -882,14 +914,14 @@ def preprocess_video_dataset(
     video_dir: str,
     output_dir: str,
     processor_name: str,
-    model_name: Optional[str] = None,
+    model_name: str | None = None,
     mode: str = "video",
     num_frames: int = 10,
-    target_frames: Optional[int] = None,
-    resolution_preset: Optional[str] = None,
-    max_pixels: Optional[int] = None,
-    target_height: Optional[int] = None,
-    target_width: Optional[int] = None,
+    target_frames: int | None = None,
+    resolution_preset: str | None = None,
+    max_pixels: int | None = None,
+    target_height: int | None = None,
+    target_width: int | None = None,
     resize_mode: str = "bilinear",
     center_crop: bool = True,
     deterministic: bool = True,
@@ -897,7 +929,7 @@ def preprocess_video_dataset(
     caption_format: str = "sidecar",
     caption_field: str = "caption",
     shard_size: int = 10000,
-    max_videos: Optional[int] = None,
+    max_videos: int | None = None,
 ):
     """
     Preprocess video dataset with one process per GPU.
@@ -1076,7 +1108,9 @@ Examples:
         """,
     )
 
-    parser.add_argument("--list_processors", action="store_true", help="List available processors and exit")
+    parser.add_argument(
+        "--list_processors", action="store_true", help="List available processors and exit"
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Preprocessing type")
 
@@ -1085,9 +1119,15 @@ Examples:
     # ===================
     image_parser = subparsers.add_parser("image", help="Preprocess images")
     image_parser.add_argument("--image_dir", type=str, required=True, help="Input image directory")
-    image_parser.add_argument("--output_dir", type=str, required=True, help="Output cache directory")
-    image_parser.add_argument("--processor", type=str, default="qwen_image", help="Processor name (default: qwen_image)")
-    image_parser.add_argument("--model_name", type=str, default=None, help="Model name (uses processor default)")
+    image_parser.add_argument(
+        "--output_dir", type=str, required=True, help="Output cache directory"
+    )
+    image_parser.add_argument(
+        "--processor", type=str, default="qwen_image", help="Processor name (default: qwen_image)"
+    )
+    image_parser.add_argument(
+        "--model_name", type=str, default=None, help="Model name (uses processor default)"
+    )
     image_parser.add_argument("--shard_size", type=int, default=10000, help="Metadata shard size")
     image_parser.add_argument("--verify", action="store_true", help="Verify latents can be decoded")
     image_parser.add_argument(
@@ -1132,18 +1172,29 @@ Examples:
     # ===================
     video_parser = subparsers.add_parser("video", help="Preprocess videos")
     video_parser.add_argument("--video_dir", type=str, required=True, help="Input video directory")
-    video_parser.add_argument("--output_dir", type=str, required=True, help="Output cache directory")
+    video_parser.add_argument(
+        "--output_dir", type=str, required=True, help="Output cache directory"
+    )
     video_parser.add_argument(
         "--processor",
         type=str,
         required=True,
         choices=["wan", "wan2.1", "hunyuan", "hunyuanvideo", "hunyuanvideo-1.5"],
     )
-    video_parser.add_argument("--model_name", type=str, default=None, help="Model name (uses processor default)")
-    video_parser.add_argument("--mode", type=str, default="video", choices=["video", "frames"], help="Processing mode")
-    video_parser.add_argument("--num_frames", type=int, default=10, help="Frames to extract in 'frames' mode")
     video_parser.add_argument(
-        "--target_frames", type=int, default=None, help="Target frame count (e.g., 121 for HunyuanVideo)"
+        "--model_name", type=str, default=None, help="Model name (uses processor default)"
+    )
+    video_parser.add_argument(
+        "--mode", type=str, default="video", choices=["video", "frames"], help="Processing mode"
+    )
+    video_parser.add_argument(
+        "--num_frames", type=int, default=10, help="Frames to extract in 'frames' mode"
+    )
+    video_parser.add_argument(
+        "--target_frames",
+        type=int,
+        default=None,
+        help="Target frame count (e.g., 121 for HunyuanVideo)",
     )
 
     # Resolution options
@@ -1157,8 +1208,12 @@ Examples:
     video_res_group.add_argument("--max_pixels", type=int, help="Custom pixel budget for bucketing")
 
     # Explicit size options (disables bucketing)
-    video_parser.add_argument("--height", type=int, default=None, help="Explicit height (disables bucketing)")
-    video_parser.add_argument("--width", type=int, default=None, help="Explicit width (disables bucketing)")
+    video_parser.add_argument(
+        "--height", type=int, default=None, help="Explicit height (disables bucketing)"
+    )
+    video_parser.add_argument(
+        "--width", type=int, default=None, help="Explicit width (disables bucketing)"
+    )
 
     video_parser.add_argument(
         "--resize_mode",
@@ -1167,13 +1222,23 @@ Examples:
         choices=["bilinear", "bicubic", "nearest", "area", "lanczos"],
         help="Interpolation mode",
     )
-    video_parser.add_argument("--center_crop", action="store_true", default=True, help="Center crop (default: True)")
-    video_parser.add_argument("--no_center_crop", dest="center_crop", action="store_false", help="Disable center crop")
     video_parser.add_argument(
-        "--deterministic", action="store_true", default=True, help="Use deterministic encoding (default: True)"
+        "--center_crop", action="store_true", default=True, help="Center crop (default: True)"
     )
     video_parser.add_argument(
-        "--stochastic", dest="deterministic", action="store_false", help="Use stochastic (sampled) encoding"
+        "--no_center_crop", dest="center_crop", action="store_false", help="Disable center crop"
+    )
+    video_parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        default=True,
+        help="Use deterministic encoding (default: True)",
+    )
+    video_parser.add_argument(
+        "--stochastic",
+        dest="deterministic",
+        action="store_false",
+        help="Use stochastic (sampled) encoding",
     )
     video_parser.add_argument(
         "--caption_format",
@@ -1182,9 +1247,15 @@ Examples:
         choices=["sidecar", "meta_json", "jsonl"],
         help="Caption format",
     )
-    video_parser.add_argument("--caption_field", type=str, default="caption", help="Caption field name")
     video_parser.add_argument(
-        "--output_format", type=str, default="meta", choices=["meta", "pt"], help="Output file format"
+        "--caption_field", type=str, default="caption", help="Caption field name"
+    )
+    video_parser.add_argument(
+        "--output_format",
+        type=str,
+        default="meta",
+        choices=["meta", "pt"],
+        help="Output file format",
     )
     video_parser.add_argument("--shard_size", type=int, default=10000, help="Metadata shard size")
     video_parser.add_argument("--max_videos", type=int, default=None, help="Max videos to process")

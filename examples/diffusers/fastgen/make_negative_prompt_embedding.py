@@ -45,16 +45,19 @@ if _THIS_DIR not in sys.path:
 
 def main() -> None:
     import torch
-
     from preprocess.processors.qwen_image import QwenImageProcessor
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", required=True, help="Output path, e.g. <cache_dir>/negative_prompt_embedding.pt"
     )
-    parser.add_argument("--model", default="Qwen/Qwen-Image", help="Qwen-Image model id or local path")
     parser.add_argument(
-        "--negative_prompt", default="", help='Negative prompt to encode (default "" = unconditional)'
+        "--model", default="Qwen/Qwen-Image", help="Qwen-Image model id or local path"
+    )
+    parser.add_argument(
+        "--negative_prompt",
+        default="",
+        help='Negative prompt to encode (default "" = unconditional)',
     )
     parser.add_argument("--device", default="cuda", help="Device for the text encoder")
     args = parser.parse_args()

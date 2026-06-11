@@ -43,22 +43,22 @@ expected batch format.
 
 import functools
 import logging
-from typing import Callable, Dict, List, Tuple
+from collections.abc import Callable
 
 import torch
-from torchdata.stateful_dataloader import StatefulDataLoader
-
 from nemo_automodel.components.datasets.diffusion.sampler import SequentialBucketSampler
-from .text_to_image_dataset import TextToImageDataset
 from nemo_automodel.components.datasets.diffusion.text_to_video_dataset import (
     TextToVideoDataset,
     collate_optional_video_fields,
 )
+from torchdata.stateful_dataloader import StatefulDataLoader
+
+from .text_to_image_dataset import TextToImageDataset
 
 logger = logging.getLogger(__name__)
 
 
-def collate_fn_production(batch: List[Dict]) -> Dict:
+def collate_fn_production(batch: list[dict]) -> dict:
     """Production collate function with verification."""
     # Verify all samples have same resolution
     resolutions = [tuple(item["crop_resolution"].tolist()) for item in batch]
@@ -103,10 +103,10 @@ def collate_fn_production(batch: List[Dict]) -> Dict:
 
 
 def collate_fn_text_to_image(
-    batch: List[Dict],
+    batch: list[dict],
     negative_text_embeddings: torch.Tensor | None = None,
     negative_text_embeddings_mask: torch.Tensor | None = None,
-) -> Dict:
+) -> dict:
     """
     Text-to-image collate function that transforms multiresolution batch output
     to match FlowMatchingPipeline expected format.
@@ -189,14 +189,14 @@ def _build_multiresolution_dataloader_core(
     batch_size: int,
     dp_rank: int,
     dp_world_size: int,
-    base_resolution: Tuple[int, int] = (512, 512),
+    base_resolution: tuple[int, int] = (512, 512),
     drop_last: bool = True,
     shuffle: bool = True,
     dynamic_batch_size: bool = False,
     num_workers: int = 4,
     pin_memory: bool = True,
     prefetch_factor: int = 2,
-) -> Tuple[StatefulDataLoader, SequentialBucketSampler]:
+) -> tuple[StatefulDataLoader, SequentialBucketSampler]:
     """Internal helper: create sampler + DataLoader from dataset and collate fn."""
     sampler = SequentialBucketSampler(
         dataset,
@@ -232,7 +232,7 @@ def build_text_to_image_multiresolution_dataloader(
     batch_size: int = 1,
     dp_rank: int = 0,
     dp_world_size: int = 1,
-    base_resolution: Tuple[int, int] = (256, 256),
+    base_resolution: tuple[int, int] = (256, 256),
     drop_last: bool = True,
     shuffle: bool = True,
     dynamic_batch_size: bool = False,
@@ -240,7 +240,7 @@ def build_text_to_image_multiresolution_dataloader(
     pin_memory: bool = True,
     prefetch_factor: int = 2,
     negative_prompt_embedding_path: str | None = None,
-) -> Tuple[StatefulDataLoader, SequentialBucketSampler]:
+) -> tuple[StatefulDataLoader, SequentialBucketSampler]:
     """
     Build a text-to-image multiresolution dataloader for TrainDiffusionRecipe.
 
@@ -279,9 +279,7 @@ def build_text_to_image_multiresolution_dataloader(
     # into the collate via ``functools.partial``; broadcast to every batch.
     collate_fn: Callable = collate_fn_text_to_image
     if negative_prompt_embedding_path is not None:
-        payload = torch.load(
-            negative_prompt_embedding_path, map_location="cpu", weights_only=False
-        )
+        payload = torch.load(negative_prompt_embedding_path, map_location="cpu", weights_only=False)
         neg_embed = payload["embed"] if isinstance(payload, dict) else payload
         if not torch.is_tensor(neg_embed):
             raise TypeError(
@@ -304,7 +302,10 @@ def build_text_to_image_multiresolution_dataloader(
             neg_mask = torch.ones(neg_embed.shape[:-1], dtype=torch.long)
         logger.info(
             "  Loaded negative_prompt_embedding from %s | shape=%s dtype=%s mask_shape=%s",
-            negative_prompt_embedding_path, tuple(neg_embed.shape), neg_embed.dtype, tuple(neg_mask.shape),
+            negative_prompt_embedding_path,
+            tuple(neg_embed.shape),
+            neg_embed.dtype,
+            tuple(neg_mask.shape),
         )
         collate_fn = functools.partial(
             collate_fn_text_to_image,
@@ -333,7 +334,7 @@ def build_text_to_image_multiresolution_dataloader(
     return dataloader, sampler
 
 
-def collate_fn_video(batch: List[Dict], model_type: str = "wan") -> Dict:
+def collate_fn_video(batch: list[dict], model_type: str = "wan") -> dict:
     """
     Video-compatible collate function for multiresolution video training.
 
@@ -374,14 +375,14 @@ def build_video_multiresolution_dataloader(
     batch_size: int = 1,
     dp_rank: int = 0,
     dp_world_size: int = 1,
-    base_resolution: Tuple[int, int] = (512, 512),
+    base_resolution: tuple[int, int] = (512, 512),
     drop_last: bool = True,
     shuffle: bool = True,
     dynamic_batch_size: bool = False,
     num_workers: int = 2,
     pin_memory: bool = True,
     prefetch_factor: int = 2,
-) -> Tuple[StatefulDataLoader, SequentialBucketSampler]:
+) -> tuple[StatefulDataLoader, SequentialBucketSampler]:
     """
     Build a multiresolution video dataloader for TrainDiffusionRecipe.
 

@@ -87,11 +87,12 @@ def test_all_configs_target_vendored_builders():
 def test_no_tools_star_imports_in_vendored_code():
     """Nothing under the vendored packages imports the un-packaged AutoModel ``tools/`` tree."""
     pat = re.compile(r"^\s*(?:from|import)\s+tools\.", re.MULTILINE)
-    offenders = []
-    for sub in ("fastgen_data", "preprocess"):
-        for py in (_FASTGEN_DIR / sub).rglob("*.py"):
-            if pat.search(py.read_text()):
-                offenders.append(str(py.relative_to(_FASTGEN_DIR)))
+    offenders = [
+        str(py.relative_to(_FASTGEN_DIR))
+        for sub in ("fastgen_data", "preprocess")
+        for py in (_FASTGEN_DIR / sub).rglob("*.py")
+        if pat.search(py.read_text())
+    ]
     assert not offenders, f"tools.* imports found in vendored code: {offenders}"
 
 
@@ -143,7 +144,9 @@ def test_vendored_files_have_provenance_headers():
         assert spdx_idx != -1, f"{target}: missing NVIDIA SPDX-FileCopyrightText header"
         assert "SPDX-License-Identifier: Apache-2.0" in text, f"{target}: missing SPDX license id"
         # Order: the source/commit note precedes the NVIDIA SPDX header (which follows the original license).
-        assert prov_idx < spdx_idx, f"{target}: NVIDIA SPDX header must come after the provenance note"
+        assert prov_idx < spdx_idx, (
+            f"{target}: NVIDIA SPDX header must come after the provenance note"
+        )
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -198,15 +201,16 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
     assert "image_latents" in out and out["image_latents"].shape[0] == len(batch)
     assert "text_embeddings" in out
     assert "text_embeddings_mask" in out  # mapped from prompt_embeds_mask
-    assert out["negative_text_embeddings"].shape[0] == len(batch)  # broadcast [seq,dim]->[B,seq,dim]
+    assert out["negative_text_embeddings"].shape[0] == len(
+        batch
+    )  # broadcast [seq,dim]->[B,seq,dim]
 
 
 def test_partial_load_checkpointer_overrides_only_load_optimizer():
     """The subclass relaxes only optimizer load; model-state load stays strict (inherited)."""
     pytest.importorskip("nemo_automodel")
-    from nemo_automodel.components.checkpoint.checkpointing import Checkpointer
-
     from fastgen_checkpoint import PartialLoadCheckpointer, make_optimizer_partial_load_tolerant
+    from nemo_automodel.components.checkpoint.checkpointing import Checkpointer
 
     assert issubclass(PartialLoadCheckpointer, Checkpointer)
     # Only load_optimizer is overridden on the subclass; load_model is inherited (strict).
@@ -232,6 +236,6 @@ def test_qwen_image_processor_registered():
     """Importing the vendored preprocessing package registers the qwen_image processor."""
     pytest.importorskip("torch")
     pytest.importorskip("nemo_automodel")
-    from preprocess.processors import ProcessorRegistry  # noqa: F401  (import registers processors)
+    from preprocess.processors import ProcessorRegistry
 
     assert ProcessorRegistry.is_registered("qwen_image")

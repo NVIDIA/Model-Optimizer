@@ -1,7 +1,8 @@
 # Vendored from NVIDIA-NeMo/Automodel @ e42584e3 (Apache-2.0):
 #   https://github.com/NVIDIA-NeMo/Automodel/blob/e42584e303397e9bd34643407b8a57d7def88ce9/tools/diffusion/processors/caption_loaders.py
 # Vendored into the fastgen example so preprocessing runs against stock nemo_automodel
-# without the un-packaged AutoModel ``tools/`` tree. Self-contained (no internal import changes). Original license below.
+# without the un-packaged AutoModel ``tools/`` tree. Self-contained (no internal import changes).
+# Original license below.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,7 +46,6 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class CaptionLoadingStats:
     captions_missing: int = 0
 
     # Error messages encountered during loading
-    errors: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
         """Human-readable summary."""
@@ -95,10 +95,10 @@ class CaptionLoader(ABC):
     @abstractmethod
     def load_captions(
         self,
-        media_files: List[Path],
+        media_files: list[Path],
         caption_field: str = "caption",
         verbose: bool = False,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Load captions for a list of media files.
 
@@ -110,14 +110,13 @@ class CaptionLoader(ABC):
         Returns:
             Dict mapping filename (not full path) to caption text
         """
-        pass
 
     def load_captions_with_stats(
         self,
-        media_files: List[Path],
+        media_files: list[Path],
         caption_field: str = "caption",
         verbose: bool = False,
-    ) -> Tuple[Dict[str, str], CaptionLoadingStats]:
+    ) -> tuple[dict[str, str], CaptionLoadingStats]:
         """
         Load captions and return statistics.
 
@@ -174,10 +173,10 @@ class JSONSidecarCaptionLoader(CaptionLoader):
 
     def load_captions(
         self,
-        media_files: List[Path],
+        media_files: list[Path],
         caption_field: str = "caption",
         verbose: bool = False,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Load captions from sidecar JSON files.
 
@@ -197,10 +196,10 @@ class JSONSidecarCaptionLoader(CaptionLoader):
 
     def load_captions_with_stats(
         self,
-        media_files: List[Path],
+        media_files: list[Path],
         caption_field: str = "caption",
         verbose: bool = False,
-    ) -> Tuple[Dict[str, str], CaptionLoadingStats]:
+    ) -> tuple[dict[str, str], CaptionLoadingStats]:
         """
         Load captions from sidecar JSON files with statistics.
 
@@ -227,7 +226,7 @@ class JSONSidecarCaptionLoader(CaptionLoader):
                 continue
 
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
+                with open(json_path, encoding="utf-8") as f:
                     data = json.load(f)
 
                 stats.files_parsed += 1
@@ -238,7 +237,7 @@ class JSONSidecarCaptionLoader(CaptionLoader):
 
             except json.JSONDecodeError as e:
                 stats.errors.append(f"JSON error in {json_path}: {e}")
-            except IOError as e:
+            except OSError as e:
                 stats.errors.append(f"IO error reading {json_path}: {e}")
 
         stats.captions_missing = len(media_files) - stats.loaded_count
@@ -274,10 +273,10 @@ class MetaJSONCaptionLoader(CaptionLoader):
 
     def load_captions(
         self,
-        media_files: List[Path],
+        media_files: list[Path],
         caption_field: str = "caption",
         verbose: bool = False,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Load captions from meta.json files.
 
@@ -296,10 +295,10 @@ class MetaJSONCaptionLoader(CaptionLoader):
 
     def load_captions_with_stats(
         self,
-        media_files: List[Path],
+        media_files: list[Path],
         caption_field: str = "caption",
         verbose: bool = False,
-    ) -> Tuple[Dict[str, str], CaptionLoadingStats]:
+    ) -> tuple[dict[str, str], CaptionLoadingStats]:
         """
         Load captions from meta.json files with statistics.
 
@@ -318,7 +317,7 @@ class MetaJSONCaptionLoader(CaptionLoader):
             logger.info("Loading captions from meta.json files...")
 
         # Group media files by directory to find meta.json files
-        dirs = set(p.parent for p in media_files)
+        dirs = {p.parent for p in media_files}
 
         for directory in dirs:
             meta_path = directory / "meta.json"
@@ -327,7 +326,7 @@ class MetaJSONCaptionLoader(CaptionLoader):
                 continue
 
             try:
-                with open(meta_path, "r", encoding="utf-8") as f:
+                with open(meta_path, encoding="utf-8") as f:
                     data = json.load(f)
 
                 stats.files_parsed += 1
@@ -351,7 +350,7 @@ class MetaJSONCaptionLoader(CaptionLoader):
 
             except json.JSONDecodeError as e:
                 stats.errors.append(f"JSON error in {meta_path}: {e}")
-            except IOError as e:
+            except OSError as e:
                 stats.errors.append(f"IO error reading {meta_path}: {e}")
 
         stats.captions_missing = len(media_files) - stats.loaded_count
@@ -385,10 +384,10 @@ class JSONLCaptionLoader(CaptionLoader):
 
     def load_captions(
         self,
-        media_files: List[Path],
+        media_files: list[Path],
         caption_field: str = "internvl",
         verbose: bool = False,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """
         Load captions from JSONL files.
 
@@ -408,10 +407,10 @@ class JSONLCaptionLoader(CaptionLoader):
 
     def load_captions_with_stats(
         self,
-        media_files: List[Path],
+        media_files: list[Path],
         caption_field: str = "internvl",
         verbose: bool = False,
-    ) -> Tuple[Dict[str, str], CaptionLoadingStats]:
+    ) -> tuple[dict[str, str], CaptionLoadingStats]:
         """
         Load captions from JSONL files with statistics.
 
@@ -432,7 +431,7 @@ class JSONLCaptionLoader(CaptionLoader):
             logger.info("Loading captions from JSONL files...")
 
         # Group files by their JSONL file
-        jsonl_to_files: Dict[Path, List[str]] = defaultdict(list)
+        jsonl_to_files: dict[Path, list[str]] = defaultdict(list)
 
         for media_path in media_files:
             media_name = media_path.name
@@ -453,7 +452,7 @@ class JSONLCaptionLoader(CaptionLoader):
                 continue
 
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
+                with open(json_path, encoding="utf-8") as f:
                     stats.files_parsed += 1
                     line_num = 0
                     for line in f:
@@ -474,7 +473,7 @@ class JSONLCaptionLoader(CaptionLoader):
                         except json.JSONDecodeError as e:
                             stats.errors.append(f"JSON error in {json_path} line {line_num}: {e}")
 
-            except IOError as e:
+            except OSError as e:
                 stats.errors.append(f"IO error reading {json_path}: {e}")
 
         stats.captions_missing = len(media_files) - stats.loaded_count
@@ -482,7 +481,9 @@ class JSONLCaptionLoader(CaptionLoader):
         if verbose:
             logger.info("  %s", stats)
             if stats.files_missing > 0:
-                logger.info("  %d JSONL files not found (will use filename fallback)", stats.files_missing)
+                logger.info(
+                    "  %d JSONL files not found (will use filename fallback)", stats.files_missing
+                )
             if stats.errors and len(stats.errors) <= 5:
                 for err in stats.errors:
                     logger.warning("  %s", err)

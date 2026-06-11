@@ -35,15 +35,14 @@ patch the global ``Checkpointer`` class or any other recipe's checkpointer).
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed.checkpoint as dcp
-from torch import nn
-from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
-
 from nemo_automodel.components.checkpoint.checkpointing import Checkpointer
 from nemo_automodel.components.checkpoint.stateful_wrappers import OptimizerState
+from torch import nn
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 
 __all__ = ["PartialLoadCheckpointer", "make_optimizer_partial_load_tolerant"]
 
@@ -62,7 +61,7 @@ class PartialLoadCheckpointer(Checkpointer):
         optimizer: torch.optim.Optimizer,
         model: nn.Module,
         weights_path: str,
-        scheduler: Optional[Any] = None,
+        scheduler: Any | None = None,
     ) -> None:
         """Load optimizer (and optional scheduler) state from ``weights_path/optim`` via DCP."""
         optimizer_state = OptimizerState(model, optimizer, scheduler, is_peft=self.config.is_peft)
