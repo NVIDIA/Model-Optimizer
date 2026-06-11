@@ -37,7 +37,7 @@ from pathlib import Path
 
 import torch
 from datasets import load_dataset
-from transformers import AutoImageProcessor, ViTConfig, ViTForImageClassification
+from transformers import AutoImageProcessor, ViTForImageClassification
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -50,34 +50,14 @@ from modelopt.torch.quantization.utils import export_torch_mode
 DEFAULT_RECIPE = "huggingface/vit/ptq/fp8"
 
 
-def load_model_and_processor(
-    model_id: str,
-    device: torch.device,
-    dtype: torch.dtype,
-    pretrained: bool = True,
-    config_overrides: dict | None = None,
-):
-    """Pull the HF ViT classifier and its preprocessor.
-
-    With ``pretrained=False`` the model is built from a config with random
-    weights (test path); ``config_overrides`` lets the caller shrink it
-    (e.g. ``{"num_hidden_layers": 1, "hidden_size": 64, ...}``). The
-    preprocessor is always loaded from ``model_id`` since it only carries
-    a small JSON config.
-    """
-    print(f"Loading {model_id} (dtype={dtype}, pretrained={pretrained})...")
+def load_model_and_processor(model_id: str, device: torch.device, dtype: torch.dtype):
+    """Pull the HF ViT classifier and its preprocessor."""
+    print(f"Loading {model_id} (dtype={dtype})...")
     processor = AutoImageProcessor.from_pretrained(model_id)
     # tanh-approximation GELU rather than the erf-based default.
-    if pretrained:
-        model = ViTForImageClassification.from_pretrained(
-            model_id, torch_dtype=dtype, hidden_act="gelu_fast"
-        )
-    else:
-        config = ViTConfig.from_pretrained(model_id)
-        config.hidden_act = "gelu_fast"
-        for k, v in (config_overrides or {}).items():
-            setattr(config, k, v)
-        model = ViTForImageClassification(config).to(dtype)
+    model = ViTForImageClassification.from_pretrained(
+        model_id, torch_dtype=dtype, hidden_act="gelu_fast"
+    )
     model.eval().to(device)
     return model, processor
 
@@ -141,58 +121,31 @@ class ViTLogitsWrapper(torch.nn.Module):
         return self.vit(pixel_values=pixel_values).logits
 
 
-def compile_with_torch_tensorrt(
-    model: torch.nn.Module, example_input: torch.Tensor, dynamic: bool = True
-):
-    """Compile the quantized model with Torch-TensorRT (Dynamo IR, strongly-typed).
-
-    `min_block_size=1` follows the Torch-TRT quantization guide so single-node
-    Q/DQ + matmul subgraphs become TRT precision layers. `export_torch_mode`
-    makes modelopt emit Q/DQ in the TRT-friendly form during `torch.export`.
-
-    ``dynamic`` builds a dynamic-batch engine (min=1, opt=``example_input``'s
-    batch, max=1024); otherwise the engine is specialized to ``example_input``.
-    Dynamic keeps the model in one engine and fuses far more FP8 (see the `cat`
-    comment below), so it is the default.
-    """
+def compile_with_torch_tensorrt(model: torch.nn.Module, example_input: torch.Tensor):
+    """Compile the quantized model with Torch-TensorRT (Dynamo IR, strongly-typed)."""
     # Imported here (not at module scope) so the quantize-only `--skip_trt` path
     # still runs on hosts without torch_tensorrt installed.
     import torch_tensorrt
 
-    print(f"Compiling with torch_tensorrt.compile (Dynamo IR, dynamic={dynamic})...")
-    if dynamic:
-        n, c, h, w = example_input.shape
-        # torch.export specializes a size-1 dynamic dim to a constant, so trace at
-        # opt batch >= 2; min=1 still serves batch 1 at runtime.
-        opt_n = max(int(n), 2)
-        compile_inputs = {
-            "inputs": [
-                torch_tensorrt.Input(
-                    min_shape=(1, c, h, w),
-                    opt_shape=(opt_n, c, h, w),
-                    max_shape=(1024, c, h, w),
-                    dtype=example_input.dtype,
-                )
-            ]
-        }
-    else:
-        compile_inputs = {"arg_inputs": [example_input]}
-
-    # The cls-token `cat` decides how much FP8 TRT can fuse. Static: the bf16 cat
-    # converter materializes a constant via numpy (no bf16 dtype), so we run
-    # `aten.cat` in PyTorch -> the graph splits into two engines and FP8 fusion is
-    # capped (~24 GEMMs). Dynamic: the cat operands are symbolic, so it stays one
-    # engine (~121 FP8 GEMMs); forcing it to PyTorch there also breaks the engine
-    # at runtime. The Debugger keeps per-layer info for dump_trt_layer_info().
-    cat_fallback = {} if dynamic else {"torch_executed_ops": {torch.ops.aten.cat.default}}
+    print("Compiling with torch_tensorrt.compile (Dynamo IR, dynamic batch)...")
+    n, c, h, w = example_input.shape
+    # torch.export specializes a size-1 dynamic dim to a constant, so trace at
+    # opt batch >= 2; min=1 still serves batch 1 at runtime.
+    opt_n = max(int(n), 2)
     with export_torch_mode(), torch_tensorrt.dynamo.Debugger(log_level="error"):
         trt_model = torch_tensorrt.compile(
             model,
             ir="dynamo",
             min_block_size=1,
             truncate_double=True,
-            **cat_fallback,
-            **compile_inputs,
+            inputs=[
+                torch_tensorrt.Input(
+                    min_shape=(1, c, h, w),
+                    opt_shape=(opt_n, c, h, w),
+                    max_shape=(1024, c, h, w),
+                    dtype=example_input.dtype,
+                )
+            ],
         )
     return trt_model
 
@@ -254,7 +207,7 @@ def main():
         "--save_dir",
         type=str,
         default="./modelopt_quantized",
-        help="Directory to save the quantized modelopt state-dict (BF16 weights "
+        help="Directory to save the quantized modelopt state-dict (FP16 weights "
         "+ Q/DQ metadata) — re-usable across runs without recalibration.",
     )
     parser.add_argument(
@@ -274,7 +227,7 @@ def main():
     if not torch.cuda.is_available():
         raise SystemExit("This example requires a CUDA-capable GPU.")
     device = torch.device("cuda")
-    dtype = torch.bfloat16
+    dtype = torch.float16
 
     model, processor = load_model_and_processor(args.model_id, device, dtype)
     image_size = model.config.image_size
@@ -283,7 +236,7 @@ def main():
         args.batch_size, num_channels, image_size, image_size, device=device, dtype=dtype
     )
 
-    print("\n=== Baseline (BF16) ===")
+    print("\n=== Baseline (FP16) ===")
     with torch.no_grad():
         baseline_pred = _argmax_logits(model(example_input))
     print(f"Baseline argmax class: {baseline_pred.tolist()}")
@@ -311,7 +264,7 @@ def main():
         return
 
     wrapped = ViTLogitsWrapper(model).to(device).eval()
-    trt_model = compile_with_torch_tensorrt(wrapped, example_input, dynamic=True)
+    trt_model = compile_with_torch_tensorrt(wrapped, example_input)
 
     if args.layer_info_path:
         dump_trt_layer_info(trt_model, Path(args.layer_info_path))

@@ -153,8 +153,6 @@ def main():
     )
     args = parser.parse_args()
 
-    dynamic = True
-
     if not torch.cuda.is_available():
         raise SystemExit("This example requires a CUDA-capable GPU.")
     device = torch.device("cuda")
@@ -190,8 +188,8 @@ def main():
         wrapped = ttptq.ViTLogitsWrapper(m).to(device).eval()
         if args.skip_trt:
             return wrapped
-        print(f"\nCompiling {what} with Torch-TensorRT (dynamic={dynamic}) ...")
-        return ttptq.compile_with_torch_tensorrt(wrapped, example_input, dynamic=dynamic)
+        print(f"\nCompiling {what} with Torch-TensorRT ...")
+        return ttptq.compile_with_torch_tensorrt(wrapped, example_input)
 
     results: list[list[str | float]] = [["Metric", "Top1 (%)", "Top5 (%)"]]
 
