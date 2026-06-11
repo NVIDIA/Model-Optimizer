@@ -20,6 +20,10 @@
     enable: false
   - quantizer_name: '*linear_attn.conv1d*'
     enable: false
+  - quantizer_name: '*linear_attn.in_proj_a*'
+    enable: false
+  - quantizer_name: '*linear_attn.in_proj_b*'
+    enable: false
   - quantizer_name: '*lm_head*'
     enable: false
   - quantizer_name: '*mixer.conv1d*'
@@ -33,6 +37,10 @@
   - quantizer_name: '*proj_out.*'
     enable: false
   - quantizer_name: '*router*'
+    enable: false
+  - quantizer_name: '*visual*'
+    enable: false
+  - quantizer_name: '*vision_tower*'
     enable: false
   - quantizer_name: 'output.*'
     enable: false
