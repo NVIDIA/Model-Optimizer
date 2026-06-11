@@ -15,8 +15,8 @@
 
 """Pre-commit hook: validate launcher YAML references to recipes and templates.
 
-Scans every ``tools/launcher/examples/**/*.yaml`` file for path-bearing args
-the launcher will pass to ``main.py``, and verifies the referenced files
+Scans the changed ``tools/launcher/examples/**/*.yaml`` files for path-bearing
+args the launcher will pass to ``main.py``, and verifies the referenced files
 exist (and load as recipes, when applicable):
 
 * ``--config <path>`` — must resolve to a file; if the file lives under
@@ -27,9 +27,10 @@ Path resolution mirrors how the launcher itself runs: paths starting with
 ``modules/Model-Optimizer/`` (the launcher's submodule symlink) resolve under
 the repo root; bare paths resolve under ``tools/launcher/``.
 
-The hook ignores the per-file paths pre-commit passes (``pass_filenames:
-false``) and re-scans the full launcher YAML set on every invocation, so
-recipe-side changes still trigger validation of all launcher references.
+The hook validates only the launcher YAML files pre-commit passes in (the ones
+staged in the commit). Recipe schema validity is the responsibility of the
+``check-modelopt-recipes`` hook. As a safety net, edits to this script itself
+re-scan the full launcher YAML set.
 """
 
 from __future__ import annotations
@@ -144,12 +145,34 @@ def _scan_launcher_yaml(path: Path) -> list[str]:
     return errors
 
 
+def _all_launcher_yamls() -> list[Path]:
+    return sorted(_LAUNCHER_EXAMPLES.rglob("*.yaml"))
+
+
+def _select_targets(changed_files: list[str]) -> list[Path]:
+    """Map the staged files to the launcher YAMLs to validate.
+
+    Only changed launcher YAMLs are checked; recipe schema validity is left to
+    ``check-modelopt-recipes``. Editing this script re-scans everything so logic
+    changes are exercised against all launcher YAMLs.
+    """
+    this_file = Path(__file__).resolve()
+    targets: set[Path] = set()
+    for f in changed_files:
+        path = (_REPO_ROOT / f).resolve()
+        if path == this_file:
+            return _all_launcher_yamls()
+        if _LAUNCHER_EXAMPLES in path.parents and path.suffix == ".yaml" and path.is_file():
+            targets.add(path)
+    return sorted(targets)
+
+
 def main() -> int:
-    """Validate every launcher YAML under examples/, exit 1 on errors."""
+    """Validate the staged launcher YAMLs, exit 1 on errors."""
     if not _LAUNCHER_EXAMPLES.is_dir():
         return 0
     errors: list[str] = []
-    for yaml_file in sorted(_LAUNCHER_EXAMPLES.rglob("*.yaml")):
+    for yaml_file in _select_targets(sys.argv[1:]):
         errors.extend(_scan_launcher_yaml(yaml_file))
     if errors:
         for e in errors:
