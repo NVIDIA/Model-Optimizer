@@ -32,3 +32,18 @@ quantize:
     - $import: w8a8_fp8_fp8
     - $import: kv_fp8
     - $import: default_disabled_quantizers
+    # Multimodal vision-branch exclusion: keep the vision encoder (SigLIP / ViT)
+    # and any multimodal embedding projection in BF16. The `w8a8_fp8_fp8` unit
+    # enables bare `*weight_quantizer` / `*input_quantizer`, which on VL
+    # checkpoints also match the vision tower (`model.vision_tower.*`,
+    # `model.visual.*`) and the embedding projection (`model.embed_vision.*`).
+    # FP8-quantizing the vision branch yields garbage output on gemma-4
+    # (NVBug 6293731) and is accuracy-harmful generally. Must come after the
+    # enables so the disable wins (later entries override earlier). No-op on
+    # text-only models.
+    - quantizer_name: '*visual*'
+      enable: false
+    - quantizer_name: '*vision_tower*'
+      enable: false
+    - quantizer_name: '*embed_vision*'
+      enable: false
