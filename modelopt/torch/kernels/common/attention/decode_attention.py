@@ -641,7 +641,6 @@ def _onwrite_fq_paged_kernel(
     stride_vc_block,
     stride_vc_pos,
     stride_vc_head,
-    tile0,  # first tile index covered by the grid (keys >= tile0*BLOCK_N)
     k_global_scale,
     v_global_scale,
     NVFP4_K: tl.constexpr,
@@ -657,20 +656,26 @@ def _onwrite_fq_paged_kernel(
     K range = newly-written keys (head-dim 16-blocks, per key). V range = newly-COMPLETE 16-key
     blocks (keys 16-blocks). Reads the tile, fakequants with the SAME ``fake_quant_fp4_k0`` the
     decode kernel would use, and stores back only the in-range valid keys via the block table.
+
+    The tile each program touches is derived *per request* from on-device bounds
+    (``base_tile = min(k_lo, v_lo) // BLOCK_N``, then ``+ program_id(2)``), so the launch grid
+    never depends on a host ``.item()``. A pure-decode step appends one key whose tile also holds
+    the at-most-one just-completed 128-block, so a fixed grid of ``(batch, n_kv, 1)`` covers it and
+    is CUDA-graph-capturable.
     """
     batch_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
-    tile = tile0 + tl.program_id(2)
+    klo = tl.load(K_lo + batch_idx)
+    khi = tl.load(K_hi + batch_idx)
+    vlo = tl.load(V_lo + batch_idx)
+    vhi = tl.load(V_hi + batch_idx)
+    base_tile = tl.minimum(klo, vlo) // BLOCK_N
+    tile = base_tile + tl.program_id(2)
     kv_start = tile * BLOCK_N
     kv_pos = tl.arange(0, BLOCK_N)
     dim_pos = tl.arange(0, BLOCK_D)
     d_mask = dim_pos < HEAD_DIM
     kv_abs = kv_start + kv_pos
-
-    klo = tl.load(K_lo + batch_idx)
-    khi = tl.load(K_hi + batch_idx)
-    vlo = tl.load(V_lo + batch_idx)
-    vhi = tl.load(V_hi + batch_idx)
 
     page_local = kv_abs // PAGE_SIZE
     offset_in_page = kv_abs % PAGE_SIZE
@@ -727,8 +732,14 @@ def fake_quant_kv_onwrite(
     k_global_scale=None,
     v_global_scale=None,
     nvfp4: set[str] | None = None,
+    decode: bool = False,
 ) -> None:
-    """Paged quantize-on-write: fakequant K (k_lo:k_hi) and V (v_lo:v_hi) per request in place."""
+    """Paged quantize-on-write: fakequant K (k_lo:k_hi) and V (v_lo:v_hi) per request in place.
+
+    Set ``decode=True`` for a pure single-token decode step: the grid is fixed to one tile per
+    request, so the launch needs no host ``.item()`` and is CUDA-graph-capturable. ``decode=False``
+    (prefill / mixed batch, run eager) sizes the grid to the largest per-request span.
+    """
     nvfp4 = nvfp4 or set()
     if not ({"k", "v"} & nvfp4):
         return
@@ -736,12 +747,17 @@ def fake_quant_kv_onwrite(
     nkv, hd = k_cache.shape[2], k_cache.shape[3]
     BLOCK_D = triton.next_power_of_2(hd)
     BLOCK_N = 128
-    hi = int(max(int(k_hi.max().item()), int(v_hi.max().item())))
-    lo = int(min(int(k_lo.min().item()), int(v_lo.min().item())))
-    if hi <= lo:
-        return
-    tile0 = lo // BLOCK_N
-    n_tiles = (hi + BLOCK_N - 1) // BLOCK_N - tile0
+    if decode:
+        # One appended key per request; its tile also holds the at-most-one just-completed
+        # 128-block, so a single per-request tile suffices. Fixed grid => graph-safe (no sync).
+        n_tiles = 1
+    else:
+        # Eager prefill/mixed: span the largest per-request range (base = min(k_lo,v_lo)//BLOCK_N).
+        base = torch.minimum(k_lo, v_lo) // BLOCK_N
+        span = int((torch.maximum(k_hi, v_hi) - base * BLOCK_N).max().item())
+        if span <= 0:
+            return
+        n_tiles = (span + BLOCK_N - 1) // BLOCK_N
     kgs = k_global_scale if k_global_scale is not None else k_cache.new_full((), 1.0)
     vgs = v_global_scale if v_global_scale is not None else k_cache.new_full((), 1.0)
     with torch.cuda.device(k_cache.device):
@@ -759,7 +775,6 @@ def fake_quant_kv_onwrite(
             v_cache.stride(0),
             v_cache.stride(1),
             v_cache.stride(2),
-            tile0,
             kgs,
             vgs,
             NVFP4_K="k" in nvfp4,

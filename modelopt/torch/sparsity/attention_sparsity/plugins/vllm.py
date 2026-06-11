@@ -344,6 +344,7 @@ class _SparseCalibrationMixin:
                     k_global_scale=attn_global_scales.get("k"),
                     v_global_scale=attn_global_scales.get("v"),
                     nvfp4=nvfp4,
+                    decode=is_decode_only,
                 )
         _resolve_skip_softmax_calibration(
             sparse_kw, is_prefill=not is_decode_only, max_seq_len=max_seq_len
