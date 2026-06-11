@@ -60,6 +60,58 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def _set(obj: Any, key: str, value: Any) -> None:
+    if isinstance(obj, dict):
+        obj[key] = value
+    else:
+        setattr(obj, key, value)
+
+
+def _delete(obj: Any, key: str) -> None:
+    if isinstance(obj, dict):
+        obj.pop(key, None)
+        return
+    try:
+        delattr(obj, key)
+    except AttributeError:
+        pass
+
+
+def _get_text_config(hf_config: Any) -> Any:
+    if hasattr(hf_config, "get_text_config"):
+        return hf_config.get_text_config()
+    return _get(hf_config, "text_config", hf_config)
+
+
+def _is_qwen3p5_config(text_config: Any, base_architecture: str) -> bool:
+    model_type = str(_get(text_config, "model_type", ""))
+    return model_type.startswith(("qwen3_5", "qwen3_6")) or base_architecture.startswith(
+        ("Qwen3_5", "Qwen3_6")
+    )
+
+
+def _is_mamba_attention(attn: Any) -> bool:
+    return _get(attn, "mamba") is not None
+
+
+def _update_qwen3p5_layer_types(
+    text_config: Any, block_configs: list[Any], base_architecture: str
+) -> bool:
+    if not _is_qwen3p5_config(text_config, base_architecture):
+        return False
+
+    layer_types = []
+    for block in block_configs:
+        attn = _get(block, "attention") or {}
+        layer_types.append("linear_attention" if _is_mamba_attention(attn) else "full_attention")
+
+    if _get(text_config, "layer_types") == layer_types:
+        return False
+
+    _set(text_config, "layer_types", layer_types)
+    return True
+
+
 def _convert_block_entry(
     block: Any,
     *,
@@ -78,6 +130,7 @@ def _convert_block_entry(
     ffn = _get(block, "ffn") or {}
     a_noop = bool(_get(attn, "no_op", False))
     f_noop = bool(_get(ffn, "no_op", False))
+    a_is_mamba = _is_mamba_attention(attn)
 
     entry: dict[str, Any] = {}
     skip: list[str] = []
@@ -88,7 +141,7 @@ def _convert_block_entry(
     if skip:
         entry["skip"] = skip
 
-    if not a_noop:
+    if not a_noop and not a_is_mamba:
         kv = _get(attn, "num_key_value_heads")
         if kv is not None and kv != global_kv:
             entry["num_key_value_heads"] = kv
@@ -131,36 +184,31 @@ def convert_block_configs_to_per_layer_config(hf_config: Any) -> bool:
     nothing to convert. If ``per_layer_config`` is already set, the legacy
     field is dropped and a warning emitted (the new schema wins).
     """
-    block_configs = getattr(hf_config, "block_configs", None)
+    block_configs = _get(hf_config, "block_configs")
     if not block_configs:
         return False
 
-    text_config = (
-        hf_config.get_text_config() if hasattr(hf_config, "get_text_config") else hf_config
-    )
+    text_config = _get_text_config(hf_config)
+    base_architecture = _get(hf_config, "base_architecture", "") or ""
+    layer_types_updated = _update_qwen3p5_layer_types(text_config, block_configs, base_architecture)
 
-    existing = getattr(text_config, "per_layer_config", None)
+    existing = _get(text_config, "per_layer_config")
     if existing:
         logger.warning_once(
             "AnyModel config has both legacy 'block_configs' and new "
             "'per_layer_config'; using per_layer_config and ignoring "
             "block_configs."
         )
-        if hasattr(hf_config, "block_configs"):
-            try:
-                delattr(hf_config, "block_configs")
-            except AttributeError:
-                pass
-        return False
+        _delete(hf_config, "block_configs")
+        return layer_types_updated
 
-    base_architecture = getattr(hf_config, "base_architecture", None) or ""
     moe_num_field, moe_size_field = _MOE_FIELDS_BY_ARCH.get(base_architecture, _DEFAULT_MOE_FIELDS)
 
-    global_kv = getattr(text_config, "num_key_value_heads", None)
-    global_isize = getattr(text_config, "intermediate_size", None)
-    global_hact = getattr(text_config, "hidden_act", None)
-    global_moe_num = getattr(text_config, moe_num_field, None)
-    global_moe_size = getattr(text_config, moe_size_field, None)
+    global_kv = _get(text_config, "num_key_value_heads")
+    global_isize = _get(text_config, "intermediate_size")
+    global_hact = _get(text_config, "hidden_act")
+    global_moe_num = _get(text_config, moe_num_field)
+    global_moe_size = _get(text_config, moe_size_field)
 
     per_layer_config: dict[str, dict[str, Any]] = {}
     for idx, block in enumerate(block_configs):
@@ -177,7 +225,7 @@ def convert_block_configs_to_per_layer_config(hf_config: Any) -> bool:
         if entry:
             per_layer_config[str(idx)] = entry
 
-    n_layers = getattr(text_config, "num_hidden_layers", None)
+    n_layers = _get(text_config, "num_hidden_layers")
     if n_layers is not None and len(block_configs) != n_layers:
         logger.warning(
             "block_configs length (%d) does not match num_hidden_layers "
@@ -187,11 +235,8 @@ def convert_block_configs_to_per_layer_config(hf_config: Any) -> bool:
             n_layers,
         )
 
-    setattr(text_config, "per_layer_config", per_layer_config)
-    try:
-        delattr(hf_config, "block_configs")
-    except AttributeError:
-        pass
+    _set(text_config, "per_layer_config", per_layer_config)
+    _delete(hf_config, "block_configs")
 
     logger.info(
         "Converted ModelOpt block_configs (%d entries) to AnyModel "

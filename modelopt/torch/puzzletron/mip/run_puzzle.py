@@ -78,11 +78,14 @@ class PuzzleConstraints:
 
     _ALLOWED_HUMAN_CONSTRAINTS = {
         "target_memory",
+        "target_memory_ratio",
         "target_throughput",
         "target_latency_seconds",
+        "target_latency_ratio",
         "target_time_to_first_token",
         "target_num_kv_heads",
         "num_params",
+        "num_params_ratio",
         "stats.has_attention",
     }
     type: Type
@@ -103,6 +106,58 @@ class PuzzleConstraints:
             raise ValueError(
                 f"The following human_constraints are illegal: {','.join(illegal_constraints)}"
             )
+
+    @staticmethod
+    def _parse_ratio(value: float | int | str) -> float:
+        if isinstance(value, str):
+            value = value.strip()
+            if value.endswith("%"):
+                value = float(value[:-1]) / 100
+            else:
+                value = float(value)
+        value = float(value)
+        if not 0 < value <= 1:
+            raise ValueError(f"Ratio constraints must be in (0, 1], got {value}")
+        return value
+
+    def has_ratio_constraints(self) -> bool:
+        return any(key.endswith("_ratio") for key in self.constraints)
+
+    def resolve_ratio_constraints(self, teacher_stats: dict[str, Any]) -> "PuzzleConstraints":
+        if self.type != PuzzleConstraints.Type.HUMAN or not self.has_ratio_constraints():
+            return self
+
+        constraints = deepcopy(self.constraints)
+        ratio_specs = {
+            "target_memory_ratio": ("target_memory", "memory_mib"),
+            "target_latency_ratio": ("target_latency_seconds", "runtime_ms"),
+            "num_params_ratio": ("num_params", "num_params"),
+        }
+        for ratio_key, (target_key, teacher_stat_key) in ratio_specs.items():
+            if ratio_key not in constraints:
+                continue
+            if target_key in constraints:
+                raise ValueError(
+                    f"Specify only one of {ratio_key!r} and {target_key!r} in human_constraints."
+                )
+            teacher_value = teacher_stats.get(teacher_stat_key)
+            if teacher_value is None:
+                raise ValueError(
+                    f"Cannot resolve {ratio_key!r}: teacher stats do not include "
+                    f"{teacher_stat_key!r}. Make sure the matching subblock_stats entry "
+                    "contains that metric."
+                )
+            ratio = self._parse_ratio(constraints.pop(ratio_key))
+            target_value = teacher_value * ratio
+            if target_key == "target_latency_seconds":
+                target_value /= 1000
+            constraints[target_key] = target_value
+            mprint(
+                f"Resolved {ratio_key}={ratio:g} to {target_key}={target_value:g} "
+                f"from teacher {teacher_stat_key}={teacher_value:g}"
+            )
+
+        return PuzzleConstraints(type=self.type, constraints=constraints)
 
     def format_num_params_to_float(self, num_params):
         if isinstance(num_params, list):
@@ -256,6 +311,9 @@ def run_single_puzzle_config(
     _dump_gathered_metrics(gathered_metrics, output_folder)
 
     non_block_stats = {"stats": _get_block_stats(subblock_stats, "non_block")}
+    if constraints.has_ratio_constraints():
+        teacher_stats = _get_teacher_total_stats(gathered_metrics, non_block_stats["stats"])
+        constraints = constraints.resolve_ratio_constraints(teacher_stats)
     batch_size = subblock_stats["args"]["batch_size"]
     generation_seq_len = subblock_stats["args"]["generation_seq_len"]
 
@@ -675,6 +733,40 @@ def _add_block_stats_to_gathered_metrics(
         else:
             for block_config, variant_metrics in block_variants.items():
                 variant_metrics["stats"] = _get_block_stats(subblock_stats, block_config)
+
+
+def _iter_teacher_stats(gathered_metrics: PuzzleMetrics) -> Iterable[dict[str, float]]:
+    for replacement_info in gathered_metrics.values():
+        if not isinstance(replacement_info, dict):
+            continue
+        if "metrics" in replacement_info:
+            if replacement_info.get("is_teacher", False):
+                yield replacement_info["stats"]
+            continue
+        for variant_info in replacement_info.values():
+            if isinstance(variant_info, dict) and variant_info.get("is_teacher", False):
+                yield variant_info["stats"]
+
+
+def _get_teacher_total_stats(
+    gathered_metrics: PuzzleMetrics, non_block_stats: dict[str, float]
+) -> dict[str, float]:
+    total_stats = {
+        "memory_mib": non_block_stats.get("memory_mib", 0),
+        "num_params": non_block_stats.get("num_params", 0),
+        "runtime_ms": non_block_stats.get("runtime_ms"),
+    }
+    num_teacher_blocks = 0
+    for block_stats in _iter_teacher_stats(gathered_metrics):
+        num_teacher_blocks += 1
+        for stat_name in total_stats:
+            total_stats[stat_name] = _none_add(total_stats[stat_name], block_stats.get(stat_name))
+
+    if num_teacher_blocks == 0:
+        raise ValueError(
+            "Ratio human_constraints require teacher metrics in the gathered replacement metrics."
+        )
+    return total_stats
 
 
 def _get_block_stats(

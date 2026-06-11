@@ -25,12 +25,12 @@ to ensure compatibility with downstream evaluation pipelines.
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
-from transformers import AutoTokenizer, LlamaForCausalLM
+from transformers import AutoTokenizer, PreTrainedModel
 
 from ..anymodel.converter import Converter
-from ..anymodel.models.llama import LlamaModelDescriptor
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,8 @@ class RuntimeConfig:
     hidden_size: int
     num_attention_heads: int
     num_key_value_heads: int
+    descriptor: type
+    model_config_fields: tuple[tuple[str, Any], ...]
     tokenizer_path: str
     repeat_block_n_times: int
     prefill_seq_len: int
@@ -49,11 +51,17 @@ class RuntimeConfig:
     num_iters: int
     num_warmup_iters: int
 
+    def model_config_value(self, key: str, default: Any = None) -> Any:
+        """Return a descriptor-specific benchmark config value."""
+        return dict(self.model_config_fields).get(key, default)
 
-def save_model(model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path) -> None:
+
+def save_model(
+    model: PreTrainedModel, tokenizer_path: Path, output_path: Path, descriptor: type
+) -> None:
     """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
     model = model.to(dtype=torch.bfloat16)
-    save_model_as_anymodel(model, output_path, LlamaModelDescriptor)
+    save_model_as_anymodel(model, output_path, descriptor)
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     tokenizer.save_pretrained(output_path)
@@ -69,7 +77,7 @@ def save_model_as_anymodel(model, output_dir: Path, descriptor):
         input_dir=output_dir,
         output_dir=output_dir,
         descriptor=descriptor,
-        num_hidden_layers=model.config.num_hidden_layers,
+        num_hidden_layers=descriptor.get_language_model_config(model.config).num_hidden_layers,
     )
     # Load the model config.json, update "architectures" to ["AnyModel"], and write back to disk.
 

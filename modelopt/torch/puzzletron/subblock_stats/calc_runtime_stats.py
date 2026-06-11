@@ -20,72 +20,50 @@ import tempfile
 from dataclasses import replace
 from functools import cache
 from pathlib import Path
+from typing import Any, Type
 
 from omegaconf import DictConfig
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
 
-from ..anymodel.models.llama import LlamaModelDescriptor
-from ..anymodel.puzzformer import deci_x_patcher
+from ..anymodel.model_descriptor import ModelDescriptor
 from ..block_config import AttentionConfig, BlockConfig, FFNConfig, SubblockConfig
 from .runtime_utils import RuntimeConfig, save_model
 from .runtime_vllm import run_vllm_latency_benchmark
 
 
-def _make_standard_block_config(num_key_value_heads: int) -> BlockConfig:
-    return BlockConfig(
-        attention=AttentionConfig(no_op=False, num_key_value_heads=num_key_value_heads),
-        ffn=FFNConfig(no_op=False, intermediate_size=256, moe=None),
-    )
+def _freeze_config_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(sorted((key, _freeze_config_value(val)) for key, val in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_config_value(item) for item in value)
+    return value
+
+
+def _freeze_config_fields(fields: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    return tuple(sorted((key, _freeze_config_value(value)) for key, value in fields.items()))
 
 
 def create_benchmark_model(
-    vocab_size: int,
-    hidden_size: int,
-    num_key_value_heads: int,
-    num_attention_heads: int,
-    prefill_seq_len: int,
-    generation_seq_len: int,
+    runtime_config: RuntimeConfig,
     block_config: BlockConfig | None,
-    repeat_block_n_times: int = 10,
-) -> LlamaForCausalLM:
-    """Build a small Llama model with repeated subblocks for latency benchmarking."""
-    block_configs = [_make_standard_block_config(num_key_value_heads)]
-
+):
+    """Build a small descriptor-specific model with repeated subblocks."""
+    block_configs = [runtime_config.descriptor.runtime_benchmark_base_block_config(runtime_config)]
     if block_config:
-        block_configs.extend([block_config] * repeat_block_n_times)
+        block_configs.extend([block_config] * runtime_config.repeat_block_n_times)
 
-    model_config = LlamaConfig(
-        max_position_embeddings=prefill_seq_len + generation_seq_len,
-        vocab_size=vocab_size,
-        hidden_size=hidden_size,
-        num_attention_heads=num_attention_heads,
-        num_hidden_layers=len(block_configs),
-        head_dim=None,  # Compute from hidden_size // num_attention_heads instead of using default 128
-        # this is required for trt-llm convertion to know which model classes to use to the checkpoint
-        auto_map={
-            "AutoConfig": "transformers.models.llama.configuration_llama.LlamaConfig",
-            "AutoModelForCausalLM": "transformers.models.llama.modeling_llama.LlamaForCausalLM",
-        },
-    )
-
-    for idx, bc in enumerate(block_configs):
-        block_configs[idx] = bc.to_dict()
-    model_config.block_configs = block_configs
-
-    with deci_x_patcher(LlamaModelDescriptor, block_configs):
-        model = AutoModelForCausalLM.from_config(model_config)
-
-    model.config.architectures = ["AnyModel"]
-    model.config.base_architecture = "LlamaForCausalLM"
-
-    return model
+    return runtime_config.descriptor.create_runtime_benchmark_model(runtime_config, block_configs)
 
 
-def calc_model_runtime(model: LlamaForCausalLM, runtime_config: RuntimeConfig) -> float:
+def calc_model_runtime(model, runtime_config: RuntimeConfig) -> float:
     """Measure total runtime of a model via vLLM latency benchmark."""
     with tempfile.TemporaryDirectory() as model_tmpdir:
-        save_model(model, Path(runtime_config.tokenizer_path), Path(model_tmpdir))
+        save_model(
+            model,
+            Path(runtime_config.tokenizer_path),
+            Path(model_tmpdir),
+            runtime_config.descriptor,
+        )
         model_total_runtime_ms = run_vllm_latency_benchmark(Path(model_tmpdir), runtime_config)
     return model_total_runtime_ms
 
@@ -103,10 +81,11 @@ def calc_subblock_runtime(
             block_config = subblock_config
         elif isinstance(subblock_config, (AttentionConfig, FFNConfig)):
             if isinstance(subblock_config, FFNConfig):
+                base_block_config = runtime_config.descriptor.runtime_benchmark_base_block_config(
+                    runtime_config
+                )
                 block_config = BlockConfig(
-                    attention=AttentionConfig(
-                        no_op=False, num_key_value_heads=runtime_config.num_key_value_heads
-                    ),
+                    attention=base_block_config.attention,
                     ffn=subblock_config,
                 )
             else:
@@ -114,16 +93,7 @@ def calc_subblock_runtime(
         else:
             raise Exception(f"Runtime stats: Not supported subblock type: {subblock_config}")
 
-    model = create_benchmark_model(
-        runtime_config.vocab_size,
-        runtime_config.hidden_size,
-        runtime_config.num_key_value_heads,
-        runtime_config.num_attention_heads,
-        runtime_config.prefill_seq_len,
-        runtime_config.generation_seq_len,
-        block_config=block_config,
-        repeat_block_n_times=runtime_config.repeat_block_n_times,
-    )
+    model = create_benchmark_model(runtime_config, block_config=block_config)
     return calc_model_runtime(model, runtime_config)
 
 
@@ -134,10 +104,12 @@ def calc_base_runtime(runtime_config: RuntimeConfig, subblock_config: SubblockCo
     if isinstance(subblock_config, AttentionConfig):
         base_runtime_ms = calc_subblock_runtime(runtime_config, None)
     elif isinstance(subblock_config, FFNConfig):
-        attn_block_config = AttentionConfig(
-            no_op=False, num_key_value_heads=runtime_config.num_key_value_heads
-        ).to_blockconfig()
-        base_runtime_ms = calc_subblock_runtime(runtime_config, attn_block_config)
+        base_block_config = runtime_config.descriptor.runtime_benchmark_base_block_config(
+            runtime_config
+        )
+        base_runtime_ms = calc_subblock_runtime(
+            runtime_config, base_block_config.attention.to_blockconfig()
+        )
     else:
         raise ValueError(f"Unsupported subblock type: {type(subblock_config)}")
 
@@ -149,7 +121,7 @@ def calc_no_block_runtime(runtime_config: RuntimeConfig) -> float:
     """Estimate the overhead runtime (embedding + LM head) with no decoder blocks."""
     runtime_cfg_ten_blocks = replace(runtime_config, repeat_block_n_times=9)
 
-    block_config = _make_standard_block_config(runtime_config.num_key_value_heads)
+    block_config = runtime_config.descriptor.runtime_benchmark_base_block_config(runtime_config)
 
     runtime_ms_one_block = calc_subblock_runtime(runtime_config, None)  # only one base block
     runtime_ms_ten_blocks = calc_subblock_runtime(
@@ -168,6 +140,8 @@ def calc_runtime_for_subblocks(
     hidden_size: int,
     num_attention_heads: int,
     num_key_value_heads: int,
+    descriptor: Type[ModelDescriptor],
+    lm_config: Any,
     tokenizer_path: str,
     prefill_seq_len: int,
     generation_seq_len: int,
@@ -181,6 +155,8 @@ def calc_runtime_for_subblocks(
         hidden_size,
         num_attention_heads,
         num_key_value_heads,
+        descriptor,
+        _freeze_config_fields(descriptor.runtime_benchmark_config_fields(lm_config)),
         tokenizer_path,
         repeat_block_n_times,
         prefill_seq_len,

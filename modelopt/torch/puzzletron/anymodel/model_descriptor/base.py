@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Type
 
 import torch.nn as nn
 
-from ...block_config import BlockConfig, maybe_cast_block_configs
+from ...block_config import AttentionConfig, BlockConfig, FFNConfig, maybe_cast_block_configs
 from ...utils.dummy_modules import DummyBlock
 
 __all__ = ["ModelDescriptor"]
@@ -206,6 +206,43 @@ class ModelDescriptor(ABC):
         lm_config.num_hidden_layers = len(block_configs)
         if lm_config is not model_config:
             model_config.num_hidden_layers = len(block_configs)
+
+    @classmethod
+    def runtime_benchmark_config_fields(cls, lm_config: Any) -> dict[str, Any]:
+        """Return model-family fields required to synthesize latency benchmark configs."""
+        return {}
+
+    @classmethod
+    def runtime_benchmark_base_block_config(cls, runtime_config: Any) -> BlockConfig:
+        """Return the standard block used as benchmark scaffolding.
+
+        Runtime stats measure a candidate subblock by repeating it after one standard
+        block, then subtracting a matching baseline.  Descriptors may override this
+        for hybrid families whose default attention/MLP classes need extra config.
+        """
+        return BlockConfig(
+            attention=AttentionConfig(
+                no_op=False, num_key_value_heads=runtime_config.num_key_value_heads
+            ),
+            ffn=FFNConfig(no_op=False, intermediate_size=256, moe=None),
+        )
+
+    @classmethod
+    def create_runtime_benchmark_model(
+        cls, runtime_config: Any, block_configs: list[BlockConfig]
+    ) -> nn.Module:
+        """Build a small model for vLLM latency benchmarking.
+
+        Implement this on descriptors that support runtime stats.  Keeping model
+        construction on the descriptor prevents the central benchmarking loop from
+        hardcoding architecture-specific attention or MLP classes.
+        """
+        raise NotImplementedError(f"Runtime benchmarking is not supported for {cls.__name__}")
+
+    @classmethod
+    def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
+        """Return extra ``vllm bench latency`` args for this descriptor."""
+        return []
 
     @staticmethod
     def passthrough_weight_name_predicates() -> Dict[str, re.Pattern]:

@@ -1,0 +1,60 @@
+defaults:
+  - ../qwen3_5-0.8b_pruneffn_memory/qwen3_5_0.8b
+  - override bypass: defaults
+  - _self_
+
+# Input Hugging Face model to compress
+input_hf_model_path: /workspace/hf_models/Qwen/Qwen3.5-0.8B
+
+# Dataset path for pruning, NAS scoring, and bypass distillation
+dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
+
+# Working directory for compression outputs
+puzzle_dir: /workspace/puzzle_dir
+
+scoring:
+  eval_samples: 16
+
+calc_subblock_stats:
+  batch_sizes: [1]
+  prefill_seq_len: 512
+  generation_seq_len: 128
+  runtime_stats:
+    backend: vllm
+    enabled: true
+    num_warmup_iters: 1
+    num_iters: 3
+
+# FFN alternatives for Qwen3.5-0.8B. Teacher intermediate size is 3584.
+pruning:
+  intermediate_size_list: [3072, 2048]
+
+mip:
+  output_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions_params75}
+  subblock_stats_args:
+    - batch_size: 1
+      weights_dtype: torch.bfloat16
+      activations_dtype: torch.bfloat16
+      kv_cache_dtype: torch.bfloat16
+
+  human_constraints:
+    - num_params_ratio: 0.75
+
+  report_additional_costs:
+    - stats.memory_mib
+    - stats.num_params
+    - stats.runtime_ms
+    - stats.num_kv_heads
+    - stats.has_attention
+    - stats.has_ffn
+    - stats.kv_cache_memory_mib
+    - stats.attention_memory_mib
+    - stats.ffn_memory_mib
+    - stats.ffn_num_params
+    - stats.attention_num_params
+
+realize_model:
+  eval_samples: 16
+
+# vLLM latency stats launch many subprocesses, so keep the process group alive.
+nccl_timeout_minutes: ${timedelta_minutes:120}

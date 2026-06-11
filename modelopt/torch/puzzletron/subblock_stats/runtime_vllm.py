@@ -87,6 +87,7 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         "--optimization-level",
         "0",
     ]
+    cmd.extend(runtime_config.descriptor.runtime_vllm_benchmark_args(config))
 
     # cmd is a fixed list of strings (no shell, no untrusted input).
     try:

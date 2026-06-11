@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+from transformers import AutoModelForCausalLM, LlamaConfig
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
     LlamaForCausalLM,
@@ -30,6 +31,7 @@ from ....block_config import BlockConfig
 from ....pruning.ffn_intermediate_pruning_mixin import FFNIntermediateLayerDescriptor
 from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ...puzzformer import deci_x_patcher
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
 __all__ = [
@@ -63,6 +65,31 @@ class LlamaModelDescriptor(ModelDescriptor):
     def mlp_no_op_post_init(decoder_layer: LlamaDecoderLayer):
         decoder_layer.post_attention_layernorm = Same()
         decoder_layer.mlp = MatchingZeros()
+
+    @classmethod
+    def create_runtime_benchmark_model(cls, runtime_config, block_configs: list[BlockConfig]):
+        model_config = LlamaConfig(
+            max_position_embeddings=runtime_config.prefill_seq_len
+            + runtime_config.generation_seq_len,
+            vocab_size=runtime_config.vocab_size,
+            hidden_size=runtime_config.hidden_size,
+            num_attention_heads=runtime_config.num_attention_heads,
+            num_hidden_layers=len(block_configs),
+            head_dim=None,
+            auto_map={
+                "AutoConfig": "transformers.models.llama.configuration_llama.LlamaConfig",
+                "AutoModelForCausalLM": "transformers.models.llama.modeling_llama.LlamaForCausalLM",
+            },
+        )
+
+        cls.set_block_configs(model_config, block_configs)
+        with deci_x_patcher(cls, block_configs):
+            model = AutoModelForCausalLM.from_config(model_config)
+
+        model.config.block_configs = [block_config.to_dict() for block_config in block_configs]
+        model.config.architectures = ["AnyModel"]
+        model.config.base_architecture = "LlamaForCausalLM"
+        return model
 
     @staticmethod
     def init_rotary_embedding(model: LlamaForCausalLM, runtime):

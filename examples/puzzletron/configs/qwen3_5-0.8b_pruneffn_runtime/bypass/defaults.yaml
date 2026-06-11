@@ -1,0 +1,108 @@
+# @package bypass
+# Short local bypass distillation for Qwen3.5-0.8B sanity checks.
+
+dtype: "bf16"
+seed: 42
+
+experiment_id:
+experiment_dir:
+iter_num: 1
+step_num: 1
+token_count: 0
+
+data:
+  data_column: "messages"
+  block_size: 512
+  bos_rate: 0.5
+  fim_rate: 0
+  fim_spm_rate: 0
+  source_datasets_to_discard: []
+  load_from_disk: true
+  keep_in_memory: false
+  val_dataset_name: valid
+  max_eval_samples: 4
+  eval_samples_per_process:
+  shuffle_train_data_seed: ${random_int:0,9999}
+
+training:
+  learning_rate: 1e-4
+  training_tokens: 1e+6
+  micro_batch_size: 1
+  val_micro_batch_size: 1
+  warmup_ratio: 0.05
+  warmup_steps: ${warmup_steps:${.training_tokens},${..data.block_size},${.micro_batch_size},${.grad_accumulation_steps},${.warmup_ratio}}
+  min_lr_factor: 1e-5
+  grad_accumulation_steps: 1
+  skip_first_batches: 0
+  weight_decay: 0.1
+  decay_lr: true
+  beta1: 0.9
+  beta2: 0.95
+  use_grad_scaling: false
+  grad_clip: 1.0
+  grad_clip_type: norm
+  clipping_count: 0
+  log_interval: 25
+  eval_interval: 100
+
+resume_checkpoint_path:
+find_last_ckpt_for_resume: true
+parameter_count:
+init_checkpoint_path:
+
+model:
+  student_weights_dtype: "bf16"
+
+  model_overrides:
+    delete_old_checkpoints: true
+    save_interval_seconds: 12900
+    save_interval: 1e+9
+    save_checkpoint_when_done: true
+
+  model_config_overrides: {}
+
+model_factory:
+  factory: bypass_factory_fn
+  block_loss_func: normalized_mse_loss
+  gqa_init_mode: AverageKV
+  mlp_init_mode: PruneByActivationsLog
+  mlp_init_config:
+    activations_log_dir: ${pruning.activations_log_dir}
+  linear_init_mode: FromTeacher
+  submodule_for_loss_calculation:
+  keys_to_learn:
+
+disable_initial_validate: false
+validate_teacher_model: true
+validate_student_model: true
+disable_validation: false
+best_val_loss: 1e+9
+
+compile: false
+disable_fa2: false
+teacher_model_load_on_cpu: false
+
+save_checkpoint_before_training: false
+disable_checkpoint_save: false
+save_best_ckpt: true
+kill_after_first_save: false
+realize_best_or_latest: "best"
+
+wandb_log: false
+wandb:
+  project:
+  entity:
+
+configs:
+  - model_config_overrides:
+      ffn:
+        - intermediate_size: 3072
+    keys_to_learn: subblock_ffn
+  - model_config_overrides:
+      ffn:
+        - intermediate_size: 2048
+    keys_to_learn: subblock_ffn
+  - model_config_overrides:
+      attention:
+        - num_key_value_heads: 1
+    keys_to_learn: subblock_attention

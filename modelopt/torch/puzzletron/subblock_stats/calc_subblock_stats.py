@@ -120,6 +120,7 @@ def calculate_subblock_stats(
         )
 
         runtime_stats_config = calc_subblock_stats_config.get("runtime_stats", {})
+        lm_config = descriptor.get_language_model_config(model_config)
 
         runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_for_subblocks(
             subblock_config_set=subblock_configs_nolayerindex,
@@ -127,7 +128,9 @@ def calculate_subblock_stats(
             vocab_size=vocab_size,
             hidden_size=n_embd,
             num_attention_heads=n_head,
-            num_key_value_heads=model_config.num_key_value_heads,
+            num_key_value_heads=lm_config.num_key_value_heads,
+            descriptor=descriptor,
+            lm_config=lm_config,
             tokenizer_path=teacher_dir,
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,

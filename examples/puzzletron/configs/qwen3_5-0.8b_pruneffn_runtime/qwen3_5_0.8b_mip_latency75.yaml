@@ -1,0 +1,8 @@
+defaults:
+  - qwen3_5_0.8b_pruneffn_runtime
+  - _self_
+
+mip:
+  output_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions_latency75}
+  human_constraints:
+    - target_latency_ratio: 0.75

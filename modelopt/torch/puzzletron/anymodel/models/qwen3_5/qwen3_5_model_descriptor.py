@@ -22,8 +22,10 @@ from typing import Any, Dict, List, Optional, Type
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5DecoderLayer,
+    Qwen3_5ForCausalLM,
     Qwen3_5TextRotaryEmbedding,
     Qwen3_5VisionRotaryEmbedding,
 )
@@ -43,6 +45,7 @@ from ....pruning.pruning_utils import (
 )
 from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
+from ...puzzformer import deci_x_patcher
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
 
 __all__ = [
@@ -174,6 +177,68 @@ class Qwen3P5TextModelDescriptor(_Qwen3P5BaseModelDescriptor):
             ),
             "kv_heads": Qwen3P5KVHeadsPruningMixIn(Qwen3P5TextKVHeadsLayerDescriptor()),
         }
+
+    @classmethod
+    def runtime_benchmark_config_fields(cls, lm_config) -> dict[str, Any]:
+        head_dim = (
+            getattr(lm_config, "head_dim", None)
+            or lm_config.hidden_size // lm_config.num_attention_heads
+        )
+        return {
+            "head_dim": head_dim,
+            "hidden_act": getattr(lm_config, "hidden_act", "silu"),
+            "intermediate_size": 256,
+            "linear_conv_kernel_dim": getattr(lm_config, "linear_conv_kernel_dim", 4),
+            "linear_key_head_dim": getattr(lm_config, "linear_key_head_dim", head_dim),
+            "linear_num_key_heads": getattr(
+                lm_config, "linear_num_key_heads", lm_config.num_key_value_heads
+            ),
+            "linear_num_value_heads": getattr(
+                lm_config, "linear_num_value_heads", lm_config.num_attention_heads
+            ),
+            "linear_value_head_dim": getattr(lm_config, "linear_value_head_dim", head_dim),
+            "rms_norm_eps": getattr(lm_config, "rms_norm_eps", 1e-6),
+            "tie_word_embeddings": getattr(lm_config, "tie_word_embeddings", False),
+        }
+
+    @classmethod
+    def create_runtime_benchmark_model(cls, runtime_config, block_configs: list[BlockConfig]):
+        model_config = Qwen3_5TextConfig(
+            max_position_embeddings=runtime_config.prefill_seq_len
+            + runtime_config.generation_seq_len,
+            vocab_size=runtime_config.vocab_size,
+            hidden_size=runtime_config.hidden_size,
+            intermediate_size=runtime_config.model_config_value("intermediate_size", 256),
+            num_attention_heads=runtime_config.num_attention_heads,
+            num_key_value_heads=runtime_config.num_key_value_heads,
+            num_hidden_layers=len(block_configs),
+            head_dim=runtime_config.model_config_value("head_dim"),
+            hidden_act=runtime_config.model_config_value("hidden_act", "silu"),
+            linear_conv_kernel_dim=runtime_config.model_config_value("linear_conv_kernel_dim", 4),
+            linear_key_head_dim=runtime_config.model_config_value("linear_key_head_dim"),
+            linear_num_key_heads=runtime_config.model_config_value("linear_num_key_heads"),
+            linear_num_value_heads=runtime_config.model_config_value("linear_num_value_heads"),
+            linear_value_head_dim=runtime_config.model_config_value("linear_value_head_dim"),
+            rms_norm_eps=runtime_config.model_config_value("rms_norm_eps", 1e-6),
+            tie_word_embeddings=runtime_config.model_config_value("tie_word_embeddings", False),
+        )
+
+        cls.set_block_configs(model_config, block_configs)
+        with deci_x_patcher(cls, block_configs):
+            model = Qwen3_5ForCausalLM(model_config)
+
+        model.config.block_configs = [block_config.to_dict() for block_config in block_configs]
+        model.config.architectures = ["AnyModel"]
+        model.config.base_architecture = "Qwen3_5ForCausalLM"
+        return model
+
+    @classmethod
+    def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
+        text_config = config.get("text_config", config)
+        layer_types = text_config.get("layer_types", [])
+        if "linear_attention" in layer_types:
+            return ["--mamba-cache-mode", "align"]
+        return []
 
     @staticmethod
     def init_rotary_embedding(model, runtime):
@@ -342,9 +407,7 @@ def _merge_qwen3p5_q_proj(
     trailing_shape = query.shape[1:]
     query = query.reshape(num_q_heads, head_size, *trailing_shape)
     gate = gate.reshape(num_q_heads, head_size, *trailing_shape)
-    return torch.cat([query, gate], dim=1).reshape(
-        num_q_heads * 2 * head_size, *trailing_shape
-    )
+    return torch.cat([query, gate], dim=1).reshape(num_q_heads * 2 * head_size, *trailing_shape)
 
 
 def _state_dict_with_tensor(
