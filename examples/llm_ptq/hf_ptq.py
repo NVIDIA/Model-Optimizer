@@ -27,6 +27,7 @@ from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
+    _resolve_model_path,
     build_quant_cfg,
     copy_custom_model_files,
     create_vlm_calibration_loop,
@@ -1166,7 +1167,12 @@ def quantize_main(
     # to NVFP4StaticQuantizer with a data-derived ``_global_amax``); we just
     # override that scalar with the closed-form value before export.
     if args.cast_mxfp4_to_nvfp4:
-        apply_cast_mxfp4_to_nvfp4(language_model, args.pyt_ckpt_path)
+        # The cast reads the source MXFP4 ``*_scales``/``*_blocks`` tensors from a local
+        # checkpoint directory. ``--pyt_ckpt_path`` may be a HF Hub ID (e.g.
+        # ``openai/gpt-oss-20b``); resolve it to the local snapshot dir that load_model's
+        # ``from_pretrained`` already populated so the cast works with the documented command.
+        source_ckpt_dir = _resolve_model_path(args.pyt_ckpt_path, args.trust_remote_code)
+        apply_cast_mxfp4_to_nvfp4(language_model, source_ckpt_dir)
 
     post_quantize(
         args,
