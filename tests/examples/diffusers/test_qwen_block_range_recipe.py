@@ -51,7 +51,7 @@ def _disabled_block_indices(rules):
     """Indices of transformer blocks explicitly disabled by per-block rules."""
     indices = set()
     for rule in rules:
-        if rule["cfg"].get("enable") is False:
+        if rule.get("enable") is False:
             match = _BLOCK_RULE_RE.fullmatch(rule["quantizer_name"])
             if match:
                 indices.add(int(match.group(1)))
@@ -62,11 +62,12 @@ def test_recipe_excludes_first_and_last_two_blocks():
     rules = build_block_range_quant_cfg(_StubBackbone(6), exclude_first_n=2, exclude_last_n=2)
 
     # 1. disable-all rules come first (weight + input).
-    assert rules[0] == {"quantizer_name": "*weight_quantizer", "cfg": {"enable": False}}
-    assert rules[1] == {"quantizer_name": "*input_quantizer", "cfg": {"enable": False}}
-    # 2. then enable only the transformer_blocks.
-    assert {"quantizer_name": "*transformer_blocks.*weight_quantizer", "cfg": {"enable": True}} in rules
-    assert {"quantizer_name": "*transformer_blocks.*input_quantizer", "cfg": {"enable": True}} in rules
+    assert rules[0] == {"quantizer_name": "*weight_quantizer", "enable": False}
+    assert rules[1] == {"quantizer_name": "*input_quantizer", "enable": False}
+    # 2. then re-enable only the transformer_blocks (top-level `enable`; a `None` cfg
+    #    keeps the base preset's quant params).
+    assert {"quantizer_name": "*transformer_blocks.*weight_quantizer", "enable": True} in rules
+    assert {"quantizer_name": "*transformer_blocks.*input_quantizer", "enable": True} in rules
     # 3. then disable the first 2 and last 2 of the 6 blocks -> {0, 1, 4, 5}; quantize {2, 3}.
     assert _disabled_block_indices(rules) == {0, 1, 4, 5}
 

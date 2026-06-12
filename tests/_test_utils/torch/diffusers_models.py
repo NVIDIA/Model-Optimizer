@@ -289,6 +289,14 @@ def get_tiny_qwen_image_transformer(**config_kwargs):
         "axes_dims_rope": (8, 4, 4),  # sums to attention_head_dim (16)
     }
     kwargs.update(**config_kwargs)
+    # Drop kwargs the installed diffusers QwenImageTransformer2DModel doesn't accept.
+    # `pooled_projection_dim` is present in the published config.json but was removed
+    # from the constructor in newer diffusers: from_pretrained tolerates the extra
+    # config key, but a direct constructor call raises TypeError.
+    import inspect
+
+    accepted = set(inspect.signature(QwenImageTransformer2DModel.__init__).parameters)
+    kwargs = {k: v for k, v in kwargs.items() if k in accepted}
     return QwenImageTransformer2DModel(**kwargs)
 
 

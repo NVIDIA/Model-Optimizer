@@ -735,15 +735,20 @@ def hide_quantizers_from_state_dict(model: nn.Module):
     # Store references to quantizers that we'll temporarily remove
     quantizer_backup: dict[str, dict[str, nn.Module]] = {}
 
-    for name, module in model.named_modules():
-        if is_quantlinear(module):
-            backup = {}
-            for attr in ["weight_quantizer", "input_quantizer", "output_quantizer"]:
-                if hasattr(module, attr):
-                    backup[attr] = getattr(module, attr)
-                    delattr(module, attr)
-            if backup:
-                quantizer_backup[name] = backup
+    # Remove every quantizer submodule from *all* modules, not only recognized
+    # quant-linears: enabled input quantizers can also live on non-linear modules
+    # (e.g. norm layers whose activations were calibrated), and their ``_amax``
+    # buffers must not leak into the saved checkpoint. Snapshot the module list
+    # first since we mutate the module tree while iterating.
+    for name, module in list(model.named_modules()):
+        backup = {}
+        for attr in ["weight_quantizer", "input_quantizer", "output_quantizer"]:
+            child = getattr(module, attr, None)
+            if isinstance(child, nn.Module):
+                backup[attr] = child
+                delattr(module, attr)
+        if backup:
+            quantizer_backup[name] = backup
 
     try:
         yield

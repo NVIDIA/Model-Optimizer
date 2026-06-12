@@ -325,7 +325,8 @@ def build_block_range_quant_cfg(
 
     Rules are applied in order with later rules overriding earlier ones:
     1. disable every linear weight/input quantizer,
-    2. re-enable only those under ``block_module``,
+    2. re-enable only those under ``block_module`` (``enable`` is a top-level
+       QuantizerCfgEntry toggle; a ``None`` cfg keeps the base preset's quant params),
     3. disable the first/last ``n`` blocks.
 
     Raises:
@@ -354,17 +355,17 @@ def build_block_range_quant_cfg(
     excluded = sorted(
         set(range(exclude_first_n)) | set(range(num_blocks - exclude_last_n, num_blocks))
     )
+    # `enable` is a top-level QuantizerCfgEntry field (independent of `cfg`); a `None`
+    # cfg leaves the base preset's quant params untouched, so disabling then
+    # re-enabling restores the original (FP8/NVFP4/...) attributes. Putting `enable`
+    # under `cfg` is rejected by the QuantizerAttributeConfig validator.
     rules: list[dict[str, Any]] = [
-        {"quantizer_name": "*weight_quantizer", "cfg": {"enable": False}},
-        {"quantizer_name": "*input_quantizer", "cfg": {"enable": False}},
-        {"quantizer_name": f"*{block_module}.*weight_quantizer", "cfg": {"enable": True}},
-        {"quantizer_name": f"*{block_module}.*input_quantizer", "cfg": {"enable": True}},
+        {"quantizer_name": "*weight_quantizer", "enable": False},
+        {"quantizer_name": "*input_quantizer", "enable": False},
+        {"quantizer_name": f"*{block_module}.*weight_quantizer", "enable": True},
+        {"quantizer_name": f"*{block_module}.*input_quantizer", "enable": True},
     ]
     for idx in excluded:
-        rules.append(
-            {"quantizer_name": f"*{block_module}.{idx}.*weight_quantizer", "cfg": {"enable": False}}
-        )
-        rules.append(
-            {"quantizer_name": f"*{block_module}.{idx}.*input_quantizer", "cfg": {"enable": False}}
-        )
+        rules.append({"quantizer_name": f"*{block_module}.{idx}.*weight_quantizer", "enable": False})
+        rules.append({"quantizer_name": f"*{block_module}.{idx}.*input_quantizer", "enable": False})
     return rules
