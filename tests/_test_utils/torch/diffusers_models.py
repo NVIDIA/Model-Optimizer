@@ -341,16 +341,16 @@ def _build_local_qwen2_tokenizer(out_dir: Path):
 
 
 def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:
-    """Create and save a tiny, (mostly) offline Qwen-Image pipeline to a directory.
+    """Create and save a tiny, fully offline Qwen-Image pipeline to a directory.
 
-    Mirrors diffusers' ``QwenImagePipelineFastTests.get_dummy_components``: the
-    Qwen2.5-VL text encoder is built inline from a tiny ``Qwen2_5_VLConfig`` (no Hub
-    model load); only the tokenizer is fetched from the tiny ``Qwen2VL`` test repo
-    (building a Qwen tokenizer fully offline is impractical). The transformer uses
-    ``num_layers=6`` so the first-2/last-2 block-range recipe is valid, and its
-    ``joint_attention_dim`` matches the text encoder ``hidden_size`` (16) so the
-    pipeline runs end-to-end during quantization calibration. The saved dir loads
-    with ``QwenImagePipeline.from_pretrained(path)``.
+    Mirrors diffusers' ``QwenImagePipelineFastTests.get_dummy_components`` but with
+    no Hub access: the Qwen2.5-VL text encoder is built inline from a tiny
+    ``Qwen2_5_VLConfig``, and the tokenizer is built locally by
+    ``_build_local_qwen2_tokenizer`` (byte-level vocab written to a temp dir). The
+    transformer uses ``num_layers=6`` so the first-2/last-2 block-range recipe is
+    valid, and its ``joint_attention_dim`` matches the text encoder ``hidden_size``
+    (16) so the pipeline runs end-to-end during quantization calibration. The saved
+    dir loads with ``QwenImagePipeline.from_pretrained(path)``.
     """
     if QwenImageTransformer2DModel is None or AutoencoderKLQwenImage is None:
         pytest.skip("QwenImage diffusers classes not available in this diffusers version.")
