@@ -20,7 +20,7 @@ Mode is determined by which args you pass, not by which tool you call. One tool,
 | Tool | Description |
 |---|---|
 | `list_examples` | Enumerate bundled launcher YAMLs under `tools/launcher/examples/` with model + description metadata extracted from each YAML. Discovery primitive — call this first when you don't know which YAML to launch. |
-| `verify_setup(executor, ...)` | Fail-fast probe for the named executor. Docker: `docker info` (daemon up) + GPU passthrough check. Slurm: `ssh -o BatchMode=yes -o ConnectTimeout=5` to the cluster login node. Returns structured failure on auth / network / daemon issues — no exception. |
+| `verify_setup(executor, ...)` | Fail-fast probe for the named executor. Docker: `docker info` (daemon up) + `docker info --format` runtime-registry check (looks for `"nvidia"` runtime registered by the NVIDIA Container Toolkit — no image pull, daemon-fast). Slurm: `ssh -o BatchMode=yes -o ConnectTimeout=5` to the cluster login node. Returns structured failure on auth / network / daemon issues — no exception. |
 | `submit_job(yaml_path, hf_local? \| cluster_host?, ...)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Returns `experiment_id` (Slurm) or PID (Docker) immediately; the actual job runs detached. Auto-runs `verify_setup` first by default (skippable). |
 | `job_status(experiment_id)` | Filesystem-based status from nemo_run's experiment dir (`_DONE`, `status_*.out`). Returns `done` / `failed` / `running` plus per-task statuses. No in-memory registry; survives MCP server restarts. |
 | `job_logs(experiment_id, task?, tail?)` | Read `log_<task>.out` from the experiment dir. Per-task filtering + optional tail to truncate. |
@@ -117,7 +117,7 @@ For local Docker execution, drop `cluster_host`/`cluster_user`/`identity` and pa
 |---|---|---|
 | `NEMORUN_HOME` | submit + status + logs | Where the launcher writes experiment artifacts. Defaults to cwd if unset. `job_status` / `job_logs` search `$NEMORUN_HOME/experiments/<id>/`. |
 | `MODELOPT_MCP_LOG` | (optional) server | Log level. Defaults to `INFO`. Logs go to stderr — stdout is the MCP wire. |
-| `MODELOPT_MCP_SKIP_GPU_CHECK` | (optional) `verify_setup(executor='docker')` | Set to skip the `docker run --gpus all nvidia-smi` step. Useful for CI hosts without GPUs. |
+| `MODELOPT_MCP_SKIP_GPU_CHECK` | (optional) `verify_setup(executor='docker')` | Set to skip the `docker info --format` runtime-registry check. Useful for CI hosts where the daemon is up but the NVIDIA Container Toolkit isn't installed. |
 | `MODELOPT_LAUNCHER_EXAMPLES_DIR` | (optional) `list_examples` | Override the examples directory location. Defaults to `../launcher/examples/` relative to this package. |
 
 ## Design principles
@@ -153,10 +153,15 @@ tools/mcp/
                                 # (mocked subprocess + tmp_path fixtures)
 ```
 
-## Phase 2
+## Phase 2 & beyond
 
-Out of scope for this PR; tracked separately:
+Tracked under [OMNIML-5123](https://jirasw.nvidia.com/browse/OMNIML-5123) (Epic). Highlights:
 
-* Capture `experiment_id` from Docker subprocess output (Phase 1 returns PID; nemo_run's id only appears in stdout after a few seconds).
-* `wait_for_experiment(experiment_id, timeout_sec)` for blocking polls — pairs with `job_status` to avoid pause-loops in the agent.
-* Extract the verify + submit helpers into a shared lib that `nmm-sandbox-mcp` can consume if it ever needs deeper Python integration.
+**Phase 2 — close the `cell.md` simplification loop:**
+* [OMNIML-5128](https://jirasw.nvidia.com/browse/OMNIML-5128) — `wait_for_experiment`, `read_cluster_artifact`, `open_draft_pr`
+* [OMNIML-5132](https://jirasw.nvidia.com/browse/OMNIML-5132) — `provision_passwordless_ssh_dry_run` (operator UX helper)
+* Capture `experiment_id` from Docker subprocess output (Phase 1 returns PID; nemo_run's id only appears in stdout after a few seconds — Phase 2 tails launcher output via a side-channel log file).
+
+**Phase 3 — NEL integration + checkpoint introspection:**
+* [OMNIML-5133](https://jirasw.nvidia.com/browse/OMNIML-5133) — `nel_submit`, `nel_status`, `nel_run_eval`, `nel_export`, `nel_compare`, `nel_gate` (wraps `nemo-evaluator-launcher`)
+* [OMNIML-5134](https://jirasw.nvidia.com/browse/OMNIML-5134) — `inspect_checkpoint`, `inspect_model`
