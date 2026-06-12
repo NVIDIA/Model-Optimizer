@@ -89,6 +89,12 @@ pipeline:
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
       - --concurrency 1
+      # gpt-oss emits Harmony channel tags (<|channel|>analysis...<|channel|>final...)
+      # in raw output. The MT-bench multi-turn loop re-feeds each answer as the next
+      # turn's assistant message; gpt-oss's chat template rejects content containing
+      # channel tags. --postprocess gptoss extracts just the final-channel text before
+      # re-feeding. (Affects only chat history, not the acceptance-length measurement.)
+      - --postprocess gptoss
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
