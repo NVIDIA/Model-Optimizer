@@ -53,6 +53,15 @@ pipeline:
       - model.use_fake_base_for_offline=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
+      # Supervise only the assistant content, not the prompt. gpt-oss's Harmony chat
+      # template is mostly fixed structural/boilerplate tokens (system prompt, channel
+      # markers); training over the full sequence (answer_only_loss=false) lets the draft
+      # trivially memorize that boilerplate -> inflated train_acc that does NOT translate
+      # to real spec-decode acceptance. The training-only chat template adds {% generation %}
+      # tags around the assistant content so the tokenizer can emit the assistant mask
+      # (it tokenizes byte-identically to the stock template otherwise).
+      - training.answer_only_loss=true
+      - data.chat_template=examples/openai/gpt-oss-20b/chat_template_train.jinja
       - training.output_dir=/scratchspace/eagle3
       - training.training_seq_len=4096
       - training.disable_tqdm=true

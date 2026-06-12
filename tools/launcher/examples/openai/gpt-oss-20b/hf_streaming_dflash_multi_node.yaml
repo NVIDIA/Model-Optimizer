@@ -63,10 +63,15 @@ pipeline:
       - training.output_dir=/scratchspace/dflash
       - training.training_seq_len=4096
       - training.disable_tqdm=true
-      # Streaming corpus is prompt-only (the serve generates the response and we
-      # capture its hidden states), so there is no assistant span to mask -> train
-      # over the full sequence, same as the EAGLE3 streaming example.
-      - training.answer_only_loss=false
+      # Supervise only the assistant content, not the prompt. The serve captures hidden
+      # states over the full corpus conversation (it does not generate), so the prompt +
+      # gpt-oss Harmony boilerplate is present; training over the full sequence
+      # (answer_only_loss=false) lets the draft trivially memorize that boilerplate ->
+      # inflated train metrics that don't translate to real acceptance. The training-only
+      # chat template adds {% generation %} tags so the tokenizer emits the assistant mask
+      # (byte-identical tokenization to the stock template otherwise).
+      - training.answer_only_loss=true
+      - data.chat_template=examples/openai/gpt-oss-20b/chat_template_train.jinja
       - training.num_train_epochs=1
       - training.max_steps=2000
       # dflash.yaml sets report_to=tensorboard, which hard-fails if tensorboard

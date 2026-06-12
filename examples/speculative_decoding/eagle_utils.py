@@ -78,6 +78,13 @@ def make_speculative_data_module(
     if mode == "streaming":
         # ``train_len`` right-truncates during tokenization and is also the collator's
         # pad target; caller must ensure ``train_len <= vllm.max_model_len``.
+        # The streaming dataset tokenizes via ``tokenizer.apply_chat_template`` (no
+        # chat_template arg), so a custom template (e.g. one carrying {% generation %}
+        # tags for answer_only_loss) must be installed on the tokenizer here — unlike
+        # the online path, which threads ``chat_template`` straight into the collator.
+        if chat_template is not None:
+            tokenizer.chat_template = chat_template
+            print_rank_0("Installed custom chat template on tokenizer for streaming.")
         print_rank_0(f"Streaming hidden states from {data_args.streaming_server_url}")
         from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
             EagleVllmStreamingConfig,
