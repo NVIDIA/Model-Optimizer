@@ -749,9 +749,13 @@ def process_layer_quant_config(layer_config_dict):
                 "group_size": block_size_value,
             }
         elif v == "nvfp4_svdquant":
+            # SVDQuant builds on the AWQ-style pre_quant_scale smoothing, so its
+            # config mirrors nvfp4_awq (group_size + pre_quant_scale flag).
             layer_config = {
                 "quant_algo": "NVFP4_SVD",
                 "group_size": block_size_value,
+                "has_zero_point": False,
+                "pre_quant_scale": True,
             }
         elif v == "mxfp8":
             layer_config = {

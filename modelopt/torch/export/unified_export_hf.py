@@ -1013,6 +1013,58 @@ def _fuse_qkv_linears_diffusion(
     )
 
 
+def _detect_svdquant_rank(component: nn.Module) -> int | None:
+    """Return the SVDQuant low-rank dimension from the first SVDQuant linear, if any.
+
+    ``svdquant_lora_a`` has shape ``(rank, in_features)``, so its first dimension
+    is the low-rank size.
+    """
+    for _, sub_module in component.named_modules():
+        weight_quantizer = getattr(sub_module, "weight_quantizer", None)
+        lora_a = getattr(weight_quantizer, "svdquant_lora_a", None)
+        if lora_a is not None:
+            return int(lora_a.shape[0])
+    return None
+
+
+def _promote_quantizer_tensors_to_module(component: nn.Module) -> None:
+    """Promote quantizer-owned export tensors onto their parent linear module.
+
+    The diffusers export path saves via ``save_pretrained`` inside
+    :func:`hide_quantizers_from_state_dict` (which deletes the ``weight_quantizer``
+    / ``input_quantizer`` submodules) and -- unlike the transformers path -- does
+    NOT run :func:`postprocess_state_dict`. Without this step the AWQ smoothing
+    scale and the SVDQuant low-rank factors would be dropped from the exported
+    checkpoint. We register them as module buffers under clean, AWQ-aligned keys
+    so they are embedded in the component's main safetensors:
+
+    - ``input_quantizer._pre_quant_scale`` -> ``<module>.pre_quant_scale``
+      (the same key the transformers/AWQ path produces via postprocess_state_dict)
+    - ``weight_quantizer.svdquant_lora_a`` -> ``<module>.svdquant_lora_a``
+    - ``weight_quantizer.svdquant_lora_b`` -> ``<module>.svdquant_lora_b``
+
+    This runs after :func:`_process_quantized_modules` (which leaves these
+    quantizer buffers in place) and before ``save_pretrained``.
+    """
+    for _, sub_module in component.named_modules():
+        if not is_quantlinear(sub_module):
+            continue
+
+        input_quantizer = getattr(sub_module, "input_quantizer", None)
+        pre_quant_scale = getattr(input_quantizer, "_pre_quant_scale", None)
+        if pre_quant_scale is not None and not hasattr(sub_module, "pre_quant_scale"):
+            sub_module.register_buffer("pre_quant_scale", pre_quant_scale.detach().clone())
+
+        weight_quantizer = getattr(sub_module, "weight_quantizer", None)
+        lora_a = getattr(weight_quantizer, "svdquant_lora_a", None)
+        lora_b = getattr(weight_quantizer, "svdquant_lora_b", None)
+        if lora_a is not None and lora_b is not None:
+            if not hasattr(sub_module, "svdquant_lora_a"):
+                sub_module.register_buffer("svdquant_lora_a", lora_a.detach().clone())
+            if not hasattr(sub_module, "svdquant_lora_b"):
+                sub_module.register_buffer("svdquant_lora_b", lora_b.detach().clone())
+
+
 def _export_diffusers_checkpoint(
     pipe: Any,
     dtype: torch.dtype | None,
@@ -1091,8 +1143,21 @@ def _export_diffusers_checkpoint(
             # Step 4: Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
 
+            # Step 4.5: Promote quantizer-owned tensors (AWQ pre_quant_scale and
+            # SVDQuant LoRA factors) onto the module so they survive
+            # hide_quantizers_from_state_dict and are embedded in the component's
+            # main safetensors under clean, AWQ-aligned keys.
+            _promote_quantizer_tensors_to_module(component)
+
             # Step 5: Build quantization config
             quant_config = get_quant_config(component, is_modelopt_qlora=False)
+            if quant_config:
+                quantization_details = quant_config.get("quantization", {})
+                # Record the SVDQuant low-rank size so consumers know the LoRA shape.
+                if quantization_details.get("quant_algo") == "NVFP4_SVD":
+                    svdquant_rank = _detect_svdquant_rank(component)
+                    if svdquant_rank is not None:
+                        quantization_details["lora_rank"] = svdquant_rank
             hf_quant_config = convert_hf_quant_config_format(quant_config) if quant_config else None
 
             # Step 6: Save the component

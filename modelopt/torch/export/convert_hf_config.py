@@ -62,6 +62,18 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         return {
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
         }
+    elif quant_algo == "NVFP4_SVD":
+        gs = group_size or 16
+        return {
+            "input_activations": {
+                "dynamic": False,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": gs,
+            },
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
+            "pre_quant_scale": True,
+        }
     elif quant_algo in ("NVFP4_AWQ", "W4A8_AWQ"):
         gs = group_size or 128
         return {
@@ -195,6 +207,29 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
             "targets": ["Linear"],
         }
+        new_config["config_groups"] = {"group_0": config_group_details}
+    elif quant_algo_value == "NVFP4_SVD":
+        # NVFP4 + SVDQuant: NVFP4 weights/activations plus an AWQ-style
+        # pre_quant_scale and a low-rank residual (svdquant_lora_a/b) stored as
+        # <module>.pre_quant_scale / <module>.svdquant_lora_{a,b} in the
+        # safetensors. The config mirrors NVFP4 with a pre_quant_scale flag and
+        # the LoRA rank so consumers can reconstruct
+        # ``y = NVFP4_GEMM(x) + (x @ lora_a^T) @ lora_b^T``.
+        group_size = original_quantization_details.get("group_size", 16)
+        config_group_details = {
+            "input_activations": {
+                "dynamic": False,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": group_size,
+            },
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
+            "pre_quant_scale": True,
+            "targets": ["Linear"],
+        }
+        lora_rank = original_quantization_details.get("lora_rank")
+        if lora_rank is not None:
+            config_group_details["lora_rank"] = lora_rank
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "MIXED_PRECISION":
         quantized_layers = original_quantization_details.get("quantized_layers", {})

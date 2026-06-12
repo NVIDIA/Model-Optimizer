@@ -32,7 +32,13 @@ from config import (
     set_quant_config_attr,
 )
 from diffusers import DiffusionPipeline
-from models_utils import MODEL_DEFAULTS, ModelType, get_model_filter_func, parse_extra_params
+from models_utils import (
+    MODEL_DEFAULTS,
+    ModelType,
+    build_block_range_quant_cfg,
+    get_model_filter_func,
+    parse_extra_params,
+)
 from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from pipeline_manager import PipelineManager
 from quantize_config import (
@@ -162,6 +168,28 @@ class Quantizer:
                     "cfg": {"num_bits": (4, 3), "axis": None},
                 }
             )
+
+        # Apply the transformer-block-range recipe (e.g. Qwen-Image) BEFORE
+        # calibration. This restricts quantization to `transformer_blocks` and
+        # excludes the first/last N blocks. It must run pre-calibration so that
+        # SVDQuant does not mutate the weights of the excluded blocks. The recipe
+        # is format-agnostic (applies to FP8/NVFP4/SVDQuant alike).
+        block_range = MODEL_DEFAULTS.get(self.model_config.model_type, {}).get("block_range")
+        if block_range is not None:
+            recipe_rules = build_block_range_quant_cfg(
+                backbone,
+                exclude_first_n=block_range.get("exclude_first_n", 2),
+                exclude_last_n=block_range.get("exclude_last_n", 2),
+                block_module=block_range.get("block_module", "transformer_blocks"),
+            )
+            self.logger.info(
+                f"Applying block-range recipe ({len(recipe_rules)} rules) for "
+                f"{self.model_config.model_type.value}: quantize only "
+                f"'{block_range.get('block_module', 'transformer_blocks')}' excluding "
+                f"first {block_range.get('exclude_first_n', 2)} / last "
+                f"{block_range.get('exclude_last_n', 2)} blocks."
+            )
+            quant_cfg_list.extend(recipe_rules)
 
         quant_config = {**base_cfg, "quant_cfg": quant_cfg_list}
         set_quant_config_attr(
@@ -543,6 +571,15 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--restore-from", type=str, help="Path to restore from previous checkpoint"
     )
     export_group.add_argument(
+        "--sanity-image-path",
+        type=str,
+        default=None,
+        help="If set, generate one image from the in-memory quantized pipeline (after "
+        "quantization, before the weights are packed for export) and save it here. This is "
+        "a quick functional sanity check of quantized inference; it does NOT reload the "
+        "exported checkpoint.",
+    )
+    export_group.add_argument(
         "--trt-high-precision-dtype",
         type=str,
         default="Half",
@@ -680,6 +717,26 @@ def main() -> None:
                 export_manager.save_checkpoint(backbone, backbone_name)
 
         pipeline_manager.print_quant_summary()
+
+        # Optional functional sanity check: generate one image from the in-memory
+        # quantized pipeline. This runs BEFORE export (while weights are still
+        # fake-quantized and runnable, not yet packed) and does not reload the
+        # exported checkpoint.
+        if args.sanity_image_path:
+            try:
+                logger.info(f"Generating sanity image to {args.sanity_image_path}")
+                inference_args = MODEL_DEFAULTS.get(model_type, {}).get("inference_extra_args", {})
+                result = pipe(
+                    prompt="A high-quality photo of a cat wearing sunglasses",
+                    num_inference_steps=calib_config.n_steps,
+                    **inference_args,
+                )
+                sanity_path = Path(args.sanity_image_path)
+                sanity_path.parent.mkdir(parents=True, exist_ok=True)
+                result.images[0].save(str(sanity_path))
+                logger.info("Sanity image saved successfully")
+            except Exception as sanity_error:  # noqa: BLE001
+                logger.warning(f"Sanity image generation failed (non-fatal): {sanity_error}")
 
         for backbone_name, backbone in pipeline_manager.iter_backbones():
             export_manager.export_onnx(

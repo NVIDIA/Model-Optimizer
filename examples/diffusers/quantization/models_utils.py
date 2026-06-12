@@ -18,6 +18,7 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
+import torch
 from diffusers import (
     DiffusionPipeline,
     FluxPipeline,
@@ -245,6 +246,15 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
             "height": 1024,
             "width": 1024,
         },
+        # Quantize only ``transformer_blocks``; keep the first 2 and last 2 blocks
+        # (and everything outside ``transformer_blocks``) in original precision.
+        # Applied pre-calibration via ``build_block_range_quant_cfg`` so SVDQuant
+        # never mutates the excluded blocks' weights.
+        "block_range": {
+            "exclude_first_n": 2,
+            "exclude_last_n": 2,
+            "block_module": "transformer_blocks",
+        },
     },
 }
 
@@ -292,3 +302,64 @@ def parse_extra_params(
         i += 1
 
     return extra_params
+
+
+def build_block_range_quant_cfg(
+    backbone: torch.nn.Module,
+    exclude_first_n: int,
+    exclude_last_n: int,
+    block_module: str = "transformer_blocks",
+) -> list[dict[str, Any]]:
+    """Build ordered ``quant_cfg`` rules for a transformer-block-only recipe.
+
+    The rules quantize only the linears under ``block_module`` while keeping the
+    first ``exclude_first_n`` and last ``exclude_last_n`` blocks -- and everything
+    outside ``block_module`` -- in original precision.
+
+    The rules are meant to be appended to the ``quant_cfg`` list consumed by
+    ``mtq.quantize`` so the selection is applied BEFORE calibration. This is
+    required for SVDQuant, whose calibration subtracts a low-rank residual from
+    the weights of every *enabled* linear: disabling the excluded blocks only
+    after calibration would leave their weights mutated instead of bit-identical
+    to the original precision.
+
+    Rules are applied in order with later rules overriding earlier ones:
+    1. disable every linear weight/input quantizer,
+    2. re-enable only those under ``block_module``,
+    3. disable the first/last ``n`` blocks.
+
+    Raises:
+        ValueError: if the backbone has no ``block_module`` list, or it has fewer
+            than ``exclude_first_n + exclude_last_n + 1`` blocks.
+    """
+    blocks = getattr(backbone, block_module, None)
+    if blocks is None or not hasattr(blocks, "__len__"):
+        raise ValueError(
+            f"Backbone {type(backbone).__name__} has no '{block_module}' module list; "
+            "cannot build the transformer-block-range recipe."
+        )
+    num_blocks = len(blocks)
+    min_blocks = exclude_first_n + exclude_last_n + 1
+    if num_blocks < min_blocks:
+        raise ValueError(
+            f"'{block_module}' has only {num_blocks} block(s); excluding the first "
+            f"{exclude_first_n} and last {exclude_last_n} requires at least {min_blocks} blocks."
+        )
+
+    excluded = sorted(
+        set(range(exclude_first_n)) | set(range(num_blocks - exclude_last_n, num_blocks))
+    )
+    rules: list[dict[str, Any]] = [
+        {"quantizer_name": "*weight_quantizer", "cfg": {"enable": False}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"enable": False}},
+        {"quantizer_name": f"*{block_module}.*weight_quantizer", "cfg": {"enable": True}},
+        {"quantizer_name": f"*{block_module}.*input_quantizer", "cfg": {"enable": True}},
+    ]
+    for idx in excluded:
+        rules.append(
+            {"quantizer_name": f"*{block_module}.{idx}.*weight_quantizer", "cfg": {"enable": False}}
+        )
+        rules.append(
+            {"quantizer_name": f"*{block_module}.{idx}.*input_quantizer", "cfg": {"enable": False}}
+        )
+    return rules
