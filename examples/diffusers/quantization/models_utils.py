@@ -248,7 +248,7 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
         },
         # Quantize only ``transformer_blocks``; keep the first 2 and last 2 blocks
         # (and everything outside ``transformer_blocks``) in original precision.
-        # Applied pre-calibration via ``build_block_range_quant_cfg`` so SVDQuant
+        # Applied before calibration via ``build_block_range_quant_cfg`` so SVDQuant
         # never mutates the excluded blocks' weights.
         "block_range": {
             "exclude_first_n": 2,

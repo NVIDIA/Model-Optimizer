@@ -171,7 +171,7 @@ class Quantizer:
 
         # Apply the transformer-block-range recipe (e.g. Qwen-Image) BEFORE
         # calibration. This restricts quantization to `transformer_blocks` and
-        # excludes the first/last N blocks. It must run pre-calibration so that
+        # excludes the first/last N blocks. It must run before calibration so that
         # SVDQuant does not mutate the weights of the excluded blocks. The recipe
         # is format-agnostic (applies to FP8/NVFP4/SVDQuant alike).
         block_range = MODEL_DEFAULTS.get(self.model_config.model_type, {}).get("block_range")

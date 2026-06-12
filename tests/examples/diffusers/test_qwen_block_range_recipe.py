@@ -16,8 +16,8 @@
 """Unit tests for the transformer-block-range quantization recipe (e.g. Qwen-Image).
 
 The recipe must quantize only the linears under ``transformer_blocks`` while
-excluding the first/last N blocks, and it must be expressible as pre-calibration
-``quant_cfg`` rules (so SVDQuant never mutates the excluded blocks' weights).
+excluding the first/last N blocks, and it must be expressible as ``quant_cfg``
+rules applied before calibration (so SVDQuant never mutates the excluded blocks).
 """
 
 import re

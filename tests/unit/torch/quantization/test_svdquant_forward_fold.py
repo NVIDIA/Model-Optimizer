@@ -15,9 +15,9 @@
 
 """SVDQuant forward / fold coverage.
 
-These tests protect the invariants the diffusers SVDQuant export relies on
-(DEC-5: the LoRA factors stay on the ``weight_quantizer`` in the live model; the
-export layer promotes them). They complement (and do not modify) the existing
+These tests protect the invariants the diffusers SVDQuant export relies on: the
+LoRA factors stay on the ``weight_quantizer`` in the live model and the export
+layer promotes them. They complement (and do not modify) the existing
 ``test_calib.py::test_svdquant_lora_weights``.
 """
 
@@ -58,7 +58,7 @@ def _quantized_linears(model: nn.Module):
 
 
 def test_svdquant_lora_stays_on_weight_quantizer():
-    """DEC-5: LoRA lives on the quantizer, not the module (export promotes it)."""
+    """LoRA lives on the quantizer, not the module (the export layer promotes it)."""
     model = _quantize_svdquant()
     linears = _quantized_linears(model)
     assert linears
