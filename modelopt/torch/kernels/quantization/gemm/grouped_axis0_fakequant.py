@@ -31,6 +31,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra.cuda import libdevice
 
 __all__ = ["grouped_axis0_fakequant", "grouped_axis0_fakequant_backward"]
 
@@ -86,12 +87,10 @@ def _grouped_axis0_fakequant_fwd_kernel(
     safe_scale = tl.where(scale > 0.0, scale, 1.0)
     q = x / safe_scale
     q = tl.maximum(tl.minimum(q, qmax), qmin)
-    # Round-half-away-from-zero via add-half-and-truncate. For bfloat16 inputs
-    # the half-tie case is rare and the difference vs round-half-to-even is
-    # negligible for fake-quant. Avoids libdevice dependency (nearbyint /
-    # rint are not consistently exposed across Triton versions).
-    half_sign = tl.where(q >= 0.0, 0.5, -0.5)
-    q_rounded = (q + half_sign).to(tl.int32).to(tl.float32)
+    # Round-half-to-even (banker's), matching cuda_ext.fake_tensor_quant exactly.
+    # libdevice.rint is CUDA's __rint* builtin. Imported via the same path that
+    # modelopt's nvfp4_quant.py uses (triton.language.extra.cuda.libdevice).
+    q_rounded = libdevice.rint(q)
     out = tl.where(scale > 0.0, q_rounded * scale, x)
 
     tl.store(out_ptr + offsets, out.to(DTYPE), mask=mask)
