@@ -88,6 +88,8 @@ pipeline:
       # No spaces: nemo_run emits `export FOO=value` unquoted.
       - EAGLE_CAPTURE_IDS: "[2,7,12,17,22,24]"
       - SERVE_TP: "2"
+      # extract_hidden_states packs all 6 capture layers into one KV spec (per-token 6*hidden_size*2B=34560); block_size must make the attn page 2*block_size*(num_kv_heads/SERVE_TP)*head_dim*2 >= that, so at TP=2 (4 kv_heads/rank) need >=64.
+      - SERVE_EXTRA_ARGS: "--block-size=64"
       # K serve replica nodes (Slurm nodes 0..K-1); the rest are trainers.
       - SERVE_NODES: "2"
       # Per-rank in-flight fetches; keep low so the cold serve isn't flooded past its execute-model timeout.
