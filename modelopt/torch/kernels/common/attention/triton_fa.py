@@ -1086,6 +1086,14 @@ class _Attention(torch.autograd.Function):
                     num_warps=_MEASURE_NUM_WARPS,
                     num_stages=_MEASURE_NUM_STAGES,
                 )
+            elif per_page_scale:
+                # Per-page bakes 128-key pages; the prefill KV tile MUST equal that page so the
+                # trailing page's amax is computed over the FULL 128-page (matching decode/on-write),
+                # not a 64-wide sub-tile. Pin BLOCK_N=128; small BLOCK_M + num_stages=1 keeps shared
+                # memory in budget (bf16 serve ~84KB on A6000's 99KB; ample on GB300/B200).
+                _attn_fwd.fn[grid](
+                    *fwd_args, **fwd_kwargs, BLOCK_M=16, BLOCK_N=128, num_warps=4, num_stages=1
+                )
             else:
                 _attn_fwd[grid](
                     *fwd_args,

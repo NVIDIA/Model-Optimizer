@@ -193,16 +193,16 @@ if __name__ == "__main__":
         f" ({e_frozen / max(e_perpage, 1e-30):.1f}x)"
     )
 
-    # ---- Test 3: prefill per-page is consistent with decode per-page ----
-    # A single-token prefill over the same baked cache must match the (validated) decode path. The
-    # boundary page uses SCALE_PAGE=128 so prefill reads baked 128-pages as-is even with a smaller
-    # autotuned BLOCK_N. Compare on a 128-ALIGNED KV (no trailing page) so the only difference is
-    # tl.dot-vs-tl.sum kernel numerics; the unaligned case differs only on the <128-token tail page
-    # (prefill quantizes it per-BLOCK_N, a finer-but-consistent sub-page scale) and is reported FYI.
-    print("\n[3] prefill(per-page) vs decode(per-page): aligned must match (kernel numerics)")
+    # ---- Test 3: prefill per-page == decode per-page, for aligned AND tail (the #4 fix) ----
+    # Per-page pins the prefill KV tile to BLOCK_N=128 = the page, so the trailing page's amax is over
+    # the FULL 128-page in BOTH prefill and decode (previously prefill used per-64 sub-tiles, an
+    # inconsistency: the tail diff was ~30x the aligned floor). After the fix, tail ≈ aligned. bf16
+    # because fp32 prefill@128 exceeds A6000 shared memory (bf16 is the serve dtype anyway); a
+    # single-token prefill over the same baked cache must match decode within bf16 + dot-vs-sum noise.
+    print("\n[3] prefill(per-page) vs decode(per-page): tail must match aligned floor (bf16)")
     torch.backends.cuda.matmul.allow_tf32 = False  # isolate per-page logic from TF32 dot error
-    for KV, gated in ((512, True), (600, False)):
-        q, kc, vc, bt, sk, _ = _setup(2, KV, torch.float32)
+    for KV in (512, 600):  # 512 = aligned (floor); 600 = 88-token tail (the #4 case)
+        q, kc, vc, bt, sk, _ = _setup(2, KV, torch.bfloat16)
         nvfp4 = {"k", "v"}
         kc2, vc2 = kc.clone(), vc.clone()
         _bake_per_page(kc2, vc2, bt, KV, 2, nvfp4)
@@ -221,8 +221,8 @@ if __name__ == "__main__":
         )
         pre = triton_attention(
             q,
-            k=torch.empty(0, NKV, HEAD_DIM, device=DEV),
-            v=torch.empty(0, NKV, HEAD_DIM, device=DEV),
+            k=torch.empty(0, NKV, HEAD_DIM, device=DEV, dtype=torch.bfloat16),
+            v=torch.empty(0, NKV, HEAD_DIM, device=DEV, dtype=torch.bfloat16),
             b_start_loc=torch.arange(2, device=DEV, dtype=torch.int32),
             b_seq_len=torch.ones(2, device=DEV, dtype=torch.int32),
             max_input_len=1,
@@ -239,15 +239,11 @@ if __name__ == "__main__":
             per_page_scale=True,
         )
         d = (dec.float() - pre.float()).abs()
-        tail = "aligned (no tail)" if KV % TILE == 0 else f"tail={KV % TILE} (per-BLOCK_N, FYI)"
-        if gated:
-            ok = d.max().item() < 5e-3
-            bad += not ok
-            print(
-                f"  KV={KV} {tail}: max={d.max().item():.3e} mean={d.mean().item():.3e}"
-                f"  {'OK' if ok else 'FAIL'}"
-            )
-        else:
-            print(f"  KV={KV} {tail}: max={d.max().item():.3e} mean={d.mean().item():.3e}  [FYI]")
+        tail = "aligned" if KV % TILE == 0 else f"tail={KV % TILE}"
+        ok = d.max().item() < 1.5e-2  # bf16 + tl.dot-vs-tl.sum kernel numerics (was ~2.5e-2 per-64)
+        bad += not ok
+        print(
+            f"  KV={KV} {tail}: max={d.max().item():.3e} mean={d.mean().item():.3e}  {'OK' if ok else 'FAIL'}"
+        )
 
     print(f"\n{'ALL PASS' if bad == 0 else f'{bad} FAILURE(S)'}")
