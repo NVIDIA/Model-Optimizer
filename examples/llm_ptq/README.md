@@ -136,6 +136,29 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 
 > You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
 
+### Vision Language Model (VLM) Supported Models
+
+PTQ for vision-language models is handled by the same `hf_ptq.py` entry point and shell script as
+LLMs — the language model is quantized while the vision encoder is kept in high precision. Pass
+`--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).
+
+| Model | fp8 | int8_sq<sup>1</sup> | int4_awq | w4a8_awq<sup>2</sup> | nvfp4<sup>3</sup> |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| Llava | ✅ | ✅ | ✅ | ✅ | - |
+| VILA<sup>4</sup> | ✅ | ✅ | ✅ | ✅ | - |
+| Phi-3-vision, Phi-4-multimodal | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Qwen2, 2.5-VL | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Gemma3 | ✅ | - | - | - | - |
+| Nemotron VL<sup>5</sup> | ✅ | - | - | - | ✅ |
+
+> *<sup>1.</sup>Only TensorRT-LLM checkpoint export is supported. Not compatible with the TensorRT-LLM torch backend.* \
+> *<sup>2.</sup>The w4a8_awq is an experimental quantization scheme that may result in a higher accuracy penalty.* \
+> *<sup>3.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later.* \
+> *<sup>4.</sup>VILA requires `transformers<=4.50.0` and the original VILA repo; the shell script bootstraps both (see [`requirements-vila.txt`](./requirements-vila.txt)).* \
+> *<sup>5.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).*
+
+> *For detailed TensorRT-LLM torch backend multimodal support, please refer to [this doc](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md#multimodal-feature-support-matrix-pytorch-backend).*
+
 ## Framework Scripts
 
 ### Hugging Face Example [Script](./scripts/huggingface_example.sh)
@@ -243,6 +266,23 @@ The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_
 
 [PTQ for DeepSeek](../deepseek/README.md) shows how to quantize the DeepSeek model with FP4 and export to TensorRT-LLM.
 
+#### VLM quantization
+
+Vision-language models are quantized through the same script. Add `--vlm` so the script bootstraps
+any VLM-specific dependencies (e.g. VILA) and runs the TensorRT-LLM multimodal quickstart as the
+deploy smoke test instead of the text-only one:
+
+```bash
+scripts/huggingface_example.sh --model <Hugging Face model card or checkpoint> --quant fp8 --vlm
+```
+
+Supported `--quant` values for VLMs are `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, and `w4a8_awq` (see
+[VLM Supported Models](#vision-language-model-vlm-supported-models)). For VILA models the script
+additionally installs [`requirements-vila.txt`](./requirements-vila.txt) and clones the VILA repo
+next to the checkpoint.
+
+> *This consolidates the former `examples/vlm_ptq` example, which now forwards here.*
+
 #### VLM calibration with image-text pairs (e.g., Nemotron VL)
 
 For vision-language models, calibration quality can likely improve by using image-text pairs instead of text-only data, especially on visual understanding tasks:
@@ -255,6 +295,12 @@ python hf_ptq.py \
   --trust_remote_code \
   --calib_with_images \
   --calib_size 512
+```
+
+The same flag is exposed by the shell script:
+
+```bash
+scripts/huggingface_example.sh --model <model> --quant nvfp4 --vlm --calib_with_images --trust_remote_code
 ```
 
 > Note: when `--calib_with_images` is set, `--calib_size` must be a single value, and the calibration dataset is nvidia/nemotron_vlm_dataset_v2.

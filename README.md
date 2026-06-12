@@ -102,7 +102,7 @@ more fine-grained control on installed dependencies or for alternative docker im
 
 | **Technique** | **Description** | **Examples** | **Docs** |
 | :------------: | :------------: | :------------: | :------------: |
-| Post Training Quantization | Compress model size by 2x-4x, speeding up inference while preserving model quality! | \[[LLMs](./examples/llm_ptq/)\] \[[diffusers](./examples/diffusers/)\] \[[VLMs](./examples/vlm_ptq/)\] \[[onnx](./examples/onnx_ptq/)\] \[[windows](./examples/windows/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Post Training Quantization | Compress model size by 2x-4x, speeding up inference while preserving model quality! | \[[LLMs](./examples/llm_ptq/)\] \[[diffusers](./examples/diffusers/)\] \[[VLMs](./examples/llm_ptq/README.md#vlm-quantization)\] \[[onnx](./examples/onnx_ptq/)\] \[[windows](./examples/windows/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Training | Refine accuracy even further with a few training steps! | \[[Hugging Face](./examples/llm_qat/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Pruning | Reduce your model size and accelerate inference by removing unnecessary weights! | \[[General](./examples/pruning/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#pruning)\] | |
 | Distillation | Reduce deployment model size by teaching small models to behave like larger models! | \[[Megatron-Bridge](./examples/llm_distill/README.md#knowledge-distillation-kd-in-nvidia-megatron-bridge-framework)\] \[[Megatron-LM](./examples/llm_distill/README.md#knowledge-distillation-kd-in-nvidia-megatron-lm-framework)\] \[[Hugging Face](./examples/llm_distill/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
@@ -132,7 +132,7 @@ more fine-grained control on installed dependencies or for alternative docker im
 |------------|----------------|
 | LLM Quantization | [View Support Matrix](./examples/llm_ptq/README.md#support-matrix) |
 | Diffusers Quantization | [View Support Matrix](./examples/diffusers/README.md#support-matrix) |
-| VLM Quantization | [View Support Matrix](./examples/vlm_ptq/README.md#support-matrix) |
+| VLM Quantization | [View Support Matrix](./examples/llm_ptq/README.md#vision-language-model-vlm-supported-models) |
 | ONNX Quantization | [View Support Matrix](./examples/torch_onnx/README.md#onnx-export-supported-llm-models) |
 | Windows Quantization | [View Support Matrix](./examples/windows/README.md#support-matrix) |
 | Quantization Aware Training | [View Support Matrix](./examples/llm_qat/README.md#support-matrix) |

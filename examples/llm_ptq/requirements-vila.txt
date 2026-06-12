@@ -1,0 +1,9 @@
+# Extra dependencies for quantizing NVILA / VILA vision-language models.
+#
+# VILA is not yet published on the Hugging Face model zoo, so its modeling code must be
+# cloned separately (handled automatically by scripts/huggingface_example.sh --vlm) from
+# https://github.com/Efficient-Large-Model/VILA.git at commit
+# ec7fb2c264920bf004fd9fa37f1ec36ea0942db5.
+#
+# VILA's modeling code is only compatible with transformers<=4.50.0.
+transformers<=4.50.0
