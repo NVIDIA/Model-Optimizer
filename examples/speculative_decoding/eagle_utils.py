@@ -250,12 +250,29 @@ class DFlashExportCallback(TrainerCallback):
             return control
 
         step = state.global_step
+        # This callback is only needed under FSDP2 SHARDED_STATE_DICT, where the
+        # checkpoint holds distributed shards (pytorch_model_fsdp_0/) and no consolidated
+        # weights. When the checkpoint was saved as a full state dict (model.safetensors /
+        # pytorch_model.bin), the post-run export_hf_checkpoint.py pass can read it
+        # directly, so skip the gather here. The decision is made from the on-disk
+        # checkpoint format — identical across ranks (shared FS), and before the collective
+        # gather below, so all ranks take the same branch.
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
+        if any(
+            os.path.exists(os.path.join(ckpt_dir, f))
+            for f in (
+                "model.safetensors",
+                "model.safetensors.index.json",
+                "pytorch_model.bin",
+                "pytorch_model.bin.index.json",
+            )
+        ):
+            return control
+
         export_dir = os.path.join(args.output_dir, f"exported-checkpoint-{step}")
 
-        # All ranks participate in state_dict gather (FSDP2 collective op).
-        # Use get_model_state_dict to get the full (ungathered) weights regardless
-        # of fsdp_state_dict_type setting.  Only the dflash_module submodule is
-        # gathered (~328 MB for MiniMax-M2.7), not the full 229B base model.
+        # All ranks participate in the state_dict gather (FSDP2 collective op). Only the
+        # dflash_module submodule is gathered (~328 MB for MiniMax-M2.7), not the 229B base.
         try:
             from torch.distributed.checkpoint.state_dict import (
                 StateDictOptions,
@@ -274,18 +291,22 @@ class DFlashExportCallback(TrainerCallback):
             # Non-distributed / single-GPU fallback
             raw_sd = model.state_dict()
 
-        # Extract dflash_module keys and strip prefix
-        drafter_sd = {}
-        for key, value in raw_sd.items():
-            if "dflash_module." in key:
-                export_key = key.split("dflash_module.", 1)[1]
-                if "rotary_emb" not in export_key:
-                    drafter_sd[export_key] = value.cpu() if value.device.type != "cpu" else value
-            elif not any(prefix in key for prefix in ("model.", "lm_head.", "embed_tokens.")):
-                # Keys already without prefix (from submodule state_dict)
-                if "rotary_emb" not in key:
-                    drafter_sd[key] = value.cpu() if value.device.type != "cpu" else value
+        # Reuse the exporter's extraction (strips the dflash_module prefix, drops rotary
+        # buffers) for the common full-model key layout. Some PyTorch versions return the
+        # submodule gather with keys already stripped of the prefix — handle that directly.
+        exporter = model.get_exporter()
+        drafter_sd = exporter._extract_state_dict(raw_sd)
+        if not drafter_sd:
+            drafter_sd = {
+                k: v
+                for k, v in raw_sd.items()
+                if "rotary_emb" not in k
+                and not any(p in k for p in ("model.", "lm_head.", "embed_tokens."))
+            }
         del raw_sd
+        # Coerce to CPU for save_file (the distributed gather uses cpu_offload, but the
+        # single-GPU fallback may return CUDA tensors).
+        drafter_sd = {k: (v.cpu() if v.device.type != "cpu" else v) for k, v in drafter_sd.items()}
 
         if not drafter_sd:
             print_rank_0(f"Warning: No dflash_module weights found at step {step}, skipping export")
@@ -297,7 +318,6 @@ class DFlashExportCallback(TrainerCallback):
                 os.makedirs(export_dir, exist_ok=True)
                 save_file(drafter_sd, os.path.join(export_dir, "model.safetensors"))
 
-                exporter = model.get_exporter()
                 config = exporter._export_config()
                 with open(os.path.join(export_dir, "config.json"), "w") as f:
                     json.dump(config, f, indent=2)

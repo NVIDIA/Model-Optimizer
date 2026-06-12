@@ -285,26 +285,13 @@ def train():
     # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
     # level (accelerate.skip_first_batches) without re-fetching them, landing at the
     # exact data position. Setting it True would restart the data order from the top.
-    # DFlash: export the draft submodule after every checkpoint save — but only under
-    # FSDP2. With FSDP2 SHARDED_STATE_DICT, checkpoint-* dirs hold only distributed
-    # shards that the post-training export_hf_checkpoint.py pass can't read, so this
-    # callback gathers just the small draft module per save and writes a deployable
-    # exported-checkpoint-{step}/. Under DDP (e.g. offline FakeBaseModel training, or
-    # any single-device recipe) checkpoints are already full and the launcher script's
-    # post-run export handles them, so the callback is unnecessary overhead.
-    # FSDP2 is active via either route: native ParallelismConfig (dp_shard_size > 1) or
-    # the accelerate-config fallback used for transformers 4.57.x (PATCH_FSDP2_BUFFERS_TF457).
+    # DFlash: export the draft submodule after each checkpoint save. The callback only
+    # does work under FSDP2 SHARDED_STATE_DICT (where checkpoint-* dirs hold distributed
+    # shards the post-training export_hf_checkpoint.py pass can't read); for full
+    # checkpoints — DDP, single-device, or FSDP2 FULL_STATE_DICT — it self-skips, since
+    # the launcher's post-run export handles those. So it's safe to add unconditionally.
     if isinstance(recipe, ModelOptDFlashRecipe):
-        uses_fsdp2 = (getattr(training_args, "dp_shard_size", 1) or 1) > 1 or os.environ.get(
-            "PATCH_FSDP2_BUFFERS_TF457"
-        ) == "1"
-        if uses_fsdp2:
-            callbacks.append(DFlashExportCallback())
-        else:
-            print_rank_0(
-                "DFlash: non-FSDP2 run detected — skipping per-step DFlashExportCallback; "
-                "checkpoints are full and will be exported post-training by the launcher script."
-            )
+        callbacks.append(DFlashExportCallback())
 
     trainer = EagleTrainerWithAccLog(
         model=model,
