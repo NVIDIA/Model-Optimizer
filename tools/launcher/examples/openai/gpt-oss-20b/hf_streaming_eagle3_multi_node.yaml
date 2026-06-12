@@ -88,7 +88,7 @@ pipeline:
       - --ep_size 1
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
-      - --concurrency 1
+      - --concurrency 32
       # gpt-oss emits Harmony channel tags (<|channel|>analysis...<|channel|>final...)
       # in raw output. The MT-bench multi-turn loop re-feeds each answer as the next
       # turn's assistant message; gpt-oss's chat template rejects content containing
