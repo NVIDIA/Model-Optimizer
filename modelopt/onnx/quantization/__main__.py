@@ -63,6 +63,15 @@ def get_parser() -> argparse.ArgumentParser:
         "--onnx_path", required=True, type=str, help="Input onnx model without Q/DQ nodes."
     )
     argparser.add_argument(
+        "--model_id",
+        required=False,
+        type=str,
+        help=(
+            "Hugging Face model ID or local config directory used to infer EP input shape "
+            "profiles when --input_shapes_profile is not provided."
+        ),
+    )
+    argparser.add_argument(
         "--quantize_mode",
         type=str,
         choices=["fp8", "int8", "int4"],
@@ -507,6 +516,7 @@ def main():
         autotune_warmup_runs=args.autotune_warmup_runs,
         autotune_timing_runs=args.autotune_timing_runs,
         autotune_trtexec_args=args.autotune_trtexec_args,
+        model_id=args.model_id,
     )
 
 

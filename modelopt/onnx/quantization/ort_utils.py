@@ -420,6 +420,59 @@ def update_trt_ep_support(
     return trt_plugins
 
 
+def create_input_shapes_profile(model_id: str, calibration_eps: list[str]) -> list[dict[str, str]]:
+    """Create per-EP input shape profiles from a Hugging Face config.
+
+    The returned list matches ``calibration_eps`` order. EPs that do not use input shape
+    profiles receive an empty dictionary.
+    """
+
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(model_id)
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    num_kv_heads = getattr(config, "num_key_value_heads", config.num_attention_heads)
+    num_layers = config.num_hidden_layers
+
+    def make_shapes(batch_size: int, seq_len: int, past_seq_len: int) -> str:
+        shapes = [f"input_ids:{batch_size}x{seq_len}", f"attention_mask:{batch_size}x{seq_len}"]
+        for layer_idx in range(num_layers):
+            shapes.extend(
+                [
+                    f"past_key_values.{layer_idx}.key:{batch_size}x{num_kv_heads}x{past_seq_len}x{head_dim}",
+                    f"past_key_values.{layer_idx}.value:{batch_size}x{num_kv_heads}x{past_seq_len}x{head_dim}",
+                ]
+            )
+        return ",".join(shapes)
+
+    min_shapes = make_shapes(batch_size=1, seq_len=1, past_seq_len=0)
+    opt_shapes = make_shapes(batch_size=1, seq_len=512, past_seq_len=512)
+    max_shapes = make_shapes(batch_size=1, seq_len=1024, past_seq_len=1024)
+
+    profiles: list[dict[str, str]] = []
+    for ep in calibration_eps:
+        if "NvTensorRtRtx" in ep:
+            profiles.append(
+                {
+                    "nv_profile_min_shapes": min_shapes,
+                    "nv_profile_opt_shapes": opt_shapes,
+                    "nv_profile_max_shapes": max_shapes,
+                }
+            )
+        elif ep == "trt":
+            profiles.append(
+                {
+                    "trt_profile_min_shapes": min_shapes,
+                    "trt_profile_opt_shapes": opt_shapes,
+                    "trt_profile_max_shapes": max_shapes,
+                }
+            )
+        else:
+            profiles.append({})
+
+    return profiles
+
+
 def create_inference_session(
     onnx_path_or_model: str | bytes,
     calibration_eps: list[str],
@@ -482,6 +535,7 @@ def configure_ort(
     calibrate_per_node: bool = False,
     custom_ops_to_quantize: list[str] = [],
     op_types_needing_output_quant: list[str] | None = None,
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
 ):
     """Configure and patches ORT to support ModelOpt ONNX quantization."""
     logger.info("Configuring ORT for ModelOpt ONNX quantization")
@@ -538,6 +592,16 @@ def configure_ort(
     ]
     if trt_extra_plugin_lib_paths is not None:
         trt_extra_plugin_lib_paths = ";".join(trt_extra_plugin_lib_paths)
+    execution_providers = _prepare_ep_list(calibration_eps)
+    if input_shapes_profile is not None:
+        assert len(calibration_eps) == len(input_shapes_profile), (
+            "Number of calibration EPs and number of input-shapes-profile don't match"
+        )
+        execution_providers = [
+            (ep, input_shapes_profile[idx]) if input_shapes_profile[idx] else ep
+            for idx, ep in enumerate(execution_providers)
+        ]
+
     trt_guided_options = {
         "QuantizeBias": False,
         "ActivationSymmetric": True,
@@ -554,7 +618,7 @@ def configure_ort(
             True
         ),
         "TrtExtraPluginLibraryPaths": trt_extra_plugin_lib_paths,
-        "ExecutionProviders": _prepare_ep_list(calibration_eps),  # type: ignore[arg-type]
+        "ExecutionProviders": execution_providers,  # type: ignore[arg-type]
     }
 
     quantizable_op_types = get_quantizable_op_types(op_types_to_quantize)
