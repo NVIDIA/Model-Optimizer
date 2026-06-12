@@ -57,6 +57,7 @@ pipeline:
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
       - training.output_dir=/scratchspace/dflash
