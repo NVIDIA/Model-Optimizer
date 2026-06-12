@@ -107,7 +107,7 @@ FP8 attention/dense.
 | `--moe-runner-backend marlin` | Hopper W4A16 FP4 MoE runner |
 | `--moe-a2a-backend deepep` | Default expert all-to-all backend |
 | `--moe-a2a-backend megamoe` | Blackwell-only, high-throughput strategy |
-| `--deepep-mode auto|normal|low_latency` | DeepEP dispatch mode |
+| `--deepep-mode auto\|normal\|low_latency` | DeepEP dispatch mode |
 
 Strategy (low-latency / balanced / high-throughput) tunes
 `--cuda-graph-max-bs`, `--max-running-requests`, and MTP (Multi-Token
