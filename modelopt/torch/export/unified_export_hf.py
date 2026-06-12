@@ -973,7 +973,8 @@ def _fuse_qkv_linears_diffusion(
     Note: This is a simplified version for diffusion models that:
     - Handles QKV fusion (shared input detection)
     - Filters to only fuse actual QKV projection layers (not AdaLN, FFN, etc.)
-    - Skips pre_quant_scale handling (TODO for future)
+    - Skips pre_quant_scale *fusion* (the export path promotes pre_quant_scale to
+      module-level keys separately; see _promote_quantizer_tensors_to_module)
     - Skips FFN fusion with layernorm (TODO for future)
 
     Args:
@@ -1143,7 +1144,8 @@ def _export_diffusers_checkpoint(
         if is_quantized:
             # Fuse QKV linears that share the same input (unify amax values)
             # This is similar to requantize_resmooth_fused_llm_layers but simplified for diffusion
-            # TODO: Add pre_quant_scale handling and FFN fusion for AWQ-style quantization
+            # TODO: Add FFN fusion for AWQ-style quantization (pre_quant_scale is
+            # promoted to module keys at export by _promote_quantizer_tensors_to_module below)
             print(f"  Running QKV fusion for {component_name}...")
             # Qwen-Image's packed-latent forward signature is non-standard; if the
             # dummy forward fails for it, fail loudly rather than silently skipping

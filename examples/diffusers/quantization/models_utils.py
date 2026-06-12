@@ -330,7 +330,8 @@ def build_block_range_quant_cfg(
 
     Raises:
         ValueError: if the backbone has no ``block_module`` list, or it has fewer
-            than ``exclude_first_n + exclude_last_n + 1`` blocks.
+            than ``exclude_first_n + exclude_last_n + 2`` blocks (it requires at
+            least two quantized middle blocks).
     """
     blocks = getattr(backbone, block_module, None)
     if blocks is None or not hasattr(blocks, "__len__"):
