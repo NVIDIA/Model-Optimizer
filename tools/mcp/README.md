@@ -24,6 +24,10 @@ Mode is determined by which args you pass, not by which tool you call. One tool,
 | `submit_job(yaml_path, hf_local? \| cluster_host?, ...)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Returns `experiment_id` (Slurm) or PID (Docker) immediately; the actual job runs detached. Auto-runs `verify_setup` first by default (skippable). |
 | `job_status(experiment_id)` | Filesystem-based status from nemo_run's experiment dir (`_DONE`, `status_*.out`). Returns `done` / `failed` / `running` plus per-task statuses. No in-memory registry; survives MCP server restarts. |
 | `job_logs(experiment_id, task?, tail?)` | Read `log_<task>.out` from the experiment dir. Per-task filtering + optional tail to truncate. |
+| `wait_for_experiment(experiment_id, timeout_sec?, poll_interval_sec?)` | Block until `job_status` returns `done` / `failed`, or until `timeout_sec` elapses. Single tool call replaces the agent's `while True: status; sleep` loop — saves tool-call turns and avoids overshooting the poll interval. Returns the final status plus `waited_seconds`. |
+| `provision_passwordless_ssh_dry_run(cluster_host, cluster_user, identity?)` | Operator UX helper. Inspects `~/.ssh/` and emits the exact `ssh-keygen` / `ssh-copy-id` commands the user should run to make `verify_setup(executor='slurm')` pass. No side effects — pure inspection + shell-command formatting. |
+| `read_cluster_artifact(experiment_id, path?, job_idx?)` | Pull artifact content from the remote cluster via nemo_run's tunnel primitives. With `path=None`, wraps `nemo experiment logs <id> <job_idx>` (built-in log fetch). With a `path`, uses the experiment's `Tunnel` to `cat` the file. No reinvented SSH. |
+| `open_draft_pr(target_repo, title, body, base_branch?, cwd?)` | Push the current branch and open a draft PR via `gh pr create --draft`. Validates `cwd` is a git repo before doing anything. On `gh` failure after a successful push, returns `branch_pushed=True` so the operator can retry just the PR-open step. |
 
 ## Install
 
@@ -145,11 +149,12 @@ tools/mcp/
 ├── README.md                   # ← this file
 ├── modelopt_mcp/
 │   ├── __init__.py
-│   ├── server.py               # FastMCP entry; 5 tool definitions
+│   ├── server.py               # FastMCP entry; 9 tool definitions
 │   └── bridge.py               # thin wrapper over launcher's core.py
 │                               # + filesystem status/log helpers
+│                               # + tunnel/PR helpers (Phase 1.5)
 └── tests/
-    └── test_bridge.py          # 19 unit tests, fully hermetic
+    └── test_bridge.py          # 32 unit tests, fully hermetic
                                 # (mocked subprocess + tmp_path fixtures)
 ```
 
@@ -157,9 +162,9 @@ tools/mcp/
 
 Tracked under [OMNIML-5123](https://jirasw.nvidia.com/browse/OMNIML-5123) (Epic). Highlights:
 
-**Phase 2 — close the `cell.md` simplification loop:**
-* [OMNIML-5128](https://jirasw.nvidia.com/browse/OMNIML-5128) — `wait_for_experiment`, `read_cluster_artifact`, `open_draft_pr`
-* [OMNIML-5132](https://jirasw.nvidia.com/browse/OMNIML-5132) — `provision_passwordless_ssh_dry_run` (operator UX helper)
+**Phase 1.5 — shipped in this PR:** `wait_for_experiment`, `provision_passwordless_ssh_dry_run`, `read_cluster_artifact`, `open_draft_pr`. Anchors: [OMNIML-5128](https://jirasw.nvidia.com/browse/OMNIML-5128) (partial: the three high-leverage tools), [OMNIML-5132](https://jirasw.nvidia.com/browse/OMNIML-5132) (full).
+
+**Phase 2 — close the remaining `cell.md` simplification loop:**
 * Capture `experiment_id` from Docker subprocess output (Phase 1 returns PID; nemo_run's id only appears in stdout after a few seconds — Phase 2 tails launcher output via a side-channel log file).
 
 **Phase 3 — NEL integration + checkpoint introspection:**

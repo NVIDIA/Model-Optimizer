@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess  # nosec B404
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -822,4 +823,477 @@ def job_logs_impl(
         "experiment_id": experiment_id,
         "experiment_dir": str(exp_dir),
         "logs": logs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# wait_for_experiment — closes the polling loop the agent would write by hand
+# ---------------------------------------------------------------------------
+
+
+def wait_for_experiment_impl(
+    experiment_id: str,
+    timeout_sec: int,
+    poll_interval_sec: int,
+) -> dict:
+    """Block until ``experiment_id`` reaches a terminal status or the timeout elapses.
+
+    Returns the same dict shape as ``job_status_impl`` plus a
+    ``waited_seconds`` field. On timeout, returns
+    ``{ok: False, reason: "wait_timeout", last_status: <last poll>}``
+    instead of raising — same structured-failure convention as the
+    other tools.
+
+    The poll uses ``job_status_impl`` directly (no subprocess shell-out),
+    so the resolution rules for finding the experiment dir match
+    exactly. If the dir never shows up,
+    ``job_status_impl`` returns ``experiment_dir_not_found`` and we
+    pass that through immediately rather than spinning to the timeout.
+    """
+    started = time.monotonic()
+    while True:
+        status = job_status_impl(experiment_id)
+        if not status.get("ok"):
+            # Pass through job_status's structured failure (e.g.
+            # experiment_dir_not_found) — no point spinning when the
+            # dir doesn't exist.
+            return {**status, "waited_seconds": time.monotonic() - started}
+        if status["status"] in ("done", "failed"):
+            return {**status, "waited_seconds": time.monotonic() - started}
+        if time.monotonic() - started > timeout_sec:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "reason": "wait_timeout",
+                "diagnostic": (
+                    f"Experiment {experiment_id!r} still "
+                    f"{status['status']!r} after {timeout_sec}s. "
+                    f"Last status: {status}."
+                ),
+                "last_status": status,
+                "waited_seconds": time.monotonic() - started,
+            }
+        time.sleep(poll_interval_sec)
+
+
+# ---------------------------------------------------------------------------
+# provision_passwordless_ssh_dry_run — operator UX helper
+# ---------------------------------------------------------------------------
+
+
+def provision_passwordless_ssh_dry_run_impl(
+    cluster_host: str,
+    cluster_user: str | None,
+    identity: str | None,
+) -> dict:
+    """Emit the exact commands to set up passwordless SSH — does NOT execute them.
+
+    Strategy:
+
+    1. Resolve which identity file to inspect (explicit arg → env →
+       ``~/.ssh/id_ed25519`` default).
+    2. If the private key file is missing, emit a ``ssh-keygen`` command
+       and stop. Operator runs it, then re-invokes this tool.
+    3. If the private key exists but the public key (``<identity>.pub``)
+       is missing, that's an unusual state — surface it as a failure
+       with a recovery hint.
+    4. If both exist, read the public key + emit the exact
+       ``ssh-copy-id`` command pointing at the named cluster. Note
+       that this is the only step that needs a password — the operator
+       runs it, types the cluster password once, and from then on
+       passwordless SSH works.
+
+    Returns ``{ok, step, commands, next_check, ...}``. ``commands`` is
+    a list of shell strings the operator should run in order.
+    ``next_check`` always recommends calling
+    ``verify_setup(executor="slurm", ...)`` after the operator
+    runs the commands.
+    """
+    # Resolve identity
+    resolved_identity = (
+        identity or os.environ.get("IDENTITY") or str(Path.home() / ".ssh" / "id_ed25519")
+    )
+    identity_path = Path(resolved_identity).expanduser()
+    pubkey_path = Path(f"{identity_path}.pub")
+    target = f"{cluster_user}@{cluster_host}" if cluster_user else cluster_host
+
+    next_check_hint = (
+        f"After running the commands above, call "
+        f"verify_setup(executor='slurm', cluster_host={cluster_host!r}"
+        + (f", cluster_user={cluster_user!r}" if cluster_user else "")
+        + (f", identity={resolved_identity!r}" if identity else "")
+        + ") to confirm key-auth now works."
+    )
+
+    if not identity_path.exists():
+        # Step 1: keygen needed
+        keygen_cmd = (
+            f"ssh-keygen -t ed25519 -N '' -f {identity_path} "
+            f'-C "{os.environ.get("USER", "user")}@$(hostname)"'
+        )
+        return {
+            "ok": True,
+            "step": "keygen_required",
+            "identity_path": str(identity_path),
+            "commands": [
+                keygen_cmd,
+                # After keygen, the operator should re-invoke this tool
+                # — they'll hit the next branch and get the ssh-copy-id
+                # command.
+            ],
+            "diagnostic": (
+                f"No SSH private key at {identity_path}. Run the "
+                f"command above, then call this tool again — it will "
+                f"emit the ssh-copy-id step to authorize the new key "
+                f"on the cluster."
+            ),
+            "next_step": (
+                f"Re-invoke provision_passwordless_ssh_dry_run("
+                f"cluster_host={cluster_host!r}"
+                + (f", cluster_user={cluster_user!r}" if cluster_user else "")
+                + ")"
+            ),
+        }
+
+    if not pubkey_path.exists():
+        return {
+            "ok": False,
+            "step": "pubkey_missing",
+            "identity_path": str(identity_path),
+            "pubkey_path": str(pubkey_path),
+            "reason": "pubkey_missing",
+            "diagnostic": (
+                f"Private key exists at {identity_path} but the matching "
+                f"public key at {pubkey_path} is missing. This is "
+                f"unusual — typically both are produced together by "
+                f"ssh-keygen. Recover by regenerating the keypair "
+                f"(move {identity_path} aside first if you don't want "
+                f"to lose it):\n"
+                f"  mv {identity_path} {identity_path}.bak\n"
+                f"  ssh-keygen -t ed25519 -N '' -f {identity_path}"
+            ),
+        }
+
+    # Step 2: ssh-copy-id needed
+    pubkey_content = pubkey_path.read_text(encoding="utf-8").strip()
+    copy_cmd = f"ssh-copy-id -i {pubkey_path} {target}"
+    return {
+        "ok": True,
+        "step": "ssh_copy_id_required",
+        "identity_path": str(identity_path),
+        "pubkey_path": str(pubkey_path),
+        "pubkey": pubkey_content,
+        "commands": [copy_cmd],
+        "diagnostic": (
+            f"Public key exists at {pubkey_path}. Run the command above "
+            f"to authorize it on {target}. ssh-copy-id will prompt for "
+            f"the cluster password ONCE — that's the only place a "
+            f"password is required. After it succeeds, passwordless "
+            f"key-auth is set up."
+        ),
+        "next_check": next_check_hint,
+    }
+
+
+# ---------------------------------------------------------------------------
+# read_cluster_artifact — wraps nemo_run's tunnel
+# ---------------------------------------------------------------------------
+
+
+def read_cluster_artifact_impl(
+    experiment_id: str,
+    path: str | None,
+    job_idx: int,
+) -> dict:
+    """Read an artifact from a remote experiment via nemo_run's tunnel.
+
+    nemo_run already knows how to talk to the cluster — the executor
+    metadata is stored alongside the experiment locally. This tool
+    delegates so we don't reinvent the SSH path.
+
+    Two modes:
+
+    * ``path=None`` + ``job_idx=N`` → fetch the job's log via
+      ``nemo experiment logs <id> <N>``.
+    * ``path="<rel>"`` → relative path inside the experiment dir; we
+      use the experiment's executor tunnel to ``cat`` it.
+
+    The tool returns ``{ok, content, ...}`` with the file content as a
+    text string (8 KB max — same as the launcher's log_excerpt cap).
+    """
+    if not path:
+        # Mode 1: fetch log via `nemo experiment logs`. Subprocess
+        # because the CLI handles tunnel auth and remote-path
+        # resolution.
+        argv = [
+            "uv",
+            "run",
+            "nemo",
+            "experiment",
+            "logs",
+            experiment_id,
+            str(job_idx),
+        ]
+        launcher_dir = _THIS_DIR.parent.parent / "launcher"
+        cwd = str(launcher_dir) if launcher_dir.exists() else None
+        try:
+            proc = subprocess.run(  # nosec B603 B607
+                argv,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "job_idx": job_idx,
+                "reason": "logs_fetch_timeout",
+                "diagnostic": (
+                    f"`nemo experiment logs {experiment_id} {job_idx}` "
+                    f"did not return within 60s — tunnel may be slow "
+                    f"or unreachable."
+                ),
+            }
+        if proc.returncode != 0:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "job_idx": job_idx,
+                "reason": "logs_fetch_failed",
+                "exit_code": proc.returncode,
+                "diagnostic": (
+                    f"`nemo experiment logs` exited with code "
+                    f"{proc.returncode}. stderr: {proc.stderr.strip()[-400:]}"
+                ),
+            }
+        content = (proc.stdout or "")[-8192:]
+        return {
+            "ok": True,
+            "experiment_id": experiment_id,
+            "job_idx": job_idx,
+            "mode": "logs",
+            "content": content,
+            "bytes": len(content),
+        }
+
+    # Mode 2: arbitrary path via the experiment's tunnel. nemo_run's
+    # Experiment loads the executor + tunnel from disk; we rsync the
+    # named relative path into a local tmp dir, then read it back.
+    try:
+        from nemo_run.run.experiment import Experiment
+    except ImportError:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "reason": "nemo_run_not_installed",
+            "diagnostic": (
+                "nemo_run is not importable from the MCP server's "
+                "environment. The arbitrary-path mode requires "
+                "nemo_run's tunnel + executor metadata. Install "
+                "nemo_run (>=0.8) or use path=None + job_idx=N to "
+                "fall back to the `nemo experiment logs` CLI path."
+            ),
+        }
+    try:
+        exp = Experiment.from_id(experiment_id)
+    except (FileNotFoundError, ValueError) as e:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "reason": "experiment_not_loadable",
+            "diagnostic": (
+                f"nemo_run could not load experiment {experiment_id!r}: "
+                f"{e}. Check that NEMORUN_HOME points at the same dir "
+                f"the submission used."
+            ),
+        }
+
+    # The executor exposes a tunnel; tunnel.run() runs a remote shell
+    # command. Use `cat` for small files; rsync for large ones is a
+    # Phase-2.1 follow-up.
+    try:
+        task = exp.tasks[job_idx]
+        executor = task.executor
+        tunnel = getattr(executor, "tunnel", None)
+    except (IndexError, AttributeError) as e:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "reason": "no_tunnel",
+            "diagnostic": (
+                f"Cannot reach the experiment's tunnel: {e}. Local-mode "
+                f"experiments don't have a remote tunnel; use "
+                f"`read_local_artifact` (Phase 2 follow-up) or read "
+                f"the file directly via job_logs / job_status."
+            ),
+        }
+    if tunnel is None:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "reason": "no_tunnel",
+            "diagnostic": "Experiment executor has no tunnel attribute.",
+        }
+
+    # Resolve the remote path. The experiment dir on the cluster is
+    # exposed via tunnel.job_dir or executor.job_dir; for the launcher's
+    # SlurmExecutor, this is set at submit time.
+    remote_dir = getattr(executor, "job_dir", None) or getattr(tunnel, "job_dir", None)
+    if not remote_dir:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "reason": "no_remote_job_dir",
+            "diagnostic": (
+                "Executor / tunnel metadata didn't carry a remote "
+                "job_dir. Pass the full remote path as `path` instead "
+                "of a relative one."
+            ),
+        }
+    remote_path = path if path.startswith("/") else f"{remote_dir}/{experiment_id}/{path}"
+
+    try:
+        result = tunnel.run(f"cat {remote_path}", warn=True)
+    except Exception as e:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "remote_path": remote_path,
+            "reason": "tunnel_run_failed",
+            "diagnostic": f"tunnel.run failed: {type(e).__name__}: {e}",
+        }
+    stdout = getattr(result, "stdout", "") or ""
+    return {
+        "ok": True,
+        "experiment_id": experiment_id,
+        "remote_path": remote_path,
+        "mode": "arbitrary_path",
+        "content": stdout[-8192:],
+        "bytes": len(stdout),
+    }
+
+
+# ---------------------------------------------------------------------------
+# open_draft_pr — wraps `gh pr create --draft`
+# ---------------------------------------------------------------------------
+
+
+def open_draft_pr_impl(
+    target_repo: str,
+    title: str,
+    body: str,
+    base_branch: str,
+    cwd: str | None,
+) -> dict:
+    """Open a draft PR on the named target repo from the caller's current branch.
+
+    Preconditions enforced by the agent (NOT this tool):
+    * The agent's working tree at ``cwd`` is at the branch it wants to
+      PR (created + committed).
+    * The branch carries a DCO ``Signed-off-by:`` trailer where the
+      target repo requires one (e.g. NVIDIA repos).
+
+    Steps:
+    1. ``git push -u origin HEAD`` to publish the branch.
+    2. ``gh pr create --draft --title ... --body ... --base ...`` to
+       open the draft PR against the target_repo.
+    3. Parse the PR URL out of gh's stdout and return it.
+    """
+    cwd_path = Path(cwd or os.getcwd())
+    if not (cwd_path / ".git").exists():
+        return {
+            "ok": False,
+            "reason": "not_a_git_repo",
+            "cwd": str(cwd_path),
+            "diagnostic": (
+                f"{cwd_path} does not look like a git repo (no .git "
+                f"directory). Pass an explicit cwd= pointing at the "
+                f"checkout where the branch + commit live."
+            ),
+        }
+
+    # Step 1: push
+    try:
+        push = subprocess.run(  # nosec B603 B607
+            ["git", "push", "-u", "origin", "HEAD"],
+            cwd=str(cwd_path),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "reason": "git_not_installed",
+            "diagnostic": "`git` not on PATH.",
+        }
+    if push.returncode != 0:
+        return {
+            "ok": False,
+            "reason": "git_push_failed",
+            "exit_code": push.returncode,
+            "diagnostic": (
+                f"git push failed (exit={push.returncode}). stderr: {push.stderr.strip()[-400:]}"
+            ),
+        }
+
+    # Step 2: gh pr create
+    try:
+        gh = subprocess.run(  # nosec B603 B607
+            [
+                "gh",
+                "pr",
+                "create",
+                "--repo",
+                target_repo,
+                "--draft",
+                "--title",
+                title,
+                "--body",
+                body,
+                "--base",
+                base_branch,
+            ],
+            cwd=str(cwd_path),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "reason": "gh_not_installed",
+            "diagnostic": "`gh` (GitHub CLI) not on PATH.",
+            "branch_pushed": True,  # branch is published; only PR-open failed
+        }
+    if gh.returncode != 0:
+        return {
+            "ok": False,
+            "reason": "gh_pr_create_failed",
+            "exit_code": gh.returncode,
+            "diagnostic": (
+                f"gh pr create failed (exit={gh.returncode}). stderr: {gh.stderr.strip()[-400:]}"
+            ),
+            "branch_pushed": True,
+        }
+
+    # Parse the PR URL out of gh's stdout (last URL on stdout is the
+    # newly-created PR).
+    url_match = re.search(
+        r"https://github\.com/[^\s]+/pull/\d+",
+        gh.stdout or "",
+    )
+    pr_url = url_match.group(0) if url_match else None
+    return {
+        "ok": True,
+        "target_repo": target_repo,
+        "title": title,
+        "base_branch": base_branch,
+        "pr_url": pr_url,
+        "stdout_tail": (gh.stdout or "")[-400:],
     }

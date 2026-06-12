@@ -363,3 +363,355 @@ def test_job_logs_missing_task(tmp_path, monkeypatch):
     result = bridge.job_logs_impl("exp_1781000005", task="task_99", tail=None)
     assert result["ok"] is False
     assert result["reason"] == "task_log_not_found"
+
+
+# ---------------------------------------------------------------------------
+# wait_for_experiment
+# ---------------------------------------------------------------------------
+
+
+def test_wait_for_experiment_returns_terminal_immediately(tmp_path, monkeypatch):
+    """If the experiment is already terminal, return without polling."""
+    exp = tmp_path / "experiments" / "exp_already_done"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    (exp / "status_task_0.out").write_text("succeeded\n")
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+
+    result = bridge.wait_for_experiment_impl(
+        "exp_already_done",
+        timeout_sec=10,
+        poll_interval_sec=1,
+    )
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    assert result["waited_seconds"] < 1  # didn't actually wait
+
+
+def test_wait_for_experiment_polls_until_done(tmp_path, monkeypatch):
+    """Spin through running → done."""
+    exp = tmp_path / "experiments" / "exp_in_flight"
+    exp.mkdir(parents=True)
+    (exp / "status_task_0.out").write_text("running\n")
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+
+    # Flip the marker after 2 polls via a counter side-effect
+    call_count = {"n": 0}
+    real_status = bridge.job_status_impl
+
+    def fake_status(experiment_id):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            (exp / "_DONE").touch()
+        return real_status(experiment_id)
+
+    monkeypatch.setattr(bridge, "job_status_impl", fake_status)
+    result = bridge.wait_for_experiment_impl(
+        "exp_in_flight",
+        timeout_sec=10,
+        poll_interval_sec=0,
+    )
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    assert call_count["n"] >= 2
+
+
+def test_wait_for_experiment_timeout(tmp_path, monkeypatch):
+    """Never reaches terminal → wait_timeout with last_status."""
+    exp = tmp_path / "experiments" / "exp_stuck"
+    exp.mkdir(parents=True)
+    (exp / "status_task_0.out").write_text("running\n")
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+
+    result = bridge.wait_for_experiment_impl(
+        "exp_stuck",
+        timeout_sec=1,
+        poll_interval_sec=0,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "wait_timeout"
+    assert result["last_status"]["status"] == "running"
+
+
+def test_wait_for_experiment_passes_through_dir_not_found(tmp_path, monkeypatch):
+    """If the experiment dir doesn't exist, don't spin to timeout."""
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    result = bridge.wait_for_experiment_impl(
+        "does_not_exist",
+        timeout_sec=60,
+        poll_interval_sec=0,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "experiment_dir_not_found"
+    # Bail out fast — not the full timeout
+    assert result["waited_seconds"] < 1
+
+
+# ---------------------------------------------------------------------------
+# provision_passwordless_ssh_dry_run
+# ---------------------------------------------------------------------------
+
+
+def test_provision_ssh_no_key_emits_keygen(tmp_path, monkeypatch):
+    """Missing private key → keygen command, step='keygen_required'."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("IDENTITY", raising=False)
+
+    result = bridge.provision_passwordless_ssh_dry_run_impl(
+        cluster_host="cw-dfw.example.com",
+        cluster_user="alice",
+        identity=None,
+    )
+    assert result["ok"] is True
+    assert result["step"] == "keygen_required"
+    assert "ssh-keygen" in result["commands"][0]
+    assert "ed25519" in result["commands"][0]
+    assert result["identity_path"].endswith(".ssh/id_ed25519")
+
+
+def test_provision_ssh_key_present_emits_copy_id(tmp_path, monkeypatch):
+    """Key + pubkey present → ssh-copy-id command + pubkey content."""
+    fake_home = tmp_path / "home"
+    ssh = fake_home / ".ssh"
+    ssh.mkdir(parents=True)
+    (ssh / "id_ed25519").write_text("PRIVKEY")
+    pubkey_content = "ssh-ed25519 AAAAC3NzaC... alice@host"
+    (ssh / "id_ed25519.pub").write_text(pubkey_content + "\n")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("IDENTITY", raising=False)
+
+    result = bridge.provision_passwordless_ssh_dry_run_impl(
+        cluster_host="cw-dfw.example.com",
+        cluster_user="alice",
+        identity=None,
+    )
+    assert result["ok"] is True
+    assert result["step"] == "ssh_copy_id_required"
+    assert "ssh-copy-id" in result["commands"][0]
+    assert "alice@cw-dfw.example.com" in result["commands"][0]
+    assert result["pubkey"] == pubkey_content
+    assert "verify_setup" in result["next_check"]
+
+
+def test_provision_ssh_priv_without_pub_surfaces_failure(tmp_path, monkeypatch):
+    """Private key but no .pub → pubkey_missing with recovery hint."""
+    fake_home = tmp_path / "home"
+    ssh = fake_home / ".ssh"
+    ssh.mkdir(parents=True)
+    (ssh / "id_ed25519").write_text("PRIVKEY")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("IDENTITY", raising=False)
+
+    result = bridge.provision_passwordless_ssh_dry_run_impl(
+        cluster_host="cw-dfw.example.com",
+        cluster_user="alice",
+        identity=None,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "pubkey_missing"
+    assert "ssh-keygen" in result["diagnostic"]
+
+
+def test_provision_ssh_explicit_identity_overrides_default(tmp_path, monkeypatch):
+    """Explicit identity arg wins over $IDENTITY and ~/.ssh/id_ed25519."""
+    explicit = tmp_path / "custom_key"
+    explicit.write_text("CUSTOM")
+    (tmp_path / "custom_key.pub").write_text("ssh-ed25519 AAAA alice\n")
+    monkeypatch.setenv("IDENTITY", "/wrong/path")  # should be ignored
+
+    result = bridge.provision_passwordless_ssh_dry_run_impl(
+        cluster_host="cw-dfw.example.com",
+        cluster_user="alice",
+        identity=str(explicit),
+    )
+    assert result["ok"] is True
+    assert result["identity_path"] == str(explicit)
+
+
+# ---------------------------------------------------------------------------
+# read_cluster_artifact — logs mode (subprocess mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_read_cluster_artifact_logs_mode_ok(monkeypatch):
+    """path=None → wraps `nemo experiment logs <id> <job_idx>`."""
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="line 1\nline 2\nline 3\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.read_cluster_artifact_impl(
+        experiment_id="cicd_42",
+        path=None,
+        job_idx=0,
+    )
+    assert result["ok"] is True
+    assert result["mode"] == "logs"
+    assert "line 1" in result["content"]
+    # Verify the wrapped command
+    assert "nemo" in captured["argv"]
+    assert "experiment" in captured["argv"]
+    assert "logs" in captured["argv"]
+    assert "cicd_42" in captured["argv"]
+
+
+def test_read_cluster_artifact_logs_mode_subprocess_failed(monkeypatch):
+    """Nemo cli non-zero → structured logs_fetch_failed."""
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="experiment cicd_42 not found\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.read_cluster_artifact_impl(
+        experiment_id="cicd_42",
+        path=None,
+        job_idx=0,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "logs_fetch_failed"
+    assert result["exit_code"] == 1
+
+
+def test_read_cluster_artifact_logs_mode_timeout(monkeypatch):
+    """Hanging tunnel → structured logs_fetch_timeout, no exception."""
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=60)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.read_cluster_artifact_impl(
+        experiment_id="cicd_42",
+        path=None,
+        job_idx=0,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "logs_fetch_timeout"
+
+
+# ---------------------------------------------------------------------------
+# open_draft_pr — subprocess mocked
+# ---------------------------------------------------------------------------
+
+
+def test_open_draft_pr_happy_path(monkeypatch, tmp_path):
+    """Git push ok → gh pr create ok → returns parsed pr_url."""
+    (tmp_path / ".git").mkdir()  # pretend it's a git repo
+
+    call_log = []
+
+    def fake_run(argv, **kwargs):
+        call_log.append(argv[0])
+        if argv[0] == "git":
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+        # gh pr create — return a typical PR URL on stdout
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=(
+                "Warning: 1 uncommitted change\n"
+                "https://github.com/NVIDIA/Model-Optimizer/pull/9999\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.open_draft_pr_impl(
+        target_repo="NVIDIA/Model-Optimizer",
+        title="test pr",
+        body="body text",
+        base_branch="main",
+        cwd=str(tmp_path),
+    )
+    assert result["ok"] is True
+    assert result["pr_url"] == "https://github.com/NVIDIA/Model-Optimizer/pull/9999"
+    assert call_log == ["git", "gh"]
+
+
+def test_open_draft_pr_not_a_git_repo(tmp_path):
+    """Cwd without .git → structured not_a_git_repo failure, no subprocess."""
+    result = bridge.open_draft_pr_impl(
+        target_repo="NVIDIA/Model-Optimizer",
+        title="x",
+        body="x",
+        base_branch="main",
+        cwd=str(tmp_path),
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "not_a_git_repo"
+
+
+def test_open_draft_pr_git_push_failed(monkeypatch, tmp_path):
+    """Git push non-zero → structured git_push_failed."""
+    (tmp_path / ".git").mkdir()
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=128,
+                stdout="",
+                stderr="rejected: non-fast-forward\n",
+            )
+        pytest.fail(f"gh should not be called when git push fails; got {argv}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.open_draft_pr_impl(
+        target_repo="NVIDIA/Model-Optimizer",
+        title="x",
+        body="x",
+        base_branch="main",
+        cwd=str(tmp_path),
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "git_push_failed"
+
+
+def test_open_draft_pr_gh_failed_but_branch_pushed(monkeypatch, tmp_path):
+    """Gh pr create non-zero → reports branch_pushed=True so the operator can retry just the PR-open step."""
+    (tmp_path / ".git").mkdir()
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="resource not found: NVIDIA/Model-Optimizer\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.open_draft_pr_impl(
+        target_repo="NVIDIA/Model-Optimizer",
+        title="x",
+        body="x",
+        base_branch="main",
+        cwd=str(tmp_path),
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "gh_pr_create_failed"
+    assert result["branch_pushed"] is True

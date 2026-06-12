@@ -269,6 +269,197 @@ def _build_server() -> FastMCP:
     ) -> dict:
         return bridge.job_logs_impl(experiment_id, task, tail)
 
+    @mcp.tool(
+        name="wait_for_experiment",
+        description=(
+            "Block until an experiment reaches a terminal status "
+            "('done' or 'failed') or the timeout elapses. Returns the "
+            "same shape as job_status plus a `waited_seconds` field. "
+            "Use this instead of writing your own polling while-loop "
+            "around job_status."
+        ),
+    )
+    def wait_for_experiment(
+        experiment_id: Annotated[
+            str,
+            Field(description="The experiment id from submit_job."),
+        ],
+        timeout_sec: Annotated[
+            int,
+            Field(
+                ge=1,
+                description=(
+                    "Max seconds to wait before returning "
+                    "`{ok: False, reason: 'wait_timeout'}`. Default 7200 "
+                    "(2 hours) — large PTQ runs need this. Cap at your "
+                    "agent's own deadline."
+                ),
+            ),
+        ] = 7200,
+        poll_interval_sec: Annotated[
+            int,
+            Field(
+                ge=1,
+                description=(
+                    "Seconds between status polls. Default 30 — "
+                    "filesystem-based status is cheap so the poll "
+                    "doesn't have to be slow."
+                ),
+            ),
+        ] = 30,
+    ) -> dict:
+        return bridge.wait_for_experiment_impl(
+            experiment_id,
+            timeout_sec,
+            poll_interval_sec,
+        )
+
+    @mcp.tool(
+        name="provision_passwordless_ssh_dry_run",
+        description=(
+            "Emit the exact commands the operator should run to set up "
+            "passwordless SSH to a slurm cluster. Does NOT execute "
+            "them and does NOT handle passwords — the MCP wire is "
+            "unsafe for cluster credentials. Two-phase:\n\n"
+            "1. If the SSH private key is missing → emit "
+            "`ssh-keygen` command. Operator runs it, re-invokes this "
+            "tool.\n"
+            "2. If the key exists → emit `ssh-copy-id` command + "
+            "public-key content. Operator runs it (this is the only "
+            "step that needs a cluster password, prompted by ssh).\n\n"
+            "After both steps complete, the `next_check` field "
+            "recommends calling `verify_setup(executor='slurm', ...)` "
+            "to confirm key-auth now works. Use this when "
+            "`verify_setup` returns `ssh_auth_failed` and you want to "
+            "tell the operator how to fix it."
+        ),
+    )
+    def provision_passwordless_ssh_dry_run(
+        cluster_host: Annotated[
+            str,
+            Field(description="Slurm cluster login hostname."),
+        ],
+        cluster_user: Annotated[
+            str | None,
+            Field(
+                description=("SSH user for the cluster. None uses the local user."),
+            ),
+        ] = None,
+        identity: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Path to the SSH private key to inspect. None "
+                    "uses $IDENTITY env var, then ~/.ssh/id_ed25519."
+                ),
+            ),
+        ] = None,
+    ) -> dict:
+        return bridge.provision_passwordless_ssh_dry_run_impl(
+            cluster_host,
+            cluster_user,
+            identity,
+        )
+
+    @mcp.tool(
+        name="read_cluster_artifact",
+        description=(
+            "Read an artifact from a remote experiment via nemo_run's "
+            "tunnel. nemo_run already knows the cluster host + user + "
+            "identity from the executor metadata stored alongside the "
+            "experiment — this tool does NOT take cluster credentials.\n\n"
+            "Two modes:\n"
+            "* `path=None, job_idx=N` → fetch the job's log via "
+            "`nemo experiment logs <id> <N>`.\n"
+            "* `path='<rel>'` → read the named relative path inside "
+            "the remote experiment dir via the executor's tunnel.\n\n"
+            "Returns the file content truncated to 8 KB (same cap as "
+            "the launcher's `log_excerpt`). Use this for files like "
+            "`specbench_results.json` that the launcher writes on the "
+            "cluster's lustre but the MCP server (running locally) can't "
+            "directly read."
+        ),
+    )
+    def read_cluster_artifact(
+        experiment_id: Annotated[
+            str,
+            Field(description="The experiment id from submit_job."),
+        ],
+        path: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Relative path inside the experiment dir. None = "
+                    "log-fetch mode via `nemo experiment logs`."
+                ),
+            ),
+        ] = None,
+        job_idx: Annotated[
+            int,
+            Field(
+                ge=0,
+                description=(
+                    "Job index for log-fetch mode. Default 0 = the first task in the pipeline."
+                ),
+            ),
+        ] = 0,
+    ) -> dict:
+        return bridge.read_cluster_artifact_impl(experiment_id, path, job_idx)
+
+    @mcp.tool(
+        name="open_draft_pr",
+        description=(
+            "Push the agent's current branch + open a draft PR on the "
+            "named target repo. Preconditions enforced by the caller "
+            "(NOT this tool): the agent's working tree is at the branch "
+            "it wants to PR, commits exist, and any required DCO "
+            "`Signed-off-by:` trailer is in place.\n\n"
+            "Steps internally: `git push -u origin HEAD` + "
+            "`gh pr create --draft --repo <target> --title --body --base`. "
+            "Returns `pr_url` parsed from gh's stdout on success, or "
+            "structured `reason` on failure (git_push_failed, "
+            "gh_pr_create_failed, etc.)."
+        ),
+    )
+    def open_draft_pr(
+        target_repo: Annotated[
+            str,
+            Field(
+                description=("GitHub repo slug, e.g. 'NVIDIA/Model-Optimizer'."),
+            ),
+        ],
+        title: Annotated[
+            str,
+            Field(description="PR title."),
+        ],
+        body: Annotated[
+            str,
+            Field(description="PR description body (Markdown)."),
+        ],
+        base_branch: Annotated[
+            str,
+            Field(
+                description=("Base branch to PR against. Default 'main'."),
+            ),
+        ] = "main",
+        cwd: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Path to the git checkout. None uses the MCP "
+                    "server's cwd (usually the agent's working dir)."
+                ),
+            ),
+        ] = None,
+    ) -> dict:
+        return bridge.open_draft_pr_impl(
+            target_repo,
+            title,
+            body,
+            base_branch,
+            cwd,
+        )
+
     return mcp
 
 
