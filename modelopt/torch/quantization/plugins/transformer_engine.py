@@ -28,7 +28,6 @@ from packaging.version import Version
 from modelopt.torch.quantization.utils import replace_function
 
 from ..nn import QuantModuleRegistry, TensorQuantizer
-from ..tensor_quant import _fake_tensor_quant_backward, fake_quant_impl
 from .custom import _ParallelLinear
 
 _TE_VERSION = Version(te.__version__)
@@ -102,55 +101,6 @@ class _QuantTELinear(_ParallelLinear):
 
     # Override the quantized linear function
     _quantized_linear_fn = te_quantized_linear_fn
-
-
-class _GroupedAxis0FakeQuant(torch.autograd.Function):
-    """Per-expert axis-0 fake-quant for TEGrouped weights without a stacked tensor.
-
-    Equivalent in numerical output to:
-        stacked = torch.stack(weights, dim=0)
-        q = quantizer(stacked)                       # quantizer._amax shape [N, 1, 1]
-        return q.unbind(0)
-
-    but without materializing the [N, out, in] stacked tensor. The per-expert
-    loop runs inside Function.forward (one Python dispatch into the Function,
-    then the loop runs at the autograd-Function boundary), so the call site
-    avoids both the stack memcopy AND the per-call Python dispatch tax of
-    looping over a per-expert quantizer module. Single autograd node — backward
-    is one fused clipping-aware STE pass-through call.
-
-    See OMNIML-5072 AC5 for the design rationale.
-    """
-
-    @staticmethod
-    def forward(ctx, amax_vec, num_bits, unsigned, narrow_range, *weights):
-        # amax_vec: [N, 1, 1]; one [1, 1] slice per expert.
-        # weights:  N tensors, each [out, in].
-        outputs = []
-        for i, w in enumerate(weights):
-            # amax_vec[i] is a [1, 1] view; broadcasts trivially over [out, in].
-            outputs.append(
-                fake_quant_impl(w, amax_vec[i], num_bits, unsigned, narrow_range)
-            )
-        # Save for clipping-aware STE backward.
-        ctx.save_for_backward(amax_vec, *weights)
-        return tuple(outputs)
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        # Clipping-aware STE per expert: dw = grad where |w| <= amax_vec[i], else 0.
-        # Delegates to modelopt's existing @torch.jit.script-decorated
-        # _fake_tensor_quant_backward so the (|w| <= amax) and torch.where ops
-        # fuse into a single kernel per expert; a plain-Python rewrite of the
-        # same math was measured ~5x slower due to eager-mode dispatcher
-        # overhead (three small unfused kernels + cudaMalloc per iteration).
-        amax_vec, *weights = ctx.saved_tensors
-        grad_weights = tuple(
-            _fake_tensor_quant_backward(w, amax_vec[i], g)
-            for i, (w, g) in enumerate(zip(weights, grad_outputs))
-        )
-        # Order of forward args: (amax_vec, num_bits, unsigned, narrow_range, *weights).
-        return (None, None, None, None, *grad_weights)
 
 
 def _reshape_loaded_amax_to_buffer_shape(
@@ -241,23 +191,6 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             self.weight_quantizer._register_load_state_dict_pre_hook(
                 _reshape_loaded_amax_to_buffer_shape, with_module=True
             )
-            # Per OMNIML-5072 AC5 caveat: the per-expert axis-0 path's inline
-            # calibration is coupled to max-calibration. Assert that constraint
-            # here so a misconfigured quantizer fails at module setup rather
-            # than producing wrong amax values silently. Adding per-expert
-            # support for other calibrators is a follow-up ticket.
-            if self._is_per_expert_weight_quant():
-                from ..calib.max import MaxCalibrator
-                calibrator = getattr(self.weight_quantizer, "_calibrator", None)
-                # Allow None: someone explicitly disabled calibration (e.g. loading
-                # pre-computed _amax from a checkpoint). Reject only non-max calibrators
-                # that would silently produce wrong amax under the inline path.
-                assert calibrator is None or isinstance(calibrator, MaxCalibrator), (
-                    "Per-expert axis=0 TEGroupedLinear weight quantization currently "
-                    "supports max-calibration only (OMNIML-5072 AC5). Got calibrator: "
-                    f"{type(calibrator).__name__}. For other calibrators (histogram, "
-                    "percentile), file a follow-up ticket."
-                )
 
     def _is_per_expert_weight_quant(self) -> bool:
         # Per-expert mode: axis=0 on the weight quantizer means the stacked
@@ -338,44 +271,18 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         new_args = list(args)
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
         if self._is_per_expert_weight_quant():
-            # Per-expert axis-0 fake-quant via a custom autograd.Function — no
-            # stacked tensor is materialized. The Function's forward loops
-            # over the N expert weights applying fake_quant_impl per expert
-            # against amax_vec[i]; backward is one fused clipping-aware STE.
-            # See OMNIML-5072 AC5 for the design rationale.
+            # Stack the N expert weights into one [N, out, in] tensor so the
+            # quantizer's axis-0 reduction sees them together; the resulting
+            # _amax of shape [N, 1, 1] broadcasts to give per-expert fake-quant.
             #
-            # Calibration (inline, max-calibration only): bypasses modelopt's
-            # calibrator interface because the calibrator API is built around
-            # a single stacked input. We accumulate per-expert max into the
-            # [N, 1, 1] _amax buffer directly. The MaxCalibrator constraint
-            # is asserted in _setup; non-max calibrators on the per-expert
-            # path are out of scope for OMNIML-5072 (separate ticket).
-            q = self.weight_quantizer
-            weights = args[weights_start : weights_start + num_gemms]
-            if q._if_calib:
-                with torch.no_grad():
-                    if not hasattr(q, "_amax") or q._amax.shape != (num_gemms, 1, 1):
-                        q.register_buffer(
-                            "_amax",
-                            torch.zeros(
-                                (num_gemms, 1, 1),
-                                device=weights[0].device,
-                                dtype=weights[0].dtype,
-                            ),
-                        )
-                    for i, w_i in enumerate(weights):
-                        torch.maximum(
-                            q._amax[i],
-                            w_i.detach().abs().amax(),
-                            out=q._amax[i],
-                        )
-            new_args[weights_start : weights_start + num_gemms] = _GroupedAxis0FakeQuant.apply(
-                q._amax,
-                q.num_bits,
-                q.unsigned,
-                q.narrow_range,
-                *weights,
-            )
+            # Use unbind(0) (not q_stacked[i]) for the unpacking — unbind's
+            # backward is a single fused stack op, vs N SelectBackward nodes
+            # that each allocate an intermediate grad buffer per slice. At
+            # high N (hundreds of experts), this collapses backward latency
+            # by orders of magnitude. Measured under OMNIML-5064.
+            stacked = torch.stack(list(args[weights_start : weights_start + num_gemms]), dim=0)
+            q_stacked = self.weight_quantizer(stacked)
+            new_args[weights_start : weights_start + num_gemms] = q_stacked.unbind(0)
         else:
             for i in range(weights_start, weights_start + num_gemms):
                 new_args[i] = self.weight_quantizer(args[i])
