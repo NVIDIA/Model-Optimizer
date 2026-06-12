@@ -25,6 +25,7 @@ def test_nvfp4_svd_group_config_mirrors_awq_with_pre_quant_scale():
     """The NVFP4_SVD config group is NVFP4 weights/activations + a pre_quant_scale flag."""
     group = _quant_algo_to_group_config("NVFP4_SVD", group_size=16)
     assert group["pre_quant_scale"] is True
+    assert group["has_zero_point"] is False
     assert group["weights"] == {
         "dynamic": False,
         "num_bits": 4,
@@ -57,6 +58,7 @@ def test_convert_hf_quant_config_format_nvfp4_svd():
     assert "config_groups" in out
     group = out["config_groups"]["group_0"]
     assert group["pre_quant_scale"] is True
+    assert group["has_zero_point"] is False
     assert group["lora_rank"] == 32
     assert group["weights"]["num_bits"] == 4
     assert group["weights"]["type"] == "float"

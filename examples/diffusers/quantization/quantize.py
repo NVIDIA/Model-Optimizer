@@ -735,8 +735,11 @@ def main() -> None:
                 sanity_path.parent.mkdir(parents=True, exist_ok=True)
                 result.images[0].save(str(sanity_path))
                 logger.info("Sanity image saved successfully")
-            except Exception as sanity_error:  # noqa: BLE001
-                logger.warning(f"Sanity image generation failed (non-fatal): {sanity_error}")
+            except Exception as sanity_error:
+                # A requested sanity image is a positive success criterion: if it
+                # cannot be produced, fail loudly rather than reporting success.
+                logger.error(f"Sanity image generation failed: {sanity_error}", exc_info=True)
+                raise
 
         for backbone_name, backbone in pipeline_manager.iter_backbones():
             export_manager.export_onnx(

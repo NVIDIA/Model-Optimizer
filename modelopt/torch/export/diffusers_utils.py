@@ -142,6 +142,11 @@ def generate_diffusion_dummy_inputs(
         "UNet2DConditionModel",
         "unet" in model_class_name.lower(),
     )
+    is_qwen = _is_model_type(
+        "diffusers.models.transformers",
+        "QwenImageTransformer2DModel",
+        "qwen" in model_class_name.lower(),
+    )
 
     cfg = getattr(model, "config", None)
 
@@ -321,6 +326,40 @@ def generate_diffusion_dummy_inputs(
             "return_dict": False,
         }
 
+    def _qwen_inputs() -> dict[str, Any]:
+        # QwenImageTransformer2DModel does NOT take the standard
+        # (hidden_states[B,C,H,W], timestep, encoder_hidden_states) triple. It expects
+        # *packed* latents [B, (H//2)*(W//2), in_channels] plus encoder_hidden_states,
+        # encoder_hidden_states_mask, img_shapes, txt_seq_lens, and optional guidance.
+        # Timesteps are continuous in [0, 1] (not the diffusers [0, 1000] scale).
+        in_channels = getattr(cfg, "in_channels", 64)
+        joint_attention_dim = getattr(cfg, "joint_attention_dim", 3584)
+        guidance_embeds = getattr(cfg, "guidance_embeds", False)
+
+        # Small packed spatial grid (already divided by the 2x2 patch size).
+        packed_h = packed_w = 4
+        img_seq_len = packed_h * packed_w
+        text_seq_len = 8
+
+        dummy_inputs: dict[str, Any] = {
+            "hidden_states": torch.randn(
+                batch_size, img_seq_len, in_channels, device=device, dtype=dtype
+            ),
+            "encoder_hidden_states": torch.randn(
+                batch_size, text_seq_len, joint_attention_dim, device=device, dtype=dtype
+            ),
+            "encoder_hidden_states_mask": torch.ones(
+                batch_size, text_seq_len, device=device, dtype=torch.int64
+            ),
+            "timestep": torch.tensor([0.5], device=device, dtype=dtype).expand(batch_size),
+            "img_shapes": [[(1, packed_h, packed_w)]] * batch_size,
+            "txt_seq_lens": [text_seq_len] * batch_size,
+            "return_dict": False,
+        }
+        if guidance_embeds:
+            dummy_inputs["guidance"] = torch.tensor([4.0], device=device, dtype=torch.float32)
+        return dummy_inputs
+
     def _generic_transformer_inputs() -> dict[str, torch.Tensor] | None:
         # Try generic transformer handling for other model types
         # Check if model has common transformer attributes
@@ -366,6 +405,7 @@ def generate_diffusion_dummy_inputs(
         ("dit", is_dit, _dit_inputs),
         ("wan", is_wan, _wan_inputs),
         ("unet", is_unet, _unet_inputs),
+        ("qwen", is_qwen, _qwen_inputs),
     ]
 
     for _, matches, build_inputs in model_input_builders:

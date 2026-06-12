@@ -960,7 +960,9 @@ def _export_transformers_checkpoint(
 
 
 def _fuse_qkv_linears_diffusion(
-    model: nn.Module, dummy_forward_fn: Callable[[], None] | None = None
+    model: nn.Module,
+    dummy_forward_fn: Callable[[], None] | None = None,
+    strict: bool = False,
 ) -> None:
     """Fuse QKV linear layers that share the same input for diffusion models.
 
@@ -994,6 +996,11 @@ def _fuse_qkv_linears_diffusion(
             model, dummy_forward_fn, collect_layernorms=False
         )
     except Exception as e:
+        if strict:
+            raise RuntimeError(
+                f"QKV fusion dummy forward failed for {type(model).__name__}; a working "
+                f"dummy forward is required to export this model correctly. Original error: {e}"
+            ) from e
         print(f"Warning: Failed to run dummy forward for QKV fusion: {e}")
         print("Skipping QKV fusion. Quantization may still work but amax values won't be unified.")
         return
@@ -1050,19 +1057,19 @@ def _promote_quantizer_tensors_to_module(component: nn.Module) -> None:
         if not is_quantlinear(sub_module):
             continue
 
+        # register_buffer overwrites an existing buffer of the same name, so a
+        # repeated export refreshes (rather than keeps stale) promoted tensors.
         input_quantizer = getattr(sub_module, "input_quantizer", None)
         pre_quant_scale = getattr(input_quantizer, "_pre_quant_scale", None)
-        if pre_quant_scale is not None and not hasattr(sub_module, "pre_quant_scale"):
+        if pre_quant_scale is not None:
             sub_module.register_buffer("pre_quant_scale", pre_quant_scale.detach().clone())
 
         weight_quantizer = getattr(sub_module, "weight_quantizer", None)
         lora_a = getattr(weight_quantizer, "svdquant_lora_a", None)
         lora_b = getattr(weight_quantizer, "svdquant_lora_b", None)
         if lora_a is not None and lora_b is not None:
-            if not hasattr(sub_module, "svdquant_lora_a"):
-                sub_module.register_buffer("svdquant_lora_a", lora_a.detach().clone())
-            if not hasattr(sub_module, "svdquant_lora_b"):
-                sub_module.register_buffer("svdquant_lora_b", lora_b.detach().clone())
+            sub_module.register_buffer("svdquant_lora_a", lora_a.detach().clone())
+            sub_module.register_buffer("svdquant_lora_b", lora_b.detach().clone())
 
 
 def _export_diffusers_checkpoint(
@@ -1138,7 +1145,11 @@ def _export_diffusers_checkpoint(
             # This is similar to requantize_resmooth_fused_llm_layers but simplified for diffusion
             # TODO: Add pre_quant_scale handling and FFN fusion for AWQ-style quantization
             print(f"  Running QKV fusion for {component_name}...")
-            _fuse_qkv_linears_diffusion(component)
+            # Qwen-Image's packed-latent forward signature is non-standard; if the
+            # dummy forward fails for it, fail loudly rather than silently skipping
+            # fusion (which would export un-unified amax values).
+            is_qwen_component = "qwen" in type(component).__name__.lower()
+            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
 
             # Step 4: Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)

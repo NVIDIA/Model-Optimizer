@@ -88,6 +88,13 @@ for fmt in ${FORMATS}; do
         --n-steps "${N_STEPS}" \
         --hf-ckpt-dir "${out}" \
         --sanity-image-path "${out}/sanity.png"
+
+    # Verify the expected artifacts were produced (a missing artifact is a failure).
+    if [[ "${DRY_RUN}" != "1" ]]; then
+        [[ -f "${out}/sanity.png" ]] || { echo "ERROR: missing sanity image ${out}/sanity.png" >&2; exit 1; }
+        find "${out}" -name '*.safetensors' | grep -q . || { echo "ERROR: no safetensors under ${out}" >&2; exit 1; }
+        find "${out}" -name 'config.json' | grep -q . || { echo "ERROR: no config.json under ${out}" >&2; exit 1; }
+    fi
     log "Done: ${fmt}. Checkpoint at ${out}, sanity image at ${out}/sanity.png"
 done
 

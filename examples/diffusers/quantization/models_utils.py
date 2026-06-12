@@ -339,11 +339,15 @@ def build_block_range_quant_cfg(
             "cannot build the transformer-block-range recipe."
         )
     num_blocks = len(blocks)
-    min_blocks = exclude_first_n + exclude_last_n + 1
+    # Require at least two quantized middle blocks so the recipe actually
+    # quantizes something (excluding first/last alone could otherwise leave 0-1
+    # quantized blocks). For the default 2+2 recipe this means n >= 6.
+    min_blocks = exclude_first_n + exclude_last_n + 2
     if num_blocks < min_blocks:
         raise ValueError(
             f"'{block_module}' has only {num_blocks} block(s); excluding the first "
-            f"{exclude_first_n} and last {exclude_last_n} requires at least {min_blocks} blocks."
+            f"{exclude_first_n} and last {exclude_last_n} requires at least {min_blocks} blocks "
+            f"(at least 2 quantized middle blocks)."
         )
 
     excluded = sorted(

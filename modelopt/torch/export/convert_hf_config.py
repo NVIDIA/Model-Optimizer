@@ -72,6 +72,7 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
                 "group_size": gs,
             },
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
+            "has_zero_point": False,
             "pre_quant_scale": True,
         }
     elif quant_algo in ("NVFP4_AWQ", "W4A8_AWQ"):
@@ -224,6 +225,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
                 "group_size": group_size,
             },
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
+            "has_zero_point": False,
             "pre_quant_scale": True,
             "targets": ["Linear"],
         }

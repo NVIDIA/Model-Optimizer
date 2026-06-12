@@ -77,10 +77,14 @@ def test_recipe_block_count_scales_with_model():
     assert _disabled_block_indices(rules) == {0, 1, 58, 59}
 
 
-def test_recipe_rejects_too_few_blocks():
-    # 2 + 2 exclusion needs at least 5 blocks; 4 blocks must raise a clear error.
+@pytest.mark.parametrize("num_blocks", [5, 4, 3])
+def test_recipe_rejects_too_few_blocks(num_blocks):
+    # A 2 + 2 exclusion needs at least 6 blocks (>= 2 quantized middle blocks).
+    # A 5-block model leaves only 1 middle block and must be rejected too.
     with pytest.raises(ValueError, match="at least"):
-        build_block_range_quant_cfg(_StubBackbone(4), exclude_first_n=2, exclude_last_n=2)
+        build_block_range_quant_cfg(
+            _StubBackbone(num_blocks), exclude_first_n=2, exclude_last_n=2
+        )
 
 
 def test_recipe_missing_block_module_raises():
