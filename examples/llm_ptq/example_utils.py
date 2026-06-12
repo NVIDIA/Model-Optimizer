@@ -55,11 +55,7 @@ logger = logging.getLogger(__name__)
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 # TODO: Refactor into the config system.
-_QWEN36_AUTOQ_DISABLED_LAYERS = (
-    "*shared_expert_gate*",
-    "*linear_attn.in_proj_a*",
-    "*linear_attn.in_proj_b*",
-)
+_QWEN36_AUTOQ_DISABLED_LAYERS = ("*shared_expert_gate*",)
 _VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
 
 
