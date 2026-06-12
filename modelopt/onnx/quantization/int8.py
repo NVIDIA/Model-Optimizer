@@ -18,6 +18,7 @@
 import os
 import tempfile
 import time
+from collections.abc import Sequence
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -139,6 +140,7 @@ def quantize(
     direct_io_types: bool = False,
     opset: int | None = None,
     autotune: bool = False,
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies INT8 quantization to an ONNX file using the compiler friendly heuristics.
@@ -177,6 +179,7 @@ def quantize(
             calibration_data_reader,
             calibration_eps,
             calibration_shapes,
+            input_shapes_profile,
         )
         nodes_to_exclude.extend(matmul_nodes_to_exclude)  # type: ignore[union-attr]
         logger.debug(f"Excluding {len(matmul_nodes_to_exclude)} MatMul nodes due to GEMV pattern")
@@ -199,6 +202,7 @@ def quantize(
         calibrate_per_node,
         custom_ops_to_quantize,
         kwargs.get("op_types_needing_output_quant"),
+        input_shapes_profile,
     )
     logger.info(f"Quantizable op types: {[t for t in quantizable_op_types if t in op_types]}")
 

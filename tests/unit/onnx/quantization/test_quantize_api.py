@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for ONNX quantization opset handling."""
+"""Tests for ONNX quantization API handling."""
 
+import importlib
 import os
 
 import onnx
@@ -48,6 +49,97 @@ OPSET_SCENARIOS = [
     # Requesting opset above minimum should be respected
     ("above_min_respected", 0, 1, 1),
 ]
+
+
+def test_realign_input_shapes_profile_after_calibration_eps_update():
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+
+    profiles = quantize_module._realign_input_shapes_profile(
+        [{"cpu_profile": "cpu"}, {"trt_profile": "trt"}],
+        ["cpu", "trt"],
+        ["trt", "cpu"],
+    )
+
+    assert profiles == [{"trt_profile": "trt"}, {"cpu_profile": "cpu"}]
+
+
+def test_realign_input_shapes_profile_rejects_duplicate_calibration_eps():
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+
+    with pytest.raises(AssertionError, match="Calibration EPs must be unique"):
+        quantize_module._realign_input_shapes_profile(
+            [{"cpu_profile": "first"}, {"cpu_profile": "second"}],
+            ["cpu", "cpu"],
+            ["cpu"],
+        )
+
+
+def test_quantize_infers_input_profiles_after_ep_support_update(monkeypatch, tmp_path):
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    onnx_path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"")
+    captured = {}
+
+    def fake_preprocess(
+        onnx_path,
+        use_external_data_format,
+        output_path,
+        enable_shared_constants_duplication,
+        trt_plugins,
+        trt_plugins_precision,
+        override_shapes,
+        simplify,
+        quantize_mode,
+        opset,
+    ):
+        return onnx_path, object(), [], True, False, False, {}, {}
+
+    def fake_update_trt_ep_support(calibration_eps, has_dds_op, has_custom_op, trt_plugins):
+        assert has_custom_op is True
+        calibration_eps.remove("trt")
+        calibration_eps.insert(0, "trt")
+        return trt_plugins
+
+    def fake_create_input_shapes_profile(model_id, calibration_eps, trust_remote_code=False):
+        captured["profile_eps"] = list(calibration_eps)
+        captured["trust_remote_code"] = trust_remote_code
+        return [{"trt_profile_min_shapes": "trt_profile"}, {}]
+
+    def fake_find_nodes_from_mha_to_exclude(*args):
+        captured["find_eps"] = list(args[-2])
+        captured["find_profile"] = args[-1]
+        return []
+
+    def fake_quantize_int8(**kwargs):
+        captured["quantize_eps"] = list(kwargs["calibration_eps"])
+        captured["quantize_profile"] = kwargs["input_shapes_profile"]
+
+    monkeypatch.setattr(quantize_module, "_preprocess_onnx", fake_preprocess)
+    monkeypatch.setattr(quantize_module, "update_trt_ep_support", fake_update_trt_ep_support)
+    monkeypatch.setattr(
+        quantize_module, "create_input_shapes_profile", fake_create_input_shapes_profile
+    )
+    monkeypatch.setattr(
+        quantize_module, "find_nodes_from_mha_to_exclude", fake_find_nodes_from_mha_to_exclude
+    )
+    monkeypatch.setattr(quantize_module, "validate_op_types_spelling", lambda *args: None)
+    monkeypatch.setattr(quantize_module, "quantize_int8", fake_quantize_int8)
+    monkeypatch.setattr(quantize_module.onnx.checker, "check_model", lambda *args: None)
+
+    quantize_module.quantize(
+        str(onnx_path),
+        calibration_eps=["cpu", "trt"],
+        calibration_data_reader=object(),
+        model_id="local-config",
+        trust_remote_code=True,
+    )
+
+    assert captured["profile_eps"] == ["trt", "cpu"]
+    assert captured["trust_remote_code"] is True
+    assert captured["find_eps"] == ["trt", "cpu"]
+    assert captured["quantize_eps"] == ["trt", "cpu"]
+    assert captured["find_profile"] == [{"trt_profile_min_shapes": "trt_profile"}, {}]
+    assert captured["quantize_profile"] == [{"trt_profile_min_shapes": "trt_profile"}, {}]
 
 
 @pytest.mark.parametrize("quant_mode", ["int8", "fp8", "int4"])
