@@ -96,9 +96,9 @@ def test_recipe_missing_block_module_raises():
 
 
 def test_svdquant_recipe_leaves_excluded_blocks_bit_identical():
-    """AC-2.2: the pre-calibration recipe must keep the excluded first/last blocks
-    bit-identical through SVDQuant (whose calibration subtracts a residual from
-    every *enabled* linear), while the middle blocks receive LoRA."""
+    """The block-range recipe must keep the excluded first/last blocks bit-identical
+    through SVDQuant (whose calibration subtracts a residual from every *enabled*
+    linear), while the middle blocks receive LoRA."""
     import torch
     import torch.nn as nn
 

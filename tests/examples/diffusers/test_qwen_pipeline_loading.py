@@ -15,7 +15,7 @@
 
 """Negative-path loading tests for Qwen-Image in the diffusers quantization example.
 
-These cover the AC-1 negative criteria without a GPU or a real model:
+These cover the negative loading paths without a GPU or a real model:
 - selecting Qwen-Image when diffusers lacks the Qwen classes raises a clear,
   actionable error (not an opaque failure);
 - Qwen loading does not pass ``trust_remote_code``.

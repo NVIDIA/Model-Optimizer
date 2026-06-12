@@ -79,7 +79,6 @@ def test_qwen_dummy_inputs_drive_real_transformer_forward():
         "encoder_hidden_states",
         "encoder_hidden_states_mask",
         "img_shapes",
-        "txt_seq_lens",
     ):
         assert key in inputs, f"missing Qwen dummy input '{key}'"
     assert inputs["hidden_states"].shape[-1] == transformer.config.in_channels

@@ -330,7 +330,7 @@ def generate_diffusion_dummy_inputs(
         # QwenImageTransformer2DModel does NOT take the standard
         # (hidden_states[B,C,H,W], timestep, encoder_hidden_states) triple. It expects
         # *packed* latents [B, (H//2)*(W//2), in_channels] plus encoder_hidden_states,
-        # encoder_hidden_states_mask, img_shapes, txt_seq_lens, and optional guidance.
+        # encoder_hidden_states_mask, img_shapes, and optional guidance.
         # Timesteps are continuous in [0, 1] (not the diffusers [0, 1000] scale).
         in_channels = getattr(cfg, "in_channels", 64)
         joint_attention_dim = getattr(cfg, "joint_attention_dim", 3584)
@@ -353,11 +353,21 @@ def generate_diffusion_dummy_inputs(
             ),
             "timestep": torch.tensor([0.5], device=device, dtype=dtype).expand(batch_size),
             "img_shapes": [[(1, packed_h, packed_w)]] * batch_size,
-            "txt_seq_lens": [text_seq_len] * batch_size,
             "return_dict": False,
         }
         if guidance_embeds:
             dummy_inputs["guidance"] = torch.tensor([4.0], device=device, dtype=torch.float32)
+
+        # Only pass kwargs the installed QwenImageTransformer2DModel.forward accepts
+        # (signatures vary across diffusers versions); prevents the strict QKV-fusion
+        # dummy forward from failing on an unexpected keyword argument.
+        import inspect
+
+        try:
+            accepted = set(inspect.signature(model.forward).parameters)
+            dummy_inputs = {k: v for k, v in dummy_inputs.items() if k in accepted}
+        except (TypeError, ValueError):
+            pass
         return dummy_inputs
 
     def _generic_transformer_inputs() -> dict[str, torch.Tensor] | None:
