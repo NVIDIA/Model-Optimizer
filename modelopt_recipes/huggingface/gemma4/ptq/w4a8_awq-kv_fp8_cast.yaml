@@ -19,14 +19,14 @@
 # (awq_lite with alpha_step=1) to avoid the overflow observed in TRT-LLM kernels
 # when using the default AWQ search on Gemma.
 #
-# The bare `*weight_quantizer` / `*input_quantizer` enables below also match the
-# SigLIP vision tower (`model.vision_tower.*`) and the multimodal embedding
+# The bare `*weight_quantizer` / `*input_quantizer` enables below would also match
+# the SigLIP vision tower (`model.vision_tower.*`) and the multimodal embedding
 # projection (`model.embed_vision.*`). The vision tower's MLP in-features (4304)
-# are not a multiple of the INT4 block size (128), so INT4 weight packing at
-# export hits a device-side "index out of bounds" assert in pack_int4_in_uint8
-# (NVBug 6294017). It is also accuracy-harmful to W4A8 the vision branch. The
-# trailing `*vision_tower*` / `*embed_vision*` disable rules keep that branch in
-# BF16, mirroring the vision exclusions in the qwen3_5 / nemotron_vl recipes.
+# are not a multiple of the INT4 block size (128), so INT4-packing them at export
+# hits a device-side "index out of bounds" assert in pack_int4_in_uint8 (NVBug
+# 6294017); it is also accuracy-harmful to W4A8 the vision branch. The vision
+# branch is kept in BF16 by the shared `default_disabled_quantizers` unit imported
+# below, which globally disables `*vision_tower*` / `*visual*` / `*embed_vision*`.
 
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
@@ -56,13 +56,7 @@ quantize:
       cfg:
         $import: fp8
     - $import: kv_fp8_cast
+    # default_disabled_quantizers (imported last so its disables win) keeps the
+    # multimodal vision branch — `*vision_tower*` / `*visual*` / `*embed_vision*` —
+    # in BF16, preventing the INT4 pack_int4_in_uint8 crash (NVBug 6294017).
     - $import: default_disabled_quantizers
-    # Multimodal vision-branch exclusion: keep the SigLIP vision tower and the
-    # vision embedding projection in BF16. Must come after the `*weight_quantizer`
-    # / `*input_quantizer` enables above so the disable wins (later entries
-    # override earlier ones). Fixes NVBug 6294017 (INT4 packing index-out-of-bounds
-    # on the vision MLP whose in-features are not a multiple of the 128 block size).
-    - quantizer_name: '*vision_tower*'
-      enable: false
-    - quantizer_name: '*embed_vision*'
-      enable: false
