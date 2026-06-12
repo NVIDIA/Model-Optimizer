@@ -376,9 +376,9 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "initializer_range": getattr(base_config, "initializer_range", 0.02),
             "attention_bias": getattr(draft_config, "attention_bias", False),
             "attention_dropout": getattr(draft_config, "attention_dropout", 0.0),
-            # Inherit the target's rope_theta — the draft drafts for the base model, so its
-            # RoPE base must match it. (DFlash trains with a minimal rope; the real
-            # long-context RoPE is applied here at export.)
+            # Inherit the target's rope_theta: DFlash injects the target's KV into every
+            # draft layer, so the draft's RoPE base must match the target's. (The draft
+            # arch config carries no rope_theta of its own.)
             "rope_theta": getattr(base_config, "rope_theta", None)
             or getattr(draft_config, "rope_theta", 1000000.0),
             # YaRN long-context scaling is injected below (see the rope_scaling block).
@@ -396,12 +396,8 @@ class DFlashExporter(SpeculativeDecodingExporter):
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
 
-        # Long-context RoPE (YaRN). The draft trains on a short window but must draft for
-        # the target at long context, so — mirroring published Eagle3 drafts such as
-        # nvidia/Kimi-K2.6-Eagle3 — inject a YaRN rope_scaling that extends the training
-        # window to the target's full context. Sourced from the config field
-        # dflash_export_rope_scaling (set in the recipe YAML), matching the eagle
-        # eagle_export_rope_scaling convention. Empty dict (default) disables injection.
+        # Inject the export-time YaRN rope_scaling from the dflash_export_rope_scaling
+        # config field (empty dict disables). Mirrors eagle's eagle_export_rope_scaling.
         export_rope_scaling = getattr(self.model, "dflash_export_rope_scaling", None)
         if export_rope_scaling:
             config["rope_scaling"] = export_rope_scaling
