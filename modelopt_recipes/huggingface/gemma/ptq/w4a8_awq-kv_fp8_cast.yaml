@@ -16,16 +16,6 @@
 # Gemma-specific W4A8 AWQ PTQ recipe with FP8 KV-cache cast. Uses a coarser
 # optimal-scale search (awq_lite with alpha_step=1) to avoid overflow observed
 # in TRT-LLM kernels when using the default AWQ search on Gemma.
-#
-# On multimodal Gemma checkpoints (e.g. gemma-4-31B-it), the bare
-# `*weight_quantizer` / `*input_quantizer` enables below also match the SigLIP
-# vision tower (`model.vision_tower.*`) and the multimodal embedding projection
-# (`model.embed_vision.*`). The vision tower's MLP in-features (4304) are not a
-# multiple of the INT4 block size (128), so INT4 weight packing at export hits a
-# device-side "index out of bounds" assert in pack_int4_in_uint8 (NVBug
-# 6294017). It is also accuracy-harmful to W4A8 the vision branch. The trailing
-# `*vision_tower*` / `*embed_vision*` disable rules keep that branch in BF16,
-# mirroring the vision exclusions in the qwen3_5 / nemotron_vl recipes.
 
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
@@ -55,12 +45,3 @@ quantize:
         $import: fp8
     - $import: kv_fp8_cast
     - $import: default_disabled_quantizers
-    # Multimodal vision-branch exclusion: keep the SigLIP vision tower and the
-    # vision embedding projection in BF16. Must come after the `*weight_quantizer`
-    # / `*input_quantizer` enables above so the disable wins (later entries
-    # override earlier ones). Fixes NVBug 6294017 (INT4 packing index-out-of-bounds
-    # on the vision MLP whose in-features are not a multiple of the 128 block size).
-    - quantizer_name: '*vision_tower*'
-      enable: false
-    - quantizer_name: '*embed_vision*'
-      enable: false

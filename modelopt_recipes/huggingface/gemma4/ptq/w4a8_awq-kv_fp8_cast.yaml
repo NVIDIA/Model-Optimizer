@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Gemma 4 (model_type=gemma4, e.g. gemma-4-31B-it) W4A8 AWQ PTQ recipe with FP8
+# KV-cache cast. gemma4 is a distinct, multimodal architecture from the text-only
+# `gemma` model type (see ../../gemma/ptq/). Uses a coarser optimal-scale search
+# (awq_lite with alpha_step=1) to avoid the overflow observed in TRT-LLM kernels
+# when using the default AWQ search on Gemma.
+#
+# The bare `*weight_quantizer` / `*input_quantizer` enables below also match the
+# SigLIP vision tower (`model.vision_tower.*`) and the multimodal embedding
+# projection (`model.embed_vision.*`). The vision tower's MLP in-features (4304)
+# are not a multiple of the INT4 block size (128), so INT4 weight packing at
+# export hits a device-side "index out of bounds" assert in pack_int4_in_uint8
+# (NVBug 6294017). It is also accuracy-harmful to W4A8 the vision branch. The
+# trailing `*vision_tower*` / `*embed_vision*` disable rules keep that branch in
+# BF16, mirroring the vision exclusions in the qwen3_5 / nemotron_vl recipes.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  fp8: configs/numerics/fp8
+  int4_per_block: configs/numerics/int4_per_block
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Gemma 4 (multimodal) W4A8 AWQ recipe with FP8 KV-cache cast: INT4 block
+    weights + FP8 inputs, awq_lite with alpha_step=1 (coarser search) to avoid
+    TRT-LLM overflow, plus FP8 KV-cache using constant amax (no KV calibration).
+    The SigLIP vision tower and vision embedding projection are kept in BF16.
+quantize:
+  algorithm:
+    method: awq_lite
+    alpha_step: 1
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*weight_quantizer'
+      cfg:
+        - $import: int4_per_block
+        - $import: fp8
+    - quantizer_name: '*input_quantizer'
+      cfg:
+        $import: fp8
+    - $import: kv_fp8_cast
+    - $import: default_disabled_quantizers
+    # Multimodal vision-branch exclusion: keep the SigLIP vision tower and the
+    # vision embedding projection in BF16. Must come after the `*weight_quantizer`
+    # / `*input_quantizer` enables above so the disable wins (later entries
+    # override earlier ones). Fixes NVBug 6294017 (INT4 packing index-out-of-bounds
+    # on the vision MLP whose in-features are not a multiple of the 128 block size).
+    - quantizer_name: '*vision_tower*'
+      enable: false
+    - quantizer_name: '*embed_vision*'
+      enable: false
