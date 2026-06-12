@@ -787,10 +787,13 @@ class TensorQuantizer(nn.Module):
             outputs, _weights_scaling_factor, _weights_scaling_factor_2 = NVFP4QTensor.quantize(
                 inputs,
                 self._block_sizes[-1],
-                weights_scaling_factor_2=self.amax.float() / (448.0 * 6.0)
-                if self.amax is not None
-                else None,
+                weights_scaling_factor_2=(
+                    NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(self)
+                    if self.amax is not None
+                    else None
+                ),
                 try_tensorrt=True,
+                four_over_six=bool(self._block_sizes.get("four_over_six", False)),
             )
             buffer_to_register["_scale"] = _weights_scaling_factor
             buffer_to_register["_double_scale"] = _weights_scaling_factor_2
@@ -1449,11 +1452,15 @@ class NVFP4StaticQuantizer(TensorQuantizer):
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self.amax is not None:
+            fp8_max_for_normalization = (
+                256.0 if self.block_sizes.get("four_over_six", False) else 448.0
+            )
             return static_blockwise_fp4_fake_quant(
                 inputs,
                 self.amax,
                 self.global_amax,  # Can be None, will be computed internally
                 True,  # quantize_block_scales
+                fp8_max_for_normalization,
                 inputs.dtype,
                 self._pass_through_bwd,
             )

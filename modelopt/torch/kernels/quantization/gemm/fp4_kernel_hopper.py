@@ -103,6 +103,7 @@ def fp4_fake_quant_block(
     x: torch.Tensor,
     global_amax: torch.Tensor,
     block_size: int = 16,
+    fp8_max_for_normalization: float = 448.0,
     tile_rows: int = 16,
     tile_cols: int = 64,
     num_warps: int | None = None,
@@ -114,6 +115,8 @@ def fp4_fake_quant_block(
         x (torch.Tensor): Input tensor of shape ``(M, N)`` or higher.
         global_amax (torch.Tensor): Global maximum value tensor for scaling.
         block_size (int): Number of elements per FP4 block.
+        fp8_max_for_normalization (float): FP8 max value used to normalize per-block
+            scales before FP8 quantization (default 448.0; use 256.0 for NVFP4 4/6 mode).
         tile_rows (int, optional): Row tile size. Defaults to 16.
         tile_cols (int, optional): Column tile size. Defaults to 64. Rounded up to
             the nearest multiple of ``block_size`` internally.
@@ -137,7 +140,7 @@ def fp4_fake_quant_block(
     tile_cols_aligned = ((tile_cols + block_size - 1) // block_size) * block_size
     num_fp4_blocks = tile_cols_aligned // block_size
 
-    global_scale = (global_amax.float() / (6.0 * 448.0)).to(x.device)
+    global_scale = (global_amax.float() / (6.0 * fp8_max_for_normalization)).to(x.device)
 
     grid = lambda *_: (triton.cdiv(M, tile_rows), triton.cdiv(N, tile_cols_aligned))
 

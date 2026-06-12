@@ -1198,7 +1198,8 @@ def sync_moe_gate_up_amax(model: nn.Module) -> int:
     """Take element-wise max of gate and up weight quantizer amaxes per expert.
 
     Serving engines fuse gate_proj and up_proj into a single gate_up_proj and
-    require a single weight_scale_2. Since weight_scale_2 = amax / (6 * 448),
+    require a single weight_scale_2. Since weight_scale_2 = amax / (6 * m_fp8)
+    (m_fp8=448 normally, 256 for NVFP4 4/6 mode),
     syncing amaxes before quantization ensures the per-block weight_scale values
     are computed against a consistent global scale.
 

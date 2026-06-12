@@ -577,6 +577,7 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
         amax,
         global_amax=None,
         quantize_block_scales=True,
+        fp8_max_for_normalization=448.0,
         out_dtype=None,
         pass_through_bwd=False,
     ):
@@ -592,13 +593,14 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
             amax,
             global_amax,
             quantize_block_scales,
+            fp8_max_for_normalization,
             out_dtype,
         )
 
     @staticmethod
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
-        return _fake_quant_backward_function(ctx, grad_outputs, num_args=6)
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=len(ctx.needs_input_grad))
 
 
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):

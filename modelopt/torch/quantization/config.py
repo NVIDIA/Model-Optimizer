@@ -523,7 +523,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             )
         for _k, _v in v.items():
             if isinstance(_k, str):
-                assert _k in ["type", "scale_bits", "scale_block_sizes"]
+                assert _k in ["type", "scale_bits", "scale_block_sizes", "four_over_six"]
             else:
                 assert isinstance(_k, int) and (_v is None or isinstance(_v, int))
         return v
@@ -1328,6 +1328,9 @@ FP8_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/
 FP8_AFFINE_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8_affine")
 
 NVFP4_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/nvfp4")
+NVFP4_FOUR_OVER_SIX_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_four_over_six"
+)
 NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/nvfp4_w4a4_weight_mse_fp8_sweep"
 )
@@ -1406,6 +1409,7 @@ choices: set[str] = {
     "NVFP4_AWQ_FULL_CFG",
     "NVFP4_AWQ_LITE_CFG",
     "NVFP4_DEFAULT_CFG",
+    "NVFP4_FOUR_OVER_SIX_CFG",
     "NVFP4_FP8_MHA_CONFIG",
     "NVFP4_KV_CFG",
     "NVFP4_KV_ROTATE_CFG",
