@@ -27,8 +27,63 @@ from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
+import modelopt.torch.kernels.quantization.gemm as _triton_kernels
 from ..nn import QuantModuleRegistry, TensorQuantizer
 from .custom import _ParallelLinear
+
+
+class _GroupedAxis0FakeQuantFn(torch.autograd.Function):
+    """Triton-backed per-expert axis-0 fake-quant for TEGroupedLinear.
+
+    See OMNIML-5072 AC5 (Option B) and
+    `modelopt/torch/kernels/quantization/gemm/grouped_axis0_fakequant.py`
+    for the kernel + design rationale.
+
+    Forward: dispatch to the Triton kernel that takes N expert weights as
+    a tensor-of-pointers (no stack memcopy). Backward honors modelopt's
+    default `pass_through_bwd=True` semantics: when set, gradient flows back
+    unchanged (no STE kernel launch); when False, the clip-aware Triton STE
+    backward kernel runs. This mirrors `_fake_quant_backward_function` in
+    tensor_quant.py — under the default config the STE backward kernel is
+    NEVER invoked, which is why A's full-layer bwd is 547us at Ultra
+    (GEMM bwd alone, no STE work).
+
+    VALIDATION STATUS: not yet bench-validated. The fallback path in
+    te_grouped_quantized_linear_fn (stack + cuda_ext + unbind) is the
+    production-blessed alternative until this kernel passes the checklist
+    in VALIDATION_TODO.md.
+    """
+
+    @staticmethod
+    def forward(ctx, amax_vec, num_bits, narrow_range, pass_through_bwd, *weights):
+        outputs = _triton_kernels.grouped_axis0_fakequant(
+            list(weights), amax_vec, num_bits=num_bits, narrow_range=narrow_range
+        )
+        ctx.pass_through_bwd = pass_through_bwd
+        if not pass_through_bwd:
+            # Match modelopt's `_save_for_backward_if_needed`: skip the save when
+            # pass_through_bwd is on. This lets backward early-exit without
+            # touching saved_tensors at all.
+            ctx.save_for_backward(amax_vec, *weights)
+            ctx.num_weights = len(weights)
+        else:
+            ctx.num_weights = len(weights)
+        return tuple(outputs)
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        # Order of forward args: (amax_vec, num_bits, narrow_range, pass_through_bwd, *weights)
+        if ctx.pass_through_bwd:
+            # No-op STE — gradient passes through unchanged. Matches modelopt's
+            # default `_fake_quant_backward_function` behavior when `saved_tensors`
+            # is empty. Zero kernel work in this branch.
+            return (None, None, None, None, *grad_outputs)
+        saved = ctx.saved_tensors
+        amax_vec, weights = saved[0], list(saved[1:])
+        grad_inputs = _triton_kernels.grouped_axis0_fakequant_backward(
+            weights, list(grad_outputs), amax_vec
+        )
+        return (None, None, None, None, *grad_inputs)
 
 _TE_VERSION = Version(te.__version__)
 
@@ -271,18 +326,44 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         new_args = list(args)
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
         if self._is_per_expert_weight_quant():
-            # Stack the N expert weights into one [N, out, in] tensor so the
-            # quantizer's axis-0 reduction sees them together; the resulting
-            # _amax of shape [N, 1, 1] broadcasts to give per-expert fake-quant.
+            # Per-expert axis-0 fake-quant. Two paths:
             #
-            # Use unbind(0) (not q_stacked[i]) for the unpacking — unbind's
-            # backward is a single fused stack op, vs N SelectBackward nodes
-            # that each allocate an intermediate grad buffer per slice. At
-            # high N (hundreds of experts), this collapses backward latency
-            # by orders of magnitude. Measured under OMNIML-5064.
-            stacked = torch.stack(list(args[weights_start : weights_start + num_gemms]), dim=0)
-            q_stacked = self.weight_quantizer(stacked)
-            new_args[weights_start : weights_start + num_gemms] = q_stacked.unbind(0)
+            # 1. Triton tensor-of-pointers kernel (OMNIML-5072 Option B, AC5).
+            #    Avoids the stack memcopy by passing N expert ptrs into a single
+            #    Triton launch. Soft-gated behind triton_kernels.IS_AVAILABLE +
+            #    feature-presence check so older modelopt installs without the
+            #    kernel fall back automatically.
+            #
+            # 2. Stack-then-quantize-then-unbind via cuda_ext (the path d7ccf0a9
+            #    fixed by replacing indexed select with unbind(0)). This is the
+            #    production-blessed fallback. unbind's backward is a single fused
+            #    stack op, vs N SelectBackward nodes that each allocate an
+            #    intermediate grad buffer per slice. At high N this collapses
+            #    backward latency by orders of magnitude (OMNIML-5064 AC4).
+            q = self.weight_quantizer
+            weights = list(args[weights_start : weights_start + num_gemms])
+            use_triton_path = (
+                _triton_kernels.IS_AVAILABLE
+                and hasattr(_triton_kernels, "grouped_axis0_fakequant")
+                and hasattr(q, "_amax")
+                and not q._if_calib
+            )
+            if use_triton_path:
+                # Read pass_through_bwd from the live quantizer to mirror modelopt's
+                # default-True STE semantics; under the default, our Triton bwd
+                # kernel is a no-op and the bwd matches A's GEMM-only latency.
+                pass_through_bwd = getattr(q, "_pass_through_bwd", True)
+                new_args[weights_start : weights_start + num_gemms] = (
+                    _GroupedAxis0FakeQuantFn.apply(
+                        q._amax, q.num_bits, q.narrow_range, pass_through_bwd, *weights
+                    )
+                )
+            else:
+                # Fallback: AC4 unbind path (also runs during calibration since
+                # the Triton kernel currently bypasses modelopt's calibrator).
+                stacked = torch.stack(weights, dim=0)
+                q_stacked = q(stacked)
+                new_args[weights_start : weights_start + num_gemms] = q_stacked.unbind(0)
         else:
             for i in range(weights_start, weights_start + num_gemms):
                 new_args[i] = self.weight_quantizer(args[i])
