@@ -23,6 +23,7 @@ from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import NVFP4QTensor, QTensorWrapper
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import FP8_E4M3_MAX, FP8_E4M3_MAX_46
 from modelopt.torch.quantization.utils import reduce_amax
 
 
@@ -76,11 +77,11 @@ def nvfp4_gemm(quant_module, input_tensor, bias=None):
     if not cached_input_global_scale:
         input_amax = quant_module.input_quantizer.amax or reduce_amax(input_tensor)
         assert input_amax != 0
-        quant_module._input_global_scale = 448.0 * 6.0 / input_amax.float()
+        quant_module._input_global_scale = FP8_E4M3_MAX * 6.0 / input_amax.float()
 
     weight = quant_module.weight
     is_four_over_six = bool(quant_module.weight_quantizer.block_sizes.get("four_over_six", False))
-    weight_fp8_max = 256.0 if is_four_over_six else 448.0
+    weight_fp8_max = FP8_E4M3_MAX_46 if is_four_over_six else FP8_E4M3_MAX
 
     cached_weight_global_scale = hasattr(quant_module, "_weight_global_scale")
     if isinstance(weight, QTensorWrapper):  # weight is already compressed.

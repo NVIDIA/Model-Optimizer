@@ -29,8 +29,8 @@ e2m1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -
 # scales to either 4 or 6 per block, therefore the FP8 block scales are either 448 or 256.
 FP4_E2M1_MAX = 6.0
 FP4_E2M1_MAX_M4 = 4.0
-F8_E4M3_MAX = 448.0
-F8_E4M3_MAX_46 = 256.0
+FP8_E4M3_MAX = 448.0
+FP8_E4M3_MAX_46 = 256.0
 
 __all__ = ["NVFP4QTensor"]
 
@@ -38,7 +38,7 @@ __all__ = ["NVFP4QTensor"]
 def _cast_per_block_scale_to_fp8(
     per_block_scale: torch.Tensor,
     per_block_scale_max: torch.Tensor | None = None,
-    fp8_max_for_normalization: float = F8_E4M3_MAX,
+    fp8_max_for_normalization: float = FP8_E4M3_MAX,
 ) -> torch.Tensor:
     """Clamp to FP8 E4M3FN range [2**-9, 448] and cast — avoids underflow→0 / overflow→NaN.
 
@@ -49,7 +49,7 @@ def _cast_per_block_scale_to_fp8(
     """
     if per_block_scale_max is not None:
         per_block_scale = per_block_scale.float() * fp8_max_for_normalization / per_block_scale_max
-    return per_block_scale.clamp(min=2**-9, max=448.0).to(torch.float8_e4m3fn)
+    return per_block_scale.clamp(min=2**-9, max=FP8_E4M3_MAX).to(torch.float8_e4m3fn)
 
 
 class NVFP4QTensor(BaseQuantizedTensor):
@@ -109,7 +109,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         Returns:
             The global scaling factor as a float tensor.
         """
-        m_fp8 = F8_E4M3_MAX_46 if cls._is_four_over_six(weight_quantizer) else F8_E4M3_MAX
+        m_fp8 = FP8_E4M3_MAX_46 if cls._is_four_over_six(weight_quantizer) else FP8_E4M3_MAX
         global_amax = cls._get_static_global_amax(weight_quantizer)
         if global_amax is not None:
             return global_amax.float() / (FP4_E2M1_MAX * m_fp8)
@@ -149,7 +149,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
             )
 
         is_four_over_six = cls._is_four_over_six(weight_quantizer)
-        fp8_max_for_normalization = F8_E4M3_MAX_46 if is_four_over_six else F8_E4M3_MAX
+        fp8_max_for_normalization = FP8_E4M3_MAX_46 if is_four_over_six else FP8_E4M3_MAX
 
         if cls._is_static_quantizer(weight_quantizer):
             # Static path: use pre-computed per-block amax values from quantizer
@@ -240,7 +240,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def get_weights_scaling_factor_2(cls, input: torch.Tensor, four_over_six: bool = False):
         """Returns per tensor weight scaling factor."""
-        m_fp8 = F8_E4M3_MAX_46 if four_over_six else F8_E4M3_MAX
+        m_fp8 = FP8_E4M3_MAX_46 if four_over_six else FP8_E4M3_MAX
         return reduce_amax(input).float() / (FP4_E2M1_MAX * m_fp8)
 
     @classmethod
@@ -251,7 +251,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         weights_scaling_factor_2: torch.Tensor,
         block_size: int,
         per_block_scale_max: torch.Tensor | None = None,
-        fp8_max_for_normalization: float = F8_E4M3_MAX,
+        fp8_max_for_normalization: float = FP8_E4M3_MAX,
     ) -> torch.Tensor:
         """Pick M=4 or M=6 per block by per-block MSE (paper §3.1, arXiv:2512.02010v5).
 
@@ -264,7 +264,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
             per_block_scale_m6: F32 per-block scale under the default M=6 rule.
                 Shape [..., num_blocks].
             weights_scaling_factor_2: per-tensor F32 alpha. Must already use the 4/6-adjusted
-                denominator (FP4_E2M1_MAX * F8_E4M3_MAX_46), set by get_weights_scaling_factor_2*.
+                denominator (FP4_E2M1_MAX * FP8_E4M3_MAX_46), set by get_weights_scaling_factor_2*.
             block_size: block length (16 for NVFP4).
             per_block_scale_max: optional max scale value for the static-export F8 rescale
                 (see _cast_per_block_scale_to_fp8). Pass-through only.
@@ -311,7 +311,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
     ) -> torch.Tensor:
         """Round-trip quantize one candidate (scale_block ⊗ alpha) and return dequantized blocks.
 
-        Returns shape [..., num_blocks, block_size] in float32.
+        Reuses ``_cast_fp4`` for the E2M1 rounding so the per-block MSE scoring matches the
+        deployed NVFP4 quantization exactly. Returns shape [..., num_blocks, block_size] in float32.
         """
         device = weight.device
         w_blocks = weight.to(torch.float32).view(*weight.shape[:-1], -1, block_size)
@@ -321,25 +322,12 @@ class NVFP4QTensor(BaseQuantizedTensor):
             divisor = scale * alpha_v
         else:
             divisor = scale * alpha_v.view(*alpha_v.shape, *([1] * (scale.dim() - alpha_v.dim())))
-        scaled = w_blocks / divisor
-
-        # Sign + abs, then round abs to E2M1 grid using the same bounds as _cast_fp4. Values
-        # whose magnitude exceeds the implicit grid max (6.0) are clamped before rounding.
-        sign = torch.sign(scaled)
-        abs_v = scaled.abs().clamp_(max=FP4_E2M1_MAX)
-        bounds = cls.get_e2m1_bounds(device)
-        ord_ = torch.searchsorted(bounds, abs_v, out_int32=True)
-        # Mirror the equals-bound nudge in _cast_fp4 (round-half-up at odd-indexed bounds)
-        odd_bounds = bounds[[1, 3, 5]]
-        nudge = torch.any(abs_v.unsqueeze(-1) == odd_bounds, dim=-1).to(ord_.dtype)
-        ord_ = ord_ + nudge
-        # Map ordinal → magnitude
-        e2m1_pos = torch.tensor(
-            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=device, dtype=torch.float32
-        )
-        ord_ = ord_.clamp_(0, 7)
-        mag = e2m1_pos[ord_.long()]
-        return sign * mag * divisor
+        # Quantize to signed E2M1 codes, then map each code back to its FP4 value via
+        # e2m1_values (code = (sign << 3) + magnitude ordinal). searchsorted in _cast_fp4
+        # saturates at ordinal 7 (= 6.0), so out-of-range magnitudes clamp naturally.
+        codes = cls._cast_fp4(w_blocks / divisor)
+        fp4_vals = cls.get_e2m1_values(device)[codes.long()]
+        return fp4_vals * divisor
 
     @classmethod
     def get_activation_scaling_factor(cls, quantizer):
@@ -353,7 +341,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         if amax is None:
             return None
 
-        activation_scaling_factor = amax.float() / (quantizer.maxbound * 448.0)
+        activation_scaling_factor = amax.float() / (quantizer.maxbound * FP8_E4M3_MAX)
 
         assert torch.all(activation_scaling_factor > 0), (
             f" activation scaling factor {activation_scaling_factor} not positive."
