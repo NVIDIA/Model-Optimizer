@@ -311,6 +311,35 @@ def get_tiny_qwen_image_vae(**config_kwargs):
     return AutoencoderKLQwenImage(**kwargs)
 
 
+def _build_local_qwen2_tokenizer(out_dir: Path):
+    """Build a tiny, fully offline byte-level Qwen2 tokenizer (no Hub access).
+
+    Uses the GPT-2/Qwen byte->unicode mapping for the 256 single-byte tokens plus
+    Qwen's core special tokens, with an empty merge table (pure byte-level
+    fallback). This is enough to tokenize calibration prompts so the pipeline runs
+    end-to-end; it is not meant for high-quality text.
+    """
+    import json
+
+    import transformers
+    from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    vocab = {token: idx for idx, token in enumerate(bytes_to_unicode().values())}
+    for special in ("<|endoftext|>", "<|im_start|>", "<|im_end|>"):
+        vocab.setdefault(special, len(vocab))
+    (out_dir / "vocab.json").write_text(json.dumps(vocab))
+    (out_dir / "merges.txt").write_text("#version: 0.2\n")
+
+    return transformers.Qwen2Tokenizer(
+        vocab_file=str(out_dir / "vocab.json"),
+        merges_file=str(out_dir / "merges.txt"),
+        unk_token="<|endoftext|>",
+        eos_token="<|endoftext|>",
+        pad_token="<|endoftext|>",
+    )
+
+
 def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:
     """Create and save a tiny, (mostly) offline Qwen-Image pipeline to a directory.
 
@@ -360,14 +389,8 @@ def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:
     )
     text_encoder = transformers.Qwen2_5_VLForConditionalGeneration(qwen_vl_config).eval()
 
-    # The Qwen tokenizer cannot be built fully offline; load the tiny one diffusers'
-    # own fast test uses (this id exists, unlike the Qwen2.5-VL one previously tried).
-    try:
-        tokenizer = transformers.Qwen2Tokenizer.from_pretrained(
-            "hf-internal-testing/tiny-random-Qwen2VLForConditionalGeneration"
-        )
-    except Exception as exc:  # pragma: no cover - depends on hub availability
-        pytest.skip(f"tiny Qwen tokenizer unavailable ({exc})")
+    # Deterministic local byte-level Qwen2 tokenizer (built offline; no Hub, no skip).
+    tokenizer = _build_local_qwen2_tokenizer(tmp_path / "qwen_tokenizer")
 
     torch.manual_seed(0)
     # num_layers=6 so the first-2/last-2 block-range recipe (which needs >=6 blocks)

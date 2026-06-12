@@ -179,6 +179,29 @@ class QwenHfExportModel(NamedTuple):
     ],
     ids=["qwen_fp8_max", "qwen_nvfp4_max", "qwen_nvfp4_svdquant"],
 )
+def _module_prefixes(keys: set[str], suffix: str) -> set[str]:
+    """Module paths (key minus suffix) for every key ending in ``suffix``."""
+    return {k[: -len(suffix)] for k in keys if k.endswith(suffix)}
+
+
+def _block_indices(prefixes: set[str]) -> set[int]:
+    """transformer_blocks indices referenced by a set of module prefixes."""
+    import re
+
+    indices = set()
+    for prefix in prefixes:
+        match = re.search(r"transformer_blocks\.(\d+)\.", prefix)
+        if match:
+            indices.add(int(match.group(1)))
+    return indices
+
+
+# Tiny Qwen fixture has 6 transformer blocks; the recipe excludes the first 2 and
+# last 2, so only blocks 2 and 3 are quantized.
+_QWEN_QUANTIZED_BLOCKS = {2, 3}
+_QWEN_LORA_RANK = 8
+
+
 def test_qwen_image_hf_ckpt_export(
     qwen_model: QwenHfExportModel, tiny_qwen_image_path: str, tmp_path: Path
 ) -> None:
@@ -196,31 +219,57 @@ def test_qwen_image_hf_ckpt_export(
     assert quant_config.get("quant_method") == "modelopt"
 
     keys: set[str] = set()
+    lora_tensors: dict[str, "object"] = {}
     safetensors_files = sorted(transformer_dir.rglob("*.safetensors"))
     assert safetensors_files, f"no safetensors in {transformer_dir}"
     for path in safetensors_files:
         with safe_open(str(path), framework="pt") as handle:
-            keys.update(handle.keys())
+            for key in handle.keys():
+                keys.add(key)
+                if key.endswith(".svdquant_lora_a") or key.endswith(".svdquant_lora_b"):
+                    lora_tensors[key] = handle.get_tensor(key)
 
     # No live quantizer state should leak into the exported checkpoint.
     assert not any("weight_quantizer" in k for k in keys), "quantizer keys leaked into export"
     assert not any("input_quantizer._amax" in k for k in keys)
 
+    # Recipe: only the middle blocks are quantized (first-2/last-2 excluded).
+    weight_scale_prefixes = _module_prefixes(keys, ".weight_scale")
+    assert _block_indices(weight_scale_prefixes) == _QWEN_QUANTIZED_BLOCKS, (
+        f"expected only blocks {_QWEN_QUANTIZED_BLOCKS} quantized"
+    )
+
     if qwen_model.is_svdquant:
-        # Promoted SVDQuant tensors under clean module-level keys.
-        assert any(k.endswith(".svdquant_lora_a") for k in keys)
-        assert any(k.endswith(".svdquant_lora_b") for k in keys)
-        assert any(k.endswith(".pre_quant_scale") for k in keys)
-        # config schema modeled on nvfp4_awq.
+        a_prefixes = _module_prefixes(keys, ".svdquant_lora_a")
+        b_prefixes = _module_prefixes(keys, ".svdquant_lora_b")
+        pqs_prefixes = _module_prefixes(keys, ".pre_quant_scale")
+        assert a_prefixes, "no promoted svdquant_lora_a keys"
+        # Every promoted linear carries lora_a, lora_b, and pre_quant_scale.
+        assert a_prefixes == b_prefixes == pqs_prefixes
+        # ...and each is a quantized linear, only in the middle blocks.
+        assert a_prefixes <= weight_scale_prefixes
+        assert _block_indices(a_prefixes) == _QWEN_QUANTIZED_BLOCKS
+        # Rank-consistent shapes; lora_a=[rank, in], lora_b=[out, rank], rank == --lowrank.
+        for key, tensor in lora_tensors.items():
+            if key.endswith(".svdquant_lora_a"):
+                assert tensor.shape[0] == _QWEN_LORA_RANK
+            else:
+                assert tensor.shape[1] == _QWEN_LORA_RANK
+        # NVFP4 secondary scales are present.
+        assert any(k.endswith(".weight_scale_2") for k in keys)
+        # config schema (modeled on nvfp4_awq).
+        assert quant_config.get("quant_algo") == "NVFP4_SVD"
         group = next(iter(quant_config.get("config_groups", {}).values()), {})
+        assert group.get("lora_rank") == _QWEN_LORA_RANK
         assert group.get("pre_quant_scale") is True
         assert group.get("has_zero_point") is False
-        assert "lora_rank" in group
-        # Excluded first-2/last-2 blocks + non-transformer_blocks modules are ignored.
         assert quant_config.get("ignore"), "expected excluded modules in 'ignore'"
     else:
-        # Plain FP8/NVFP4 expose weight scales.
-        assert any(k.endswith(".weight_scale") for k in keys), "no weight_scale in export"
+        # Plain FP8/NVFP4: weight scales present, no SVDQuant tensors.
+        assert weight_scale_prefixes, "no weight_scale in export"
+        assert not any(k.endswith(".svdquant_lora_a") for k in keys)
+        if qwen_model.format_type == "fp4":
+            assert any(k.endswith(".weight_scale_2") for k in keys)
 
 
 class Wan22HfExportModel(NamedTuple):

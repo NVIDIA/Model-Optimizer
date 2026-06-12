@@ -1100,7 +1100,7 @@ def _export_diffusers_checkpoint(
     """
     export_dir = Path(export_dir)
 
-    # Step 1: Get all pipeline components (nn.Module, tokenizers, schedulers, etc.)
+    # Get all pipeline components (nn.Module, tokenizers, schedulers, etc.)
     all_components = get_diffusion_components(pipe, components)
 
     if not all_components:
@@ -1122,7 +1122,7 @@ def _export_diffusers_checkpoint(
         except Exception:
             is_diffusers_pipe = False
 
-    # Step 3: Export each nn.Module component with quantization handling
+    # Export each nn.Module component with quantization handling
     for component_name, component in module_components.items():
         is_quantized = has_quantized_modules(component)
         status = "quantized" if is_quantized else "non-quantized"
@@ -1141,7 +1141,7 @@ def _export_diffusers_checkpoint(
         component_dtype = dtype if dtype is not None else infer_dtype_from_model(component)
 
         if is_quantized:
-            # Step 3.5: Fuse QKV linears that share the same input (unify amax values)
+            # Fuse QKV linears that share the same input (unify amax values)
             # This is similar to requantize_resmooth_fused_llm_layers but simplified for diffusion
             # TODO: Add pre_quant_scale handling and FFN fusion for AWQ-style quantization
             print(f"  Running QKV fusion for {component_name}...")
@@ -1151,7 +1151,7 @@ def _export_diffusers_checkpoint(
             is_qwen_component = "qwen" in type(component).__name__.lower()
             _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
 
-            # Step 4: Process quantized modules (convert weights, register scales)
+            # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
 
             # Promote quantizer-owned tensors (AWQ pre_quant_scale and SVDQuant
@@ -1160,7 +1160,7 @@ def _export_diffusers_checkpoint(
             # main safetensors under clean, AWQ-aligned keys.
             _promote_quantizer_tensors_to_module(component)
 
-            # Step 5: Build quantization config
+            # Build quantization config
             quant_config = get_quant_config(component, is_modelopt_qlora=False)
             if quant_config:
                 quantization_details = quant_config.get("quantization", {})
@@ -1171,7 +1171,7 @@ def _export_diffusers_checkpoint(
                         quantization_details["lora_rank"] = svdquant_rank
             hf_quant_config = convert_hf_quant_config_format(quant_config) if quant_config else None
 
-            # Step 6: Save the component
+            # Save the component
             # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
             # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
             if hasattr(component, "save_pretrained"):
@@ -1181,7 +1181,7 @@ def _export_diffusers_checkpoint(
                 with hide_quantizers_from_state_dict(component):
                     _save_component_state_dict_safetensors(component, component_export_dir)
 
-            # Step 7: Post-process — merge, metadata, padding, swizzle
+            # Post-process — merge, metadata, padding, swizzle
             _postprocess_safetensors(
                 component_export_dir,
                 pipe,
@@ -1189,7 +1189,7 @@ def _export_diffusers_checkpoint(
                 **kwargs,
             )
 
-            # Step 8: Update config.json with quantization info
+            # Update config.json with quantization info
             if hf_quant_config is not None:
                 config_path = component_export_dir / "config.json"
                 if config_path.exists():
@@ -1204,7 +1204,7 @@ def _export_diffusers_checkpoint(
         else:
             _save_component_state_dict_safetensors(component, component_export_dir)
 
-        # Step 9: Update config.json with sparse attention info (both quantized and non-quantized)
+        # Update config.json with sparse attention info (both quantized and non-quantized)
         if export_sparse_attention_config is not None:
             sparse_attn_config = export_sparse_attention_config(component)
             if sparse_attn_config is not None:
@@ -1219,7 +1219,7 @@ def _export_diffusers_checkpoint(
 
         print(f"  Saved to: {component_export_dir}")
 
-    # Step 4: Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)
+    # Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)
     if is_diffusers_pipe:
         for component_name, component in all_components.items():
             # Skip nn.Module components (already handled above)
@@ -1247,7 +1247,7 @@ def _export_diffusers_checkpoint(
 
             print(f"  Saved to: {component_export_dir}")
 
-    # Step 5: For pipelines, also save model_index.json
+    # For pipelines, also save model_index.json
     if is_diffusers_pipe:
         model_index_path = export_dir / "model_index.json"
         is_partial_export = components is not None
