@@ -114,7 +114,7 @@ def filter_func_wan_video(name: str) -> bool:
 # Qwen-Image's transformer has 60 ``transformer_blocks``. The recipe quantizes
 # only those blocks while keeping the first two and last two -- and everything
 # outside ``transformer_blocks`` -- in original precision. The model-agnostic,
-# before-calibration form of this recipe (deriving the block count from the model)
+# config-driven form of this recipe (deriving the block count from the model)
 # lives in quantize.py; this name-only filter covers the plain FP8/NVFP4 path
 # for the full 60-block Qwen-Image transformer.
 QWEN_IMAGE_NUM_TRANSFORMER_BLOCKS = 60

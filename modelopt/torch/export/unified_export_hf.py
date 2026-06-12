@@ -1154,8 +1154,8 @@ def _export_diffusers_checkpoint(
             # Step 4: Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
 
-            # Step 4.5: Promote quantizer-owned tensors (AWQ pre_quant_scale and
-            # SVDQuant LoRA factors) onto the module so they survive
+            # Promote quantizer-owned tensors (AWQ pre_quant_scale and SVDQuant
+            # LoRA factors) onto the module so they survive
             # hide_quantizers_from_state_dict and are embedded in the component's
             # main safetensors under clean, AWQ-aligned keys.
             _promote_quantizer_tensors_to_module(component)

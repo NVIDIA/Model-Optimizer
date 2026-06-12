@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from pathlib import Path
 from typing import NamedTuple
 
@@ -128,6 +129,98 @@ def test_diffusers_hf_ckpt_export(model: DiffuserHfExportModel, tmp_path: Path) 
 
     weight_files = list(hf_ckpt_dir.rglob("*.safetensors")) + list(hf_ckpt_dir.rglob("*.bin"))
     assert len(weight_files) > 0, f"No weight files (.safetensors or .bin) found in {hf_ckpt_dir}"
+
+
+class QwenHfExportModel(NamedTuple):
+    format_type: str
+    quant_algo: str
+    is_svdquant: bool
+
+    def quantize_and_export_hf(self, tiny_qwen_image_path: str, tmp_path: Path) -> Path:
+        hf_ckpt_dir = tmp_path / f"qwen_{self.format_type}_{self.quant_algo}_hf_ckpt"
+        cmd_args = [
+            "python",
+            "quantize.py",
+            "--model",
+            "qwen-image",
+            "--override-model-path",
+            str(tiny_qwen_image_path),
+            "--format",
+            self.format_type,
+            "--quant-algo",
+            self.quant_algo,
+            "--collect-method",
+            "default",
+            "--model-dtype",
+            "BFloat16",
+            "--trt-high-precision-dtype",
+            "BFloat16",
+            "--calib-size",
+            "2",
+            "--batch-size",
+            "1",
+            "--n-steps",
+            "2",
+            "--hf-ckpt-dir",
+            str(hf_ckpt_dir),
+        ]
+        if self.is_svdquant:
+            cmd_args.extend(["--lowrank", "8"])
+        run_example_command(cmd_args, "diffusers/quantization")
+        return hf_ckpt_dir
+
+
+@pytest.mark.parametrize(
+    "qwen_model",
+    [
+        pytest.param(QwenHfExportModel("fp8", "max", False), marks=minimum_sm(89)),
+        pytest.param(QwenHfExportModel("fp4", "max", False), marks=minimum_sm(89)),
+        pytest.param(QwenHfExportModel("fp4", "svdquant", True), marks=minimum_sm(89)),
+    ],
+    ids=["qwen_fp8_max", "qwen_nvfp4_max", "qwen_nvfp4_svdquant"],
+)
+def test_qwen_image_hf_ckpt_export(
+    qwen_model: QwenHfExportModel, tiny_qwen_image_path: str, tmp_path: Path
+) -> None:
+    from safetensors import safe_open
+
+    hf_ckpt_dir = qwen_model.quantize_and_export_hf(tiny_qwen_image_path, tmp_path)
+    assert hf_ckpt_dir.exists(), f"HF checkpoint directory was not created: {hf_ckpt_dir}"
+
+    # The transformer is the quantized component.
+    transformer_dir = hf_ckpt_dir / "transformer"
+    config_path = transformer_dir / "config.json"
+    assert config_path.exists(), f"no transformer/config.json in {hf_ckpt_dir}"
+    quant_config = json.loads(config_path.read_text()).get("quantization_config")
+    assert quant_config is not None, "missing quantization_config"
+    assert quant_config.get("quant_method") == "modelopt"
+
+    keys: set[str] = set()
+    safetensors_files = sorted(transformer_dir.rglob("*.safetensors"))
+    assert safetensors_files, f"no safetensors in {transformer_dir}"
+    for path in safetensors_files:
+        with safe_open(str(path), framework="pt") as handle:
+            keys.update(handle.keys())
+
+    # No live quantizer state should leak into the exported checkpoint.
+    assert not any("weight_quantizer" in k for k in keys), "quantizer keys leaked into export"
+    assert not any("input_quantizer._amax" in k for k in keys)
+
+    if qwen_model.is_svdquant:
+        # Promoted SVDQuant tensors under clean module-level keys.
+        assert any(k.endswith(".svdquant_lora_a") for k in keys)
+        assert any(k.endswith(".svdquant_lora_b") for k in keys)
+        assert any(k.endswith(".pre_quant_scale") for k in keys)
+        # config schema modeled on nvfp4_awq.
+        group = next(iter(quant_config.get("config_groups", {}).values()), {})
+        assert group.get("pre_quant_scale") is True
+        assert group.get("has_zero_point") is False
+        assert "lora_rank" in group
+        # Excluded first-2/last-2 blocks + non-transformer_blocks modules are ignored.
+        assert quant_config.get("ignore"), "expected excluded modules in 'ignore'"
+    else:
+        # Plain FP8/NVFP4 expose weight scales.
+        assert any(k.endswith(".weight_scale") for k in keys), "no weight_scale in export"
 
 
 class Wan22HfExportModel(NamedTuple):
