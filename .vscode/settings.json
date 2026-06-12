@@ -1,0 +1,48 @@
+// VSCode workspace settings for modelopt
+{
+    "editor.rulers": [
+        100,
+        120
+    ], // 100 for ruff auto-formatter, 120 for hard limit in ruff
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit"
+        },
+    },
+    "files.exclude": {
+        "build": true,
+    },
+    "files.watcherExclude": {
+        ".ipynb_checkpoints": true,
+        ".mypy_cache": true,
+        ".pytest_cache": true,
+        ".ruff_cache": true,
+        ".tox": true,
+        "**/__pycache__/**": true,
+        "**/*.pyc": true,
+        "**/runs": true,
+        "build": true
+    },
+    "[yaml]": {
+        "editor.defaultFormatter": "redhat.vscode-yaml",
+    },
+    "yaml.format.enable": true,
+    "yaml.format.printWidth": 150,
+    "yaml.format.bracketSpacing": false,
+    "yaml.customTags": [
+        "!reference sequence"
+    ],
+    "python.testing.pytestEnabled": true,
+    "python.testing.pytestArgs": [
+        "./tests",
+        "--no-cov",
+    ],
+    "evenBetterToml.schema.enabled": false, // disable toml/json schema since we have custom fields
+    "cursorpyright.analysis.extraPaths": [
+        "./tests/" // add tests to python path just like pytest does in pyproject.toml
+    ],
+    "git.alwaysSignOff": true,
+    "git.enableCommitSigning": true,
+}

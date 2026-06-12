@@ -1,0 +1,63 @@
+# Byte-compiled / optimized / DLL files
+**/__pycache__
+**.py[cod]
+**$py.class
+
+# C, CPP extensions
+*.so
+*.so.lock
+**.rendered.*.cpp
+**.rendered.*.o
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Unit test / coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+.pytest_cache/
+
+# Sphinx documentation
+docs/build
+docs/source/reference/generated
+
+# Jupyter Notebook
+**/.ipynb_checkpoints
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Linters
+**/.mypy_cache
+**/.ruff_cache
+
+# Vscode
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Mac stuff
+**/.DS_Store
+
+# Ignore experiment checkpoints
+**.pt
+**.pth.tar
+**.pth
+**.pb
+**.onnx
+**.ckpt
+**.safetensors
+**.bin
+**.pkl
+**.pickle
+**.tar.gz
+
+# Ignore claude local settings
+.claude/settings.local.json

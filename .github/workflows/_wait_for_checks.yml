@@ -1,0 +1,29 @@
+name: Wait for checks
+
+on:
+  workflow_call:
+    inputs:
+      match_pattern:
+        required: true
+        type: string
+      delay:
+        required: false
+        type: string
+        default: 10s
+
+jobs:
+  wait:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+    steps:
+      - name: Wait for checks (PRs only)
+        if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/')
+        uses: poseidon/wait-for-status-checks@v0.6.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          match_pattern: ${{ inputs.match_pattern }}
+          delay: ${{ inputs.delay }}
+      - name: No-op for non-PR events
+        if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/heads/pull-request/')
+        run: echo "Not a pull_request event"

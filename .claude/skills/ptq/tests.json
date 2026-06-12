@@ -1,0 +1,77 @@
+{
+  "skill_name": "ptq",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Quantize Qwen3-0.6B to nvfp4",
+      "expected_output": "Quantized checkpoint produced with config.json + safetensors via hf_ptq.py",
+      "files": [],
+      "expectations": [
+        "Skill auto-triggers and reads SKILL.md",
+        "Checks README support table — Qwen3 is listed",
+        "Takes path 4A or 4B depending on environment",
+        "Runs hf_ptq.py with --qformat nvfp4",
+        "Produces checkpoint directory with config.json and model safetensors"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Quantize HuggingFaceTB/SmolLM-135M to nvfp4",
+      "expected_output": "Agent follows 4C path, determines hf_ptq.py works via auto-detection, runs smoke test then full calibration",
+      "files": [],
+      "expectations": [
+        "Checks README — SmolLM is NOT listed",
+        "Reads unsupported-models.md (4C path)",
+        "Investigates model source — finds standard LlamaForCausalLM",
+        "Determines hf_ptq.py should work via auto-detection",
+        "Runs smoke test first (unlisted model requirement)",
+        "Runs full calibration after smoke test passes"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Quantize OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview to nvfp4",
+      "expected_output": "Agent identifies VLM with trust_remote_code, follows unlisted model path, handles custom modeling code in checkpoint dir",
+      "files": [],
+      "expectations": [
+        "Checks README — InternVL is NOT listed",
+        "Reads unsupported-models.md (4C path)",
+        "Finds modeling code in checkpoint dir (trust_remote_code model)",
+        "Identifies VLM — only quantizes language model backbone",
+        "Uses remote cluster if clusters.yaml exists",
+        "Runs smoke test first (unlisted model)"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Quantize supermmx/FakeUnsupported-0.6B to nvfp4",
+      "expected_output": "Agent patches ModelOpt plugin directly, then runs hf_ptq.py",
+      "files": [],
+      "expectations": [
+        "Checks README — model is NOT listed",
+        "Reads unsupported-models.md (4C path)",
+        "Finds modeling_fake_model.py — uses trust_remote_code",
+        "Identifies FusedGateUpProj as non-standard (nn.Parameter, not nn.Linear)",
+        "Patches modelopt/torch/quantization/plugins/huggingface.py with QuantFusedGateUpProj (Pattern 1)",
+        "Uses QuantModuleRegistry.register or on-the-fly registration (Pattern 3)",
+        "Runs hf_ptq.py (not a standalone custom script)",
+        "Runs smoke test first, then full calibration"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Quantize MiniMax-M2.5 to nvfp4",
+      "expected_output": "Agent detects FP8 pre-quantized checkpoint, relies on _QuantFP8Linear plugin for standard FP8Linear modules, dequantizes non-standard MoE expert weights manually, then runs PTQ",
+      "files": [],
+      "expectations": [
+        "Checks README — MiniMax-M2.5 is NOT listed",
+        "Reads unsupported-models.md (4C path)",
+        "Detects FP8 quantization_config in config.json (Step B)",
+        "Identifies _QuantFP8Linear plugin handles standard FP8Linear modules automatically",
+        "Identifies non-standard 3D MoE expert weights that need manual dequantization (Pattern 5)",
+        "Applies manual dequantize_fp8_params for fused expert tensors",
+        "Runs smoke test first, then full calibration"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+name: Code Quality
+
+on:
+  pull_request:
+    branches: [main, release/*, feature/*]
+  schedule:
+    - cron: "0 0 * * *" # Nightly
+  workflow_dispatch: # On-demand
+
+# Cancel previous runs if new commit is pushed to the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  code-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Secret Scanning
+        uses: trufflesecurity/trufflehog@v3.90.5
+        with:
+          extra_args: --results=verified,unknown
+      - name: Run code quality checks
+        run: pip install tox && tox -e pre-commit-all

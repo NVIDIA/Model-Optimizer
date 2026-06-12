@@ -1,0 +1,20 @@
+name: Ubuntu runner setup
+description: Standard setup for ubuntu-latest runners (setup Python, cleanup disk space)
+
+inputs:
+  python-version:
+    description: Python version to setup
+    required: false
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Clean up disk space
+      shell: bash
+      run: |
+        sudo rm -rf /usr/local/lib/android || true
+        sudo rm -rf /usr/share/dotnet || true

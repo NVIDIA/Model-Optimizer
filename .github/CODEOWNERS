@@ -1,0 +1,62 @@
+# GitHub Teams defined at https://github.com/orgs/NVIDIA/teams/modelopt-devs/teams
+
+# Configuration files
+.github @NVIDIA/modelopt-setup-codeowners
+.gitlab @NVIDIA/modelopt-setup-codeowners
+.pre-commit-config.yaml @NVIDIA/modelopt-setup-codeowners
+CONTRIBUTING.md @NVIDIA/modelopt-setup-codeowners
+LICENSE @NVIDIA/modelopt-setup-codeowners
+LICENSE_HEADER @NVIDIA/modelopt-setup-codeowners
+pyproject.toml @NVIDIA/modelopt-setup-codeowners
+SECURITY.md @NVIDIA/modelopt-setup-codeowners
+tox.ini @NVIDIA/modelopt-setup-codeowners
+uv.lock @NVIDIA/modelopt-setup-codeowners
+
+# Library
+modelopt/deploy @NVIDIA/modelopt-deploy-codeowners
+modelopt/onnx @NVIDIA/modelopt-onnx-codeowners
+modelopt/onnx/autocast @NVIDIA/modelopt-onnx-autocast-codeowners
+modelopt/torch @NVIDIA/modelopt-torch-codeowners
+modelopt/torch/_deploy @NVIDIA/modelopt-torch-deploy-codeowners
+modelopt/torch/distill @NVIDIA/modelopt-torch-distill-codeowners
+modelopt/torch/export @NVIDIA/modelopt-torch-export-codeowners
+modelopt/torch/nas @NVIDIA/modelopt-torch-nas-prune-codeowners
+modelopt/torch/opt @NVIDIA/modelopt-torch-opt-codeowners
+modelopt/torch/peft @NVIDIA/modelopt-torch-peft-codeowners
+modelopt/torch/prune @NVIDIA/modelopt-torch-nas-prune-codeowners
+modelopt/torch/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
+modelopt/torch/quantization @NVIDIA/modelopt-torch-quantization-codeowners
+modelopt/torch/sparsity @NVIDIA/modelopt-torch-sparsity-codeowners
+modelopt/torch/speculative @NVIDIA/modelopt-torch-speculative-codeowners
+modelopt/torch/trace @NVIDIA/modelopt-torch-nas-prune-codeowners
+modelopt/torch/utils @NVIDIA/modelopt-torch-utils-codeowners
+modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
+
+# Examples
+/README.md @NVIDIA/modelopt-examples-codeowners
+/examples @NVIDIA/modelopt-examples-codeowners
+/examples/chained_optimizations @NVIDIA/modelopt-torch-nas-prune-codeowners
+/examples/cnn_qat @NVIDIA/modelopt-examples-cnn_qat-codeowners
+/examples/deepseek @NVIDIA/modelopt-deploy-codeowners
+/examples/diffusers @NVIDIA/modelopt-examples-diffusers-codeowners
+/examples/gpt-oss @NVIDIA/modelopt-examples-gpt-oss-codeowners
+/examples/llm_autodeploy @NVIDIA/modelopt-deploy-codeowners
+/examples/llm_distill @NVIDIA/modelopt-torch-distill-codeowners
+/examples/llm_eval @NVIDIA/modelopt-examples-llm_ptq-codeowners
+/examples/llm_ptq @NVIDIA/modelopt-examples-llm_ptq-codeowners
+/examples/llm_qat @NVIDIA/modelopt-examples-llm_qat-codeowners
+/examples/llm_sparsity @NVIDIA/modelopt-torch-sparsity-codeowners
+/examples/megatron_bridge @NVIDIA/modelopt-examples-megatron-codeowners
+/examples/model_hub @NVIDIA/modelopt-examples-model_hub-codeowners
+/examples/onnx_ptq @NVIDIA/modelopt-onnx-codeowners
+/examples/pruning @NVIDIA/modelopt-torch-nas-prune-codeowners
+/examples/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
+/examples/specdec_bench @NVIDIA/modelopt-torch-speculative-codeowners
+/examples/speculative_decoding @NVIDIA/modelopt-torch-speculative-codeowners
+/examples/torch_onnx @NVIDIA/modelopt-onnx-codeowners
+/examples/vlm_ptq @NVIDIA/modelopt-examples-vlm-codeowners
+/examples/vllm_serve @NVIDIA/modelopt-examples-llm_ptq-codeowners
+/examples/windows @NVIDIA/modelopt-windows-codeowners
+
+# Requirements files are owned by the setup team regardless of location
+requirements*.txt @NVIDIA/modelopt-setup-codeowners

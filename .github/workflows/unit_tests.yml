@@ -1,0 +1,152 @@
+# NOTE: Make sure this file is consistent with .gitlab/tests.yml
+name: Unit tests
+
+on:
+  pull_request:
+    branches: [main, release/*, feature/*]
+  push:
+    branches: [main, release/*, feature/*]
+    paths:
+      - ".github/workflows/unit_tests.yml"
+      - "modelopt/**"
+      - "tests/unit/**"
+      - "pyproject.toml"
+      - "tox.ini"
+      - "tools/launcher/**"
+  schedule:
+    - cron: "0 0 * * *" # Nightly
+  workflow_dispatch: # On-demand
+
+# Cancel previous runs if new commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  check-dco:
+    uses: ./.github/workflows/_wait_for_checks.yml
+    permissions:
+      checks: read
+    secrets: inherit
+    with:
+      match_pattern: "^DCO$"
+  linux:
+    needs: [check-dco]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Run unit tests
+        run: pip install tox && COV_ARGS="--cov" tox -e py312-torch211-tf_latest-unit
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unit
+          fail_ci_if_error: true
+          verbose: true
+  windows:
+    if: github.event_name == 'pull_request'
+    needs: [linux]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Run unit tests (without coverage)
+        # Some issues with torch 2.10 on Windows, so using 2.9 for now
+        run: pip install tox && tox -e py312-torch29-tf_latest-unit
+  multi-py:
+    if: github.event_name == 'pull_request'
+    needs: [linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        py: [10, 11, 13]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+        with:
+          python-version: "3.${{ matrix.py }}"
+      - name: Run unit tests
+        run: pip install tox && tox -e py3${{ matrix.py }}-torch211-tf_latest-unit
+  multi-torch:
+    if: github.event_name == 'pull_request'
+    needs: [linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        torch: [28, 29, 210]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Run unit tests
+        run: pip install tox && tox -e py312-torch${{ matrix.torch }}-tf_latest-unit
+  multi-transformers:
+    if: github.event_name == 'pull_request'
+    needs: [linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tf: [min]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Run unit tests
+        run: pip install tox && tox -e py312-torch211-tf_${{ matrix.tf }}-unit
+  launcher:
+    if: github.event_name == 'pull_request'
+    needs: [linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Run launcher tests
+        working-directory: tools/launcher
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv .venv
+          uv pip install -e . pytest
+          uv run python3 -m pytest -v
+  partial-install:
+    if: github.event_name == 'pull_request'
+    needs: [linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        test-env: [onnx, torch]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Run unit tests
+        run: pip install tox && tox -e py312-partial-unit-${{ matrix.test-env }}
+  unit-pr-required-check:
+    # Run even if some jobs are skipped
+    if: ${{ github.event_name == 'pull_request' && always() }}
+    needs: [linux, windows, multi-py, multi-torch, multi-transformers, partial-install, launcher]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Required unit tests did not succeed
+        if: >-
+          ${{ needs.linux.result != 'success' ||
+          needs.windows.result != 'success' ||
+          needs.multi-py.result != 'success' ||
+          needs.multi-torch.result != 'success' ||
+          needs.multi-transformers.result != 'success' ||
+          needs.partial-install.result != 'success' ||
+          needs.launcher.result != 'success' }}
+        run: exit 1
