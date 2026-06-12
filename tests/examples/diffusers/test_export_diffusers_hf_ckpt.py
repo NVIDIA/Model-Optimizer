@@ -170,15 +170,6 @@ class QwenHfExportModel(NamedTuple):
         return hf_ckpt_dir
 
 
-@pytest.mark.parametrize(
-    "qwen_model",
-    [
-        pytest.param(QwenHfExportModel("fp8", "max", False), marks=minimum_sm(89)),
-        pytest.param(QwenHfExportModel("fp4", "max", False), marks=minimum_sm(89)),
-        pytest.param(QwenHfExportModel("fp4", "svdquant", True), marks=minimum_sm(89)),
-    ],
-    ids=["qwen_fp8_max", "qwen_nvfp4_max", "qwen_nvfp4_svdquant"],
-)
 def _module_prefixes(keys: set[str], suffix: str) -> set[str]:
     """Module paths (key minus suffix) for every key ending in ``suffix``."""
     return {k[: -len(suffix)] for k in keys if k.endswith(suffix)}
@@ -202,6 +193,15 @@ _QWEN_QUANTIZED_BLOCKS = {2, 3}
 _QWEN_LORA_RANK = 8
 
 
+@pytest.mark.parametrize(
+    "qwen_model",
+    [
+        pytest.param(QwenHfExportModel("fp8", "max", False), marks=minimum_sm(89)),
+        pytest.param(QwenHfExportModel("fp4", "max", False), marks=minimum_sm(89)),
+        pytest.param(QwenHfExportModel("fp4", "svdquant", True), marks=minimum_sm(89)),
+    ],
+    ids=["qwen_fp8_max", "qwen_nvfp4_max", "qwen_nvfp4_svdquant"],
+)
 def test_qwen_image_hf_ckpt_export(
     qwen_model: QwenHfExportModel, tiny_qwen_image_path: str, tmp_path: Path
 ) -> None:
@@ -233,8 +233,13 @@ def test_qwen_image_hf_ckpt_export(
     assert not any("weight_quantizer" in k for k in keys), "quantizer keys leaked into export"
     assert not any("input_quantizer._amax" in k for k in keys)
 
-    # Recipe: only the middle blocks are quantized (first-2/last-2 excluded).
+    # Recipe: only the middle transformer blocks are quantized — first-2/last-2 of
+    # transformer_blocks are excluded, and nothing outside transformer_blocks.
     weight_scale_prefixes = _module_prefixes(keys, ".weight_scale")
+    assert weight_scale_prefixes, "no quantized linears found in export"
+    assert all("transformer_blocks." in p for p in weight_scale_prefixes), (
+        f"a non-transformer_blocks module was quantized: {weight_scale_prefixes}"
+    )
     assert _block_indices(weight_scale_prefixes) == _QWEN_QUANTIZED_BLOCKS, (
         f"expected only blocks {_QWEN_QUANTIZED_BLOCKS} quantized"
     )
@@ -244,10 +249,9 @@ def test_qwen_image_hf_ckpt_export(
         b_prefixes = _module_prefixes(keys, ".svdquant_lora_b")
         pqs_prefixes = _module_prefixes(keys, ".pre_quant_scale")
         assert a_prefixes, "no promoted svdquant_lora_a keys"
-        # Every promoted linear carries lora_a, lora_b, and pre_quant_scale.
-        assert a_prefixes == b_prefixes == pqs_prefixes
-        # ...and each is a quantized linear, only in the middle blocks.
-        assert a_prefixes <= weight_scale_prefixes
+        # Every promoted linear carries lora_a, lora_b, and pre_quant_scale, and
+        # every quantized linear is promoted (the sets are identical).
+        assert a_prefixes == b_prefixes == pqs_prefixes == weight_scale_prefixes
         assert _block_indices(a_prefixes) == _QWEN_QUANTIZED_BLOCKS
         # Rank-consistent shapes; lora_a=[rank, in], lora_b=[out, rank], rank == --lowrank.
         for key, tensor in lora_tensors.items():
