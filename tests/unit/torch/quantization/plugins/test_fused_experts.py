@@ -152,6 +152,21 @@ class TestIsFusedExpertsModule:
         module.num_experts = 4
         assert _is_fused_experts_module(module) is False
 
+    def test_module_with_apply_gate_detected(self):
+        """Clamped-swiglu experts (e.g. MiniMaxM3VLExperts) use _apply_gate instead of act_fn."""
+
+        class _ApplyGateExperts(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_up_proj = nn.Parameter(torch.randn(4, 16, 8))
+                self.down_proj = nn.Parameter(torch.randn(4, 8, 16))
+                self.num_experts = 4
+
+            def _apply_gate(self, gate, up):
+                return up * torch.sigmoid(gate)
+
+        assert _is_fused_experts_module(_ApplyGateExperts()) is True
+
     def test_sparse_moe_block_not_detected_as_fused(self):
         block = _SyntheticSparseMoeBlock()
         assert _is_fused_experts_module(block) is False
