@@ -84,14 +84,14 @@ def get_parser() -> argparse.ArgumentParser:
         help="Calibration data in npz/npy format. If None, random data for calibration will be used.",
     )
     group.add_argument(
-        "--trust_calibration_data",
-        action="store_true",
-        help="If True, trust the calibration data and allow pickle deserialization.",
-    )
-    group.add_argument(
         "--calibration_cache_path",
         type=str,
         help="Pre-calculated activation tensor scaling factors aka calibration cache path.",
+    )
+    argparser.add_argument(
+        "--trust_calibration_data",
+        action="store_true",
+        help="If True, trust the calibration data and allow pickle deserialization.",
     )
     argparser.add_argument(
         "--calibration_shapes",
