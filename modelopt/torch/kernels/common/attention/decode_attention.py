@@ -119,6 +119,9 @@ def _attn_decode_split_fwd(
     MIXED_FP16: tl.constexpr,  # reference mixed-precision softmax (native fp16 MUFU)
     K_CACHE_QUANTIZED: tl.constexpr,  # K cache pre-quantized (skip in-kernel K FQ entirely)
     V_CACHE_QUANTIZED: tl.constexpr,  # V cache pre-quantized for COMPLETE 16-key blocks (FQ only tail)
+    PER_PAGE_SCALE: tl.constexpr,  # method 2: per-page (per-BLOCK_N-tile) NVFP4 global scale —
+    # complete tiles are baked with their own amax; the trailing (in-progress) tile is FQ'd on read
+    # from its own in-kernel amax (the raw-bf16 "master pool"). Overrides the passed k/v_global_scale.
     # Per-tensor NVFP4 global scales (amax/(6*448)) as device 0-d tensors (pointers);
     # read via tl.load so no host .item() sync is needed (CUDA-graph-safe).
     q_global_scale,
@@ -138,6 +141,9 @@ def _attn_decode_split_fwd(
     # every COMPLETE 16-key NVFP4 block; only the in-progress tail block (the last
     # ``seq_len_kv % 16`` keys) is still raw and must be fakequantized in-kernel.
     v_dense_boundary = (seq_len_kv // 16) * 16
+    # Per-page mode: a tile is "complete" (baked) iff it ends at/below the last whole-tile
+    # boundary; the trailing tile (the in-progress page) is FQ'd on read from its own amax.
+    page_boundary = (seq_len_kv // BLOCK_N) * BLOCK_N
 
     # Partition whole BLOCK_N tiles (calibration-aligned) evenly across splits.
     num_tiles = (seq_len_kv + BLOCK_N - 1) // BLOCK_N
@@ -197,9 +203,14 @@ def _attn_decode_split_fwd(
             max_blocks_per_seq,
         )
         kt_f = kt.to(tl.float32)
-        if NVFP4_K and not K_CACHE_QUANTIZED:  # pre-quantized K read as-is (every key's
-            # head-dim block is complete at write time, so the whole cache is already on-grid)
-            kt_f = fake_quant_fp4_k0(kt_f, BLOCK_D, BLOCK_N, 16, 1, k_gs, QUANT_NVFP4)
+        if NVFP4_K and (
+            (not K_CACHE_QUANTIZED) or (PER_PAGE_SCALE and kv_start + BLOCK_N > page_boundary)
+        ):
+            # Frozen mode: pre-quantized K read as-is (every key's head-dim block is complete at
+            # write). Per-page mode: complete tiles read as-is; only the trailing (raw) tile is
+            # FQ'd here, with its own per-tile amax (recomputed each step from the bf16 master).
+            kgs_eff = (tl.max(tl.abs(kt_f)) / (6.0 * 448.0) + 1e-30) if PER_PAGE_SCALE else k_gs
+            kt_f = fake_quant_fp4_k0(kt_f, BLOCK_D, BLOCK_N, 16, 1, kgs_eff, QUANT_NVFP4)
         scores = tl.sum(q[:, None] * kt_f, axis=0) * qk_scale  # [BLOCK_N], fp32 accum
         scores = tl.where(kv_valid, scores, -float("inf"))
 
@@ -264,8 +275,13 @@ def _attn_decode_split_fwd(
             if NVFP4_V:  # BMM2 value (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = keys = axis 0)
                 # Pre-quantized completed V blocks read as-is; only tiles reaching the raw tail
                 # (kv_start+BLOCK_N > boundary) are fakequantized. Without on-write, FQ every tile.
-                if (not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_dense_boundary):
-                    vt_f = fake_quant_fp4_k0(vt_f, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
+                v_bound = page_boundary if PER_PAGE_SCALE else v_dense_boundary
+                if (not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_bound):
+                    # Per-page: the trailing tile's scale = its own amax (bf16-master re-quant).
+                    vgs_eff = (
+                        (tl.max(tl.abs(vt_f)) / (6.0 * 448.0) + 1e-30) if PER_PAGE_SCALE else v_gs
+                    )
+                    vt_f = fake_quant_fp4_k0(vt_f, BLOCK_N, BLOCK_D, 16, 1, vgs_eff, QUANT_NVFP4)
             acc += tl.sum(p_bmm[:, None] * vt_f, axis=0)  # [BLOCK_D], fp32 accum
             m_i = m_new
 
@@ -348,6 +364,7 @@ def attention_decode(
     attn_global_scales: dict | None = None,
     k_cache_quantized: bool = False,  # K cache holds fake-quantized values (skip in-kernel K FQ)
     v_cache_quantized: bool = False,  # V cache pre-quantized for complete 16-key blocks (FQ tail only)
+    per_page_scale: bool = False,  # method 2: per-page (per-tile) NVFP4 global scale (see kernel)
 ) -> torch.Tensor:
     """Decode attention (one query token per request) over a paged KV cache.
 
@@ -414,12 +431,17 @@ def attention_decode(
     # small per-step q/k/v); scanning the full paged K/V cache here would OOM.
     _gs = attn_global_scales or {}
     q_gs = (_gs["q"] if "q" in _gs else tensor_global_scale_device(q)) if "q" in nvfp4 else 1.0
-    k_gs = (
-        (_gs["k"] if "k" in _gs else tensor_global_scale_device(k_cache)) if "k" in nvfp4 else 1.0
-    )
-    v_gs = (
-        (_gs["v"] if "v" in _gs else tensor_global_scale_device(v_cache)) if "v" in nvfp4 else 1.0
-    )
+    if per_page_scale:
+        # The K/V global scale is computed per tile in-kernel from the cache content; the passed
+        # k/v scales are unused. Pass cheap 0-d placeholders (never tl.load'd on the per-page path)
+        # and skip the cache-wide amax scan that would OOM on a large paged cache.
+        k_gs = q.new_full((), 1.0) if "k" in nvfp4 else 1.0
+        v_gs = q.new_full((), 1.0) if "v" in nvfp4 else 1.0
+    else:
+        # Default (no explicit scale) = constant 1.0. The old whole-cache amax fallback both OOMs on
+        # a large paged cache and, used as a frozen scale, saturates on long context — deprecated.
+        k_gs = (_gs["k"] if "k" in _gs else k_cache.new_full((), 1.0)) if "k" in nvfp4 else 1.0
+        v_gs = (_gs["v"] if "v" in _gs else v_cache.new_full((), 1.0)) if "v" in nvfp4 else 1.0
     # P global is a fixed constant (unnormalized exp P max ~1); 0-d device tensor for
     # uniformity. Built copy-free with new_full (device-side fill) — torch.tensor(const,
     # device=cuda) does a host->device copy that is illegal during CUDA-graph capture.
@@ -495,6 +517,7 @@ def attention_decode(
             MIXED_FP16=_mixed_fp16,
             K_CACHE_QUANTIZED=k_cache_quantized,
             V_CACHE_QUANTIZED=v_cache_quantized,
+            PER_PAGE_SCALE=per_page_scale,
             q_global_scale=q_gs,
             k_global_scale=k_gs,
             p_global_scale=p_gs,
@@ -645,6 +668,7 @@ def _onwrite_fq_paged_kernel(
     v_global_scale,
     NVFP4_K: tl.constexpr,
     NVFP4_V: tl.constexpr,
+    PER_PAGE_SCALE: tl.constexpr,  # derive the global scale per tile from its own amax (method 2)
     PAGE_SIZE: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -685,7 +709,6 @@ def _onwrite_fq_paged_kernel(
     )
 
     if NVFP4_K:
-        k_gs = tl.load(k_global_scale)
         k_ptrs = (
             page_global[None, :].to(tl.int64) * stride_kc_block
             + offset_in_page[None, :] * stride_kc_pos
@@ -696,13 +719,19 @@ def _onwrite_fq_paged_kernel(
         kt = tl.load(K_cache + k_ptrs, mask=k_in[None, :] & d_mask[:, None], other=0.0).to(
             tl.float32
         )
+        # Per-page: this tile is a complete page (the plugin restricts the range to whole tiles),
+        # so bake it with its own amax. Frozen: use the passed per-tensor scale.
+        k_gs = (
+            (tl.max(tl.abs(kt)) / (6.0 * 448.0) + 1e-30)
+            if PER_PAGE_SCALE
+            else tl.load(k_global_scale)
+        )
         kq = fake_quant_fp4_k0(kt, BLOCK_D, BLOCK_N, 16, 1, k_gs, QUANT_NVFP4)
         tl.store(
             K_cache + k_ptrs, kq.to(K_cache.dtype.element_ty), mask=k_in[None, :] & d_mask[:, None]
         )
 
     if NVFP4_V:
-        v_gs = tl.load(v_global_scale)
         v_ptrs = (
             page_global[:, None].to(tl.int64) * stride_vc_block
             + offset_in_page[:, None] * stride_vc_pos
@@ -712,6 +741,11 @@ def _onwrite_fq_paged_kernel(
         v_in = (kv_abs >= vlo) & (kv_abs < vhi)
         vt = tl.load(V_cache + v_ptrs, mask=v_in[:, None] & d_mask[None, :], other=0.0).to(
             tl.float32
+        )
+        v_gs = (
+            (tl.max(tl.abs(vt)) / (6.0 * 448.0) + 1e-30)
+            if PER_PAGE_SCALE
+            else tl.load(v_global_scale)
         )
         vq = fake_quant_fp4_k0(vt, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
         tl.store(
@@ -733,12 +767,17 @@ def fake_quant_kv_onwrite(
     v_global_scale=None,
     nvfp4: set[str] | None = None,
     decode: bool = False,
+    per_page_scale: bool = False,
 ) -> None:
     """Paged quantize-on-write: fakequant K (k_lo:k_hi) and V (v_lo:v_hi) per request in place.
 
     Set ``decode=True`` for a pure single-token decode step: the grid is fixed to one tile per
     request, so the launch needs no host ``.item()`` and is CUDA-graph-capturable. ``decode=False``
     (prefill / mixed batch, run eager) sizes the grid to the largest per-request span.
+
+    ``per_page_scale=True`` (method 2) derives each tile's NVFP4 global scale from its own amax in
+    the kernel (the passed ``k/v_global_scale`` are then unused); the caller must restrict
+    ``[k_lo,k_hi)``/``[v_lo,v_hi)`` to whole BLOCK_N tiles so only complete pages are baked.
     """
     nvfp4 = nvfp4 or set()
     if not ({"k", "v"} & nvfp4):
@@ -779,6 +818,7 @@ def fake_quant_kv_onwrite(
             vgs,
             NVFP4_K="k" in nvfp4,
             NVFP4_V="v" in nvfp4,
+            PER_PAGE_SCALE=per_page_scale,
             PAGE_SIZE=page_size,
             BLOCK_N=BLOCK_N,
             BLOCK_D=BLOCK_D,

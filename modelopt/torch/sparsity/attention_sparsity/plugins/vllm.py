@@ -110,6 +110,7 @@ def parse_attn_quant_env() -> dict:
 
     Env knobs:
       ``MODELOPT_ATTN_NVFP4``        e.g. ``"q,k,p,v"`` | ``"kv"`` | ``"qkpv"`` — BMM operands -> NVFP4
+      ``MODELOPT_ATTN_NVFP4_PER_PAGE_SCALE`` ``"1"`` -> per-page NVFP4 KV$ global scale (method 2)
       ``MODELOPT_ATTN_FP16_SOFTMAX`` ``"1"`` -> FP16 softmax (all DIFF/EXP2/ACC points)
       ``MODELOPT_ATTN_SOFTMAX_QUANT`` e.g. ``"diff:fp16_rz,exp2:bf16_rne,acc:fp16"``
       ``MODELOPT_ATTN_SPARSITY_NM``  e.g. ``"2:4"`` — N:M sparse softmax (prefill)
@@ -121,6 +122,11 @@ def parse_attn_quant_env() -> dict:
         cfg["nvfp4"] = ops
     if os.environ.get("MODELOPT_ATTN_FP16_SOFTMAX", "0").lower() in ("1", "true", "yes"):
         cfg["fp16_softmax"] = True
+    if os.environ.get("MODELOPT_ATTN_NVFP4_PER_PAGE_SCALE", "0").lower() in ("1", "true", "yes"):
+        # Method 2: per-page NVFP4 global scale (per BLOCK_N tile) instead of one frozen
+        # per-tensor scale — complete pages baked with their own amax, the in-progress page
+        # re-quantized from its bf16 master each step. Better dynamic range on long-context/math/code.
+        cfg["per_page_scale"] = True
     sq = os.environ.get("MODELOPT_ATTN_SOFTMAX_QUANT", "")
     sq_map = {}
     for pair in sq.split(","):
@@ -291,60 +297,57 @@ class _SparseCalibrationMixin:
         fp16_softmax = aq.get("fp16_softmax", False)
         softmax_quant = aq.get("softmax_quant")
         quant_active = bool(nvfp4) or fp16_softmax or bool(softmax_quant)
-        # Precompute NVFP4 per-tensor global scales from the small per-step q/k/v
-        # operands, kept as 0-d *device* tensors so the kernels read them via tl.load
-        # (no host .item()). The kernels otherwise derive them from the full paged K/V
-        # cache, which materializes the whole cache and OOMs (P is a fixed constant).
-        # Q is scaled per-step (Q rows = exactly what is quantized this launch). K/V
-        # are quantized over the *whole* cache in the kernel, but only this step's new
-        # tokens are visible here, so keep a running max on the impl — prefill seeds a
-        # representative scale and decode steps only raise it. The running max is an
-        # in-place update of a persistent device buffer (stable address, no host sync),
-        # so it is safe to capture in a CUDA graph and accumulates across replays.
+        # NVFP4 per-tensor global scales (0-d *device* tensors, read in-kernel via tl.load — no host
+        # .item()). Q is scaled per-step (the Q rows are exactly what is quantized this launch).
+        #
+        # K/V global scale DEFAULT = constant 1.0. The previous default — a per-tensor scale frozen
+        # on the FIRST prefill chunk — saturated the E4M3 block scales whenever later context exceeded
+        # the prompt (large long-context accuracy loss), so it is deprecated. 1.0 needs no calibration
+        # and E4M3's wide range absorbs typical KV magnitudes. Opt into the per-page scale
+        # (``MODELOPT_ATTN_NVFP4_PER_PAGE_SCALE=1``) for best fidelity — it derives a per-128-page
+        # scale in-kernel from the cache content (no saturation, fully causal).
+        per_page_scale = bool(aq.get("per_page_scale"))
         attn_global_scales = None
         if nvfp4:
             attn_global_scales = {}
             if "q" in nvfp4:
                 attn_global_scales["q"] = tensor_global_scale_device(query[:num_actual_tokens])
-            gs_cache = getattr(self, "_nvfp4_gs_cache", None)
-            if gs_cache is None:
-                gs_cache = {}
-                self._nvfp4_gs_cache = gs_cache
-
-            def _running_max(name, tensor):
-                # FROZEN scale: quantize-on-write requires a fixed per-tensor scale (write-time ==
-                # read-time), else previously-written cache entries drift. The first prefill seeds a
-                # representative scale and it is reused thereafter (graph-safe persistent buffer).
-                buf = gs_cache.get(name)
-                if buf is None:
-                    buf = tensor_global_scale_device(tensor[:num_actual_tokens]).detach().clone()
-                    gs_cache[name] = buf
-                attn_global_scales[name] = buf
-
-            if "k" in nvfp4 and new_key is not None:
-                _running_max("k", new_key)
-            if "v" in nvfp4 and new_value is not None:
-                _running_max("v", new_value)
+            # Default K/V scale = constant 1.0 (per_page_scale derives it per tile in-kernel instead).
+            if not per_page_scale:
+                one = query.new_full((), 1.0, dtype=torch.float32)
+                if "k" in nvfp4:
+                    attn_global_scales["k"] = one
+                if "v" in nvfp4:
+                    attn_global_scales["v"] = one
             # Quantize-KV-on-write: fake-quantize the newly-written K/V in the paged cache once
-            # (frozen scale) so the decode kernel reads them pre-quantized instead of re-FQ'ing the
+            # (fixed scale) so the decode kernel reads them pre-quantized instead of re-FQ'ing the
             # whole cache every step. K = new keys [prev, seq); V = newly-complete 128-tiles. Prefill
             # re-FQ's idempotently on read; decode (flags below) skips it -> the 8-18x decode speedup.
             if {"k", "v"} & nvfp4:
                 prev = (seq_lens - b_seq_len).to(torch.int32)
                 seqk32 = seq_lens.to(torch.int32)
+                if per_page_scale:
+                    # Per-page bakes only COMPLETE BLOCK_N tiles (with their own amax); K and V share
+                    # the same whole-tile range, and the in-progress page stays raw (bf16 master).
+                    k_lo = v_lo = (prev // 128) * 128
+                    k_hi = v_hi = (seqk32 // 128) * 128
+                else:
+                    k_lo, k_hi = prev, seqk32
+                    v_lo, v_hi = (prev // 128) * 128, (seqk32 // 128) * 128
                 fake_quant_kv_onwrite(
                     key_cache,
                     value_cache,
                     block_table,
-                    prev,
-                    seqk32,
-                    (prev // 128) * 128,
-                    (seqk32 // 128) * 128,
+                    k_lo,
+                    k_hi,
+                    v_lo,
+                    v_hi,
                     page_size=page_size,
                     k_global_scale=attn_global_scales.get("k"),
                     v_global_scale=attn_global_scales.get("v"),
                     nvfp4=nvfp4,
                     decode=is_decode_only,
+                    per_page_scale=per_page_scale,
                 )
         _resolve_skip_softmax_calibration(
             sparse_kw, is_prefill=not is_decode_only, max_seq_len=max_seq_len
@@ -374,6 +377,7 @@ class _SparseCalibrationMixin:
                 attn_global_scales=attn_global_scales,
                 k_cache_quantized=("k" in nvfp4),
                 v_cache_quantized=("v" in nvfp4),
+                per_page_scale=per_page_scale,
                 output=output,
             )
         if not sparse_kw and not quant_active:
@@ -405,6 +409,7 @@ class _SparseCalibrationMixin:
             fp16_softmax=fp16_softmax,
             softmax_quant=softmax_quant,
             attn_global_scales=attn_global_scales,
+            per_page_scale=per_page_scale,
             **sparse_kw,
         )
         output[:num_actual_tokens] = triton_out
@@ -428,6 +433,7 @@ class _SparseCalibrationMixin:
         attn_global_scales: dict | None = None,
         k_cache_quantized: bool = False,
         v_cache_quantized: bool = False,
+        per_page_scale: bool = False,
     ) -> torch.Tensor:
         """Decode via the dedicated paged decode kernel (skip-softmax and/or NVFP4).
 
@@ -455,6 +461,7 @@ class _SparseCalibrationMixin:
             attn_global_scales=attn_global_scales,
             k_cache_quantized=k_cache_quantized,
             v_cache_quantized=v_cache_quantized,
+            per_page_scale=per_page_scale,
         )
         output[:num_actual_tokens] = decode_out
         return output

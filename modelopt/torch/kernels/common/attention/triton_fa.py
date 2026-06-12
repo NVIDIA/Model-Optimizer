@@ -306,6 +306,11 @@ def _attn_fwd(
     EXP2_QUANT: tl.constexpr = 0,
     ACC_QUANT: tl.constexpr = 0,
     MIXED_FP16: tl.constexpr = False,  # reference mixed-precision softmax (native fp16 MUFU)
+    PER_PAGE_SCALE: tl.constexpr = False,  # method 2: derive K/V global scale per tile from its own
+    # amax (overrides the passed k/v_global_scale); complete tiles read as-is (baked), tail FQ'd.
+    SCALE_PAGE: tl.constexpr = 128,  # per-page granularity = the on-write bake tile (128). The page
+    # boundary uses THIS, not BLOCK_N, so a smaller autotuned BLOCK_N still reads baked 128-pages
+    # correctly. (The trailing-page amax is then over BLOCK_N, a finer-but-consistent sub-page scale.)
     # Per-tensor NVFP4 global scales (amax/(6*448)). When the matching NVFP4_* flag is
     # set these are device 0-d tensors (pointers), read via ``tl.load`` so no host
     # ``.item()`` sync is needed (CUDA-graph-safe); otherwise an unused float default.
@@ -328,6 +333,10 @@ def _attn_fwd(
     seq_len_kv = tl.load(b_seq_len_k + batch_idx)
     q_offset = tl.load(b_start_loc + batch_idx)
     kv_offset = tl.load(b_start_loc_k + batch_idx)
+    # Per-page: tiles ending at/below this boundary are complete pages (baked on write -> read
+    # as-is); only the trailing in-progress page is fakequantized on read, from its own amax. The
+    # boundary is the 128-key bake page (SCALE_PAGE), independent of the autotuned BLOCK_N.
+    page_boundary = (seq_len_kv // SCALE_PAGE) * SCALE_PAGE
 
     if tile_q * BLOCK_M >= seq_len_q:
         return  # This Q tile is past the sequence end
@@ -401,8 +410,13 @@ def _attn_fwd(
                 other=0.0,
             )
 
-        if NVFP4_K:  # BMM1 key operand (B-side, K^T [BLOCK_D, BLOCK_N], GEMM-K = axis 0)
-            k = fake_quant_fp4_k0(k, BLOCK_D, BLOCK_N, 16, 1, k_gs, QUANT_NVFP4)
+        if NVFP4_K and (  # BMM1 key operand (B-side, K^T [BLOCK_D, BLOCK_N], GEMM-K = axis 0)
+            (not PER_PAGE_SCALE) or (not IS_PAGED) or (kv_start + BLOCK_N > page_boundary)
+        ):
+            # Per-page: complete tiles are baked (read as-is); only the trailing tile is FQ'd,
+            # with its own per-tile amax. Frozen: every tile FQ'd with the per-tensor k_gs.
+            kgs_eff = (tl.max(tl.abs(k)) / (6.0 * 448.0) + 1e-30) if PER_PAGE_SCALE else k_gs
+            k = fake_quant_fp4_k0(k, BLOCK_D, BLOCK_N, 16, 1, kgs_eff, QUANT_NVFP4)
 
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
         scores = tl.dot(q, k) * qk_scale
@@ -485,8 +499,12 @@ def _attn_fwd(
                     mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                     other=0.0,
                 )
-            if NVFP4_V:  # BMM2 value operand (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = keys = axis 0)
-                v = fake_quant_fp4_k0(v, BLOCK_N, BLOCK_D, 16, 1, v_gs, QUANT_NVFP4)
+            if NVFP4_V and (  # BMM2 value operand (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = axis 0)
+                (not PER_PAGE_SCALE) or (not IS_PAGED) or (kv_start + BLOCK_N > page_boundary)
+            ):
+                # Per-page: complete tiles baked (read as-is); trailing tile FQ'd from its own amax.
+                vgs_eff = (tl.max(tl.abs(v)) / (6.0 * 448.0) + 1e-30) if PER_PAGE_SCALE else v_gs
+                v = fake_quant_fp4_k0(v, BLOCK_N, BLOCK_D, 16, 1, vgs_eff, QUANT_NVFP4)
             # BMM2 prob operand (A-side, P [BLOCK_M, BLOCK_N], GEMM-K = keys = axis 1) with a
             # per-tensor p_global_scale, matching mni/attnOpt: quantize the *unnormalized* exp
             # P tile, accumulate, normalize acc by row_sum after the loop. (Across KV tiles the
@@ -897,6 +915,7 @@ class _Attention(torch.autograd.Function):
         fp16_softmax=False,
         softmax_quant=None,
         attn_global_scales=None,
+        per_page_scale=False,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -980,10 +999,6 @@ class _Attention(torch.autograd.Function):
         _nvfp4 = nvfp4 or set()
         assert _nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
         _diff_q, _exp2_q, _acc_q, _mixed_fp16 = _resolve_softmax_modes(fp16_softmax, softmax_quant)
-        # Per-tensor NVFP4 global scales (host-side amax/(6*448)), aligned with the
-        # mni/attnOpt convention (tensor_scale). K/V are read from the paged cache.
-        _k_src = k_cache if is_paged else k
-        _v_src = v_cache if is_paged else v
         # P global is a fixed constant (unnormalized exp P has per-row max ~1); keep it
         # as a 0-d device tensor so every scale enters the kernel uniformly by pointer.
         # Built copy-free with new_full (device-side fill) — torch.tensor(const,
@@ -994,6 +1009,10 @@ class _Attention(torch.autograd.Function):
         # K/V cache here would upcast it to fp32 and OOM. Eager/test launches leave
         # ``attn_global_scales`` unset and compute from the (small) q/k/v operands.
         _gs = attn_global_scales or {}
+        # K/V NVFP4 global scale: DEFAULT = constant 1.0. The deprecated whole-cache amax scan OOMs
+        # on a paged cache and, used as a frozen scale, saturates long context. per_page_scale derives
+        # it per tile in-kernel (the passed scale is then ignored). Either way pass this cheap 0-d 1.0.
+        _one_gs = q.new_full((), 1.0, dtype=torch.float32)
         fwd_kwargs = {
             "N_CTX": max_input_len,
             "kv_group_num": kv_group_num,
@@ -1036,13 +1055,14 @@ class _Attention(torch.autograd.Function):
             "q_global_scale": (_gs["q"] if "q" in _gs else tensor_global_scale_device(q))
             if "q" in _nvfp4
             else 1.0,
-            "k_global_scale": (_gs["k"] if "k" in _gs else tensor_global_scale_device(_k_src))
+            "k_global_scale": (_one_gs if per_page_scale else _gs.get("k", _one_gs))
             if "k" in _nvfp4
             else 1.0,
             "p_global_scale": _p_global if "p" in _nvfp4 else 1.0,
-            "v_global_scale": (_gs["v"] if "v" in _gs else tensor_global_scale_device(_v_src))
+            "v_global_scale": (_one_gs if per_page_scale else _gs.get("v", _one_gs))
             if "v" in _nvfp4
             else 1.0,
+            "PER_PAGE_SCALE": per_page_scale,
         }
 
         # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.
@@ -1239,6 +1259,7 @@ class _Attention(torch.autograd.Function):
             None,  # fp16_softmax
             None,  # softmax_quant
             None,  # attn_global_scales
+            None,  # per_page_scale
         )
 
 
@@ -1269,6 +1290,7 @@ def attention(
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     page_size: int = 16,
+    per_page_scale: bool = False,
 ) -> torch.Tensor:
     """Variable-length flash attention with GQA, autograd, optional sparsity, and paged KV.
 
@@ -1353,6 +1375,7 @@ def attention(
         fp16_softmax,
         softmax_quant,
         attn_global_scales,
+        per_page_scale,
     )
 
 
