@@ -50,17 +50,3 @@ quantize:
         $import: nvfp4
     - $import: kv_fp8
     - $import: default_disabled_quantizers
-    # Multimodal vision-branch exclusion: keep the vision encoder (SigLIP / ViT)
-    # and any multimodal embedding projection in BF16. The `*mlp*` enables above
-    # match not only the language-model MLPs but also the vision tower's block
-    # MLPs (`model.vision_tower.encoder.layers.*.mlp`, `model.visual.blocks.*.mlp`).
-    # NVFP4-quantizing the vision branch crashes the FP4 kernel on gemma-4
-    # (NVBug 6293762) and produces garbage image embeddings on Qwen3.5-VL. Must
-    # come after the enables so the disable wins (later entries override earlier).
-    # No-op on text-only models.
-    - quantizer_name: '*visual*'
-      enable: false
-    - quantizer_name: '*vision_tower*'
-      enable: false
-    - quantizer_name: '*embed_vision*'
-      enable: false
