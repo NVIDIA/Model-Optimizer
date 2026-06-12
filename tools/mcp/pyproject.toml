@@ -5,12 +5,20 @@ description = "MCP server exposing ModelOpt launcher operations (submit, status,
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0",
-    # The launcher provides the core orchestration primitive (core.run_jobs,
-    # SandboxPipeline, build_slurm_executor, build_docker_executor). Pulled
-    # in via git+subdirectory so `uvx --from <this-repo>#subdirectory=tools/mcp
-    # modelopt-mcp` resolves both packages from the same clone — no
-    # duplicate fetch.
-    "modelopt-launcher",
+    # NOTE on modelopt-launcher: `tools/launcher/pyproject.toml` declares
+    # the package name as `modelopt-launcher` but configures
+    # `py-modules = []` — there is NO importable `modelopt_launcher`
+    # Python package on disk. bridge.py invokes the launcher via
+    # `uv run launch.py` (subprocess) from `<repo>/tools/launcher/` as
+    # a sibling directory; it does NOT `import modelopt_launcher`.
+    # Declaring the bare name here would add an unsatisfiable PyPI
+    # dependency for end users installing via
+    # `uvx --from "git+...#subdirectory=tools/mcp" modelopt-mcp`. So we
+    # do NOT declare it. The install relationship is documented in
+    # README.md as a sibling-checkout layout requirement instead. The
+    # uvx-from-git path satisfies this naturally because uvx clones
+    # the whole repo, putting tools/launcher and tools/mcp next to
+    # each other on disk.
     "pyyaml",
     "pydantic>=2.0",
 ]
@@ -28,16 +36,13 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["modelopt_mcp*"]
 
-# The launcher sibling lives next door at ../launcher. We can't `pip install
-# ../launcher` as a path-dep in a published pyproject without breaking the
-# uvx-from-git workflow. For development, run:
-#   uv pip install -e ../launcher
+# No [tool.uv.sources] for the launcher — bridge.py uses it via
+# `subprocess.run(["uv", "run", "launch.py", ...], cwd=<repo>/tools/launcher/)`,
+# so the launcher is a file-layout dependency, not a Python import
+# dependency. The uvx-from-git path clones the whole repo so the
+# sibling tools/launcher/ ends up on disk automatically. For dev:
 #   uv pip install -e .
-# For users installing via uvx-from-git, the launcher comes in transitively
-# via the modelopt-launcher dep (resolved from the SAME git repo's
-# tools/launcher/ subdirectory — pip handles the fetch).
-[tool.uv.sources]
-modelopt-launcher = { path = "../launcher", editable = true }
+#   # then run from a clone where ../launcher exists.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

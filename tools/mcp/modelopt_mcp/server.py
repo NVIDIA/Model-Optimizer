@@ -258,7 +258,13 @@ def _build_server() -> FastMCP:
         ] = None,
         tail: Annotated[
             int | None,
-            Field(description=("Return only the last N lines per task. None returns full.")),
+            Field(
+                ge=1,
+                description=(
+                    "Return only the last N lines per task. Must be >= 1 when set; "
+                    "None returns the full log."
+                ),
+            ),
         ] = None,
     ) -> dict:
         return bridge.job_logs_impl(experiment_id, task, tail)

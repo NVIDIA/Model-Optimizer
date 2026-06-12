@@ -26,9 +26,11 @@ Tool surface (Phase 1):
 * ``verify_setup`` — fail-fast probe for the named executor (docker or
   slurm) BEFORE the user burns minutes on a misconfigured submission.
 * ``submit_job`` — submit a launcher YAML; mode determined by args
-  (``hf_local`` → Docker; ``cluster_host`` → Slurm). Returns the
-  experiment id immediately; Docker runs in a background thread,
-  Slurm submits with ``detach=True``.
+  (``hf_local`` → Docker; ``cluster_host`` → Slurm). Returns
+  immediately: Slurm returns ``experiment_id`` (parsed from launch.py's
+  detach-mode stdout), Docker returns the background subprocess
+  ``pid`` (Phase 2 will tail launcher output to capture the nemo_run
+  experiment_id for the Docker path too).
 * ``job_status`` — filesystem-based status from nemo_run's experiment
   dir (``_DONE``, ``status_*.out``). No in-memory registry; survives
   MCP server restarts.

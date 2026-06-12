@@ -34,7 +34,7 @@ need — keeps the surface area auditable.
 from __future__ import annotations
 
 import os
-import shlex
+import re
 import subprocess  # nosec B404
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +45,12 @@ import yaml
 # path. Works for both editable installs (../launcher/examples/) and
 # uvx-from-git installs (the launcher is a sibling site-packages install).
 _THIS_DIR = Path(__file__).resolve().parent
+
+# Canonical task-status failure tokens — matched against the FIRST word
+# of each ``status_<task>.out`` file by ``job_status_impl``.
+_STATUS_FAILURE_WORDS: frozenset[str] = frozenset(
+    {"failed", "error", "errored", "cancelled", "canceled"}
+)
 
 
 def _find_launcher_examples_dir() -> Path | None:
@@ -126,21 +132,29 @@ def list_examples_impl() -> dict:
     entries: list[dict] = []
     for path in sorted(examples_dir.rglob("*.yaml")):
         rel = path.relative_to(examples_dir.parent)  # launcher/examples/...
+        # Derive a model identifier from the path layout first
+        # (`examples/<family>/<model>/<task>.yaml`). The launcher's
+        # bundled examples don't carry top-level `model` / `description`
+        # fields — only `job_name` — so path-derivation gives the LLM
+        # useful routing metadata even when the YAML body says nothing.
+        parts = rel.parts  # ('examples', <family>, <model>, <file>) typically
+        path_model = f"{parts[1]}/{parts[2]}" if len(parts) >= 4 else None
         entry = ExampleEntry(
             path=str(rel),
             abs_path=str(path),
-            model=None,
+            model=path_model,
             description=None,
         )
-        # Best-effort parse — examples occasionally have non-standard
-        # shapes, don't crash list_examples on a single bad YAML.
+        # Best-effort YAML body parse — prefer body-supplied fields over
+        # the path-derived defaults when present. Don't crash on a
+        # malformed YAML.
         try:
             with open(path) as f:
                 doc = yaml.safe_load(f) or {}
             if isinstance(doc, dict):
-                # job_name is the most common identifier; "model" may
-                # also be a top-level field in some examples.
-                entry.model = doc.get("model") or doc.get("base_model") or doc.get("job_name")
+                body_model = doc.get("model") or doc.get("base_model") or doc.get("job_name")
+                if body_model:
+                    entry.model = body_model
                 entry.description = doc.get("description")
         except (yaml.YAMLError, OSError):
             pass
@@ -219,22 +233,25 @@ def verify_docker_setup_impl() -> dict:
             "gpu_check_skipped": True,
         }
 
-    # Same B603/B607 false-positive shape as the daemon check above —
-    # fixed argv, no shell interpolation, no untrusted input.
+    # GPU passthrough probe. Earlier versions of this code ran
+    # `docker run --gpus all nvidia/cuda:12.0-base nvidia-smi`, which
+    # pulled a ~150 MB CUDA image on first invocation and blew past
+    # the 60s timeout on healthy hosts that simply hadn't cached it
+    # yet (a real PR review finding — see
+    # https://github.com/NVIDIA/Model-Optimizer/pull/1701).
+    #
+    # Replacement: ask the Docker daemon directly whether the NVIDIA
+    # runtime is registered via `docker info --format '{{json .}}'`.
+    # No image pull, no container run; the daemon already knows
+    # whether the NVIDIA Container Toolkit registered "nvidia" as a
+    # runtime when nvidia-ctk runtime configure was last invoked.
+    # B603/B607 same false-positive shape as daemon check.
     try:
         gpu = subprocess.run(  # nosec B603 B607
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--gpus",
-                "all",
-                "nvidia/cuda:12.0-base-ubuntu22.04",
-                "nvidia-smi",
-            ],
+            ["docker", "info", "--format", "{{json .}}"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=10,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -243,20 +260,29 @@ def verify_docker_setup_impl() -> dict:
             "executor": "docker",
             "daemon_ok": True,
             "reason": "gpu_check_timeout",
-            "diagnostic": "GPU smoketest container did not return in 60s.",
+            "diagnostic": "`docker info --format` did not return in 10s.",
         }
-    if gpu.returncode != 0:
+    runtimes: list[str] = []
+    if gpu.returncode == 0 and gpu.stdout.strip():
+        try:
+            import json as _json
+
+            info = _json.loads(gpu.stdout)
+            runtimes = list((info.get("Runtimes") or {}).keys())
+        except (ValueError, AttributeError):
+            runtimes = []
+    if "nvidia" not in runtimes:
         return {
             "ok": False,
             "executor": "docker",
             "daemon_ok": True,
             "reason": "gpu_unavailable",
             "diagnostic": (
-                "Docker daemon is up but `--gpus all` + nvidia-smi "
-                f"failed. exit={gpu.returncode}. Likely missing the "
-                "NVIDIA Container Toolkit; install per "
+                "Docker daemon is up but the `nvidia` runtime is not "
+                "registered. Install the NVIDIA Container Toolkit + "
+                "register the runtime: "
                 "https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html. "
-                f"stderr: {gpu.stderr.strip()[-400:]}"
+                f"Registered runtimes: {runtimes!r}."
             ),
         }
     return {
@@ -472,23 +498,30 @@ def submit_job_impl(
     # NEMORUN_HOME defaulting, and signal handling in ways that are
     # painful to replicate. Phase 2 may move to direct in-process
     # invocation once we've audited those edge cases.
+    # Build argv WITHOUT shell-quoting values — subprocess.run/Popen with a
+    # list never goes through a shell, so quoting bakes literal quote chars
+    # into the values that nemo-run's CLI parser sees. Verbatim values
+    # carry spaces / special chars safely.
     argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--yes"]
     if hf_local:
-        argv.append(f"hf_local={shlex.quote(hf_local)}")
+        argv.append(f"hf_local={hf_local}")
     else:
-        # Slurm mode — pass cluster config knobs as nemo-run overrides.
-        argv.append(f"cluster_host={shlex.quote(cluster_host or '')}")
+        # Slurm mode — `launch.py`'s entrypoint does not accept a
+        # `cluster_host` arg (see tools/launcher/launch.py:82). The host
+        # is sourced via the SLURM_HOST env var, consumed by
+        # `slurm_factory(host=os.environ.get("SLURM_HOST", ""))` in
+        # tools/launcher/slurm_config.py. Propagate via env, not argv.
         if cluster_user:
-            argv.append(f"user={shlex.quote(cluster_user)}")
+            argv.append(f"user={cluster_user}")
         if identity:
-            argv.append(f"identity={shlex.quote(identity)}")
+            argv.append(f"identity={identity}")
         argv.append("detach=true")
     if job_dir:
-        argv.append(f"job_dir={shlex.quote(job_dir)}")
+        argv.append(f"job_dir={job_dir}")
     if job_name:
-        argv.append(f"job_name={shlex.quote(job_name)}")
+        argv.append(f"job_name={job_name}")
     for k, v in (extra_overrides or {}).items():
-        argv.append(f"{k}={shlex.quote(str(v))}")
+        argv.append(f"{k}={v}")
 
     # Run from the launcher dir so it picks up its own ./core.py etc.
     launcher_dir = _THIS_DIR.parent.parent / "launcher"
@@ -503,46 +536,60 @@ def submit_job_impl(
             ),
         }
 
+    # Propagate env so submit-side and status-side agree on NEMORUN_HOME.
+    # Without this, `launch.py` defaults NEMORUN_HOME to its own cwd
+    # (tools/launcher/), but `_resolve_experiment_dir` later checks the
+    # MCP server's cwd — different paths, so job_status would return
+    # experiment_dir_not_found for jobs that actually succeeded.
+    child_env = os.environ.copy()
+    child_env.setdefault("NEMORUN_HOME", os.getcwd())
+    if executor == "slurm":
+        # Required for slurm_factory's host default. Verify_setup ran
+        # against this same host above (when verify_setup=True), so the
+        # value is known good.
+        child_env["SLURM_HOST"] = cluster_host or ""
+
     if executor == "docker":
-        # Docker mode: spawn in background so we don't block the MCP
-        # call. The subprocess writes its experiment dir + status into
-        # NEMORUN_HOME; we'll read it back via job_status.
-        # B603 false positive — `argv` is a list built by this module
-        # from typed parameters, no shell interpretation.
+        # Docker mode: spawn detached. Discard stdout/stderr to /dev/null —
+        # leaving them as Popen.PIPE without a reader fills the kernel's
+        # ~64 KB pipe buffer and BLOCKS the launcher's next write(), which
+        # would hang long-running PTQ jobs forever while the MCP server
+        # appears to have "succeeded".
+        # `start_new_session=True` detaches from the MCP server's process
+        # group so an MCP server restart / SIGINT doesn't SIGHUP the
+        # in-flight launcher.
+        # B603 false positive — argv is a controlled list built above.
         proc = subprocess.Popen(  # nosec B603
             argv,
             cwd=str(launcher_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            env=child_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        # Detached: don't wait. The caller polls job_status by
-        # experiment_id (derived from job_name or auto-named).
-        # Generate a best-effort experiment_id from job_name + timestamp.
-        # nemo_run names experiments deterministically as
-        # `<title>_<job_name>_<timestamp>`; if the caller didn't provide
-        # job_name we can't predict the id ahead of time.
         return {
             "ok": True,
             "executor": "docker",
             "pid": proc.pid,
             "argv": argv,
-            "experiment_id": None,  # Phase 2: tail the subprocess output
-            # until nemo_run logs the id, then return it
+            "nemorun_home": child_env["NEMORUN_HOME"],
+            "experiment_id": None,  # Phase 2: tail launcher's output
+            # via a side-channel log file to capture nemo_run's id
             "spike_note": (
-                "Docker mode launched in background. Phase 1: the "
-                "experiment_id is None — Phase 2 tails the subprocess "
-                "output to capture the id. For now, list experiments "
-                "via nemo_run's CLI or check NEMORUN_HOME."
+                "Docker mode launched detached. Phase 1: experiment_id "
+                "is None — list under $NEMORUN_HOME/experiments/ or use "
+                "Phase 2's tail-based id capture."
             ),
         }
 
-    # Slurm mode: synchronous call (slurm.py exits quickly after sbatch
+    # Slurm mode: synchronous call (launch.py exits quickly after sbatch
     # with detach=true). Capture stdout to parse experiment_id.
-    # B603 false positive — same as above; controlled argv list.
+    # B603 false positive — argv is a controlled list built above.
     try:
         proc = subprocess.run(  # nosec B603
             argv,
             cwd=str(launcher_dir),
+            env=child_env,
             capture_output=True,
             text=True,
             timeout=300,
@@ -583,28 +630,43 @@ def submit_job_impl(
             "argv": argv,
         }
 
-    # Best-effort experiment_id parse
-    import re as _re
-
+    # Best-effort experiment_id + dir + slurm_job_id parse. nemo_run's
+    # output format may shift across versions; on parse miss, fields
+    # come back None and the caller still gets stdout_tail to inspect
+    # by hand.
     experiment_id = None
     experiment_dir = None
     slurm_job_id = None
-    for m in _re.finditer(
-        r"experiment[_\s-]+([a-zA-Z0-9_]+_\d{10,})",
+    # nemo_run prints "Entering Experiment <title>_<id> with id: <id>" —
+    # match the trailing id directly so we don't have to encode the
+    # title prefix or hard-code timestamp width.
+    m = re.search(
+        r"experiment[_\s-]+id[:\s]+(\S+)",
         stdout_tail,
-        _re.IGNORECASE,
-    ):
+        re.IGNORECASE,
+    )
+    if m:
         experiment_id = m.group(1)
-        break
-    for m in _re.finditer(
-        r"(/lustre/[^\s]+|/home/[^\s]+)/experiments/[^\s]+",
-        stdout_tail,
-    ):
-        experiment_dir = m.group(0)
-        break
-    for m in _re.finditer(r"Submitted batch job (\d+)", stdout_tail):
+    else:
+        # Fallback for older nemo_run output that lacked the explicit
+        # "id:" label. Accepts any path-safe id token following the
+        # word "experiment" — not just timestamp-style.
+        m = re.search(
+            r"experiment[_\s-]+([A-Za-z0-9_-]+)",
+            stdout_tail,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    # Match any path containing `/experiments/<id>/` — don't anchor on
+    # cluster-specific filesystem roots (NVIDIA's /lustre, partner
+    # clusters' /scratch / /work / /data / /p / ...).
+    m = re.search(r"(\S+/experiments/[^\s/]+)", stdout_tail)
+    if m:
+        experiment_dir = m.group(1)
+    m = re.search(r"Submitted batch job (\d+)", stdout_tail)
+    if m:
         slurm_job_id = m.group(1)
-        break
 
     return {
         "ok": True,
@@ -627,9 +689,15 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
     """Map an experiment_id to its on-disk directory.
 
     nemo_run lays experiments out under ``$NEMORUN_HOME/experiments/<id>/``
-    by default; ``NEMORUN_HOME`` falls back to cwd. We also check
-    ``./experiments/<id>`` directly and ``./local_experiments/<id>``
-    (the Docker-mode fallback path).
+    by default; ``NEMORUN_HOME`` falls back to cwd. We check several
+    candidate roots in order:
+
+    1. ``$NEMORUN_HOME/experiments/`` — what submit_job_impl pins via env.
+    2. cwd's ``experiments/`` + ``local_experiments/`` — for operators
+       running the MCP server from their own checkout.
+    3. The launcher's own ``experiments/`` directory — belt-and-braces
+       for the case where the operator didn't set NEMORUN_HOME at all
+       AND the MCP server's cwd differs from where launch.py ran.
     """
     candidates = []
     nemorun_home = os.environ.get("NEMORUN_HOME")
@@ -637,6 +705,12 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
         candidates.append(Path(nemorun_home) / "experiments" / experiment_id)
     candidates.append(Path.cwd() / "experiments" / experiment_id)
     candidates.append(Path.cwd() / "local_experiments" / experiment_id)
+    # The launcher's own experiments dir — submit_job_impl uses
+    # cwd=str(launcher_dir) for the subprocess, so when NEMORUN_HOME is
+    # unset, launch.py defaults to launcher_dir/experiments/.
+    launcher_dir = _THIS_DIR.parent.parent / "launcher"
+    candidates.append(launcher_dir / "experiments" / experiment_id)
+    candidates.append(launcher_dir / "local_experiments" / experiment_id)
     for c in candidates:
         if c.exists():
             return c
@@ -675,12 +749,16 @@ def job_status_impl(experiment_id: str) -> dict:
     task_statuses: dict[str, str] = {}
     any_failed = False
     for status_file in sorted(exp_dir.glob("status_*.out")):
-        # Convention: filename is `status_<task_name>.out`, contents
-        # are a single word ("succeeded" or "failed").
         task_name = status_file.stem.removeprefix("status_")
         body = status_file.read_text(encoding="utf-8", errors="replace").strip()
         task_statuses[task_name] = body
-        if "fail" in body.lower():
+        # Anchor on the FIRST word of the status file. Anchoring this way
+        # (instead of `in body.lower()`) avoids substring false-positives
+        # like "succeeded after retry; previous attempt failed" — the
+        # canonical convention is a single word but the runner has been
+        # observed to append context (e.g. "failed (rc=1)").
+        first_word = (body.split() or [""])[0].lower()
+        if first_word in _STATUS_FAILURE_WORDS:
             any_failed = True
 
     if done_marker.exists():
