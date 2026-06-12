@@ -152,14 +152,10 @@ For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
 
 > **Cross-check SGLang launch flags via the SGLang cookbook** (the SGLang analog
 > of `recipes.vllm.ai`): `docs.sglang.io/cookbook/<category>/<org>/<model>` (e.g.
-> `.../autoregressive/DeepSeek/DeepSeek-V4`), authoritative for parallelism
-> (`--tp` / `--ep`, plus multi-node/data-parallel settings), MoE backends
-> (`--moe-runner-backend flashinfer_mxfp4`
-> on Blackwell vs `marlin` on Hopper W4A16; `--moe-a2a-backend deepep` /
-> `megamoe`), strategy-driven flags (MTP steps, `--cuda-graph-max-bs`,
-> `--max-running-requests`), Docker image, and min version. Select the variant
-> via the URL fragment `#hw=...&variant=...&quant=...&strategy=...&nodes=...`.
-> The page is **JS-rendered** — fetch the raw markdown at
+> `.../autoregressive/DeepSeek/DeepSeek-V4`) — authoritative for parallelism, MoE
+> backends, strategy flags, Docker image, and min version. Select the variant via
+> the URL fragment `#hw=...&variant=...&quant=...&strategy=...&nodes=...`. The
+> page is **JS-rendered** — fetch the raw markdown at
 > `raw.githubusercontent.com/sgl-project/sglang/main/docs_new/cookbook/<category>/<org>/<model>.mdx`.
 > SM120 (RTX PRO 6000) needs the `lmsysorg/sglang:dev` nightly (`:latest` lacks
 > SM120). See `references/sglang.md` for the full backend/flag matrix.
