@@ -1073,6 +1073,21 @@ def _promote_quantizer_tensors_to_module(component: nn.Module) -> None:
             sub_module.register_buffer("svdquant_lora_b", lora_b.detach().clone())
 
 
+def _remove_promoted_quantizer_tensors(component: nn.Module) -> None:
+    """Undo :func:`_promote_quantizer_tensors_to_module`.
+
+    Removes the temporary module-level export buffers (``svdquant_lora_a/b`` and
+    ``pre_quant_scale``) so the live module is unchanged after export, keeping
+    repeated export / post-export module reuse correct. The quantizer-owned tensors
+    (``weight_quantizer.svdquant_lora_a/b``, ``input_quantizer._pre_quant_scale``)
+    are left untouched.
+    """
+    for _, sub_module in component.named_modules():
+        for buffer_name in ("svdquant_lora_a", "svdquant_lora_b", "pre_quant_scale"):
+            if buffer_name in getattr(sub_module, "_buffers", {}):
+                del sub_module._buffers[buffer_name]
+
+
 def _export_diffusers_checkpoint(
     pipe: Any,
     dtype: torch.dtype | None,
@@ -1200,6 +1215,10 @@ def _export_diffusers_checkpoint(
                     config_data["quantization_config"] = hf_quant_config
                     with open(config_path, "w") as file:
                         json.dump(config_data, file, indent=4)
+
+            # Drop the temporary promoted export buffers so the live module is
+            # unchanged after export (supports repeated export / module reuse).
+            _remove_promoted_quantizer_tensors(component)
         # Non-quantized component: just save as-is
         elif hasattr(component, "save_pretrained"):
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
