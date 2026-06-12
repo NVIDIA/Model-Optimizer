@@ -24,6 +24,7 @@ from modelopt.torch.export.quant_utils import QUANTIZATION_NVFP4, to_quantized_w
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import FP4_E2M1_MAX, FP4_E2M1_MAX_M4
 
 BLOCK_SIZE = 16
 FP4_VALUES = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
@@ -318,3 +319,81 @@ class TestNVFP4StaticCornerCases:
         # FP8 e4m3fn NaN bytes are 0x7F (127) and 0xFF (255).
         nan_count = int(((ws_bytes == 127) | (ws_bytes == 255)).sum().item())
         assert nan_count == 0, f"static export emitted {nan_count} NaN FP8 weight_scale bytes"
+
+
+def _make_static_quantizer_46(
+    per_block_amax: torch.Tensor, global_amax: torch.Tensor
+) -> NVFP4StaticQuantizer:
+    """Static NVFP4 quantizer with 4/6 adaptive block scaling enabled."""
+    cfg = QuantizerAttributeConfig(
+        num_bits=(2, 1),
+        block_sizes={
+            -1: BLOCK_SIZE,
+            "type": "static",
+            "scale_bits": (4, 3),
+            "four_over_six": True,
+        },
+    )
+    q = NVFP4StaticQuantizer(quant_attribute_cfg=cfg)
+    q.amax = per_block_amax.clone()
+    q.global_amax = global_amax.clone()
+    return q
+
+
+class TestNVFP4StaticFourOverSixExport:
+    """4/6 static export normalizes block scales by 256 (not 448) and stays finite.
+
+    The only difference from the default NVFP4 export is the FP8 normalization max:
+    weight_scale_2 = global_amax / (6 * 256) instead of / (6 * 448), and per block the
+    export picks the M=4 scale (M=6 scale * 6/4) when it lowers reconstruction MSE.
+    """
+
+    def test_scale_2_normalizes_by_256(self):
+        weight = _layer1_routed_expert_like(32, 128, n_outliers=4, seed=5)
+        block_max = _per_block_max(weight)
+        global_amax = block_max.max()
+        amax = block_max.clamp(min=1e-30)
+
+        ws2_46 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(
+            _make_static_quantizer_46(amax, global_amax)
+        )
+        ws2_default = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(
+            _make_static_quantizer(amax, global_amax)
+        )
+
+        # weight_scale_2 = global_amax / (6 * m_fp8); only m_fp8 differs (256 vs 448).
+        assert torch.allclose(ws2_46, global_amax.float() / (6.0 * 256.0), rtol=1e-6)
+        assert torch.allclose(ws2_46 / ws2_default, torch.tensor(448.0 / 256.0), rtol=1e-5)
+
+    def test_export_round_trip_finite(self):
+        weight = _layer1_routed_expert_like(64, 256, n_outliers=4, seed=6)
+        block_max = _per_block_max(weight)
+        global_amax = block_max.max()
+        amax = block_max.clamp(min=1e-30)
+        q = _make_static_quantizer_46(amax, global_amax)
+
+        ws, ws2, deq = _export_round_trip(weight, q)
+
+        assert torch.isfinite(ws.float()).all(), "weight_scale (FP8) must be finite"
+        assert torch.isfinite(ws2).all(), "weight_scale_2 (FP32) must be finite"
+        assert torch.isfinite(deq.float()).all(), "dequantized weight must be finite"
+
+    def test_selected_high_precision_scale_is_m6_or_m4(self):
+        """Each high-precision per-block scale is either the M=6 candidate or its 6/4 multiple."""
+        weight = _layer1_routed_expert_like(32, 128, n_outliers=6, seed=7)
+        block_max = _per_block_max(weight)
+        global_amax = block_max.max()
+        amax = block_max.clamp(min=1e-30)
+        q = _make_static_quantizer_46(amax, global_amax)
+
+        ws2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q)
+        selected, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+            q, weight, ws2, keep_high_precision=True
+        )
+
+        # Static-path M=6 baseline per-block scale = per_block_amax / 6 (no zero blocks here).
+        m6 = (amax.float() / FP4_E2M1_MAX).view_as(selected)
+        m4 = m6 * (FP4_E2M1_MAX / FP4_E2M1_MAX_M4)
+        is_m6 = torch.isclose(selected, m6, rtol=1e-5)
+        is_m4 = torch.isclose(selected, m4, rtol=1e-5)
+        assert (is_m6 | is_m4).all(), "Selected scale is neither the M=6 nor the M=4 candidate."

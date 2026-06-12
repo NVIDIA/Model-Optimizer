@@ -29,10 +29,10 @@ import torch
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import choices
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
-    F8_E4M3_MAX,
-    F8_E4M3_MAX_46,
     FP4_E2M1_MAX,
     FP4_E2M1_MAX_M4,
+    FP8_E4M3_MAX,
+    FP8_E4M3_MAX_46,
     NVFP4QTensor,
     _cast_per_block_scale_to_fp8,
 )
@@ -48,8 +48,8 @@ def _per_block_amax(weight: torch.Tensor, block_size: int) -> torch.Tensor:
 
 class TestConstants:
     def test_fp8_and_e2m1_constants(self):
-        assert F8_E4M3_MAX == 448.0
-        assert F8_E4M3_MAX_46 == 256.0
+        assert FP8_E4M3_MAX == 448.0
+        assert FP8_E4M3_MAX_46 == 256.0
         assert FP4_E2M1_MAX == 6.0
         assert FP4_E2M1_MAX_M4 == 4.0
 
@@ -120,7 +120,7 @@ class TestSelectFourOverSixScale:
         deq_sel = NVFP4QTensor._fake_quant_to_e2m1(
             weight,
             _cast_per_block_scale_to_fp8(
-                sel_scale, fp8_max_for_normalization=F8_E4M3_MAX_46
+                sel_scale, fp8_max_for_normalization=FP8_E4M3_MAX_46
             ).float(),
             alpha,
             BLOCK_SIZE,

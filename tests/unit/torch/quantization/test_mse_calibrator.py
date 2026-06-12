@@ -780,3 +780,48 @@ class TestStaticNVFP4Promotion:
         for child in (model.q_proj, model.k_proj, model.v_proj):
             assert isinstance(child.weight_quantizer, NVFP4StaticQuantizer)
             assert torch.equal(child.weight_quantizer.global_amax, torch.tensor(6.0))
+
+
+class TestFourOverSixNormalizationThreading:
+    """4/6 is calibrator-agnostic: the MSE calibrator finds per-block amaxes the usual way,
+    and the 256-vs-448 FP8 normalization is applied later, at static fake-quant time.
+
+    ``NVFP4StaticQuantizer._fake_quantize`` selects ``fp8_max_for_normalization`` from the
+    ``four_over_six`` block_sizes flag and threads it into ``static_blockwise_fp4_fake_quant``.
+    """
+
+    @staticmethod
+    def _make_static_quantizer(four_over_six: bool) -> NVFP4StaticQuantizer:
+        block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
+        if four_over_six:
+            block_sizes["four_over_six"] = True
+        cfg = QuantizerAttributeConfig(num_bits=(2, 1), block_sizes=block_sizes)
+        q = NVFP4StaticQuantizer(quant_attribute_cfg=cfg)
+        q.amax = torch.full((1, 4), 0.5)
+        q.global_amax = torch.tensor(2.0)
+        return q
+
+    def _captured_fp8_max(self, monkeypatch, four_over_six: bool) -> float:
+        import modelopt.torch.quantization.nn.modules.tensor_quantizer as tqm
+
+        captured = {}
+
+        def spy(*args, **kwargs):
+            # Call site: (inputs, amax, global_amax, quantize_block_scales,
+            #             fp8_max_for_normalization, dtype, pass_through_bwd).
+            # The 4/6 → 256 vs 448 selection happens before this call, so capturing the
+            # threaded value is enough; we return a passthrough to avoid the triton kernel
+            # (unavailable on CPU) — this is a unit test of the threading, not the kernel.
+            captured["fp8_max"] = args[4]
+            return args[0]
+
+        monkeypatch.setattr(tqm, "static_blockwise_fp4_fake_quant", spy)
+        q = self._make_static_quantizer(four_over_six)
+        q._fake_quantize(torch.randn(1, 64))
+        return captured["fp8_max"]
+
+    def test_four_over_six_threads_256(self, monkeypatch):
+        assert self._captured_fp8_max(monkeypatch, four_over_six=True) == 256.0
+
+    def test_default_threads_448(self, monkeypatch):
+        assert self._captured_fp8_max(monkeypatch, four_over_six=False) == 448.0
