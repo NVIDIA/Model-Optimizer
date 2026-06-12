@@ -68,7 +68,7 @@ pipeline:
       # over the full sequence, same as the EAGLE3 streaming example.
       - training.answer_only_loss=false
       - training.num_train_epochs=1
-      - training.max_steps=5000
+      - training.max_steps=2000
       # dflash.yaml sets report_to=tensorboard, which hard-fails if tensorboard
       # isn't in the serve container; the streaming trainer doesn't need it.
       - training.report_to=none

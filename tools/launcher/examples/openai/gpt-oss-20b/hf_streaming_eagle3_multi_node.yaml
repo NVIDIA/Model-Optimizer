@@ -58,7 +58,7 @@ pipeline:
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
-      - training.max_steps=5000
+      - training.max_steps=2000
       - eagle.eagle_use_torch_compile=false
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
