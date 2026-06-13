@@ -29,6 +29,7 @@ from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
+import modelopt.torch.kernels.quantization.gemm as _triton_kernels
 from ..nn import QuantModuleRegistry, SequentialQuantizer
 from .custom import _ParallelLinear
 
@@ -110,6 +111,39 @@ class _QuantTELinear(_ParallelLinear):
     _quantized_linear_fn = te_quantized_linear_fn
 
 
+class _GroupedAxis0FakeQuantFn(torch.autograd.Function):
+    """Triton-backed per-expert fake-quant adapter for the N-modules path.
+
+    Forward: single-launch Triton kernel over N expert weights (tensor-of-pointers,
+    no stack memcopy). Backward honors modelopt's default `pass_through_bwd=True`
+    — gradient flows back unchanged with zero kernel work. When False, the
+    clip-aware Triton STE backward kernel runs. See
+    `modelopt/torch/kernels/quantization/gemm/grouped_axis0_fakequant.py`.
+    """
+
+    @staticmethod
+    def forward(ctx, amax_vec, num_bits, narrow_range, pass_through_bwd, *weights):
+        outputs = _triton_kernels.grouped_axis0_fakequant(
+            list(weights), amax_vec, num_bits=num_bits, narrow_range=narrow_range
+        )
+        ctx.pass_through_bwd = pass_through_bwd
+        if not pass_through_bwd:
+            ctx.save_for_backward(amax_vec, *weights)
+        ctx.num_weights = len(weights)
+        return tuple(outputs)
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        if ctx.pass_through_bwd:
+            return (None, None, None, None, *grad_outputs)
+        saved = ctx.saved_tensors
+        amax_vec, weights = saved[0], list(saved[1:])
+        grad_inputs = _triton_kernels.grouped_axis0_fakequant_backward(
+            weights, list(grad_outputs), amax_vec
+        )
+        return (None, None, None, None, *grad_inputs)
+
+
 # Register the public te.pytorch.GroupedLinear class
 @QuantModuleRegistry.register({te_grouped_linear.GroupedLinear: "te_GroupedLinear"})
 class _QuantTEGroupedLinear(_ParallelLinear):
@@ -182,6 +216,40 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             return getattr(self, f"weight_quantizer_{gemm_idx}")
         return self.weight_quantizer
 
+    def _gather_per_expert_amax(self) -> torch.Tensor:
+        """Stack N per-expert weight_quantizer_i._amax scalars into a [N] fp32 vector.
+
+        Matches the amax-input contract of `grouped_axis0_fakequant` — one
+        entry per expert, indexed by gemm_idx.
+        """
+        amaxes = []
+        for i in range(self.num_gemms):
+            q = self._get_weight_quantizer(i)
+            amaxes.append(q._amax.to(torch.float32).reshape(()))
+        return torch.stack(amaxes).contiguous()
+
+    def _can_use_triton_per_expert_path(self, num_gemms: int) -> bool:
+        """Soft-gate the Triton dispatch on availability + ready-to-quantize state."""
+        if not getattr(self, "_per_expert_weight_quantizer", False):
+            return False
+        if not _triton_kernels.IS_AVAILABLE:
+            return False
+        if not hasattr(_triton_kernels, "grouped_axis0_fakequant"):
+            return False
+        for i in range(num_gemms):
+            q = self._get_weight_quantizer(i)
+            # SequentialQuantizer (multi-stage) not supported on the Triton
+            # path; fall back to the cuda_ext per-quantizer loop.
+            if isinstance(q, SequentialQuantizer):
+                return False
+            if not hasattr(q, "_amax"):
+                return False
+            # During calibration each quantizer still needs the cuda_ext path
+            # so its _amax gets updated; skip Triton until calib finishes.
+            if getattr(q, "_if_calib", False):
+                return False
+        return True
+
     def iter_weights_for_calibration(self):
         """Yield ``(weight_i, weight_quantizer)`` for each of the ``num_gemms`` grouped weights."""
         for i in range(self.num_gemms):
@@ -214,9 +282,26 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
         new_args = list(args)
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
-        for gemm_idx in range(num_gemms):
-            pos = weights_start + gemm_idx
-            new_args[pos] = self._get_weight_quantizer(gemm_idx)(args[pos])
+        if self._can_use_triton_per_expert_path(num_gemms):
+            # Single-launch Triton fakequant for the N expert weights.
+            # Replaces the per-expert cuda_ext loop (N kernel launches -> 1).
+            # All per-expert quantizers share the same config (each is a
+            # copy.deepcopy of the base weight_quantizer in _setup), so
+            # num_bits/narrow_range/pass_through_bwd read from quantizer 0
+            # apply to the whole layer.
+            weights = list(args[weights_start : weights_start + num_gemms])
+            amax_vec = self._gather_per_expert_amax()
+            q0 = self._get_weight_quantizer(0)
+            pass_through_bwd = getattr(q0, "_pass_through_bwd", True)
+            qweights = _GroupedAxis0FakeQuantFn.apply(
+                amax_vec, q0.num_bits, q0.narrow_range, pass_through_bwd, *weights
+            )
+            for gemm_idx in range(num_gemms):
+                new_args[weights_start + gemm_idx] = qweights[gemm_idx]
+        else:
+            for gemm_idx in range(num_gemms):
+                pos = weights_start + gemm_idx
+                new_args[pos] = self._get_weight_quantizer(gemm_idx)(args[pos])
         output = getattr(package, func_name)(*new_args)
         # TE 2.15+ returns `(out, new_workspaces)`; TE <= 2.14 returns just `out`.
         # Only the activation tensor participates in output quantization.
