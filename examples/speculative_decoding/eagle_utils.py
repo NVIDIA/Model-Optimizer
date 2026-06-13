@@ -230,12 +230,17 @@ class LoRAWarmupCallback(TrainerCallback):
         return control
 
 
-class DFlashExportCallback(TrainerCallback):
-    """Export DFlash draft module after each checkpoint save.
+class DFlashFSDP2ShardedSDExportCallback(TrainerCallback):
+    """Export the DFlash draft module after each checkpoint save, for FSDP2 sharded runs.
 
-    Under FSDP2 SHARDED_STATE_DICT, checkpoints only contain distributed shards
-    (pytorch_model_fsdp_0/), not model.safetensors. This callback extracts the
-    small draft module weights and saves them in deployment format after each save.
+    Applicable range: this is needed only under FSDP2 ``SHARDED_STATE_DICT``, where the
+    checkpoint holds distributed shards (``pytorch_model_fsdp_0/``) and no consolidated
+    ``model.safetensors`` — so the post-training ``export_hf_checkpoint.py`` pass can't read
+    it. It gathers just the small draft submodule and writes the deployable export.
+
+    Gating is the caller's responsibility: ``main.py`` adds this callback only when the
+    accelerator's FSDP state dict type is ``SHARDED_STATE_DICT`` (full-state-dict runs —
+    DDP, single-device, FSDP2 FULL_STATE_DICT — use the launcher's post-run export instead).
     """
 
     def on_save(self, args, state, control, **kwargs):
@@ -250,25 +255,6 @@ class DFlashExportCallback(TrainerCallback):
             return control
 
         step = state.global_step
-        # This callback is only needed under FSDP2 SHARDED_STATE_DICT, where the
-        # checkpoint holds distributed shards (pytorch_model_fsdp_0/) and no consolidated
-        # weights. When the checkpoint was saved as a full state dict (model.safetensors /
-        # pytorch_model.bin), the post-run export_hf_checkpoint.py pass can read it
-        # directly, so skip the gather here. The decision is made from the on-disk
-        # checkpoint format — identical across ranks (shared FS), and before the collective
-        # gather below, so all ranks take the same branch.
-        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
-        if any(
-            os.path.exists(os.path.join(ckpt_dir, f))
-            for f in (
-                "model.safetensors",
-                "model.safetensors.index.json",
-                "pytorch_model.bin",
-                "pytorch_model.bin.index.json",
-            )
-        ):
-            return control
-
         export_dir = os.path.join(args.output_dir, f"exported-checkpoint-{step}")
 
         # All ranks participate in the state_dict gather (FSDP2 collective op). Only the

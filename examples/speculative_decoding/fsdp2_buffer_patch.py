@@ -371,3 +371,23 @@ def patch_accelerator(accelerator):
     print(
         "[fsdp2_buffer_patch] Patched accelerator.clip_grad_norm_ for FSDP2 DTensor compatibility"
     )
+
+
+def log_param_dtypes(model):
+    """Debug aid: log per-rank parameter dtype counts (gated by DFLASH_LOG_PARAM_DTYPES=1).
+
+    Used to verify the FSDP2 dtype synchronization above — after ``fully_shard()`` params
+    are DTensors whose dtype lives on ``_local_tensor``. Off by default; this is purely
+    diagnostic and has no effect on training.
+    """
+    import os
+
+    if os.environ.get("DFLASH_LOG_PARAM_DTYPES") != "1":
+        return
+    rank = int(os.environ.get("RANK", 0))
+    dtypes = {}
+    for name, p in model.named_parameters():
+        dt_key = str(p.dtype) if not hasattr(p, "_local_tensor") else str(p._local_tensor.dtype)
+        dtypes.setdefault(dt_key, []).append(name)
+    for dt, names in dtypes.items():
+        print(f"[dtype_check rank={rank}] {dt}: {len(names)} params (e.g. {names[0]})")
