@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import types
 
 import pytest
 
@@ -600,6 +602,85 @@ def test_read_cluster_artifact_logs_mode_timeout(monkeypatch):
     )
     assert result["ok"] is False
     assert result["reason"] == "logs_fetch_timeout"
+
+
+def _install_fake_experiment(monkeypatch, experiment):
+    nemo_run_mod = types.ModuleType("nemo_run")
+    run_mod = types.ModuleType("nemo_run.run")
+    experiment_mod = types.ModuleType("nemo_run.run.experiment")
+
+    class FakeExperiment:
+        @classmethod
+        def from_id(cls, experiment_id):
+            return experiment
+
+    experiment_mod.Experiment = FakeExperiment
+    nemo_run_mod.run = run_mod
+    run_mod.experiment = experiment_mod
+    monkeypatch.setitem(sys.modules, "nemo_run", nemo_run_mod)
+    monkeypatch.setitem(sys.modules, "nemo_run.run", run_mod)
+    monkeypatch.setitem(sys.modules, "nemo_run.run.experiment", experiment_mod)
+
+
+def test_read_cluster_artifact_path_mode_quotes_remote_path(monkeypatch):
+    """Relative path mode quotes the remote cat target before invoking the tunnel."""
+    captured = {}
+
+    class FakeTunnel:
+        def run(self, command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            return types.SimpleNamespace(stdout="artifact content")
+
+    executor = types.SimpleNamespace(
+        job_dir="/lustre/job dir/$(not_a_command)",
+        tunnel=FakeTunnel(),
+    )
+    experiment = types.SimpleNamespace(tasks=[types.SimpleNamespace(executor=executor)])
+    _install_fake_experiment(monkeypatch, experiment)
+
+    result = bridge.read_cluster_artifact_impl(
+        experiment_id="cicd_42",
+        path="results/specbench_results.json",
+        job_idx=0,
+    )
+
+    assert result["ok"] is True
+    assert result["mode"] == "arbitrary_path"
+    assert result["content"] == "artifact content"
+    assert result["remote_path"] == (
+        "/lustre/job dir/$(not_a_command)/cicd_42/results/specbench_results.json"
+    )
+    assert captured["command"] == (
+        "cat -- '/lustre/job dir/$(not_a_command)/cicd_42/results/specbench_results.json'"
+    )
+    assert captured["kwargs"] == {"warn": True}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/passwd",
+        "../secret.txt",
+        "results/../secret.txt",
+        "results//secret.txt",
+        "results/./secret.txt",
+        "results/secret; touch pwned",
+        "results/$(touch pwned)",
+        "results/`touch pwned`",
+        "results/secret file.txt",
+    ],
+)
+def test_read_cluster_artifact_rejects_unsafe_paths(path):
+    """Unsafe artifact paths fail before nemo_run import or tunnel execution."""
+    result = bridge.read_cluster_artifact_impl(
+        experiment_id="cicd_42",
+        path=path,
+        job_idx=0,
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "invalid_artifact_path"
 
 
 # ---------------------------------------------------------------------------
