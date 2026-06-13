@@ -314,6 +314,24 @@ def _check_for_nv_tensorrt_rtx_libs():
     return found
 
 
+def _check_for_nv_tensorrt_rtx_abi_libs(ep_path: str):
+    logger.info("Checking for NvTensorRtRtx ABI EP library")
+    if not ep_path:
+        raise FileNotFoundError("Need to provide abi_ep_path to use NvTensorRtRtx-abi")
+    if not os.path.isfile(ep_path):
+        raise FileNotFoundError(f"NvTensorRtRtx ABI EP library not found: {ep_path}")
+
+    ort.register_execution_provider_library("NvTensorRTRTXExecutionProvider", ep_path)
+    return True
+
+
+def register_abi_ep(abi_ep_path: str | None):
+    """Register an external NvTensorRtRtx ABI execution-provider library."""
+
+    _check_for_nv_tensorrt_rtx_abi_libs(abi_ep_path or "")
+    logger.debug("Registered NvTensorRtRtx ABI EP")
+
+
 def _prepare_ep_list(calibration_eps: list[str]):
     """Prepares the EP list for ORT from the given user input."""
     logger.debug(f"Preparing execution providers list from: {calibration_eps}")
@@ -334,6 +352,9 @@ def _prepare_ep_list(calibration_eps: list[str]):
         elif "cpu" in ep:
             providers.append("CPUExecutionProvider")
             logger.debug("Added CPU EP")
+        elif "NvTensorRtRtx-abi" in ep:
+            providers.append("NvTensorRTRTXExecutionProvider")
+            logger.debug("Added NvTensorRtRtx ABI EP")
         elif "NvTensorRtRtx" in ep:
             try:
                 _check_for_nv_tensorrt_rtx_libs()

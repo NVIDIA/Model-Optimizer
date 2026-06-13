@@ -63,7 +63,7 @@ from modelopt.onnx.quantization.graph_utils import (
 )
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.int8 import quantize as quantize_int8
-from modelopt.onnx.quantization.ort_utils import update_trt_ep_support
+from modelopt.onnx.quantization.ort_utils import register_abi_ep, update_trt_ep_support
 from modelopt.onnx.quantization.qdq_utils import (
     qdq_to_dq,
     remove_graph_input_q,
@@ -358,6 +358,7 @@ def quantize(
     simplify: bool = False,
     calibrate_per_node: bool = False,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    abi_ep_path: str | None = None,
     direct_io_types: bool = False,
     opset: int | None = None,
     autotune: bool = False,
@@ -491,6 +492,9 @@ def quantize(
             If None of the calibration_eps require any such shapes profile for model inputs, then nothing needs to be
             set for this "input_shapes_profile" parameter.
             Default value is None.
+        abi_ep_path:
+            Path to an external NvTensorRtRtx ABI execution-provider library. Required when
+            ``NvTensorRtRtx-abi`` is present in ``calibration_eps``.
         direct_io_types:
             If True, modify the I/O types in the quantized ONNX model to be lower precision whenever possible.
             If False, keep the I/O types in the quantized ONNX model the same as in the given ONNX model.
@@ -546,6 +550,9 @@ def quantize(
         raise ValueError(
             "Per node calibration is only supported for int8 and fp8 quantization modes"
         )
+
+    if "NvTensorRtRtx-abi" in calibration_eps:
+        register_abi_ep(abi_ep_path)
 
     # quantize_static creates a shape-inferred copy at the input model's directory
     # Needs to check if we have write permission to this directory
