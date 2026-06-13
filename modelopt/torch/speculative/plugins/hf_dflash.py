@@ -248,7 +248,9 @@ class HFDFlashModel(DFlashModel):
 
         self._find_base_model_parts()
 
-        self.dflash_module = DFlashModule(self.dflash_config)
+        # Factory hook: subclasses (e.g. Domino) override to build an augmented
+        # draft module while reusing all of DFlash's modify() setup.
+        self.dflash_module = self._build_draft_module(self.dflash_config)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
         if self.dflash_offline:
@@ -264,6 +266,10 @@ class HFDFlashModel(DFlashModel):
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
+
+    def _build_draft_module(self, dflash_config):
+        """Build the draft module. Subclasses override to use an augmented module."""
+        return DFlashModule(dflash_config)
 
     def get_exporter(self):
         """Get the exporter for the DFlash draft model."""

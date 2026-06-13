@@ -24,18 +24,16 @@ from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from ..config import DFlashConfig
 
 DFlashDMRegistry = _DMRegistryCls(prefix="DFlash")  # global instance for the registry
+# Domino reuses the dflash mode/config/recipe but converts the base model to a
+# DFlash module augmented with a causal correction head. It is selected via
+# ``dflash_architecture_config.projector_type == "domino"`` and lives in its own
+# registry so its wrapper (HFDominoModel) does not overwrite HFDFlashModel.
+DominoDMRegistry = _DMRegistryCls(prefix="Domino")
 
 
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
-    """Convert the model to a DFlash model as per `config`."""
+    """Convert the model to a DFlash (or Domino) model as per `config`."""
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
-
-    original_cls = type(model)
-    if original_cls not in DFlashDMRegistry:
-        for cls in DFlashDMRegistry._registry:
-            if issubclass(original_cls, cls):
-                DFlashDMRegistry.register({original_cls: "base_model_class"})(DFlashDMRegistry[cls])
-                break
 
     # merge custom config with default config (lazy import to avoid circular)
     from .default_config import default_dflash_config
@@ -43,7 +41,21 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
     custom_config = config.dflash_architecture_config
     config.dflash_architecture_config = {**default_dflash_config, **custom_config}
 
-    dflash_model = DFlashDMRegistry.convert(model)
+    # Route to the Domino registry when the architecture asks for the Domino head.
+    registry = (
+        DominoDMRegistry
+        if config.dflash_architecture_config.get("projector_type") == "domino"
+        else DFlashDMRegistry
+    )
+
+    original_cls = type(model)
+    if original_cls not in registry:
+        for cls in registry._registry:
+            if issubclass(original_cls, cls):
+                registry.register({original_cls: "base_model_class"})(registry[cls])
+                break
+
+    dflash_model = registry.convert(model)
     dflash_model.modify(config)
 
     metadata = {}

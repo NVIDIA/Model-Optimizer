@@ -1,0 +1,60 @@
+# Domino online speculative decoding training for Qwen3-8B.
+#
+# Domino = the parallel DFlash draft backbone + a lightweight causal correction
+# head (GRU over the block's previously decoded tokens -> logit correction on the
+# block suffix), trained with a base/final dual loss whose lambda_base weight is
+# decayed from 1->0 over training (curriculum). See the domino.yaml recipe and
+# modelopt/torch/speculative/plugins/{modeling,hf}_domino.py.
+#
+# 1-step pipeline (training only):
+#   task_0: Online Domino training + export of the drafter checkpoint
+#
+# NOTE: the inference side (vLLM / AR evaluation) is intentionally not wired up
+# yet — the Domino correction head is not applied in pseudo_speculative_generate
+# or in the serving stack. Add the vLLM smoke-test / MT-Bench AR-eval steps
+# (see hf_online_dflash.yaml task_1/task_2) once the inference path lands.
+#
+# Reference: SpecForge PR #571 (z-lab) | drafter format:
+# huggingface.co/Huang2020/Qwen3-8B-Domino-b16
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_domino.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_online_domino.yaml --yes
+
+job_name: Qwen3-8B_Domino_online
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  # Step 1: Online Domino training (the script exports the drafter at the end).
+  task_0:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/domino.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-100K-openai.jsonl
+      - data.chat_template=examples/Qwen/Qwen3-8B/chat_template_train.jinja
+      - training.output_dir=/scratchspace/domino_bs16
+      - training.per_device_train_batch_size=1
+      - training.num_train_epochs=1
+      - training.training_seq_len=4096
+      - training.save_steps=5000
+      - training.logging_steps=100
+      - training.disable_tqdm=true
+      - training.answer_only_loss=true
+      # Domino knobs (also set in the recipe; repeated here for visibility).
+      - dflash.dflash_block_size=16
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=7
+      - dflash.dflash_mask_token_id=151669
+      - dflash.dflash_self_logit_distillation=false
+      - dflash.dflash_lambda_base_start=1.0
+      - dflash.dflash_lambda_base_decay_ratio=1.0
+    environment:
+      - MAX_FINAL_LOSS: "5.0"
+      - MIN_FINAL_ACC: "0.15"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
