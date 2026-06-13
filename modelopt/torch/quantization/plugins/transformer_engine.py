@@ -210,6 +210,9 @@ class _QuantTEGroupedLinear(_ParallelLinear):
                     continue
                 wq_i.reset_amax()
                 max_calibrate(wq_i, lambda wq, w=weight_i: wq(w), distributed_sync=False)
+            # Re-calibration just changed every per-expert _amax. Drop the cache
+            # so the next forward rebuilds from the fresh values.
+            self._invalidate_per_expert_amax_cache()
 
     def _get_weight_quantizer(self, gemm_idx: int):
         if getattr(self, "_per_expert_weight_quantizer", False):
@@ -221,12 +224,41 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
         Matches the amax-input contract of `grouped_axis0_fakequant` — one
         entry per expert, indexed by gemm_idx.
+
+        Cached lazily: the per-expert _amax scalars don't change outside
+        calibration, and the gate (_can_use_triton_per_expert_path) only
+        admits this path when `q._if_calib` is False on every quantizer —
+        so once the cache is populated it stays valid for the lifetime of
+        the layer's calibrated state. The cache is invalidated explicitly
+        via _invalidate_per_expert_amax_cache (called from modelopt_post_restore)
+        in case checkpoint reload changes the amax values.
+
+        Eliminates the O(N)-Python-overhead-per-forward walk over N submodules
+        observed in OMNIML-5072 AC3's microbench (the gap to Btriton5 grew
+        with N — 1.59x at N=32, 2.18x at N=128 — symptomatic of per-forward
+        scaling that disappears once the gathered tensor is reused).
         """
+        cached = getattr(self, "_per_expert_amax_cache", None)
+        if cached is not None:
+            return cached
         amaxes = []
         for i in range(self.num_gemms):
             q = self._get_weight_quantizer(i)
             amaxes.append(q._amax.to(torch.float32).reshape(()))
-        return torch.stack(amaxes).contiguous()
+        stacked = torch.stack(amaxes).contiguous()
+        self._per_expert_amax_cache = stacked
+        return stacked
+
+    def _invalidate_per_expert_amax_cache(self) -> None:
+        """Drop the cached _gather_per_expert_amax result.
+
+        Called automatically from modelopt_post_restore (where dist-ckpt load
+        may have changed per-expert _amax buffers). Also callable by user code
+        after explicit re-calibration that mutates _amax outside the normal
+        calibration flow.
+        """
+        if hasattr(self, "_per_expert_amax_cache"):
+            self._per_expert_amax_cache = None
 
     def _can_use_triton_per_expert_path(self, num_gemms: int) -> bool:
         """Soft-gate the Triton dispatch on availability + ready-to-quantize state."""
