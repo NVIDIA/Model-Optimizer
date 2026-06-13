@@ -38,4 +38,8 @@ if torch.cuda.is_available():
         if torch.cuda.get_device_capability() >= (8, 9):
             from .fp4_kernel_hopper import *
 
+        # OMNIML-5072 — per-expert axis-0 fake-quant via tensor-of-pointers.
+        # Generic Triton + CUDA; no special hardware. See VALIDATION_TODO.md.
+        from .grouped_axis0_fakequant import *
+
         IS_AVAILABLE = True
