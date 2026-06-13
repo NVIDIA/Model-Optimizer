@@ -27,9 +27,10 @@ the mirror of their ``tensor_scale``), the same block-scale formula
 
 Two intentional portability tweaks (numerically identical to theirs):
   - ``A-side``/``B-side`` use ``k1``/``k0`` for Q,P / K,V (GEMM-K = axis 1 / 0).
-  - the E4M3 per-block scale is computed with an fp32 E4M3 emulation that is
-    bit-exact to ``torch.float8_e4m3fn`` (== their ``.to(tl.float8e4nv)``), so the
-    NVFP4 path also runs on pre-sm_89 GPUs where ``tl.float8e4nv`` is unsupported;
+  - the E4M3 per-block scale uses native ``tl.float8e4nv`` on sm_89+ (matching
+    their ``.to(tl.float8e4nv)``) and an fp32 E4M3 emulation — bit-exact to
+    ``torch.float8_e4m3fn`` — as the fallback on pre-sm_89 GPUs (e.g. A6000) where
+    ``tl.float8e4nv`` is unsupported (identical numerics either way);
     the E2M1 value rounding uses their PTX ``cvt`` on sm_100 and the portable
     ``>=`` fallback elsewhere.
 
@@ -84,11 +85,17 @@ def tensor_global_scale_device(tensor):
 
 @triton.jit
 def e4m3_emulate(x):
-    """fp32 round to nearest E4M3 (E4M3fn, max 448) — bit-exact to torch.float8_e4m3fn.
+    """Round-trip ``x`` through E4M3 (E4M3fn, max 448) for the per-block scale.
 
-    Portable equivalent of ``x.to(tl.float8e4nv).to(tl.float32)`` for the per-block
-    scale, so the NVFP4 path runs on GPUs without native fp8 (pre-sm_89).
+    Native ``x.to(tl.float8e4nv).to(tl.float32)`` on sm_89+ (Ada/Hopper/Blackwell,
+    matching mni/attnOpt); an fp32 emulation — bit-exact to ``torch.float8_e4m3fn``,
+    which *is* ``tl.float8e4nv`` — as the fallback on pre-sm_89 GPUs (e.g. A6000/sm_86)
+    where ``tl.float8e4nv`` is unsupported. Numerically identical either way; the
+    capability gate only swaps the SFU-heavy emulation (``log2``/``exp2``) for a
+    hardware ``cvt`` where it exists.
     """
+    if cuda_capability_geq(8, 9):
+        return x.to(tl.float8e4nv).to(tl.float32)
     ax = tl.minimum(tl.abs(x), 448.0)
     nz = ax > 0.0
     safe = tl.where(nz, ax, 1.0)
@@ -151,7 +158,8 @@ def _round_e2m1(x_s):
 def _block_scale(scale_f32, global_scale, SCALE_TYPE: tl.constexpr):
     """Quantize the per-block scale per SCALE_TYPE (mirror of mni/attnOpt)."""
     if SCALE_TYPE == QUANT_NVFP4:
-        # E4M3 block scale relative to the FP32 global (emulated E4M3 == fp8e4nv).
+        # E4M3 block scale relative to the FP32 global (native fp8e4nv on sm_89+,
+        # bit-exact fp32 emulation as the pre-sm_89 fallback — see e4m3_emulate).
         return e4m3_emulate(scale_f32 / global_scale) * global_scale
     elif SCALE_TYPE == QUANT_MXFP4_RUP:
         return tl.exp2(tl.ceil(tl.log2(scale_f32)))
