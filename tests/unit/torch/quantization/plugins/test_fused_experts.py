@@ -22,6 +22,8 @@ import torch.nn.functional as F
 
 pytest.importorskip("transformers")
 
+from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
+
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.export.quant_utils import get_quant_config
@@ -512,6 +514,115 @@ class TestExportFusedExperts:
         finally:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
+
+
+# ---------------------------------------------------------------------------
+# Tests for tied-experts dedup in _export_fused_experts
+# ---------------------------------------------------------------------------
+def _build_two_moe_blocks(tie: bool) -> nn.Module:
+    """Build a parent with two _SyntheticSparseMoeBlock children, optionally with tied 3-D params."""
+    parent = nn.Module()
+    parent.encoder = _SyntheticSparseMoeBlock()
+    parent.decoder = _SyntheticSparseMoeBlock()
+    if tie:
+        tie_fused_experts_3d_params(parent.encoder.experts, parent.decoder.experts)
+    return parent
+
+
+def _moe_fp8_quant_cfg():
+    """Custom inline FP8 cfg targeting the MoE-specific quantizer names."""
+    return {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*gate_up_proj_input_quantizer",
+                "cfg": {"num_bits": 8, "axis": None},
+            },
+            {"quantizer_name": "*down_proj_input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*gate_up_proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*down_proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+
+
+def _calibrate_two_moe_blocks(parent):
+    """Fire one calibration batch through both encoder.experts and decoder.experts."""
+
+    def forward_loop(m):
+        torch.manual_seed(0)
+        x = torch.randn(1, 4, HIDDEN_DIM)
+        m.encoder(x)
+        m.decoder(x)
+
+    mtq.quantize(parent, _moe_fp8_quant_cfg(), forward_loop=forward_loop)
+
+
+def _clear_fused_experts_caches():
+    """Clear function-static alias caches in both export entry points."""
+    _export_fused_experts.__dict__.pop("_tied_unpacked_cache", None)
+    # _export_fused_experts internally calls _export_quantized_weight per per-expert
+    # wrapper; clear that cache too so each test sees a pristine state.
+    from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+
+    _export_quantized_weight.__dict__.pop("_tied_weight_alias_cache", None)
+
+
+class TestExportFusedExpertsTiedDedup:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    def test_per_expert_buffers_share_data_ptr_for_tied_fused_experts(self):
+        """Two tied FusedExperts modules: every per-expert .weight + scale buffer shares data_ptr."""
+        _clear_fused_experts_caches()
+        parent = _build_two_moe_blocks(tie=True)
+        expert_type = type(parent.encoder.experts)
+        self._cleanup_registry(expert_type)
+        try:
+            _calibrate_two_moe_blocks(parent)
+
+            _export_fused_experts(parent.encoder.experts, torch.float16)
+            _export_fused_experts(parent.decoder.experts, torch.float16)
+
+            for idx in range(NUM_EXPERTS):
+                enc_expert = getattr(parent.encoder.experts, str(idx))
+                dec_expert = getattr(parent.decoder.experts, str(idx))
+                for proj_name in ("gate_proj", "up_proj", "down_proj"):
+                    enc_proj = getattr(enc_expert, proj_name)
+                    dec_proj = getattr(dec_expert, proj_name)
+                    assert enc_proj.weight.data_ptr() == dec_proj.weight.data_ptr()
+                    for scale_attr in ("weight_scale", "weight_scale_2"):
+                        if hasattr(enc_proj, scale_attr) and hasattr(dec_proj, scale_attr):
+                            assert (
+                                getattr(enc_proj, scale_attr).data_ptr()
+                                == getattr(dec_proj, scale_attr).data_ptr()
+                            )
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def test_per_expert_buffers_have_independent_data_ptrs_for_untied_fused_experts(self):
+        """Two untied FusedExperts modules: per-expert buffers stay independent (no false-positive alias)."""
+        _clear_fused_experts_caches()
+        parent = _build_two_moe_blocks(tie=False)
+        expert_type = type(parent.encoder.experts)
+        self._cleanup_registry(expert_type)
+        try:
+            _calibrate_two_moe_blocks(parent)
+
+            _export_fused_experts(parent.encoder.experts, torch.float16)
+            _export_fused_experts(parent.decoder.experts, torch.float16)
+
+            for idx in range(NUM_EXPERTS):
+                enc_expert = getattr(parent.encoder.experts, str(idx))
+                dec_expert = getattr(parent.decoder.experts, str(idx))
+                for proj_name in ("gate_proj", "up_proj", "down_proj"):
+                    enc_proj = getattr(enc_expert, proj_name)
+                    dec_proj = getattr(dec_expert, proj_name)
+                    assert enc_proj.weight.data_ptr() != dec_proj.weight.data_ptr()
+        finally:
+            self._cleanup_registry(expert_type)
 
 
 # ---------------------------------------------------------------------------
