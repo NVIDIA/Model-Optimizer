@@ -91,6 +91,18 @@ class NameRemapping(CustomModuleMapping):
         )
 
 
+class MambaConv1dMapping(CustomModuleMapping):
+    """A custom module mapping for Mamba conv1d weights."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a mapping for old Conv1d modules and new direct conv1d parameters."""
+        super().__init__(
+            func_name="mamba_conv1d_remapping",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs=func_kwargs,
+        )
+
+
 class QKVMerging(CustomModuleMapping):
     """A custom module mapping that merges Q, K, V."""
 

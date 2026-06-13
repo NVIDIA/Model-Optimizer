@@ -53,8 +53,10 @@ from megatron.core.transformer.moe.router import TopKRouter
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.model_calib import max_calibrate
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.megatron import _QuantTEMCoreRowParallelLinear
+from modelopt.torch.quantization.utils import export_torch_mode, weight_attr_names
 
 try:
     from megatron.core.extensions.transformer_engine import TERowParallelLinear
@@ -494,6 +496,65 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
             model_config,
         ),
     )
+
+
+def test_mamba_direct_conv1d_weight_quantizer_calibrates(distributed_setup_size_1):
+    """New MCore direct Mamba conv1d params should get a calibratable weight quantizer."""
+    if not HAS_MAMBA:
+        pytest.skip("Mamba not installed")
+
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = _gpt_model_provider(
+        tp_size=1,
+        hidden_size=256,
+        vocab_size=256,
+        is_hybrid=True,
+        hybrid_override_pattern="M",
+        mamba_head_dim=16,
+    )
+
+    mtq.replace_quant_module(model)
+    mixers = [module for module in model.modules() if hasattr(module, "conv1d_weight")]
+    assert mixers
+    mixer = mixers[0]
+
+    assert hasattr(mixer, "conv1d_weight_weight_quantizer")
+    assert list(weight_attr_names(mixer)) == ["conv1d_weight"]
+    weights_for_calibration = list(mixer.iter_weights_for_calibration())
+    assert len(weights_for_calibration) == 1
+    weight, weight_quantizer = weights_for_calibration[0]
+    assert weight is mixer.conv1d_weight
+    assert weight_quantizer is mixer.conv1d_weight_weight_quantizer
+
+    mtq.disable_quantizer(model, "*")
+    mixer.conv1d_weight_weight_quantizer.enable()
+    max_calibrate(model, lambda model: None, distributed_sync=False)
+
+    assert mixer.conv1d_weight_weight_quantizer.amax is not None
+    assert mixer.conv1d_weight_weight_quantizer.amax.shape == (
+        mixer.conv1d_weight.shape[0],
+        1,
+        1,
+    )
+
+    quantizer_calls = []
+    original_forward = mixer.conv1d_weight_weight_quantizer.forward
+
+    def counted_forward(inputs):
+        quantizer_calls.append(inputs)
+        return original_forward(inputs)
+
+    mixer.conv1d_weight_weight_quantizer.forward = counted_forward
+    _ = mixer.conv1d_weight
+    assert len(quantizer_calls) == 0
+
+    with mixer.quantize_conv1d_weight():
+        _ = mixer.conv1d_weight
+    assert len(quantizer_calls) == 1
+
+    with export_torch_mode():
+        _ = mixer.conv1d_weight
+    assert len(quantizer_calls) == 2
 
 
 @pytest.mark.parametrize(

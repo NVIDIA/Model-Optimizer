@@ -102,6 +102,21 @@ __all__ = [
 ]
 
 
+class _MambaConv1dParamView(torch.nn.Module):
+    """Module view exposing direct Mamba conv parameters with standard weight names."""
+
+    def __init__(self, mixer: torch.nn.Module):
+        super().__init__()
+        self.weight = mixer.conv1d_weight
+        bias = getattr(mixer, "conv1d_bias", None)
+        if bias is not None:
+            self.bias = bias
+
+        weight_quantizer = getattr(mixer, "conv1d_weight_weight_quantizer", None)
+        if weight_quantizer is not None:
+            self.weight_quantizer = weight_quantizer
+
+
 class GPTModelExporter:
     """Megatron Core GPTModel Exporter.
 
@@ -664,7 +679,7 @@ class GPTModelExporter:
         self.rules["D"](layer.mixer.D, layer_id)
         self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
 
-        self.rules["conv1d"](layer.mixer.conv1d, layer_id)
+        self.rules["conv1d"](layer.mixer, layer_id)
         self.rules["in_proj"](layer.mixer.in_proj, layer_id)
         self.rules["out_proj"](layer.mixer.out_proj, layer_id)
 
@@ -787,6 +802,7 @@ class GPTModelExporter:
                 "grouped_mlp_slicing": self._grouped_mlp_slicing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
+                "mamba_conv1d_remapping": self._mamba_conv1d_remapping,
             }
             func = method_map[mapping.func_name]
             prefix = mapping.target_name_or_prefix
@@ -926,6 +942,20 @@ class GPTModelExporter:
 
         if layer_name not in self.exclude_modules:
             self.exclude_modules.append(layer_name)
+
+    def _mamba_conv1d_remapping(self, module: torch.nn.Module, prefix: str, **kwargs):
+        """Export Mamba conv1d from either old Conv1d modules or new direct parameters."""
+        conv1d = getattr(module, "conv1d", None)
+        if conv1d is not None:
+            self._name_remapping(conv1d, prefix, **kwargs)
+            return
+
+        if not hasattr(module, "conv1d_weight"):
+            raise AttributeError(
+                f"{type(module).__name__} has neither conv1d nor conv1d_weight for export"
+            )
+
+        self._name_remapping(_MambaConv1dParamView(module), prefix, **kwargs)
 
     def _name_remapping(
         self,

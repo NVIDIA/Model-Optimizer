@@ -17,6 +17,7 @@ import json
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -388,6 +389,80 @@ def test_qkv_slicing_records_hf_excludes_for_unquantized_fused_qkv():
     assert "backbone.layers.0.mixer.q_proj" in exporter.exclude_modules
     assert "backbone.layers.0.mixer.k_proj" in exporter.exclude_modules
     assert "backbone.layers.0.mixer.v_proj" in exporter.exclude_modules
+
+
+def _make_minimal_exporter() -> GPTModelExporter:
+    exporter = object.__new__(GPTModelExporter)
+    exporter.dtype = torch.bfloat16
+    exporter.exclude_modules = []
+    exporter.layer_config_dict = {}
+    exporter._state_dict = {}
+    return exporter
+
+
+def test_mamba_conv1d_remapping_exports_direct_params():
+    """New MCore Mamba direct conv params should export to HF conv1d keys."""
+    exporter = _make_minimal_exporter()
+    mixer = torch.nn.Module()
+    mixer.conv1d_weight = torch.nn.Parameter(torch.arange(12, dtype=torch.float32).reshape(3, 1, 4))
+    mixer.conv1d_bias = torch.nn.Parameter(torch.arange(3, dtype=torch.float32))
+
+    exporter._mamba_conv1d_remapping(mixer, "backbone.layers.0.mixer.conv1d.")
+
+    torch.testing.assert_close(
+        exporter._state_dict["backbone.layers.0.mixer.conv1d.weight"],
+        mixer.conv1d_weight.to(torch.bfloat16).cpu(),
+    )
+    torch.testing.assert_close(
+        exporter._state_dict["backbone.layers.0.mixer.conv1d.bias"],
+        mixer.conv1d_bias.to(torch.bfloat16).cpu(),
+    )
+    assert exporter.exclude_modules == ["backbone.layers.0.mixer.conv1d"]
+
+
+def test_mamba_conv1d_remapping_preserves_old_conv_module_export():
+    """Old MCore Mamba nn.Conv1d modules should still use normal name remapping."""
+    exporter = _make_minimal_exporter()
+    mixer = torch.nn.Module()
+    mixer.conv1d = torch.nn.Conv1d(3, 3, 4, groups=3)
+
+    exporter._mamba_conv1d_remapping(mixer, "backbone.layers.0.mixer.conv1d.")
+
+    torch.testing.assert_close(
+        exporter._state_dict["backbone.layers.0.mixer.conv1d.weight"],
+        mixer.conv1d.weight.to(torch.bfloat16).cpu(),
+    )
+    torch.testing.assert_close(
+        exporter._state_dict["backbone.layers.0.mixer.conv1d.bias"],
+        mixer.conv1d.bias.to(torch.bfloat16).cpu(),
+    )
+
+
+def test_mamba_layer_state_dict_routes_conv1d_mapping_to_mixer():
+    """Mamba layer export should route the full mixer into the conv1d rule."""
+    exporter = _make_minimal_exporter()
+    exporter.rules = exporter._populate_rule_book()["NemotronHForCausalLM"]
+
+    layer = SimpleNamespace(
+        norm=torch.nn.LayerNorm(3),
+        mixer=SimpleNamespace(
+            norm=torch.nn.LayerNorm(3),
+            A_log=torch.ones(2),
+            D=torch.ones(2),
+            dt_bias=torch.ones(2),
+            conv1d_weight=torch.nn.Parameter(
+                torch.arange(12, dtype=torch.float32).reshape(3, 1, 4)
+            ),
+            conv1d_bias=torch.nn.Parameter(torch.arange(3, dtype=torch.float32)),
+            in_proj=torch.nn.Linear(3, 3),
+            out_proj=torch.nn.Linear(3, 3),
+        ),
+    )
+
+    exporter._get_mamba_layer_state_dict(layer, layer_id=0)
+
+    assert "backbone.layers.0.mixer.conv1d.weight" in exporter._state_dict
+    assert "backbone.layers.0.mixer.conv1d.bias" in exporter._state_dict
 
 
 def _make_exporter_for_mtp(model_dir: Path) -> GPTModelExporter:

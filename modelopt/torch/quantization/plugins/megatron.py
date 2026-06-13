@@ -15,6 +15,7 @@
 
 """Support quantization for megatron linear layers."""
 
+import contextlib
 import types
 from typing import Any
 
@@ -39,12 +40,18 @@ from modelopt.torch.opt.plugins.megatron import (
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
+from .. import tensor_quant
 from ..conversion import maybe_promote_nvfp4_static_quantizer
 from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
-from ..utils import sync_moe_expert_amax
+from ..utils import is_torch_export_mode, sync_moe_expert_amax
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
+
+try:
+    from megatron.core.ssm.mamba_mixer import MambaMixer
+except ImportError:
+    MambaMixer = None
 
 try:
     from megatron.core.extensions.transformer_engine import (
@@ -230,6 +237,71 @@ def quant_module_set_extra_state(self, state: Any):
     real_quant_module_set_extra_state(self, state)
 
     self.allow_post_restore = False
+
+
+if MambaMixer is not None:
+
+    @QuantModuleRegistry.register({MambaMixer: "megatron_MambaMixer"})
+    class _QuantMambaMixer(QuantModule):
+        """Quantize new Megatron Mamba direct conv1d parameters."""
+
+        default_quant_desc_weight = tensor_quant.QUANT_DESC_8BIT_CONV1D_WEIGHT_PER_CHANNEL
+
+        @contextlib.contextmanager
+        def quantize_conv1d_weight(self):
+            """Context in which ``self.conv1d_weight`` is quantized."""
+            if not hasattr(self, "conv1d_weight_weight_quantizer"):
+                yield
+                return
+
+            self._enable_conv1d_weight_quantization = True
+            try:
+                yield
+            finally:
+                self._enable_conv1d_weight_quantization = False
+
+        @staticmethod
+        def _get_quantized_conv1d_weight(
+            module: "_QuantMambaMixer", weight: torch.Tensor
+        ) -> torch.Tensor:
+            if module._enable_conv1d_weight_quantization or is_torch_export_mode():
+                return module.conv1d_weight_weight_quantizer(weight)
+            return weight
+
+        def forward(self, *args, **kwargs):
+            """Quantize the direct conv1d weight before calling MambaMixer.forward."""
+            if is_torch_export_mode() or not hasattr(self, "conv1d_weight_weight_quantizer"):
+                return super().forward(*args, **kwargs)
+
+            with self.quantize_conv1d_weight():
+                return super().forward(*args, **kwargs)
+
+        def _setup(self):
+            if not hasattr(self, "conv1d_weight"):
+                return
+
+            if not hasattr(self, "parallel_state") or self.parallel_state is None:
+                data_parallel_group = None
+                try:
+                    data_parallel_group = get_data_parallel_group(with_context_parallel=True)
+                except AssertionError:
+                    warn_rank_0(
+                        "Context parallel group is not initialized, using data parallel group"
+                    )
+                    data_parallel_group = get_data_parallel_group()
+                self.parallel_state = ParallelState(
+                    data_parallel_group,
+                    mcore_parallel.get_tensor_model_parallel_group(),
+                )
+
+            self._register_temp_attribute(
+                # Generic weight discovery maps parameter ``<name>`` to
+                # ``<name>_weight_quantizer``.
+                "conv1d_weight_weight_quantizer",
+                TensorQuantizer(self.default_quant_desc_weight),
+            )
+            self._register_temp_attribute("_enable_conv1d_weight_quantization", False)
+            self._register_dynamic_attribute("conv1d_weight", self._get_quantized_conv1d_weight)
 
 
 def _create_incompatible_method(method_name: str):
