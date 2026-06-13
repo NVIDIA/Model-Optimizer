@@ -145,6 +145,7 @@ def get_mcore_gpt_model(
     moe_ffn_hidden_size: int | None = None,
     moe_shared_expert_intermediate_size: int | None = None,
     num_moe_experts: int | None = None,
+    sequence_parallel: bool = False,
     **config_kwargs: dict,
 ) -> GPTModel:
     assert activation_func in ["swiglu", "squared_relu"]
@@ -168,7 +169,7 @@ def get_mcore_gpt_model(
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         expert_model_parallel_size=expert_model_parallel_size,
         expert_tensor_parallel_size=expert_tensor_parallel_size,
-        sequence_parallel=False,
+        sequence_parallel=sequence_parallel,
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,

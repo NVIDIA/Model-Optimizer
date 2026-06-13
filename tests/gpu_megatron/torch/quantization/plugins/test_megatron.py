@@ -15,6 +15,7 @@
 
 import copy
 import math
+import os
 from functools import partial
 
 import pytest
@@ -291,6 +292,7 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                sequence_parallel=(tp_size > 1),  # OMNIML-5030: Required for MoE + TP (mirrors hybrid path)
             )
 
     if not meta_device:
@@ -817,6 +819,64 @@ def _test_te_grouped_vs_sequential_default_loss_helper(tp_size, ep_size, quant_c
 def test_te_grouped_vs_sequential_default_loss(dist_workers_size_4, quant_cfg):
     dist_workers_size_4.run(
         partial(_test_te_grouped_vs_sequential_default_loss_helper, 1, 2, quant_cfg)
+    )
+
+
+# OMNIML-5072 AC4: A's N-modules-per-expert weight amax should round-trip through
+# sharded_state_dict / dist-checkpoint with bit-for-bit equality across EP. Mirror
+# of B's test_te_grouped_per_expert_sharded_state_dict layout (dist_workers fixture,
+# hidden_size=256, tp=2 ep=2 etp=1 num_moe_experts=4 moe_grouped_gemm=True), but
+# A's path is triggered by the MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER env var
+# instead of an axis=0 quant_cfg knob.
+def _test_te_grouped_n_modules_sharded_state_dict_helper(
+    tmp_path, config, hidden_size, modelopt_version, compress, meta_device, model_config, rank, size
+):
+    # Per-rank env-var set so _QuantTEGroupedLinear._setup picks up the
+    # N-modules path. Must precede mtq.quantize() — that's where _setup runs.
+    os.environ["MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER"] = "1"
+    try:
+        _test_sharded_state_dict(
+            tmp_path,
+            config,
+            hidden_size,
+            modelopt_version,
+            compress,
+            meta_device,
+            model_config,
+            rank,
+            size,
+        )
+    finally:
+        os.environ.pop("MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER", None)
+
+
+@pytest.mark.parametrize("config", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
+def test_te_grouped_n_modules_sharded_state_dict(dist_workers, need_4_gpus, tmp_path, config):
+    """A's N-modules per-expert weight amax round-trips through dist-checkpoint on TEGroupedMLP.
+
+    OMNIML-5072 AC4. Each rank's `weight_quantizer_i._amax` scalars are gathered
+    across the EP group at save time, persisted as an `[N_global]` vector, and
+    narrowed back to per-submodule scalars on load.
+    """
+    moe_config = {
+        "tp_size": 2,
+        "ep_size": 2,
+        "etp_size": 1,
+        "num_moe_experts": 4,
+        "moe_grouped_gemm": True,
+        "transformer_impl": "transformer_engine",
+    }
+    dist_workers.run(
+        partial(
+            _test_te_grouped_n_modules_sharded_state_dict_helper,
+            tmp_path,
+            copy.deepcopy(config),
+            256,
+            None,
+            False,
+            False,
+            moe_config,
+        ),
     )
 
 
