@@ -21,6 +21,7 @@
 import json
 import os
 import tempfile
+import warnings
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -105,7 +106,7 @@ __all__ = [
 class _MambaConv1dParamView(torch.nn.Module):
     """Module view exposing direct Mamba conv parameters with standard weight names."""
 
-    def __init__(self, mixer: torch.nn.Module):
+    def __init__(self, mixer: torch.nn.Module, include_weight_quantizer: bool = True):
         super().__init__()
         self.weight = mixer.conv1d_weight
         bias = getattr(mixer, "conv1d_bias", None)
@@ -113,7 +114,7 @@ class _MambaConv1dParamView(torch.nn.Module):
             self.bias = bias
 
         weight_quantizer = getattr(mixer, "conv1d_weight_weight_quantizer", None)
-        if weight_quantizer is not None:
+        if include_weight_quantizer and weight_quantizer is not None:
             self.weight_quantizer = weight_quantizer
 
 
@@ -955,7 +956,23 @@ class GPTModelExporter:
                 f"{type(module).__name__} has neither conv1d nor conv1d_weight for export"
             )
 
-        self._name_remapping(_MambaConv1dParamView(module), prefix, **kwargs)
+        conv1d_view = _MambaConv1dParamView(module)
+        qformat = self._get_quantization_format(conv1d_view)
+        block_size = get_weight_block_size(conv1d_view)
+        if (
+            qformat not in (None, QUANTIZATION_NONE)
+            and block_size
+            and conv1d_view.weight.shape[-1] % block_size != 0
+        ):
+            warnings.warn(
+                f"Exporting direct Mamba conv1d {prefix} in {self.dtype} because "
+                f"weight shape {tuple(conv1d_view.weight.shape)} is not divisible by "
+                f"block size {block_size} for {qformat} packing.",
+                stacklevel=2,
+            )
+            conv1d_view = _MambaConv1dParamView(module, include_weight_quantizer=False)
+
+        self._name_remapping(conv1d_view, prefix, **kwargs)
 
     def _name_remapping(
         self,

@@ -526,16 +526,39 @@ def test_mamba_direct_conv1d_weight_quantizer_calibrates(distributed_setup_size_
     assert weight is mixer.conv1d_weight
     assert weight_quantizer is mixer.conv1d_weight_weight_quantizer
 
+    weight_quantizer.set_from_attribute_config(
+        {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        }
+    )
     mtq.disable_quantizer(model, "*")
     mixer.conv1d_weight_weight_quantizer.enable()
     max_calibrate(model, lambda model: None, distributed_sync=False)
 
     assert mixer.conv1d_weight_weight_quantizer.amax is not None
-    assert mixer.conv1d_weight_weight_quantizer.amax.shape == (
-        mixer.conv1d_weight.shape[0],
-        1,
-        1,
+    assert mixer.conv1d_weight_weight_quantizer.amax.numel() == 1
+    sharded_state_dict = mixer.sharded_state_dict(prefix="layers.0.mixer.")
+    assert "layers.0.mixer._extra_state" in sharded_state_dict
+    extra_state = sharded_state_dict["layers.0.mixer._extra_state"].data
+    quantizer_state = extra_state["modelopt_quantizer_state"]
+    assert "conv1d_weight_weight_quantizer" in quantizer_state
+    assert (
+        "_amax"
+        in quantizer_state["conv1d_weight_weight_quantizer"]["_pytorch_state_metadata"]["buffers"]
     )
+    conv1d_amax_key = "layers.0.mixer.conv1d_weight_weight_quantizer._amax"
+    assert conv1d_amax_key in sharded_state_dict
+    assert torch.equal(
+        sharded_state_dict[conv1d_amax_key].data,
+        mixer.conv1d_weight_weight_quantizer.amax,
+    )
+    calibrated_amax = mixer.conv1d_weight_weight_quantizer.amax.clone()
+    delattr(mixer.conv1d_weight_weight_quantizer, "_amax")
+    sharded_state_dict = mixer.sharded_state_dict(prefix="layers.0.mixer.")
+    assert torch.equal(mixer.conv1d_weight_weight_quantizer.amax, calibrated_amax)
+    assert conv1d_amax_key in sharded_state_dict
+    assert torch.equal(sharded_state_dict[conv1d_amax_key].data, calibrated_amax)
 
     quantizer_calls = []
     original_forward = mixer.conv1d_weight_weight_quantizer.forward
@@ -555,6 +578,13 @@ def test_mamba_direct_conv1d_weight_quantizer_calibrates(distributed_setup_size_
     with export_torch_mode():
         _ = mixer.conv1d_weight
     assert len(quantizer_calls) == 2
+
+    mixer.fold_weight()
+    assert mixer.conv1d_weight_weight_quantizer.amax is not None
+    assert torch.equal(mixer.conv1d_weight_weight_quantizer.amax, calibrated_amax)
+    sharded_state_dict = mixer.sharded_state_dict(prefix="layers.0.mixer.")
+    assert conv1d_amax_key in sharded_state_dict
+    assert torch.equal(sharded_state_dict[conv1d_amax_key].data, calibrated_amax)
 
 
 @pytest.mark.parametrize(

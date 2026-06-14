@@ -241,6 +241,62 @@ def quant_module_set_extra_state(self, state: Any):
 
 if MambaMixer is not None:
 
+    def _save_mamba_extra_state(self, prefix, sharded_offsets, sharded_state_dict):
+        with contextlib.suppress(RuntimeError):
+            extra_state = self.get_extra_state()
+            if extra_state is not None:
+                sharded_state_dict.update(
+                    **make_sharded_tensors_for_checkpoint(
+                        {"_extra_state": extra_state}, prefix, {}, sharded_offsets
+                    )
+                )
+        return sharded_state_dict
+
+    def _save_mamba_conv1d_quantizer_amax(self, prefix, sharded_offsets, sharded_state_dict):
+        quantizer = getattr(self, "conv1d_weight_weight_quantizer", None)
+        if quantizer is None:
+            return sharded_state_dict
+
+        # Direct Mamba conv1d stores its quantizer as a ModelOpt temp attribute.
+        # MCore's native MambaMixer sharded state saves conv1d_weight/bias but
+        # does not know that this extra quantizer amax must round-trip for export.
+        quantizer_state_dict = {
+            k: v
+            for k, v in quantizer.state_dict(
+                prefix="conv1d_weight_weight_quantizer.", keep_vars=True
+            ).items()
+            if k.endswith(("_amax", "_global_amax"))
+        }
+        if "conv1d_weight_weight_quantizer._amax" not in quantizer_state_dict:
+            calibrator = getattr(quantizer, "_calibrator", None)
+            if calibrator is not None:
+                calib_amax = calibrator.compute_amax()
+                if calib_amax is not None:
+                    quantizer.amax = calib_amax.detach()
+                    quantizer_state_dict["conv1d_weight_weight_quantizer._amax"] = quantizer.amax
+        if (
+            "conv1d_weight_weight_quantizer._amax" not in quantizer_state_dict
+            and quantizer.is_enabled
+        ):
+            # After checkpoint reload, the direct temp quantizer may no longer
+            # have calibrator statistics. For weight max calibration, the source
+            # is the conv1d weight itself, so recompute the same scalar before
+            # saving/exporting rather than dropping the required amax.
+            quantizer.amax = quantizer._get_amax(self.conv1d_weight.detach().float()).detach()
+            quantizer_state_dict["conv1d_weight_weight_quantizer._amax"] = quantizer.amax
+
+        for key, value in quantizer_state_dict.items():
+            if value.numel() != 1:
+                raise AssertionError(
+                    f"Only scalar direct Mamba conv1d quantizer amax is supported, got "
+                    f"{key} with shape {tuple(value.shape)}."
+                )
+
+        sharded_state_dict.update(
+            **make_sharded_tensors_for_checkpoint(quantizer_state_dict, prefix, {}, sharded_offsets)
+        )
+        return sharded_state_dict
+
     @QuantModuleRegistry.register({MambaMixer: "megatron_MambaMixer"})
     class _QuantMambaMixer(QuantModule):
         """Quantize new Megatron Mamba direct conv1d parameters."""
@@ -275,6 +331,39 @@ if MambaMixer is not None:
 
             with self.quantize_conv1d_weight():
                 return super().forward(*args, **kwargs)
+
+        def iter_weights_for_calibration(self):
+            """Yield direct conv1d weights for weight-only max calibration."""
+            seen_quantizers = set()
+            for weight, weight_quantizer in super().iter_weights_for_calibration():
+                seen_quantizers.add(id(weight_quantizer))
+                yield weight, weight_quantizer
+
+            weight_quantizer = getattr(self, "conv1d_weight_weight_quantizer", None)
+            if weight_quantizer is not None and id(weight_quantizer) not in seen_quantizers:
+                yield self.conv1d_weight, weight_quantizer
+
+        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+            sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
+            sharded_state_dict = _save_mamba_conv1d_quantizer_amax(
+                self, prefix, sharded_offsets, sharded_state_dict
+            )
+            return _save_mamba_extra_state(self, prefix, sharded_offsets, sharded_state_dict)
+
+        def fold_weight(self, keep_attrs: bool = False):
+            # NVFP4 export still needs the calibrated scalar amax after the direct
+            # conv1d weight is folded.
+            super().fold_weight(keep_attrs=True)
+            weight_quantizer = getattr(self, "conv1d_weight_weight_quantizer", None)
+            if (
+                weight_quantizer is not None
+                and weight_quantizer.fake_quant
+                and weight_quantizer.is_enabled
+            ):
+                self.conv1d_weight.data.copy_(
+                    weight_quantizer(self.conv1d_weight.float()).to(self.conv1d_weight.dtype)
+                )
+                weight_quantizer.disable()
 
         def _setup(self):
             if not hasattr(self, "conv1d_weight"):

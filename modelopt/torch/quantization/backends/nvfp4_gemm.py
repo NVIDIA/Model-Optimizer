@@ -21,7 +21,6 @@ from torch.autograd import Function
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.backends.utils import fp4_compatible
-from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import NVFP4QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils import reduce_amax
 
@@ -193,6 +192,10 @@ class Nvfp4Linear(Function):
 
 def _nvfp4_availability_check(module, input, args, kwargs):
     """Comprehensive check for FP4 GEMM availability."""
+    # Imported lazily to avoid an import cycle:
+    # quant_linear -> backends -> nvfp4_gemm -> quant_linear.
+    from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
+
     # NOTE: Having the import at the top causes mpirun commands inside pytest (vlm_ptq) to fail without any error
     try:
         import tensorrt_llm  # noqa: F401
