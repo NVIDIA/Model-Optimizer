@@ -429,7 +429,7 @@ def submit_job_impl(
       * Neither set → error (unless ``dry_run=True``)
       * Both set → error
 
-    When ``dry_run=True``, the launcher is invoked with ``--dry-run`` —
+    When ``dry_run=True``, the launcher is invoked with ``--dryrun`` —
     the YAML is parsed and validated but no cluster contact / no
     container spawn / no sbatch happens. ``hf_local`` and
     ``cluster_host`` are optional in dry-run mode (pass one to validate
@@ -714,7 +714,7 @@ def _submit_job_dry_run(
     job_name: str | None,
     extra_overrides: dict[str, str] | None,
 ) -> dict:
-    """Validate a launcher YAML by running ``launch.py --dry-run``.
+    """Validate a launcher YAML by running ``launch.py --dryrun``.
 
     No cluster contact, no container spawn, no sbatch. Used by
     verify-task workflow stages (deployment_support,
@@ -742,12 +742,12 @@ def _submit_job_dry_run(
             ),
         }
 
-    # Build argv — launch.py supports --dry-run as a flag that prevents
+    # Build argv — launch.py supports --dryrun as a flag that prevents
     # actual submission while still exercising the YAML loader, factory
     # resolution, and arg parser. Same argv shape as live submit minus
     # the --yes (no confirmation prompt to bypass for dry-run, since
     # nothing is actually submitted).
-    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--dry-run"]
+    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--dryrun"]
     if hf_local:
         argv.append(f"hf_local={hf_local}")
     if cluster_user:
@@ -783,7 +783,15 @@ def _submit_job_dry_run(
         child_env["SLURM_HOST"] = cluster_host
 
     # Dry-run is fast (no network, no container) — 60s timeout is
-    # generous. B603 false positive: argv is a controlled list.
+    # generous. Same subprocess invocation shape as the live-submit
+    # branch above (line 590): list-form argv, no shell, inherited
+    # env. ``argv`` members are string-literal constants
+    # ("uv", "run", "launch.py", "--yaml", "--dryrun"), validated
+    # filesystem paths (``str(abs_yaml)``, ``str(launcher_dir)``), or
+    # key=value override strings sourced from typed MCP-tool args.
+    # B603 false-positive matches the precedent in this module's
+    # `submit_job_impl` (Popen at line 563 + run at line 590), the
+    # verify probes (line 197 + 251), and the SSH probe (line 326).
     try:
         proc = subprocess.run(  # nosec B603
             argv,
@@ -799,11 +807,13 @@ def _submit_job_dry_run(
             "ok": False,
             "dry_run": True,
             "reason": "dry_run_timeout",
+            "exit_code": None,
+            "stdout_tail": (e.stdout or b"").decode(errors="replace")[-2000:] if e.stdout else "",
+            "stderr_tail": (e.stderr or b"").decode(errors="replace")[-2000:] if e.stderr else "",
             "diagnostic": (
-                "launch.py --dry-run did not return within 60 seconds. "
+                "launch.py --dryrun did not return within 60 seconds. "
                 "This usually means a YAML import / factory resolution "
-                f"hung. Partial stdout: "
-                f"{(e.stdout or b'').decode(errors='replace')[-400:]}"
+                "hung."
             ),
             "argv": argv,
         }
@@ -820,7 +830,7 @@ def _submit_job_dry_run(
             "stdout_tail": stdout_tail,
             "stderr_tail": stderr_tail,
             "diagnostic": (
-                f"launch.py --dry-run rejected the YAML (exit code "
+                f"launch.py --dryrun rejected the YAML (exit code "
                 f"{proc.returncode}). Common reasons: invalid YAML "
                 f"syntax, missing required fields, factory function "
                 f"not registered, or a referenced file (HF model path, "
@@ -830,12 +840,16 @@ def _submit_job_dry_run(
             "argv": argv,
         }
 
+    # Success branch returns the same field set as the failure branch
+    # (plus diagnostic-free since there's nothing to diagnose) so the
+    # caller can read stderr_tail / exit_code uniformly.
     return {
         "ok": True,
         "dry_run": True,
         "validated": True,
         "exit_code": 0,
         "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
         "argv": argv,
     }
 
