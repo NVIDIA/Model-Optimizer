@@ -1,0 +1,16 @@
+qualitative Average_AL= 2.9666
+qualitative Category_AL coding = 3.1415
+qualitative Category_AL humanities = 2.8639
+qualitative Category_AL math = 3.1119
+qualitative Category_AL multilingual = 3.2996
+qualitative Category_AL qa = 2.8134
+qualitative Category_AL rag = 3.1423
+qualitative Category_AL reasoning = 3.0296
+qualitative Category_AL roleplay = 2.5954
+qualitative Category_AL stem = 2.9126
+qualitative Category_AL summarization = 3.0023
+qualitative Category_AL writing = 2.7201
+throughput_32k Average_AL= 3.0703
+throughput_32k Category_AL high_entropy = 2.6015
+throughput_32k Category_AL low_entropy = 3.4928
+throughput_32k Category_AL mixed = 3.1322
