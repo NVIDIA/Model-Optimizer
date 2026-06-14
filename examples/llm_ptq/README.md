@@ -114,6 +114,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | GLM-4.7<sup>8</sup> | ✅ | - | - | - | ✅ |
 | Kimi K2 | - | - | - | - | ✅ |
 | MiniMax M2.1 | - | - | - | - | ✅ |
+| MiniMax M3<sup>11</sup> | - | - | - | - | ✅ |
 | GPT-OSS<sup>10</sup> | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper<sup>9</sup> | ✅ | ❌ | ❌ | ❌ | - |
@@ -130,7 +131,8 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
 > *<sup>9.</sup>Running Whisper model with transformers>=5.0 requires [torchcodec](https://github.com/meta-pytorch/torchcodec?tab=readme-ov-file#installing-cuda-enabled-torchcodec) and other system packages (e.g. ffmpeg).* \
-> *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).*
+> *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).* \
+> *<sup>11.</sup>MiniMax M3 (`minimax_m3_vl`) requires transformers >=5.12 (native support); load without `trust_remote_code`. Recommended recipe `nvfp4_experts_only` (routed experts to NVFP4; attention, dense layers, shared experts, vision tower, router/gate, embeddings, lm_head kept higher precision).*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
