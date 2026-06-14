@@ -132,6 +132,10 @@ Three constants drive the surface here:
 2. **Filesystem is the source of truth.** Status + logs both read from nemo_run's experiment dir. No in-memory registry — survives MCP server restarts. The bridge module never holds per-job state across calls.
 3. **`verify_setup` is auto-called by `submit_job` by default.** The probe takes ~1 second; the cost of a misconfigured submission is 30+ seconds of cluster timeout or container-pull. Always-on verification pays back immediately. Callers can pass `skip_verify=True` when they just probed.
 
+## Scope: environment tooling, not workflow policy
+
+See [SCOPE.md](SCOPE.md) for the policy that gates what belongs in this MCP family. Short version: tools here are universal verb-shaped operations on the cluster / launcher / engine (`submit_job`, `verify_setup`, `read_cluster_artifact`, …). Workflow-specific logic ("run an EAGLE3 cell", "publish a specdec release") stays in SPEC text + agent reasoning, composed out of these primitives. The policy applies to `nmm-sandbox-mcp` and `pensieve-intern-mcp` too.
+
 ## Internal companion (NVIDIA only)
 
 For NVIDIA-internal users running on the in-house clusters, there's a companion server [`nmm-sandbox-mcp`](https://gitlab-master.nvidia.com/omniml/integration/nmm-sandbox/-/tree/main/tools/mcp) that adds:
