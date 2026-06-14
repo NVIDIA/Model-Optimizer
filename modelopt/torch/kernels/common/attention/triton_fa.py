@@ -1014,7 +1014,14 @@ class _Attention(torch.autograd.Function):
         # it per tile in-kernel (the passed scale is then ignored). Either way pass this cheap 0-d 1.0.
         _one_gs = q.new_full((), 1.0, dtype=torch.float32)
         fwd_kwargs = {
-            "N_CTX": max_input_len,
+            # Bucket the autotune key to a power-of-2 length REGIME, not the exact
+            # seq len: keying on exact max_input_len re-ran autotune (benchmark all
+            # _FWD_CONFIGS) per unique prefill length — ~149 re-tunes on a varying-
+            # length workload (random bench / agentic GDPval), the bulk of the TTFT
+            # blowup. next_power_of_2 collapses that to one tune per length regime,
+            # each still getting a length-appropriate config. (N_CTX is key-only,
+            # never used in compute — see the kernel arg comment.)
+            "N_CTX": triton.next_power_of_2(max(1, max_input_len)),
             "kv_group_num": kv_group_num,
             "BLOCK_D": BLOCK_D,
             "IS_CAUSAL": is_causal,
