@@ -207,6 +207,26 @@ def _build_server() -> FastMCP:
                 )
             ),
         ] = False,
+        dry_run: Annotated[
+            bool,
+            Field(
+                description=(
+                    "If True, run `launch.py --dry-run` to validate that "
+                    "the YAML parses, the factory resolves, and any "
+                    "referenced files exist — without contacting the "
+                    "cluster, spawning a container, or running sbatch. "
+                    "Used by verify-task workflow stages (deployment_support, "
+                    "hidden_state_dump_support, mlm_eval, ...) that only "
+                    "need to confirm a YAML compiles. Returns "
+                    "`{ok, dry_run: True, validated: bool, diagnostics: ...}` "
+                    "with no `experiment_id`. Skips verify_setup automatically — "
+                    "no cluster contact happens in dry-run. `hf_local` / "
+                    "`cluster_host` are optional in this mode (pass one to "
+                    "validate executor-specific config, omit both to validate "
+                    "just the YAML shape)."
+                )
+            ),
+        ] = False,
     ) -> dict:
         return bridge.submit_job_impl(
             yaml_path=yaml_path,
@@ -218,6 +238,7 @@ def _build_server() -> FastMCP:
             job_name=job_name,
             extra_overrides=extra_overrides,
             skip_verify=skip_verify,
+            dry_run=dry_run,
         )
 
     @mcp.tool(

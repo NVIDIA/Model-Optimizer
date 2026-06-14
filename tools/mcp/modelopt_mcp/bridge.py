@@ -419,19 +419,41 @@ def submit_job_impl(
     job_name: str | None,
     extra_overrides: dict[str, str] | None,
     skip_verify: bool,
+    dry_run: bool = False,
 ) -> dict:
     """Submit a launcher YAML.
 
     Mode is determined by mutually-exclusive args:
       * ``hf_local`` set → Docker (local GPU)
       * ``cluster_host`` set → Slurm (remote SSH)
-      * Neither set → error
+      * Neither set → error (unless ``dry_run=True``)
       * Both set → error
+
+    When ``dry_run=True``, the launcher is invoked with ``--dry-run`` —
+    the YAML is parsed and validated but no cluster contact / no
+    container spawn / no sbatch happens. ``hf_local`` and
+    ``cluster_host`` are optional in dry-run mode (pass one to validate
+    that the YAML's executor-specific config compiles for the intended
+    target; omit both to validate just the YAML shape). ``verify_setup``
+    is skipped automatically — there's nothing to talk to.
 
     The actual orchestration is delegated to the launcher's
     ``core.run_jobs``. We don't re-implement nemo_run integration here —
     that lives upstream.
     """
+    # ---- Dry-run branch (no cluster contact) -----------------------
+    if dry_run:
+        return _submit_job_dry_run(
+            yaml_path=yaml_path,
+            hf_local=hf_local,
+            cluster_host=cluster_host,
+            cluster_user=cluster_user,
+            identity=identity,
+            job_dir=job_dir,
+            job_name=job_name,
+            extra_overrides=extra_overrides,
+        )
+
     # ---- Mode resolution -------------------------------------------
     if hf_local and cluster_host:
         return {
@@ -675,6 +697,143 @@ def submit_job_impl(
         "experiment_id": experiment_id,
         "experiment_dir": experiment_dir,
         "slurm_job_id": slurm_job_id,
+        "exit_code": 0,
+        "stdout_tail": stdout_tail,
+        "argv": argv,
+    }
+
+
+def _submit_job_dry_run(
+    *,
+    yaml_path: str,
+    hf_local: str | None,
+    cluster_host: str | None,
+    cluster_user: str | None,
+    identity: str | None,
+    job_dir: str | None,
+    job_name: str | None,
+    extra_overrides: dict[str, str] | None,
+) -> dict:
+    """Validate a launcher YAML by running ``launch.py --dry-run``.
+
+    No cluster contact, no container spawn, no sbatch. Used by
+    verify-task workflow stages (deployment_support,
+    hidden_state_dump_support, mlm_eval, ...) that just need to confirm
+    a YAML compiles before declaring support is ready.
+
+    Returns ``{ok, dry_run: True, validated: bool, diagnostics: str,
+    argv: [...], stdout_tail: str}``. Never returns ``experiment_id``
+    or ``pid`` — there's nothing to track.
+    """
+    # Same path resolution as the live submit, so dry-run and live use
+    # exactly the same YAML.
+    abs_yaml = _normalize_yaml_path(yaml_path)
+    if not abs_yaml.exists():
+        return {
+            "ok": False,
+            "dry_run": True,
+            "reason": "yaml_not_found",
+            "yaml_path": yaml_path,
+            "resolved_path": str(abs_yaml),
+            "diagnostic": (
+                f"YAML not found at {abs_yaml}. Pass a path under "
+                f"tools/launcher/examples/ (relative), an absolute path, "
+                f"or one of the examples returned by list_examples."
+            ),
+        }
+
+    # Build argv — launch.py supports --dry-run as a flag that prevents
+    # actual submission while still exercising the YAML loader, factory
+    # resolution, and arg parser. Same argv shape as live submit minus
+    # the --yes (no confirmation prompt to bypass for dry-run, since
+    # nothing is actually submitted).
+    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--dry-run"]
+    if hf_local:
+        argv.append(f"hf_local={hf_local}")
+    if cluster_user:
+        argv.append(f"user={cluster_user}")
+    if identity:
+        argv.append(f"identity={identity}")
+    if job_dir:
+        argv.append(f"job_dir={job_dir}")
+    if job_name:
+        argv.append(f"job_name={job_name}")
+    for k, v in (extra_overrides or {}).items():
+        argv.append(f"{k}={v}")
+
+    launcher_dir = _THIS_DIR.parent.parent / "launcher"
+    if not launcher_dir.exists():
+        return {
+            "ok": False,
+            "dry_run": True,
+            "reason": "launcher_dir_not_found",
+            "diagnostic": (
+                f"Expected tools/launcher/ at {launcher_dir} but it "
+                f"doesn't exist. modelopt-mcp must be installed from a "
+                f"Model-Optimizer clone or via uvx-from-git."
+            ),
+        }
+
+    # Propagate env so the launcher's factory resolution matches what
+    # the live submit would see (mainly: SLURM_HOST for slurm-factory
+    # default when cluster_host is set).
+    child_env = os.environ.copy()
+    child_env.setdefault("NEMORUN_HOME", os.getcwd())
+    if cluster_host:
+        child_env["SLURM_HOST"] = cluster_host
+
+    # Dry-run is fast (no network, no container) — 60s timeout is
+    # generous. B603 false positive: argv is a controlled list.
+    try:
+        proc = subprocess.run(  # nosec B603
+            argv,
+            cwd=str(launcher_dir),
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "reason": "dry_run_timeout",
+            "diagnostic": (
+                "launch.py --dry-run did not return within 60 seconds. "
+                "This usually means a YAML import / factory resolution "
+                f"hung. Partial stdout: "
+                f"{(e.stdout or b'').decode(errors='replace')[-400:]}"
+            ),
+            "argv": argv,
+        }
+
+    stdout_tail = str(proc.stdout or "")[-2000:]
+    stderr_tail = str(proc.stderr or "")[-2000:]
+
+    if proc.returncode != 0:
+        return {
+            "ok": True,  # The tool itself ran cleanly
+            "dry_run": True,
+            "validated": False,  # ...but the YAML failed validation
+            "exit_code": proc.returncode,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "diagnostic": (
+                f"launch.py --dry-run rejected the YAML (exit code "
+                f"{proc.returncode}). Common reasons: invalid YAML "
+                f"syntax, missing required fields, factory function "
+                f"not registered, or a referenced file (HF model path, "
+                f"container tag) doesn't exist. See stderr_tail for the "
+                f"specific error."
+            ),
+            "argv": argv,
+        }
+
+    return {
+        "ok": True,
+        "dry_run": True,
+        "validated": True,
         "exit_code": 0,
         "stdout_tail": stdout_tail,
         "argv": argv,
