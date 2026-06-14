@@ -37,6 +37,7 @@ Changelog
 **Bug Fixes**
 
 - Fix ``ShapeInferenceError`` during ONNX INT8 + FP16 quantization (``--high_precision_dtype fp16``) of weakly-typed models (e.g. TensorFlow exports) that carry stale rank-0 ``graph.output`` shapes or ops such as ``TopK`` that ONNX's static shape inference cannot resolve. ``clear_stale_value_info`` now reconciles stale output shapes via symbolic shape inference (keeping every output's shape field populated), and AutoCast runs ONNX shape inference in strict mode and falls back to schema-based standalone type inference when it fails, so unresolved ops no longer leave tensors untyped.
+- Fused MoE expert auto-detection (``register_fused_experts_on_the_fly``) no longer requires an ``act_fn`` attribute. Some fused-expert modules (e.g. ``MiniMaxM3VLExperts``) apply a custom gated activation between the two ``F.linear`` calls instead of exposing ``act_fn``; they were silently skipped, leaving routed experts unquantized (an experts-only recipe matched nothing) and failing HF export with ``NotImplementedError``. ``_QuantFusedExperts`` is activation-agnostic (it only intercepts the two ``F.linear`` calls), so the requirement was unnecessary. This enables NVFP4/FP8 quantization and export for MiniMax-M2 / MiniMax-M3.
 
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^
