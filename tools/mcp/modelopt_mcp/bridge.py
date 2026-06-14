@@ -721,9 +721,12 @@ def _submit_job_dry_run(
     hidden_state_dump_support, mlm_eval, ...) that just need to confirm
     a YAML compiles before declaring support is ready.
 
-    Returns ``{ok, dry_run: True, validated: bool, diagnostics: str,
-    argv: [...], stdout_tail: str}``. Never returns ``experiment_id``
-    or ``pid`` — there's nothing to track.
+    Returns ``{ok, dry_run: True, validated: bool, diagnostic?: str,
+    exit_code: int|None, stdout_tail: str, stderr_tail: str,
+    argv: list[str]}``. Never returns ``experiment_id`` or ``pid`` —
+    there's nothing to track. ``diagnostic`` is present only on the
+    failure / timeout branches (the validated-success branch omits
+    it since there's nothing to diagnose).
     """
     # Same path resolution as the live submit, so dry-run and live use
     # exactly the same YAML.
@@ -745,9 +748,13 @@ def _submit_job_dry_run(
     # Build argv — launch.py supports --dryrun as a flag that prevents
     # actual submission while still exercising the YAML loader, factory
     # resolution, and arg parser. Same argv shape as live submit minus
-    # the --yes (no confirmation prompt to bypass for dry-run, since
-    # nothing is actually submitted).
-    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--dryrun"]
+    # `--yes` pairs with `--dryrun` in every launcher CLI example (see
+    # `tools/launcher/CLAUDE.md:28` and `:93`, plus `tools/launcher/docs/
+    # contributing.md:24`). Without it, nemo_run's `run.cli.entrypoint`
+    # blocks on its confirmation prompt — and since we're capturing
+    # stdout (no TTY), the prompt would hang until the 60-second
+    # timeout fires.
+    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--dryrun", "--yes"]
     if hf_local:
         argv.append(f"hf_local={hf_local}")
     if cluster_user:

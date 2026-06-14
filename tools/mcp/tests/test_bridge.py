@@ -313,7 +313,7 @@ def test_submit_job_dry_run_yaml_validates(monkeypatch, tmp_path):
     assert result["validated"] is True
     assert "experiment_id" not in result  # dry-run produces no experiment
     assert "--dryrun" in captured["argv"]  # launcher CLI spells it as one word
-    assert "--yes" not in captured["argv"]  # dry-run skips --yes
+    assert "--yes" in captured["argv"]  # launcher requires --yes to suppress confirm prompt
 
 
 def test_submit_job_dry_run_yaml_invalid(monkeypatch, tmp_path):

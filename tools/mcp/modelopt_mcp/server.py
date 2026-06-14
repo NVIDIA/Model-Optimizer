@@ -211,15 +211,17 @@ def _build_server() -> FastMCP:
             bool,
             Field(
                 description=(
-                    "If True, run `launch.py --dry-run` to validate that "
+                    "If True, run `launch.py --dryrun --yes` to validate that "
                     "the YAML parses, the factory resolves, and any "
                     "referenced files exist — without contacting the "
                     "cluster, spawning a container, or running sbatch. "
                     "Used by verify-task workflow stages (deployment_support, "
                     "hidden_state_dump_support, mlm_eval, ...) that only "
                     "need to confirm a YAML compiles. Returns "
-                    "`{ok, dry_run: True, validated: bool, diagnostics: ...}` "
-                    "with no `experiment_id`. Skips verify_setup automatically — "
+                    "`{ok, dry_run: True, validated: bool, diagnostic?: str, "
+                    "exit_code: int|None, stdout_tail: str, stderr_tail: str, "
+                    "argv: list[str]}` with no `experiment_id`. Skips "
+                    "verify_setup automatically — "
                     "no cluster contact happens in dry-run. `hf_local` / "
                     "`cluster_host` are optional in this mode (pass one to "
                     "validate executor-specific config, omit both to validate "
