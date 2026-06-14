@@ -254,3 +254,30 @@ def test_apply_to_model_raises_on_wrong_quantizer_type(tmp_path):
 
     with pytest.raises(AssertionError, match="expected NVFP4StaticQuantizer"):
         cast.apply_to_model(_Wrong(), ckpt_dir)
+
+
+# ---------- force_weight_quantizers_static ----------------------------------
+
+
+def test_force_weight_quantizers_static():
+    """Only ``*weight_quantizer`` entries with a ``block_sizes`` dict flip to ``type='static'``;
+    input quantizers and entries without block_sizes are left untouched."""
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "dynamic"}},
+        },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "dynamic"}},
+        },
+        {"quantizer_name": "*router*", "enable": False},  # no cfg / block_sizes
+    ]
+
+    cast.force_weight_quantizers_static(quant_cfg)
+
+    assert quant_cfg[1]["cfg"]["block_sizes"]["type"] == "static"  # weight quantizer forced
+    assert quant_cfg[1]["cfg"]["block_sizes"][-1] == 16  # other block_sizes keys preserved
+    assert quant_cfg[2]["cfg"]["block_sizes"]["type"] == "dynamic"  # input quantizer untouched
+    assert "cfg" not in quant_cfg[3]  # entry without block_sizes untouched

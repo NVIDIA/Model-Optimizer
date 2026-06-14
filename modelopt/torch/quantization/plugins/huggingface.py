@@ -471,6 +471,34 @@ class _TransposedQuantization(torch.autograd.Function):
 _transposed_quantize = _TransposedQuantization.apply
 
 
+class _TransposedExpertsCalibMixin:
+    """Weight-only calibration for BMM-style experts that quantize their weights transposed.
+
+    ``_QuantGptOssExperts`` / ``_QuantLlama4TextExperts`` hold 3-D expert weights of shape
+    ``(num_experts, in_dim, out_dim)`` and quantize them *transposed* in the forward (see
+    :class:`_TransposedQuantization`: per-channel / per-block quantization expects the
+    contraction ``in_dim`` as the last axis). Weight-only calibration
+    (``max_calibrate`` -> ``weight_only_quantize``) must feed the weight quantizer the same
+    transposed view; otherwise static-block NVFP4 locks ``_original_shape`` from the
+    non-transposed weight and the forward then raises "Input shape has changed".
+    Calibrating transposed also matches the orientation the unified HF export reads ``_amax``
+    in (it transposes BMM expert weights before deriving scales).
+
+    The transposed view is not made contiguous (unlike the forward's ``_transposed_quantize``,
+    which needs it for the matmul): calibration only reads the shape and reduces for ``_amax``,
+    both of which the quantizer handles on a non-contiguous view via ``reshape``.
+
+    For ``_QuantGptOssExperts`` ``gate_up_proj``/``down_proj`` are dynamic attributes; weight-only
+    calibration runs with weight quantization disabled, so they return the raw weight here.
+    """
+
+    def iter_weights_for_calibration(self):
+        """Yield ``(transposed_weight, weight_quantizer)`` for each expert projection."""
+        for weight_name in ("gate_up_proj", "down_proj"):
+            weight = getattr(self, weight_name)
+            yield weight.transpose(-1, -2), getattr(self, f"{weight_name}_weight_quantizer")
+
+
 class _QuantSparseSequentialMoe(QuantModule):
     """Quantization wrapper for HuggingFace sparse MoE blocks.
 
@@ -601,7 +629,7 @@ class _QuantSparseSequentialMoe(QuantModule):
         sync_moe_expert_amax(self.experts, sync_weight_amax=sync_weight_amax)
 
 
-class _QuantLlama4TextExperts(QuantModule):
+class _QuantLlama4TextExperts(_TransposedExpertsCalibMixin, QuantModule):
     def _setup(self):
         self.gate_up_proj_input_quantizer = TensorQuantizer()
         self.gate_up_proj_weight_quantizer = TensorQuantizer()
@@ -1253,7 +1281,7 @@ except ImportError:
     pass
 
 
-class _QuantGptOssExperts(_QuantFunctionalMixin):
+class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
     """Quantized wrapper for `transformers.GptOssExperts`.
 
     Quantizes `gate_up_proj` and `down_proj` weights via dynamic attributes inside `quantize_weight()`.

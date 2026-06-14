@@ -127,6 +127,29 @@ def test_trt_plugin_quantization(tmp_path):
         assert assert_nodes_are_quantized(quantizable_nodes)
 
 
+def test_trt_plugin_quantization_int4_awq(tmp_path):
+    model = _create_test_model_trt()
+    with open(os.path.join(tmp_path, "model_with_trt_plugin_int4.onnx"), "w") as f:
+        onnx.save_model(model, f.name)
+
+        # Quantize at int4 with awq_clip (the path that forces opset >= 21).
+        quantize(
+            f.name,
+            quantize_mode="int4",
+            calibration_method="awq_clip",
+            calibration_eps=["trt", "cuda:0", "cpu"],
+        )
+
+        # The regression was a hard failure at calibration-session load; reaching a
+        # written output model means the custom op's type survived the value_info clear.
+        output_onnx_path = f.name.replace(".onnx", ".quant.onnx")
+        assert os.path.isfile(output_onnx_path)
+
+        # The custom op must still be present (not dropped) in the quantized model.
+        graph = gs.import_onnx(onnx.load(output_onnx_path))
+        assert any(n.op == "CustomSkipLayerNormPluginDynamic" for n in graph.nodes)
+
+
 def test_trt_plugin_autocast(tmp_path):
     model = _create_test_model_trt()
     with open(os.path.join(tmp_path, "model_with_trt_plugin_autocast.onnx"), "w") as f:
