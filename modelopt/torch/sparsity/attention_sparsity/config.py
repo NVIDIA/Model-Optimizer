@@ -126,11 +126,11 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
     )
 
     dense_recent_tokens: int = ModeloptField(
-        default=64,
+        default=128,
         title="Dense recent tokens.",
         description=(
             "Number of recent KV tokens excluded from N:M sparsity and kept dense. "
-            "Default 64. Used by triton_sparse_softmax, or exported for vLLM restore "
+            "Default 128. Used by triton_sparse_softmax, or exported for vLLM restore "
             "when export_sparse_softmax is True."
         ),
     )

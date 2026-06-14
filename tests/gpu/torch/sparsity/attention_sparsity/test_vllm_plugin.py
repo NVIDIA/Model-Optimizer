@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ruff: noqa: N806 — attention dims (H, KVH, S, ...) use uppercase by convention
+
 """GPU tests for the vLLM sparse attention plugin (ModelOptSparseAttentionImpl).
 
 Covers the integration-critical metadata translation done in
@@ -43,6 +45,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     enable_calibration,
     fit_calibration,
     get_flashinfer_sparse_impl_cls,
+    parse_attn_quant_env,
     patch_flashinfer_metadata_builder,
 )
 
@@ -382,6 +385,128 @@ class TestModelOptSparseAttentionImpl:
 
         ref = _dense_decode_ref(q, k, v, kv_start, kv_lens, num_heads, num_kv_heads, scale)
         torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+
+    def test_parse_attn_quant_env(self, monkeypatch):
+        """MODELOPT_ATTN_* env knobs parse into the expected attention-quant config."""
+        for k in ("NVFP4", "FP16_SOFTMAX", "SOFTMAX_QUANT", "SPARSITY_NM"):
+            monkeypatch.delenv(f"MODELOPT_ATTN_{k}", raising=False)
+        assert parse_attn_quant_env() == {}
+        monkeypatch.setenv("MODELOPT_ATTN_NVFP4", "q,k,p,v")
+        monkeypatch.setenv("MODELOPT_ATTN_FP16_SOFTMAX", "1")
+        monkeypatch.setenv("MODELOPT_ATTN_SOFTMAX_QUANT", "diff:fp16_rz,exp2:bf16_rne")
+        monkeypatch.setenv("MODELOPT_ATTN_SPARSITY_NM", "2:4")
+        cfg = parse_attn_quant_env()
+        assert cfg["nvfp4"] == {"q", "k", "p", "v"}
+        assert cfg["fp16_softmax"] is True
+        assert cfg["softmax_quant"] == {"diff": "fp16_rz", "exp2": "bf16_rne"}
+        assert (cfg["sparsity_n"], cfg["sparsity_m"]) == (2, 4)
+        monkeypatch.setenv("MODELOPT_ATTN_NVFP4", "kv")  # shorthand -> {k, v}
+        assert parse_attn_quant_env()["nvfp4"] == {"k", "v"}
+
+    def test_decode_nvfp4_via_attn_quant_kw(self, monkeypatch):
+        """Quant-only decode (NVFP4, no skip threshold) engages the decode kernel, not dense."""
+        from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
+
+        batch = 2
+        kv_lens = torch.tensor([130, 200], device="cuda", dtype=torch.int32)
+        H, KVH, d, ps = 4, 2, 64, 16
+        scale = 1.0 / (d**0.5)
+        torch.manual_seed(5)
+        q = torch.randn(batch, H, d, device="cuda", dtype=torch.float16)
+        k = torch.randn(int(kv_lens.sum()), KVH, d, device="cuda", dtype=torch.float16)
+        v = torch.randn_like(k)
+        kv_start = torch.tensor([0, int(kv_lens[0].item())], device="cuda", dtype=torch.int32)
+        kv_cache, bt = _make_paged_cache(k, v, kv_start, kv_lens, KVH, d, ps)
+        meta = SimpleNamespace(
+            num_actual_tokens=batch,
+            max_query_len=1,
+            max_seq_len=int(kv_lens.max().item()),
+            query_start_loc=torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32),
+            seq_lens=kv_lens,
+            block_table=bt,
+        )
+        monkeypatch.setattr(
+            FlashAttentionImpl,
+            "forward",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("quant-only must not delegate")),
+        )
+        impl = _make_impl(H, d, KVH)
+        impl.sparse_kw = {}  # no skip / N:M — quant only
+        impl.attn_quant_kw = {"nvfp4": {"q", "k", "p", "v"}}
+        out = impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=meta,
+            output=torch.empty_like(q),
+        )
+        kc, vc = kv_cache.unbind(0)
+        # The serving impl precomputes NVFP4 per-tensor global scales per-step from q/k/v
+        # (the cache-wide fp32 reduction OOMs), so the reference must use the same scales
+        # to match. Here key=value=q, so all three scales are tensor_global_scale(q).
+        from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
+            tensor_global_scale,
+        )
+
+        gs = tensor_global_scale(q)
+        ref = attention_decode(
+            q,
+            kc,
+            vc,
+            bt,
+            kv_lens,
+            softmax_scale=scale,
+            page_size=ps,
+            nvfp4={"q", "k", "p", "v"},
+            attn_global_scales={"q": gs, "k": gs, "v": gs},
+        )
+        torch.testing.assert_close(out, ref, rtol=1e-3, atol=1e-3)
+
+    def test_prefill_nvfp4_via_attn_quant_kw(self):
+        """Quant-only prefill (NVFP4, no sparse feature) engages the kernel (paged == contiguous)."""
+        S, H, KVH, d, ps = 64, 4, 2, 64, 16
+        scale = 1.0 / (d**0.5)
+        torch.manual_seed(6)
+        q = torch.randn(S, H, d, device="cuda", dtype=torch.float16)
+        k = torch.randn(S, KVH, d, device="cuda", dtype=torch.float16)
+        v = torch.randn_like(k)
+        seq = torch.tensor([S], device="cuda", dtype=torch.int32)
+        qsl = torch.tensor([0, S], device="cuda", dtype=torch.int32)
+        out_ref = triton_attention(
+            q,
+            k,
+            v,
+            qsl[:1],
+            seq,
+            S,
+            is_causal=True,
+            softmax_scale=scale,
+            nvfp4={"q", "k", "p", "v"},
+        )
+        kv_cache, bt = _make_paged_cache(k, v, qsl[:1], seq, KVH, d, ps)
+        meta = SimpleNamespace(
+            num_actual_tokens=S,
+            max_query_len=S,
+            max_seq_len=S,
+            query_start_loc=qsl,
+            seq_lens=seq,
+            block_table=bt,
+        )
+        impl = _make_impl(H, d, KVH)
+        impl.sparse_kw = {}
+        impl.attn_quant_kw = {"nvfp4": {"q", "k", "p", "v"}}
+        out = impl.forward(
+            layer=None,
+            query=q,
+            key=k,
+            value=v,
+            kv_cache=kv_cache,
+            attn_metadata=meta,
+            output=torch.empty_like(q),
+        )
+        torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
 
     def test_profiling_run_returns_zeros(self):
         """attn_metadata=None (vLLM profiling pass) must zero-fill output and return."""

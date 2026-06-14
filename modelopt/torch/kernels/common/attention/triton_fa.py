@@ -30,6 +30,40 @@ import torch
 import triton
 import triton.language as tl
 
+from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import (
+    QUANT_NVFP4,
+    fake_quant_fp4_k0,
+    fake_quant_fp4_k1,
+    tensor_global_scale_device,
+)
+from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
+    ex2_fp16,
+    resolve_softmax_mode,
+    softmax_round,
+)
+
+
+def _resolve_softmax_modes(fp16_softmax, softmax_quant):
+    """(fp16_softmax bool, per-point dict) -> (DIFF, EXP2, ACC, MIXED_FP16).
+
+    ``fp16_softmax=True`` engages the reference mixed-precision softmax design: both exp2s (the
+    softmax exp and the online correction) run in native fp16 (``ex2.approx.ftz.f16``) and the
+    denominator accumulates the fp16 P in fp32 (unrounded). The optional ``softmax_quant`` dict
+    ({"diff"/"exp2"/"acc": mode}) instead selects per-point round-based datapath quant (the
+    fp8/bf16/fp16-round experiments) and takes precedence when given.
+    """
+    sq = softmax_quant or {}
+    if fp16_softmax and not sq:
+        return (0, 0, 0, True)
+    default = "fp16_rne" if fp16_softmax else None
+    return (
+        resolve_softmax_mode(sq.get("diff", default)),
+        resolve_softmax_mode(sq.get("exp2", default)),
+        resolve_softmax_mode(sq.get("acc", default)),
+        False,
+    )
+
+
 # Helpers for optional N:M sparsity and sink/window-aware dense regions live
 # in the sparsity package. The baseline forward kernel below calls them
 # conditionally under constexpr guards, so the unified single-kernel design
@@ -127,7 +161,9 @@ def _load_paged_k_tile(
     # Load K values: K_cache[page_global, offset_in_page, kv_head_idx, dim]
     # K^T layout [BLOCK_D, BLOCK_N] for Q @ K^T matmul
     k_ptrs = (
-        page_global[None, :] * stride_kc_block
+        # int64: real KV pools have >2^31/stride blocks, so page_global*stride_kc_block
+        # overflows int32 at high block IDs -> negative offset -> illegal memory access.
+        page_global[None, :].to(tl.int64) * stride_kc_block
         + offset_in_page[None, :] * stride_kc_pos
         + kv_head_idx * stride_kc_head
         + dim_pos[:, None]
@@ -169,7 +205,8 @@ def _load_paged_v_tile(
 
     # V layout [BLOCK_N, BLOCK_D]
     v_ptrs = (
-        page_global[:, None] * stride_vc_block
+        # int64: see _load_paged_k_tile — avoid int32 overflow at high block IDs.
+        page_global[:, None].to(tl.int64) * stride_vc_block
         + offset_in_page[:, None] * stride_vc_pos
         + kv_head_idx * stride_vc_head
         + dim_pos[None, :]
@@ -243,7 +280,7 @@ def _attn_fwd(
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
     DENSE_SINK_TOKENS: tl.constexpr = 0,  # Leading KV tokens kept dense (attention sinks)
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,  # Recent KV tokens kept dense (BLOCK_N-independent)
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,  # Recent KV tokens kept dense (BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
@@ -261,6 +298,26 @@ def _attn_fwd(
     stride_vc_head=0,
     PAGE_SIZE: tl.constexpr = 16,
     max_blocks_per_seq=0,
+    NVFP4_Q: tl.constexpr = False,  # fakequant Q -> NVFP4 before BMM1
+    NVFP4_K: tl.constexpr = False,  # fakequant K -> NVFP4 before BMM1 (= NVFP4 KV$ K side)
+    NVFP4_P: tl.constexpr = False,  # fakequant softmax P -> NVFP4 before BMM2
+    NVFP4_V: tl.constexpr = False,  # fakequant V -> NVFP4 before BMM2 (= NVFP4 KV$ V side)
+    DIFF_QUANT: tl.constexpr = 0,  # softmax-datapath modes: DIFF (pre-exp2), EXP2, ACC (sum)
+    EXP2_QUANT: tl.constexpr = 0,
+    ACC_QUANT: tl.constexpr = 0,
+    MIXED_FP16: tl.constexpr = False,  # reference mixed-precision softmax (native fp16 MUFU)
+    PER_PAGE_SCALE: tl.constexpr = False,  # method 2: derive K/V global scale per tile from its own
+    # amax (overrides the passed k/v_global_scale); complete tiles read as-is (baked), tail FQ'd.
+    SCALE_PAGE: tl.constexpr = 128,  # per-page granularity = the on-write bake tile (128). The page
+    # boundary uses THIS, not BLOCK_N, so a smaller autotuned BLOCK_N still reads baked 128-pages
+    # correctly. (The trailing-page amax is then over BLOCK_N, a finer-but-consistent sub-page scale.)
+    # Per-tensor NVFP4 global scales (amax/(6*448)). When the matching NVFP4_* flag is
+    # set these are device 0-d tensors (pointers), read via ``tl.load`` so no host
+    # ``.item()`` sync is needed (CUDA-graph-safe); otherwise an unused float default.
+    q_global_scale=1.0,
+    k_global_scale=1.0,
+    p_global_scale=1.0,
+    v_global_scale=1.0,
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -276,6 +333,10 @@ def _attn_fwd(
     seq_len_kv = tl.load(b_seq_len_k + batch_idx)
     q_offset = tl.load(b_start_loc + batch_idx)
     kv_offset = tl.load(b_start_loc_k + batch_idx)
+    # Per-page: tiles ending at/below this boundary are complete pages (baked on write -> read
+    # as-is); only the trailing in-progress page is fakequantized on read, from its own amax. The
+    # boundary is the 128-key bake page (SCALE_PAGE), independent of the autotuned BLOCK_N.
+    page_boundary = (seq_len_kv // SCALE_PAGE) * SCALE_PAGE
 
     if tile_q * BLOCK_M >= seq_len_q:
         return  # This Q tile is past the sequence end
@@ -286,9 +347,19 @@ def _attn_fwd(
     dim_pos = tl.arange(0, BLOCK_D)  # Head dimension positions
     d_mask = dim_pos < HEAD_DIM  # Mask for non-power-of-2 head dims
 
+    # --- NVFP4 global scales: read on-device (no host sync) once, reuse in the KV loop.
+    # The matching constexpr guard means the arg is only dereferenced when that operand
+    # is actually quantized; otherwise it is an unused scalar default.
+    q_gs = tl.load(q_global_scale) if NVFP4_Q else 1.0
+    k_gs = tl.load(k_global_scale) if NVFP4_K else 1.0
+    p_gs = tl.load(p_global_scale) if NVFP4_P else 1.0
+    v_gs = tl.load(v_global_scale) if NVFP4_V else 1.0
+
     # --- Load Q tile [BLOCK_M, BLOCK_D]: stays in SRAM for the entire KV loop ---
     q_ptrs = (q_offset + q_pos[:, None]) * stride_qbs + head_idx * stride_qh + dim_pos[None, :]
     q = tl.load(Q + q_ptrs, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :], other=0.0)
+    if NVFP4_Q:  # BMM1 query operand (A-side, GEMM-K = head dim = axis 1)
+        q = fake_quant_fp4_k1(q, BLOCK_M, BLOCK_D, 16, q_gs, QUANT_NVFP4)
 
     # Base pointers for K and V at this KV head (per-tile offset added in loop)
     k_base = K + kv_head_idx * stride_kh
@@ -339,6 +410,14 @@ def _attn_fwd(
                 other=0.0,
             )
 
+        if NVFP4_K and (  # BMM1 key operand (B-side, K^T [BLOCK_D, BLOCK_N], GEMM-K = axis 0)
+            (not PER_PAGE_SCALE) or (not IS_PAGED) or (kv_start + BLOCK_N > page_boundary)
+        ):
+            # Per-page: complete tiles are baked (read as-is); only the trailing tile is FQ'd,
+            # with its own per-tile amax. Frozen: every tile FQ'd with the per-tensor k_gs.
+            kgs_eff = (tl.max(tl.abs(k)) / (6.0 * 448.0) + 1e-30) if PER_PAGE_SCALE else k_gs
+            k = fake_quant_fp4_k0(k, BLOCK_D, BLOCK_N, 16, 1, kgs_eff, QUANT_NVFP4)
+
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
         scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
@@ -375,11 +454,21 @@ def _attn_fwd(
             )
 
         if not skip_tile:
-            # --- Online softmax update ---
+            # --- Online softmax update (with optional mixed-precision datapath quant) ---
             m_new = tl.maximum(row_max, tl.max(scores, 1))
-            p = tl.math.exp2(scores - m_new[:, None])
-            l_new = tl.sum(p, 1)
-            correction = tl.math.exp2(row_max - m_new)
+            if MIXED_FP16:
+                # Reference mixed-precision softmax: fp16 datapath, fp32 reductions. The exp2
+                # input (scores - max) and the correction delta are converted to fp16 inside
+                # ex2_fp16 (cvt.rn.f16.f32) and exponentiated by the native fp16 MUFU; P comes
+                # out fp16-valued, and the denominator sums it in fp32 (unrounded).
+                p = ex2_fp16(scores - m_new[:, None])  # FHADD2 -> fp16 ; MUFU.ex2.fp16 -> P fp16
+                l_new = tl.sum(p, 1)  # row_sum accumulates fp16 P in fp32 (unrounded)
+                correction = ex2_fp16(row_max - m_new)  # fp16 correction factor
+            else:
+                s_shift = softmax_round(scores - m_new[:, None], DIFF_QUANT)  # DIFF: input to exp2
+                p = softmax_round(tl.math.exp2(s_shift), EXP2_QUANT)  # EXP2: output of exp2
+                l_new = softmax_round(tl.sum(p, 1), ACC_QUANT)  # ACC: running softmax denom
+                correction = tl.math.exp2(row_max - m_new)
             row_sum = row_sum * correction + l_new
             acc = acc * correction[:, None]
 
@@ -410,7 +499,19 @@ def _attn_fwd(
                     mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                     other=0.0,
                 )
-            acc = tl.dot(p.to(v.dtype), v, acc)
+            if NVFP4_V and (  # BMM2 value operand (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = axis 0)
+                (not PER_PAGE_SCALE) or (not IS_PAGED) or (kv_start + BLOCK_N > page_boundary)
+            ):
+                # Per-page: complete tiles baked (read as-is); trailing tile FQ'd from its own amax.
+                vgs_eff = (tl.max(tl.abs(v)) / (6.0 * 448.0) + 1e-30) if PER_PAGE_SCALE else v_gs
+                v = fake_quant_fp4_k0(v, BLOCK_N, BLOCK_D, 16, 1, vgs_eff, QUANT_NVFP4)
+            # BMM2 prob operand (A-side, P [BLOCK_M, BLOCK_N], GEMM-K = keys = axis 1) with a
+            # per-tensor p_global_scale, matching mni/attnOpt: quantize the *unnormalized* exp
+            # P tile, accumulate, normalize acc by row_sum after the loop. (Across KV tiles the
+            # online-softmax rescaling makes this an approximation of full-P NVFP4 — same as
+            # their flash kernel; the materialized/eager path is the exact reference.)
+            p_dot = fake_quant_fp4_k1(p, BLOCK_M, BLOCK_N, 16, p_gs, QUANT_NVFP4) if NVFP4_P else p
+            acc = tl.dot(p_dot.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
 
@@ -514,7 +615,7 @@ def _attn_bwd_dq(
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
     DENSE_SINK_TOKENS: tl.constexpr = 0,
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
@@ -665,7 +766,7 @@ def _attn_bwd_dkdv(
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
     DENSE_SINK_TOKENS: tl.constexpr = 0,
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
@@ -810,6 +911,11 @@ class _Attention(torch.autograd.Function):
         v_cache,
         block_table,
         page_size,
+        nvfp4=None,
+        fp16_softmax=False,
+        softmax_quant=None,
+        attn_global_scales=None,
+        per_page_scale=False,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -890,8 +996,32 @@ class _Attention(torch.autograd.Function):
             lse.stride(0),
             lse.stride(1),
         )
+        _nvfp4 = nvfp4 or set()
+        assert _nvfp4 <= {"q", "k", "p", "v"}, f"nvfp4 must be a subset of q/k/p/v, got {nvfp4}"
+        _diff_q, _exp2_q, _acc_q, _mixed_fp16 = _resolve_softmax_modes(fp16_softmax, softmax_quant)
+        # P global is a fixed constant (unnormalized exp P has per-row max ~1); keep it
+        # as a 0-d device tensor so every scale enters the kernel uniformly by pointer.
+        # Built copy-free with new_full (device-side fill) — torch.tensor(const,
+        # device=cuda) does a host->device copy that is illegal during CUDA-graph capture.
+        _p_global = q.new_full((), 1.0 / (6.0 * 448.0) + 1e-30, dtype=torch.float32)
+        # In paged serving the caller passes precomputed per-tensor global scales
+        # (from the small per-step q/k/v); falling back to scanning the full paged
+        # K/V cache here would upcast it to fp32 and OOM. Eager/test launches leave
+        # ``attn_global_scales`` unset and compute from the (small) q/k/v operands.
+        _gs = attn_global_scales or {}
+        # K/V NVFP4 global scale: DEFAULT = constant 1.0. The deprecated whole-cache amax scan OOMs
+        # on a paged cache and, used as a frozen scale, saturates long context. per_page_scale derives
+        # it per tile in-kernel (the passed scale is then ignored). Either way pass this cheap 0-d 1.0.
+        _one_gs = q.new_full((), 1.0, dtype=torch.float32)
         fwd_kwargs = {
-            "N_CTX": max_input_len,
+            # Bucket the autotune key to a power-of-2 length REGIME, not the exact
+            # seq len: keying on exact max_input_len re-ran autotune (benchmark all
+            # _FWD_CONFIGS) per unique prefill length — ~149 re-tunes on a varying-
+            # length workload (random bench / agentic GDPval), the bulk of the TTFT
+            # blowup. next_power_of_2 collapses that to one tune per length regime,
+            # each still getting a length-appropriate config. (N_CTX is key-only,
+            # never used in compute — see the kernel arg comment.)
+            "N_CTX": triton.next_power_of_2(max(1, max_input_len)),
             "kv_group_num": kv_group_num,
             "BLOCK_D": BLOCK_D,
             "IS_CAUSAL": is_causal,
@@ -918,6 +1048,28 @@ class _Attention(torch.autograd.Function):
             "stride_vc_head": v_cache.stride(2) if is_paged else 0,
             "PAGE_SIZE": page_size,
             "max_blocks_per_seq": block_table.shape[1] if is_paged else 0,
+            "NVFP4_Q": "q" in _nvfp4,
+            "NVFP4_K": "k" in _nvfp4,
+            "NVFP4_P": "p" in _nvfp4,
+            "NVFP4_V": "v" in _nvfp4,
+            "DIFF_QUANT": _diff_q,
+            "EXP2_QUANT": _exp2_q,
+            "ACC_QUANT": _acc_q,
+            "MIXED_FP16": _mixed_fp16,
+            # Device 0-d tensors (pointers) when quantized — read via tl.load in-kernel,
+            # no host .item(). The caller's precomputed scales (paged serving) are also
+            # device tensors; the fallback computes from the small q/k/v operands.
+            "q_global_scale": (_gs["q"] if "q" in _gs else tensor_global_scale_device(q))
+            if "q" in _nvfp4
+            else 1.0,
+            "k_global_scale": (_one_gs if per_page_scale else _gs.get("k", _one_gs))
+            if "k" in _nvfp4
+            else 1.0,
+            "p_global_scale": _p_global if "p" in _nvfp4 else 1.0,
+            "v_global_scale": (_one_gs if per_page_scale else _gs.get("v", _one_gs))
+            if "v" in _nvfp4
+            else 1.0,
+            "PER_PAGE_SCALE": per_page_scale,
         }
 
         # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.
@@ -940,6 +1092,14 @@ class _Attention(torch.autograd.Function):
                     BLOCK_N=_MEASURE_BLOCK_N,
                     num_warps=_MEASURE_NUM_WARPS,
                     num_stages=_MEASURE_NUM_STAGES,
+                )
+            elif per_page_scale:
+                # Per-page bakes 128-key pages; the prefill KV tile MUST equal that page so the
+                # trailing page's amax is computed over the FULL 128-page (matching decode/on-write),
+                # not a 64-wide sub-tile. Pin BLOCK_N=128; small BLOCK_M + num_stages=1 keeps shared
+                # memory in budget (bf16 serve ~84KB on A6000's 99KB; ample on GB300/B200).
+                _attn_fwd.fn[grid](
+                    *fwd_args, **fwd_kwargs, BLOCK_M=16, BLOCK_N=128, num_warps=4, num_stages=1
                 )
             else:
                 _attn_fwd[grid](
@@ -1110,6 +1270,11 @@ class _Attention(torch.autograd.Function):
             None,  # v_cache
             None,  # block_table
             None,  # page_size
+            None,  # nvfp4
+            None,  # fp16_softmax
+            None,  # softmax_quant
+            None,  # attn_global_scales
+            None,  # per_page_scale
         )
 
 
@@ -1129,13 +1294,18 @@ def attention(
     sparsity_n: int = 0,
     sparsity_m: int = 4,
     dense_sink_tokens: int = 0,
-    dense_recent_tokens: int = 64,
+    dense_recent_tokens: int = 128,
     skip_softmax_threshold: float | None = None,
     measure_sparsity: bool = False,
+    nvfp4: set[str] | None = None,
+    fp16_softmax: bool = False,
+    softmax_quant: dict | None = None,
+    attn_global_scales: dict | None = None,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     page_size: int = 16,
+    per_page_scale: bool = False,
 ) -> torch.Tensor:
     """Variable-length flash attention with GQA, autograd, optional sparsity, and paged KV.
 
@@ -1176,6 +1346,12 @@ def attention(
         block_table: Page table [batch, max_blocks_per_seq] mapping sequence
             block indices to global page IDs.
         page_size: Number of tokens per page in the KV cache.
+        fp16_softmax: Engage the reference mixed-precision softmax — both exp2s (the softmax
+            exp and the online correction) run in native fp16 (``ex2.approx.ftz.f16``) and the
+            denominator accumulates the fp16 P in fp32 (P fp16-in, sum unrounded). The matmul
+            accumulators stay fp32. Ignored when ``softmax_quant`` is given.
+        softmax_quant: Optional per-point datapath quant ``{"diff"/"exp2"/"acc": mode}`` for the
+            round-based experiments (fp8/bf16/fp16-round); takes precedence over ``fp16_softmax``.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
@@ -1210,6 +1386,11 @@ def attention(
         v_cache,
         block_table,
         page_size,
+        nvfp4,
+        fp16_softmax,
+        softmax_quant,
+        attn_global_scales,
+        per_page_scale,
     )
 
 

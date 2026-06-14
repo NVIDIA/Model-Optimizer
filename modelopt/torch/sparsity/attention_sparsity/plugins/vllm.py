@@ -30,6 +30,7 @@ live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 import functools
 import inspect
 import math
+import os
 import warnings
 
 import torch
@@ -39,8 +40,12 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
 )
 
-from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
+from modelopt.torch.kernels.common.attention.decode_attention import (
+    attention_decode,
+    fake_quant_kv_onwrite,
+)
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
+from modelopt.torch.kernels.quantization.attention.nvfp4_fakequant import tensor_global_scale_device
 from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
 
@@ -96,6 +101,47 @@ def _resolve_skip_softmax_calibration(
     sparse_kw["skip_softmax_threshold"] = threshold
 
 
+def parse_attn_quant_env() -> dict:
+    """Read ``MODELOPT_ATTN_*`` env knobs into an attention-quant config.
+
+    Mirrors the env-driven ``vllm_serve_fakequant`` flow (``QUANT_CFG``/``KV_QUANT_CFG``):
+    lets a single served checkpoint toggle NVFP4 attention BMMs, mixed-precision softmax,
+    and N:M sparse softmax at serve time, with no re-export. Returns ``{}`` if none set.
+
+    Env knobs:
+      ``MODELOPT_ATTN_NVFP4``        e.g. ``"q,k,p,v"`` | ``"kv"`` | ``"qkpv"`` — BMM operands -> NVFP4
+      ``MODELOPT_ATTN_NVFP4_PER_PAGE_SCALE`` ``"1"`` -> per-page NVFP4 KV$ global scale (method 2)
+      ``MODELOPT_ATTN_FP16_SOFTMAX`` ``"1"`` -> FP16 softmax (all DIFF/EXP2/ACC points)
+      ``MODELOPT_ATTN_SOFTMAX_QUANT`` e.g. ``"diff:fp16_rz,exp2:bf16_rne,acc:fp16"``
+      ``MODELOPT_ATTN_SPARSITY_NM``  e.g. ``"2:4"`` — N:M sparse softmax (prefill)
+    """
+    cfg: dict = {}
+    nv = os.environ.get("MODELOPT_ATTN_NVFP4", "")
+    ops = {ch for tok in nv.replace(" ", "").split(",") for ch in tok if ch in "qkpv"}
+    if ops:
+        cfg["nvfp4"] = ops
+    if os.environ.get("MODELOPT_ATTN_FP16_SOFTMAX", "0").lower() in ("1", "true", "yes"):
+        cfg["fp16_softmax"] = True
+    if os.environ.get("MODELOPT_ATTN_NVFP4_PER_PAGE_SCALE", "0").lower() in ("1", "true", "yes"):
+        # Method 2: per-page NVFP4 global scale (per BLOCK_N tile) instead of one frozen
+        # per-tensor scale — complete pages baked with their own amax, the in-progress page
+        # re-quantized from its bf16 master each step. Better dynamic range on long-context/math/code.
+        cfg["per_page_scale"] = True
+    sq = os.environ.get("MODELOPT_ATTN_SOFTMAX_QUANT", "")
+    sq_map = {}
+    for pair in sq.split(","):
+        key, sep, val = pair.partition(":")
+        if sep and key.strip() and val.strip():
+            sq_map[key.strip()] = val.strip()
+    if sq_map:
+        cfg["softmax_quant"] = sq_map
+    nm = os.environ.get("MODELOPT_ATTN_SPARSITY_NM", "")
+    if ":" in nm:
+        n, m = nm.split(":", 1)
+        cfg["sparsity_n"], cfg["sparsity_m"] = int(n), int(m)
+    return cfg
+
+
 def _build_sparse_kw(layer_cfg: dict) -> dict:
     """Convert one checkpoint layer config into kernel kwargs."""
     sparse_kw = {}
@@ -104,7 +150,7 @@ def _build_sparse_kw(layer_cfg: dict) -> dict:
         sparse_kw["sparsity_n"] = sparsity_n
         sparse_kw["sparsity_m"] = layer_cfg.get("sparsity_m", 4)
         sparse_kw["dense_sink_tokens"] = layer_cfg.get("dense_sink_tokens", 0)
-        sparse_kw["dense_recent_tokens"] = layer_cfg.get("dense_recent_tokens", 64)
+        sparse_kw["dense_recent_tokens"] = layer_cfg.get("dense_recent_tokens", 128)
 
     threshold = layer_cfg.get("skip_softmax_threshold")
     if threshold is not None:
@@ -231,6 +277,8 @@ class _SparseCalibrationMixin:
         is_causal: bool,
         output: torch.Tensor,
         dense_fallback,
+        new_key: torch.Tensor | None = None,
+        new_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run the ModelOpt sparse Triton kernel over the paged cache, or delegate.
 
@@ -243,6 +291,64 @@ class _SparseCalibrationMixin:
         disabled sparsity).
         """
         sparse_kw = dict(getattr(self, "sparse_kw", {}))
+        # Attention-quant knobs (env-harness): NVFP4 BMMs + mixed-precision softmax.
+        aq = getattr(self, "attn_quant_kw", {}) or {}
+        nvfp4 = aq.get("nvfp4")
+        fp16_softmax = aq.get("fp16_softmax", False)
+        softmax_quant = aq.get("softmax_quant")
+        quant_active = bool(nvfp4) or fp16_softmax or bool(softmax_quant)
+        # NVFP4 per-tensor global scales (0-d *device* tensors, read in-kernel via tl.load — no host
+        # .item()). Q is scaled per-step (the Q rows are exactly what is quantized this launch).
+        #
+        # K/V global scale DEFAULT = constant 1.0. The previous default — a per-tensor scale frozen
+        # on the FIRST prefill chunk — saturated the E4M3 block scales whenever later context exceeded
+        # the prompt (large long-context accuracy loss), so it is deprecated. 1.0 needs no calibration
+        # and E4M3's wide range absorbs typical KV magnitudes. Opt into the per-page scale
+        # (``MODELOPT_ATTN_NVFP4_PER_PAGE_SCALE=1``) for best fidelity — it derives a per-128-page
+        # scale in-kernel from the cache content (no saturation, fully causal).
+        per_page_scale = bool(aq.get("per_page_scale"))
+        attn_global_scales = None
+        if nvfp4:
+            attn_global_scales = {}
+            if "q" in nvfp4:
+                attn_global_scales["q"] = tensor_global_scale_device(query[:num_actual_tokens])
+            # Default K/V scale = constant 1.0 (per_page_scale derives it per tile in-kernel instead).
+            if not per_page_scale:
+                one = query.new_full((), 1.0, dtype=torch.float32)
+                if "k" in nvfp4:
+                    attn_global_scales["k"] = one
+                if "v" in nvfp4:
+                    attn_global_scales["v"] = one
+            # Quantize-KV-on-write: fake-quantize the newly-written K/V in the paged cache once
+            # (fixed scale) so the decode kernel reads them pre-quantized instead of re-FQ'ing the
+            # whole cache every step. K = new keys [prev, seq); V = newly-complete 128-tiles. Prefill
+            # re-FQ's idempotently on read; decode (flags below) skips it -> the 8-18x decode speedup.
+            if {"k", "v"} & nvfp4:
+                prev = (seq_lens - b_seq_len).to(torch.int32)
+                seqk32 = seq_lens.to(torch.int32)
+                if per_page_scale:
+                    # Per-page bakes only COMPLETE BLOCK_N tiles (with their own amax); K and V share
+                    # the same whole-tile range, and the in-progress page stays raw (bf16 master).
+                    k_lo = v_lo = (prev // 128) * 128
+                    k_hi = v_hi = (seqk32 // 128) * 128
+                else:
+                    k_lo, k_hi = prev, seqk32
+                    v_lo, v_hi = (prev // 128) * 128, (seqk32 // 128) * 128
+                fake_quant_kv_onwrite(
+                    key_cache,
+                    value_cache,
+                    block_table,
+                    k_lo,
+                    k_hi,
+                    v_lo,
+                    v_hi,
+                    page_size=page_size,
+                    k_global_scale=attn_global_scales.get("k"),
+                    v_global_scale=attn_global_scales.get("v"),
+                    nvfp4=nvfp4,
+                    decode=is_decode_only,
+                    per_page_scale=per_page_scale,
+                )
         _resolve_skip_softmax_calibration(
             sparse_kw, is_prefill=not is_decode_only, max_seq_len=max_seq_len
         )
@@ -251,11 +357,11 @@ class _SparseCalibrationMixin:
             for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
                 sparse_kw.pop(name, None)
             threshold = sparse_kw.get("skip_softmax_threshold")
-            if threshold is None:
-                # No decode sparsity active for this launch.
+            if threshold is None and not quant_active:
+                # No decode sparsity and no attention quant active for this launch.
                 return dense_fallback()
-            # Decode-only skip-softmax runs on the dedicated decode kernel
-            # (one query vector per request, split-K), not the prefill kernel.
+            # Decode runs on the dedicated decode kernel (one query vector per request,
+            # split-K). It applies skip-softmax and/or NVFP4 + mixed-precision softmax.
             return self._forward_sparse_decode(
                 query=query,
                 key_cache=key_cache,
@@ -265,9 +371,16 @@ class _SparseCalibrationMixin:
                 block_table=block_table,
                 num_actual_tokens=num_actual_tokens,
                 skip_softmax_threshold=threshold,
+                nvfp4=nvfp4,
+                fp16_softmax=fp16_softmax,
+                softmax_quant=softmax_quant,
+                attn_global_scales=attn_global_scales,
+                k_cache_quantized=("k" in nvfp4),
+                v_cache_quantized=("v" in nvfp4),
+                per_page_scale=per_page_scale,
                 output=output,
             )
-        if not sparse_kw:
+        if not sparse_kw and not quant_active:
             # Dynamic calibration can disable sparse work for a launch (e.g. a
             # short-prefill threshold outside the valid lambda range).
             return dense_fallback()
@@ -292,6 +405,11 @@ class _SparseCalibrationMixin:
             v_cache=value_cache,
             block_table=block_table,
             page_size=page_size,
+            nvfp4=nvfp4,
+            fp16_softmax=fp16_softmax,
+            softmax_quant=softmax_quant,
+            attn_global_scales=attn_global_scales,
+            per_page_scale=per_page_scale,
             **sparse_kw,
         )
         output[:num_actual_tokens] = triton_out
@@ -307,10 +425,17 @@ class _SparseCalibrationMixin:
         seq_lens: torch.Tensor,
         block_table: torch.Tensor,
         num_actual_tokens: int,
-        skip_softmax_threshold: float,
         output: torch.Tensor,
+        skip_softmax_threshold: float | None = None,
+        nvfp4: set[str] | None = None,
+        fp16_softmax: bool = False,
+        softmax_quant: dict | None = None,
+        attn_global_scales: dict | None = None,
+        k_cache_quantized: bool = False,
+        v_cache_quantized: bool = False,
+        per_page_scale: bool = False,
     ) -> torch.Tensor:
-        """Decode-only skip-softmax via the dedicated paged decode kernel.
+        """Decode via the dedicated paged decode kernel (skip-softmax and/or NVFP4).
 
         Standard decode schedules exactly one query token per request, so the
         ``num_actual_tokens`` query rows are the per-request decode queries. The
@@ -330,6 +455,13 @@ class _SparseCalibrationMixin:
             softmax_scale=self.scale,
             skip_softmax_threshold=skip_softmax_threshold,
             page_size=page_size,
+            nvfp4=nvfp4,
+            fp16_softmax=fp16_softmax,
+            softmax_quant=softmax_quant,
+            attn_global_scales=attn_global_scales,
+            k_cache_quantized=k_cache_quantized,
+            v_cache_quantized=v_cache_quantized,
+            per_page_scale=per_page_scale,
         )
         output[:num_actual_tokens] = decode_out
         return output
@@ -455,6 +587,8 @@ class ModelOptSparseAttentionImpl(_SparseCalibrationMixin, FlashAttentionImpl):
             is_decode_only=is_decode_only,
             is_causal=is_causal,
             output=output,
+            new_key=key,
+            new_value=value,
             dense_fallback=lambda: self._forward_vllm_flash_attn(
                 layer,
                 query,
@@ -678,6 +812,8 @@ def get_flashinfer_sparse_impl_cls() -> type:
                 is_decode_only=is_decode_only,
                 is_causal=not is_decode_only,
                 output=output,
+                new_key=key,
+                new_value=value,
                 dense_fallback=dense,
             )
 
