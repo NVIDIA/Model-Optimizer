@@ -294,6 +294,254 @@ def _attn_decode_split_fwd(
 
 
 @triton.jit
+def _attn_decode_split_fwd_batched(
+    Q,  # [batch, num_q_heads, head_dim] — one query token per request
+    qk_scale,  # softmax_scale * log2(e)
+    B_seq_len_k,  # [batch] total KV length per request
+    M_partial,  # [batch, num_q_heads, num_kv_splits] per-split running max
+    L_partial,  # [batch, num_q_heads, num_kv_splits] per-split softmax denom
+    Acc_partial,  # [batch, num_q_heads, num_kv_splits, BLOCK_D] per-split weighted V sum
+    stride_qb,
+    stride_qh,
+    stride_mb,
+    stride_mh,
+    stride_ab,
+    stride_ah,
+    stride_as,
+    K_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+    V_cache,
+    Block_table,  # [batch, max_blocks_per_seq]
+    stride_kc_block,
+    stride_kc_pos,
+    stride_kc_head,
+    stride_vc_block,
+    stride_vc_pos,
+    stride_vc_head,
+    Sparsity_total,  # optional int64 scalar (atomic) — total tiles
+    Sparsity_skipped,  # optional int64 scalar (atomic) — skipped tiles
+    kv_group_num: tl.constexpr,  # GQA ratio num_q_heads // num_kv_heads
+    BLOCK_H: tl.constexpr,  # query heads (M dim) processed together per KV head
+    BLOCK_D: tl.constexpr,  # next_power_of_2(head_dim)
+    BLOCK_N: tl.constexpr,  # KV tile size (128 to match the calibration granularity)
+    HEAD_DIM: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    max_blocks_per_seq,
+    NUM_KV_SPLITS: tl.constexpr,
+    APPLY_SKIP: tl.constexpr,
+    SKIP_THRESHOLD_LOG2: tl.constexpr,  # log2(lambda) in the scaled-log2 score space
+    MEASURE_SPARSITY: tl.constexpr,
+    NVFP4_Q: tl.constexpr,  # fakequant Q -> NVFP4 before BMM1
+    NVFP4_K: tl.constexpr,  # fakequant K -> NVFP4 before BMM1 (= NVFP4 KV$ K side)
+    NVFP4_P: tl.constexpr,  # fakequant softmax P -> NVFP4 before BMM2
+    NVFP4_V: tl.constexpr,  # fakequant V -> NVFP4 before BMM2 (= NVFP4 KV$ V side)
+    DIFF_QUANT: tl.constexpr,  # softmax-datapath modes: DIFF (pre-exp2), EXP2, ACC (sum)
+    EXP2_QUANT: tl.constexpr,
+    ACC_QUANT: tl.constexpr,
+    MIXED_FP16: tl.constexpr,  # reference mixed-precision softmax (native fp16 MUFU)
+    K_CACHE_QUANTIZED: tl.constexpr,  # K cache pre-quantized (skip in-kernel K FQ entirely)
+    V_CACHE_QUANTIZED: tl.constexpr,  # V cache pre-quantized for COMPLETE 16-key blocks (FQ only tail)
+    PER_PAGE_SCALE: tl.constexpr,  # method 2: per-page (per-BLOCK_N-tile) NVFP4 global scale
+    # Per-tensor NVFP4 global scales (amax/(6*448)) as device 0-d tensors (pointers).
+    q_global_scale,
+    k_global_scale,
+    p_global_scale,
+    v_global_scale,
+):
+    """GQA-batched decode split: one (request, KV head tile, KV split).
+
+    Processes ``BLOCK_H`` query heads that share one KV head together, so the
+    paged K/V is loaded ONCE per KV head and BMM1/BMM2 run as ``tl.dot`` at
+    ``M=BLOCK_H`` on the tensor cores. The per-row online softmax (each query
+    head keeps its own running max/denom/acc) plus the per-row skip decision make
+    every head's partial-softmax state bit-identical to the per-head kernel; the
+    combine kernel then merges the splits exactly as before.
+
+    Grid: ``(batch, num_kv_heads * num_h_tiles, num_kv_splits)`` where
+    ``num_h_tiles = ceil(kv_group_num / BLOCK_H)``. Program ``id(1)`` selects
+    ``(kv_head, h_tile)`` and owns query heads
+    ``kv_head*kv_group_num + h_tile*BLOCK_H .. +BLOCK_H``. Rows that fall past the
+    group (when ``kv_group_num`` is not a multiple of ``BLOCK_H``) are masked off:
+    they neither write output nor veto the all-rows-skip fast path.
+    """
+    batch_idx = tl.program_id(0)
+    hk_idx = tl.program_id(1)  # flattened (kv_head, h_tile)
+    split_idx = tl.program_id(2)
+
+    NUM_H_TILES: tl.constexpr = (kv_group_num + BLOCK_H - 1) // BLOCK_H
+    kv_head_idx = hk_idx // NUM_H_TILES
+    h_tile = hk_idx % NUM_H_TILES
+
+    # Absolute query-head indices for the BLOCK_H rows of this tile.
+    h_local = tl.arange(0, BLOCK_H)  # 0..BLOCK_H-1 within the group
+    group_pos = h_tile * BLOCK_H + h_local  # position within the GQA group
+    head_pos = kv_head_idx * kv_group_num + group_pos  # absolute q-head index
+    head_valid = group_pos < kv_group_num  # rows past the group are padding
+
+    seq_len_kv = tl.load(B_seq_len_k + batch_idx)
+
+    v_dense_boundary = (seq_len_kv // 16) * 16
+    page_boundary = (seq_len_kv // BLOCK_N) * BLOCK_N
+
+    num_tiles = (seq_len_kv + BLOCK_N - 1) // BLOCK_N
+    tiles_per_split = (num_tiles + NUM_KV_SPLITS - 1) // NUM_KV_SPLITS
+    tile_lo = split_idx * tiles_per_split
+    tile_hi = tl.minimum(tile_lo + tiles_per_split, num_tiles)
+    kv_lo = tile_lo * BLOCK_N
+    kv_hi = tile_hi * BLOCK_N
+
+    dim_pos = tl.arange(0, BLOCK_D)
+    d_mask = dim_pos < HEAD_DIM
+    kv_pos = tl.arange(0, BLOCK_N)
+
+    q_gs = tl.load(q_global_scale) if NVFP4_Q else 1.0
+    k_gs = tl.load(k_global_scale) if NVFP4_K else 1.0
+    p_gs = tl.load(p_global_scale) if NVFP4_P else 1.0
+    v_gs = tl.load(v_global_scale) if NVFP4_V else 1.0
+
+    # Q tile [BLOCK_H, BLOCK_D]; invalid head rows read as 0 (masked out at store).
+    # Upcast to fp32: BMM1 (Q@K^T) runs with input_precision="tf32x3" (3-pass tf32 ~=
+    # fp32 accuracy on tensor cores), matching the per-head kernel's fp32 elementwise
+    # reduce within tolerance while still using tensor cores. BMM1 is precision-critical
+    # because its score error feeds the softmax — fp16 there shifts probabilities enough
+    # to break NVFP4 at short seq. (The QDQ helpers already compute in fp32; their
+    # dequantized output stays fp32 here. On sm_100 the fp32-operand dot maps to the
+    # native low-precision path.) BMM2 (P@V) instead uses the cache dtype — see below.
+    q_ptrs = batch_idx * stride_qb + head_pos[:, None] * stride_qh + dim_pos[None, :]
+    q = tl.load(Q + q_ptrs, mask=head_valid[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+    if NVFP4_Q:  # BMM1 query (A-side, GEMM-K = head dim = axis 1)
+        q = fake_quant_fp4_k1(q, BLOCK_H, BLOCK_D, 16, q_gs, QUANT_NVFP4)
+
+    m_i = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")  # per-row running max
+    l_i = tl.zeros([BLOCK_H], dtype=tl.float32)  # per-row softmax denom
+    acc = tl.zeros([BLOCK_H, BLOCK_D], dtype=tl.float32)  # per-row weighted V sum
+
+    for kv_start in range(kv_lo, kv_hi, BLOCK_N):
+        kv_start = tl.multiple_of(kv_start, BLOCK_N)
+        kv_valid = (kv_start + kv_pos) < seq_len_kv
+
+        # K^T tile [BLOCK_D, BLOCK_N] (loaded ONCE for all BLOCK_H heads).
+        kt = _load_paged_k_tile(
+            K_cache,
+            Block_table,
+            batch_idx,
+            kv_head_idx,
+            kv_start,
+            kv_pos,
+            dim_pos,
+            seq_len_kv,
+            stride_kc_block,
+            stride_kc_pos,
+            stride_kc_head,
+            PAGE_SIZE,
+            BLOCK_N,
+            BLOCK_D,
+            HEAD_DIM,
+            max_blocks_per_seq,
+        )
+        kt_f = kt.to(tl.float32)
+        if NVFP4_K and (
+            (not K_CACHE_QUANTIZED) or (PER_PAGE_SCALE and kv_start + BLOCK_N > page_boundary)
+        ):
+            kgs_eff = (tl.max(tl.abs(kt_f)) / (6.0 * 448.0) + 1e-30) if PER_PAGE_SCALE else k_gs
+            kt_f = fake_quant_fp4_k0(kt_f, BLOCK_D, BLOCK_N, 16, 1, kgs_eff, QUANT_NVFP4)
+
+        # scores[BLOCK_H, BLOCK_N] = Q @ K^T on tensor cores, fp32 accum. tf32x3 keeps
+        # fp32-operand fidelity (matches the per-head fp32 reduce within tolerance).
+        scores = tl.dot(q, kt_f, input_precision="tf32x3") * qk_scale  # [BLOCK_H, BLOCK_N]
+        scores = tl.where(kv_valid[None, :], scores, -float("inf"))
+
+        tile_max = tl.max(scores, axis=1)  # [BLOCK_H] per-row tile max
+
+        # Per-row skip: identical criterion to the per-head kernel applied to each
+        # row independently. Invalid head rows are forced skippable so they never
+        # veto the all-rows-skip fast path.
+        if APPLY_SKIP:
+            row_skip = (tile_max < (m_i + SKIP_THRESHOLD_LOG2)) | (~head_valid)
+        else:
+            row_skip = ~head_valid  # only padding rows skip when skipping disabled
+        if MEASURE_SPARSITY:
+            # Match the per-head kernel's counts: one (head, tile) per valid row.
+            n_valid = tl.sum(head_valid.to(tl.int32))
+            n_skip = tl.sum((row_skip & head_valid).to(tl.int32))
+            tl.atomic_add(Sparsity_total, n_valid)
+            tl.atomic_add(Sparsity_skipped, n_skip)
+
+        # Whole-tile fast path: only load V + run BMM2 if at least one row keeps it.
+        any_keep = tl.min(row_skip.to(tl.int32)) == 0
+        if any_keep:
+            # Skip rows get m_new == m_i (correction == 1, p == 0) so their running
+            # state is left untouched — bit-identical to the per-head kernel skipping.
+            m_new = tl.where(row_skip, m_i, tl.maximum(m_i, tile_max))  # [BLOCK_H]
+            if MIXED_FP16:
+                p = ex2_fp16(scores - m_new[:, None])
+                p = tl.where(kv_valid[None, :], p, 0.0)
+                p = tl.where(row_skip[:, None], 0.0, p)
+                correction = ex2_fp16(m_i - m_new)
+                l_i = l_i * correction + tl.sum(p, axis=1)
+            else:
+                s_shift = softmax_round(scores - m_new[:, None], DIFF_QUANT)
+                p = softmax_round(tl.math.exp2(s_shift), EXP2_QUANT)
+                p = tl.where(kv_valid[None, :], p, 0.0)
+                p = tl.where(row_skip[:, None], 0.0, p)
+                correction = tl.math.exp2(m_i - m_new)
+                l_i = l_i * correction + softmax_round(tl.sum(p, axis=1), ACC_QUANT)
+            acc = acc * correction[:, None]
+            # P operand of BMM2 -> NVFP4 (A-side [BLOCK_H, BLOCK_N], GEMM-K = keys = axis 1).
+            p_bmm = fake_quant_fp4_k1(p, BLOCK_H, BLOCK_N, 16, p_gs, QUANT_NVFP4) if NVFP4_P else p
+
+            vt = _load_paged_v_tile(
+                V_cache,
+                Block_table,
+                batch_idx,
+                kv_head_idx,
+                kv_start,
+                kv_pos,
+                dim_pos,
+                seq_len_kv,
+                stride_vc_block,
+                stride_vc_pos,
+                stride_vc_head,
+                PAGE_SIZE,
+                BLOCK_N,
+                BLOCK_D,
+                HEAD_DIM,
+                max_blocks_per_seq,
+            )
+            # BMM2 (P @ V) runs in the cache dtype (fp16/bf16) with fp32 accumulation:
+            # the P@V product is dominated by small softmax probs, so fp16 inputs match
+            # the fp32 reference to ~2e-4 (verified) — unlike BMM1, whose score error
+            # would shift the softmax. Keeping V in cache dtype also halves the BMM2 SRAM
+            # (no fp32 V copy), which is what lets BLOCK_H=32 + NVFP4 fit the A6000.
+            vt_q = vt
+            if NVFP4_V:  # BMM2 value (B-side, V [BLOCK_N, BLOCK_D], GEMM-K = keys = axis 0)
+                v_bound = page_boundary if PER_PAGE_SCALE else v_dense_boundary
+                if (not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_bound):
+                    vgs_eff = (
+                        (tl.max(tl.abs(vt.to(tl.float32))) / (6.0 * 448.0) + 1e-30)
+                        if PER_PAGE_SCALE
+                        else v_gs
+                    )
+                    vt_q = fake_quant_fp4_k0(vt, BLOCK_N, BLOCK_D, 16, 1, vgs_eff, QUANT_NVFP4)
+            # acc[BLOCK_H, BLOCK_D] += P @ V on tensor cores, fp32 accum. P cast to the V
+            # dtype (mirrors prefill's tl.dot(p_dot.to(v.dtype), v, acc)).
+            acc = tl.dot(p_bmm.to(vt_q.dtype), vt_q, acc)
+            m_i = m_new
+        # else: every row skips this tile -> no V load, no BMM2, state unchanged.
+
+    # Store each row's partial softmax state at its absolute query head.
+    off_ml = batch_idx * stride_mb + head_pos * stride_mh + split_idx
+    tl.store(M_partial + off_ml, m_i, mask=head_valid)
+    tl.store(L_partial + off_ml, l_i, mask=head_valid)
+    off_a = (
+        batch_idx * stride_ab
+        + head_pos[:, None] * stride_ah
+        + split_idx * stride_as
+        + dim_pos[None, :]
+    )
+    tl.store(Acc_partial + off_a, acc, mask=head_valid[:, None] & d_mask[None, :])
+
+
+@triton.jit
 def _attn_decode_combine(
     M_partial,  # [batch, num_q_heads, num_kv_splits]
     L_partial,
@@ -365,6 +613,11 @@ def attention_decode(
     k_cache_quantized: bool = False,  # K cache holds fake-quantized values (skip in-kernel K FQ)
     v_cache_quantized: bool = False,  # V cache pre-quantized for complete 16-key blocks (FQ tail only)
     per_page_scale: bool = False,  # method 2: per-page (per-tile) NVFP4 global scale (see kernel)
+    gqa_batched: bool = False,  # opt-in: batch GQA group (M=BLOCK_H tensor-core tl.dot). Numerically
+    # equivalent (validated max_abs 4.9e-4 on sm_86+sm_100), but on GB300/sm_100 the per-head path is
+    # as-fast-or-faster at common seq lens (tf32x3 BMM1 + L2-cached KV negate the batching win); the
+    # batched path's single-K/V-load only wins at very long context (>~50K, e.g. RULER-1M). Default off.
+    block_h: int | None = None,  # query heads per program in the batched path (default: clamp 16)
 ) -> torch.Tensor:
     """Decode attention (one query token per request) over a paged KV cache.
 
@@ -471,60 +724,132 @@ def attention_decode(
         sparsity_total = None
         sparsity_skipped = None
 
+    # GQA-batched path needs >1 query head per KV head; with group==1 there is
+    # nothing to batch, so fall back to the per-head kernel (still correct).
+    use_batched = gqa_batched and kv_group_num > 1
+
     with torch.cuda.device(q.device):
-        _attn_decode_split_fwd[(batch, num_q_heads, num_kv_splits)](
-            q,
-            qk_scale,
-            b_seq_len_k,
-            m_partial,
-            l_partial,
-            acc_partial,
-            q.stride(0),
-            q.stride(1),
-            m_partial.stride(0),
-            m_partial.stride(1),
-            acc_partial.stride(0),
-            acc_partial.stride(1),
-            acc_partial.stride(2),
-            k_cache,
-            v_cache,
-            block_table,
-            k_cache.stride(0),
-            k_cache.stride(1),
-            k_cache.stride(2),
-            v_cache.stride(0),
-            v_cache.stride(1),
-            v_cache.stride(2),
-            sparsity_total,
-            sparsity_skipped,
-            kv_group_num=kv_group_num,
-            BLOCK_D=BLOCK_D,
-            BLOCK_N=BLOCK_N,
-            HEAD_DIM=head_dim,
-            PAGE_SIZE=page_size,
-            max_blocks_per_seq=block_table.shape[1],
-            NUM_KV_SPLITS=num_kv_splits,
-            APPLY_SKIP=apply_skip,
-            SKIP_THRESHOLD_LOG2=skip_threshold_log2,
-            MEASURE_SPARSITY=do_measure,
-            NVFP4_Q="q" in nvfp4,
-            NVFP4_K="k" in nvfp4,
-            NVFP4_P="p" in nvfp4,
-            NVFP4_V="v" in nvfp4,
-            DIFF_QUANT=diff_q,
-            EXP2_QUANT=exp2_q,
-            ACC_QUANT=acc_q,
-            MIXED_FP16=_mixed_fp16,
-            K_CACHE_QUANTIZED=k_cache_quantized,
-            V_CACHE_QUANTIZED=v_cache_quantized,
-            PER_PAGE_SCALE=per_page_scale,
-            q_global_scale=q_gs,
-            k_global_scale=k_gs,
-            p_global_scale=p_gs,
-            v_global_scale=v_gs,
-            num_warps=4,
-            num_stages=2,
-        )
+        if use_batched:
+            # BLOCK_H query heads per program; clamp to [16, next_pow2(group)] so the
+            # tl.dot M dim is tensor-core sized and <= the group (no all-padding tiles).
+            if block_h is None:
+                block_h_eff = min(16, triton.next_power_of_2(kv_group_num))
+            else:
+                block_h_eff = block_h
+            block_h_eff = max(16, triton.next_power_of_2(block_h_eff))
+            block_h_eff = min(block_h_eff, triton.next_power_of_2(kv_group_num))
+            num_h_tiles = (kv_group_num + block_h_eff - 1) // block_h_eff
+            _attn_decode_split_fwd_batched[(batch, num_kv_heads * num_h_tiles, num_kv_splits)](
+                q,
+                qk_scale,
+                b_seq_len_k,
+                m_partial,
+                l_partial,
+                acc_partial,
+                q.stride(0),
+                q.stride(1),
+                m_partial.stride(0),
+                m_partial.stride(1),
+                acc_partial.stride(0),
+                acc_partial.stride(1),
+                acc_partial.stride(2),
+                k_cache,
+                v_cache,
+                block_table,
+                k_cache.stride(0),
+                k_cache.stride(1),
+                k_cache.stride(2),
+                v_cache.stride(0),
+                v_cache.stride(1),
+                v_cache.stride(2),
+                sparsity_total,
+                sparsity_skipped,
+                kv_group_num=kv_group_num,
+                BLOCK_H=block_h_eff,
+                BLOCK_D=BLOCK_D,
+                BLOCK_N=BLOCK_N,
+                HEAD_DIM=head_dim,
+                PAGE_SIZE=page_size,
+                max_blocks_per_seq=block_table.shape[1],
+                NUM_KV_SPLITS=num_kv_splits,
+                APPLY_SKIP=apply_skip,
+                SKIP_THRESHOLD_LOG2=skip_threshold_log2,
+                MEASURE_SPARSITY=do_measure,
+                NVFP4_Q="q" in nvfp4,
+                NVFP4_K="k" in nvfp4,
+                NVFP4_P="p" in nvfp4,
+                NVFP4_V="v" in nvfp4,
+                DIFF_QUANT=diff_q,
+                EXP2_QUANT=exp2_q,
+                ACC_QUANT=acc_q,
+                MIXED_FP16=_mixed_fp16,
+                K_CACHE_QUANTIZED=k_cache_quantized,
+                V_CACHE_QUANTIZED=v_cache_quantized,
+                PER_PAGE_SCALE=per_page_scale,
+                q_global_scale=q_gs,
+                k_global_scale=k_gs,
+                p_global_scale=p_gs,
+                v_global_scale=v_gs,
+                num_warps=4,
+                # M=BLOCK_H tiles already fill the dot; num_stages=1 keeps the fp32
+                # K/V tiles (BLOCK_N x BLOCK_D) within the A6000's 99KB SRAM at
+                # BLOCK_H=32. (B200/GB300 have ample SRAM for deeper pipelining.)
+                num_stages=1,
+            )
+        else:
+            _attn_decode_split_fwd[(batch, num_q_heads, num_kv_splits)](
+                q,
+                qk_scale,
+                b_seq_len_k,
+                m_partial,
+                l_partial,
+                acc_partial,
+                q.stride(0),
+                q.stride(1),
+                m_partial.stride(0),
+                m_partial.stride(1),
+                acc_partial.stride(0),
+                acc_partial.stride(1),
+                acc_partial.stride(2),
+                k_cache,
+                v_cache,
+                block_table,
+                k_cache.stride(0),
+                k_cache.stride(1),
+                k_cache.stride(2),
+                v_cache.stride(0),
+                v_cache.stride(1),
+                v_cache.stride(2),
+                sparsity_total,
+                sparsity_skipped,
+                kv_group_num=kv_group_num,
+                BLOCK_D=BLOCK_D,
+                BLOCK_N=BLOCK_N,
+                HEAD_DIM=head_dim,
+                PAGE_SIZE=page_size,
+                max_blocks_per_seq=block_table.shape[1],
+                NUM_KV_SPLITS=num_kv_splits,
+                APPLY_SKIP=apply_skip,
+                SKIP_THRESHOLD_LOG2=skip_threshold_log2,
+                MEASURE_SPARSITY=do_measure,
+                NVFP4_Q="q" in nvfp4,
+                NVFP4_K="k" in nvfp4,
+                NVFP4_P="p" in nvfp4,
+                NVFP4_V="v" in nvfp4,
+                DIFF_QUANT=diff_q,
+                EXP2_QUANT=exp2_q,
+                ACC_QUANT=acc_q,
+                MIXED_FP16=_mixed_fp16,
+                K_CACHE_QUANTIZED=k_cache_quantized,
+                V_CACHE_QUANTIZED=v_cache_quantized,
+                PER_PAGE_SCALE=per_page_scale,
+                q_global_scale=q_gs,
+                k_global_scale=k_gs,
+                p_global_scale=p_gs,
+                v_global_scale=v_gs,
+                num_warps=4,
+                num_stages=2,
+            )
         _attn_decode_combine[(batch, num_q_heads)](
             m_partial,
             l_partial,
