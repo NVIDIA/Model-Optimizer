@@ -141,7 +141,19 @@ def apply():
         import accelerate.utils.fsdp_utils as fsdp_utils
         from torch.distributed.tensor import DTensor
 
-        _orig = fsdp_utils.fsdp2_load_full_state_dict
+        def _dtype_code(dt):
+            """Map a dtype to its broadcast sync code, raising on anything unmapped.
+
+            Silently coercing an unknown dtype to fp32 would cast data on the wire (or
+            make NCCL refuse on an element-size mismatch), so fail loudly instead.
+            """
+            code = _DTYPE_TO_CODE.get(dt)
+            if code is None or code < 0:
+                raise ValueError(
+                    f"fsdp2_buffer_patch: unsupported dtype {dt} in the broadcast "
+                    f"dtype-sync; add it to _DTYPE_TO_CODE."
+                )
+            return code
 
         def _patched(accelerator, model, full_sd, cpu_offload=False):
             import time
@@ -175,7 +187,7 @@ def apply():
             # each broadcast tensor.
             if accelerator.is_main_process:
                 dtype_codes = torch.tensor(
-                    [_DTYPE_TO_CODE.get(full_sd[name].dtype, 0) for name in meta_sharded_sd],
+                    [_dtype_code(full_sd[name].dtype) for name in meta_sharded_sd],
                     dtype=torch.int32,
                     device=accelerator.device,
                 )
@@ -309,15 +321,19 @@ def _clip_grad_norm(parameters, max_norm, norm_type=2):
     norm_type = float(norm_type)
 
     grads = [p.grad for p in parameters if p.grad is not None]
-    if len(grads) == 0:
-        # Match the device of the normal return path (GPU when training on CUDA) so
-        # callers don't hit a device mismatch on the empty-grad case.
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-        return torch.tensor(0.0, device=dev)
+    # Every rank MUST reach the all_reduce below: under FSDP2 sharding (and especially
+    # MoE + LoRA co-training) a rank can legitimately have no grads on a step — e.g. an
+    # expert that received no tokens, so the shard it owns gets no gradient. Early-
+    # returning here while other ranks call all_reduce would deadlock the job. So we
+    # never short-circuit before the collective; an empty-grad rank simply contributes a
+    # zero local norm and clips nothing.
+    if grads:
+        device = grads[0]._local_tensor.device if isinstance(grads[0], DTensor) else grads[0].device
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Shard DTensors hold partial data — need all_reduce for global norm.
     # Replicate DTensors and regular tensors already hold full data.
-    device = grads[0]._local_tensor.device if isinstance(grads[0], DTensor) else grads[0].device
     sharded_norm_p = torch.tensor(0.0, device=device)
     local_norm_p = torch.tensor(0.0, device=device)
 
@@ -341,14 +357,18 @@ def _clip_grad_norm(parameters, max_norm, norm_type=2):
             local_norm_p += n.pow(norm_type)
             n_regular += 1
 
-    dist.all_reduce(sharded_norm_p, op=dist.ReduceOp.SUM)
+    # Symmetric across ranks: reached on every rank regardless of whether this rank had
+    # grads (see note above). Guard for the non-distributed case where local == global.
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(sharded_norm_p, op=dist.ReduceOp.SUM)
     total_norm = (sharded_norm_p + local_norm_p).pow(1.0 / norm_type)
 
     clip_coef = torch.clamp(max_norm / (total_norm + 1e-6), max=1.0)
 
     # Debug: log computation breakdown on first 5 calls (no collectives — safe).
     _clip_grad_norm_call_count += 1
-    if _clip_grad_norm_call_count <= 5 and dist.get_rank() == 0:
+    _rank0 = not (dist.is_available() and dist.is_initialized()) or dist.get_rank() == 0
+    if _clip_grad_norm_call_count <= 5 and _rank0:
         print(
             f"[clip_grad_norm debug] call={_clip_grad_norm_call_count} "
             f"total_norm={total_norm.item():.6f} "

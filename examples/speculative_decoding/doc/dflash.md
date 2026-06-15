@@ -163,7 +163,6 @@ See [`modelopt_recipes/general/speculative_decoding/dflash.yaml`](../../../model
 | `dflash.dflash_num_anchors` | 512 | Random anchor positions per sample (see below) |
 | `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables, see below) |
 | `dflash.dflash_self_logit_distillation` | true | Use target model logits as soft labels (vs hard CE) |
-| `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
 | `dflash.dflash_mask_token_id` | auto | Token ID for masked positions (see note below) |
 | `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
 | `training.answer_only_loss` | false | Mask loss on non-assistant tokens |

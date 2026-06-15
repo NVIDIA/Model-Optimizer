@@ -271,7 +271,14 @@ class DFlashFSDP2ShardedSDExportCallback(TrainerCallback):
                     model, submodules={model.dflash_module}, options=options
                 )
             except TypeError:
-                # Older PyTorch without submodules parameter — gather full model
+                # Older PyTorch without the submodules= parameter: this gathers the FULL
+                # model (the entire base, e.g. ~229B for MiniMax-M2.7), defeating the
+                # submodule-only design and risking OOM. Warn loudly — upgrade PyTorch.
+                print_rank_0(
+                    "WARNING: DFlash export: get_model_state_dict lacks submodules= on this "
+                    "PyTorch — gathering the FULL base model (slow / may OOM). Upgrade PyTorch "
+                    "for the submodule-only gather."
+                )
                 raw_sd = get_model_state_dict(model, options=options)
         except ImportError:
             # Non-distributed / single-GPU fallback
@@ -283,6 +290,14 @@ class DFlashFSDP2ShardedSDExportCallback(TrainerCallback):
         exporter = model.get_exporter()
         drafter_sd = exporter._extract_state_dict(raw_sd)
         if not drafter_sd:
+            # Fallback for the already-stripped-key layout: a denylist heuristic rather than
+            # the prefix-based extractor. Warn, since a key-naming change upstream could let
+            # a malformed draft ship and only fail at vLLM load time.
+            print_rank_0(
+                "WARNING: DFlash export: prefix-based extraction found no dflash_module keys; "
+                "falling back to a denylist heuristic on already-stripped keys. Verify the "
+                "exported draft loads in vLLM."
+            )
             drafter_sd = {
                 k: v
                 for k, v in raw_sd.items()

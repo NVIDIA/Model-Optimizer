@@ -379,8 +379,11 @@ class DFlashExporter(SpeculativeDecodingExporter):
             # Inherit the target's rope_theta: DFlash injects the target's KV into every
             # draft layer, so the draft's RoPE base must match the target's. (The draft
             # arch config carries no rope_theta of its own.)
-            "rope_theta": getattr(base_config, "rope_theta", None)
-            or getattr(draft_config, "rope_theta", 1000000.0),
+            "rope_theta": (
+                getattr(base_config, "rope_theta", None)
+                if getattr(base_config, "rope_theta", None) is not None
+                else getattr(draft_config, "rope_theta", 1000000.0)
+            ),
             # YaRN long-context scaling is injected below (see the rope_scaling block).
             "rope_scaling": None,
             "tie_word_embeddings": False,
