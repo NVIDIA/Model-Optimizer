@@ -400,11 +400,24 @@ python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
     --trust-remote-code
 ```
 
+</details>
+
 ---
 
 ### 4. Evaluation
 
 The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job (with tool calling enabled via `--enable-auto-tool-choice --tool-call-parser qwen3_coder`) and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
+
+**Tasks and exact metric names reported in the results table:**
+
+| Benchmark | Library | num_repeats | Metric name |
+| --- | --- | --- | --- |
+| MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
+| GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
+| LiveCodeBench v6 | NeMo Evaluator | 4 | `livecodebench_pass_at_1_avg-of-4_accuracy` |
+| AIME 2025 | NeMo Evaluator | 32 | `aime25_pass_at_1_avg-of-32_symbolic_correct` |
+| IFBench | NeMo Evaluator | 8 | `ifbench_pass_at_1_avg-of-8_average_score` |
+| SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |
 
 <details>
 <summary>Evaluation launch steps (click to expand)</summary>
@@ -441,17 +454,6 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 ```
 
 </details>
-
-**Tasks and exact metric names reported in the results table:**
-
-| Benchmark | Library | num_repeats | Metric name |
-| --- | --- | --- | --- |
-| MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
-| GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
-| LiveCodeBench v6 | NeMo Evaluator | 4 | `livecodebench_pass_at_1_avg-of-4_accuracy` |
-| AIME 2025 | NeMo Evaluator | 32 | `aime25_pass_at_1_avg-of-32_symbolic_correct` |
-| IFBench | NeMo Evaluator | 8 | `ifbench_pass_at_1_avg-of-8_average_score` |
-| SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |
 
 For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVIDIA-NeMo/evaluator) and [documentation](https://docs.nvidia.com/nemo/evaluator/latest/).
 
