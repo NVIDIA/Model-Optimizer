@@ -271,6 +271,152 @@ def test_submit_job_yaml_not_found(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# submit_job dry-run branch
+# ---------------------------------------------------------------------------
+
+
+def test_submit_job_dry_run_yaml_validates(monkeypatch, tmp_path):
+    """dry_run=True with a valid YAML → ok+validated, no cluster contact."""
+    yaml_dir = tmp_path / "examples" / "fam" / "model"
+    yaml_dir.mkdir(parents=True)
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(tmp_path / "examples"))
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Dry-run OK — YAML compiles\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="fam/model/config.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+    )
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["validated"] is True
+    assert "experiment_id" not in result  # dry-run produces no experiment
+    assert "--dryrun" in captured["argv"]  # launcher CLI spells it as one word
+    assert "--yes" in captured["argv"]  # launcher requires --yes to suppress confirm prompt
+
+
+def test_submit_job_dry_run_yaml_invalid(monkeypatch, tmp_path):
+    """dry_run=True + launcher rejects YAML → ok=True but validated=False."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "bad.yaml"
+    yaml_path.write_text("not: [unbalanced\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="yaml.YAMLError: while parsing a flow sequence\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="bad.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+    )
+    assert result["ok"] is True  # The TOOL ran cleanly
+    assert result["dry_run"] is True
+    assert result["validated"] is False  # ...but the YAML failed validation
+    assert result["exit_code"] == 1
+    assert "yaml.YAMLError" in result["stderr_tail"]
+
+
+def test_submit_job_dry_run_yaml_not_found(monkeypatch, tmp_path):
+    """dry_run=True + missing yaml → yaml_not_found with dry_run flag set."""
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(tmp_path))
+    result = bridge.submit_job_impl(
+        yaml_path="missing.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+    )
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+    assert result["reason"] == "yaml_not_found"
+
+
+def test_submit_job_dry_run_skips_verify(monkeypatch, tmp_path):
+    """dry_run=True bypasses verify_setup even when skip_verify=False."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "ok.yaml").write_text("job_name: ok\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    verify_called = {"n": 0}
+    real_verify = bridge.verify_slurm_setup_impl
+
+    def fake_verify(**kwargs):
+        verify_called["n"] += 1
+        return real_verify(**kwargs)
+
+    monkeypatch.setattr(bridge, "verify_slurm_setup_impl", fake_verify)
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="dry-run ok\n",
+            stderr="",
+        ),
+    )
+
+    bridge.submit_job_impl(
+        yaml_path="ok.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="alice",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,  # would normally trigger verify
+        dry_run=True,
+    )
+    assert verify_called["n"] == 0  # verify_setup never invoked in dry-run
+
+
+# ---------------------------------------------------------------------------
 # job_status / job_logs — filesystem-based
 # ---------------------------------------------------------------------------
 
@@ -715,3 +861,102 @@ def test_open_draft_pr_gh_failed_but_branch_pushed(monkeypatch, tmp_path):
     assert result["ok"] is False
     assert result["reason"] == "gh_pr_create_failed"
     assert result["branch_pushed"] is True
+
+
+# ---------------------------------------------------------------------------
+# _find_launcher_dir — env override + walk-up search
+# ---------------------------------------------------------------------------
+
+
+def test_find_launcher_dir_env_override(monkeypatch, tmp_path):
+    """`$MODELOPT_LAUNCHER_DIR` wins over in-repo / cwd-walk."""
+    launcher = tmp_path / "custom-launcher"
+    launcher.mkdir()
+    monkeypatch.setenv("MODELOPT_LAUNCHER_DIR", str(launcher))
+    monkeypatch.chdir(tmp_path)  # ensure no walk-up match interferes
+    assert bridge._find_launcher_dir() == launcher
+
+
+def test_find_launcher_dir_env_override_missing_dir_fallthrough(monkeypatch, tmp_path):
+    """`$MODELOPT_LAUNCHER_DIR` pointing at a nonexistent path → fall through."""
+    monkeypatch.setenv("MODELOPT_LAUNCHER_DIR", str(tmp_path / "ghost"))
+    monkeypatch.chdir(tmp_path)  # no walk-up candidate
+    # In-repo candidate may or may not exist depending on test env; in
+    # the uv-tool-install case + this cwd it won't, so we get None.
+    in_repo = bridge._THIS_DIR.parent.parent / "launcher"
+    result = bridge._find_launcher_dir()
+    if in_repo.exists():
+        assert result == in_repo
+    else:
+        assert result is None
+
+
+def test_find_launcher_dir_walk_up_modules_layout(monkeypatch, tmp_path):
+    """Walk-up finds `modules/Model-Optimizer/tools/launcher/` from a deep cwd."""
+    workspace = tmp_path / "nmm-sandbox"
+    launcher = workspace / "modules" / "Model-Optimizer" / "tools" / "launcher"
+    launcher.mkdir(parents=True)
+    # Agent cwds deep inside the workspace
+    deep_cwd = workspace / "experiments" / "cicd" / "cicd_42"
+    deep_cwd.mkdir(parents=True)
+    monkeypatch.chdir(deep_cwd)
+    monkeypatch.delenv("MODELOPT_LAUNCHER_DIR", raising=False)
+
+    found = bridge._find_launcher_dir()
+    # In-repo `_THIS_DIR.parent.parent / "launcher"` may also exist in dev mode;
+    # accept either, but if it doesn't exist we MUST have walked up to find the
+    # workspace launcher.
+    in_repo = bridge._THIS_DIR.parent.parent / "launcher"
+    if in_repo.exists():
+        assert found == in_repo
+    else:
+        assert found == launcher
+
+
+def test_find_launcher_dir_walk_up_tools_layout(monkeypatch, tmp_path):
+    """Walk-up finds plain `tools/launcher/` (direct Model-Optimizer checkout)."""
+    checkout = tmp_path / "Model-Optimizer-clone"
+    launcher = checkout / "tools" / "launcher"
+    launcher.mkdir(parents=True)
+    deep_cwd = checkout / "examples" / "speculative_decoding"
+    deep_cwd.mkdir(parents=True)
+    monkeypatch.chdir(deep_cwd)
+    monkeypatch.delenv("MODELOPT_LAUNCHER_DIR", raising=False)
+
+    found = bridge._find_launcher_dir()
+    in_repo = bridge._THIS_DIR.parent.parent / "launcher"
+    if in_repo.exists():
+        assert found == in_repo
+    else:
+        assert found == launcher
+
+
+def test_find_launcher_dir_returns_none_when_nothing_found(monkeypatch, tmp_path):
+    """No env, no in-repo, no walk-up candidate → None."""
+    monkeypatch.delenv("MODELOPT_LAUNCHER_DIR", raising=False)
+    isolated = tmp_path / "iso"
+    isolated.mkdir()
+    monkeypatch.chdir(isolated)
+    found = bridge._find_launcher_dir()
+    # In a dev-install test env, the in-repo path may resolve. Accept
+    # either None or that specific path — but NEVER something unrelated.
+    in_repo = bridge._THIS_DIR.parent.parent / "launcher"
+    assert found is None or found == in_repo
+
+
+def test_launcher_dir_not_found_response_shape():
+    """Helper returns the canonical structured-failure dict."""
+    resp = bridge._launcher_dir_not_found_response()
+    assert resp["ok"] is False
+    assert resp["reason"] == "launcher_dir_not_found"
+    assert "Searched" in resp["diagnostic"]
+    assert "MODELOPT_LAUNCHER_DIR" in resp["diagnostic"]
+    assert "dry_run" not in resp
+
+
+def test_launcher_dir_not_found_response_dry_run_flag():
+    """`dry_run=True` adds `dry_run: True` to the response."""
+    resp = bridge._launcher_dir_not_found_response(dry_run=True)
+    assert resp["ok"] is False
+    assert resp["dry_run"] is True
+    assert resp["reason"] == "launcher_dir_not_found"

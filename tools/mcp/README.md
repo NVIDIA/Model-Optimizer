@@ -21,7 +21,7 @@ Mode is determined by which args you pass, not by which tool you call. One tool,
 |---|---|
 | `list_examples` | Enumerate bundled launcher YAMLs under `tools/launcher/examples/` with model + description metadata extracted from each YAML. Discovery primitive — call this first when you don't know which YAML to launch. |
 | `verify_setup(executor, ...)` | Fail-fast probe for the named executor. Docker: `docker info` (daemon up) + `docker info --format` runtime-registry check (looks for `"nvidia"` runtime registered by the NVIDIA Container Toolkit — no image pull, daemon-fast). Slurm: `ssh -o BatchMode=yes -o ConnectTimeout=5` to the cluster login node. Returns structured failure on auth / network / daemon issues — no exception. |
-| `submit_job(yaml_path, hf_local? \| cluster_host?, ...)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Returns `experiment_id` (Slurm) or PID (Docker) immediately; the actual job runs detached. Auto-runs `verify_setup` first by default (skippable). |
+| `submit_job(yaml_path, hf_local? \| cluster_host?, ..., dry_run?)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Returns `experiment_id` (Slurm) or PID (Docker) immediately; the actual job runs detached. Auto-runs `verify_setup` first by default (skippable). **Pass `dry_run=True`** to validate the YAML via `launch.py --dryrun --yes` without contacting the cluster / spawning a container / running sbatch — returns `{ok, dry_run: True, validated: bool, diagnostic?, exit_code, stdout_tail, stderr_tail, argv}` instead of `experiment_id`. Used by verify-task workflow stages (deployment_support, hidden_state_dump_support, mlm_eval, ...). |
 | `job_status(experiment_id)` | Filesystem-based status from nemo_run's experiment dir (`_DONE`, `status_*.out`). Returns `done` / `failed` / `running` plus per-task statuses. No in-memory registry; survives MCP server restarts. |
 | `job_logs(experiment_id, task?, tail?)` | Read `log_<task>.out` from the experiment dir. Per-task filtering + optional tail to truncate. |
 | `wait_for_experiment(experiment_id, timeout_sec?, poll_interval_sec?)` | Block until `job_status` returns `done` / `failed`, or until `timeout_sec` elapses. Single tool call replaces the agent's `while True: status; sleep` loop — saves tool-call turns and avoids overshooting the poll interval. Returns the final status plus `waited_seconds`. |
@@ -131,6 +131,10 @@ Three constants drive the surface here:
 1. **Single `submit_job` with mode by args.** Not separate `submit_docker` / `submit_slurm` tools. The LLM tool catalog stays compact; the mutual-exclusion is a runtime check that returns structured failure when both or neither mode is specified.
 2. **Filesystem is the source of truth.** Status + logs both read from nemo_run's experiment dir. No in-memory registry — survives MCP server restarts. The bridge module never holds per-job state across calls.
 3. **`verify_setup` is auto-called by `submit_job` by default.** The probe takes ~1 second; the cost of a misconfigured submission is 30+ seconds of cluster timeout or container-pull. Always-on verification pays back immediately. Callers can pass `skip_verify=True` when they just probed.
+
+## Scope: environment tooling, not workflow policy
+
+See [SCOPE.md](SCOPE.md) for the policy that gates what belongs in this MCP family. Short version: tools here are universal verb-shaped operations on the cluster / launcher / engine (`submit_job`, `verify_setup`, `read_cluster_artifact`, …). Workflow-specific logic ("run an EAGLE3 cell", "publish a specdec release") stays in SPEC text + agent reasoning, composed out of these primitives. The policy applies to `nmm-sandbox-mcp` and `pensieve-intern-mcp` too.
 
 ## Internal companion (NVIDIA only)
 

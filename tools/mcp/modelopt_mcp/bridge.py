@@ -54,6 +54,85 @@ _STATUS_FAILURE_WORDS: frozenset[str] = frozenset(
 )
 
 
+def _find_launcher_dir() -> Path | None:
+    """Resolve the modelopt launcher's directory.
+
+    Tries, in order:
+
+    1. ``$MODELOPT_LAUNCHER_DIR`` env override — the deterministic
+       path agents/operators can set when the package layout doesn't
+       match the in-repo expectation.
+    2. ``_THIS_DIR.parent.parent / "launcher"`` — the in-repo layout
+       (``tools/mcp/modelopt_mcp/bridge.py`` → ``tools/launcher/``).
+       Works in dev installs (``pip install -e tools/mcp``) and in
+       direct ``Model-Optimizer`` clones.
+    3. Walk up from ``os.getcwd()`` looking for
+       ``modules/Model-Optimizer/tools/launcher/`` (intern-agent
+       workspace layout) or ``tools/launcher/`` (direct
+       Model-Optimizer checkout) at each ancestor. Stops at the
+       filesystem root.
+
+    Returns ``None`` if no candidate resolves to an existing dir.
+    Callers surface that as a structured ``launcher_dir_not_found``
+    failure with the searched paths in the diagnostic.
+
+    Empirically: when modelopt-mcp is installed via ``uv tool install``
+    (intern-agent's CI install pattern, MR !226), ``_THIS_DIR`` lives
+    inside ``~/.local/share/uv/tools/modelopt-mcp/lib/.../site-packages/``
+    and step 2's parent-walk doesn't find the launcher. Step 3 (cwd
+    walk-up) handles that case — the agent's CWD is always inside
+    its cloned nmm-sandbox workspace where ``modules/Model-Optimizer/
+    tools/launcher/`` does exist.
+    """
+    env = os.environ.get("MODELOPT_LAUNCHER_DIR")
+    if env:
+        p = Path(env)
+        if p.exists():
+            return p
+
+    # In-repo layout (dev install / direct clone)
+    candidate = _THIS_DIR.parent.parent / "launcher"
+    if candidate.exists():
+        return candidate
+
+    # cwd walk-up (uv-tool-install + agent workspace layout)
+    cwd = Path.cwd().resolve()
+    for ancestor in (cwd, *cwd.parents):
+        for rel in ("modules/Model-Optimizer/tools/launcher", "tools/launcher"):
+            candidate = ancestor / rel
+            if candidate.exists():
+                return candidate
+
+    return None
+
+
+def _launcher_dir_not_found_response(*, dry_run: bool = False) -> dict:
+    """Structured failure when ``_find_launcher_dir()`` returns None.
+
+    Centralized so the five callsites that need the launcher dir
+    return a consistent diagnostic listing the searched paths.
+    """
+    env_path = os.environ.get("MODELOPT_LAUNCHER_DIR") or "(unset)"
+    in_repo = _THIS_DIR.parent.parent / "launcher"
+    resp: dict = {
+        "ok": False,
+        "reason": "launcher_dir_not_found",
+        "diagnostic": (
+            "Could not locate tools/launcher/. Searched:\n"
+            f"  1. $MODELOPT_LAUNCHER_DIR={env_path}\n"
+            f"  2. in-repo layout: {in_repo} (exists={in_repo.exists()})\n"
+            f"  3. cwd walk-up from {Path.cwd().resolve()} looking for "
+            "modules/Model-Optimizer/tools/launcher or tools/launcher\n"
+            "Fix: set $MODELOPT_LAUNCHER_DIR to the absolute path of your "
+            "Model-Optimizer checkout's tools/launcher/, or run modelopt-mcp "
+            "from inside such a checkout."
+        ),
+    }
+    if dry_run:
+        resp["dry_run"] = True
+    return resp
+
+
 def _find_launcher_examples_dir() -> Path | None:
     """Resolve the launcher examples directory.
 
@@ -419,19 +498,41 @@ def submit_job_impl(
     job_name: str | None,
     extra_overrides: dict[str, str] | None,
     skip_verify: bool,
+    dry_run: bool = False,
 ) -> dict:
     """Submit a launcher YAML.
 
     Mode is determined by mutually-exclusive args:
       * ``hf_local`` set → Docker (local GPU)
       * ``cluster_host`` set → Slurm (remote SSH)
-      * Neither set → error
+      * Neither set → error (unless ``dry_run=True``)
       * Both set → error
+
+    When ``dry_run=True``, the launcher is invoked with ``--dryrun`` —
+    the YAML is parsed and validated but no cluster contact / no
+    container spawn / no sbatch happens. ``hf_local`` and
+    ``cluster_host`` are optional in dry-run mode (pass one to validate
+    that the YAML's executor-specific config compiles for the intended
+    target; omit both to validate just the YAML shape). ``verify_setup``
+    is skipped automatically — there's nothing to talk to.
 
     The actual orchestration is delegated to the launcher's
     ``core.run_jobs``. We don't re-implement nemo_run integration here —
     that lives upstream.
     """
+    # ---- Dry-run branch (no cluster contact) -----------------------
+    if dry_run:
+        return _submit_job_dry_run(
+            yaml_path=yaml_path,
+            hf_local=hf_local,
+            cluster_host=cluster_host,
+            cluster_user=cluster_user,
+            identity=identity,
+            job_dir=job_dir,
+            job_name=job_name,
+            extra_overrides=extra_overrides,
+        )
+
     # ---- Mode resolution -------------------------------------------
     if hf_local and cluster_host:
         return {
@@ -525,17 +626,9 @@ def submit_job_impl(
         argv.append(f"{k}={v}")
 
     # Run from the launcher dir so it picks up its own ./core.py etc.
-    launcher_dir = _THIS_DIR.parent.parent / "launcher"
-    if not launcher_dir.exists():
-        return {
-            "ok": False,
-            "reason": "launcher_dir_not_found",
-            "diagnostic": (
-                f"Expected tools/launcher/ at {launcher_dir} but it "
-                f"doesn't exist. modelopt-mcp must be installed from a "
-                f"Model-Optimizer clone or via uvx-from-git."
-            ),
-        }
+    launcher_dir = _find_launcher_dir()
+    if launcher_dir is None:
+        return _launcher_dir_not_found_response()
 
     # Propagate env so submit-side and status-side agree on NEMORUN_HOME.
     # Without this, `launch.py` defaults NEMORUN_HOME to its own cwd
@@ -681,6 +774,155 @@ def submit_job_impl(
     }
 
 
+def _submit_job_dry_run(
+    *,
+    yaml_path: str,
+    hf_local: str | None,
+    cluster_host: str | None,
+    cluster_user: str | None,
+    identity: str | None,
+    job_dir: str | None,
+    job_name: str | None,
+    extra_overrides: dict[str, str] | None,
+) -> dict:
+    """Validate a launcher YAML by running ``launch.py --dryrun``.
+
+    No cluster contact, no container spawn, no sbatch. Used by
+    verify-task workflow stages (deployment_support,
+    hidden_state_dump_support, mlm_eval, ...) that just need to confirm
+    a YAML compiles before declaring support is ready.
+
+    Returns ``{ok, dry_run: True, validated: bool, diagnostic?: str,
+    exit_code: int|None, stdout_tail: str, stderr_tail: str,
+    argv: list[str]}``. Never returns ``experiment_id`` or ``pid`` —
+    there's nothing to track. ``diagnostic`` is present only on the
+    failure / timeout branches (the validated-success branch omits
+    it since there's nothing to diagnose).
+    """
+    # Same path resolution as the live submit, so dry-run and live use
+    # exactly the same YAML.
+    abs_yaml = _normalize_yaml_path(yaml_path)
+    if not abs_yaml.exists():
+        return {
+            "ok": False,
+            "dry_run": True,
+            "reason": "yaml_not_found",
+            "yaml_path": yaml_path,
+            "resolved_path": str(abs_yaml),
+            "diagnostic": (
+                f"YAML not found at {abs_yaml}. Pass a path under "
+                f"tools/launcher/examples/ (relative), an absolute path, "
+                f"or one of the examples returned by list_examples."
+            ),
+        }
+
+    # Build argv — launch.py supports --dryrun as a flag that prevents
+    # actual submission while still exercising the YAML loader, factory
+    # resolution, and arg parser. Same argv shape as live submit minus
+    # `--yes` pairs with `--dryrun` in every launcher CLI example (see
+    # `tools/launcher/CLAUDE.md:28` and `:93`, plus `tools/launcher/docs/
+    # contributing.md:24`). Without it, nemo_run's `run.cli.entrypoint`
+    # blocks on its confirmation prompt — and since we're capturing
+    # stdout (no TTY), the prompt would hang until the 60-second
+    # timeout fires.
+    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--dryrun", "--yes"]
+    if hf_local:
+        argv.append(f"hf_local={hf_local}")
+    if cluster_user:
+        argv.append(f"user={cluster_user}")
+    if identity:
+        argv.append(f"identity={identity}")
+    if job_dir:
+        argv.append(f"job_dir={job_dir}")
+    if job_name:
+        argv.append(f"job_name={job_name}")
+    for k, v in (extra_overrides or {}).items():
+        argv.append(f"{k}={v}")
+
+    launcher_dir = _find_launcher_dir()
+    if launcher_dir is None:
+        return _launcher_dir_not_found_response(dry_run=True)
+
+    # Propagate env so the launcher's factory resolution matches what
+    # the live submit would see (mainly: SLURM_HOST for slurm-factory
+    # default when cluster_host is set).
+    child_env = os.environ.copy()
+    child_env.setdefault("NEMORUN_HOME", os.getcwd())
+    if cluster_host:
+        child_env["SLURM_HOST"] = cluster_host
+
+    # Dry-run is fast (no network, no container) — 60s timeout is
+    # generous. Same subprocess invocation shape as the live-submit
+    # branch above (line 590): list-form argv, no shell, inherited
+    # env. ``argv`` members are string-literal constants
+    # ("uv", "run", "launch.py", "--yaml", "--dryrun"), validated
+    # filesystem paths (``str(abs_yaml)``, ``str(launcher_dir)``), or
+    # key=value override strings sourced from typed MCP-tool args.
+    # B603 false-positive matches the precedent in this module's
+    # `submit_job_impl` (Popen at line 563 + run at line 590), the
+    # verify probes (line 197 + 251), and the SSH probe (line 326).
+    try:
+        proc = subprocess.run(  # nosec B603
+            argv,
+            cwd=str(launcher_dir),
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "reason": "dry_run_timeout",
+            "exit_code": None,
+            "stdout_tail": (e.stdout or b"").decode(errors="replace")[-2000:] if e.stdout else "",
+            "stderr_tail": (e.stderr or b"").decode(errors="replace")[-2000:] if e.stderr else "",
+            "diagnostic": (
+                "launch.py --dryrun did not return within 60 seconds. "
+                "This usually means a YAML import / factory resolution "
+                "hung."
+            ),
+            "argv": argv,
+        }
+
+    stdout_tail = str(proc.stdout or "")[-2000:]
+    stderr_tail = str(proc.stderr or "")[-2000:]
+
+    if proc.returncode != 0:
+        return {
+            "ok": True,  # The tool itself ran cleanly
+            "dry_run": True,
+            "validated": False,  # ...but the YAML failed validation
+            "exit_code": proc.returncode,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "diagnostic": (
+                f"launch.py --dryrun rejected the YAML (exit code "
+                f"{proc.returncode}). Common reasons: invalid YAML "
+                f"syntax, missing required fields, factory function "
+                f"not registered, or a referenced file (HF model path, "
+                f"container tag) doesn't exist. See stderr_tail for the "
+                f"specific error."
+            ),
+            "argv": argv,
+        }
+
+    # Success branch returns the same field set as the failure branch
+    # (plus diagnostic-free since there's nothing to diagnose) so the
+    # caller can read stderr_tail / exit_code uniformly.
+    return {
+        "ok": True,
+        "dry_run": True,
+        "validated": True,
+        "exit_code": 0,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "argv": argv,
+    }
+
+
 # ---------------------------------------------------------------------------
 # job_status / job_logs — filesystem-based
 # ---------------------------------------------------------------------------
@@ -708,10 +950,15 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
     candidates.append(Path.cwd() / "local_experiments" / experiment_id)
     # The launcher's own experiments dir — submit_job_impl uses
     # cwd=str(launcher_dir) for the subprocess, so when NEMORUN_HOME is
-    # unset, launch.py defaults to launcher_dir/experiments/.
-    launcher_dir = _THIS_DIR.parent.parent / "launcher"
-    candidates.append(launcher_dir / "experiments" / experiment_id)
-    candidates.append(launcher_dir / "local_experiments" / experiment_id)
+    # unset, launch.py defaults to launcher_dir/experiments/. If the
+    # launcher dir can't be resolved (uv-tool-install without an
+    # override + the agent's cwd doesn't see a launcher checkout),
+    # we skip this fallback rather than crashing — the env-vs-cwd
+    # candidates above still cover the common cases.
+    launcher_dir = _find_launcher_dir()
+    if launcher_dir is not None:
+        candidates.append(launcher_dir / "experiments" / experiment_id)
+        candidates.append(launcher_dir / "local_experiments" / experiment_id)
     for c in candidates:
         if c.exists():
             return c
@@ -1034,8 +1281,8 @@ def read_cluster_artifact_impl(
             experiment_id,
             str(job_idx),
         ]
-        launcher_dir = _THIS_DIR.parent.parent / "launcher"
-        cwd = str(launcher_dir) if launcher_dir.exists() else None
+        launcher_dir = _find_launcher_dir()
+        cwd = str(launcher_dir) if launcher_dir is not None else None
         try:
             proc = subprocess.run(  # nosec B603 B607
                 argv,

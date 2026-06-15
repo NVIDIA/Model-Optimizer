@@ -298,9 +298,8 @@ def main(args: argparse.Namespace):
             num_samples=args.calib_num_samples,
             seq_length=args.seq_length,
             batch_size=args.calib_batch_size,
-            # Calibrate on unpacked sequences. pack=True is Megatron pretraining-style global-stream
-            # document packing, which changes the per-sample calibration statistics.
-            pack=False,
+            # pack=True uses Megatron pretraining-style global-stream document packing
+            pack=True,
         )
     else:
         warn_rank_0("Dynamic or weight-only quantization detected; skipping calibration.")
@@ -327,7 +326,6 @@ def main(args: argparse.Namespace):
     if dist.is_master():
         mtq.print_quant_summary(unwrapped_model, args.export_megatron_path)
 
-    print_rank_0(f"\nSaving quantized model to {args.export_megatron_path} in Megatron format...")
     bridge.save_megatron_model(
         model,
         args.export_megatron_path,
