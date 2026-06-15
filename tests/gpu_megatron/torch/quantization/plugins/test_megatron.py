@@ -53,7 +53,11 @@ import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantModuleRegistry
-from modelopt.torch.quantization.plugins.megatron import _QuantTEMCoreRowParallelLinear
+from modelopt.torch.quantization.plugins.megatron import (
+    _QuantTEMCoreRowParallelLinear,
+    get_mcore_layerwise_calibration_layers,
+)
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 try:
     from megatron.core.extensions.transformer_engine import TERowParallelLinear
@@ -732,6 +736,38 @@ def _test_auto_quantize_moe_ep_helper(rank, size):
 def test_auto_quantize_moe_ep(dist_workers_size_2):
     """auto_quantize must sum score/cost across EP ranks and pick a consistent recipe."""
     dist_workers_size_2.run(_test_auto_quantize_moe_ep_helper)
+
+
+def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(distributed_setup_size_1):
+    if not HAS_TE:
+        pytest.skip("Transformer Engine is not installed")
+
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = _gpt_model_provider(
+        tp_size=1,
+        hidden_size=32,
+        meta_device=True,
+        transformer_impl="modelopt",
+    )
+    decoder_layers = model.decoder.layers
+    decoder_len = len(decoder_layers)
+    output_layer = model.output_layer
+
+    discovered_layers = get_mcore_layerwise_calibration_layers(model)
+
+    assert discovered_layers is not None
+    assert len(discovered_layers) == decoder_len + 1
+    assert discovered_layers[-1] is output_layer
+    assert len(decoder_layers) == decoder_len
+    assert all(layer is not output_layer for layer in decoder_layers)
+
+    assert LayerActivationCollector.is_supported(model)
+    discovered_layers = LayerActivationCollector.get_decoder_layers(model)
+    assert discovered_layers is not None
+    assert len(discovered_layers) == decoder_len + 1
+    assert discovered_layers[-1] is output_layer
+    assert len(decoder_layers) == decoder_len
+    assert all(layer is not output_layer for layer in decoder_layers)
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])

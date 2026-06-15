@@ -121,6 +121,21 @@ def test_update_hessian():
     assert n_samples_accumulated == 12, f"Expected n_samples=12, got {n_samples_accumulated}"
 
 
+def test_update_hessian_zero_token_input_noops():
+    features = 4
+    hessian = torch.eye(features, dtype=torch.float32)
+    expected_hessian = hessian.clone()
+    n_samples = 7
+
+    updated_hessian, new_n_samples = update_hessian(
+        torch.empty(0, features, dtype=torch.float32), hessian, n_samples
+    )
+
+    assert updated_hessian is hessian
+    assert new_n_samples == n_samples
+    torch.testing.assert_close(hessian, expected_hessian)
+
+
 @pytest.mark.parametrize(
     ("block_size", "dim", "model_weight", "expect_weight_change"),
     [

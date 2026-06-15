@@ -822,16 +822,19 @@ def register_megatron_autoquant_support() -> None:
     _AUTOQUANT_SUPPORT_REGISTERED = True
 
 
-# GPTQ layerwise calibration support
-def get_mcore_decoder_layers(model: torch.nn.Module) -> torch.nn.ModuleList | None:
-    layers = None
-    if hasattr(model, "decoder") and hasattr(model.decoder, "layers"):
-        layers = model.decoder.layers
-    if hasattr(model, "output_layer") and layers:
-        layers.append(model.output_layer)
+def get_mcore_layerwise_calibration_layers(
+    model: torch.nn.Module,
+) -> list[torch.nn.Module] | torch.nn.ModuleList | None:
+    if not hasattr(model, "decoder") or not hasattr(model.decoder, "layers"):
+        return None
+    decoder_layers = model.decoder.layers
+    if getattr(model, "output_layer", None) is None:
+        return decoder_layers
+    layers = list(decoder_layers)
+    layers.append(model.output_layer)
     return layers
 
 
 LayerActivationCollector.register_decoder_layer_support(
-    _is_supported_megatron_model, get_mcore_decoder_layers
+    _is_supported_megatron_model, get_mcore_layerwise_calibration_layers
 )
