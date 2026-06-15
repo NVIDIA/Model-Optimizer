@@ -58,7 +58,6 @@ pipeline:
       - --ep_size 1
       - --concurrency 8
       - --num_requests 80
-      - --runtime_params common/specdec_bench/runtime_params_throughput_32k.yaml
       - --output_length 4096
       - --aa_timing
       - --show_progress
