@@ -54,6 +54,85 @@ _STATUS_FAILURE_WORDS: frozenset[str] = frozenset(
 )
 
 
+def _find_launcher_dir() -> Path | None:
+    """Resolve the modelopt launcher's directory.
+
+    Tries, in order:
+
+    1. ``$MODELOPT_LAUNCHER_DIR`` env override — the deterministic
+       path agents/operators can set when the package layout doesn't
+       match the in-repo expectation.
+    2. ``_THIS_DIR.parent.parent / "launcher"`` — the in-repo layout
+       (``tools/mcp/modelopt_mcp/bridge.py`` → ``tools/launcher/``).
+       Works in dev installs (``pip install -e tools/mcp``) and in
+       direct ``Model-Optimizer`` clones.
+    3. Walk up from ``os.getcwd()`` looking for
+       ``modules/Model-Optimizer/tools/launcher/`` (intern-agent
+       workspace layout) or ``tools/launcher/`` (direct
+       Model-Optimizer checkout) at each ancestor. Stops at the
+       filesystem root.
+
+    Returns ``None`` if no candidate resolves to an existing dir.
+    Callers surface that as a structured ``launcher_dir_not_found``
+    failure with the searched paths in the diagnostic.
+
+    Empirically: when modelopt-mcp is installed via ``uv tool install``
+    (intern-agent's CI install pattern, MR !226), ``_THIS_DIR`` lives
+    inside ``~/.local/share/uv/tools/modelopt-mcp/lib/.../site-packages/``
+    and step 2's parent-walk doesn't find the launcher. Step 3 (cwd
+    walk-up) handles that case — the agent's CWD is always inside
+    its cloned nmm-sandbox workspace where ``modules/Model-Optimizer/
+    tools/launcher/`` does exist.
+    """
+    env = os.environ.get("MODELOPT_LAUNCHER_DIR")
+    if env:
+        p = Path(env)
+        if p.exists():
+            return p
+
+    # In-repo layout (dev install / direct clone)
+    candidate = _THIS_DIR.parent.parent / "launcher"
+    if candidate.exists():
+        return candidate
+
+    # cwd walk-up (uv-tool-install + agent workspace layout)
+    cwd = Path.cwd().resolve()
+    for ancestor in (cwd, *cwd.parents):
+        for rel in ("modules/Model-Optimizer/tools/launcher", "tools/launcher"):
+            candidate = ancestor / rel
+            if candidate.exists():
+                return candidate
+
+    return None
+
+
+def _launcher_dir_not_found_response(*, dry_run: bool = False) -> dict:
+    """Structured failure when ``_find_launcher_dir()`` returns None.
+
+    Centralized so the five callsites that need the launcher dir
+    return a consistent diagnostic listing the searched paths.
+    """
+    env_path = os.environ.get("MODELOPT_LAUNCHER_DIR") or "(unset)"
+    in_repo = _THIS_DIR.parent.parent / "launcher"
+    resp: dict = {
+        "ok": False,
+        "reason": "launcher_dir_not_found",
+        "diagnostic": (
+            "Could not locate tools/launcher/. Searched:\n"
+            f"  1. $MODELOPT_LAUNCHER_DIR={env_path}\n"
+            f"  2. in-repo layout: {in_repo} (exists={in_repo.exists()})\n"
+            f"  3. cwd walk-up from {Path.cwd().resolve()} looking for "
+            "modules/Model-Optimizer/tools/launcher or tools/launcher\n"
+            "Fix: set $MODELOPT_LAUNCHER_DIR to the absolute path of your "
+            "Model-Optimizer checkout's tools/launcher/, or run modelopt-mcp "
+            "from inside such a checkout."
+        ),
+    }
+    if dry_run:
+        resp["dry_run"] = True
+    return resp
+
+
 def _find_launcher_examples_dir() -> Path | None:
     """Resolve the launcher examples directory.
 
@@ -547,17 +626,9 @@ def submit_job_impl(
         argv.append(f"{k}={v}")
 
     # Run from the launcher dir so it picks up its own ./core.py etc.
-    launcher_dir = _THIS_DIR.parent.parent / "launcher"
-    if not launcher_dir.exists():
-        return {
-            "ok": False,
-            "reason": "launcher_dir_not_found",
-            "diagnostic": (
-                f"Expected tools/launcher/ at {launcher_dir} but it "
-                f"doesn't exist. modelopt-mcp must be installed from a "
-                f"Model-Optimizer clone or via uvx-from-git."
-            ),
-        }
+    launcher_dir = _find_launcher_dir()
+    if launcher_dir is None:
+        return _launcher_dir_not_found_response()
 
     # Propagate env so submit-side and status-side agree on NEMORUN_HOME.
     # Without this, `launch.py` defaults NEMORUN_HOME to its own cwd
@@ -768,18 +839,9 @@ def _submit_job_dry_run(
     for k, v in (extra_overrides or {}).items():
         argv.append(f"{k}={v}")
 
-    launcher_dir = _THIS_DIR.parent.parent / "launcher"
-    if not launcher_dir.exists():
-        return {
-            "ok": False,
-            "dry_run": True,
-            "reason": "launcher_dir_not_found",
-            "diagnostic": (
-                f"Expected tools/launcher/ at {launcher_dir} but it "
-                f"doesn't exist. modelopt-mcp must be installed from a "
-                f"Model-Optimizer clone or via uvx-from-git."
-            ),
-        }
+    launcher_dir = _find_launcher_dir()
+    if launcher_dir is None:
+        return _launcher_dir_not_found_response(dry_run=True)
 
     # Propagate env so the launcher's factory resolution matches what
     # the live submit would see (mainly: SLURM_HOST for slurm-factory
@@ -888,10 +950,15 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
     candidates.append(Path.cwd() / "local_experiments" / experiment_id)
     # The launcher's own experiments dir — submit_job_impl uses
     # cwd=str(launcher_dir) for the subprocess, so when NEMORUN_HOME is
-    # unset, launch.py defaults to launcher_dir/experiments/.
-    launcher_dir = _THIS_DIR.parent.parent / "launcher"
-    candidates.append(launcher_dir / "experiments" / experiment_id)
-    candidates.append(launcher_dir / "local_experiments" / experiment_id)
+    # unset, launch.py defaults to launcher_dir/experiments/. If the
+    # launcher dir can't be resolved (uv-tool-install without an
+    # override + the agent's cwd doesn't see a launcher checkout),
+    # we skip this fallback rather than crashing — the env-vs-cwd
+    # candidates above still cover the common cases.
+    launcher_dir = _find_launcher_dir()
+    if launcher_dir is not None:
+        candidates.append(launcher_dir / "experiments" / experiment_id)
+        candidates.append(launcher_dir / "local_experiments" / experiment_id)
     for c in candidates:
         if c.exists():
             return c
@@ -1214,8 +1281,8 @@ def read_cluster_artifact_impl(
             experiment_id,
             str(job_idx),
         ]
-        launcher_dir = _THIS_DIR.parent.parent / "launcher"
-        cwd = str(launcher_dir) if launcher_dir.exists() else None
+        launcher_dir = _find_launcher_dir()
+        cwd = str(launcher_dir) if launcher_dir is not None else None
         try:
             proc = subprocess.run(  # nosec B603 B607
                 argv,
