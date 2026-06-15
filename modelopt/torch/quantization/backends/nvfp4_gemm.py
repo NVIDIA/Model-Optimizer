@@ -80,7 +80,7 @@ def nvfp4_gemm(quant_module, input_tensor, bias=None):
         quant_module._input_global_scale = FP8_E4M3_MAX * 6.0 / input_amax.float()
 
     weight = quant_module.weight
-    is_four_over_six = bool(quant_module.weight_quantizer.block_sizes.get("four_over_six", False))
+    is_four_over_six = NVFP4QTensor._is_four_over_six(quant_module.weight_quantizer)
     weight_fp8_max = FP8_E4M3_MAX_46 if is_four_over_six else FP8_E4M3_MAX
 
     cached_weight_global_scale = hasattr(quant_module, "_weight_global_scale")
@@ -218,7 +218,7 @@ def _nvfp4_availability_check(module, input, args, kwargs):
     # from FP16/BF16 weights only has a global scale and cannot reproduce that selection.
     # Keep backend available for pre-quantized weights (QTensorWrapper) where per-block
     # scales are already materialized.
-    if module.weight_quantizer.block_sizes.get("four_over_six", False) and not isinstance(
+    if NVFP4QTensor._is_four_over_six(module.weight_quantizer) and not isinstance(
         module.weight, QTensorWrapper
     ):
         return False

@@ -23,7 +23,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .fp4_kernel import _torch_dtype_to_tl
+from .fp4_kernel import FP8_E4M3_MAX, _torch_dtype_to_tl
 from .nvfp4_quant import fp4_round_magnitude, fp8_quantize_scale
 
 __all__ = ["fp4_fake_quant_block"]
@@ -103,7 +103,7 @@ def fp4_fake_quant_block(
     x: torch.Tensor,
     global_amax: torch.Tensor,
     block_size: int = 16,
-    fp8_max_for_normalization: float = 448.0,
+    fp8_max_for_normalization: float = FP8_E4M3_MAX,
     tile_rows: int = 16,
     tile_cols: int = 64,
     num_warps: int | None = None,
