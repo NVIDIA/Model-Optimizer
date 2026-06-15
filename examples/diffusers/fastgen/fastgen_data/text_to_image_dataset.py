@@ -1,22 +1,3 @@
-# Vendored from NVIDIA-NeMo/Automodel @ e42584e3 (Apache-2.0):
-#   https://github.com/NVIDIA-NeMo/Automodel/blob/e42584e303397e9bd34643407b8a57d7def88ce9/nemo_automodel/components/datasets/diffusion/text_to_image_dataset.py
-# Local modifications for the self-contained fastgen example: the relative import of the
-# unpatched ``BaseMultiresolutionDataset`` is rewritten to its absolute ``nemo_automodel``
-# package path. Includes the DMD2 ``prompt_embeds_mask`` emission. Original license below.
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #

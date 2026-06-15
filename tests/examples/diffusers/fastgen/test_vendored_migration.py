@@ -115,11 +115,11 @@ def test_all_staged_automodel_files_are_removable():
     }
 
 
-# Files vendored verbatim-with-modifications from AutoModel — these carry the provenance header
-# and are excluded from the insert-license pre-commit hook. Authored modelopt files
-# (fastgen_checkpoint.py, fastgen_data/{__init__,collate_fns}.py, the package __init__.py's, the
-# launcher) are NOT in this list: they carry the standard NVIDIA SPDX header instead.
-VENDORED_WITH_HEADER = [
+# Files copied from AutoModel. Per review, these are NVIDIA-authored Apache-2.0 files, so they
+# are treated as ordinary NVIDIA files: the insert-license hook manages the header (no pre-commit
+# exclusion), and the per-file "Vendored from" provenance note + duplicated original-license block
+# were removed — only the standard NVIDIA SPDX header remains.
+FORMERLY_VENDORED = [
     "fastgen_data/text_to_image_dataset.py",
     "preprocess/preprocessing_multiprocess.py",
     "preprocess/processors/__init__.py",
@@ -130,23 +130,17 @@ VENDORED_WITH_HEADER = [
 ]
 
 
-def test_vendored_files_have_provenance_headers():
-    """Each verbatim-vendored file has the source/commit note AND the NVIDIA SPDX header, in order.
-
-    Per CONTRIBUTING "Copying code from other sources": (1) source link + commit, (2) original
-    copyright/license, (3) the NVIDIA SPDX header after the original.
-    """
-    for target in VENDORED_WITH_HEADER:
+def test_formerly_vendored_files_use_standard_nvidia_header():
+    """They carry only the standard NVIDIA SPDX header — no provenance note, no duplicate license."""
+    for target in FORMERLY_VENDORED:
         text = (_FASTGEN_DIR / target).read_text()
-        prov_idx = text.find("Vendored from NVIDIA-NeMo/Automodel")
-        spdx_idx = text.find("SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION")
-        assert prov_idx != -1, f"{target}: missing 'Vendored from' provenance note"
-        assert prov_idx < 800, f"{target}: provenance note not at the top"
-        assert spdx_idx != -1, f"{target}: missing NVIDIA SPDX-FileCopyrightText header"
+        assert text.startswith(
+            "# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES"
+        ), f"{target}: must start with the standard NVIDIA SPDX header"
         assert "SPDX-License-Identifier: Apache-2.0" in text, f"{target}: missing SPDX license id"
-        # Order: the source/commit note precedes the NVIDIA SPDX header (which follows the original license).
-        assert prov_idx < spdx_idx, (
-            f"{target}: NVIDIA SPDX header must come after the provenance note"
+        assert "Vendored from" not in text, f"{target}: stray 'Vendored from' provenance note"
+        assert text.count('Licensed under the Apache License, Version 2.0 (the "License")') == 1, (
+            f"{target}: expected exactly one license block (no duplicate)"
         )
 
 
