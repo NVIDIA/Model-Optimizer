@@ -132,25 +132,44 @@ class HFDFlashModel(DFlashModel):
         self.dflash_config.hidden_size = base_config.hidden_size
         self.dflash_config.vocab_size = base_config.vocab_size
 
-        # Inherit architecture settings from base model when not specified by user.
-        # Static defaults (hidden_act, attention_bias, etc.) are in dflash/default_config.py.
-        # NOTE: rope_scaling is intentionally excluded. DFlash draft uses Qwen3
-        # RotaryEmbedding which only supports standard RoPE. Inheriting M-RoPE
-        # config from multimodal models (e.g. Qwen3.5) would be incorrect.
-        _base_model_attrs = [
+        # Inherit architecture settings from base model when not specified by user
+        # (setdefault). Static defaults (hidden_act, attention_bias, etc.) are in
+        # dflash/default_config.py.
+        _setdefault_attrs = [
             "max_position_embeddings",
             "intermediate_size",
             "num_attention_heads",
             "num_key_value_heads",
-            "rope_theta",
-            "rope_type",
-            "rope_interleaved",
             "rms_norm_eps",
         ]
-        for attr in _base_model_attrs:
+        for attr in _setdefault_attrs:
             if not hasattr(self.dflash_config, attr) or getattr(self.dflash_config, attr) is None:
                 if hasattr(base_config, attr):
                     setattr(self.dflash_config, attr, getattr(base_config, attr))
+
+        # RoPE base settings are ENFORCED to match the base model (not setdefault): the
+        # DFlash draft injects the target's KV into every layer, so its RoPE base must
+        # match the target's for the injected positions to align — and the exporter writes
+        # the base model's rope_theta. Letting dflash_architecture_config override these
+        # would make training (draft rope) and inference (base rope) disagree, so we
+        # overwrite any user value and warn. (rope_scaling is intentionally NOT inherited:
+        # DFlash uses standard Qwen3 RotaryEmbedding; the long-context YaRN scaling is
+        # added only at export via dflash_export_rope_scaling.)
+        for attr in ("rope_theta", "rope_type", "rope_interleaved"):
+            if not hasattr(base_config, attr):
+                continue
+            base_val = getattr(base_config, attr)
+            user_val = getattr(self.dflash_config, attr, None)
+            if user_val is not None and user_val != base_val:
+                logger.warning(
+                    "DFlash: ignoring dflash_architecture_config.%s=%r and enforcing the "
+                    "base model's value %r — the draft injects the target's KV, so its RoPE "
+                    "base must match the target's.",
+                    attr,
+                    user_val,
+                    base_val,
+                )
+            setattr(self.dflash_config, attr, base_val)
 
         self.dflash_config.head_dim = getattr(
             self.dflash_config,
