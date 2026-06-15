@@ -175,11 +175,17 @@ class MseCalibrator(_Calibrator):
 class NVFP4MSECalibrator(MseCalibrator):
     """Per-block FP8 scale sweep calibrator for NVFP4 static quantization.
 
-    Uses a fused Triton kernel as an internal fast path on the first ``collect`` call
-    when (a) ``error_func is None``, (b) the input tensor is on CUDA in the standard
-    blocked ``[n_blocks, block_size]`` layout, and (c) Triton + the kernel package are
-    importable. Falls back to the reference 126-step Python sweep otherwise and caches
-    the final amax immediately, so this calibrator is one-shot between resets.
+    ``collect`` dispatches to one of two fused Triton fast paths, else the reference 126-step
+    Python sweep. Both fast paths require the input on CUDA in the blocked
+    ``[n_blocks, block_size]`` layout with Triton + the kernel package importable:
+
+    - **Hessian-weighted** (local_hessian): taken when ``hessian is not None`` — minimizes
+      ``dwᵀ H dw``. Wins over the plain path, so it fires even when ``error_func`` is also set.
+    - **plain squared-error**: taken when ``hessian is None and error_func is None``.
+
+    Otherwise (CPU, non-blocked layout, Triton unavailable, or an ``error_func`` with no
+    ``hessian``) it runs the reference sweep, using ``error_func`` as the metric when set.
+    The final amax is cached immediately, so this calibrator is one-shot between resets.
     """
 
     def __init__(
