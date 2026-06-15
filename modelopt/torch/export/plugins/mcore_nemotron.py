@@ -59,6 +59,8 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "D": NameRemapping("backbone.layers.{}.mixer.D", REPLICATE),
     "dt_bias": NameRemapping("backbone.layers.{}.mixer.dt_bias", REPLICATE),
     "conv1d": NameRemapping("backbone.layers.{}.mixer.conv1d.", REPLICATE),
+    "conv1d_weight": NameRemapping("backbone.layers.{}.mixer.conv1d.weight", REPLICATE),
+    "conv1d_bias": NameRemapping("backbone.layers.{}.mixer.conv1d.bias", REPLICATE),
     # mapping layer_norm_weight to None tells _name_remapping to skip it;
     # the fused layer_norm_weight is loaded separately via the "fused_norm" rule.
     "in_proj": NameRemapping(
@@ -124,6 +126,8 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "D": NameRemapping("backbone.layers.{}.mixer.D"),
     "dt_bias": NameRemapping("backbone.layers.{}.mixer.dt_bias"),
     "conv1d": NameRemapping("backbone.layers.{}.mixer.conv1d."),
+    "conv1d_weight": NameRemapping("backbone.layers.{}.mixer.conv1d.weight"),
+    "conv1d_bias": NameRemapping("backbone.layers.{}.mixer.conv1d.bias"),
     "in_proj": NameRemapping("backbone.layers.{}.mixer.in_proj."),
     "out_proj": NameRemapping("backbone.layers.{}.mixer.out_proj."),
     "fused_norm": NameRemapping("backbone.layers.{}.norm.weight"),

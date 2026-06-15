@@ -664,7 +664,12 @@ class GPTModelExporter:
         self.rules["D"](layer.mixer.D, layer_id)
         self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
 
-        self.rules["conv1d"](layer.mixer.conv1d, layer_id)
+        if hasattr(layer.mixer, "conv1d"):
+            self.rules["conv1d"](layer.mixer.conv1d, layer_id)
+        else:
+            self.rules["conv1d_weight"](layer.mixer.conv1d_weight, layer_id)
+            if hasattr(layer.mixer, "conv1d_bias"):
+                self.rules["conv1d_bias"](layer.mixer.conv1d_bias, layer_id)
         self.rules["in_proj"](layer.mixer.in_proj, layer_id)
         self.rules["out_proj"](layer.mixer.out_proj, layer_id)
 
