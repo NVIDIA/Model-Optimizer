@@ -330,9 +330,10 @@ class PrecisionConverter:
             else:
                 for vi in g.value_info:
                     vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                    for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                        if d.dim_value:
-                            vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                    if not self.use_standalone_type_inference:
+                        for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                            if d.dim_value:
+                                vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
             # Clear outputs for both main graph and subgraphs
             for out in g.output:
