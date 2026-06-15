@@ -130,8 +130,7 @@ evaluation:
     OPENAI_CLIENT_ID: OPENAI_CLIENT_ID
     OPENAI_CLIENT_SECRET: OPENAI_CLIENT_SECRET
 
-  # For no-tools results: in ns_gpqa and ns_aime2025 below, remove `use_sandbox: true` and
-  # the `++tool_modules=[...]` token from `args`.
+  # For no-tools results: in ns_gpqa and ns_aime2025 below, remove `use_sandbox: true` and the `++tool_modules=[...]` token from `args`
   tasks:
     # 1. MMLU Pro
     - name: ns_mmlu_pro
