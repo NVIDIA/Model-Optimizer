@@ -150,6 +150,23 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
         )
 
 
+def _is_hf_format_checkpoint(checkpoint: str | None) -> bool:
+    """True if the checkpoint dir holds consolidated HF weights (from_pretrained-loadable).
+
+    FSDP2 SHARDED_STATE_DICT checkpoints contain only distributed shards
+    (``pytorch_model_fsdp_*/``), no ``model.safetensors`` — those return False, signalling
+    the caller to load the base model and resume via the Trainer instead. This inspects the
+    on-disk format of the *resume* checkpoint, which is a property of the existing bytes and
+    is independent of the current run's save mode (the two can differ across runs), so it's
+    intentionally separate from the save-time FSDP state-dict-type gate used for the export
+    callback.
+    """
+    if not checkpoint:
+        return False
+    hf_files = ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json")
+    return any(os.path.isfile(os.path.join(checkpoint, f)) for f in hf_files)
+
+
 def train():
     config_path, dry_run, overrides = _parse_cli()
     recipe = load_recipe(config_path, overrides=overrides)
@@ -186,12 +203,10 @@ def train():
 
     use_offline_training = recipe.data.mode != "online"
 
-    # Check if checkpoint has HF-format model files (compatible with from_pretrained).
-    # FSDP distributed checkpoints (pytorch_model_fsdp_*) don't — load base model instead.
-    _hf_ckpt_files = ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json")
-    checkpoint_is_hf = checkpoint and any(
-        os.path.isfile(os.path.join(checkpoint, f)) for f in _hf_ckpt_files
-    )
+    # Resume path depends on the existing checkpoint's on-disk format: consolidated HF
+    # weights load via from_pretrained; FSDP sharded checkpoints load the base model and
+    # resume through the Trainer.
+    checkpoint_is_hf = _is_hf_format_checkpoint(checkpoint)
 
     if checkpoint_is_hf:
         assert checkpoint is not None  # guaranteed by checkpoint_is_hf
