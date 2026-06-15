@@ -56,6 +56,7 @@ from modelopt.recipe.config import (
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
+from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
 )
@@ -301,8 +302,6 @@ def train():
         isinstance(recipe, ModelOptDFlashRecipe)
         and recipe.dflash.dflash_architecture_config.get("projector_type") == "domino"
     ):
-        from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
-
         callbacks.append(DominoLambdaCallback())
     # Leave training_args.ignore_data_skip at its default (False). The dataset is
     # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler

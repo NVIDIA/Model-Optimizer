@@ -165,6 +165,8 @@ class DFlashConfig(ModeloptBaseConfig):
 
     dflash_lambda_base_start: float = ModeloptField(
         default=1.0,
+        ge=0.0,
+        le=1.0,
         description=(
             "Domino only: initial weight of the base (backbone-only) loss in the "
             "loss = (1 - lambda)*final + lambda*base mixture; linearly decayed to 0. "
@@ -174,6 +176,8 @@ class DFlashConfig(ModeloptBaseConfig):
 
     dflash_lambda_base_decay_ratio: float = ModeloptField(
         default=1.0,
+        gt=0.0,
+        le=1.0,
         description=(
             "Domino only: fraction of total training steps over which lambda_base "
             "decays from dflash_lambda_base_start to 0."

@@ -26,11 +26,13 @@ from copy import deepcopy
 
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
+from safetensors.torch import load_file
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import HFDominoModel, compute_lambda_base
+from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule
 from modelopt.torch.speculative.plugins.modeling_domino import DominoModule
 
 BLOCK_SIZE = 4
@@ -96,8 +98,6 @@ class TestDominoConvert:
 
     def test_dflash_mode_still_creates_plain_dflash(self):
         """Without projector_type=domino, conversion still yields a plain DFlash model."""
-        from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule
-
         config = deepcopy(DFLASH_DEFAULT_CFG["config"])
         config["dflash_mask_token_id"] = 0
         config["dflash_architecture_config"] = {"num_hidden_layers": NUM_DRAFT_LAYERS}
@@ -181,8 +181,6 @@ class TestDominoExporter:
 
     def test_export_weight_keys_match_reference(self, tmp_path):
         """Exported weights include head tensors under the reference names, no prefix."""
-        from safetensors.torch import load_file
-
         export_dir = self._export(tmp_path)
         sd = load_file(str(export_dir / "model.safetensors"))
         for key in sd:

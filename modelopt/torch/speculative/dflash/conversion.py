@@ -42,11 +42,16 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
     config.dflash_architecture_config = {**default_dflash_config, **custom_config}
 
     # Route to the Domino registry when the architecture asks for the Domino head.
-    registry = (
-        DominoDMRegistry
-        if config.dflash_architecture_config.get("projector_type") == "domino"
-        else DFlashDMRegistry
-    )
+    projector_type = config.dflash_architecture_config.get("projector_type")
+    if projector_type == "domino":
+        registry = DominoDMRegistry
+    elif projector_type in (None, "dflash"):
+        registry = DFlashDMRegistry
+    else:
+        raise ValueError(
+            f"Unsupported dflash_architecture_config.projector_type: {projector_type!r}. "
+            "Expected 'dflash' (default) or 'domino'."
+        )
 
     original_cls = type(model)
     if original_cls not in registry:

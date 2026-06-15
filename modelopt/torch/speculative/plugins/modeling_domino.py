@@ -56,6 +56,11 @@ class DominoModule(DFlashModule):
         # pure_draft_prefix_len positions at the block start keep base logits only
         # (no causal correction); the GRU correction applies to the suffix.
         self.pure_draft_prefix_len = getattr(config, "pure_draft_prefix_len", 1)
+        if not 0 <= self.pure_draft_prefix_len < self.block_size:
+            raise ValueError(
+                f"pure_draft_prefix_len must be in [0, {self.block_size - 1}] "
+                f"(block_size={self.block_size}), got {self.pure_draft_prefix_len}."
+            )
         self.shift_label = getattr(config, "shift_label", True)
 
         # Causal state over the block's token embeddings. bias=False matches the
