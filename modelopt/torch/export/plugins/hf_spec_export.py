@@ -462,8 +462,9 @@ class DominoExporter(DFlashExporter):
         config = super()._export_config()
         draft_config = self.model.dflash_config
 
-        emb_dim = getattr(draft_config, "emb_dim")
-        gru_hidden_dim = getattr(draft_config, "gru_hidden_dim")
+        # Present because HFDominoModel.modify validates them at convert time.
+        emb_dim = draft_config.emb_dim
+        gru_hidden_dim = draft_config.gru_hidden_dim
         # Mirror the reference checkpoint: emb_dim also appears at the top level.
         config["emb_dim"] = emb_dim
         config["dflash_config"].update(

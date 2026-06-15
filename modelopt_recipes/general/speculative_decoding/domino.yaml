@@ -37,6 +37,8 @@ training:
   cp_size: 1
   dp_shard_size: 1
   disable_tqdm: true
+  # Keep off: eval runs the DFlash backbone only (correction head not applied
+  # yet), so AR would reflect the backbone alone, not the trained model.
   estimate_ar: false
   ar_validate_steps: 0
   answer_only_loss: true
@@ -51,6 +53,8 @@ training:
   bf16: true
   tf32: true
   remove_unused_columns: false
+  # Required: while lambda_base == 1 the head params are unused in the backward
+  # graph, so DDP needs unused params allowed.
   ddp_find_unused_parameters: true
   ddp_timeout: 1800
   report_to: tensorboard

@@ -86,6 +86,15 @@ class HFDominoModel(HFDFlashModel):
 
     def modify(self, config):
         """Initialize the Domino draft module and read the lambda_base schedule."""
+        # Validate head fields up front: a clear error here beats a cryptic
+        # AttributeError later in DominoModule.__init__ or the exporter.
+        arch_config = config.dflash_architecture_config
+        missing = [k for k in ("emb_dim", "gru_hidden_dim") if arch_config.get(k) is None]
+        if missing:
+            raise ValueError(
+                f"Domino (projector_type='domino') requires {missing} in "
+                "dflash_architecture_config (the GRU correction head dimensions)."
+            )
         super().modify(config)
         # Curriculum schedule for the base/final loss mixing weight. Read here
         # (DFlashConfig carries the two fields); updated each step by
@@ -249,6 +258,14 @@ class HFDominoModel(HFDFlashModel):
         two-term loss. Eval/offline-eval is delegated to the DFlash parent.
         """
         if not self.training:
+            # Eval delegates to the DFlash backbone; the correction head is not
+            # applied yet, so warn once that acceptance rates are backbone-only.
+            if not getattr(self, "_warned_eval_head_bypass", False):
+                logger.warning(
+                    "Domino eval uses the DFlash backbone only (correction head not "
+                    "applied yet); reported acceptance rates are backbone-only."
+                )
+                self._warned_eval_head_bypass = True
             return super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -355,7 +372,18 @@ class DominoLambdaCallback(TrainerCallback):
         inner = getattr(model, "module", model)
         if not hasattr(inner, "dflash_lambda_base_start"):
             return
-        total_steps = state.max_steps if state.max_steps and state.max_steps > 0 else 1
+        if state.max_steps and state.max_steps > 0:
+            total_steps = state.max_steps
+        else:
+            # No max_steps -> decay window is one step -> lambda_base is 0 from the
+            # start, disabling the curriculum. Warn once instead of doing it silently.
+            total_steps = 1
+            if not getattr(self, "_warned_no_max_steps", False):
+                logger.warning(
+                    "DominoLambdaCallback: state.max_steps unset (<=0); lambda_base "
+                    "curriculum disabled (decays to 0 from the first step)."
+                )
+                self._warned_no_max_steps = True
         inner._lambda_base = compute_lambda_base(
             state.global_step,
             total_steps,
