@@ -242,7 +242,7 @@ def main(args: argparse.Namespace) -> None:
     staging_root = os.environ.get("DFLASH_HS_STAGING_DIR", "/dev/shm")
     storage_path = Path(staging_root) / f"vllm_hidden_states_dp{args.dp_rank}"
     storage_path.mkdir(parents=True, exist_ok=True)
-    atexit.register(lambda p=storage_path: shutil.rmtree(p, ignore_errors=True))
+    atexit.register(shutil.rmtree, storage_path, ignore_errors=True)
 
     llm = LLM(
         model=args.model,
