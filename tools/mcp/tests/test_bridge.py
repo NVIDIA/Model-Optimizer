@@ -271,6 +271,152 @@ def test_submit_job_yaml_not_found(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# submit_job dry-run branch
+# ---------------------------------------------------------------------------
+
+
+def test_submit_job_dry_run_yaml_validates(monkeypatch, tmp_path):
+    """dry_run=True with a valid YAML → ok+validated, no cluster contact."""
+    yaml_dir = tmp_path / "examples" / "fam" / "model"
+    yaml_dir.mkdir(parents=True)
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(tmp_path / "examples"))
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Dry-run OK — YAML compiles\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="fam/model/config.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+    )
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["validated"] is True
+    assert "experiment_id" not in result  # dry-run produces no experiment
+    assert "--dryrun" in captured["argv"]  # launcher CLI spells it as one word
+    assert "--yes" in captured["argv"]  # launcher requires --yes to suppress confirm prompt
+
+
+def test_submit_job_dry_run_yaml_invalid(monkeypatch, tmp_path):
+    """dry_run=True + launcher rejects YAML → ok=True but validated=False."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "bad.yaml"
+    yaml_path.write_text("not: [unbalanced\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="yaml.YAMLError: while parsing a flow sequence\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="bad.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+    )
+    assert result["ok"] is True  # The TOOL ran cleanly
+    assert result["dry_run"] is True
+    assert result["validated"] is False  # ...but the YAML failed validation
+    assert result["exit_code"] == 1
+    assert "yaml.YAMLError" in result["stderr_tail"]
+
+
+def test_submit_job_dry_run_yaml_not_found(monkeypatch, tmp_path):
+    """dry_run=True + missing yaml → yaml_not_found with dry_run flag set."""
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(tmp_path))
+    result = bridge.submit_job_impl(
+        yaml_path="missing.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+    )
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+    assert result["reason"] == "yaml_not_found"
+
+
+def test_submit_job_dry_run_skips_verify(monkeypatch, tmp_path):
+    """dry_run=True bypasses verify_setup even when skip_verify=False."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "ok.yaml").write_text("job_name: ok\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    verify_called = {"n": 0}
+    real_verify = bridge.verify_slurm_setup_impl
+
+    def fake_verify(**kwargs):
+        verify_called["n"] += 1
+        return real_verify(**kwargs)
+
+    monkeypatch.setattr(bridge, "verify_slurm_setup_impl", fake_verify)
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="dry-run ok\n",
+            stderr="",
+        ),
+    )
+
+    bridge.submit_job_impl(
+        yaml_path="ok.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="alice",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,  # would normally trigger verify
+        dry_run=True,
+    )
+    assert verify_called["n"] == 0  # verify_setup never invoked in dry-run
+
+
+# ---------------------------------------------------------------------------
 # job_status / job_logs — filesystem-based
 # ---------------------------------------------------------------------------
 
