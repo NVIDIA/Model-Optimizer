@@ -920,9 +920,29 @@ def get_supported_datasets() -> list[str]:
     return list(SUPPORTED_DATASET_CONFIG.keys()) + list(DATASET_COMBOS.keys())
 
 
+_NESTED_USE_CACHE_CONFIG_ATTRS = ("text_config",)
+
+
+def _iter_use_cache_configs(model: torch.nn.Module) -> Iterator[Any]:
+    """Yield the top-level config and Step3.7-style nested text config."""
+    seen: set[int] = set()
+    config = getattr(model, "config", None)
+    if config is None:
+        return
+
+    for candidate in (
+        config,
+        *(getattr(config, attr, None) for attr in _NESTED_USE_CACHE_CONFIG_ATTRS),
+    ):
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        yield candidate
+
+
 @contextmanager
 def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
-    """Set ``model.config.use_cache = False`` for the duration of the block.
+    """Set model config ``use_cache`` flags to ``False`` for the duration of the block.
 
     KV caching is unwanted during calibration / memory-probe forward passes:
     it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
@@ -931,23 +951,26 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     present) also sidesteps configs that never assign the attribute at all
     — e.g., ``Step3p5Config`` from stepfun-ai/Step-3.5-Flash — where forward
     code that reads ``self.config.use_cache`` would otherwise raise
-    ``AttributeError``. The prior value is restored on exit if one existed.
+    ``AttributeError``. Step3.7 keeps the relevant language config nested
+    under ``text_config``; that config object is handled the same way. The
+    prior value is restored on exit if one existed.
     """
-    config = getattr(model, "config", None)
-    if config is None:
-        yield
-        return
-    had_attr = hasattr(config, "use_cache")
-    prev = config.use_cache if had_attr else None
-    config.use_cache = False
+    states = []
+    for config in _iter_use_cache_configs(model):
+        had_attr = hasattr(config, "use_cache")
+        prev = config.use_cache if had_attr else None
+        config.use_cache = False
+        states.append((config, had_attr, prev))
+
     try:
         yield
     finally:
-        if had_attr:
-            config.use_cache = prev
-        else:
-            with suppress(AttributeError):
-                delattr(config, "use_cache")
+        for config, had_attr, prev in reversed(states):
+            if had_attr:
+                config.use_cache = prev
+            else:
+                with suppress(AttributeError):
+                    delattr(config, "use_cache")
 
 
 def get_max_batch_size(
