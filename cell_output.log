@@ -1,0 +1,779 @@
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/1/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_mo… │
+│ job_name         │ 'gemma-4-E4B-it_specdec_bench_mtp_vllm'                   │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(                            │
+│                  │     hf_model='/hf-local/google/gemma-4-E4B-it',           │
+│                  │     draft_model='/hf-local/google/gemma-4-E4B-it-assista… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:v0.22.1',               │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=1),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_model_dir <<global_vars.draft_model>>',          │
+│                  │ '--draft_length 3', '--tp_size 1', '--ep_size 1',         │
+│                  │ '--concurrency 32', '--output_length 4096',               │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/{sweep_name_default}/qualitative',          │
+│                  │ '--runtime_params                                         │
+│                  │ common/specdec_bench/_cells/gemma-4-E4B-it_mtp_vllm_t1_d… │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/gemma-4-E4B-it_mtp_vllm_t1_d7/qualitative', │
+│                  │ '--draft_length 7'],                                      │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}]), │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:v0.22.1',               │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=1),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_model_dir <<global_vars.draft_model>>',          │
+│                  │ '--draft_length 3', '--tp_size 1', '--ep_size 1',         │
+│                  │ '--concurrency 8', '--num_requests 80', '--runtime_params │
+│                  │ common/specdec_bench/runtime_params_throughput_32k.yaml', │
+│                  │ '--output_length 4096', '--aa_timing', '--show_progress', │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/{sweep_name_default}/throughput_32k',       │
+│                  │ '--runtime_params                                         │
+│                  │ common/specdec_bench/_cells/gemma-4-E4B-it_mtp_vllm_t1_d… │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/gemma-4-E4B-it_mtp_vllm_t1_d7/throughput_3… │
+│                  │ '--num_requests 80', '--draft_length 7'],                 │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       31dfcdf      (main)
+  Model-Optimizer                9f37fe196    (pensieve-intern/OMNIML-5022/cell-t1-d7)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781546976 ───────────────
+job gemma-4-E4B-it_specdec_bench_mtp_vllm task 0 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:v0.22.1', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=1, time='04:00:00', local=False, segment=None)
+job gemma-4-E4B-it_specdec_bench_mtp_vllm task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:v0.22.1', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=1, time='04:00:00', local=False, segment=None)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[18:09:41] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[18:09:41] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+[18:09:42] INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-j2tng56u/workspace/ex            
+                    periments/cicd/cicd_1781546976 to                           
+                    /lustre/fsw/portfolios/coreai/projects/coreai_dl            
+                    algo_modelopt/cicd/cicd ...                                 
+[18:10:07] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-j2tng56u/workspace/ex            
+                    periments/cicd/cicd_1781546976                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/projects/coreai_dlalgo_            
+                    modelopt/cicd/cicd`                                         
+[18:10:07] Launching job                                       experiment.py:800
+           gemma-4-E4B-it_specdec_bench_mtp_vllm_0 for                          
+           experiment cicd                                                      
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12835190                            
+           Launching job                                       experiment.py:800
+           gemma-4-E4B-it_specdec_bench_mtp_vllm_1 for                          
+           experiment cicd                                                      
+[SLURM] Job 12835190 - State: PENDING, Estimated start: N/A, Current time: 2026-06-15 18:10:07
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12835191                            
+────────────────── Detaching from Experiment cicd_1781546976. ──────────────────
+           Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12835191 - State: PENDING, Estimated start: N/A, Current time: 2026-06-15 18:10:07
+
+Experiment Status for cicd_1781546976
+
+Task 0: gemma-4-E4B-it_specdec_bench_mtp_vllm_0
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12835190
+- Local Directory: /tmp/pensieve-intern-agent-j2tng56u/workspace/experiments/cicd/cicd_1781546976/gemma-4-E4B-it_specdec_bench_mtp_vllm_0
+- Remote Directory: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/cicd/cicd/cicd_1781546976/gemma-4-E4B-it_specdec_bench_mtp_vllm_0
+
+Task 1: gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12835191
+- Local Directory: /tmp/pensieve-intern-agent-j2tng56u/workspace/experiments/cicd/cicd_1781546976/gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/cicd/cicd/cicd_1781546976/gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+
+                                                                                
+# The experiment was run with the following tasks: ['gemma-4-E4B-it_specdec_benc
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781546976")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("gemma-4-E4B-it_specdec_bench_mtp_vllm_0") # Gets the log for th
+experiment.cancel("gemma-4-E4B-it_specdec_bench_mtp_vllm_0") # Cancels the provi
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781546976                                          
+nemo experiment logs cicd_1781546976 0                                          
+nemo experiment cancel cicd_1781546976 0                                        
+                                                                                
+Found 1 experiment(s): cicd_1781546976
+
+=== [2026-06-15 18:10:15] Polling iteration 1/320 ===
+  cicd_1781546976 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781546976 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:13:18] Polling iteration 2/320 ===
+  cicd_1781546976 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781546976 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:16:21] Polling iteration 3/320 ===
+  cicd_1781546976 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: FAILED
+  cicd_1781546976 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: CANCELLED
+
+  Summary: 0 succeeded, 1 failed, 1 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 0
+  FAILED: 1
+  CANCELLED: 1
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781546976 task 0
+Fetching logs: cicd_1781546976 task 1
+=== Done fetching logs ===
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/1/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_mo… │
+│ job_name         │ 'gemma-4-E4B-it_specdec_bench_mtp_vllm'                   │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(                            │
+│                  │     hf_model='/hf-local/google/gemma-4-E4B-it',           │
+│                  │     draft_model='/hf-local/google/gemma-4-E4B-it-assista… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:gemma',                 │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=1),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_model_dir <<global_vars.draft_model>>',          │
+│                  │ '--draft_length 3', '--tp_size 1', '--ep_size 1',         │
+│                  │ '--concurrency 32', '--output_length 4096',               │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/{sweep_name_default}/qualitative',          │
+│                  │ '--runtime_params                                         │
+│                  │ common/specdec_bench/_cells/gemma-4-E4B-it_mtp_vllm_t1_d… │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/gemma-4-E4B-it_mtp_vllm_t1_d7/qualitative', │
+│                  │ '--draft_length 7'],                                      │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}]), │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:gemma',                 │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=1),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_model_dir <<global_vars.draft_model>>',          │
+│                  │ '--draft_length 3', '--tp_size 1', '--ep_size 1',         │
+│                  │ '--concurrency 8', '--num_requests 80', '--runtime_params │
+│                  │ common/specdec_bench/runtime_params_throughput_32k.yaml', │
+│                  │ '--output_length 4096', '--aa_timing', '--show_progress', │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/{sweep_name_default}/throughput_32k',       │
+│                  │ '--runtime_params                                         │
+│                  │ common/specdec_bench/_cells/gemma-4-E4B-it_mtp_vllm_t1_d… │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/gemma-4-E4B-it_mtp_vllm_t1_d7/throughput_3… │
+│                  │ '--num_requests 80', '--draft_length 7'],                 │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       31dfcdf      (main)
+  Model-Optimizer                9f37fe196    (pensieve-intern/OMNIML-5022/cell-t1-d7)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781547446 ───────────────
+job gemma-4-E4B-it_specdec_bench_mtp_vllm task 0 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:gemma', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=1, time='04:00:00', local=False, segment=None)
+job gemma-4-E4B-it_specdec_bench_mtp_vllm task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:gemma', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=1, time='04:00:00', local=False, segment=None)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[18:17:31] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[18:17:31] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+[18:17:32] INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-j2tng56u/workspace/ex            
+                    periments/cicd/cicd_1781547446 to                           
+                    /lustre/fsw/portfolios/coreai/projects/coreai_dl            
+                    algo_modelopt/cicd/cicd ...                                 
+[18:17:56] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-j2tng56u/workspace/ex            
+                    periments/cicd/cicd_1781547446                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/projects/coreai_dlalgo_            
+                    modelopt/cicd/cicd`                                         
+[18:17:56] Launching job                                       experiment.py:800
+           gemma-4-E4B-it_specdec_bench_mtp_vllm_0 for                          
+           experiment cicd                                                      
+[18:17:57] INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12835356                            
+[18:17:57] Launching job                                       experiment.py:800
+           gemma-4-E4B-it_specdec_bench_mtp_vllm_1 for                          
+           experiment cicd                                                      
+[SLURM] Job 12835356 - State: PENDING, Estimated start: N/A, Current time: 2026-06-15 18:17:57
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12835357                            
+────────────────── Detaching from Experiment cicd_1781547446. ──────────────────
+           Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12835357 - State: PENDING, Estimated start: N/A, Current time: 2026-06-15 18:17:57
+
+Experiment Status for cicd_1781547446
+
+Task 0: gemma-4-E4B-it_specdec_bench_mtp_vllm_0
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12835356
+- Local Directory: /tmp/pensieve-intern-agent-j2tng56u/workspace/experiments/cicd/cicd_1781547446/gemma-4-E4B-it_specdec_bench_mtp_vllm_0
+- Remote Directory: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/cicd/cicd/cicd_1781547446/gemma-4-E4B-it_specdec_bench_mtp_vllm_0
+
+Task 1: gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12835357
+- Local Directory: /tmp/pensieve-intern-agent-j2tng56u/workspace/experiments/cicd/cicd_1781547446/gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/cicd/cicd/cicd_1781547446/gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+
+                                                                                
+# The experiment was run with the following tasks: ['gemma-4-E4B-it_specdec_benc
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781547446")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("gemma-4-E4B-it_specdec_bench_mtp_vllm_0") # Gets the log for th
+experiment.cancel("gemma-4-E4B-it_specdec_bench_mtp_vllm_0") # Cancels the provi
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781547446                                          
+nemo experiment logs cicd_1781547446 0                                          
+nemo experiment cancel cicd_1781547446 0                                        
+                                                                                
+Found 1 experiment(s): cicd_1781547446
+
+=== [2026-06-15 18:18:02] Polling iteration 1/320 ===
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:21:04] Polling iteration 2/320 ===
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:24:07] Polling iteration 3/320 ===
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: RUNNING
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:27:09] Polling iteration 4/320 ===
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 1 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:30:12] Polling iteration 5/320 ===
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 1 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:33:14] Polling iteration 6/320 ===
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_0: SUCCEEDED
+  cicd_1781547446 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: FAILED
+
+  Summary: 1 succeeded, 1 failed, 0 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 1
+  FAILED: 1
+  CANCELLED: 0
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781547446 task 0
+Fetching logs: cicd_1781547446 task 1
+=== Done fetching logs ===
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/1/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_mo… │
+│ job_name         │ 'gemma-4-E4B-it_specdec_bench_mtp_vllm'                   │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(                            │
+│                  │     hf_model='/hf-local/google/gemma-4-E4B-it',           │
+│                  │     draft_model='/hf-local/google/gemma-4-E4B-it-assista… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:gemma',                 │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=1),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_model_dir <<global_vars.draft_model>>',          │
+│                  │ '--draft_length 3', '--tp_size 1', '--ep_size 1',         │
+│                  │ '--concurrency 32', '--output_length 4096',               │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/{sweep_name_default}/qualitative'],         │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}],  │
+│                  │     skip=True),                                           │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:gemma',                 │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=1),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_model_dir <<global_vars.draft_model>>',          │
+│                  │ '--draft_length 3', '--tp_size 1', '--ep_size 1',         │
+│                  │ '--concurrency 8', '--num_requests 80', '--runtime_params │
+│                  │ common/specdec_bench/runtime_params_throughput_32k.yaml', │
+│                  │ '--output_length 4096', '--aa_timing', '--show_progress', │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/{sweep_name_default}/throughput_32k',       │
+│                  │ '--runtime_params                                         │
+│                  │ common/specdec_bench/_cells/gemma-4-E4B-it_mtp_vllm_t1_d… │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/gemma-4-E4B-it_mtp_vllm_t1_d7/throughput_3… │
+│                  │ '--num_requests 80', '--concurrency 1', '--draft_length   │
+│                  │ 7'],                                                      │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       31dfcdf      (main)
+  Model-Optimizer                9f37fe196    (pensieve-intern/OMNIML-5022/cell-t1-d7)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781548489 ───────────────
+job gemma-4-E4B-it_specdec_bench_mtp_vllm task 0: skipped
+job gemma-4-E4B-it_specdec_bench_mtp_vllm task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:gemma', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=1, time='04:00:00', local=False, segment=None)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[18:34:52] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[18:34:52] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+[18:34:53] INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-j2tng56u/workspace/ex            
+                    periments/cicd/cicd_1781548489 to                           
+                    /lustre/fsw/portfolios/coreai/projects/coreai_dl            
+                    algo_modelopt/cicd/cicd ...                                 
+[18:35:07] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-j2tng56u/workspace/ex            
+                    periments/cicd/cicd_1781548489                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/projects/coreai_dlalgo_            
+                    modelopt/cicd/cicd`                                         
+[18:35:07] Launching job                                       experiment.py:800
+           gemma-4-E4B-it_specdec_bench_mtp_vllm_1 for                          
+           experiment cicd                                                      
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12835833                            
+────────────────── Detaching from Experiment cicd_1781548489. ──────────────────
+           Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12835833 - State: PENDING, Estimated start: N/A, Current time: 2026-06-15 18:35:07
+
+Experiment Status for cicd_1781548489
+
+Task 0: gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12835833
+- Local Directory: /tmp/pensieve-intern-agent-j2tng56u/workspace/experiments/cicd/cicd_1781548489/gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/cicd/cicd/cicd_1781548489/gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+
+                                                                                
+# The experiment was run with the following tasks: ['gemma-4-E4B-it_specdec_benc
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781548489")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("gemma-4-E4B-it_specdec_bench_mtp_vllm_1") # Gets the log for th
+experiment.cancel("gemma-4-E4B-it_specdec_bench_mtp_vllm_1") # Cancels the provi
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781548489                                          
+nemo experiment logs cicd_1781548489 0                                          
+nemo experiment cancel cicd_1781548489 0                                        
+                                                                                
+Found 1 experiment(s): cicd_1781548489
+
+=== [2026-06-15 18:35:13] Polling iteration 1/320 ===
+  cicd_1781548489 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 0 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:38:15] Polling iteration 2/320 ===
+  cicd_1781548489 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:41:18] Polling iteration 3/320 ===
+  cicd_1781548489 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:44:20] Polling iteration 4/320 ===
+  cicd_1781548489 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: FAILED
+
+  Summary: 0 succeeded, 1 failed, 0 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 0
+  FAILED: 1
+  CANCELLED: 0
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781548489 task 0
+=== Done fetching logs ===
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/1/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_mo… │
+│ job_name         │ 'gemma-4-E4B-it_specdec_bench_mtp_vllm'                   │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(                            │
+│                  │     hf_model='/hf-local/google/gemma-4-E4B-it',           │
+│                  │     draft_model='/hf-local/google/gemma-4-E4B-it-assista… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:latest',                │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=1),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_model_dir <<global_vars.draft_model>>',          │
+│                  │ '--draft_length 3', '--tp_size 1', '--ep_size 1',         │
+│                  │ '--concurrency 32', '--output_length 4096',               │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/{sweep_name_default}/qualitative'],         │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}],  │
+│                  │     skip=True),                                           │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:latest',                │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=1),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm MTP',           │
+│                  │ '--draft_model_dir <<global_vars.draft_model>>',          │
+│                  │ '--draft_length 3', '--tp_size 1', '--ep_size 1',         │
+│                  │ '--concurrency 8', '--num_requests 80', '--runtime_params │
+│                  │ common/specdec_bench/runtime_params_throughput_32k.yaml', │
+│                  │ '--output_length 4096', '--aa_timing', '--show_progress', │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/{sweep_name_default}/throughput_32k',       │
+│                  │ '--runtime_params                                         │
+│                  │ common/specdec_bench/_cells/gemma-4-E4B-it_mtp_vllm_t1_d… │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/gemma-4-E4B-it_mtp_vllm_t1_d7/throughput_3… │
+│                  │ '--num_requests 80', '--max_seq_len 65536',               │
+│                  │ '--draft_length 7'],                                      │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       31dfcdf      (main)
+  Model-Optimizer                9f37fe196    (pensieve-intern/OMNIML-5022/cell-t1-d7)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781549159 ───────────────
+job gemma-4-E4B-it_specdec_bench_mtp_vllm task 0: skipped
+job gemma-4-E4B-it_specdec_bench_mtp_vllm task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:latest', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=1, time='04:00:00', local=False, segment=None)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[18:46:02] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[18:46:02] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+           INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-j2tng56u/workspace/ex            
+                    periments/cicd/cicd_1781549159 to                           
+                    /lustre/fsw/portfolios/coreai/projects/coreai_dl            
+                    algo_modelopt/cicd/cicd ...                                 
+[18:46:15] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-j2tng56u/workspace/ex            
+                    periments/cicd/cicd_1781549159                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/projects/coreai_dlalgo_            
+                    modelopt/cicd/cicd`                                         
+[18:46:15] Launching job                                       experiment.py:800
+           gemma-4-E4B-it_specdec_bench_mtp_vllm_1 for                          
+           experiment cicd                                                      
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12836312                            
+────────────────── Detaching from Experiment cicd_1781549159. ──────────────────
+           Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12836312 - State: PENDING, Estimated start: N/A, Current time: 2026-06-15 18:46:15
+
+Experiment Status for cicd_1781549159
+
+Task 0: gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12836312
+- Local Directory: /tmp/pensieve-intern-agent-j2tng56u/workspace/experiments/cicd/cicd_1781549159/gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/cicd/cicd/cicd_1781549159/gemma-4-E4B-it_specdec_bench_mtp_vllm_1
+
+                                                                                
+# The experiment was run with the following tasks: ['gemma-4-E4B-it_specdec_benc
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781549159")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("gemma-4-E4B-it_specdec_bench_mtp_vllm_1") # Gets the log for th
+experiment.cancel("gemma-4-E4B-it_specdec_bench_mtp_vllm_1") # Cancels the provi
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781549159                                          
+nemo experiment logs cicd_1781549159 0                                          
+nemo experiment cancel cicd_1781549159 0                                        
+                                                                                
+Found 1 experiment(s): cicd_1781549159
+
+=== [2026-06-15 18:46:22] Polling iteration 1/320 ===
+  cicd_1781549159 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:49:24] Polling iteration 2/320 ===
+  cicd_1781549159 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:52:27] Polling iteration 3/320 ===
+  cicd_1781549159 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:55:29] Polling iteration 4/320 ===
+  cicd_1781549159 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: RUNNING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-15 18:58:32] Polling iteration 5/320 ===
+  cicd_1781549159 / gemma-4-E4B-it_specdec_bench_mtp_vllm_1: SUCCEEDED
+
+  Summary: 1 succeeded, 0 failed, 0 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 1
+  FAILED: 0
+  CANCELLED: 0
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781549159 task 0
+=== Done fetching logs ===
