@@ -13,49 +13,36 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 
 ![Benchmark Recovery (BF16) During Knowledge Distillation](figures/learning_curves.png)
 
-<b>Main results:</b>
+<b>Main results</b> — all models evaluated with the same [setup](#4-evaluation). Values are `mean ± std_dev` across repeats:
 
-| Model | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| **Pruned 22B/A3.0B + Distilled — 100B tokens (BF16)** | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 66.2 |
-| &nbsp;&nbsp;↳ **FP8** (quantized from BF16) | 76.7 | 70.7 | 65.5 | 87.3 | 69.0 | 28.5 | 66.3 |
-| &nbsp;&nbsp;↳ **NVFP4 + QAD** (quantized from BF16, 10B-token QAD) | 72.3 | 61.9 | ? | 78.9 | 65.3 | 23.0 | ? |
-| **Official Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B)** | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 67.4 |
+| Model | MMLU Pro | GPQA Diamond | GPQA Diamond (w. tools) | LiveCodeBench v6 | AIME 2025 | AIME 2025 (w. tools) | IFBench | SciCode (Subtask) | Average |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **Pruned 22B/A3.0B + Distilled — 100B tokens (BF16)** | 76.7 | 68.9 ± 2.5 | 71.4 ± 2.1 | 65.1 ± 1.0 | 86.4 ± 3.7 | 97.2 ± 3.3 | 69.2 | 28.8 ± 1.7 | 70.5 |
+| &nbsp;&nbsp;↳ **FP8** (quantized from BF16) | 75.9 | 71.1 ± 1.4 | 70.4 ± 1.1 | 64.8 ± 0.9 | 87.0 ± 4.2 | 95.1 ± 4.8 | 68.2 | 28.7 ± 2.5 | 70.2 |
+| &nbsp;&nbsp;↳ **NVFP4 + QAD** (quantized from BF16) |  |  |  |  |  |  |  |  |  |
+| **Official Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B)** | 78.2 | 70.3 ± 1.7 | 74.2 ± 1.9 | 68.9 ± 0.9 | 86.8 ± 4.4 | 97.7 ± 3.3 | 69.2 | 31.8 ± 1.2 | 72.1 |
 
 <details>
-<summary><b>Full results</b> — pruning baseline, full distillation trajectory, and intermediate-QAD results (click to expand)</summary>
+<summary><b>Full results</b> — pruning baseline and full distillation trajectory (click to expand)</summary>
 
-| Model | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Pruned 22B/A3.0B (no distillation) | 47.1 | 33.5 | 27.4 | 15.5 | 36.9 | 12.1 | 28.8 |
-| Distill @ 2.5B tokens (100 iters at 8K SeqLen) | 73.3 | 63.7 | 55.3 | 77.6 | 59.1 | 25.1 | 59.0 |
-| Distill @ 20B tokens (800 iters at 8K SeqLen) | 74.8 | 66.0 | 62.3 | 79.6 | 65.4 | 26.1 | 62.4 |
-| Distill @ 40B tokens (1600 iters at 8K SeqLen) | 76.4 | 67.2 | 62.3 | 79.8 | 66.0 | 26.6 | 63.1 |
-| Distill @ 60B tokens (2400 iters at 8K SeqLen) | 76.1 | 68.1 | 63.6 | 78.8 | 67.3 | 27.0 | 63.5 |
-| Distill @ 80B tokens (3200 iters at 8K SeqLen) | 76.5 | 69.1 | 63.9 | 80.7 | 66.5 | 29.0 | 64.3 |
-| Distill @ 82.5B tokens (+100 iters at 32K SeqLen) | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 65.5 |
-| Distill @ 100B tokens (+800 iters at 32K SeqLen) - **BF16** | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 66.2 |
-| Distill @ 100B tokens + **FP8 Quantize** | 76.7 | 70.7 | 65.5 | 87.3 | 69.0 | 28.5 | 66.3 |
-| Distill @ 100B tokens + **NVFP4 Quantize** | 71.9 | 60.9 | ? | 80.4 | 63.0 | 0.4 | ? |
-| Distill @ 100B tokens + **NVFP4 + QAD @ 2.5B tokens (32K SeqLen)** | 72.2 | 61.2 | ? | 80.4 | 65.5 | 22.8 | ? |
-| Distill @ 100B tokens + **NVFP4 + QAD @ 10B tokens (32K SeqLen)** | 72.3 | 61.9 | ? | 78.9 | 65.3 | 23.0 | ? |
-| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 67.4 |
+| Model | MMLU Pro | GPQA Diamond | GPQA Diamond (w. tools) | LiveCodeBench v6 | AIME 2025 | AIME 2025 (w. tools) | IFBench | SciCode (Subtask) | Average |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Pruned 22B/A3.0B (no distillation) | 47.8 | 33.5 ± 2.3 | 34.2 ± 3.0 | 26.7 ± 1.3 | 15.1 ± 3.8 | 17.8 ± 5.5 | 39.9 | 13.1 ± 1.8 | 28.5 |
+| Distill @ 2.5B tokens (100 iters at 8K SeqLen) | 73.0 | 62.2 ± 1.4 | 62.0 ± 2.1 | 58.4 ± 1.9 | 79.7 ± 5.4 | 90.0 ± 5.8 | 59.9 | 21.3 ± 2.5 | 63.3 |
+| Distill @ 20B tokens (800 iters at 8K SeqLen) | 74.9 | 66.0 ± 2.1 | 68.0 ± 1.8 | 62.5 ± 0.9 | 78.6 ± 3.8 | 88.3 ± 5.2 | 67.0 | 25.2 ± 2.3 | 66.3 |
+| Distill @ 40B tokens (1600 iters at 8K SeqLen) | 75.6 | 67.2 ± 2.2 | 69.1 ± 2.2 | 62.4 ± 1.0 | 79.0 ± 3.9 | 92.5 ± 4.3 | 66.8 | 27.4 ± 1.3 | 67.5 |
+| Distill @ 60B tokens (2400 iters at 8K SeqLen) | 76.0 | 68.4 ± 2.0 | 70.1 ± 2.0 | 64.3 ± 1.5 | 79.6 ± 4.5 | 92.0 ± 4.2 | 67.6 | 28.4 ± 2.2 | 68.3 |
+| Distill @ 80B tokens (3200 iters at 8K SeqLen) | 76.7 | 68.7 ± 3.1 | 68.2 ± 1.8 | 63.9 ± 0.9 | 81.6 ± 6.0 | 93.4 ± 4.6 | 69.0 | 28.5 ± 2.7 | 68.8 |
+| Distill @ 82.5B tokens (+100 iters at 32K SeqLen) | 76.6 | 70.0 ± 0.9 | 70.1 ± 1.6 | 65.4 ± 1.0 | 86.8 ± 4.5 | 96.7 ± 3.5 | 68.9 | 27.9 ± 2.7 | 70.3 |
+| Distill @ 100B tokens (+800 iters at 32K SeqLen) - **BF16** | 76.7 | 68.9 ± 2.5 | 71.4 ± 2.1 | 65.1 ± 1.0 | 86.4 ± 3.7 | 97.2 ± 3.3 | 69.2 | 28.8 ± 1.7 | 70.5 |
+| Distill @ 100B tokens + **FP8 Quantize** | 75.9 | 71.1 ± 1.4 | 70.4 ± 1.1 | 64.8 ± 0.9 | 87.0 ± 4.2 | 95.1 ± 4.8 | 68.2 | 28.7 ± 2.5 | 70.2 |
+| Distill @ 100B tokens + **NVFP4 + QAD** |  |  |  |  |  |  |  |  |  |
+| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.2 | 70.3 ± 1.7 | 74.2 ± 1.9 | 68.9 ± 0.9 | 86.8 ± 4.4 | 97.7 ± 3.3 | 69.2 | 31.8 ± 1.2 | 72.1 |
 
 </details>
 
-<b>Updated results (re-evaluated):</b>
-
-| Model | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Pruned 22B/A3.0B (no distillation) | 47.1 | 33.5 | 27.4 | 15.5 | 36.9 | 12.1 | 28.8 |
-| Distill @ 2.5B tokens (100 iters at 8K SeqLen) | 72.6 | 62.2 | 58.6 | 79.7 | 59.7 | 20.9 | 58.9 |
-| Distill @ 20B tokens (800 iters at 8K SeqLen) | 75.1 | 66.0 | 61.8 | 78.6 | 66.7 | 26.1 | 62.4 |
-| Distill @ 40B tokens (1600 iters at 8K SeqLen) | 75.9 | 67.2 | 62.6 | 79.0 | 67.7 | 27.4 | 63.3 |
-| Distill @ 60B tokens (2400 iters at 8K SeqLen) | 76.2 | 68.4 | 64.1 | 79.6 | 68.3 | 28.7 | 64.2 |
-| Distill @ 80B tokens (3200 iters at 8K SeqLen) | 76.4 | 68.7 | 63.4 | 81.6 | 67.6 | 29.3 | 64.5 |
-| Distill @ 82.5B tokens (+100 iters at 32K SeqLen) |  |  |  |  |  |  |  |
-| Distill @ 100B tokens (+800 iters at 32K SeqLen) - **BF16** |  |  |  |  |  |  |  |
-| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 67.4 |
+> [!NOTE]
+> Some of these benchmarks are very noisy with a large per-run spread (e.g. AIME, which has only 30 problems, and SciCode), so small differences are not always meaningful. For a more reliable comparison, use a larger `num_repeats` in practice.
 
 ### vLLM Throughput (single H100, ISL=32768, OSL=1024)
 
@@ -134,13 +121,13 @@ DATA_BLEND=" \
 
 #### General Guidelines
 
-The optimal blend is 30% pretraining and 70% post-training data. Exact proportions may vary depending on the benchmarks you care about. The blend above was designed to maximize recovery on popular General Knowledge, Reasoning, Instruction Following, and Tool Calling benchmarks. The key design decisions were:
+The optimal blend is 30% pretraining and 70% post-training data. Exact proportions may vary depending on the benchmarks you care about. The blend above was designed to maximize recovery on popular General Knowledge, Reasoning, Coding, and Instruction Following benchmarks. The key design decisions were:
 
 - **30% pretraining data** closes the MMLU gap that arises from training exclusively on reasoning-heavy post-training data. The General split (20%) is upweighted specifically to recover general knowledge recall.
 - **Math (27%)** is the largest post-training category because AIME and MMLU Pro respond strongly to more math reasoning tokens. We use a mix of `Nemotron-Math-v2` and `Nemotron-SFT-Math-v3` for higher quality math reasoning signal with full reasoning traces.
 - **Science (13%)** uses `Nemotron-Post-Training-Dataset-v1 / stem` as the primary source for volume and GPQA stability, with small allocations to `Nemotron-Science-v1` MCQ/RQA subsets for format alignment with GPQA's multiple-choice structure.
 - **Instruction following (5%)** saturates quickly so a small allocation is sufficient.
-- **Tool calling (5%)** uses `Nemotron-Agentic-v1 / tool_calling`. Our evals run with `--enable-auto-tool-choice`, so the student needs explicit exposure to function-call schemas; this helps SciCode (heavy Python tool use) and GPQA Diamond (which can benefit from calculator tools).
+- **Tool calling (5%)** uses `Nemotron-Agentic-v1 / tool_calling`. Our GPQA and AIME evals enable a Python sandbox tool (`--enable-auto-tool-choice`), so the student needs explicit exposure to function-call schemas to use it; this helps GPQA Diamond and AIME 2025 (which can offload quantitative steps to the tool).
 
 This blend intentionally omits capabilities not targeted in this experiment (e.g. multilingual, SWE). Depending on what benchmarks matter for your use case, you can substitute or add datasets from the [Nemotron Post-Training v3 collection](https://huggingface.co/collections/nvidia/nemotron-post-training-v3), for example:
 
@@ -497,8 +484,8 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quanti
     --trust_remote_code \
     --tp_size 8 \
     --quant_cfg MAMBA_MOE_FP8_CONSERVATIVE_CFG \
-    --calib_batch_size 32 \
-    --seq_length 512 \
+    --calib_batch_size 4 \
+    --seq_length 8192 \
     --export_megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_fp8_megatron \
     --skip_generate
 ```
@@ -537,7 +524,7 @@ The exported HuggingFace checkpoint is directly deployable with [vLLM](https://g
 
 See FP8 vs BF16 results in the [Results](#results) section above.
 
-#### NVFP4 + Quantization Aware Distillation (QAD)
+#### NVFP4 PTQ + Quantization Aware Distillation (QAD)
 
 NVFP4 (W4A4) gives a larger speedup and memory reduction than FP8, but also a larger accuracy drop. We recover that drop with **Quantization Aware Distillation (QAD)**: NVFP4 PTQ → distill the NVFP4 student from the BF16 teacher → export. See the [Quantization Aware Distillation section](../../README.md#quantization-aware-distillation-qad) of the Megatron-Bridge README for details.
 
@@ -552,8 +539,8 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quanti
     --trust_remote_code \
     --tp_size 8 \
     --quant_cfg MAMBA_MOE_NVFP4_CONSERVATIVE_CFG \
-    --calib_batch_size 32 \
-    --seq_length 512 \
+    --calib_batch_size 4 \
+    --seq_length 8192 \
     --export_megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_nvfp4_megatron \
     --skip_generate
 ```

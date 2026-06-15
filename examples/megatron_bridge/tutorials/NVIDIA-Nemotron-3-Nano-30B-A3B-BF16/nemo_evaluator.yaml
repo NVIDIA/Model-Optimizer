@@ -94,6 +94,10 @@ evaluation:
         adapter_config:
           use_system_prompt: true
           use_reasoning: false
+          # vLLM rejects both max_tokens and max_completion_tokens for these tasks
+          params_to_remove:
+            - max_tokens
+            - max_completion_tokens
           params_to_add:
             chat_template_kwargs:
               enable_thinking: true
@@ -109,8 +113,8 @@ evaluation:
       params:
         parallelism: 64
         max_new_tokens: 131072
-        temperature: 0.99999
-        top_p: 0.99999
+        temperature: 1.0
+        top_p: 1.0
         request_timeout: 3600
         max_retries: 10
         extra:
@@ -126,6 +130,8 @@ evaluation:
     OPENAI_CLIENT_ID: OPENAI_CLIENT_ID
     OPENAI_CLIENT_SECRET: OPENAI_CLIENT_SECRET
 
+  # For no-tools results: in ns_gpqa and ns_aime2025 below, remove `use_sandbox: true` and
+  # the `++tool_modules=[...]` token from `args`.
   tasks:
     # 1. MMLU Pro
     - name: ns_mmlu_pro
@@ -136,7 +142,7 @@ evaluation:
           params:
             extra:
               num_repeats: 1
-              args: "++prompt_config=eval/aai/mcq-10choices-boxed"
+              args: "++prompt_config=eval/aai/mcq-10choices-boxed ++inference.tokens_to_generate=null"
 
     # 2. GPQA Diamond
     - name: ns_gpqa
@@ -147,7 +153,9 @@ evaluation:
           params:
             extra:
               num_repeats: 8
-              args: "++prompt_config=eval/aai/mcq-4choices"
+              # Tool calling: run the Python sandbox tool during generation
+              use_sandbox: true
+              args: "++prompt_config=eval/aai/mcq-4choices ++inference.tokens_to_generate=null ++tool_modules=[nemo_skills.mcp.servers.python_tool::PythonTool]"
 
     # 3. LiveCodeBench
     - name: ns_livecodebench
@@ -169,6 +177,9 @@ evaluation:
           params:
             extra:
               num_repeats: 32
+              # Tool calling: run the Python sandbox tool during generation
+              use_sandbox: true
+              args: "++prompt_config=/nemo_run/code/eval_factory_prompts/math-oai.yaml ++inference.tokens_to_generate=null ++tool_modules=[nemo_skills.mcp.servers.python_tool::PythonTool]"
 
     # 5. IFBench
     - name: ns_ifbench
@@ -189,3 +200,4 @@ evaluation:
           params:
             extra:
               num_repeats: 8
+              args: "++eval_config.num_parallel_requests=20"
