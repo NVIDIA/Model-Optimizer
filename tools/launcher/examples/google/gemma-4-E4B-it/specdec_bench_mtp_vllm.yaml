@@ -15,7 +15,7 @@
 # pipeline.task_N.args+=[...]:
 #
 #   uv run slurm.py \
-#     --yaml modules/Model-Optimizer/tools/launcher/examples/gemma-4/gemma-4-E4B-it/specdec_bench_mtp_vllm.yaml \
+#     --yaml modules/Model-Optimizer/tools/launcher/examples/google/gemma-4-E4B-it/specdec_bench_mtp_vllm.yaml \
 #     --yes detach=true \
 #     pipeline.task_0.args+=["--temperature 0","--max_seq_len 65536","--save_dir /scratchspace/<sweep>/qualitative","--draft_length 3"] \
 #     pipeline.task_1.args+=["--temperature 0","--max_seq_len 65536","--save_dir /scratchspace/<sweep>/throughput_32k","--num_requests 80","--draft_length 3"]

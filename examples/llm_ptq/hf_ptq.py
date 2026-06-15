@@ -29,6 +29,7 @@ from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
     _get_auto_quantize_cost_excluded_patterns,
     _get_auto_quantize_disabled_layers,
+    _resolve_model_path,
     build_quant_cfg,
     copy_custom_model_files,
     create_vlm_calibration_loop,
@@ -1010,7 +1011,8 @@ def quantize_main(
             return _is_layerwise(obj.quantize.algorithm)
         if isinstance(obj, list):
             return any(_is_layerwise(a) for a in obj)
-        return bool(getattr(obj, "layerwise", False))
+        layerwise = getattr(obj, "layerwise", None)
+        return bool(getattr(layerwise, "enable", False))
 
     is_layerwise = _is_layerwise(recipe)
 
@@ -1144,10 +1146,8 @@ def quantize_main(
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
         if needs_checkpoint_path_update(quant_cfg):
-            quant_cfg = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
-            print(
-                f"Auto-resolved layerwise_checkpoint_dir: {quant_cfg['algorithm']['layerwise_checkpoint_dir']}"
-            )
+            quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
+            print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
 
         if args.cast_mxfp4_to_nvfp4:
             quant_cfg = copy.deepcopy(quant_cfg)
@@ -1174,7 +1174,12 @@ def quantize_main(
     # to NVFP4StaticQuantizer with a data-derived ``_global_amax``); we just
     # override that scalar with the closed-form value before export.
     if args.cast_mxfp4_to_nvfp4:
-        apply_cast_mxfp4_to_nvfp4(language_model, args.pyt_ckpt_path)
+        # The cast reads the source MXFP4 ``*_scales``/``*_blocks`` tensors from a local
+        # checkpoint directory. ``--pyt_ckpt_path`` may be a HF Hub ID (e.g.
+        # ``openai/gpt-oss-20b``); resolve it to the local snapshot dir that load_model's
+        # ``from_pretrained`` already populated so the cast works with the documented command.
+        source_ckpt_dir = _resolve_model_path(args.pyt_ckpt_path, args.trust_remote_code)
+        apply_cast_mxfp4_to_nvfp4(language_model, source_ckpt_dir)
 
     post_quantize(
         args,

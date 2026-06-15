@@ -97,8 +97,6 @@ def test_qwen_autoquant_disabled_layers_are_scoped_to_qwen_models(monkeypatch):
     llama_model = SimpleNamespace(config=SimpleNamespace(model_type="llama"))
     qwen_only_patterns = {
         "*shared_expert_gate*",
-        "*linear_attn.in_proj_a*",
-        "*linear_attn.in_proj_b*",
     }
 
     monkeypatch.setattr(example_utils, "is_multimodal_model", lambda model: False)

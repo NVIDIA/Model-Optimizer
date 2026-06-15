@@ -1,0 +1,48 @@
+[project]
+name = "modelopt-mcp"
+version = "0.1.0"
+description = "MCP server exposing ModelOpt launcher operations (submit, status, logs) as typed tools for codex / Claude Code agents"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0",
+    # NOTE on modelopt-launcher: `tools/launcher/pyproject.toml` declares
+    # the package name as `modelopt-launcher` but configures
+    # `py-modules = []` — there is NO importable `modelopt_launcher`
+    # Python package on disk. bridge.py invokes the launcher via
+    # `uv run launch.py` (subprocess) from `<repo>/tools/launcher/` as
+    # a sibling directory; it does NOT `import modelopt_launcher`.
+    # Declaring the bare name here would add an unsatisfiable PyPI
+    # dependency for end users installing via
+    # `uvx --from "git+...#subdirectory=tools/mcp" modelopt-mcp`. So we
+    # do NOT declare it. The install relationship is documented in
+    # README.md as a sibling-checkout layout requirement instead. The
+    # uvx-from-git path satisfies this naturally because uvx clones
+    # the whole repo, putting tools/launcher and tools/mcp next to
+    # each other on disk.
+    "pyyaml",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+# Console entry. Codex / Claude Code launch this as a stdio subprocess.
+# See OMNIML-5123 for the design + acceptance criteria.
+modelopt-mcp = "modelopt_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["modelopt_mcp*"]
+
+# No [tool.uv.sources] for the launcher — bridge.py uses it via
+# `subprocess.run(["uv", "run", "launch.py", ...], cwd=<repo>/tools/launcher/)`,
+# so the launcher is a file-layout dependency, not a Python import
+# dependency. The uvx-from-git path clones the whole repo so the
+# sibling tools/launcher/ ends up on disk automatically. For dev:
+#   uv pip install -e .
+#   # then run from a clone where ../launcher exists.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

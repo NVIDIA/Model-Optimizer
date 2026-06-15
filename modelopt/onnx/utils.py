@@ -1868,14 +1868,15 @@ def clear_stale_value_info(model: onnx.ModelProto) -> int:
     Walks every ``Cast`` node and forces the ``elem_type`` of any
     ``graph.output`` entry produced by that Cast to match the Cast's ``to``
     attribute (the spec-defined contract for a Cast's output dtype). Then
-    clears ``value_info`` wholesale so ORT/shape-inference re-derives
-    intermediate-tensor types from the operator graph during session setup.
+    clears ``value_info`` so ORT/shape-inference re-derives intermediate-tensor
+    types from the operator graph during session setup -- except entries for
+    outputs of ``trt.plugins`` custom-op nodes, whose types ORT cannot infer.
 
     Args:
         model: Loaded in-memory onnx ModelProto.
 
     Returns:
-        Total number of entries reconciled or cleared.
+        Number of Cast outputs reconciled plus value_info entries cleared.
     """
     cast_to_by_output = {
         node.output[0]: get_cast_to_type(node)
@@ -1890,7 +1891,14 @@ def clear_stale_value_info(model: onnx.ModelProto) -> int:
             o.type.tensor_type.elem_type = to_attr
             fixed_outputs += 1
 
-    n_vi = len(model.graph.value_info)
-    if n_vi:
+    # Outputs of TensorRT-plugin nodes carry types ORT cannot infer so they must survive the
+    # value_info clear, otherwise ORT fails output type inference for the custom op.
+    preserve_names = {
+        out for node in model.graph.node if node.domain == "trt.plugins" for out in node.output
+    }
+    preserved = [vi for vi in model.graph.value_info if vi.name in preserve_names]
+    n_cleared = len(model.graph.value_info) - len(preserved)
+    if n_cleared:
         del model.graph.value_info[:]
-    return fixed_outputs + n_vi
+        model.graph.value_info.extend(preserved)
+    return fixed_outputs + n_cleared
