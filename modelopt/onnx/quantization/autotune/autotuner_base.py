@@ -257,16 +257,32 @@ class QDQAutotunerBase:
             logger.debug(f"Pattern signature: {region_pattern.signature}")
             return
 
-        pattern_schemes, num_seeded = self._seed_from_cache(region_pattern)
-        if pattern_schemes is None:
-            pattern_schemes = PatternSchemes()
-            pattern_schemes.pattern = region_pattern
-            logger.debug("Initialized with empty scheme collection")
+        # Check if there's a partially-profiled entry in profiled_patterns
+        # (e.g. from warm restart with reset error schemes that need retry).
+        existing_pattern_schemes = None
+        for idx, p in enumerate(self.profiled_patterns):
+            if (
+                p.pattern is not None
+                and p.pattern.matches(region, self.graph)
+                and any(not s.is_profiled for s in p.schemes)
+            ):
+                existing_pattern_schemes = self.profiled_patterns.pop(idx)
+                break
+
+        if existing_pattern_schemes is not None:
+            pattern_schemes = existing_pattern_schemes
+            num_unprofiled = sum(1 for s in pattern_schemes.schemes if not s.is_profiled)
+            mode_info = f"resuming with {num_unprofiled} schemes to retry"
+        else:
+            pattern_schemes, num_seeded = self._seed_from_cache(region_pattern)
+            if pattern_schemes is None:
+                pattern_schemes = PatternSchemes()
+                pattern_schemes.pattern = region_pattern
+                logger.debug("Initialized with empty scheme collection")
+            mode_info = f"seeded with {num_seeded} schemes" if num_seeded > 0 else "starting fresh"
 
         self.current_profile_region = region
         self.current_profile_pattern_schemes = pattern_schemes
-
-        mode_info = f"seeded with {num_seeded} schemes" if num_seeded > 0 else "starting fresh"
         logger.info(
             f"Profiling region {region.id} [level {region.level}, size"
             f"{region.get_size_of_region_and_descendants()}, {mode_info}]"
@@ -784,10 +800,21 @@ class QDQAutotunerBase:
         if "patterns" in state:
             num_loaded_patterns = 0
             num_loaded_schemes = 0
+            num_reset_errors = 0
 
             for pattern_data in state["patterns"]:
                 try:
                     pattern_schemes = PatternSchemes.from_dict(pattern_data)
+
+                    # Reset error schemes so they can be retried on warm restart.
+                    # Errors are often transient (e.g. connection loss) and should
+                    # not permanently block a scheme from being re-profiled.
+                    for scheme in pattern_schemes.schemes:
+                        if scheme.error:
+                            scheme.error = False
+                            scheme.latency_ms = float("inf")
+                            scheme.profile_timestamp = None
+                            num_reset_errors += 1
 
                     if pattern_schemes.schemes:
                         self.profiled_patterns.append(pattern_schemes)
@@ -804,7 +831,7 @@ class QDQAutotunerBase:
 
             logger.info(
                 f"Loaded state from {input_path} ({num_loaded_patterns} patterns, "
-                f"{num_loaded_schemes} schemes)"
+                f"{num_loaded_schemes} schemes, {num_reset_errors} error records reset for retry)"
             )
 
         base_path, ext = os.path.splitext(input_path)

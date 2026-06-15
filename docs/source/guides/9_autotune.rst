@@ -209,6 +209,8 @@ A long run can be interrupted (Ctrl+C, preemption, or crash) and resumed later:
 
 When rerun with the same ``--output_dir``, the autotuner detects ``autotuner_state.yaml``, restores progress, and continues from the next unprofiled region.
 
+Schemes that previously failed due to transient errors (e.g. connection loss, TensorRT build timeout) are automatically reset on warm restart and retried. This means you do not need to manually clean the state file after infrastructure failures.
+
 Custom TensorRT Plugins
 -----------------------
 
@@ -648,6 +650,7 @@ The model may not benefit from quantization:
 * Use the same ``--output_dir`` (and ``--onnx_path``) as the original run
 * Confirm ``autotuner_state.yaml`` exists in that directory
 * If the state file is corrupted, remove it and start over
+* Schemes that failed due to connection loss or transient errors are automatically retried on restart
 
 Debugging
 ---------
