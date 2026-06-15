@@ -94,7 +94,7 @@ Exported checkpoints can be deployed on [TensorRT-LLM](https://github.com/NVIDIA
 > python simple_qat_train.py --model-path meta-llama/Llama-3.2-3B --recipe general/ptq/nvfp4_default-kv_fp8
 > ```
 >
-> For multi-GPU training (FSDP2, DDP, DeepSpeed), use [train.py](train.py) with `accelerate launch` as shown in the [Run End-to-End QAT/QAD Example](#Run-End-to-End-QAT/QAD-Example) commands above.
+> For multi-GPU training (FSDP2, DDP, DeepSpeed), use [train.py](train.py) with `accelerate launch` as shown in the [commands](#qat) above.
 
 > [!TIP]
 > For more performant QAD, please refer to [examples/megatron_bridge/README.md](../megatron_bridge/README.md) for example scripts for PTQ / QAD with Megatron-Bridge which is generally more performant than the Hugging Face scripts.
