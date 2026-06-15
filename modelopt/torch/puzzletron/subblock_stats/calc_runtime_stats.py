@@ -188,6 +188,7 @@ def calc_runtime_for_subblocks(
         batch_size,
         runtime_stats_config.get("num_iters", 30),
         runtime_stats_config.get("num_warmup_iters", 10),
+        runtime_stats_config.get("gpu_memory_utilization", 0.5),
     )
 
     runtime_by_subblock_dict = {}
