@@ -112,6 +112,10 @@ class LayerActivationCollector:
       No computation or real-device allocation is performed. Tuple/list
       structure is preserved for parent code that unpacks outputs, but
       real-device inter-layer tensor operations are intentionally unsupported.
+      These meta placeholders are used unconditionally (not gated by
+      ``calib_mutates_weights``): a model whose parent ``forward`` runs
+      real-device ops on the hidden state *between* decoder blocks is not
+      supported by layerwise calibration — use non-layerwise calibration for it.
     * **run** — replay previously captured inputs through the original forward,
       ignoring whatever the parent passes in.  Only the just-calibrated layer
       uses this mode, so its output reflects updated weights.
@@ -697,6 +701,15 @@ class _CheckpointState:
                         buffers_path, map_location=layer_device, weights_only=False
                     )
                     set_quantizer_state_dict(layer, quantizer_buffers)
+                else:
+                    # restore_quantizer_state freshly registered _amax via torch.empty;
+                    # with neither file to fill it, the layer would silently carry
+                    # uninitialized buffers. Fail loudly instead.
+                    raise FileNotFoundError(
+                        f"Layer {i} checkpoint at {d} is missing both weights.pt and "
+                        "quantizer_buffers.pt; the checkpoint is incomplete. "
+                        "Use a fresh checkpoint directory."
+                    )
 
         print_rank_0(f"Checkpoint: restored {self.start_layer} previously calibrated layers")
 
