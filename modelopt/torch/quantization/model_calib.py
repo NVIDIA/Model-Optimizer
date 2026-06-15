@@ -1793,8 +1793,15 @@ def layerwise_calibrate(
     If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
     are saved after each layer completes. On restart, calibration resumes from
     the last completed layer.
+
+    ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
+    whether the cached inputs handed to layer N+1 come from a forward through
+    the just-calibrated layer with quantizers active (True; e.g. GPTQ) or
+    temporarily disabled (False; matches non-layerwise max-calib semantics).
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
+    save_every = calib_kwargs.pop("save_every", 1)
 
     if forward_loop is None:
         raise ValueError(
@@ -1812,7 +1819,11 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
-    ckpt = _CheckpointState.from_folder(checkpoint_dir, num_layers)
+    ckpt = _CheckpointState.from_folder(
+        checkpoint_dir,
+        num_layers,
+        save_every=save_every,
+    )
     start_layer = ckpt.start_layer if ckpt else 0
 
     input_getter = LayerActivationCollector(model)
@@ -1848,19 +1859,37 @@ def layerwise_calibrate(
                             kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
+            is_last = layer_idx + 1 >= num_layers
+
             with persistent_materialization(layer):
+                # qdq_from_prev=False: capture before calib_func so the forward
+                # replay uses the original FP weights. Disable quantizers too in
+                # case any pre-calibration observer behavior would perturb the
+                # captured activations.
+                if not is_last and not qdq_from_prev:
+                    with set_quantizer_by_cfg_context(
+                        layer, [{"quantizer_name": "*", "enable": False}]
+                    ):
+                        next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                            layer, forward_loop
+                        )
+                    # cache_outputs left this layer in "run" mode with an empty
+                    # deque; reset so calib_func's replay hits the real forward.
+                    layer._layerwise_calib.mode = "original"
+
                 calib_func(layer, _layer_forward_loop, **calib_kwargs)
 
-            # Run one more forward to get next layer's inputs and set
-            # output_meta on the just-calibrated layer (via "run" mode).
-            is_last = layer_idx + 1 >= num_layers
-            if not is_last:
-                next_inputs = input_getter.cache_outputs_for_next_layer_calib(layer, forward_loop)
-            else:
-                next_inputs = None
+                # qdq_from_prev=True: capture after calib_func so the next layer
+                # sees QDQ error and any in-place weight updates from this layer.
+                if not is_last and qdq_from_prev:
+                    next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                        layer, forward_loop
+                    )
+                elif is_last:
+                    next_inputs = None
 
-            if ckpt:
-                ckpt.save(layer_idx, layer, model, transformer_layers, next_inputs)
+                if ckpt:
+                    ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
             del layer_inputs
             torch.cuda.empty_cache()
@@ -1884,13 +1913,13 @@ def gptq(
 ):
     """GPTQ quantization.
 
-    Works in two modes depending on ``layerwise`` in the config:
+    Works in two modes depending on ``layerwise.enable`` in the config:
 
-    * **Layerwise** (``layerwise=True``): ``layerwise_calibrate`` calls this
-      function once per decoder layer with updated activations, producing more
-      accurate Hessian estimates.
-    * **Non-layerwise** (``layerwise=False``): called once on the full model.
-      All layers are quantized in parallel from the original activations.
+    * **Layerwise** (``layerwise.enable=True``): ``layerwise_calibrate`` calls
+      this function once per decoder layer with updated activations, producing
+      more accurate Hessian estimates.
+    * **Non-layerwise** (``layerwise.enable=False``): called once on the full
+      model. All layers are quantized in parallel from the original activations.
 
     Per-module steps:
 

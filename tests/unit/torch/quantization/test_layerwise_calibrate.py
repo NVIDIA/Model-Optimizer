@@ -16,6 +16,7 @@
 """Unit tests for layerwise_calibrate and LayerActivationCollector."""
 
 import copy
+import json
 from collections import deque
 
 import pytest
@@ -598,11 +599,13 @@ def test_cleanup_restores_original_layers(monkeypatch):
         assert not hasattr(orig, "_layerwise_calib"), f"Layer {i} still has _layerwise_calib"
 
 
-def _int8_layerwise_config(algorithm: dict) -> dict:
-    """Start from the shipped INT8 config and enable layerwise in the algorithm block.
+def _int8_cfg_with_algorithm(algorithm: dict) -> dict:
+    """Build an INT8 quant config with the given ``algorithm`` block.
 
-    Using a real shipped config guarantees the same include/exclude rules
-    production PTQ relies on, so algorithm dispatch matches real usage.
+    Starts from a real shipped INT8 config (so include/exclude rules match
+    production PTQ) and overrides only the ``algorithm`` entry. Layerwise
+    calibration runs only when ``algorithm`` sets ``layerwise={"enable": True}``;
+    a plain ``{"method": ...}`` yields the standard non-layerwise (sequential) path.
     """
     cfg = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
     cfg["algorithm"] = algorithm
@@ -640,7 +643,7 @@ def test_mtq_quantize_layerwise_e2e_max(monkeypatch):
     CUDA) or unnecessary duplication.
     """
     _register_test_discoverer(monkeypatch)
-    config = _int8_layerwise_config({"method": "max", "layerwise": True})
+    config = _int8_cfg_with_algorithm({"method": "max", "layerwise": True})
 
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=3, dim=16)
@@ -694,7 +697,7 @@ def test_mtq_quantize_layerwise_dispatches_for_algorithm(monkeypatch, algorithm)
     if algorithm == "awq_lite":
         config = _awq_layerwise_config()
     else:
-        config = _int8_layerwise_config({"method": algorithm, "layerwise": True})
+        config = _int8_cfg_with_algorithm({"method": algorithm, "layerwise": True})
 
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
@@ -713,9 +716,307 @@ def test_mtq_quantize_layerwise_raises_for_unsupported_algorithm():
     config = _svdquant_layerwise_config()
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
-    with pytest.raises(ValueError, match="does not support layerwise=True"):
+    with pytest.raises(ValueError, match="does not support layerwise.enable=True"):
         mtq.quantize(
             model,
             config,
             forward_loop=lambda m: m(torch.randint(0, 32, (2, 8))),
         )
+
+
+def _collect_amax(model):
+    return {
+        name: q._amax.clone().detach()
+        for name, q in model.named_modules()
+        if isinstance(q, TensorQuantizer) and q.is_enabled and getattr(q, "_amax", None) is not None
+    }
+
+
+def _assert_amax_close(actual, expected, label):
+    assert set(actual) == set(expected), (
+        f"Different quantizers populated for {label}: "
+        f"missing={set(expected) - set(actual)}, extra={set(actual) - set(expected)}"
+    )
+    for name in expected:
+        torch.testing.assert_close(
+            actual[name],
+            expected[name],
+            rtol=1e-5,
+            atol=1e-6,
+            msg=f"{label}: amax mismatch at {name}",
+        )
+
+
+def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
+    """Layerwise + ``get_qdq_activations_from_prev_layer=False`` must produce the
+    same per-quantizer amax as the non-layerwise (sequential) max-calibration
+    flow. Both paths feed every layer full-precision activations.
+    """
+    _register_test_discoverer(monkeypatch)
+
+    torch.manual_seed(0)
+    model_seq = _SimpleTransformerModel(n_layers=3, dim=16)
+    model_lw = copy.deepcopy(model_seq)
+    calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
+
+    def fwd(m):
+        for batch in calib_data:
+            m(batch)
+
+    mtq.quantize(model_seq, _int8_cfg_with_algorithm({"method": "max"}), forward_loop=fwd)
+    mtq.quantize(
+        model_lw,
+        _int8_cfg_with_algorithm(
+            {
+                "method": "max",
+                "layerwise": {"enable": True, "get_qdq_activations_from_prev_layer": False},
+            }
+        ),
+        forward_loop=fwd,
+    )
+
+    seq_amax = _collect_amax(model_seq)
+    assert seq_amax, "sequential calibration populated no amax values"
+    _assert_amax_close(_collect_amax(model_lw), seq_amax, "layerwise vs sequential")
+
+
+def test_layerwise_no_qdq_captures_inputs_before_calib_func_mutates_weights(monkeypatch):
+    """A destructive ``calib_func`` (zeros weights) must not affect what is
+    captured for downstream layers under ``qdq_from_prev=False`` — otherwise
+    weight-mutating algorithms (GPTQ/AWQ/SmoothQuant) silently propagate
+    updates forward and break the "identical to non-layerwise pass" contract.
+    """
+    _register_test_discoverer(monkeypatch)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+
+    def run_and_capture(calib_func):
+        torch.manual_seed(0)
+        model = _SimpleTransformerModel(n_layers=3, dim=16)
+        captured: dict[int, torch.Tensor] = {}
+        real = LayerActivationCollector.cache_outputs_for_next_layer_calib
+
+        def spy(self, layer, fwd):
+            result = real(self, layer, fwd)
+            captured[self._layer_to_idx[layer] + 1] = result[0][0][0].clone().detach()
+            return result
+
+        with monkeypatch.context() as m:
+            m.setattr(LayerActivationCollector, "cache_outputs_for_next_layer_calib", spy)
+            layerwise_calibrate(
+                model,
+                forward_loop=lambda mm: [mm(b) for b in calib_data],
+                calib_func=calib_func,
+                get_qdq_activations_from_prev_layer=False,
+            )
+        return captured
+
+    def identity(layer, fwd, **_):
+        fwd(layer)
+
+    def destructive(layer, fwd, **_):
+        fwd(layer)
+        for sub in layer.modules():
+            if isinstance(sub, nn.Linear):
+                sub.weight.data.zero_()
+
+    benign = run_and_capture(identity)
+    mutated = run_and_capture(destructive)
+
+    for i in (1, 2):
+        torch.testing.assert_close(mutated[i], benign[i], rtol=1e-5, atol=1e-6)
+
+
+def _layer_dir_names(checkpoint_dir):
+    return sorted(p.name for p in checkpoint_dir.iterdir() if p.name.startswith("layer_"))
+
+
+def test_layerwise_save_every_writes_next_inputs_only_at_window_boundaries(monkeypatch, tmp_path):
+    """With save_every=2 on a 4-layer model, every layer dir is still written
+    (so resume can replay skip layers), but ``next_inputs.pt`` — the large
+    activation cache — appears only at window boundaries.
+    """
+    _register_test_discoverer(monkeypatch)
+
+    config = _int8_cfg_with_algorithm(
+        {
+            "method": "max",
+            "layerwise": {
+                "enable": True,
+                "checkpoint_dir": str(tmp_path),
+                "save_every": 2,
+            },
+        }
+    )
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=4, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+    mtq.quantize(model, config, forward_loop=lambda m: [m(b) for b in calib_data])
+
+    # Window boundaries are layer_idx 1 and 3 -> all 4 layer dirs exist (window-save).
+    assert _layer_dir_names(tmp_path) == [
+        "layer_0000",
+        "layer_0001",
+        "layer_0002",
+        "layer_0003",
+    ]
+    # next_inputs.pt is only at the boundary layers (the resume restart points).
+    assert not (tmp_path / "layer_0000" / "next_inputs.pt").exists()
+    assert (tmp_path / "layer_0001" / "next_inputs.pt").exists()
+    assert not (tmp_path / "layer_0002" / "next_inputs.pt").exists()
+    # Last layer never has next_inputs.pt (no subsequent layer).
+    assert not (tmp_path / "layer_0003" / "next_inputs.pt").exists()
+
+
+@pytest.mark.parametrize(
+    ("n_layers", "save_every", "rewind_to"),
+    [
+        # Pins the per-call snapshot fix: each save() captures the
+        # just-calibrated layer's state before the next-layer capture forward
+        # swaps it to _SkipLayer.
+        (4, 2, 1),
+    ],
+)
+def test_layerwise_checkpoint_resume_matches_one_shot_amax(
+    monkeypatch, tmp_path, n_layers, save_every, rewind_to
+):
+    """Full run → rewind manifest → fresh resume reproduces one-shot ``_amax``.
+
+    Covers the per-window save/resume path with always-full-weight saves.
+    """
+    _register_test_discoverer(monkeypatch)
+
+    calib_data = [torch.randint(0, 32, (2, 8))]
+    forward_loop = lambda m: [m(b) for b in calib_data]  # noqa: E731
+
+    def build_cfg(ckpt_dir):
+        return _int8_cfg_with_algorithm(
+            {
+                "method": "max",
+                "layerwise": {
+                    "enable": True,
+                    "checkpoint_dir": str(ckpt_dir),
+                    "save_every": save_every,
+                },
+            }
+        )
+
+    baseline_dir = tmp_path / "baseline"
+    torch.manual_seed(0)
+    baseline_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
+    mtq.quantize(baseline_model, build_cfg(baseline_dir), forward_loop=forward_loop)
+    baseline_amax = _collect_amax(baseline_model)
+    assert baseline_amax
+
+    resume_dir = tmp_path / "resume"
+    torch.manual_seed(0)
+    setup_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
+    mtq.quantize(setup_model, build_cfg(resume_dir), forward_loop=forward_loop)
+
+    (resume_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "last_completed_layer": rewind_to,
+                "num_layers": n_layers,
+                "save_every": save_every,
+            }
+        )
+    )
+
+    torch.manual_seed(0)
+    resumed_model = _SimpleTransformerModel(n_layers=n_layers, dim=16)
+    mtq.quantize(resumed_model, build_cfg(resume_dir), forward_loop=forward_loop)
+
+    _assert_amax_close(_collect_amax(resumed_model), baseline_amax, "resume")
+
+
+def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeypatch, tmp_path):
+    """A crash inside a window must not advance ``last_completed_layer``; resume
+    re-calibrates the unfinished window from the previous boundary.
+
+    Monkeypatches ``torch.save`` to raise on the second window's first per-layer
+    write (layer 2), then asserts the on-disk manifest still points at layer 1
+    (the previous boundary).
+    """
+    _register_test_discoverer(monkeypatch)
+
+    cfg = _int8_cfg_with_algorithm(
+        {
+            "method": "max",
+            "layerwise": {
+                "enable": True,
+                "checkpoint_dir": str(tmp_path),
+                "save_every": 2,
+            },
+        }
+    )
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=4, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+
+    real_torch_save = torch.save
+    state = {"crashed": False}
+
+    def crashing_torch_save(obj, path, *args, **kwargs):
+        # Crash on the first per-layer file write for layer 2 (mid-window).
+        if not state["crashed"] and "layer_0002" in str(path):
+            state["crashed"] = True
+            raise RuntimeError("simulated crash during layer 2 save")
+        return real_torch_save(obj, path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.utils.layerwise_calib.torch.save",
+        crashing_torch_save,
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        mtq.quantize(model, cfg, forward_loop=lambda m: [m(b) for b in calib_data])
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["last_completed_layer"] == 1, f"manifest leaked mid-window state: {manifest}"
+
+
+def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
+    """Resuming with a different ``save_every`` than the checkpoint was produced
+    with must raise — the on-disk window layout assumes a fixed value.
+    """
+    _register_test_discoverer(monkeypatch)
+
+    cfg_first = _int8_cfg_with_algorithm(
+        {
+            "method": "max",
+            "layerwise": {
+                "enable": True,
+                "checkpoint_dir": str(tmp_path),
+                "save_every": 2,
+            },
+        }
+    )
+    torch.manual_seed(0)
+    model = _SimpleTransformerModel(n_layers=4, dim=16)
+    calib_data = [torch.randint(0, 32, (2, 8))]
+    mtq.quantize(model, cfg_first, forward_loop=lambda m: [m(b) for b in calib_data])
+
+    # Rewind manifest so the second run sees an in-progress resume,
+    # then change save_every to trigger the mismatch check.
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "last_completed_layer": 1,
+                "num_layers": 4,
+                "save_every": 2,
+            }
+        )
+    )
+    cfg_mismatched = _int8_cfg_with_algorithm(
+        {
+            "method": "max",
+            "layerwise": {
+                "enable": True,
+                "checkpoint_dir": str(tmp_path),
+                "save_every": 4,
+            },
+        }
+    )
+    torch.manual_seed(0)
+    fresh_model = _SimpleTransformerModel(n_layers=4, dim=16)
+    with pytest.raises(ValueError, match="save_every mismatch"):
+        mtq.quantize(fresh_model, cfg_mismatched, forward_loop=lambda m: [m(b) for b in calib_data])
