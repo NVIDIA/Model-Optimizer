@@ -95,7 +95,12 @@ from datasets import get_dataset_config_names, get_dataset_split_names, load_dat
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
 
-from modelopt.torch.utils import num2hrb
+from modelopt.torch.utils import (
+    REASONING_CONTENT_MODES,
+    ReasoningContentMode,
+    num2hrb,
+    prepare_messages_for_chat_template,
+)
 
 __all__ = ["megatron_preprocess_data"]
 
@@ -121,7 +126,7 @@ class _Encoder:
         json_keys: list[str],
         append_eod: bool,
         max_sequence_length: int | None,
-        reasoning_content: str = "strip",
+        reasoning_content: ReasoningContentMode = "strip",
         strip_newlines: bool = False,
     ):
         self.tokenizer_name_or_path = tokenizer_name_or_path
@@ -159,53 +164,11 @@ class _Encoder:
         - ``"native"``: pass messages unchanged; the tokenizer's chat template must
           handle ``reasoning_content`` itself (e.g. Qwen3).
         """
-        if self.reasoning_content == "native":
-            return messages
-
-        def _fix_arguments(args):
-            """Ensure tool_call.arguments is a dict for Jinja2 |items compatibility."""
-            if isinstance(args, dict):
-                return args
-            if isinstance(args, str):
-                try:
-                    parsed = json.loads(args)
-                    return parsed if isinstance(parsed, dict) else {}
-                except (json.JSONDecodeError, TypeError):
-                    return {}
-            return {}
-
-        processed = []
-        for msg in messages:
-            has_tool_calls = "tool_calls" in msg and isinstance(msg.get("tool_calls"), list)
-            needs_copy = "reasoning_content" in msg or has_tool_calls
-            if not needs_copy:
-                processed.append(msg)
-                continue
-            msg = dict(msg)  # shallow copy — don't mutate the original
-            rc = msg.pop("reasoning_content", None)
-            if self.reasoning_content == "inline" and rc:
-                msg["content"] = f"<think>\n{rc}\n</think>\n{msg.get('content', '')}"
-            # Always normalize tool_call.arguments to dict so Jinja2 |items doesn't crash.
-            # The Nemotron v3 chat template reassigns tool_call = tool_call.function when
-            # the nested OpenAI format is used, so we fix both the direct and nested levels.
-            if has_tool_calls:
-                fixed_tool_calls = []
-                for tc in msg["tool_calls"]:
-                    if not isinstance(tc, dict):
-                        fixed_tool_calls.append(tc)
-                        continue
-                    tc = dict(tc)
-                    if "arguments" in tc and not isinstance(tc["arguments"], dict):
-                        tc["arguments"] = _fix_arguments(tc["arguments"])
-                    if isinstance(tc.get("function"), dict):
-                        fn = dict(tc["function"])
-                        if "arguments" in fn and not isinstance(fn["arguments"], dict):
-                            fn["arguments"] = _fix_arguments(fn["arguments"])
-                        tc["function"] = fn
-                    fixed_tool_calls.append(tc)
-                msg["tool_calls"] = fixed_tool_calls
-            processed.append(msg)
-        return processed
+        return prepare_messages_for_chat_template(
+            messages,
+            reasoning_content=self.reasoning_content,
+            normalize_tool_calls=self.reasoning_content != "native",
+        )
 
     def encode(self, json_line: str):
         try:
@@ -489,7 +452,7 @@ def megatron_preprocess_data(
     max_sequence_length: int | None = None,
     workers: int = 1,
     log_interval: int = 100000,
-    reasoning_content: str = "strip",
+    reasoning_content: ReasoningContentMode = "strip",
     strip_newlines: bool = False,
 ):
     """Process large data for pretraining.
@@ -658,7 +621,7 @@ def main():
         "--reasoning_content",
         type=str,
         default="strip",
-        choices=["strip", "inline", "native"],
+        choices=sorted(REASONING_CONTENT_MODES),
         help=(
             "How to handle the reasoning_content field in Nemotron v3 datasets. "
             "'strip': discard (default, safe for any tokenizer). "

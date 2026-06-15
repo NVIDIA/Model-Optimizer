@@ -161,9 +161,14 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/nvfp4_default-kv_nvfp4_cast",
     "general/ptq/nvfp4_default-kv_none-gptq",
     "general/ptq/nvfp4_experts_only-kv_fp8",
+    "general/ptq/nvfp4_experts_only-kv_fp8_cast",
     "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
     "general/ptq/nvfp4_mlp_only-kv_fp8",
+    "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
     "general/ptq/nvfp4_omlp_only-kv_fp8",
+    "general/ptq/nvfp4_omlp_only-kv_fp8_cast",
+    "general/ptq/nvfp4_weight_only-kv_fp16",
+    "general/ptq/nvfp4_weight_only-kv_fp8_cast",
 ]
 
 
@@ -174,6 +179,22 @@ def test_load_recipe_all_builtins(recipe_path):
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
     assert recipe.quantize
+
+
+def test_nvfp4_weight_only_recipe_disables_vllm_marlin_incompatible_projections():
+    recipe = load_recipe("general/ptq/nvfp4_weight_only-kv_fp16")
+    disabled_quantizers = {
+        entry["quantizer_name"]
+        for entry in recipe.quantize.model_dump()["quant_cfg"]
+        if entry.get("enable") is False
+    }
+
+    assert {
+        "*linear_attn.in_proj_a*",
+        "*linear_attn.in_proj_b*",
+        "*visual*",
+        "*vision_tower*",
+    } <= disabled_quantizers
 
 
 # ---------------------------------------------------------------------------

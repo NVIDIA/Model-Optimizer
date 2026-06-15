@@ -66,7 +66,14 @@ def run(args):
 
     print("TensorRT-LLM example outputs:")
 
-    llm = LLM(args.checkpoint_dir, tokenizer=tokenizer, max_batch_size=len(input_texts))
+    # generate_context_logits() below requires KV cache reuse disabled: with prefix block reuse,
+    # shared-prefix inputs return truncated (silently incorrect) context logits.
+    llm = LLM(
+        args.checkpoint_dir,
+        tokenizer=tokenizer,
+        max_batch_size=len(input_texts),
+        enable_kv_cache_reuse=False,
+    )
     torch.cuda.cudart().cudaProfilerStart()
     outputs = llm.generate_text(input_texts, args.max_output_len)
     torch.cuda.cudart().cudaProfilerStop()

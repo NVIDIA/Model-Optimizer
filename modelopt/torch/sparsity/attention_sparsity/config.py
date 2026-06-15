@@ -155,6 +155,16 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    initial_disabled_steps: int = ModeloptField(
+        default=0,
+        title="Initial disabled steps.",
+        description=(
+            "User-specified number of initial disabled steps recorded in the exported "
+            "sparse attention config. Passed straight through; not interpreted by "
+            "sparsify or calibration; only written to the checkpoint when > 0."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):

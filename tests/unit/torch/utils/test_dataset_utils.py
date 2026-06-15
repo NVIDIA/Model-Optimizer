@@ -25,12 +25,38 @@ from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
     _disable_use_cache,
     _forward_loop,
+    _iter_use_cache_configs,
     _pack_documents_into_rows,
     _process_batch,
     get_dataset_dataloader,
     get_dataset_samples,
     get_max_batch_size,
+    prepare_messages_for_chat_template,
 )
+
+
+def test_prepare_messages_for_chat_template():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "think",
+            "tool_calls": [
+                {"function": {"name": "search", "arguments": '{"q": "x"}'}},
+            ],
+        },
+    ]
+    prepared = prepare_messages_for_chat_template(
+        messages, reasoning_content="native", normalize_tool_calls=True
+    )
+    assert prepared[0]["reasoning_content"] == "think"
+    assert prepared[0]["tool_calls"][0]["function"]["arguments"] == {"q": "x"}
+    assert (
+        prepare_messages_for_chat_template(
+            messages, reasoning_content="native", normalize_tool_calls=False
+        )
+        is messages
+    )
 
 
 def setup_test_data():
@@ -195,6 +221,45 @@ def test_disable_use_cache_without_existing_attr():
         assert model.config.use_cache is False
 
     assert not hasattr(model.config, "use_cache")
+
+
+@pytest.mark.parametrize("prev_value", [True, False])
+def test_disable_use_cache_with_nested_text_config_existing_attr(prev_value):
+    """Nested text config `use_cache` is disabled and restored."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = _Config()
+    model.config.text_config.use_cache = prev_value
+
+    with _disable_use_cache(model):
+        assert model.config.use_cache is False
+        assert model.config.text_config.use_cache is False
+
+    assert not hasattr(model.config, "use_cache")
+    assert model.config.text_config.use_cache is prev_value
+
+
+def test_disable_use_cache_with_nested_text_config_without_existing_attr():
+    """Nested text config `use_cache` is removed if it was added by the context."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = _Config()
+
+    with _disable_use_cache(model):
+        assert model.config.use_cache is False
+        assert model.config.text_config.use_cache is False
+
+    assert not hasattr(model.config, "use_cache")
+    assert not hasattr(model.config.text_config, "use_cache")
+
+
+def test_iter_use_cache_configs_deduplicates_text_config_alias():
+    """The same config object is patched once if `config.text_config is config`."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = model.config
+
+    assert list(_iter_use_cache_configs(model)) == [model.config]
 
 
 def test_forward_loop_runs_under_disabled_use_cache():

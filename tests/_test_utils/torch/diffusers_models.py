@@ -42,6 +42,16 @@ try:
 except Exception:  # pragma: no cover - optional diffusers models
     AutoencoderKLWan = None
 
+try:
+    from diffusers.models.transformers import QwenImageTransformer2DModel
+except Exception:  # pragma: no cover - optional diffusers models
+    QwenImageTransformer2DModel = None
+
+try:
+    from diffusers.models.autoencoders import AutoencoderKLQwenImage
+except Exception:  # pragma: no cover - optional diffusers models
+    AutoencoderKLQwenImage = None
+
 import modelopt.torch.opt as mto
 
 
@@ -248,5 +258,122 @@ def create_tiny_wan22_pipeline_dir(tmp_path: Path) -> Path:
     )
 
     save_dir = tmp_path / "tiny_wan22"
+    pipe.save_pretrained(save_dir)
+    return save_dir
+
+
+def get_tiny_qwen_image_transformer(**config_kwargs):
+    """Create a tiny QwenImageTransformer2DModel for testing.
+
+    Scaled down from the real Qwen-Image config (60 layers, 24 heads, head_dim 128,
+    joint_attention_dim 3584). Two constraints to keep in mind:
+    - ``axes_dims_rope`` must sum to ``attention_head_dim``.
+    - ``joint_attention_dim`` must match the text-embedding dim the model is fed. In
+      the DMD2 mock-data training path that is the *dataloader's* ``text_embed_dim``
+      (the bundled text encoder is bypassed), so pair this with
+      ``--data.dataloader.text_embed_dim=<joint_attention_dim>``.
+    """
+    if QwenImageTransformer2DModel is None:
+        pytest.skip("QwenImageTransformer2DModel is not available in this diffusers version.")
+
+    kwargs = {
+        "patch_size": 2,
+        "in_channels": 64,  # vae z_dim (16) * 2x2 patch
+        "out_channels": 16,  # = vae z_dim
+        "num_layers": 2,
+        "attention_head_dim": 16,
+        "num_attention_heads": 2,  # hidden_dim = 32
+        "joint_attention_dim": 32,
+        "pooled_projection_dim": 32,
+        "guidance_embeds": False,
+        "axes_dims_rope": (8, 4, 4),  # sums to attention_head_dim (16)
+    }
+    kwargs.update(**config_kwargs)
+    return QwenImageTransformer2DModel(**kwargs)
+
+
+def get_tiny_qwen_image_vae(**config_kwargs):
+    """Create a tiny AutoencoderKLQwenImage for testing (z_dim=16 to match the transformer)."""
+    if AutoencoderKLQwenImage is None:
+        pytest.skip("AutoencoderKLQwenImage is not available in this diffusers version.")
+
+    kwargs = {
+        "base_dim": 8,
+        "z_dim": 16,  # = transformer out_channels
+        "dim_mult": [1, 2],
+        "num_res_blocks": 1,
+        "temperal_downsample": [True],  # len == len(dim_mult) - 1
+        "attn_scales": [],
+        "latents_mean": [0.0] * 16,  # length must == z_dim
+        "latents_std": [1.0] * 16,
+    }
+    kwargs.update(**config_kwargs)
+    return AutoencoderKLQwenImage(**kwargs)
+
+
+def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:
+    """Create and save a tiny Qwen-Image pipeline to a directory (SKETCH).
+
+    Mirrors ``create_tiny_wan22_pipeline_dir``. Needs in-container validation; the
+    fragile piece is the Qwen2.5-VL text encoder. This prefers a tiny-random HF model
+    (as Wan uses ``hf-internal-testing/tiny-random-t5``); if that id drifts or the
+    config schema differs across transformers versions, copy the text-encoder
+    construction from diffusers' own QwenImage fast test
+    (``tests/pipelines/qwenimage/test_qwenimage.py``).
+
+    For the DMD2 mock-data training path the transformer consumes the dataloader's
+    embeddings rather than the text encoder, so the bundled tiny text encoder only
+    needs to load; its hidden size is intentionally decoupled from the transformer's
+    ``joint_attention_dim`` (set the dataloader's ``text_embed_dim`` to match instead).
+    The saved dir loads with ``QwenImagePipeline.from_pretrained(path)``.
+    """
+    if QwenImageTransformer2DModel is None or AutoencoderKLQwenImage is None:
+        pytest.skip("QwenImage diffusers classes not available in this diffusers version.")
+    from diffusers import FlowMatchEulerDiscreteScheduler, QwenImagePipeline
+
+    transformers = pytest.importorskip("transformers")
+
+    # Tiny Qwen2.5-VL text encoder + matching Qwen2 tokenizer (loaded, but bypassed
+    # during DMD2 mock-data training).
+    # NOTE (validated 2026-06-06): the hf-internal-testing id below does NOT exist on the
+    # Hub, so this fixture currently skips. To make the recipe e2e runnable in CI,
+    # construct the encoder inline from a tiny ``Qwen2_5_VLConfig`` (nested text + vision
+    # config) — mirror diffusers' ``QwenImagePipelineFastTests.get_dummy_components`` in
+    # ``tests/pipelines/qwenimage/test_qwenimage.py``.
+    tiny_id = "hf-internal-testing/tiny-random-Qwen2_5_VLForConditionalGeneration"
+    try:
+        text_encoder = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(tiny_id)
+        tokenizer = transformers.Qwen2Tokenizer.from_pretrained(tiny_id)
+    except Exception as exc:  # pragma: no cover - depends on hub availability / version
+        pytest.skip(
+            f"tiny Qwen2.5-VL text encoder unavailable ({exc}); "
+            "copy the fixture from diffusers' QwenImage fast test"
+        )
+
+    torch.manual_seed(0)
+    transformer = get_tiny_qwen_image_transformer()
+    torch.manual_seed(0)
+    vae = get_tiny_qwen_image_vae()
+
+    scheduler = FlowMatchEulerDiscreteScheduler(
+        base_image_seq_len=256,
+        base_shift=0.5,
+        max_image_seq_len=8192,
+        max_shift=0.9,
+        num_train_timesteps=1000,
+        shift=1.0,
+        shift_terminal=0.02,
+        use_dynamic_shifting=True,
+        time_shift_type="exponential",
+    )
+
+    pipe = QwenImagePipeline(
+        transformer=transformer,
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        scheduler=scheduler,
+    )
+    save_dir = tmp_path / "tiny_qwen_image"
     pipe.save_pretrained(save_dir)
     return save_dir

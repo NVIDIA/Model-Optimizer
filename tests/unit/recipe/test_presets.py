@@ -68,6 +68,21 @@ def test_kv_none_sentinel_is_not_a_discovered_preset():
     assert presets.KV_CACHE_NONE not in presets.KV_QUANT_CFG_CHOICES
 
 
+def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
+    disabled_quantizers = {
+        entry["quantizer_name"]
+        for entry in presets.QUANT_CFG_CHOICES["w4a16_nvfp4"]["quant_cfg"]
+        if entry.get("enable") is False
+    }
+
+    assert {
+        "*linear_attn.in_proj_a*",
+        "*linear_attn.in_proj_b*",
+        "*visual*",
+        "*vision_tower*",
+    } <= disabled_quantizers
+
+
 def test_load_quant_cfg_choices_rejects_stale_alias():
     with pytest.raises(ValueError, match="does-not-exist"):
         presets.load_quant_cfg_choices(
