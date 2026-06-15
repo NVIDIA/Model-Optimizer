@@ -16,9 +16,13 @@
 # dir containing model.safetensors), e.g. the output of hf_online_dflash.yaml.
 #
 # Usage:
-#   Edit the two --draft_model_dir args to point at your exported draft checkpoint
-#   (an exported-checkpoint-* dir with model.safetensors), then:
+#   Edit the two --draft_model_dir args to point at your exported draft checkpoint, then:
 #   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/MiniMax/MiniMax-M2.7-DFlash/specdec_bench.yaml --yes
+#
+# NOTE: the placeholder below is `exported-checkpoint-final` — that dir is written by the
+# training launcher's post-run export (dflash_online_training.sh) for the final model. The
+# per-save DFlashFSDP2ShardedSDExportCallback instead writes `exported-checkpoint-<step>`
+# dirs; to bench a specific intermediate step, point at one of those.
 
 job_name: MiniMax-M2.7-DFlash_specdec_bench
 pipeline:

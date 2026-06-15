@@ -25,6 +25,9 @@ See https://docs.vllm.ai/en/stable/features/speculative_decoding/extract_hidden_
 """
 
 import argparse
+import atexit
+import os
+import shutil
 from pathlib import Path
 
 import torch
@@ -44,22 +47,26 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 )
 
 
-def _resolve_aux_layers_standalone(aux_layers: str, num_hidden_layers: int) -> list[int]:
+def _resolve_aux_layers_standalone(
+    aux_layers: str, num_hidden_layers: int, num_draft: int = 5
+) -> list[int]:
     """Resolve aux-layer ids without importing modelopt.
 
     This dump runs in a stock vLLM container. ``common.resolve_aux_layers`` resolves the
     'dflash'/'eagle' presets by importing ``modelopt.torch.speculative.plugins`` — which
     pulls in the full ``modelopt.torch`` init chain (omegaconf, etc.) that the vLLM
     container does not have, so the import fails. Resolve the 'dflash' preset inline
-    (mirroring ``modeling_dflash.build_target_layer_ids`` with num_draft=5, the recipe
-    default) and accept an explicit comma-separated int list. Keep in sync with modelopt.
+    (mirroring ``modeling_dflash.build_target_layer_ids`` for ``num_draft`` draft layers)
+    and accept an explicit comma-separated int list. ``num_draft`` MUST match the recipe's
+    ``dflash.dflash_architecture_config.num_hidden_layers`` (pass --num-draft-layers) or the
+    dumped aux layers silently mis-align with what the draft consumes at training time.
+    Keep in sync with modelopt.
 
     TODO: drop this once ``common.resolve_aux_layers`` is decoupled from the heavy
     ``modelopt.torch`` import chain so it can be reused directly in a vLLM container.
     """
     spec = aux_layers.strip().lower()
     if spec == "dflash":
-        num_draft = 5
         if num_draft == 1:
             return [num_hidden_layers // 2]
         start = min(1, num_hidden_layers - 1)
@@ -107,6 +114,13 @@ def parse_args() -> argparse.Namespace:
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
     )
     add_aux_layers_args(parser)
+    parser.add_argument(
+        "--num-draft-layers",
+        type=int,
+        default=5,
+        help="DFlash draft depth, for resolving the 'dflash' --aux-layers preset. MUST match "
+        "the recipe's dflash.dflash_architecture_config.num_hidden_layers (default: 5).",
+    )
     add_answer_only_loss_args(parser)
 
     return parser.parse_args()
@@ -157,7 +171,9 @@ def main(args: argparse.Namespace) -> None:
     num_hidden_layers = getattr(config, "num_hidden_layers", None)
     if num_hidden_layers is None:
         raise ValueError(f"model config has no 'num_hidden_layers' attribute: {config}")
-    aux_layer_ids = _resolve_aux_layers_standalone(args.aux_layers, num_hidden_layers)
+    aux_layer_ids = _resolve_aux_layers_standalone(
+        args.aux_layers, num_hidden_layers, num_draft=args.num_draft_layers
+    )
     # The trailing entry is the final output hidden state; the rest are aux layers.
     extract_layer_ids = [*aux_layer_ids, num_hidden_layers]
     print(f"Extracting hidden states from layers {extract_layer_ids} (last = final output)")
@@ -220,9 +236,13 @@ def main(args: argparse.Namespace) -> None:
     # Stage the connector's intermediate safetensors on local tmpfs, not the (lustre)
     # output dir: the producer writes one file per request and the client reads it back
     # immediately, so a fast local path avoids cross-node FS latency. Per-DP-rank dir so
-    # parallel shards don't collide.
-    storage_path = Path("/dev/shm") / f"vllm_hidden_states_dp{args.dp_rank}"
+    # parallel shards don't collide. Overridable via DFLASH_HS_STAGING_DIR for containers
+    # where /dev/shm is unmapped or undersized; cleaned up on exit so a crash doesn't strand
+    # RAM-backed files until the node reboots.
+    staging_root = os.environ.get("DFLASH_HS_STAGING_DIR", "/dev/shm")
+    storage_path = Path(staging_root) / f"vllm_hidden_states_dp{args.dp_rank}"
     storage_path.mkdir(parents=True, exist_ok=True)
+    atexit.register(lambda p=storage_path: shutil.rmtree(p, ignore_errors=True))
 
     llm = LLM(
         model=args.model,
