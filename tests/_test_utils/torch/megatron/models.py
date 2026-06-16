@@ -149,6 +149,7 @@ def get_mcore_gpt_model(
     moe_grouped_gemm: bool = False,
     moe_ffn_hidden_size: int | None = None,
     moe_shared_expert_intermediate_size: int | None = None,
+    moe_latent_size: int | None = None,
     num_moe_experts: int | None = None,
     # Experimental attention variant (e.g. "gated_delta_net" for Qwen3.5-style hybrid GatedDeltaNet
     # + gated full-attention layers). When set, the experimental block spec is used.
@@ -161,6 +162,9 @@ def get_mcore_gpt_model(
     assert activation_func in ["swiglu", "squared_relu"]
     assert normalization in ["LayerNorm", "RMSNorm"]
     assert transformer_impl in ["local", "transformer_engine", "modelopt"]
+    assert not (multi_latent_attention and experimental_attention_variant is not None), (
+        "multi_latent_attention and experimental_attention_variant are mutually exclusive."
+    )
     print(f"Using `{transformer_impl=}` model spec for building GPT Model.")
 
     config_cls = TransformerConfig
@@ -229,6 +233,7 @@ def get_mcore_gpt_model(
         moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
+        moe_latent_size=moe_latent_size,
         moe_router_enable_expert_bias=True,
         moe_router_score_function="sigmoid",
         num_moe_experts=num_moe_experts,

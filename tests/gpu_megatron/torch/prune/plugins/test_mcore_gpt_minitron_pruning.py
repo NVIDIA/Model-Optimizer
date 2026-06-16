@@ -26,6 +26,7 @@ from _test_utils.torch.misc import compare_outputs, set_seed
 from _test_utils.torch.nas_prune.minitron_common import prune_minitron
 from megatron.core.transformer.attention import SelfAttention
 from megatron.core.transformer.identity_op import IdentityOp
+from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 
 import modelopt.torch.nas as mtn
@@ -38,6 +39,56 @@ from modelopt.torch.prune.plugins.mcore_minitron import (
 )
 
 SEED = 1234
+
+
+def _make_forward_loop(batch_size, hidden_size, num_iters=5):
+    """Return a forward_loop that runs dummy-input inference a few times (for activation collection)."""
+
+    def forward_loop(m):
+        for _ in range(num_iters):
+            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
+
+    return forward_loop
+
+
+def _sort_and_capture(
+    model, minitron_config, *, num_forward, vocab_size, max_sequence_length, batch_size
+):
+    """Convert ``model`` to a dynamic space, collect activations, sort by importance, and capture I/O.
+
+    Randomizes layernorm weights (so importance is non-trivial), runs ``num_forward`` dummy-input
+    passes, then sorts. Returns ``(dynamic_space, baseline_output, prompt_tokens)`` so callers can
+    assert which hparams were sorted and that sorting preserves the output.
+    """
+    # Randomize layernorm weights instead of all zeros or ones
+    for n, m in model.named_modules():
+        if "layernorm" in n and not isinstance(m, IdentityOp):
+            m.weight.data = torch.randn_like(m.weight)
+
+    model.eval()
+    dynamic_space = _convert_model_to_dynamic_space(model, minitron_config)
+    registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
+
+    for _ in range(num_forward):
+        run_mcore_inference_with_dummy_input(model, batch_size)
+
+    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
+    baseline_output = run_mcore_inference(model, prompt_tokens)
+
+    mtn.utils.sort_parameters(model)
+    registry.cleanup()
+    return dynamic_space, baseline_output, prompt_tokens
+
+
+def _assert_reprune_matches(
+    get_model, sd, constraints, ckpt_dir, channel_divisor, prompt_tokens, output, pruned_hidden_size
+):
+    """Re-prune a fresh model from the saved scores checkpoint (no forward loop) and assert it matches."""
+    model_rerun = get_model(initialize_megatron=False)
+    model_rerun.load_state_dict(sd)
+    prune_minitron(model_rerun, constraints, {"checkpoint": ckpt_dir}, channel_divisor)
+    output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
+    assert torch.allclose(output, output_rerun, atol=1e-5)
 
 
 def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
@@ -70,30 +121,16 @@ def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
         bf16=False,
     ).cuda()
 
-    # Randomize layernorm weights instead of all zeros or ones
-    for n, m in model.named_modules():
-        if "layernorm" in n and not isinstance(m, IdentityOp):
-            m.weight.data = torch.randn_like(m.weight)
-
-    model.eval()
-    dynamic_space = _convert_model_to_dynamic_space(
+    dynamic_space, y1, prompt_tokens = _sort_and_capture(
         model,
         get_mcore_minitron_config(
             hidden_size_divisor=channel_divisor, ffn_hidden_size_divisor=channel_divisor
         ),
+        num_forward=5,
+        vocab_size=vocab_size,
+        max_sequence_length=max_sequence_length,
+        batch_size=batch_size,
     )
-    registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
-
-    # Compute activations for sorting
-    for _ in range(5):
-        run_mcore_inference_with_dummy_input(model, batch_size)
-
-    # Get the output of the original model
-    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
-    y1 = run_mcore_inference(model, prompt_tokens)
-
-    mtn.utils.sort_parameters(model)
-    registry.cleanup()
 
     # check if all ffn_hidden_size, num_attention_heads, hidden_size have been sorted
     sortable_per_pp = [
@@ -104,8 +141,6 @@ def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
 
     # sanity check if the model functionality is preserved after sorting
     y2 = run_mcore_inference(model, prompt_tokens)
-
-    # check if the inference results after sorting is the same
     compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
 
 
@@ -181,9 +216,7 @@ def _test_mcore_gpt_pruning(
     model = _get_model()
     sd = model.state_dict()
 
-    def forward_loop(m):
-        for _ in range(5):
-            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
+    forward_loop = _make_forward_loop(batch_size, hidden_size)
 
     pruned_ffn = ffn_hidden_size // pruned_ffn_div
     pruned_num_attention_heads = num_attention_heads // pruned_num_attention_heads_div
@@ -244,14 +277,16 @@ def _test_mcore_gpt_pruning(
 
     # Assert re-pruning from checkpoint works without running the forward loop again
     if ckpt_dir:
-        model_rerun = _get_model(initialize_megatron=False)
-        model_rerun.load_state_dict(sd)
-        model_rerun, pruning_scores = prune_minitron(
-            model_rerun, constraints, {"checkpoint": ckpt_dir}, channel_divisor
+        _assert_reprune_matches(
+            _get_model,
+            sd,
+            constraints,
+            ckpt_dir,
+            channel_divisor,
+            prompt_tokens,
+            output,
+            pruned_hidden_size,
         )
-
-        output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
-        assert torch.allclose(output, output_rerun, atol=1e-5)
 
 
 @pytest.mark.parametrize(
@@ -351,32 +386,18 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
         bf16=False,
     ).cuda()
 
-    # Randomize layernorm weights instead of all zeros or ones
-    for n, m in model.named_modules():
-        if "layernorm" in n and not isinstance(m, IdentityOp):
-            m.weight.data = torch.randn_like(m.weight)
-
-    model.eval()
-    dynamic_space = _convert_model_to_dynamic_space(
+    dynamic_space, y1, prompt_tokens = _sort_and_capture(
         model,
         get_mcore_minitron_config(
             hidden_size_divisor=channel_divisor,
             ffn_hidden_size_divisor=channel_divisor,
             num_moe_experts_divisor=1,
         ),
+        num_forward=10,
+        vocab_size=vocab_size,
+        max_sequence_length=max_sequence_length,
+        batch_size=batch_size,
     )
-    registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
-
-    # Compute activations for sorting
-    for _ in range(10):
-        run_mcore_inference_with_dummy_input(model, batch_size)
-
-    # Get the output of the original model
-    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
-    y1 = run_mcore_inference(model, prompt_tokens)
-
-    mtn.utils.sort_parameters(model)
-    registry.cleanup()
 
     # check if all num_moe_experts, moe_ffn, moe_shared_ffn, num_attention_heads, hidden_size
     # have been sorted
@@ -390,8 +411,6 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
     # sanity check if the model functionality is preserved after sorting
     export_searchspace(model, mtn.get_subnet_config(model))
     y2 = run_mcore_inference(model, prompt_tokens)
-
-    # check if the inference results after sorting is the same
     compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
 
 
@@ -431,9 +450,7 @@ def _test_mcore_gpt_pruning_moe(ckpt_dir, rank, size):
     model = _get_model()
     sd = model.state_dict()
 
-    def forward_loop(m):
-        for _ in range(5):
-            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
+    forward_loop = _make_forward_loop(batch_size, hidden_size)
 
     pruned_hidden_size = hidden_size // 2
     pruned_moe_ffn = moe_ffn_hidden_size // 2
@@ -486,62 +503,72 @@ def _test_mcore_gpt_pruning_moe(ckpt_dir, rank, size):
     output = run_mcore_inference(model, prompt_tokens, pruned_hidden_size)
 
     # Assert re-pruning from checkpoint works without running the forward loop again
-    model_rerun = _get_model(initialize_megatron=False)
-    model_rerun.load_state_dict(sd)
-    prune_minitron(model_rerun, constraints, {"checkpoint": ckpt_dir}, channel_divisor)
-
-    output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
-    assert torch.allclose(output, output_rerun, atol=1e-5)
+    _assert_reprune_matches(
+        _get_model,
+        sd,
+        constraints,
+        ckpt_dir,
+        channel_divisor,
+        prompt_tokens,
+        output,
+        pruned_hidden_size,
+    )
 
 
 def test_mcore_gpt_pruning_moe(dist_workers, tmp_path):
     dist_workers.run(partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores"))
 
 
-def _test_mcore_qwen35_gdn_moe_pruning(rank, size):
-    # Qwen3.5-like hybrid MoE LM: GatedDeltaNet + gated full-attention layers. Only hidden_size,
-    # moe_ffn_hidden_size, moe_shared_expert_intermediate_size and num_moe_experts are pruned;
-    # attention/GDN internal heads and the fused output gate are kept.
-    set_seed(SEED)
-    hidden_size = ffn_hidden_size = 64
-    vocab_size, max_sequence_length, batch_size, channel_divisor = 64, 16, 2, 16
-    # 2 layers per pipeline stage (linear_attention_freq=2 -> 1 GatedDeltaNet + 1 gated attention)
-    num_layers = min(size * 2, 8)
+def _build_and_prune_variant(size, export_config, *, num_attention_heads=4, **model_kwargs):
+    """Build a tiny RMSNorm/TE variant model, prune it per ``export_config`` and sanity-check forward.
 
+    Shared scaffolding for the hidden_size-pruning attention/MoE variant tests below; returns the
+    pruned model so each test asserts its variant-specific shapes. ``model_kwargs`` selects the
+    variant (e.g. ``experimental_attention_variant``, ``multi_latent_attention``, ``moe_latent_size``).
+    """
+    set_seed(SEED)
+    hidden_size, vocab_size, max_seq, batch_size, channel_divisor = 64, 64, 16, 2, 16
     model = get_mcore_gpt_model(
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
-        num_layers=num_layers,
+        num_layers=min(size * 2, 8),
         hidden_size=hidden_size,
-        num_attention_heads=4,
-        num_query_groups=2,
-        ffn_hidden_size=ffn_hidden_size,
+        num_attention_heads=num_attention_heads,
+        max_sequence_length=max_seq,
         vocab_size=vocab_size,
-        max_sequence_length=max_sequence_length,
         normalization="RMSNorm",
+        transformer_impl="transformer_engine",
+        **model_kwargs,
+    ).cuda()
+
+    forward_loop = _make_forward_loop(batch_size, hidden_size)
+    model, _ = prune_minitron(
+        model, {"export_config": export_config}, {"forward_loop": forward_loop}, channel_divisor
+    )
+
+    # Sanity-check forward pass on the pruned model
+    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_seq)).cuda()
+    run_mcore_inference(model, prompt_tokens, export_config["hidden_size"])
+    return model
+
+
+def _test_mcore_qwen35_gdn_moe_pruning(rank, size):
+    # Qwen3.5-like hybrid MoE LM: GatedDeltaNet + gated full-attention layers. Only hidden_size and
+    # MoE dims are pruned; attention/GDN internal heads and the fused output gate are kept.
+    pruned_hidden, pruned_moe_ffn, pruned_moe_shared, pruned_experts = 32, 16, 32, 2
+    model = _build_and_prune_variant(
+        size,
+        {
+            "hidden_size": pruned_hidden,
+            "moe_ffn_hidden_size": pruned_moe_ffn,
+            "moe_shared_expert_intermediate_size": pruned_moe_shared,
+            "num_moe_experts": pruned_experts,
+        },
+        num_query_groups=2,
         experimental_attention_variant="gated_delta_net",
         num_moe_experts=4,
         moe_ffn_hidden_size=32,
         moe_shared_expert_intermediate_size=64,
-    ).cuda()
-
-    def forward_loop(m):
-        for _ in range(5):
-            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
-
-    pruned_hidden, pruned_moe_ffn, pruned_moe_shared, pruned_experts = 32, 16, 32, 2
-    model, _ = prune_minitron(
-        model,
-        {
-            "export_config": {
-                "hidden_size": pruned_hidden,
-                "moe_ffn_hidden_size": pruned_moe_ffn,
-                "moe_shared_expert_intermediate_size": pruned_moe_shared,
-                "num_moe_experts": pruned_experts,
-            }
-        },
-        {"forward_loop": forward_loop},
-        channel_divisor,
     )
 
     for layer in model.decoder.layers:
@@ -562,10 +589,6 @@ def _test_mcore_qwen35_gdn_moe_pruning(rank, size):
     assert model.config.moe_ffn_hidden_size == pruned_moe_ffn
     assert model.config.num_moe_experts == pruned_experts
 
-    # Forward pass works on the pruned model
-    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
-    run_mcore_inference(model, prompt_tokens, pruned_hidden)
-
 
 def test_mcore_qwen35_gdn_moe_pruning(dist_workers):
     dist_workers.run(_test_mcore_qwen35_gdn_moe_pruning)
@@ -574,35 +597,12 @@ def test_mcore_qwen35_gdn_moe_pruning(dist_workers):
 def _test_mcore_mla_pruning(rank, size):
     # MLA (DeepSeek-style Multi-Latent Attention) LM. Only hidden_size and ffn_hidden_size are
     # pruned; Q/KV latent ranks and head dims are kept.
-    set_seed(SEED)
-    hidden_size = ffn_hidden_size = 64
-    vocab_size, max_sequence_length, batch_size, channel_divisor = 64, 16, 2, 16
-    num_layers = min(size * 2, 8)
-
-    model = get_mcore_gpt_model(
-        pipeline_model_parallel_size=size,
-        initialize_megatron=True,
-        num_layers=num_layers,
-        hidden_size=hidden_size,
-        num_attention_heads=4,
-        ffn_hidden_size=ffn_hidden_size,
-        vocab_size=vocab_size,
-        max_sequence_length=max_sequence_length,
-        normalization="RMSNorm",
-        transformer_impl="transformer_engine",
+    pruned_hidden, pruned_ffn = 32, 32
+    model = _build_and_prune_variant(
+        size,
+        {"hidden_size": pruned_hidden, "ffn_hidden_size": pruned_ffn},
+        ffn_hidden_size=64,
         multi_latent_attention=True,
-    ).cuda()
-
-    def forward_loop(m):
-        for _ in range(5):
-            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
-
-    pruned_hidden, pruned_ffn = hidden_size // 2, ffn_hidden_size // 2
-    model, _ = prune_minitron(
-        model,
-        {"export_config": {"hidden_size": pruned_hidden, "ffn_hidden_size": pruned_ffn}},
-        {"forward_loop": forward_loop},
-        channel_divisor,
     )
 
     for layer in model.decoder.layers:
@@ -617,13 +617,43 @@ def _test_mcore_mla_pruning(rank, size):
     assert model.config.hidden_size == pruned_hidden
     assert model.config.ffn_hidden_size == pruned_ffn
 
-    # Forward pass works on the pruned model
-    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
-    run_mcore_inference(model, prompt_tokens, pruned_hidden)
-
 
 def test_mcore_mla_pruning(dist_workers):
     dist_workers.run(_test_mcore_mla_pruning)
+
+
+def _test_mcore_latent_moe_pruning(rank, size):
+    # Latent MoE (e.g. Nemotron-3): experts run in a compressed latent dim via fc1/fc2_latent_proj.
+    # Pruning hidden_size resizes the latent projections; experts stay in the (static) latent dim.
+    latent_size, pruned_hidden, pruned_moe_ffn, pruned_experts = 32, 32, 16, 2
+    model = _build_and_prune_variant(
+        size,
+        {
+            "hidden_size": pruned_hidden,
+            "moe_ffn_hidden_size": pruned_moe_ffn,
+            "num_moe_experts": pruned_experts,
+        },
+        num_moe_experts=4,
+        moe_ffn_hidden_size=32,
+        moe_latent_size=latent_size,
+    )
+
+    for layer in model.decoder.layers:
+        moe = layer.mlp
+        assert isinstance(moe, MoELayer)
+        # latent projections carry hidden_size; experts stay in the unchanged latent dim
+        assert moe.fc1_latent_proj.weight.shape == (latent_size, pruned_hidden)
+        assert moe.fc2_latent_proj.weight.shape == (pruned_hidden, latent_size)
+        assert moe.router.weight.shape == (pruned_experts, pruned_hidden)
+        assert len(moe.experts.local_experts) == pruned_experts
+        for expert in moe.experts.local_experts:
+            assert expert.linear_fc1.weight.shape[1] == latent_size
+            assert expert.linear_fc2.weight.shape == (latent_size, pruned_moe_ffn)
+    assert model.config.hidden_size == pruned_hidden
+
+
+def test_mcore_latent_moe_pruning(dist_workers):
+    dist_workers.run(_test_mcore_latent_moe_pruning)
 
 
 def test_generate_search_space_combos():

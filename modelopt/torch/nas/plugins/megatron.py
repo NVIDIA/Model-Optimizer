@@ -752,10 +752,28 @@ class _DynamicMoELayer(DynamicModule):
 
     def _setup(self, *, hidden_size: TracedHp):
         """Setup the MoELayer dynamic module with global hidden_size hparam."""
+        # Routed experts run on hidden_size, unless MoE latent projections (e.g. Nemotron-3 latent
+        # MoE) compress to a static latent dim; then fc1/fc2_latent_proj carry hidden_size and the
+        # experts run in the latent dim. The router and shared experts always run on hidden_size.
+        expert_io_size = hidden_size
+        if getattr(self.config, "moe_latent_size", None):
+            # TODO: also prune moe_latent_size. Make latent_size a configurable TracedHp shared
+            # across fc1/fc2_latent_proj and every expert's fc1.input / fc2.output, register an
+            # activation-based importance estimator on the latent projection output (like ffn), and
+            # add a moe_latent_size_divisor to get_mcore_minitron_config. Kept static for now.
+            latent_size = TracedHp([self.config.moe_latent_size])
+            DMRegistry.convert(
+                self.fc1_latent_proj, input_size=hidden_size, output_size=latent_size
+            )
+            DMRegistry.convert(
+                self.fc2_latent_proj, input_size=latent_size, output_size=hidden_size
+            )
+            expert_io_size = latent_size
+
         # Convert to dynamic modules
         # Reuse _DynamicSequentialMLP's num_moe_experts hparam for _DynamicTopKRouter's hparam so
         #   importance estimator and depth hparam is retained.
-        DMRegistry.convert(self.experts, hidden_size=hidden_size)
+        DMRegistry.convert(self.experts, hidden_size=expert_io_size)
         num_moe_experts_hp = self.experts.get_hparam("num_local_experts")
         DMRegistry.convert(self.router, hidden_size=hidden_size, num_experts=num_moe_experts_hp)
 
@@ -822,6 +840,9 @@ class _DynamicMoELayer(DynamicModule):
         """Export the dynamic module to a standard MoELayer."""
         self.router.export()
         self.experts.export()
+        if getattr(self.config, "moe_latent_size", None):
+            self.fc1_latent_proj.export()
+            self.fc2_latent_proj.export()
         if self.use_shared_expert:
             self.shared_experts.export()
         self._export_reinit_token_dispatcher()
