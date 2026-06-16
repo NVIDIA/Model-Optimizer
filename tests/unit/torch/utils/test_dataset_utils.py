@@ -25,6 +25,7 @@ from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
     _disable_use_cache,
     _forward_loop,
+    _iter_use_cache_configs,
     _pack_documents_into_rows,
     _process_batch,
     get_dataset_dataloader,
@@ -220,6 +221,45 @@ def test_disable_use_cache_without_existing_attr():
         assert model.config.use_cache is False
 
     assert not hasattr(model.config, "use_cache")
+
+
+@pytest.mark.parametrize("prev_value", [True, False])
+def test_disable_use_cache_with_nested_text_config_existing_attr(prev_value):
+    """Nested text config `use_cache` is disabled and restored."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = _Config()
+    model.config.text_config.use_cache = prev_value
+
+    with _disable_use_cache(model):
+        assert model.config.use_cache is False
+        assert model.config.text_config.use_cache is False
+
+    assert not hasattr(model.config, "use_cache")
+    assert model.config.text_config.use_cache is prev_value
+
+
+def test_disable_use_cache_with_nested_text_config_without_existing_attr():
+    """Nested text config `use_cache` is removed if it was added by the context."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = _Config()
+
+    with _disable_use_cache(model):
+        assert model.config.use_cache is False
+        assert model.config.text_config.use_cache is False
+
+    assert not hasattr(model.config, "use_cache")
+    assert not hasattr(model.config.text_config, "use_cache")
+
+
+def test_iter_use_cache_configs_deduplicates_text_config_alias():
+    """The same config object is patched once if `config.text_config is config`."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = model.config
+
+    assert list(_iter_use_cache_configs(model)) == [model.config]
 
 
 def test_forward_loop_runs_under_disabled_use_cache():

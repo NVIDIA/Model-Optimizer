@@ -33,9 +33,14 @@ import triton
 import triton.language as tl
 
 from ._fp8_scale_candidates import fp8_scale_candidates
+from .fp4_kernel import compute_fp4_scales
 from .nvfp4_quant import fp4_round_magnitude
 
-__all__ = ["fp8_scale_candidates", "nvfp4_fp8_scale_sweep"]
+__all__ = [
+    "fp8_scale_candidates",
+    "nvfp4_fp8_scale_sweep",
+    "nvfp4_fp8_scale_sweep_hessian",
+]
 
 
 # Selected from a (BLOCKS_PER_PROGRAM, num_warps) sweep on B300:
@@ -102,6 +107,23 @@ def _fp8_scale_sweep_kernel(
     tl.store(best_amax_ptr + block_idx, best_amax, mask=block_mask)
 
 
+def _prepare_block_sweep(x: torch.Tensor, block_size: int):
+    """Validate a block-sweep weight tensor; return ``(n_blocks, x_flat, best_amax)``.
+
+    Shared by both FP8 scale-sweep entry points so their input contracts stay in sync.
+    """
+    if not x.is_cuda:
+        raise ValueError("nvfp4 FP8 scale sweep requires a CUDA tensor.")
+    if not isinstance(block_size, int) or block_size <= 0:
+        raise ValueError(f"block_size must be a positive int, got {block_size!r}.")
+    if x.numel() % block_size != 0:
+        raise ValueError(f"x.numel() ({x.numel()}) is not divisible by block_size ({block_size}).")
+    n_blocks = x.numel() // block_size
+    x_flat = x.contiguous().view(-1)
+    best_amax = torch.empty(n_blocks, dtype=torch.float32, device=x.device)
+    return n_blocks, x_flat, best_amax
+
+
 def nvfp4_fp8_scale_sweep(
     x: torch.Tensor,
     global_amax: torch.Tensor,
@@ -122,19 +144,9 @@ def nvfp4_fp8_scale_sweep(
     Returns:
         ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
     """
-    if not x.is_cuda:
-        raise ValueError("nvfp4_fp8_scale_sweep requires a CUDA tensor.")
-    if not isinstance(block_size, int) or block_size <= 0:
-        raise ValueError(f"block_size must be a positive int, got {block_size!r}.")
-    if x.numel() % block_size != 0:
-        raise ValueError(f"x.numel() ({x.numel()}) is not divisible by block_size ({block_size}).")
-
+    n_blocks, x_flat, best_amax = _prepare_block_sweep(x, block_size)
     candidates = fp8_scale_candidates(x.device).to(dtype=torch.float32)
-
-    n_blocks = x.numel() // block_size
-    x_flat = x.contiguous().view(-1)
     global_amax_f32 = global_amax.detach().to(device=x.device, dtype=torch.float32).reshape(1)
-    best_amax = torch.empty(n_blocks, dtype=torch.float32, device=x.device)
 
     grid = lambda meta: (triton.cdiv(n_blocks, meta["BLOCKS_PER_PROGRAM"]),)
     with torch.cuda.device(x.device):
@@ -146,5 +158,133 @@ def nvfp4_fp8_scale_sweep(
             n_blocks,
             BLOCK_SIZE=block_size,
             NUM_CANDIDATES=int(candidates.numel()),
+        )
+    return best_amax
+
+
+# Each program sweeps a tile of output rows of one cin-block, so the block's [BS, BS] Hessian
+# loads once and dwᵀ H dw runs as a [ROWS, BS] x [BS, BS] tl.dot on tensor cores.
+# ROWS_PER_PROGRAM=32 / num_warps=4 was fastest in a shape sweep; hard-coded (not autotuned)
+# since there is no second config to tune over.
+_HESSIAN_ROWS_PER_PROGRAM = 32
+_HESSIAN_NUM_WARPS = 4
+
+
+@triton.jit
+def _fp8_scale_sweep_hessian_kernel(
+    x_ptr,  # [COUT * N_CIN_BLOCKS * BLOCK_SIZE], any float dtype (loaded as fp32)
+    hessian_ptr,  # [N_CIN_BLOCKS * BLOCK_SIZE * BLOCK_SIZE] fp32
+    candidate_scales_ptr,  # [NUM_CANDIDATES] fp32: per-candidate FP8-quantized block scale
+    candidate_amaxes_ptr,  # [NUM_CANDIDATES] fp32: per-candidate block amax (kernel output value)
+    best_amax_ptr,  # [COUT * N_CIN_BLOCKS] fp32 output
+    COUT,
+    N_CIN_BLOCKS,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_CANDIDATES: tl.constexpr,
+    ROWS_PER_PROGRAM: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    cin_block = pid % N_CIN_BLOCKS
+    rows = (pid // N_CIN_BLOCKS) * ROWS_PER_PROGRAM + tl.arange(0, ROWS_PER_PROGRAM)
+    row_mask = rows < COUT
+    # Block layout is row-major over (cout, cin // block_size): block = row*N_CIN + n.
+    block_idx = rows * N_CIN_BLOCKS + cin_block
+
+    # Signed residual: the Hessian cross-terms mean the sign does not cancel (unlike plain MSE).
+    elem = tl.arange(0, BLOCK_SIZE)
+    w = tl.load(
+        x_ptr + block_idx[:, None] * BLOCK_SIZE + elem[None, :], mask=row_mask[:, None], other=0.0
+    ).to(tl.float32)  # [ROWS, BS]
+    w_abs = tl.abs(w)
+    w_sign = tl.where(w >= 0, 1.0, -1.0)
+
+    idx = tl.arange(0, BLOCK_SIZE)
+    hessian = tl.load(
+        hessian_ptr
+        + cin_block * (BLOCK_SIZE * BLOCK_SIZE)
+        + idx[:, None] * BLOCK_SIZE
+        + idx[None, :]
+    ).to(tl.float32)  # [BS, BS]
+
+    best_loss = tl.full([ROWS_PER_PROGRAM], float("inf"), dtype=tl.float32)
+    best_idx = tl.zeros([ROWS_PER_PROGRAM], dtype=tl.int32)
+
+    # Non-unrolled loop: unrolling 126 tl.dot bodies explodes compile time for no runtime gain.
+    for k in tl.range(NUM_CANDIDATES):
+        scale = tl.load(candidate_scales_ptr + k).to(tl.float32)
+        scale_safe = tl.where(scale == 0.0, 1.0, scale)  # scale == 0 only if global_amax == 0
+        q_mag = fp4_round_magnitude(w_abs / scale_safe)
+        dw = w_sign * (w_abs - q_mag * scale_safe)  # = w - quant(w), [ROWS, BS]
+        # dwᵀ H dw per row (H symmetric); allow_tf32=False keeps it true fp32 vs the reference.
+        hdw = tl.dot(dw, hessian, allow_tf32=False)  # [ROWS, BS]
+        loss = tl.sum(hdw * dw, axis=1)  # [ROWS]
+        is_better = loss < best_loss
+        best_loss = tl.where(is_better, loss, best_loss)
+        best_idx = tl.where(is_better, k, best_idx)
+
+    best_amax = tl.load(candidate_amaxes_ptr + best_idx, mask=row_mask, other=0.0).to(tl.float32)
+    tl.store(best_amax_ptr + block_idx, best_amax, mask=row_mask)
+
+
+def nvfp4_fp8_scale_sweep_hessian(
+    x: torch.Tensor,
+    global_amax: torch.Tensor,
+    hessian: torch.Tensor,
+    block_size: int = 16,
+) -> torch.Tensor:
+    """Find the per-block FP8 scale minimizing the Hessian-weighted NVFP4 quant error.
+
+    Hessian-weighted counterpart of :func:`nvfp4_fp8_scale_sweep`: for each NVFP4 block
+    it minimizes ``dwᵀ H dw`` (``dw = w - quant(w)``) over the 126 FP8 E4M3 candidates,
+    where ``H`` is the per-cin-block local Hessian shared across all output rows. Used by
+    :class:`NVFP4MSECalibrator` for ``local_hessian`` calibration.
+
+    Args:
+        x: Weight tensor on CUDA in the blocked ``[N_BLOCKS, block_size]`` layout, row-major
+            over ``(cout, cin // block_size)`` so flat block ``b`` has cin-block
+            ``b % (cin // block_size)``.
+        global_amax: Scalar FP32 global amax (``= reduce_amax(per_block_amax)``).
+        hessian: Per-cin-block Hessian of shape ``[cin // block_size, block_size, block_size]``,
+            fp32 (typically normalized by sample count).
+        block_size: NVFP4 block size (typically 16).
+
+    Returns:
+        ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
+    """
+    n_blocks, x_flat, best_amax = _prepare_block_sweep(x, block_size)
+    if hessian.dim() != 3 or hessian.shape[1] != block_size or hessian.shape[2] != block_size:
+        raise ValueError(
+            f"hessian must have shape [n_cin_blocks, {block_size}, {block_size}], "
+            f"got {tuple(hessian.shape)}."
+        )
+    n_cin_blocks = hessian.shape[0]
+    if n_blocks % n_cin_blocks != 0:
+        raise ValueError(
+            f"n_blocks ({n_blocks}) is not divisible by n_cin_blocks ({n_cin_blocks})."
+        )
+
+    cout = n_blocks // n_cin_blocks
+    grid = (triton.cdiv(cout, _HESSIAN_ROWS_PER_PROGRAM) * n_cin_blocks,)
+    with torch.cuda.device(x.device):
+        global_amax_f32 = global_amax.detach().to(device=x.device, dtype=torch.float32).reshape(())
+        # Candidate scales via the reference ``compute_fp4_scales`` (the exact fake-quant path)
+        # keep the kernel's residual bit-identical to the reference sweep.
+        candidate_amaxes = fp8_scale_candidates(x.device).to(dtype=torch.float32) * global_amax_f32
+        candidate_scales = compute_fp4_scales(
+            candidate_amaxes, global_amax_f32, quantize_block_scales=True
+        ).to(dtype=torch.float32)
+        hessian_flat = hessian.contiguous().to(device=x.device, dtype=torch.float32).view(-1)
+        _fp8_scale_sweep_hessian_kernel[grid](
+            x_flat,
+            hessian_flat,
+            candidate_scales,
+            candidate_amaxes,
+            best_amax,
+            cout,
+            n_cin_blocks,
+            BLOCK_SIZE=block_size,
+            NUM_CANDIDATES=int(candidate_amaxes.numel()),
+            ROWS_PER_PROGRAM=_HESSIAN_ROWS_PER_PROGRAM,
+            num_warps=_HESSIAN_NUM_WARPS,
         )
     return best_amax
