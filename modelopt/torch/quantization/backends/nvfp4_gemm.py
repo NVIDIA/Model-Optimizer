@@ -23,7 +23,6 @@ from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import NVFP4QTensor, QTensorWrapper
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import FP8_E4M3_MAX, FP8_E4M3_MAX_46
 from modelopt.torch.quantization.utils import reduce_amax
 
 
@@ -77,11 +76,9 @@ def nvfp4_gemm(quant_module, input_tensor, bias=None):
     if not cached_input_global_scale:
         input_amax = quant_module.input_quantizer.amax or reduce_amax(input_tensor)
         assert input_amax != 0
-        quant_module._input_global_scale = FP8_E4M3_MAX * 6.0 / input_amax.float()
+        quant_module._input_global_scale = 448.0 * 6.0 / input_amax.float()
 
     weight = quant_module.weight
-    is_four_over_six = NVFP4QTensor._is_four_over_six(quant_module.weight_quantizer)
-    weight_fp8_max = FP8_E4M3_MAX_46 if is_four_over_six else FP8_E4M3_MAX
 
     cached_weight_global_scale = hasattr(quant_module, "_weight_global_scale")
     if isinstance(weight, QTensorWrapper):  # weight is already compressed.
@@ -105,7 +102,7 @@ def nvfp4_gemm(quant_module, input_tensor, bias=None):
         if not cached_weight_global_scale:
             weight_amax = quant_module.weight_quantizer.amax or reduce_amax(weight)
             assert weight_amax != 0
-            quant_module._weight_global_scale = weight_fp8_max * 6.0 / weight_amax.float()
+            quant_module._weight_global_scale = 448.0 * 6.0 / weight_amax.float()
             quant_module._weight_amax = weight_amax
 
         weight_fp4, weight_scale = torch.ops.trtllm.fp4_quantize(
@@ -212,15 +209,6 @@ def _nvfp4_availability_check(module, input, args, kwargs):
 
     # Check quantizer presence and configuration
     if not hasattr(module, "input_quantizer") or not hasattr(module, "weight_quantizer"):
-        return False
-
-    # 4/6 relies on adaptive per-block M=4 vs M=6 selection. TRT on-the-fly quantization
-    # from FP16/BF16 weights only has a global scale and cannot reproduce that selection.
-    # Keep backend available for pre-quantized weights (QTensorWrapper) where per-block
-    # scales are already materialized.
-    if NVFP4QTensor._is_four_over_six(module.weight_quantizer) and not isinstance(
-        module.weight, QTensorWrapper
-    ):
         return False
 
     quant_cfg_list: list = mtq.NVFP4_DEFAULT_CFG["quant_cfg"]
