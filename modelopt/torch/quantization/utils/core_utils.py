@@ -250,10 +250,17 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
         if name == "weight":
             continue
         weight = getattr(module, name, None)
-        if (
-            isinstance(weight, nn.Parameter)
-            and representative_weight_quantizer(module, name) is not None
+        if not isinstance(weight, nn.Parameter):
+            continue
+        if representative_weight_quantizer(module, name) is not None:
+            yield name
+        elif name == getattr(module, "_first_proj_attr", None) and isinstance(
+            getattr(module, "gate_up_proj_weight_quantizers", None), nn.ModuleList
         ):
+            # Non-gated fused experts (e.g. NemotronH): the first projection is
+            # named ``up_proj`` but its per-expert quantizers live on the
+            # ``gate_up_proj_weight_quantizers`` sentinel list, so the name-derived
+            # lookup above misses it. Yield it explicitly.
             yield name
 
 

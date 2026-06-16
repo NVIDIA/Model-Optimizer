@@ -10,6 +10,10 @@ Changelog
 - Add **streaming** speculative-decoding training (EAGLE3 / DFlash): the draft trains on base-model hidden states produced on the fly by a co-located ``vllm serve`` (no disk dump), moved trainer-side over NIXL RDMA, scaling to multi-node (dedicated serve replicas + DDP trainers). New launcher examples for NVFP4 Kimi-K2.5 / K2.6 on GB200/aarch64 under ``tools/launcher/examples/moonshotai/``.
 - Add a fused Triton fast path for ``local_hessian`` NVFP4 weight-scale search (the Hessian-weighted FP8-E4M3 scale sweep). For each NVFP4 block it minimizes ``dwᵀ H dw`` over the 126 candidate scales using the per-cin-block local Hessian on tensor cores, replacing the per-weight Python reference sweep — roughly **34x** faster on a single 8192x4096 weight and bit-exact with the reference for fp32/fp16 weights. Used automatically during ``local_hessian`` calibration for both dense and fused-MoE expert weights; falls back to the reference sweep on CPU, when Triton is unavailable, or via ``MODELOPT_NVFP4_TRITON_SWEEP=0``.
 
+**Bug Fixes**
+
+- Support non-gated fused MoE experts in unified HuggingFace export. Nemotron-H MoE models (transformers 5.x ``NemotronHExperts``) store experts as fused 3-D ``up_proj`` / ``down_proj`` parameters with no ``gate_up_proj``; the fused-experts detection previously keyed on ``gate_up_proj``, so these were never wrapped as ``_QuantFusedExperts`` and export raised ``NotImplementedError: MoE model with experts type 'NemotronHExperts' is not supported``. The fused-experts path now also recognizes the non-gated layout (new ``_QuantNonGatedFusedExperts``) and exports a single ``up_proj`` per expert; the gated path is unchanged.
+
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^
 

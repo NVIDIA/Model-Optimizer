@@ -26,20 +26,21 @@ import torch.nn as nn
 def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     """Split fused MoE expert weights and export per-expert quantization scales.
 
-    Works with any module wrapped by ``_QuantFusedExperts`` — i.e. any HF
-    transformers 5.0+ fused expert container that stores ``gate_up_proj`` and
-    ``down_proj`` as 3-D ``nn.Parameter`` tensors with per-expert quantizer
-    ``nn.ModuleList`` s.
+    Works with any module wrapped by ``_QuantFusedExperts`` (gated, with a fused
+    ``gate_up_proj``) or ``_QuantNonGatedFusedExperts`` (non-gated, with a single
+    ``up_proj`` — e.g. NemotronH). Both store their projections as 3-D
+    ``nn.Parameter`` tensors with per-expert quantizer ``nn.ModuleList`` s.
 
     Steps:
 
-    1. Handle amax fallback for uncalibrated expert input quantizers.
-    2. Split fused 3-D weights into per-expert 2-D projections
-       (``gate_proj``, ``up_proj``, ``down_proj``).
+    1. Handle amax fallback for uncalibrated expert weight quantizers.
+    2. Split fused 3-D weights into per-expert 2-D projections — gated:
+       (``gate_proj``, ``up_proj``, ``down_proj``); non-gated: (``up_proj``,
+       ``down_proj``).
     3. Call ``_export_quantized_weight`` on each projection.
     4. Register results under the standard naming convention::
 
-           {E}.gate_proj.weight, {E}.gate_proj.weight_scale, ...
+           {E}.gate_proj.weight, {E}.gate_proj.weight_scale, ...  # gated only
            {E}.up_proj.weight, {E}.up_proj.weight_scale, ...
            {E}.down_proj.weight, {E}.down_proj.weight_scale, ...
     """
@@ -47,17 +48,21 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
 
     n = module.num_experts
-    expert_dim = _get_fused_expert_intermediate_dim(module)
+    # Gated experts fuse gate+up into ``gate_up_proj`` and must be split on export;
+    is_gated = getattr(module, "_is_gated", True)
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    # Only the gated split needs the per-expert intermediate dim (gate|up boundary).
+    expert_dim = _get_fused_expert_intermediate_dim(module) if is_gated else None
 
     # 1. Shared input quantizers — one per projection type, shared across all experts.
     gate_up_input_q = module.gate_up_proj_input_quantizer
     down_input_q = module.down_proj_input_quantizer
 
-    gate_up = module.gate_up_proj.data
+    gate_up = getattr(module, first_proj_attr).data  # first projection (gate_up or up)
     down = module.down_proj.data
 
     # 2-3. Split + export each per-expert projection.
-    fused_dim0 = gate_up.shape[1]  # 2 * expert_dim
+    fused_dim0 = gate_up.shape[1]  # gated: 2 * expert_dim; non-gated: expert_dim
 
     for idx in range(n):
         expert = nn.Module()
@@ -70,11 +75,17 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
         # fallback further down would otherwise compute amax independently from
         # each half — gate's max and up's max generally differ — producing
         # mismatched weight_scale_2 and garbled MoE output at inference.
+        # Non-gated experts have no gate/up fusion, so this shared-amax step is
+        # skipped — their single up_proj uses the generic per-projection fallback.
         gate_up_q = module.gate_up_proj_weight_quantizers[idx]
-        if getattr(gate_up_q, "is_enabled", False) and (
-            not hasattr(gate_up_q, "_amax")
-            or gate_up_q._amax is None
-            or torch.all(gate_up_q._amax == 0)
+        if (
+            is_gated
+            and getattr(gate_up_q, "is_enabled", False)
+            and (
+                not hasattr(gate_up_q, "_amax")
+                or gate_up_q._amax is None
+                or torch.all(gate_up_q._amax == 0)
+            )
         ):
             gate_up_q.amax = gate_up[idx].abs().amax().to(torch.float32)
             warnings.warn(
@@ -85,11 +96,19 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
                 stacklevel=2,
             )
 
-        projections = [
-            ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0, True),
-            ("up_proj", gate_up[idx, expert_dim:, :], expert_dim, fused_dim0, True),
-            ("down_proj", down[idx], 0, down.shape[1], False),
-        ]
+        if is_gated:
+            projections = [
+                ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0, True),
+                ("up_proj", gate_up[idx, expert_dim:, :], expert_dim, fused_dim0, True),
+                ("down_proj", down[idx], 0, down.shape[1], False),
+            ]
+        else:
+            # Non-gated: the single up_proj maps 1:1 to its weight quantizer, so it
+            # is exported whole (no dim-0 split, no shared gate/up weight_scale_2).
+            projections = [
+                ("up_proj", gate_up[idx], 0, fused_dim0, True),
+                ("down_proj", down[idx], 0, down.shape[1], False),
+            ]
 
         for proj_name, weight_slice, fused_start, fused_total, is_gate_up in projections:
             w_quantizer_src = (
@@ -169,6 +188,7 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     # 4. Remove fused params and quantizer lists — replaced by per-expert submodules
     for attr in (
         "gate_up_proj",
+        first_proj_attr,  # non-gated: "up_proj" (gated: same as gate_up_proj above)
         "down_proj",
         "gate_up_proj_weight_quantizers",
         "gate_up_proj_input_quantizer",
