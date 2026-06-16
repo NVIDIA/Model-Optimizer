@@ -253,7 +253,13 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if _kw["num_workers"] > 0:
             _kw["prefetch_factor"] = getattr(_old, "prefetch_factor", 2)
             _kw["persistent_workers"] = bool(getattr(_old, "persistent_workers", False))
-        self.dataloader = StatefulDataLoader(_old.dataset, batch_sampler=self.sampler, **_kw)
+        # ``dataloader`` is already a tracked state key (registered by the parent setup);
+        # BaseRecipe.__setattr__ raises "State key 'dataloader' is already tracked" on a plain
+        # re-assignment. Update the underlying attribute directly so it stays tracked (its
+        # __state_tracked entry is unchanged) and the rebuilt loader is still checkpointed.
+        self.__dict__["dataloader"] = StatefulDataLoader(
+            _old.dataset, batch_sampler=self.sampler, **_kw
+        )
         self.step_scheduler.epoch = cur_epoch
         self.sampler.set_epoch(cur_epoch)
         self.sampler._batches_to_skip = skip_batches

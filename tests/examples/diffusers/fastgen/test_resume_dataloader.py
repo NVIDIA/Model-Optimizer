@@ -116,19 +116,24 @@ def test_resume_rebuild_serves_clean_run_position(monkeypatch):
     # Mid-epoch, epoch-boundary, and cross-epoch resume points.
     for global_step in (1, 5, n - 1, n, n + 3, 2 * n, 2 * n + 7):
         sampler, loader = _build(n, SequentialBucketSampler, StatefulDataLoader)
-        stub = SimpleNamespace(
-            dataloader=loader,
-            sampler=sampler,
-            step_scheduler=SimpleNamespace(epoch_len=n, grad_acc_steps=1, epoch=0),
-        )
+        # Use a REAL recipe instance (object.__new__ skips __init__) so BaseRecipe.__setattr__
+        # state-tracking is exercised: ``dataloader`` is registered as a tracked key here and the
+        # reset re-assigns it. A plain stub (no __setattr__) misses the "State key 'dataloader'
+        # is already tracked" guard that crashed the real run on resume.
+        recipe = object.__new__(dmd2_recipe.DMD2DiffusionRecipe)
+        recipe.sampler = sampler
+        recipe.step_scheduler = SimpleNamespace(epoch_len=n, grad_acc_steps=1, epoch=0)
+        recipe.dataloader = loader  # registers "dataloader" in __state_tracked
+        assert "dataloader" in recipe.__dict__["__state_tracked"]
 
-        dmd2_recipe.DMD2DiffusionRecipe._rebuild_dataloader_for_resume(stub, global_step)
+        recipe._rebuild_dataloader_for_resume(global_step)  # must not raise "already tracked"
 
         # Position was derived from global_step (also drives the epoch label + progress bar).
-        assert stub.step_scheduler.epoch == global_step // n
-        assert stub.sampler._batches_to_skip == global_step % n
+        assert recipe.step_scheduler.epoch == global_step // n
+        assert recipe.sampler._batches_to_skip == global_step % n
+        assert "dataloader" in recipe.__dict__["__state_tracked"]  # still tracked after rebuild
 
-        first = next(iter(stub.dataloader))[0]
+        first = next(iter(recipe.dataloader))[0]
         assert first == clean[global_step], (
             f"resume@{global_step}: served {first}, a clean run serves {clean[global_step]} "
             "(re-serving / wrong-position bug)"
@@ -147,13 +152,12 @@ def test_resume_reset_is_noop_on_fresh_start(monkeypatch):
     monkeypatch.setattr(dmd2_recipe, "is_main_process", lambda: True, raising=False)
 
     sampler, loader = _build(_N, SequentialBucketSampler, StatefulDataLoader)
-    stub = SimpleNamespace(
-        dataloader=loader,
-        sampler=sampler,
-        step_scheduler=SimpleNamespace(epoch_len=_N, grad_acc_steps=1, epoch=0),
-    )
-    dmd2_recipe.DMD2DiffusionRecipe._rebuild_dataloader_for_resume(stub, 0)
+    recipe = object.__new__(dmd2_recipe.DMD2DiffusionRecipe)
+    recipe.sampler = sampler
+    recipe.step_scheduler = SimpleNamespace(epoch_len=_N, grad_acc_steps=1, epoch=0)
+    recipe.dataloader = loader
+    recipe._rebuild_dataloader_for_resume(0)
 
-    assert stub.dataloader is loader, "fresh start must not rebuild the dataloader"
-    assert getattr(stub.sampler, "_batches_to_skip", 0) == 0
-    assert stub.step_scheduler.epoch == 0
+    assert recipe.dataloader is loader, "fresh start must not rebuild the dataloader"
+    assert getattr(recipe.sampler, "_batches_to_skip", 0) == 0
+    assert recipe.step_scheduler.epoch == 0
