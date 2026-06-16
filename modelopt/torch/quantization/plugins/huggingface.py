@@ -1470,17 +1470,22 @@ def _is_fused_experts_module(module):
     """Check if a module is a fused MoE expert container compatible with _QuantFusedExperts.
 
     Detects the standardized HuggingFace transformers 5.0+ fused expert pattern:
-    ``gate_up_proj`` (3-D parameter), ``down_proj`` (3-D parameter), ``num_experts``,
-    and ``act_fn``.  Matches ``MixtralExperts``, ``Qwen2MoeExperts``,
+    ``gate_up_proj`` (3-D parameter), ``down_proj`` (3-D parameter), and
+    ``num_experts``.  Matches ``MixtralExperts``, ``Qwen2MoeExperts``,
     ``Qwen3MoeExperts``, ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``,
-    ``JambaExperts``, ``OlmoeExperts``, etc.
+    ``JambaExperts``, ``OlmoeExperts``, ``MiniMaxM3VLExperts``, etc.
+
+    ``act_fn`` is intentionally NOT required: some fused-expert containers (e.g.
+    ``MiniMaxM3VLExperts``) apply their gating activation inline rather than via an
+    ``act_fn`` submodule. ``_QuantFusedExperts`` never reads ``act_fn`` (it only
+    intercepts ``F.linear``), so the activation form is irrelevant to detection.
 
     Returns ``False`` for non-standard layouts (DBRX, GptOss, GraniteMoE,
     Llama4TextExperts) which have their own explicit registrations.
     """
     if not hasattr(module, "gate_up_proj") or not hasattr(module, "down_proj"):
         return False
-    if not hasattr(module, "num_experts") or not hasattr(module, "act_fn"):
+    if not hasattr(module, "num_experts"):
         return False
     gate_up = getattr(module, "gate_up_proj")
     down = getattr(module, "down_proj")

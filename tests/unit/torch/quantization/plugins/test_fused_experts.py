@@ -84,6 +84,37 @@ class _SyntheticFusedExperts(nn.Module):
         return final_hidden_states
 
 
+class _SyntheticFusedExpertsInlineSwiglu(_SyntheticFusedExperts):
+    """Fused experts that apply SwiGLU inline (no ``act_fn`` submodule), mimicking
+    transformers' ``MiniMaxM3VLExperts``. Verifies detection/quantization do not require ``act_fn``."""
+
+    def __init__(self):
+        super().__init__()
+        del self.act_fn  # gating activation is applied inline in forward, not via a submodule
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        final_hidden_states = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            expert_mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
+            if expert_idx == self.num_experts:
+                continue
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current_state = hidden_states[token_idx]
+            gate, up = F.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
+            current_hidden_states = F.silu(gate) * up  # inline swiglu (no self.act_fn)
+            current_hidden_states = F.linear(current_hidden_states, self.down_proj[expert_idx])
+            current_hidden_states = (
+                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            )
+            final_hidden_states.index_add_(
+                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
+            )
+        return final_hidden_states
+
+
 class _SyntheticTopKRouter(nn.Module):
     def __init__(self):
         super().__init__()
@@ -145,12 +176,23 @@ class TestIsFusedExpertsModule:
         module.act_fn = nn.SiLU()
         assert _is_fused_experts_module(module) is False
 
-    def test_module_missing_act_fn_not_detected(self):
+    def test_module_missing_act_fn_still_detected(self):
+        """``act_fn`` is optional: e.g. ``MiniMaxM3VLExperts`` applies swiglu inline.
+
+        ``_QuantFusedExperts`` only intercepts ``F.linear`` and never reads ``act_fn``,
+        so the structural detector must not require it.
+        """
         module = nn.Module()
         module.gate_up_proj = nn.Parameter(torch.randn(4, 16, 8))
         module.down_proj = nn.Parameter(torch.randn(4, 8, 16))
         module.num_experts = 4
-        assert _is_fused_experts_module(module) is False
+        assert _is_fused_experts_module(module) is True
+
+    def test_inline_swiglu_fused_experts_detected(self):
+        """Fused experts applying swiglu inline (no ``act_fn`` submodule) are detected."""
+        module = _SyntheticFusedExpertsInlineSwiglu()
+        assert not hasattr(module, "act_fn")
+        assert _is_fused_experts_module(module) is True
 
     def test_sparse_moe_block_not_detected_as_fused(self):
         block = _SyntheticSparseMoeBlock()
@@ -649,6 +691,56 @@ class TestFusedExpertsCalibration:
             assert experts.down_proj_weight_quantizers[idx].amax is not None, (
                 f"down_proj_weight_quantizers[{idx}].amax is None."
             )
+
+        self._cleanup_registry(expert_type)
+
+    def test_inline_swiglu_experts_calibrate(self):
+        """No-``act_fn`` (inline swiglu) fused experts convert and calibrate like ``act_fn`` ones.
+
+        Regression for ``MiniMaxM3VLExperts``: detection used to require ``act_fn``, so these
+        experts were never wrapped and no quantizers were inserted.
+        """
+        model = _TinyMoEModel()
+        model.moe.experts = _SyntheticFusedExpertsInlineSwiglu()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                m(torch.randn(1, 4, HIDDEN_DIM))
+
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+
+        experts = model.moe.experts
+        assert experts.gate_up_proj_input_quantizer.amax is not None
+        assert experts.down_proj_input_quantizer.amax is not None
+        for idx in range(NUM_EXPERTS):
+            assert experts.gate_up_proj_weight_quantizers[idx].amax is not None
+            assert experts.down_proj_weight_quantizers[idx].amax is not None
 
         self._cleanup_registry(expert_type)
 
