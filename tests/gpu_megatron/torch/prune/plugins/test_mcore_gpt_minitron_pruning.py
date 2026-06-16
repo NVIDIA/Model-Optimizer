@@ -69,14 +69,18 @@ def _sort_and_capture(
     dynamic_space = _convert_model_to_dynamic_space(model, minitron_config)
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
-    for _ in range(num_forward):
-        run_mcore_inference_with_dummy_input(model, batch_size)
+    # try/finally so hooks + patched TE state are always cleaned up, even if a forward/sort raises
+    # (otherwise they leak into subsequent tests in the same worker process).
+    try:
+        for _ in range(num_forward):
+            run_mcore_inference_with_dummy_input(model, batch_size)
 
-    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
-    baseline_output = run_mcore_inference(model, prompt_tokens)
+        prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
+        baseline_output = run_mcore_inference(model, prompt_tokens)
 
-    mtn.utils.sort_parameters(model)
-    registry.cleanup()
+        mtn.utils.sort_parameters(model)
+    finally:
+        registry.cleanup()
     return dynamic_space, baseline_output, prompt_tokens
 
 
