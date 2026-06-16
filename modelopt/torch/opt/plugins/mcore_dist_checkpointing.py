@@ -210,9 +210,7 @@ def restore_sharded_modelopt_state(
     if os.path.exists(legacy_common_path):
         common_modelopt_state = safe_load(legacy_common_path)
     else:
-        common_modelopt_state = dist_checkpointing.load_common_state_dict(
-            modelopt_checkpoint_name
-        )
+        common_modelopt_state = dist_checkpointing.load_common_state_dict(modelopt_checkpoint_name)
 
     modelopt_load_version = common_modelopt_state["modelopt_version"]
 
