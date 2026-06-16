@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import os
 import warnings
 from contextlib import nullcontext
@@ -32,6 +33,7 @@ from packaging.version import Version
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
+    _TransposedExpertsCalibMixin,
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
 )
@@ -204,8 +206,6 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
     tiny_llama_dir = create_tiny_llama_dir(tmp_path, dtype=torch.float32)
     # update config to fit test cases
     if quant_config == mtq.INT4_AWQ_CFG:
-        import copy
-
         quant_config = copy.deepcopy(quant_config)
         for entry in quant_config["quant_cfg"]:
             if entry["quantizer_name"] == "*weight_quantizer":
@@ -232,6 +232,58 @@ def test_is_homogeneous_hf_model_llama():
 def test_is_homogeneous_hf_model_gpt_oss():
     model = get_tiny_gpt_oss(num_hidden_layers=1)
     assert is_homogeneous_hf_model(model)
+
+
+def test_gpt_oss_experts_iter_weights_for_calibration_transposed():
+    """``_QuantGptOssExperts`` quantizes its expert weights *transposed* in the forward
+    (``_transposed_quantize`` puts the contraction ``in_dim`` last). Weight-only
+    calibration must yield the same transposed view; otherwise the unconditional
+    ``weight_only_quantize`` locks a non-transposed block-quant ``_original_shape`` and the
+    calibration forward then raises "Input shape has changed" for static-block NVFP4.
+    """
+    # Use intermediate_size != hidden_size so both expert weights are non-square and the
+    # transpose is observable in the shape.
+    model = get_tiny_gpt_oss(num_hidden_layers=1, hidden_size=32, intermediate_size=48)
+    mtq.replace_quant_module(model)
+    experts = model.model.layers[0].mlp.experts
+    assert hasattr(experts, "gate_up_proj_weight_quantizer")
+
+    yielded = {q: w for w, q in experts.iter_weights_for_calibration()}
+    # Stored weights are (num_experts, in_dim, out_dim); calibration must see (…, out_dim, in_dim).
+    assert (
+        yielded[experts.gate_up_proj_weight_quantizer].shape
+        == experts.gate_up_proj.transpose(-1, -2).shape
+    )
+    assert (
+        yielded[experts.down_proj_weight_quantizer].shape
+        == experts.down_proj.transpose(-1, -2).shape
+    )
+
+
+def test_transposed_experts_calib_mixin_yields_transposed_views():
+    """Unit-level guard for the shared ``_TransposedExpertsCalibMixin`` (no GPU / no model
+    conversion needed): it must yield the transposed ``(num_experts, out, in)`` weight view
+    paired with the matching weight quantizer, so weight-only calibration agrees with the
+    experts' transposed forward (regression for the static-block "Input shape has changed").
+    """
+
+    class _FakeExperts(_TransposedExpertsCalibMixin):
+        def __init__(self):
+            # Non-square so the transpose is observable; (num_experts, in_dim, out_dim).
+            self.gate_up_proj = torch.randn(8, 64, 192)
+            self.down_proj = torch.randn(8, 96, 64)
+            self.gate_up_proj_weight_quantizer = nn.Identity()
+            self.down_proj_weight_quantizer = nn.Identity()
+
+    experts = _FakeExperts()
+    pairs = list(experts.iter_weights_for_calibration())
+
+    assert len(pairs) == 2
+    (gate_up_w, gate_up_q), (down_w, down_q) = pairs
+    assert torch.equal(gate_up_w, experts.gate_up_proj.transpose(-1, -2))
+    assert gate_up_q is experts.gate_up_proj_weight_quantizer
+    assert torch.equal(down_w, experts.down_proj.transpose(-1, -2))
+    assert down_q is experts.down_proj_weight_quantizer
 
 
 def test_hf_decoder_discoverer_registration_path():

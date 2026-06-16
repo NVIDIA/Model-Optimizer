@@ -74,7 +74,44 @@ def make_speculative_data_module(
             chat_template = f.read()
         print_rank_0(f"Loaded chat template from {template_path}")
 
-    if data_args.offline_data_path is None:
+    mode = getattr(data_args, "mode", "online")
+    if mode == "streaming":
+        # ``train_len`` right-truncates during tokenization and is also the collator's
+        # pad target; caller must ensure ``train_len <= vllm.max_model_len``.
+        # The streaming dataset tokenizes via ``tokenizer.apply_chat_template`` (no
+        # chat_template arg), so a custom template (e.g. one carrying {% generation %}
+        # tags for answer_only_loss) must be installed on the tokenizer here — unlike
+        # the online path, which threads ``chat_template`` straight into the collator.
+        if chat_template is not None:
+            tokenizer.chat_template = chat_template
+            print_rank_0("Installed custom chat template on tokenizer for streaming.")
+        print_rank_0(f"Streaming hidden states from {data_args.streaming_server_url}")
+        from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
+            EagleVllmStreamingConfig,
+            EagleVllmStreamingDataset,
+        )
+
+        ds = load_dataset("json", data_files=data_args.data_path, split="train")
+        if data_args.sample_size > 0:
+            ds = ds.select(range(data_args.sample_size))
+        # Map-style dataset: each rank fetches its own DistributedSampler shard.
+        # Fetch concurrency comes from the DataLoader's num_workers, not a config knob;
+        # shuffling/order is the sampler's job (seeded by training_args.seed).
+        # ``server_urls`` accepts a comma-separated string for multi-server fan-out.
+        streaming_cfg = EagleVllmStreamingConfig(
+            server_urls=data_args.streaming_server_url,
+            model=data_args.streaming_model_name,
+            max_seq_len=train_len,
+            answer_only_loss=answer_only_loss,
+        )
+        train_dataset = EagleVllmStreamingDataset(
+            entries=ds,
+            tokenizer=tokenizer,
+            config=streaming_cfg,
+        )
+        data_collator = EagleOfflineDataCollator(train_len=train_len)
+
+    elif mode == "online":
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
 
         if not data_args.vlm_processor:
@@ -108,7 +145,9 @@ def make_speculative_data_module(
             raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         if data_args.sample_size > 0:
             dumped_files = dumped_files[: data_args.sample_size]
-        train_dataset = OfflineSupervisedDataset(dumped_files, answer_only_loss=answer_only_loss)
+        train_dataset = OfflineSupervisedDataset(
+            dumped_files, answer_only_loss=answer_only_loss, tokenizer=tokenizer
+        )
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
     return {
@@ -191,33 +230,114 @@ class LoRAWarmupCallback(TrainerCallback):
             raw_model = model.module if hasattr(model, "module") else model
             if hasattr(raw_model, "_lora_cotraining_active"):
                 raw_model._lora_cotraining_active = True
-                # Unfreeze LoRA parameters
-                lora_params = []
-                for name, param in raw_model._base_model.named_parameters():
-                    if "lora_" in name:
-                        param.requires_grad = True
-                        lora_params.append(param)
-
-                # Add LoRA params to optimizer — they were excluded at creation time
-                # because requires_grad was False during warmup.
-                optimizer = kwargs.get("optimizer")
-                if optimizer is not None and lora_params:
-                    existing_ids = {id(p) for g in optimizer.param_groups for p in g["params"]}
-                    new_params = [p for p in lora_params if id(p) not in existing_ids]
-                    if new_params:
-                        optimizer.add_param_group(
-                            {
-                                "params": new_params,
-                                "lr": optimizer.param_groups[0]["lr"],
-                                "weight_decay": 0.0,
-                            }
-                        )
-                        print_rank_0(f"  Added {len(new_params)} LoRA params to optimizer")
-
                 print_rank_0(
                     f"Step {state.global_step}: LoRA warmup complete, enabling co-training."
                 )
             self._activated = True
+        return control
+
+
+class DFlashFSDP2ShardedSDExportCallback(TrainerCallback):
+    """Export the DFlash draft module after each checkpoint save, for FSDP2 sharded runs.
+
+    Applicable range: this is needed only under FSDP2 ``SHARDED_STATE_DICT``, where the
+    checkpoint holds distributed shards (``pytorch_model_fsdp_0/``) and no consolidated
+    ``model.safetensors`` — so the post-training ``export_hf_checkpoint.py`` pass can't read
+    it. It gathers just the small draft submodule and writes the deployable export.
+
+    Gating is the caller's responsibility: ``main.py`` adds this callback only when the
+    accelerator's FSDP state dict type is ``SHARDED_STATE_DICT`` (full-state-dict runs —
+    DDP, single-device, FSDP2 FULL_STATE_DICT — use the launcher's post-run export instead).
+    """
+
+    def on_save(self, args, state, control, **kwargs):
+        """Export DFlash draft module weights + config after checkpoint save."""
+        import json
+        import os
+
+        from safetensors.torch import save_file
+
+        model = kwargs["model"]
+        if not hasattr(model, "dflash_module"):
+            return control
+
+        step = state.global_step
+        export_dir = os.path.join(args.output_dir, f"exported-checkpoint-{step}")
+
+        # All ranks participate in the state_dict gather (FSDP2 collective op). Only the
+        # dflash_module submodule is gathered (~328 MB for MiniMax-M2.7), not the 229B base.
+        try:
+            from torch.distributed.checkpoint.state_dict import (
+                StateDictOptions,
+                get_model_state_dict,
+            )
+
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+            try:
+                raw_sd = get_model_state_dict(
+                    model, submodules={model.dflash_module}, options=options
+                )
+            except TypeError:
+                # Older PyTorch without the submodules= parameter: this gathers the FULL
+                # model (the entire base, e.g. ~229B for MiniMax-M2.7), defeating the
+                # submodule-only design and risking OOM. Warn loudly — upgrade PyTorch.
+                print_rank_0(
+                    "WARNING: DFlash export: get_model_state_dict lacks submodules= on this "
+                    "PyTorch — gathering the FULL base model (slow / may OOM). Upgrade PyTorch "
+                    "for the submodule-only gather."
+                )
+                raw_sd = get_model_state_dict(model, options=options)
+        except ImportError:
+            # Non-distributed / single-GPU fallback
+            raw_sd = model.state_dict()
+
+        # Reuse the exporter's extraction (strips the dflash_module prefix, drops rotary
+        # buffers) for the common full-model key layout. Some PyTorch versions return the
+        # submodule gather with keys already stripped of the prefix — handle that directly.
+        exporter = model.get_exporter()
+        drafter_sd = exporter._extract_state_dict(raw_sd)
+        if not drafter_sd:
+            # Fallback for the already-stripped-key layout: a denylist heuristic rather than
+            # the prefix-based extractor. Warn, since a key-naming change upstream could let
+            # a malformed draft ship and only fail at vLLM load time.
+            print_rank_0(
+                "WARNING: DFlash export: prefix-based extraction found no dflash_module keys; "
+                "falling back to a denylist heuristic on already-stripped keys. Verify the "
+                "exported draft loads in vLLM."
+            )
+            drafter_sd = {
+                k: v
+                for k, v in raw_sd.items()
+                if "rotary_emb" not in k
+                and not any(p in k for p in ("model.", "lm_head.", "embed_tokens."))
+            }
+        del raw_sd
+        # Coerce to CPU for save_file (the distributed gather uses cpu_offload, but the
+        # single-GPU fallback may return CUDA tensors).
+        drafter_sd = {k: (v.cpu() if v.device.type != "cpu" else v) for k, v in drafter_sd.items()}
+
+        if not drafter_sd:
+            print_rank_0(f"Warning: No dflash_module weights found at step {step}, skipping export")
+            return control
+
+        # Only rank 0 writes files
+        if is_master():
+            try:
+                os.makedirs(export_dir, exist_ok=True)
+                save_file(drafter_sd, os.path.join(export_dir, "model.safetensors"))
+
+                config = exporter._export_config()
+                with open(os.path.join(export_dir, "config.json"), "w") as f:
+                    json.dump(config, f, indent=2)
+
+                total_mb = sum(v.nbytes for v in drafter_sd.values()) / 1024 / 1024
+                print_rank_0(
+                    f"Exported DFlash draft ({len(drafter_sd)} tensors, {total_mb:.0f}MB) "
+                    f"to {export_dir}"
+                )
+            except Exception as e:
+                print_rank_0(f"Warning: DFlash export failed at step {step}: {e}")
+
         return control
 
 

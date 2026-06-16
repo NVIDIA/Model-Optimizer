@@ -1,6 +1,10 @@
 # QAD Training Scripts
 
+> **Deprecated:** These scripts are deprecated and will be removed in the next release. Please migrate to the [megatron_bridge QAD example](../megatron_bridge/README.md#quantization-aware-distillation-qad), which provides a simpler Python-based interface and better model coverage.
+
 Quantization-Aware Distillation (QAD) training scripts for language models using Megatron-LM. These scripts enable training quantized (e.g., NVFP4) student models with knowledge distillation from full-precision teacher models.
+
+> **Note:** For Hugging Face LLM QAD, see the [LLM QAT QAD section](../llm_qat/README.md#end-to-end-qad-example).
 
 ## Overview
 
@@ -51,7 +55,7 @@ See [Megatron-LM ModelOpt examples](https://github.com/NVIDIA/Megatron-LM/tree/m
    ```bash
    # For MoE models
    cp configs/qwen3-30b-a3b-instruct-2507-moe_template.conf configs/my-experiment.conf
-   
+
    # For Dense models
    cp configs/qwen3-8b_template.conf configs/my-experiment.conf
    ```

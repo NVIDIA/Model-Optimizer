@@ -14,11 +14,13 @@
 # limitations under the License.
 
 import copy
+from contextlib import nullcontext
 from functools import partial
 
 import pytest
 import torch
 from _test_utils.torch.megatron.models import (
+    HAS_MAMBA,
     MegatronModel,
     get_mcore_gpt_model,
     get_mcore_mamba_hybrid_model,
@@ -256,8 +258,6 @@ def _gpt_model_provider(
     hybrid_override_pattern=None,
     mamba_head_dim=16,
 ):
-    from contextlib import nullcontext
-
     device_ctx = torch.device("meta") if meta_device else nullcontext()
 
     with device_ctx:
@@ -473,6 +473,8 @@ def test_homogeneous_sharded_state_dict(
 )
 def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
     """Test sharded state dict for hybrid Mamba MOE models."""
+    if not HAS_MAMBA:
+        pytest.skip("Mamba not installed")
     # TP+EP is not supported by QuantSequentialMLP. Set either TP or EP to 1
     num_gpus = torch.cuda.device_count()
     if num_gpus > 4:

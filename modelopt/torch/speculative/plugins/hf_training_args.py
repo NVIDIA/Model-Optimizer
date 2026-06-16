@@ -29,7 +29,11 @@ The module is pure Pydantic schema with no runtime dependencies on ``transformer
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+__all__ = ["DataArguments", "ModelArguments", "TrainingArguments"]
 
 
 class ModelArguments(BaseModel):
@@ -47,6 +51,9 @@ class DataArguments(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Derived in ``_check_mode_requirements`` from the data-source fields; accepted as input
+    # only for backward compatibility (existing ``mode:`` keys / overrides), then overwritten.
+    mode: Literal["online", "offline", "streaming"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
     lazy_preprocess: bool = True
@@ -55,6 +62,8 @@ class DataArguments(BaseModel):
     vlm_img_dir: str | None = None
     vlm_processor: str | None = None
     sample_size: int = -1
+    streaming_server_url: str | None = None
+    streaming_model_name: str | None = None
 
     @field_validator("sample_size")
     @classmethod
@@ -62,6 +71,25 @@ class DataArguments(BaseModel):
         if v == 0 or v < -1:
             raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
         return v
+
+    @model_validator(mode="after")
+    def _check_mode_requirements(self) -> DataArguments:
+        # Always recompute from the data-source fields, never trust an incoming ``mode``: a
+        # value stored by an earlier validation can go stale across a recipe dump/reload +
+        # override round-trip and silently select the wrong training path.
+        has_offline = self.offline_data_path is not None
+        has_streaming = self.streaming_server_url is not None
+        if has_offline and has_streaming:
+            raise ValueError(
+                "ambiguous: set only one of data.offline_data_path / data.streaming_server_url"
+            )
+        self.mode = "offline" if has_offline else "streaming" if has_streaming else "online"
+        if self.mode == "streaming" and not self.streaming_model_name:
+            raise ValueError(
+                "data.mode='streaming' requires data.streaming_server_url and "
+                "data.streaming_model_name"
+            )
+        return self
 
 
 class TrainingArguments(BaseModel):

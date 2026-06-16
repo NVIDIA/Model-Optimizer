@@ -39,6 +39,13 @@ def preprocess_function(sample):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_path", type=str, default="data")
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="If set, keep only the first N rows of each split before processing. Greatly "
+        "speeds up preparation for smoke tests (cnn_dailymail train is ~287k rows).",
+    )
     return parser.parse_args()
 
 
@@ -47,6 +54,14 @@ def main():
 
     # Load dataset from the hub
     dataset = load_dataset(dataset_id, name=dataset_config)
+
+    if args.max_samples is not None:
+        dataset = type(dataset)(
+            {
+                split: ds.select(range(min(args.max_samples, len(ds))))
+                for split, ds in dataset.items()
+            }
+        )
 
     # process dataset
     tokenized_dataset = dataset.map(

@@ -15,6 +15,7 @@
 
 import copy
 import io
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -23,6 +24,11 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization._auto_quantize_cost import (
+    EXCLUDED_MODULE_NAME_PATTERNS_KEY,
+    get_auto_quantize_cost_model,
+    infer_active_moe_expert_ratio,
+)
 from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
     QuantRecipe,
@@ -59,6 +65,31 @@ class TransformerBlock(torch.nn.Module):
         x = self.attn(x)
         x = self.mlp(x)
         return x
+
+    def get_input(self):
+        return torch.randn(1, 4, 32)
+
+
+class _AutoQuantMoeModel(torch.nn.Module):
+    def __init__(self, num_experts_attr="num_experts"):
+        super().__init__()
+        self.config = SimpleNamespace(text_config=SimpleNamespace(num_experts_per_tok=2))
+        setattr(self.config.text_config, num_experts_attr, 8)
+        self.mlp = torch.nn.Module()
+        self.mlp.experts = torch.nn.ModuleList()
+        for _ in range(2):
+            expert = torch.nn.Module()
+            expert.gate_proj = torch.nn.Linear(32, 32)
+            expert.up_proj = torch.nn.Linear(32, 32)
+            expert.down_proj = torch.nn.Linear(32, 32)
+            self.mlp.experts.append(expert)
+        self.mlp.shared_expert = torch.nn.Linear(32, 32)
+
+    def forward(self, x):
+        y = self.mlp.shared_expert(x)
+        for expert in self.mlp.experts:
+            y = y + expert.down_proj(expert.gate_proj(x) + expert.up_proj(x))
+        return y
 
     def get_input(self):
         return torch.randn(1, 4, 32)
@@ -109,6 +140,154 @@ def test_quant_recipe_hparam():
     output_ref = model_ref(inputs)
 
     assert torch.allclose(output_test, output_ref)
+
+
+def test_quant_recipe_hparam_cost_weight():
+    model_test = mtq.quantize(torch.nn.Linear(4, 16), mtq.INT8_DEFAULT_CFG)
+    search_recipes = [QuantRecipe(mtq.INT8_DEFAULT_CFG)]
+    hparam = QuantRecipeHparam(
+        search_recipes,
+        quant_modules=[model_test],
+        quant_module_names=["layers.0.mlp.experts.0.down_proj"],
+        cost_weight=0.25,
+    )
+
+    dense_cost = hparam.get_cost(QuantRecipe(quant_cfg=None))
+    int8_cost = hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG))
+
+    assert dense_cost == pytest.approx(model_test.weight.numel() * 0.25)
+    assert int8_cost == pytest.approx(model_test.weight.numel() * 0.25 * 0.5)
+
+
+def test_quant_recipe_hparam_zero_cost_weight():
+    model_test = mtq.quantize(torch.nn.Linear(4, 16), mtq.INT8_DEFAULT_CFG)
+    hparam = QuantRecipeHparam(
+        [QuantRecipe(mtq.INT8_DEFAULT_CFG)],
+        quant_modules=[model_test],
+        quant_module_names=["visual.blocks.0.attn.qkv"],
+        cost_weight=0.0,
+    )
+
+    assert hparam.get_cost(QuantRecipe(quant_cfg=None)) == pytest.approx(0.0)
+    assert hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG)) == pytest.approx(0.0)
+
+
+def test_auto_quantize_cost_model_excludes_module_name_patterns():
+    visual = torch.nn.Linear(4, 16)
+    mtp = torch.nn.Linear(4, 16)
+    lm_head = torch.nn.Linear(4, 16)
+    cost_model = get_auto_quantize_cost_model("weight")
+    cost_constraints = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*", "*vision_tower*", "*mtp*"]}
+
+    total_weight_size = cost_model.total_weight_size(
+        [
+            ("model.visual.blocks.0.attn.qkv", visual),
+            ("model.mtp.layers.0.mlp", mtp),
+            ("lm_head", lm_head),
+        ],
+        is_auto_quantize_module=lambda module: True,
+        cost_constraints=cost_constraints,
+    )
+
+    assert total_weight_size == pytest.approx(lm_head.weight.numel())
+    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
+    assert cost_model.module_cost_weight(["model.mtp.layers.0.mlp"], cost_constraints) == 0
+    assert (
+        cost_model.module_cost_weight(
+            ["model.visual.blocks.0.attn.qkv", "lm_head"], cost_constraints
+        )
+        == 1.0
+    )
+
+
+def test_active_moe_cost_model_counts_fused_experts_without_weight():
+    fused_experts = torch.nn.Module()
+    fused_experts.gate_up_proj = torch.nn.Parameter(torch.empty(2, 3, 5))
+    fused_experts.down_proj = torch.nn.Parameter(torch.empty(2, 5, 3))
+    visual = torch.nn.Linear(4, 16)
+    cost_model = get_auto_quantize_cost_model("active_moe")
+
+    total_weight_size = cost_model.total_weight_size(
+        [
+            ("layers.0.mlp.experts", fused_experts),
+            ("model.visual.blocks.0.attn.qkv", visual),
+        ],
+        is_auto_quantize_module=lambda module: True,
+        cost_constraints={
+            "active_moe_expert_ratio": 0.25,
+            EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
+        },
+    )
+
+    assert total_weight_size == pytest.approx(
+        (fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()) * 0.25
+    )
+
+
+@pytest.mark.parametrize("num_experts_attr", ["num_experts", "num_local_experts"])
+def test_auto_quantize_active_moe_cost_model(num_experts_attr):
+    model = _AutoQuantMoeModel(num_experts_attr)
+
+    _, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0, "cost_model": "active_moe"},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    assert search_history["cost_model"] == "active_moe"
+    assert search_history["active_moe_expert_ratio"] == pytest.approx(0.25)
+    weighted_no_quant_cost = sum(
+        stats["costs"][-1] for stats in search_history["candidate_stats"].values()
+    )
+    assert search_history["cost_denominator"] == pytest.approx(weighted_no_quant_cost)
+    routed_stats = [
+        stats
+        for stats in search_history["candidate_stats"].values()
+        if any("mlp.experts" in name for name in stats["module_names"])
+    ]
+    shared_stats = [
+        stats
+        for stats in search_history["candidate_stats"].values()
+        if any("mlp.shared_expert" in name for name in stats["module_names"])
+    ]
+    assert routed_stats
+    assert shared_stats
+    assert all(stats["cost_weight"] == pytest.approx(0.25) for stats in routed_stats)
+    assert all(stats["cost_weight"] == pytest.approx(1.0) for stats in shared_stats)
+    assert all("active_costs" not in stats for stats in search_history["candidate_stats"].values())
+
+
+def test_active_moe_ratio_requires_single_config_object():
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(
+        num_experts_per_tok=2,
+        text_config=SimpleNamespace(num_experts=8),
+    )
+
+    assert infer_active_moe_expert_ratio(model) is None
+
+
+def test_active_moe_search_prefers_budget_lower_bound():
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.config = {"cost_model": "active_moe"}
+    searcher.cost_model = "active_moe"
+    searcher.candidate_stats = {
+        "layers.0.mlp.quant_recipe": {
+            "formats": ["under_budget", "near_budget"],
+            "costs": [1.0, 4.95],
+            "scores": [0.0, 10.0],
+        }
+    }
+
+    best_recipes, is_satisfied = searcher.run_search_with_stats(5.0)
+
+    assert is_satisfied
+    assert best_recipes["layers.0.mlp.quant_recipe"]["format"] == "near_budget"
 
 
 # use this config to test custom quantization config
@@ -304,7 +483,8 @@ def _test_data_parallel_auto_quantize(rank, size):
 
 
 def test_data_parallel_auto_quantize(skip_on_windows):
-    spawn_multiprocess_job(4, _test_data_parallel_auto_quantize, backend="gloo")
+    # 2 ranks fully exercise the cross-rank sync the test asserts; more just adds spawn overhead.
+    spawn_multiprocess_job(2, _test_data_parallel_auto_quantize, backend="gloo")
 
 
 def test_auto_quantize_budget_uses_no_quant_candidate_cost(monkeypatch):
@@ -543,3 +723,62 @@ def test_get_auto_quantize_config(method):
     fresh_model = mtq.quantize(fresh_model, config, forward_loop=lambda m: m(model.get_input()))
     output = fresh_model(model.get_input())
     assert output is not None
+
+
+def test_get_auto_quantize_config_keeps_selected_lm_head_enabled():
+    recipe_config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    recipe_config["quant_cfg"].append({"quantizer_name": "*lm_head*", "enable": False})
+    recipe = QuantRecipe(recipe_config, name="explicit_lm_head_disable")
+    search_state = {
+        "best": {"recipe": {"lm_head.quant_recipe": recipe}},
+        "candidate_stats": {"lm_head.quant_recipe": {"module_names": ["lm_head"]}},
+        "disabled_layers": ["*visual*", "*mtp*"],
+    }
+
+    config = mtq.get_auto_quantize_config(search_state)
+    quant_cfg = config["quant_cfg"]
+    quantizer_names = [entry["quantizer_name"] for entry in quant_cfg]
+
+    default_disable_idx = next(
+        idx for idx, entry in enumerate(quant_cfg) if entry["quantizer_name"] == "*lm_head*"
+    )
+    weight_idx = next(
+        idx
+        for idx, entry in enumerate(quant_cfg)
+        if entry["quantizer_name"] == "lm_head.weight_quantizer"
+    )
+    weight_entry = quant_cfg[weight_idx]
+
+    assert "*visual*" in quantizer_names
+    assert "*mtp*" in quantizer_names
+    assert default_disable_idx < weight_idx
+    assert weight_entry["enable"] is True
+    assert weight_entry["cfg"]["num_bits"] == (4, 3)
+
+
+@pytest.mark.parametrize("with_persisted_attrs", [True, False])
+def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persisted_attrs):
+    recipe = QuantRecipe(copy.deepcopy(mtq.FP8_DEFAULT_CFG), name="fp8")
+    module_name = "layers.0.mlp.experts"
+    candidate_stat = {"module_names": [module_name]}
+    if with_persisted_attrs:
+        candidate_stat["quantizer_attrs"] = {
+            module_name: [
+                "gate_up_proj_input_quantizer",
+                "gate_up_proj_weight_quantizer",
+                "down_proj_input_quantizer",
+                "down_proj_weight_quantizer",
+            ]
+        }
+    search_state = {
+        "best": {"recipe": {f"{module_name}.quant_recipe": recipe}},
+        "candidate_stats": {f"{module_name}.quant_recipe": candidate_stat},
+        "disabled_layers": [],
+    }
+
+    config = mtq.get_auto_quantize_config(search_state)
+    quantizer_names = {entry["quantizer_name"] for entry in config["quant_cfg"]}
+
+    assert f"{module_name}.gate_up_proj_weight_quantizer" in quantizer_names
+    assert f"{module_name}.down_proj_weight_quantizer" in quantizer_names
+    assert f"{module_name}.weight_quantizer" not in quantizer_names

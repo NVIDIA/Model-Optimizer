@@ -640,7 +640,9 @@ def test_medusa(command):
         *ModelDeployerList(
             base_model="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
             model_id="nvidia/EAGLE3-NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-            backend=("trtllm", "vllm", "sglang"),
+            # SGLang excluded: Nemotron hybrid (Mamba+attention) doesn't support
+            # speculative decoding in SGLang (NVBugs 6130106)
+            backend=("trtllm", "vllm"),
             eagle3_one_model=False,
             tensor_parallel_size=8,
             mini_sm=89,

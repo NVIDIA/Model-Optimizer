@@ -15,9 +15,7 @@
 
 """Support quantization for megatron linear layers."""
 
-import logging
 import types
-import warnings
 from contextlib import contextmanager
 from typing import Any
 
@@ -39,6 +37,7 @@ from modelopt.torch.opt.plugins.megatron import (
     ensure_metadata_has_dp_cp_group,
     register_modelopt_extra_state_callbacks,
 )
+from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
 from ..conversion import maybe_promote_nvfp4_static_quantizer
@@ -66,7 +65,6 @@ try:
 except ImportError:
     HAS_TE = False
 
-logger = logging.getLogger(__name__)
 
 __all__ = []
 
@@ -266,7 +264,7 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
         """Configure Attention module for KV cache quantization compatibility."""
         # Disable flash_decode if enabled - it bypasses core_attention (only called during inference)
         if getattr(module.config, "flash_decode", False):
-            warnings.warn(
+            warn_rank_0(
                 "flash_decode=True is incompatible with ModelOpt KV cache quantization. "
                 "Setting flash_decode=False. Flash decode bypasses core_attention during decode phase."
             )
@@ -326,9 +324,7 @@ class _MegatronParallelLinear(_ParallelLinear):
             try:
                 data_parallel_group = get_data_parallel_group(with_context_parallel=True)
             except AssertionError:
-                logger.warning(
-                    "Context parallel group is not initialized, using data parallel group"
-                )
+                warn_rank_0("Context parallel group is not initialized, using data parallel group")
                 data_parallel_group = get_data_parallel_group()
             self.parallel_state = ParallelState(
                 data_parallel_group,
@@ -336,7 +332,7 @@ class _MegatronParallelLinear(_ParallelLinear):
             )
 
         if getattr(self, "gradient_accumulation_fusion", False):
-            warnings.warn(
+            warn_rank_0(
                 "gradient_accumulation_fusion is not supported with ModelOpt quantization. "
                 "Setting gradient_accumulation_fusion to False."
             )
@@ -384,9 +380,7 @@ class _MegatronParallelLinear(_ParallelLinear):
                     getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False)
                 )
             except Exception as e:
-                logger.warning(
-                    f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}"
-                )
+                warn_rank_0(f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}")
                 _untied = False
             if not _untied:
                 return super().sharded_state_dict(prefix, sharded_offsets, metadata)
@@ -400,7 +394,7 @@ class _MegatronParallelLinear(_ParallelLinear):
             elif self._parameter_to_keep_in_quantizer_state_dict(k):
                 quantizer_state_dict[k] = v
             elif "quantizer" in k:
-                warnings.warn(
+                warn_rank_0(
                     f"Quantizer state {k} is not supported for sharded_state_dict. "
                     "Please use regular state_dict."
                 )

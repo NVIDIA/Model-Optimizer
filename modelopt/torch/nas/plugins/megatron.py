@@ -568,9 +568,11 @@ class _DynamicSelfAttention(DynamicModule):
 
         # Convert the TEDotProductAttention to dynamic module
         assert isinstance(self.core_attention, TEDotProductAttention)
+        # Use type(self.core_attention) (not TEDotProductAttention) so model-specific subclasses
+        # (e.g. Gemma3's Gemma3TEDotProductAttention) keep their overridden behavior post-conversion.
         _DynamicTEDotProductAttention: DynamicModule = type(  # noqa: N806
             "_DynamicTEDotProductAttention",
-            (DynamicModule, TEDotProductAttention),
+            (DynamicModule, type(self.core_attention)),
             {"_setup": lambda self: None},
         )
         _DynamicTEDotProductAttention.convert(self.core_attention)
@@ -584,6 +586,16 @@ class _DynamicSelfAttention(DynamicModule):
             num_attention_heads=num_attention_heads,
             hidden_size=hidden_size,
         )
+        self._convert_linear_proj(num_attention_heads=num_attention_heads, hidden_size=hidden_size)
+
+    def _convert_linear_proj(
+        self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp
+    ) -> None:
+        """Convert linear_proj to a dynamic module.
+
+        Overridable so model-specific output projections (e.g. Gemma3's post-LN
+        ``TERowParallelLinearLayerNorm``) can register their extra dynamic state.
+        """
         _DynamicTEProjRowParallelLinear.convert(
             self.linear_proj,
             num_attention_heads=num_attention_heads,

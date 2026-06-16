@@ -23,6 +23,18 @@ from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
 from .eagle.default_config import default_eagle_config, default_kimik2_eagle_config
 
+__all__ = [
+    "DFLASH_DEFAULT_CFG",
+    "EAGLE3_DEFAULT_CFG",
+    "EAGLE_MTP_DEFAULT_CFG",
+    "DFlashConfig",
+    "EagleConfig",
+    "MedusaConfig",
+    "eagle3_default_config",
+    "eagle_mtp_default_config",
+    "kimik2_eagle_default_config",
+]
+
 kimik2_eagle_default_config = deepcopy(default_kimik2_eagle_config)
 
 eagle3_default_config = deepcopy(default_eagle_config)
@@ -68,8 +80,10 @@ class DFlashConfig(ModeloptBaseConfig):
     dflash_offline: bool = ModeloptField(
         default=False,
         description=(
-            "Whether to use detached DFlash (offline training from pre-computed hidden states). "
-            "Derived by ModelOptDFlashRecipe from data.offline_data_path; not user-configurable."
+            "Whether the DFlash module consumes pre-computed hidden states (offline from "
+            "dumped .pt files, or streaming via NIXL RDMA from a vLLM serve) instead of running "
+            "the base model. Derived by ModelOptDFlashRecipe from data.mode (True unless "
+            "online); not user-configurable."
         ),
     )
 
@@ -118,6 +132,20 @@ class DFlashConfig(ModeloptBaseConfig):
         description="Whether to use torch.compile on DFlash forward/loss methods.",
     )
 
+    dflash_export_rope_scaling: dict = ModeloptField(
+        default={},
+        description=(
+            "The rope_scaling config to inject into the exported HuggingFace draft config. "
+            "The DFlash draft trains on a short window but must draft for the target at long "
+            "context, so — mirroring published Eagle3 drafts such as nvidia/Kimi-K2.6-Eagle3 — "
+            "a YaRN rope_scaling is injected at export to extend the training window to the "
+            "target's full context. Example: "
+            '{"type": "yarn", "factor": 48.0, "original_max_position_embeddings": 4096, '
+            '"beta_fast": 1.0, "beta_slow": 1.0, "mscale": 1.0, "mscale_all_dim": 1.0}. '
+            "Set to empty dict {} (default) to disable rope scaling injection at export."
+        ),
+    )
+
 
 class MedusaConfig(ModeloptBaseConfig):
     """Medusa config."""
@@ -139,8 +167,9 @@ class EagleConfig(ModeloptBaseConfig):
     eagle_offline: bool = ModeloptField(
         default=False,
         description=(
-            "Whether to use detached Eagle. Derived by ModelOptEagleRecipe from "
-            "data.offline_data_path; not user-configurable."
+            "Whether the Eagle module consumes pre-computed hidden states (offline or streaming) "
+            "instead of running the base model in-process. Derived by ModelOptEagleRecipe from "
+            "``data.mode``; not user-configurable."
         ),
     )
 
@@ -246,6 +275,14 @@ class EagleConfig(ModeloptBaseConfig):
         description=(
             "Number of warmup steps where LoRA is frozen and only the EAGLE draft head trains. "
             "After warmup, LoRA is enabled for co-training."
+        ),
+    )
+
+    eagle_base_lora_start_layer: int | None = ModeloptField(
+        default=None,
+        description=(
+            "If set, only inject LoRA into base model layers with index >= this value. "
+            "For example, setting to 17 on a 36-layer model applies LoRA to layers 17-35 only."
         ),
     )
 

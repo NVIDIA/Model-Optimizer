@@ -46,13 +46,13 @@ import re
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import get_supported_datasets, print_rank_0, warn_rank_0
+from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.utils import get_supported_datasets, print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
@@ -256,10 +256,10 @@ def get_args() -> argparse.Namespace:
             raise ValueError("--prune_export_config must parse to a dictionary.")
         args.prune_export_config = prune_export_config
 
-    print_rank_0("\n==================== Arguments ====================")
-    for k, v in args.__dict__.items():
-        print_rank_0(f"{k:<35} {v}")
-    print_rank_0("===================================================\n")
+    if args.inference_batch_size is None:
+        args.inference_batch_size = args.calib_batch_size
+
+    print_args(args)
 
     return args
 
@@ -280,7 +280,8 @@ def main(args: argparse.Namespace):
         hf_model_name_or_path=args.hf_model_name_or_path,
         trust_remote_code=args.trust_remote_code,
         provider_overrides={
-            "tensor_model_parallel_size": 1,
+            "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
+            "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "pipeline_model_parallel_size": args.pp_size,
             "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
@@ -376,11 +377,7 @@ def main(args: argparse.Namespace):
         pruning_config["hparams_to_skip"] = args.hparams_to_skip
         pruning_config["top_k"] = args.top_k
         # memory_mb constraint requires batch_size and seq_length
-        pruning_config["batch_size"] = (
-            args.inference_batch_size
-            if args.inference_batch_size is not None
-            else args.calib_batch_size
-        )
+        pruning_config["batch_size"] = args.inference_batch_size
         pruning_config["seq_length"] = args.seq_length
     print_rank_0(f"Pruning constraints: {pruning_constraints}")
 
@@ -407,8 +404,9 @@ def main(args: argparse.Namespace):
             f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
         )
 
-        # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR
-        use_fast_tokenizer = isinstance(provider, NemotronHModelProvider)
+        # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR.
+        architectures = getattr(bridge.hf_pretrained.config, "architectures", None) or []
+        use_fast_tokenizer = "NemotronHForCausalLM" in architectures
         bridge.save_megatron_model(
             model,
             args.output_megatron_path,
@@ -471,6 +469,8 @@ def main(args: argparse.Namespace):
             args.output_hf_path, trust_remote_code=args.trust_remote_code
         )
         pruned_bridge.save_hf_weights(model, args.output_hf_path)
+
+        copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
 
     print_rank_0("Done!")

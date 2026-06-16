@@ -27,12 +27,6 @@ import pytest
 import torch
 from conftest import make_qkv, make_varlen_meta
 
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::UserWarning"),
-    pytest.mark.filterwarnings("ignore::RuntimeWarning"),
-    pytest.mark.filterwarnings("ignore::DeprecationWarning"),
-]
-
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
@@ -131,6 +125,43 @@ class TestAttentionCalibrate:
         )
         assert out.shape == q.shape
         assert counters.shape == (2, 2)
+
+    def test_decode_skips_padding_rows(self):
+        """Decode (seq_q=1) skips real KV tiles once padding Q rows are excluded.
+
+        With BLOCK_M=128, 127/128 query rows are padding. Before the padding-row
+        fix their ~0 gap forced zero skips; after it the largest threshold skips a
+        meaningful number of KV tiles.
+        """
+        seq_q, seq_k, num_heads, head_dim = 1, 512, 4, 64
+        scale = 1.0 / (head_dim**0.5)
+        torch.manual_seed(0)
+        q = torch.randn(seq_q, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(seq_k, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(seq_k, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        b_start_loc = torch.zeros(1, device="cuda", dtype=torch.int32)
+        b_seq_len = torch.ones(1, device="cuda", dtype=torch.int32)
+        b_start_loc_k = torch.zeros(1, device="cuda", dtype=torch.int32)
+        b_seq_len_k = torch.full((1,), seq_k, device="cuda", dtype=torch.int32)
+
+        _, counters = attention_calibrate(
+            q,
+            k,
+            v,
+            b_start_loc,
+            b_seq_len,
+            seq_q,
+            softmax_scale=scale,
+            is_causal=False,
+            b_start_loc_k=b_start_loc_k,
+            b_seq_len_k=b_seq_len_k,
+            max_input_len_k=seq_k,
+            threshold_trials=[1e-2, 1e-1, 5e-1, 9e-1],
+        )
+        skipped = counters[:, 1]
+        assert (skipped[1:] >= skipped[:-1]).all()  # monotonic non-decreasing
+        assert (skipped <= counters[:, 0]).all()
+        assert skipped[-1] > 0  # padding-row fix makes this non-zero
 
     def test_threshold_order_doesnt_affect_counts(self):
         """Skipped counts at the same threshold are independent of trial ordering."""
@@ -282,7 +313,9 @@ print(f"TOTAL={out._sparsity_total}")
         assert result.returncode == 0, result.stderr
         totals = [line for line in result.stdout.splitlines() if line.startswith("TOTAL=")]
         assert totals, result.stdout
-        assert int(totals[-1].split("=", maxsplit=1)[1]) == 8
+        # seq_len=256, _MEASURE_BLOCK_M = _MEASURE_BLOCK_N = 128, non-causal:
+        # Q tiles = ceil(256/128) = 2, KV tiles = ceil(256/128) = 2, total = 4.
+        assert int(totals[-1].split("=", maxsplit=1)[1]) == 4
 
     def test_measure_sparsity_without_skip_is_noop(self):
         """Without skip-softmax, measure_sparsity doesn't attach counters."""

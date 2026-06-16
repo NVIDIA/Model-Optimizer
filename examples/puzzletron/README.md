@@ -43,7 +43,7 @@ python -m pytest tests/gpu/torch/puzzletron/test_puzzletron.py -k "Qwen3-8B"
 
 - For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use a single GPU.
 
-- To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
+- To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Puzzle-KD-Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
 
 ```bash
 hf auth login --token <your token>
@@ -51,15 +51,17 @@ hf auth login --token <your token>
 
 ## Compress the Model
 
-1. Download and prepare the [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
+1. Download and prepare the dataset.
 
-   dataset split: "code", "math", "stem", "chat", excluding reasoning samples (2.62GB)
+   **Default (recommended):** Use the prebuilt [Puzzle-KD-Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2) (~3 GB disk required).
 
    ```bash
    python -m modelopt.torch.puzzletron.dataset.prepare_dataset \
-      --dataset_name nvidia/Nemotron-Post-Training-Dataset-v2 \
-      --output_dir path/to/Nemotron-Post-Training-Dataset-v2
+      --dataset_name nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2 \
+      --output_dir path/to/Puzzle-KD-Nemotron-Post-Training-Dataset-v2
    ```
+
+   > **Note:** Alternatively, you can derive the dataset from the raw [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) by passing `--dataset_name nvidia/Nemotron-Post-Training-Dataset-v2`. This downloads the full raw dataset (~136 GB) before filtering it down to the same ~2.6 GB result. Only do this if you need to reproduce the preprocessing from scratch.
 
 2. Specify the `puzzle_dir`, `input_hf_model_path`, `dataset_path`, `intermediate_size_list`, and `target_memory` arguments in the [llama-3_1-8B_pruneffn_memory.yaml](./configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml) configuration file.
 
@@ -342,6 +344,46 @@ To recover degradation in the quality of the compressed model, we can use knowle
 See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) for instructions on using Megatron-Bridge for knowledge distillation. The distillation script supports both standard HuggingFace and Puzzletron AnyModel checkpoints.
 
 For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
+
+## Runtime-Based Latency Optimization
+
+You can enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints.
+
+A ready-to-run example config is included at [`configs/llama-3_1-8B_pruneffn_runtime/`](./configs/llama-3_1-8B_pruneffn_runtime/llama-3_1-8B_pruneffn_runtime.yaml). The following key fields enable and control execution of the runtime statistics in the `llama-3_1-8B_pruneffn_runtime.yaml` config file:
+
+```yaml
+calc_subblock_stats:
+  runtime_stats:
+    enabled: true
+    num_warmup_iters: 2
+    num_iters: 10
+```
+
+The runtime constraint is specified in the `human_constraints` section of the config `Llama-3_1-8B.yaml`:
+
+```yaml
+human_constraints:
+  target_latency_seconds: 21
+```
+
+Run the pipeline against this config the same way as the memory-constrained variant:
+
+```bash
+torchrun --nproc_per_node 2 examples/puzzletron/main.py \
+   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_runtime/llama-3_1-8B_pruneffn_runtime.yaml 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+```
+
+The MIP solver will now search for a heterogeneous architecture whose measured end-to-end latency is at or below `target_latency_seconds`, instead of optimizing for a memory budget.
+
+Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly (already included in the example config):
+
+```yaml
+nccl_timeout_minutes: 90  # default is 10 if omitted
+```
+
+This field is supported in any Puzzletron YAML config and overrides the default 10-minute distributed timeout.
+
+Due to non-linear extension of the runtime stats of single subblocks to the total runtime of the model, the `target_latency_seconds` value should be set to a value that is slightly lower than the desired latency. For example, in our experiments, the `target_latency_seconds` value of 5 resulted in a final model latency of 5.4 seconds.
 
 ## Advanced Usage
 

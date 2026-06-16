@@ -15,6 +15,7 @@
 
 """Tests for bypass-distillation dataloader behavior added by this PR."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -206,73 +207,42 @@ class _EmptyConversationDataset:
         yield {"text": []}
 
 
-def test_constant_length_dataset_no_chat_template_adds_role_tags_and_warns_once(monkeypatch):
-    monkeypatch.setattr(dataset_module, "_CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED", False)
-    tokenizer = _NoChatTemplateTokenizer()
-    dataset = ConstantLengthDataset(
-        tokenizer,
-        _ConversationDataset(),
-        infinite=False,
-        seq_length=2,
-        num_of_sequences=1,
-        chars_per_token=100,
-        content_field="text",
-        fim_rate=0.0,
-        fim_spm_rate=0.0,
-        label_shift=False,
-    )
-
-    with pytest.warns(UserWarning, match="no chat_template"):
-        realized = list(dataset)
-
-    assert tokenizer.seen_texts == ["user: hello\nassistant: world"]
-    assert len(realized) == 1
-    assert torch.equal(realized[0]["input_ids"], torch.tensor([0, 1]))
-    assert torch.equal(realized[0]["targets"], torch.tensor([0, 1]))
-
-
-def test_constant_length_dataset_uses_tokenizer_chat_template_when_available(monkeypatch):
-    monkeypatch.setattr(dataset_module, "_CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED", False)
-    tokenizer = _ChatTemplateTokenizer()
-    dataset = ConstantLengthDataset(
-        tokenizer,
-        _ConversationDataset(),
-        infinite=False,
-        seq_length=2,
-        num_of_sequences=1,
-        chars_per_token=100,
-        content_field="text",
-        fim_rate=0.0,
-        fim_spm_rate=0.0,
-        label_shift=False,
-    )
-
-    realized = list(dataset)
-
-    assert tokenizer.template_messages == [
+def test_constant_length_dataset_formats_conversation_messages(monkeypatch):
+    expected_messages = [
         {"role": "user", "content": {"text": "hello"}},
         {"role": "assistant", "content": "world"},
     ]
-    assert tokenizer.seen_texts == ["templated chat"]
-    assert len(realized) == 1
+    for tokenizer, raw_dataset, expected_texts, warning_context in [
+        (
+            _NoChatTemplateTokenizer(),
+            _ConversationDataset(),
+            ["user: hello\nassistant: world"],
+            pytest.warns(UserWarning, match="no chat_template"),
+        ),
+        (_ChatTemplateTokenizer(), _ConversationDataset(), ["templated chat"], nullcontext()),
+        (_NoChatTemplateTokenizer(), _EmptyConversationDataset(), [""], nullcontext()),
+    ]:
+        monkeypatch.setattr(dataset_module, "_CHAT_TEMPLATE_FALLBACK_WARNING_EMITTED", False)
+        dataset = ConstantLengthDataset(
+            tokenizer,
+            raw_dataset,
+            infinite=False,
+            seq_length=2,
+            num_of_sequences=1,
+            chars_per_token=100,
+            content_field="text",
+            fim_rate=0.0,
+            fim_spm_rate=0.0,
+            label_shift=False,
+        )
 
+        with warning_context:
+            realized = list(dataset)
 
-def test_constant_length_dataset_handles_empty_message_list():
-    tokenizer = _NoChatTemplateTokenizer()
-    dataset = ConstantLengthDataset(
-        tokenizer,
-        _EmptyConversationDataset(),
-        infinite=False,
-        seq_length=2,
-        num_of_sequences=1,
-        chars_per_token=100,
-        content_field="text",
-        fim_rate=0.0,
-        fim_spm_rate=0.0,
-        label_shift=False,
-    )
-
-    realized = list(dataset)
-
-    assert tokenizer.seen_texts == [""]
-    assert len(realized) == 1
+        assert tokenizer.seen_texts == expected_texts
+        assert len(realized) == 1
+        if isinstance(tokenizer, _ChatTemplateTokenizer):
+            assert tokenizer.template_messages == expected_messages
+        else:
+            assert torch.equal(realized[0]["input_ids"], torch.tensor([0, 1]))
+            assert torch.equal(realized[0]["targets"], torch.tensor([0, 1]))

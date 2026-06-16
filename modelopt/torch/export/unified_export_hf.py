@@ -859,9 +859,14 @@ def _export_transformers_checkpoint(
                 elif hasattr(sub_module.experts, "gate_up_proj_weight_quantizers"):
                     # _QuantFusedExperts: amax fallback is handled in _export_fused_experts
                     break
-                elif "QuantGptOssExperts" in type(sub_module.experts).__name__:
-                    # Handle GPT-OSS experts specifically
-                    # GPT-OSS experts use gate_up_proj and down_proj
+                elif (
+                    "QuantGptOssExperts" in type(sub_module.experts).__name__
+                    or "QuantLlama4TextExperts" in type(sub_module.experts).__name__
+                ):
+                    # Handle GPT-OSS / Llama4 fused experts specifically.
+                    # Both use gate_up_proj and down_proj with singular input quantizers
+                    # (gate_up_proj_input_quantizer/down_proj_input_quantizer); the actual
+                    # amax fallback and weight export is performed in _process_quantized_modules.
                     gpt_oss_linear_names = ["gate_up_proj", "down_proj"]
                     for linear_name in gpt_oss_linear_names:
                         if hasattr(sub_module.experts, linear_name):
@@ -1127,6 +1132,19 @@ def _export_diffusers_checkpoint(
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
         else:
             _save_component_state_dict_safetensors(component, component_export_dir)
+
+        # Step 9: Update config.json with sparse attention info (both quantized and non-quantized)
+        if export_sparse_attention_config is not None:
+            sparse_attn_config = export_sparse_attention_config(component)
+            if sparse_attn_config is not None:
+                config_path = component_export_dir / "config.json"
+                if config_path.exists():
+                    with open(config_path) as file:
+                        config_data = json.load(file)
+                    config_data["sparse_attention_config"] = sparse_attn_config
+                    with open(config_path, "w") as file:
+                        json.dump(config_data, file, indent=4)
+                    print(f"  Added sparse_attention_config to {config_path.name}")
 
         print(f"  Saved to: {component_export_dir}")
 

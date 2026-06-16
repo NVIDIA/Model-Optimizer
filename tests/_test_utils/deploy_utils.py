@@ -17,6 +17,7 @@ import itertools
 import os
 import subprocess
 import sys
+import traceback
 
 import pytest
 import torch
@@ -84,8 +85,6 @@ def _run_trtllm_deploy(
         )
         deployer._deploy_trtllm_impl()
     except Exception:
-        import traceback
-
         traceback.print_exc()
         pytest.fail(traceback.format_exc())
 
@@ -111,8 +110,6 @@ def _run_vllm_deploy(
         )
         deployer._deploy_vllm_impl()
     except Exception:
-        import traceback
-
         traceback.print_exc()
         pytest.fail(traceback.format_exc())
 
@@ -138,8 +135,6 @@ def _run_sglang_deploy(
         )
         deployer._deploy_sglang_impl()
     except Exception:
-        import traceback
-
         traceback.print_exc()
         pytest.fail(traceback.format_exc())
 
@@ -309,15 +304,27 @@ class ModelDeployer:
         """Run vLLM deploy (used by subprocess in run())."""
         from vllm import LLM, SamplingParams
 
-        quantization_method = "modelopt"
-        if "fp4" in self.model_id.lower():
-            quantization_method = "modelopt_fp4"
-        llm = LLM(
-            model=self.model_id,
-            quantization=quantization_method,
-            tensor_parallel_size=self.tensor_parallel_size,
-            trust_remote_code=True,
-        )
+        if "eagle" in self.model_id.lower():
+            llm = LLM(
+                model=self.base_model,
+                speculative_config={
+                    "method": "eagle3",
+                    "model": self.model_id,
+                    "num_speculative_tokens": 3,
+                },
+                tensor_parallel_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+            )
+        else:
+            quantization_method = "modelopt"
+            if "fp4" in self.model_id.lower():
+                quantization_method = "modelopt_fp4"
+            llm = LLM(
+                model=self.model_id,
+                quantization=quantization_method,
+                tensor_parallel_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+            )
         sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
         outputs = llm.generate(COMMON_PROMPTS, sampling_params)
 
@@ -347,18 +354,25 @@ class ModelDeployer:
         if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         if "eagle" in self.model_id.lower():
-            llm = sgl.Engine(
-                model_path=self.base_model,
-                speculative_algorithm="EAGLE3",
-                speculative_num_steps=3,
-                speculative_eagle_topk=1,
-                speculative_num_draft_tokens=4,
-                speculative_draft_model_path=self.model_id,
-                tp_size=self.tensor_parallel_size,
-                trust_remote_code=True,
-                mem_fraction_static=0.7,
-                context_length=1024,
-            )
+            eagle_kwargs = {
+                "model_path": self.base_model,
+                "speculative_algorithm": "EAGLE3",
+                "speculative_num_steps": 3,
+                "speculative_eagle_topk": 1,
+                "speculative_num_draft_tokens": 4,
+                "speculative_draft_model_path": self.model_id,
+                "tp_size": self.tensor_parallel_size,
+                "trust_remote_code": True,
+                "mem_fraction_static": 0.7,
+                "context_length": 1024,
+            }
+            # Nemotron hybrid (Mamba+attention) requires extra_buffer scheduler
+            # strategy and SGLANG_ENABLE_SPEC_V2 for radix cache compatibility
+            # with speculative decoding
+            if "nemotron" in self.base_model.lower():
+                eagle_kwargs["mamba_scheduler_strategy"] = "extra_buffer"
+                os.environ["SGLANG_ENABLE_SPEC_V2"] = "1"
+            llm = sgl.Engine(**eagle_kwargs)
         elif self.model_id in (
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",

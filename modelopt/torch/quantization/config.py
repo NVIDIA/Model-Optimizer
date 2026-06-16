@@ -150,11 +150,12 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 """
 
+import re
 import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from pydantic import AliasChoices, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -633,6 +634,71 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     )
 
 
+class LayerwiseConfig(ModeloptBaseConfig):
+    """Nested config for layer-by-layer calibration behavior."""
+
+    enable: bool = ModeloptField(
+        default=False,
+        title="Enable layerwise (layer-by-layer) calibration.",
+        description=(
+            "If True, the calibration algorithm is applied layer by layer. "
+            "Each layer's inputs are captured via a forward pass that reflects the "
+            "quantization of all preceding layers, incurring O(N) forward passes for N layers."
+        ),
+    )
+
+    get_qdq_activations_from_prev_layer: bool = ModeloptField(
+        default=False,
+        title="Cache next-layer inputs from QDQ outputs of prior layers.",
+        description=(
+            "If True (GPTQ default), capture each layer's next-layer inputs "
+            "after it is calibrated, so QDQ error and in-place weight updates "
+            "propagate forward. If False (max/mse default), capture before, so "
+            "the next layer sees the same FP activations as a non-layerwise pass."
+        ),
+    )
+
+    checkpoint_dir: str | None = ModeloptField(
+        default=None,
+        title="Per-layer checkpoint directory (resume on restart).",
+        description=(
+            "If set, per-layer checkpoints are saved here during calibration. "
+            "On restart, calibration resumes from the last completed layer."
+        ),
+    )
+
+    save_every: int = ModeloptField(
+        default=1,
+        ge=1,
+        title="Flush resume metadata every N layers (final layer always flushes).",
+        description=(
+            "Only the boundary layer of each window writes the large "
+            "``next_inputs.pt`` activation cache; other per-layer files are "
+            "still written for every layer (resume needs them to replay skips). "
+            "Mid-window interrupts re-calibrate the unfinished window on resume."
+        ),
+    )
+
+
+def _coerce_layerwise_input(value):
+    """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
+    if isinstance(value, bool):
+        warnings.warn(
+            "Passing the layerwise field as a bool is deprecated; use a dict, "
+            "e.g. `{'enable': True}`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return {"enable": value}
+    if value is None:
+        return {}
+    if isinstance(value, LayerwiseConfig):
+        # ``exclude_unset=True`` so downstream ``model_fields_set`` reflects the
+        # user's actual input
+        return value.model_dump(exclude_unset=True)
+    return value
+
+
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
 
@@ -656,39 +722,115 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
-    layerwise: bool = ModeloptField(
-        default=False,
+    layerwise: LayerwiseConfig = Field(
+        default_factory=LayerwiseConfig,
         validation_alias=AliasChoices("layerwise", "use_sequential"),
-        title="Enable layerwise (layer-by-layer) calibration.",
+        title="Layerwise calibration configuration.",
         description=(
-            "If True, the calibration algorithm is applied layer by layer. "
-            "Each layer's inputs are captured via a forward pass that reflects the "
-            "quantization of all preceding layers, incurring O(N) forward passes for N layers."
+            "Nested config controlling layer-by-layer calibration. Pass a dict, "
+            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``. Bool input is "
+            "accepted for backward compatibility but deprecated."
         ),
     )
 
-    layerwise_checkpoint_dir: str | None = ModeloptField(
-        default=None,
-        title="Checkpoint directory for layerwise calibration.",
-        description=(
-            "If set together with layerwise=True, per-layer checkpoints are saved to this "
-            "directory during calibration. On restart, calibration resumes from the last "
-            "completed layer."
-        ),
-    )
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_layerwise_checkpoint_dir(cls, data):
+        """Merge the legacy flat ``layerwise_checkpoint_dir`` key into ``layerwise``.
+
+        Raises if both the flat key and a nested ``checkpoint_dir`` are set with conflicting values.
+        """
+        if not isinstance(data, dict) or "layerwise_checkpoint_dir" not in data:
+            return data
+        warnings.warn(
+            "Passing `layerwise_checkpoint_dir` at the top level is deprecated; "
+            "nest it under `layerwise.checkpoint_dir` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        data = dict(data)
+        flat_dir = data.pop("layerwise_checkpoint_dir")
+        # Resolve the legacy ``use_sequential`` alias before writing ``layerwise``,
+        # otherwise the alias value is silently dropped when AliasChoices picks the
+        # newly-written ``layerwise`` key over ``use_sequential``.
+        raw_layerwise = data.pop("layerwise", data.pop("use_sequential", None))
+        layerwise = _coerce_layerwise_input(raw_layerwise)
+        existing = layerwise.get("checkpoint_dir")
+        if existing is not None and existing != flat_dir:
+            raise ValueError(
+                f"Conflicting checkpoint_dir: layerwise_checkpoint_dir={flat_dir!r} "
+                f"differs from layerwise.checkpoint_dir={existing!r}. Set only one."
+            )
+        data["layerwise"] = {**layerwise, "checkpoint_dir": flat_dir}
+        return data
+
+    @field_validator("layerwise", mode="before")
+    @classmethod
+    def _coerce_layerwise(cls, value):
+        """Coerce ``layerwise=bool/None`` to dict form; also handles the alias path."""
+        return _coerce_layerwise_input(value)
 
     @model_validator(mode="after")
     def validate_layerwise_checkpoint_dir(self):
-        """Raise if layerwise_checkpoint_dir is set but layerwise is False."""
-        if self.layerwise_checkpoint_dir is not None and not self.layerwise:
+        """Raise if layerwise.checkpoint_dir is set but layerwise.enable is False."""
+        if self.layerwise.checkpoint_dir is not None and not self.layerwise.enable:
             raise ValueError(
-                "layerwise_checkpoint_dir requires layerwise=True. "
-                "Set layerwise=True or remove layerwise_checkpoint_dir."
+                "layerwise.checkpoint_dir requires layerwise.enable=True. "
+                "Set layerwise.enable=True or remove layerwise.checkpoint_dir."
             )
         return self
 
 
-class MaxCalibConfig(QuantizeAlgorithmConfig):
+class _SharedStatesConfig(ModeloptBaseConfig):
+    """The ``shared_states`` grouping knob, shared by max / mse / local_hessian calibration."""
+
+    shared_states: dict[str, dict[str, list[str]]] | None = ModeloptField(
+        default=None,
+        title="Concrete shared quantization states and their grouping patterns",
+        description=(
+            "Optional dict keyed by shared-state name. ``'weight_global_amax'`` is implemented "
+            "today and accepts ``{'patterns': [...]}``, where patterns are full-match regexes "
+            "against module fully-qualified names. Omitted patterns use the state's defaults; "
+            "an empty pattern list disables that state."
+        ),
+    )
+
+    @field_validator("shared_states")
+    @classmethod
+    def validate_shared_states(cls, v):
+        """Reject unknown shared-state names, fields, and invalid regexes."""
+        if v is None:
+            return v
+        supported = {"weight_global_amax"}
+        unknown = set(v) - supported
+        if unknown:
+            raise ValueError(
+                f"shared_states has unsupported state(s) {sorted(unknown)}; "
+                f"expected keys from {sorted(supported)}."
+            )
+
+        offending = ("", "")
+        try:
+            for name, state_cfg in v.items():
+                unknown_fields = set(state_cfg) - {"patterns"}
+                if unknown_fields:
+                    raise ValueError(
+                        f"shared_states[{name!r}] has unsupported field(s) "
+                        f"{sorted(unknown_fields)}; expected ['patterns']."
+                    )
+                for pattern in state_cfg.get("patterns", []):
+                    offending = (name, pattern)
+                    re.compile(pattern)
+        except re.error as e:
+            bad_state, bad_pattern = offending
+            raise ValueError(
+                f"shared_states[{bad_state!r}]['patterns'] has an invalid regex "
+                f"{bad_pattern!r}: {e}"
+            ) from e
+        return v
+
+
+class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.
 
     Max calibration estimates max values of activations or weights and use this max values
@@ -716,15 +858,15 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class MseCalibConfig(QuantizeAlgorithmConfig):
+class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
 
     Finds a scale s (via amax a, with s = a / q_max) that minimizes the
     reconstruction error of a tensor after uniform Q→DQ:
 
-        s* = argmin_s  E[(X - DQ(Q(X; s)))^2],   X ∈ {weights | activations}
+        s* = argmin_s  E[(W - DQ(Q(W; s)))^2],   W ∈ weights
 
-    When fp8_scale_sweep is enabled, step_size is ignored.
+    When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.
     """
 
     method: Literal["mse"] = ModeloptField("mse")
@@ -755,8 +897,8 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
         default=False,
         title="Enable FP8 scale sweep for NVFP4 per-block quantization.",
         description="If True, sweep all 128 FP8 E4M3 scale values instead of using multipliers. "
-        "Only applies to NVFP4 weight quantization. When enabled, num_steps, step_size, "
-        "start_multiplier, and stop_multiplier are ignored.",
+        "Applies to ModelOpt static NVFP4 weight quantizers and registered custom backends with "
+        "FP8 sweep support. Other weight quantizers use the multiplier search.",
     )
 
     distributed_sync: bool | None = ModeloptField(
@@ -766,7 +908,7 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
+class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for local Hessian-weighted MSE calibration.
 
     This algorithm uses activation information to optimize per-block scales for weight
@@ -995,6 +1137,21 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
+
+    @model_validator(mode="after")
+    def _gptq_qdq_default(self):
+        """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.
+
+        GPTQ's Hessian correctness depends on prior-layer QDQ activations, so the
+        default differs from the base class. Uses ``model_fields_set`` to detect
+        whether the user explicitly set the field — covers every input shape
+        (empty constructor, bool, dict) without a per-shape special case.
+        """
+        if "get_qdq_activations_from_prev_layer" not in self.layerwise.model_fields_set:
+            self.layerwise = self.layerwise.model_copy(
+                update={"get_qdq_activations_from_prev_layer": True}
+            )
+        return self
 
 
 QuantizeQuantCfgType = list[QuantizerCfgEntry]

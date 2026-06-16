@@ -15,9 +15,12 @@
 
 """Test of quantization config validations."""
 
+import warnings
+
 import pytest
 from pydantic import ValidationError
 
+from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 from modelopt.torch.quantization.config import (
     FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     FP8_DEFAULT_CFG,
@@ -25,6 +28,8 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    GPTQCalibConfig,
+    LayerwiseConfig,
     MaxCalibConfig,
     QuantizeConfig,
     find_quant_cfg_entry_by_path,
@@ -438,8 +443,6 @@ class TestMatchQuantizerCfg:
 
     def test_wildcard_matches_bare_name(self):
         """'*weight_quantizer' matches bare 'weight_quantizer'."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
@@ -449,8 +452,6 @@ class TestMatchQuantizerCfg:
 
     def test_star_matches_any_bare_name(self):
         """'*' matches any bare quantizer name."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list([{"quantizer_name": "*", "enable": False}])
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
         assert matched is None  # enable-only entry has cfg=None
@@ -458,8 +459,6 @@ class TestMatchQuantizerCfg:
 
     def test_path_scoped_pattern_matches_matching_suffix(self):
         """'*mlp*weight_quantizer' matches bare 'weight_quantizer' (suffix match)."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
@@ -468,8 +467,6 @@ class TestMatchQuantizerCfg:
 
     def test_path_scoped_pattern_does_not_match_different_suffix(self):
         """'*mlp*weight_quantizer' does NOT match bare 'input_quantizer'."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
@@ -479,8 +476,6 @@ class TestMatchQuantizerCfg:
 
     def test_last_match_wins(self):
         """Later entries override earlier ones."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [
                 {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
@@ -490,10 +485,24 @@ class TestMatchQuantizerCfg:
         matched, _ = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
         assert matched.model_dump(exclude_unset=True) == {"num_bits": 4}
 
+    def test_parent_class_scoped_entries_are_ignored_for_bare_autoquant_lookup(self):
+        """parent_class-scoped globals should not override AutoQuantize bare-name lookup."""
+        quant_cfg = normalize_quant_cfg_list(
+            [
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
+                {
+                    "parent_class": "nn.BatchNorm1d",
+                    "quantizer_name": "*",
+                    "enable": False,
+                },
+            ]
+        )
+        matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 8}
+        assert enable is True
+
     def test_no_match_returns_none(self):
         """No matching entry returns (None, None)."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
@@ -503,8 +512,6 @@ class TestMatchQuantizerCfg:
 
     def test_bracket_pattern_matches_correctly(self):
         """'*[kv]_bmm_quantizer' matches 'k_bmm_quantizer' and 'v_bmm_quantizer'."""
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3)}}]
         )
@@ -521,8 +528,6 @@ class TestMatchQuantizerCfg:
         Regression test: the old rsplit('*') logic would strip to 'weight_quantizer' and
         overmatch any quantizer ending in 'weight_quantizer', but should not match unrelated names.
         """
-        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
-
         quant_cfg = normalize_quant_cfg_list(
             [
                 {"quantizer_name": "*", "enable": False},
@@ -573,32 +578,119 @@ class TestQuantizeConfigValidators:
 
 
 class TestLayerwiseUseSequentialAlias:
-    """`layerwise` accepts the legacy `use_sequential` name via validation_alias.
+    """`use_sequential` is the legacy alias for `layerwise` (pre-#1251 checkpoints)."""
 
-    Old PTQ checkpoints serialized the field as `use_sequential` before #1251 renamed
-    it to `layerwise`. AliasChoices lets those checkpoints load without a migration
-    validator while still serializing under the current name.
-    """
+    @pytest.mark.parametrize("value", [True, False])
+    def test_use_sequential_resolves_to_layerwise(self, value):
+        with pytest.warns(DeprecationWarning):
+            cfg = MaxCalibConfig(use_sequential=value)
+        assert cfg.layerwise.enable is value
 
-    def test_use_sequential_true_sets_layerwise(self):
-        cfg = MaxCalibConfig(use_sequential=True)
-        assert cfg.layerwise is True
-
-    def test_use_sequential_false_sets_layerwise(self):
-        cfg = MaxCalibConfig(use_sequential=False)
-        assert cfg.layerwise is False
-
-    def test_layerwise_name_still_accepted(self):
-        cfg = MaxCalibConfig(layerwise=True)
-        assert cfg.layerwise is True
-
-    def test_serializes_under_current_name(self):
-        """Dump must use `layerwise`, not the legacy alias."""
-        dumped = MaxCalibConfig(use_sequential=True).model_dump()
-        assert dumped["layerwise"] is True
+    def test_serializes_under_layerwise_not_alias(self):
+        with pytest.warns(DeprecationWarning):
+            dumped = MaxCalibConfig(use_sequential=True).model_dump()
+        assert dumped["layerwise"]["enable"] is True
         assert "use_sequential" not in dumped
 
-    def test_unknown_field_still_rejected(self):
-        """extra='forbid' must still reject unrelated unknown fields."""
+
+class TestLayerwiseNestedConfig:
+    """Layerwise expands from a bool to a nested ``LayerwiseConfig``.
+
+    Backward compatibility: bool input is coerced with a DeprecationWarning, and
+    the legacy flat ``layerwise_checkpoint_dir`` key is silently absorbed.
+    """
+
+    def test_nested_form_accepted(self):
+        cfg = MaxCalibConfig(layerwise={"enable": True, "checkpoint_dir": "/x"})
+        assert cfg.layerwise.enable is True
+        assert cfg.layerwise.checkpoint_dir == "/x"
+
+    def test_bool_form_deprecated_but_accepted(self):
+        with pytest.warns(DeprecationWarning, match="bool is deprecated"):
+            cfg = MaxCalibConfig(layerwise=True)
+        assert cfg.layerwise.enable is True
+
+    def test_dict_form_no_deprecation(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            MaxCalibConfig(layerwise={"enable": True})
+
+    def test_flat_checkpoint_dir_migrated_with_deprecation(self):
+        """Legacy ``layerwise_checkpoint_dir`` is migrated into the nested config
+        and emits a deprecation warning naming the flat key (independent of the
+        bool-form deprecation tested above).
+        """
+        with pytest.warns(DeprecationWarning, match="layerwise_checkpoint_dir.*deprecated"):
+            cfg = MaxCalibConfig(layerwise={"enable": True}, layerwise_checkpoint_dir="/x")
+        assert cfg.layerwise.checkpoint_dir == "/x"
+
+    def test_use_sequential_alias_survives_flat_checkpoint_migration(self):
+        """``use_sequential`` + flat ``layerwise_checkpoint_dir`` must not drop the alias value."""
+        with pytest.warns(DeprecationWarning):
+            cfg = MaxCalibConfig(use_sequential=True, layerwise_checkpoint_dir="/x")
+        assert cfg.layerwise.enable is True
+        assert cfg.layerwise.checkpoint_dir == "/x"
+
+    def test_conflicting_flat_and_nested_checkpoint_dir_raises(self):
+        with pytest.raises(ValidationError, match="Conflicting checkpoint_dir"):
+            MaxCalibConfig(
+                layerwise={"enable": True, "checkpoint_dir": "/a"},
+                layerwise_checkpoint_dir="/b",
+            )
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"layerwise": {"checkpoint_dir": "/x"}},
+            {"layerwise_checkpoint_dir": "/x"},
+        ],
+    )
+    def test_checkpoint_dir_requires_enable(self, kwargs):
+        with pytest.raises(ValidationError, match="requires layerwise.enable=True"):
+            MaxCalibConfig(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("cfg_cls", "expected_qdq"),
+        [(MaxCalibConfig, False), (GPTQCalibConfig, True)],
+    )
+    def test_per_algorithm_qdq_default(self, cfg_cls, expected_qdq):
+        assert cfg_cls().layerwise.get_qdq_activations_from_prev_layer is expected_qdq
+
+    @pytest.mark.parametrize(
+        ("layerwise_input", "expected_qdq"),
+        [
+            # GPTQ default kicks in for user dict that doesn't mention qdq.
+            ({"enable": True}, True),
+            # GPTQ default kicks in for legacy bool form too.
+            pytest.param(
+                True, True, marks=pytest.mark.filterwarnings("ignore::DeprecationWarning")
+            ),
+            # User-explicit False overrides the GPTQ default.
+            ({"enable": True, "get_qdq_activations_from_prev_layer": False}, False),
+            # ``LayerwiseConfig`` instance: ``_coerce_layerwise_input`` must
+            # preserve ``model_fields_set`` so the GPTQ default still kicks in
+            # for fields the user didn't explicitly set.
+            (LayerwiseConfig(enable=True), True),
+            (
+                LayerwiseConfig(enable=True, get_qdq_activations_from_prev_layer=False),
+                False,
+            ),
+        ],
+    )
+    def test_gptq_qdq_default_respects_user_explicit_value(self, layerwise_input, expected_qdq):
+        cfg = GPTQCalibConfig(layerwise=layerwise_input)
+        assert cfg.layerwise.get_qdq_activations_from_prev_layer is expected_qdq
+
+    def test_default_dump_shape(self):
+        dumped = MaxCalibConfig().model_dump()
+        assert dumped["layerwise"] == {
+            "enable": False,
+            "get_qdq_activations_from_prev_layer": False,
+            "checkpoint_dir": None,
+            "save_every": 1,
+        }
+        assert "layerwise_checkpoint_dir" not in dumped
+
+    def test_save_every_must_be_positive(self):
         with pytest.raises(ValidationError):
-            MaxCalibConfig(not_a_real_field=True)
+            MaxCalibConfig(layerwise={"enable": True, "save_every": 0})

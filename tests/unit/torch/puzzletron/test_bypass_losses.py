@@ -45,7 +45,7 @@ def test_batched_normalized_mse_loss_matches_manual_relative_l2():
     torch.testing.assert_close(loss, expected)
 
 
-def test_batched_normalized_mse_loss_zero_target_is_finite():
+def test_batched_normalized_mse_loss_handles_zero_targets():
     """All-zero target slice must not produce NaN/Inf.
 
     With the relative-L2 formula ``sum((x-t)^2) / (sum(t^2) + eps)``, an all-zero
@@ -54,67 +54,43 @@ def test_batched_normalized_mse_loss_zero_target_is_finite():
     by construction (that's what zero-magnitude targets mean), but the test
     pins the property we actually care about: finiteness, not magnitude.
     """
-    input_ = torch.full((1, 8), 1.0)
-    target = torch.zeros(1, 8)
-    loss = batched_normalized_mse_loss(input_, target)
+    loss = batched_normalized_mse_loss(torch.full((1, 8), 1.0), torch.zeros(1, 8))
     assert torch.isfinite(loss)
     assert not torch.isnan(loss)
 
-
-def test_batched_normalized_mse_loss_zero_input_and_target():
-    """Both zero should give exactly 0.0 — numerator is zero, denominator is eps."""
-    input_ = torch.zeros(2, 4)
-    target = torch.zeros(2, 4)
-    loss = batched_normalized_mse_loss(input_, target)
-    assert loss.item() == 0.0
+    zero_loss = batched_normalized_mse_loss(torch.zeros(2, 4), torch.zeros(2, 4))
+    torch.testing.assert_close(zero_loss, torch.tensor(0.0))
 
 
-def test_batched_normalized_mse_loss_rejects_shape_mismatch():
-    input_ = torch.randn(2, 3)
-    target = torch.randn(2, 1)
-
-    with pytest.raises(ValueError, match="input and target shapes must match exactly"):
-        batched_normalized_mse_loss(input_, target)
-
-
-def test_batched_normalized_mse_loss_rejects_invalid_batch_dim():
+def test_batched_normalized_mse_loss_rejects_invalid_inputs():
     input_ = torch.randn(2, 3)
     target = torch.randn(2, 3)
 
-    with pytest.raises(ValueError, match="batch_dims contains invalid dimension"):
-        batched_normalized_mse_loss(input_, target, batch_dims=(2,))
+    for args, kwargs, match in [
+        ((input_, torch.randn(2, 1)), {}, "input and target shapes must match exactly"),
+        ((input_, target), {"batch_dims": (2,)}, "batch_dims contains invalid dimension"),
+        ((input_, target), {"epsilon": 0.0}, "epsilon must be strictly positive"),
+    ]:
+        with pytest.raises(ValueError, match=match):
+            batched_normalized_mse_loss(*args, **kwargs)
 
 
-def test_batched_normalized_mse_loss_rejects_invalid_options():
-    input_ = torch.randn(2, 3)
-    target = torch.randn(2, 3)
-
-    with pytest.raises(ValueError, match="epsilon must be strictly positive"):
-        batched_normalized_mse_loss(input_, target, epsilon=0.0)
-
-
-def test_format_stitched_losses_keeps_trainable_nan_visible():
-    out = format_stitched_losses(
+def test_format_stitched_losses_reports_expected_summary_states():
+    non_finite_out = format_stitched_losses(
         {"block_0": float("nan"), "block_1": 1.0},
         initial_values_dict={"block_0": 0.5, "block_1": 2.0},
         not_trainable_names={"block_2"},
         step_number=3,
     )
+    assert "nan" in non_finite_out
+    assert "non-finite" in non_finite_out
+    assert "Skipped=1" in non_finite_out
+    assert "No trainable blocks found" not in non_finite_out
 
-    assert "nan" in out
-    assert "non-finite" in out
-    assert "Skipped=1" in out
-    assert "No trainable blocks found" not in out
+    empty_out = format_stitched_losses({}, not_trainable_names={"block_0", "block_1"})
+    assert empty_out == "No trainable losses found; skipped 2 non-trainable blocks"
 
-
-def test_format_stitched_losses_empty_trainable_reports_skipped_blocks():
-    out = format_stitched_losses({}, not_trainable_names={"block_0", "block_1"})
-
-    assert out == "No trainable losses found; skipped 2 non-trainable blocks"
-
-
-def test_format_stitched_losses_reports_delta_from_initial_and_filters_stale_history():
-    out = format_stitched_losses(
+    delta_out = format_stitched_losses(
         {"block_0": 1.0, "block_1": 3.0},
         best_steps_dict={"block_0": 5, "block_9": 99},
         best_values_dict={"block_0": 0.5, "block_9": 9.0},
@@ -122,10 +98,9 @@ def test_format_stitched_losses_reports_delta_from_initial_and_filters_stale_his
         not_trainable_names={"block_2"},
         step_number=8,
     )
-
-    assert "↓ -1.0e+00 (-50%)" in out
-    assert "↔ 0.0e+00" in out
-    assert "Step 5" in out
-    assert "Step 99" not in out
-    assert "Skipped=1" in out
-    assert "Avg=2.00e+00" in out
+    assert "↓ -1.0e+00 (-50%)" in delta_out
+    assert "↔ 0.0e+00" in delta_out
+    assert "Step 5" in delta_out
+    assert "Step 99" not in delta_out
+    assert "Skipped=1" in delta_out
+    assert "Avg=2.00e+00" in delta_out

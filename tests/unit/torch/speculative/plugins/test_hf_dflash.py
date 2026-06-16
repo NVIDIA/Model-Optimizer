@@ -18,13 +18,12 @@
 GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 """
 
+import json
 import os
 from copy import deepcopy
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 import torch
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
@@ -36,10 +35,13 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import (
+    DFlashAttention,
     DFlashModule,
     HFDFlashModel,
     build_target_layer_ids,
 )
+from modelopt.torch.speculative.utils import AcceptanceRateValidation
+from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
 
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
@@ -190,8 +192,6 @@ class TestDFlashSlidingWindow:
         """Test DFlashAttention reads sliding_window from config.layer_types."""
         from transformers import PretrainedConfig
 
-        from modelopt.torch.speculative.plugins.hf_dflash import DFlashAttention
-
         config = PretrainedConfig(
             hidden_size=64,
             num_attention_heads=4,
@@ -213,8 +213,6 @@ class TestDFlashSlidingWindow:
         """Test DFlashAttention defaults to no sliding window."""
         from transformers import PretrainedConfig
 
-        from modelopt.torch.speculative.plugins.hf_dflash import DFlashAttention
-
         config = PretrainedConfig(
             hidden_size=64,
             num_attention_heads=4,
@@ -234,8 +232,6 @@ class TestValidateOnline:
 
     def test_all_accepted(self):
         """When all draft tokens match posterior, AR = 1 + steps."""
-        from modelopt.torch.speculative.utils import AcceptanceRateValidation
-
         validator = AcceptanceRateValidation.__new__(AcceptanceRateValidation)
         validator.check_data_consistency_across_ranks = lambda x: x
 
@@ -278,8 +274,6 @@ class TestValidateOnline:
 
     def test_all_rejected(self):
         """When no draft tokens match, AR = 1 (base token only + correction)."""
-        from modelopt.torch.speculative.utils import AcceptanceRateValidation
-
         validator = AcceptanceRateValidation.__new__(AcceptanceRateValidation)
         validator.check_data_consistency_across_ranks = lambda x: x
 
@@ -353,8 +347,6 @@ class TestDFlashExporter:
 
     def test_export_config_fields(self, tmp_path):
         """Exported config.json should have required DFlash fields."""
-        import json
-
         model = get_tiny_llama(num_hidden_layers=4)
         config = _get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
@@ -399,37 +391,23 @@ class TestDFlashExporter:
 
 
 class TestEnsureGenerationTags:
-    """Test _ensure_generation_tags with a real tokenizer (Qwen3-0.6B from HF)."""
+    """Test _ensure_generation_tags masking with the local tiny tokenizer.
 
-    @pytest.fixture
-    def qwen3_tokenizer(self):
-        from transformers import AutoTokenizer
+    Masking is driven by the injected ``{% generation %}`` blocks and
+    ``return_assistant_tokens_mask``, so the local tiny tokenizer suffices — no
+    HF Hub download needed.
+    """
 
-        return AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-
-    @pytest.fixture
-    def qwen3_chat_template(self):
-        template_path = (
-            Path(__file__).parents[5]
-            / "tools/launcher/examples/Qwen/Qwen3-8B/chat_template_train.jinja"
-        )
-        return template_path.read_text()
-
-    def test_chatml_think_template_produces_assistant_mask(
-        self, qwen3_tokenizer, qwen3_chat_template
-    ):
+    def test_chatml_think_template_produces_assistant_mask(self, tiny_tokenizer):
         """Verify generation-tagged chat template produces correct assistant masks."""
-        from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
-
         collator = LanguageDataCollator(
-            tokenizer=qwen3_tokenizer,
+            tokenizer=tiny_tokenizer,
             train_len=128,
             return_labels=True,
             answer_only_loss=True,
-            chat_template=qwen3_chat_template,
         )
 
-        # Verify template was replaced with generation-tagged version
+        # The tiny tokenizer ships a generation-tagged chat template
         assert "generation" in collator.tokenizer.chat_template
 
         # Tokenize a sample conversation
@@ -454,19 +432,16 @@ class TestEnsureGenerationTags:
 
         # Decode the non-masked positions to verify they're assistant content
         non_masked = input_ids[labels != -100]
-        decoded = qwen3_tokenizer.decode(non_masked)
+        decoded = tiny_tokenizer.decode(non_masked)
         assert "The answer is 4" in decoded
 
-    def test_multi_turn_masks_only_assistant(self, qwen3_tokenizer, qwen3_chat_template):
+    def test_multi_turn_masks_only_assistant(self, tiny_tokenizer):
         """Verify multi-turn: only assistant turns are unmasked."""
-        from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
-
         collator = LanguageDataCollator(
-            tokenizer=qwen3_tokenizer,
+            tokenizer=tiny_tokenizer,
             train_len=256,
             return_labels=True,
             answer_only_loss=True,
-            chat_template=qwen3_chat_template,
         )
 
         samples = [
@@ -485,7 +460,7 @@ class TestEnsureGenerationTags:
         input_ids = result["input_ids"]
 
         non_masked = input_ids[labels != -100]
-        decoded = qwen3_tokenizer.decode(non_masked)
+        decoded = tiny_tokenizer.decode(non_masked)
         # Both assistant responses should appear in unmasked tokens
         assert "Hi there" in decoded
         assert "I am fine" in decoded

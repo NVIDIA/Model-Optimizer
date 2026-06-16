@@ -28,6 +28,7 @@ parse_options() {
     LM_EVAL_TASKS="mmlu,gsm8k"
     LM_EVAL_LIMIT=
     SIMPLE_EVAL_TASKS="mmlu"
+    MMLU_LIMIT=
 
     TASKS="quant"
 
@@ -38,7 +39,7 @@ parse_options() {
     CAST_MXFP4_TO_NVFP4=false
 
   # Parse command-line options
-  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,auto_quantize_bits:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_checkpoint:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4" -n "$0" -- "$@")
+  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,auto_quantize_bits:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,simple_eval_limit:,mmlu_limit:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_checkpoint:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4" -n "$0" -- "$@")
 
   eval set -- "$ARGS"
   while true; do
@@ -60,6 +61,8 @@ parse_options() {
       --lm_eval_tasks ) LM_EVAL_TASKS="$2"; shift 2;;
       --lm_eval_limit ) LM_EVAL_LIMIT="$2"; shift 2;;
       --simple_eval_tasks ) SIMPLE_EVAL_TASKS="$2"; shift 2;;
+      --simple_eval_limit ) SIMPLE_EVAL_LIMIT="$2"; shift 2;;
+      --mmlu_limit ) MMLU_LIMIT="$2"; shift 2;;
       --trust_remote_code ) TRUST_REMOTE_CODE=true; shift;;
       --use_seq_device_map ) USE_SEQ_DEVICE_MAP=true; shift;;
       --gpu_max_mem_percentage ) GPU_MAX_MEM_PERCENTAGE="$2"; shift 2;;
@@ -159,6 +162,8 @@ parse_options() {
   echo "lm_eval_tasks: $LM_EVAL_TASKS"
   echo "lm_eval_limit: $LM_EVAL_LIMIT"
   echo "simple_eval_tasks: $SIMPLE_EVAL_TASKS"
+  echo "simple_eval_limit: $SIMPLE_EVAL_LIMIT"
+  echo "mmlu_limit: $MMLU_LIMIT"
   echo "num_sample: $NUM_SAMPLES"
   echo "use_seq_device_map: $USE_SEQ_DEVICE_MAP"
   echo "gpu_max_mem_percentage: $GPU_MAX_MEM_PERCENTAGE"

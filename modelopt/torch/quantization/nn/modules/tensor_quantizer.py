@@ -172,7 +172,18 @@ class TensorQuantizer(nn.Module):
         "pre_bwd_fn",
         # quantizer cache for custom backends, like luts
         "_quantizer_cache",
+        # Runtime-only set of storage attributes tied to shared state. The tied
+        # aliases are rebuilt from calibration config and tensor state during restore.
+        "_shared_quant_tied_attrs",
     }
+
+    def __setattr__(self, name, value):
+        if name in self.__dict__.get("_shared_quant_tied_attrs", set()):
+            raise RuntimeError(
+                f"{name} is tied shared quant state; update it via the owning shared-state "
+                "object or in place (e.g. .copy_), not by reassignment on a member."
+            )
+        return super().__setattr__(name, value)
 
     def __init__(
         self,
@@ -337,6 +348,9 @@ class TensorQuantizer(nn.Module):
         if not isinstance(value, torch.Tensor):
             value = torch.tensor(value)
 
+        self._amax_setter_helper(value)
+
+    def _amax_setter_helper(self, value):
         if not hasattr(self, "_amax"):
             self.register_buffer("_amax", value.clone().detach())
         else:
@@ -633,10 +647,7 @@ class TensorQuantizer(nn.Module):
                     err_msg
                     + " Passing 'strict=False' to `load_calib_amax()` will ignore the error."
                 )
-        if not hasattr(self, "_amax"):
-            self.register_buffer("_amax", calib_amax.clone().detach())
-        else:
-            self._amax.data.copy_(calib_amax.clone().detach())
+        self.amax = calib_amax
 
     def load_calib_bias(self, *args, **kwargs):
         """Load affine bias for quantization."""
@@ -1356,7 +1367,23 @@ class NVFP4StaticQuantizer(TensorQuantizer):
     """TensorQuantizer for NVFP4 static block quantization with two-level scaling.
 
     Uses _global_amax and inherited _amax for per-block amax values.
+    Preserves both amax states in fp32.
     """
+
+    def _preserve_amax_in_fp32(self):
+        amax = getattr(self, "_amax", None)
+        if amax is not None:
+            self._amax = amax.to(dtype=torch.float32)
+        global_amax = getattr(self, "_global_amax", None)
+        if global_amax is not None and global_amax.dtype != torch.float32:
+            if "_global_amax" in self.__dict__.get("_shared_quant_tied_attrs", set()):
+                global_amax.data = global_amax.to(dtype=torch.float32)
+            else:
+                self._global_amax = global_amax.to(dtype=torch.float32)
+
+    def _amax_setter_helper(self, value):
+        super()._amax_setter_helper(value)
+        self._preserve_amax_in_fp32()
 
     @classmethod
     def from_tensor_quantizer(
@@ -1368,14 +1395,18 @@ class NVFP4StaticQuantizer(TensorQuantizer):
             tq: The TensorQuantizer to convert.
             global_amax: Optional global amax value to set on the quantizer.
         """
-        if isinstance(tq, cls):
+
+        def _preserve_and_set_global_amax(tq):
+            tq._preserve_amax_in_fp32()
             if global_amax is not None:
                 tq.global_amax = global_amax
+
+        if isinstance(tq, cls):
+            _preserve_and_set_global_amax(tq)
             return tq
         tq.__class__ = cls
         tq._is_nvfp4_static_quantizer = True
-        if global_amax is not None:
-            tq.global_amax = global_amax
+        _preserve_and_set_global_amax(tq)
         return tq
 
     @property
@@ -1393,10 +1424,27 @@ class NVFP4StaticQuantizer(TensorQuantizer):
             return
         if not isinstance(value, torch.Tensor):
             value = torch.tensor(value)
-        if not hasattr(self, "_global_amax") or self._global_amax is None:
+
+        global_amax = getattr(self, "_global_amax", None)
+        if global_amax is None:
             self.register_buffer("_global_amax", value.clone().detach())
+            global_amax = self._global_amax
         else:
-            self._global_amax.data.copy_(value.clone().detach().to(self._global_amax.device))
+            global_amax.data.copy_(value.clone().detach().to(global_amax.device))
+        self._preserve_amax_in_fp32()
+
+    def _apply(self, fn, recurse=True):
+        """Apply module transforms without rounding static scale state."""
+        amax = getattr(self, "_amax", None)
+        global_amax = getattr(self, "_global_amax", None)
+
+        module = super()._apply(fn, recurse=recurse)
+        self._preserve_amax_in_fp32()
+        if amax is not None:
+            self.amax = amax
+        if global_amax is not None:
+            self.global_amax = global_amax
+        return module
 
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""

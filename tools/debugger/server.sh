@@ -63,6 +63,12 @@ RESULT_DIR="$RELAY_DIR/result"
 
 echo "[server] Workdir: $WORKDIR"
 
+# Unique id for this server instance. Servers can share one relay dir over NFS
+# (e.g. the same repo mounted on multiple hosts), so single-owner is enforced by
+# this token rather than by host-local PIDs: whoever writes .relay/owner last wins,
+# and the others step down on their next poll (see below).
+SERVER_ID="$(hostname):$$:$(date +%s%N)"
+
 cleanup() {
     echo "[server] Shutting down..."
     # Kill any running command (guard all reads with || true to prevent set -e
@@ -73,10 +79,12 @@ cleanup() {
     fi
     # Kill any child processes in our process group
     pkill -P $$ 2>/dev/null || true
-    rm -f "$RELAY_DIR/server.ready"
-    rm -f "$RELAY_DIR/handshake.done"
-    rm -f "$RELAY_DIR/running"
-    rm -f "$RELAY_DIR/cancel"
+    # Only clear shared markers if we still own the relay — never clobber a
+    # successor server that has taken over (servers share one NFS relay dir).
+    if [[ "$(cat "$RELAY_DIR/owner" 2>/dev/null)" == "$SERVER_ID" ]]; then
+        rm -f "$RELAY_DIR/server.ready" "$RELAY_DIR/handshake.done" \
+              "$RELAY_DIR/running" "$RELAY_DIR/cancel" "$RELAY_DIR/owner"
+    fi
     exit 0
 }
 trap cleanup SIGINT SIGTERM
@@ -84,22 +92,23 @@ trap cleanup SIGINT SIGTERM
 # Set environment
 export PYTHONPATH="$WORKDIR"
 
-# Check for an already-running server
+# A previously-running server (possibly on another host sharing this NFS relay)
+# steps down on its next poll once we claim ownership below, so take over rather
+# than refuse to start.
 if [[ -f "$RELAY_DIR/server.ready" ]]; then
-    old_pid=$(cut -d: -f2 "$RELAY_DIR/server.ready")
-    if kill -0 "$old_pid" 2>/dev/null; then
-        echo "[server] ERROR: Another server (PID $old_pid) is already running."
-        exit 1
-    fi
+    echo "[server] Note: existing server.ready found ($(cat "$RELAY_DIR/server.ready" 2>/dev/null)); taking over."
 fi
 
 # Initialize relay directories
 rm -rf "$RELAY_DIR"
 mkdir -p "$CMD_DIR" "$RESULT_DIR"
 
+# Claim ownership of the relay (single-owner enforcement; see main loop).
+echo "$SERVER_ID" > "$RELAY_DIR/owner.tmp" && mv "$RELAY_DIR/owner.tmp" "$RELAY_DIR/owner"
+
 # Ensure modelopt is editable-installed from WORKDIR
 check_modelopt_local() {
-    python -c "
+    python3 -c "
 import modelopt, os, sys
 actual = os.path.realpath(modelopt.__path__[0])
 expected = os.path.realpath('$WORKDIR')
@@ -112,11 +121,11 @@ if os.path.commonpath([actual, expected]) != expected:
 if check_modelopt_local >/dev/null 2>&1; then
     echo "[server] modelopt already editable-installed from $WORKDIR, skipping pip install."
 else
-    echo "[server] Installing modelopt (pip install -e .[dev]) ..."
-    (cd "$WORKDIR" && pip install -e ".[dev]")
+    echo "[server] Installing modelopt (python3 -m pip install -e .[dev]) ..."
+    (cd "$WORKDIR" && python3 -m pip install -e ".[dev]")
     if ! check_modelopt_local; then
         echo "[server] ERROR: modelopt is not running from the local folder ($WORKDIR)."
-        echo "[server] Try: pip install -e '.[dev]' inside the container, then restart the server."
+        echo "[server] Try: python3 -m pip install -e '.[dev]' inside the container, then restart the server."
         exit 1
     fi
     echo "[server] Install done."
@@ -129,6 +138,11 @@ echo "[server] Waiting for client handshake..."
 
 # Wait for client handshake
 while [[ ! -f "$RELAY_DIR/client.ready" ]]; do
+    current_owner="$(cat "$RELAY_DIR/owner" 2>/dev/null || true)"
+    if [[ -n "$current_owner" && "$current_owner" != "$SERVER_ID" ]]; then
+        echo "[server] Superseded by $current_owner before handshake — exiting."
+        exit 0
+    fi
     sleep "$POLL_INTERVAL"
 done
 
@@ -140,6 +154,13 @@ echo "[server] Handshake complete. Listening for commands..."
 # Main loop: watch for command files and re-handshake requests
 shopt -s nullglob
 while true; do
+    # Step down if a newer server has claimed the relay (single-owner across hosts).
+    current_owner="$(cat "$RELAY_DIR/owner" 2>/dev/null || true)"
+    if [[ -n "$current_owner" && "$current_owner" != "$SERVER_ID" ]]; then
+        echo "[server] Superseded by $current_owner — exiting."
+        exit 0
+    fi
+
     # Detect re-handshake (client flushed and reconnected)
     if [[ -f "$RELAY_DIR/client.ready" && ! -f "$RELAY_DIR/handshake.done" ]]; then
         CLIENT_INFO=$(cat "$RELAY_DIR/client.ready")

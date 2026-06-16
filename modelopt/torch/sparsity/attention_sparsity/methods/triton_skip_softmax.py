@@ -49,6 +49,13 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         self.skip_softmax_threshold = method_config.get("skip_softmax_threshold", 0.1)
         # Calibration state
         self._threshold_trials: list[float] | None = None
+        # HF (modelopt_triton) backend calibration outputs, accumulated across
+        # attention calls in one forward pass and read back in
+        # ``_collect_calibration_stats``. The HF backend reads/writes these
+        # directly on the method instance (no thread-local needed).
+        self._hf_calibration_counters: torch.Tensor | None = None
+        self._hf_calibration_seq_k: int | None = None
+        self._hf_calibration_is_decode: bool = False
         # Runtime sparsity measurement
         self._measure_sparsity: bool = False
         self._sparsity_total: int = 0
@@ -111,6 +118,11 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
     def _triton_calibration_context(self, module):
         """Calibration: collect multi-threshold sparsity stats via Triton kernel."""
         module._apply_skip_softmax = True
+        # Reset the HF-backend calibration accumulators for this forward pass.
+        # (The diffusers/LTX backends reset their own state in ``_set_triton_backends``.)
+        self._hf_calibration_counters = None
+        self._hf_calibration_seq_k = None
+        self._hf_calibration_is_decode = False
         self._set_triton_backends(calibration_mode=True, threshold_trials=self._threshold_trials)
         with self._get_diffusers_backend_context():
             try:
@@ -121,20 +133,20 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
                 module._apply_skip_softmax = False
                 self._clear_triton_backends()
 
-    def _get_scale_factor(self) -> float | None:
-        """Compute scale_factor from calibration params, or None if uncalibrated.
+    def _get_scale_factor(self, phase: str = "prefill") -> float | None:
+        """Compute the scale_factor for ``phase`` from calibration params, or None.
 
-        The scale_factor is sequence-length-independent. Backends divide by the
+        The scale_factor is sequence-length-independent. Callers divide by the
         actual ``seq_k`` at call time: ``threshold = scale_factor / seq_k``.
         """
         if self.calibration_params and self.target_sparse_ratio:
             import math
             import warnings
 
-            params = self.calibration_params.get("prefill", {})
+            params = self.calibration_params.get(phase, {})
             a = params.get("a", 0)
             b = params.get("b", 0)
-            target = self.target_sparse_ratio.get("prefill", 0.5)
+            target = self.target_sparse_ratio.get(phase, 0.5)
             if a > 0 and b > 0:
                 # Warn if target is outside the calibrated range
                 min_s = params.get("min_observed_sparsity")
@@ -155,6 +167,22 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
                 return a * math.exp(b * target)
         return None
 
+    def get_inference_threshold(self, seq_q: int, seq_k: int) -> float | None:
+        """Return the skip threshold to apply for this call's phase.
+
+        Picks the phase from the query length (``decode`` when ``seq_q == 1``,
+        else ``prefill``) and returns the calibrated dynamic threshold
+        ``scale_factor(phase) / seq_k`` when the phase is calibrated, otherwise
+        the static ``skip_softmax_threshold`` (or ``None`` to disable). This is
+        what the HF backend applies; it keeps prefill and decode on their own
+        calibrated ``(a, b)`` instead of forcing decode onto prefill's.
+        """
+        phase = "decode" if seq_q <= 1 else "prefill"
+        scale_factor = self._get_scale_factor(phase)
+        if scale_factor is not None and seq_k > 0:
+            return scale_factor / seq_k
+        return self.skip_softmax_threshold or None
+
     @staticmethod
     @contextmanager
     def _get_diffusers_backend_context():
@@ -170,7 +198,12 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             yield
 
     def _set_triton_backends(self, **kwargs):
-        """Set config on both diffusers and LTX Triton backends."""
+        """Set config on the diffusers and LTX Triton backends.
+
+        The HF (modelopt_triton) backend reads its calibration config directly
+        from this method instance during ``triton_attention_forward``, so it
+        needs no separate configuration here.
+        """
         try:
             from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
                 set_triton_skip_softmax_config,
@@ -189,7 +222,7 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             pass
 
     def _clear_triton_backends(self):
-        """Clear config on both Triton backends."""
+        """Clear config on the diffusers and LTX Triton backends."""
         try:
             from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
                 clear_triton_skip_softmax_config,
@@ -211,6 +244,9 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         """Read Triton calibration counters and store as stats on the module."""
         counters = None
         seq_k = None
+        # Diffusers/LTX (video) backends are prefill-only; only the HF backend
+        # reports a phase, for decode-step calibration.
+        phase = "prefill"
 
         try:
             from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
@@ -235,6 +271,14 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
             except ImportError:
                 pass
 
+        if counters is None:
+            # HF (modelopt_triton) backend accumulates counters on this method
+            # instance (``module._sparse_method_instance is self``).
+            counters = self._hf_calibration_counters
+            seq_k = self._hf_calibration_seq_k
+            if counters is not None and self._hf_calibration_is_decode:
+                phase = "decode"
+
         if counters is None or self._threshold_trials is None:
             return
 
@@ -251,7 +295,7 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         module._last_stats = {
             "sparsity": sparsity_list,
             "sample_length": sample_length,
-            "phase": "prefill",
+            "phase": phase,
         }
 
     def get_threshold_info(self) -> dict:

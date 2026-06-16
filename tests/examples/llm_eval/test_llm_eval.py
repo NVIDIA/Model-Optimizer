@@ -15,6 +15,7 @@
 
 import subprocess
 
+import pytest
 from _test_utils.examples.run_command import (
     extend_cmd_parts,
     run_example_command,
@@ -40,10 +41,13 @@ def test_lm_eval_hf(tmp_path):
 
 
 @minimum_sm(89)
+@pytest.mark.timeout(900)
 def test_qwen3_eval_fp8(tmp_path):
-    # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than
-    # max_seq_len, and the default (32) is shorter than even simple MMLU prompts.
-    model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, max_position_embeddings=2048)
+    # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than max_seq_len.
+    # The default (32) is shorter than even simple MMLU prompts, and 2048 is shorter than
+    # 5-shot gsm8k prompts (~3.9k tokens). The eval LLM caps max_seq_len at max_gen_toks + 4096,
+    # so 8192 leaves headroom for the longest prompts we evaluate.
+    model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, max_position_embeddings=8192)
     try:
         run_llm_ptq_command(
             model=str(model_dir),
@@ -52,7 +56,12 @@ def test_qwen3_eval_fp8(tmp_path):
             calib=64,
             lm_eval_tasks="hellaswag,gsm8k",
             simple_eval_tasks="humaneval",
-            lm_eval_limit=0.1,
+            lm_eval_limit=16,
+            simple_eval_limit=16,
+            # MMLU has no inherent sample cap and otherwise evaluates the full ~14k-question
+            # test set; limit it like lm_eval/simple_eval to keep this a fast smoke test.
+            mmlu_limit=16,
+            output=128,  # Cap generation length: gsm8k/humaneval otherwise generate up to 1024 tokens/sample
             batch=8,
         )
     finally:

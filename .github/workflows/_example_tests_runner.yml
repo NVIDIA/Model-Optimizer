@@ -26,7 +26,7 @@ on:
         description: "GitHub runner to use"
         required: false
         type: string
-        default: "linux-amd64-gpu-h100-latest-1"
+        default: "linux-amd64-gpu-rtxpro6000-latest-1"
 
 jobs:
   run-test:
@@ -34,9 +34,6 @@ jobs:
     timeout-minutes: ${{ inputs.timeout_minutes }}
     container:
       image: ${{ inputs.docker_image }}
-      credentials:
-        username: $oauthtoken
-        password: ${{ secrets.NGC_API_KEY }}
       options: --shm-size=2gb # TRT-LLM tests on 2-GPU runner needs more shared memory
       env:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
@@ -44,14 +41,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
+      - uses: ./.github/actions/cache-extensions
+        with:
+          cache-key: rtxpro6000-${{ inputs.docker_image }}
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
           echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
       - name: Install dependencies
         run: |
-          # use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
-          python -m pip install ".${{ inputs.pip_install_extras }}"
+          # Uninstall conflicting system-wide installed modelopt in nemo containers
+          pip uninstall -y nvidia-modelopt || true
+
+          # Use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
+          # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
+          python -m pip install -e ".${{ inputs.pip_install_extras }}"
 
           if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
             echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"

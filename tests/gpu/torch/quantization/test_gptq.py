@@ -18,14 +18,13 @@ import time
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
+from _test_utils.torch.transformers_models import get_tiny_llama
 from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
-from modelopt.torch.quantization.utils import promote_nvfp4_static_quantizers
 from modelopt.torch.quantization.utils.calib_utils import (
     compute_hessian_inverse,
     gptq_blockwise_update,
@@ -229,23 +228,15 @@ def test_gptq_export_roundtrip():
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
-def test_gptq_e2e_flow(quant_cfg):
-    tokenizer = get_tiny_tokenizer()
-    model = get_tiny_llama(vocab_size=tokenizer.vocab_size).to("cuda")
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    tokenizer.padding_side = "left"
-
-    assert tokenizer.pad_token is not None, "Pad token cannot be set!"
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+    model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = {"method": "gptq", "layerwise": True}
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
-        tokenizer=tokenizer,
+        tokenizer=tiny_tokenizer,
         batch_size=2,
         num_samples=8,
         device="cuda",
@@ -280,7 +271,6 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     }
     inp = torch.randn(4, 32, dim, device="cuda")
     mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(inp))
-    promote_nvfp4_static_quantizers(model)
 
     # Restore original weight (GPTQ operates on original weights)
     model.weight.data = weight.clone()

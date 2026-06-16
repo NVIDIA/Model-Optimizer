@@ -29,7 +29,13 @@ pytest.importorskip("transformers", reason="transformers required for GQA graph 
 
 from modelopt.onnx.graph_surgery.gqa_replacement import replace_attention_with_gqa
 
-MODEL_ID = "Qwen/Qwen2.5-0.5B"
+# Attention shape mirroring ``Qwen/Qwen2.5-0.5B`` — built locally
+_QWEN_CONFIG_KWARGS = {
+    "hidden_size": 896,
+    "num_attention_heads": 14,
+    "num_key_value_heads": 2,
+    "rope_theta": 1000000.0,
+}
 VOCAB_SIZE = 64
 SEQ_LEN = 4
 MAX_SEQ_LEN = 128
@@ -583,10 +589,34 @@ def _build_toy_model(hidden_size, num_heads, kv_heads, head_dim, inv_freq_np, nu
     return model
 
 
-def _get_config():
+def _run_session(model_proto, feeds):
+    """Run inference directly from an in-memory ModelProto."""
+    model_bytes = model_proto.SerializeToString()
+    sess = ort.InferenceSession(model_bytes, providers=["CPUExecutionProvider"])
+    return sess.run(None, feeds)
+
+
+@pytest.fixture(scope="module")
+def qwen_config_dir(tmp_path_factory):
+    """Local Qwen2 config dir so GQA surgery reads its config offline (no Hub download).
+
+    ``replace_attention_with_gqa`` loads the config from ``hf_model_id`` itself
+    (via ``get_rope_caches``), so a real on-disk config is required — a bare
+    config object would not suffice.
+    """
+    from transformers import Qwen2Config
+
+    d = tmp_path_factory.mktemp("qwen_config")
+    Qwen2Config(**_QWEN_CONFIG_KWARGS).save_pretrained(str(d))
+    return str(d)
+
+
+@pytest.fixture(scope="module")
+def qwen_attention_shapes(qwen_config_dir):
+    """Attention shape (hidden, heads, kv, head_dim, inv_freq) derived from the config."""
     from transformers import AutoConfig
 
-    cfg = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=False)
+    cfg = AutoConfig.from_pretrained(qwen_config_dir, trust_remote_code=False)
     hidden = cfg.hidden_size
     heads = cfg.num_attention_heads
     kv = getattr(cfg, "num_key_value_heads", heads)
@@ -596,17 +626,10 @@ def _get_config():
     return hidden, heads, kv, hd, inv_freq.numpy()
 
 
-def _run_session(model_proto, feeds):
-    """Run inference directly from an in-memory ModelProto."""
-    model_bytes = model_proto.SerializeToString()
-    sess = ort.InferenceSession(model_bytes, providers=["CPUExecutionProvider"])
-    return sess.run(None, feeds)
-
-
 @pytest.fixture(scope="module")
-def models_and_config():
+def models_and_config(qwen_config_dir, qwen_attention_shapes):
     """Build original model, run GQA surgery, return both protos + config."""
-    hidden, heads, kv, hd, inv_freq_np = _get_config()
+    hidden, heads, kv, hd, inv_freq_np = qwen_attention_shapes
     orig = _build_toy_model(hidden, heads, kv, hd, inv_freq_np)
     onnx.checker.check_model(orig)
 
@@ -618,7 +641,7 @@ def models_and_config():
         replace_attention_with_gqa(
             model_path=orig_path,
             output_path=gqa_path,
-            hf_model_id=MODEL_ID,
+            hf_model_id=qwen_config_dir,
             max_seq_len=MAX_SEQ_LEN,
             io_dtype="float16",
             use_external_data=False,

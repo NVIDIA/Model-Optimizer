@@ -45,6 +45,7 @@ from .nn import (
     TensorQuantizer,
 )
 from .utils import is_quantized, is_quantized_linear
+from .utils.shared_input import SharedWeightGlobalAmaxState
 
 __all__ = [
     "register",
@@ -105,6 +106,20 @@ def maybe_promote_nvfp4_static_quantizer(module: nn.Module, quantizer_state: dic
         NVFP4StaticQuantizer.from_tensor_quantizer(module)
 
 
+def _restore_shared_quant_state_aliases(
+    model: nn.Module, config: QuantizeConfig, metadata: MetadataDict
+) -> None:
+    """Rebuild shared-state ties before checkpoint tensor values are loaded."""
+    if not metadata.get("shared_quant_states"):
+        return
+    # max / mse / local_hessian all carry ``shared_states`` (via _SharedStatesConfig) and use
+    # the same grouping; resolve the patterns that were in effect at save and rebuild the ties.
+    patterns = SharedWeightGlobalAmaxState.resolve_patterns(
+        shared_states=getattr(config, "shared_states", None)
+    )
+    SharedWeightGlobalAmaxState.restore(model, patterns=patterns)
+
+
 def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: MetadataDict):
     """Restore the quantizer states from the given state dict.
 
@@ -146,6 +161,8 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
             name = get_unwrapped_name(name, model)
             module.modelopt_post_restore(name)
 
+    _restore_shared_quant_state_aliases(model, config, metadata)
+
     return model
 
 
@@ -176,6 +193,10 @@ def update_quantize_metadata(
 ) -> None:
     """Update the quantizer state in the metadata dict."""
     metadata["quantizer_state"] = quantizer_state(model)
+    if shared_state_metadata := SharedWeightGlobalAmaxState.metadata(model):
+        metadata["shared_quant_states"] = shared_state_metadata
+    else:
+        metadata.pop("shared_quant_states", None)
 
 
 def quantizer_state(model: nn.Module) -> dict[str, Any]:

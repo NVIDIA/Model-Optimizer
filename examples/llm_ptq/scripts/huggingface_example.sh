@@ -29,6 +29,10 @@ for i in $(env | grep ^SLURM_ | cut -d"=" -f 1); do unset -v $i; done
 for i in $(env | grep ^PMI_ | cut -d"=" -f 1); do unset -v $i; done
 for i in $(env | grep ^PMIX_ | cut -d"=" -f 1); do unset -v $i; done
 
+# Fail on errors inside pipelines (e.g. `python eval.py | tee result.txt`), otherwise a crashing
+# eval is masked by tee's exit code and the script passes silently.
+set -o pipefail
+
 if [ -z "$MODEL_PATH" ]; then
     echo "Unsupported model argument: Expected a huggingface model path or model name" >&2
     exit 1
@@ -216,7 +220,11 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         RUN_ARGS+=" --trust_remote_code "
     fi
 
-    python run_tensorrt_llm.py --checkpoint_dir=$SAVE_PATH $RUN_ARGS
+    # Only run the deploy+generate smoke test when "quant" is explicitly requested. Eval tasks
+    # (lm_eval/mmlu/simple_eval) deploy the checkpoint themselves, so it is redundant there.
+    if [[ $TASKS =~ "quant" ]]; then
+        python run_tensorrt_llm.py --checkpoint_dir=$SAVE_PATH $RUN_ARGS
+    fi
 fi
 
 if [[ -d "${MODEL_PATH}" ]]; then
@@ -285,11 +293,16 @@ if [[ $TASKS =~ "mmlu" ]]; then
         tar -xf /tmp/mmlu.tar -C data && mv data/data $MMLU_DATA_PATH
     fi
 
+    mmlu_flags=""
+    if [ -n "$MMLU_LIMIT" ]; then
+        mmlu_flags+=" --limit $MMLU_LIMIT "
+    fi
+
     python mmlu.py \
         --model_name causal \
         --model_path $MODEL_ABS_PATH \
         --checkpoint_dir $SAVE_PATH \
-        --data_dir $MMLU_DATA_PATH | tee $MMLU_RESULT
+        --data_dir $MMLU_DATA_PATH $mmlu_flags | tee $MMLU_RESULT
     popd
 
 fi
@@ -304,16 +317,16 @@ if [[ $TASKS =~ "livecodebench" || $TASKS =~ "simple_eval" ]]; then
     trtllm-serve $SAVE_PATH --host 0.0.0.0 --port $PORT >$SAVE_PATH/serve.txt 2>&1 &
     SERVE_PID=$!
 
-    tail -f $SAVE_PATH/serve.txt | while read line; do
-        if echo "$line" | grep -q "Application startup complete"; then
-            echo "Application startup complete."
-            break
-        fi
+    # Poll the log instead of `tail -f | while ... break`: under `set -o pipefail` (set above),
+    # breaking out of that pipeline leaves tail to die by SIGPIPE, which would abort the script.
+    while ! grep -q "Application startup complete" $SAVE_PATH/serve.txt 2>/dev/null; do
         if ! kill -0 $SERVE_PID 2>/dev/null; then
             echo "trtllm-serve has exited."
             exit 1
         fi
+        sleep 2
     done
+    echo "Application startup complete."
 
     pushd ../llm_eval/
 
@@ -328,7 +341,7 @@ if [[ $TASKS =~ "livecodebench" || $TASKS =~ "simple_eval" ]]; then
 
     if [[ $TASKS =~ "simple_eval" ]]; then
         echo "Using the following config: max output $BUILD_MAX_OUTPUT_LEN max batch $BUILD_MAX_BATCH_SIZE"
-        bash run_simple_eval.sh $MODEL_NAME $SIMPLE_EVAL_TASKS $BUILD_MAX_OUTPUT_LEN $PORT | tee $SAVE_PATH/simple_eval.txt
+        bash run_simple_eval.sh $MODEL_NAME $SIMPLE_EVAL_TASKS $BUILD_MAX_OUTPUT_LEN $PORT $SIMPLE_EVAL_LIMIT | tee $SAVE_PATH/simple_eval.txt
         echo "Simple eval results are saved under $SAVE_PATH/simple_eval.txt."
     fi
 

@@ -35,6 +35,21 @@ engines_available = {
     "AUTO_DEPLOY": models.AutoDeployModel,
     "SPECBENCH_MEDUSA": models.SpecBenchMedusaModel,
 }
+
+# Translation table for --max_seq_len. Each engine spells the same
+# concept (max input + output sequence the engine should reserve)
+# differently:
+#   VLLM   → max_model_len   (AsyncEngineArgs)
+#   TRTLLM → max_seq_len     (LLM(...))
+#   SGLANG → context_length  (sgl.Engine)
+# Mapping applied in run_simple() so cell YAMLs use one CLI flag
+# regardless of --engine. New engines: add an entry + a comment in
+# the wrapper's __init__ pointing back here.
+_MAX_SEQ_LEN_KEY = {
+    "VLLM": "max_model_len",
+    "TRTLLM": "max_seq_len",
+    "SGLANG": "context_length",
+}
 datasets_available = {
     "mtbench": datasets.MTBench,
     "random": datasets.RandomToken,
@@ -145,8 +160,27 @@ def run_simple(args):
         dataset = datasets.RandomToken(tokenizer, args.random_isl, **dataset_kwargs)
     elif args.specbench is not None:
         dataset = datasets.SpecBench(args.specbench, **dataset_kwargs)
+    # CLI overrides take precedence over --runtime_params; supplying neither
+    # leaves engine_args empty (engine auto-derives sequence length) and
+    # sampling_kwargs defaulting to greedy (temperature=0).
+    #
+    # --max_seq_len is the generic sequence-length cap; _MAX_SEQ_LEN_KEY
+    # (module scope) maps it to the engine-specific kwarg so cell / variant
+    # YAMLs can use one flag regardless of --engine. Engines outside the
+    # table fall back to --runtime_params (engine_args.<their-key>).
     engine_args = args.runtime_params.get("engine_args", {})
+    if args.max_seq_len is not None:
+        key = _MAX_SEQ_LEN_KEY.get(args.engine)
+        if key is None:
+            raise ValueError(
+                f"--max_seq_len is not wired for --engine {args.engine}. "
+                f"Use --runtime_params with engine_args.<key> for this engine, "
+                f"or extend _MAX_SEQ_LEN_KEY in run.py."
+            )
+        engine_args[key] = args.max_seq_len
     sampling_kwargs = args.runtime_params.get("sampling_kwargs", {"temperature": 0})
+    if args.temperature is not None:
+        sampling_kwargs["temperature"] = args.temperature
     model_class = engines_available[args.engine]
     model = model_class(
         args.model_dir,
@@ -155,6 +189,7 @@ def run_simple(args):
         speculative_algorithm=args.speculative_algorithm,
         draft_model_dir=args.draft_model_dir,
         speculative_num_steps=args.draft_length,
+        speculative_num_draft_tokens=args.block_size,
         tensor_parallel_size=args.tp_size,
         moe_expert_parallel_size=args.ep_size,
         trust_remote_code=args.trust_remote_code,
@@ -289,9 +324,45 @@ if __name__ == "__main__":
         help="Path to the runtime params yaml file",
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        required=False,
+        default=None,
+        help=(
+            "Sampling temperature. Overrides sampling_kwargs.temperature from "
+            "--runtime_params if both set. Default when neither is set: 0 (greedy)."
+        ),
+    )
+    parser.add_argument(
+        "--max_seq_len",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "Max sequence length the engine should reserve (input + output). "
+            "Maps to the engine-specific kwarg at the model-wrapper seam: "
+            "VLLM → max_model_len, TRTLLM → max_seq_len, SGLANG → context_length. "
+            "Overrides the same key in --runtime_params engine_args if both "
+            "are set. When neither is set, the engine auto-derives from the "
+            "model config + memory budget, which can cap below the input "
+            "length on tight GPUs. Set to 40960 for the SPEED-Bench "
+            "throughput_32k split (32K input + 4K output + 4K headroom)."
+        ),
+    )
+    parser.add_argument(
         "--output_length", type=int, required=False, default=4096, help="Output length"
     )
     parser.add_argument("--draft_length", type=int, required=False, default=3, help="Draft length")
+    parser.add_argument(
+        "--block_size",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "DFlash block size (num_speculative_tokens). Use instead of --draft_length "
+            "for DFLASH: block_size = draft_length + 1."
+        ),
+    )
     parser.add_argument(
         "--tp_size", type=int, required=False, default=4, help="Tensor parallel size"
     )

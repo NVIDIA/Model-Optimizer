@@ -30,6 +30,8 @@ import safetensors.torch
 import torch
 from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
 
+from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
+
 EAGLE3_YAML = str(
     MODELOPT_ROOT / "modelopt_recipes" / "general" / "speculative_decoding" / "eagle3.yaml"
 )
@@ -97,6 +99,8 @@ def test_offline_eagle_training(tiny_llama_path, tiny_daring_anteater_path, offl
         "training.learning_rate=1e-5",
         "training.training_seq_len=64",
         "training.save_steps=1",
+        # torch.compile is smoke-tested once by test_llama_eagle3[1-False]; skip its warmup here.
+        "eagle.eagle_use_torch_compile=false",
         *_TINY_EAGLE_ARCH,
     ]
 
@@ -135,8 +139,6 @@ def test_offline_ptq(offline_ptq_dirs):
     export_dir = offline_ptq_dirs["ptq_export"]
     assert (export_dir / "model.safetensors").exists(), "PTQ export missing model.safetensors"
     assert (export_dir / "config.json").exists(), "PTQ export missing config.json"
-
-    from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
 
     state_dict = safetensors.torch.load_file(export_dir / "model.safetensors")
     for key in LLAMA_EAGLE_SINGLE_LAYER["required"] - {"fc", "layers.0.hidden_norm"}:

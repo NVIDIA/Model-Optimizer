@@ -1,9 +1,19 @@
-# SPEED-bench smoke run for Qwen3.5-4B via vLLM (autoregressive baseline).
+# SPEED-bench run for Qwen3.5-4B via vLLM (autoregressive baseline).
 #
-# Reads nvidia/SPEED-Bench-Internal/qualitative through Qwen/Qwen3.5-4B with
-# --speculative_algorithm NONE (no draft model) and writes timing.json +
-# aa_timing.json + acceptance_rate.json + specbench_responses.jsonl +
-# specbench_results.json to /scratchspace/specdec_bench/.
+# Two-task pipeline:
+#   task_0  Quantitative quality split (nvidia/SPEED-Bench-Internal/qualitative)
+#   task_1  Long-context throughput split (nvidia/SPEED-Bench-Internal/throughput_32k)
+#
+# Both use --speculative_algorithm NONE (no draft model) — this is the
+# autoregressive baseline that the MTP variant in specdec_bench_mtp.yaml is
+# compared against.
+#
+# Results write to /scratchspace/qwen35_4b_none_vllm/<split>/. The
+# pensieve-intern `specdec_bench` workflow's wrap_up stage owns publishing
+# these to s3://team-specdec-workgroup/results/qwen35_4b_none_vllm/<split>/
+# with provenance stamps (jira_ticket + huggingface_model_id). Sweep-name
+# convention: <model>_<algorithm>_<engine> so multi-model / multi-engine
+# records don't collide in S3.
 #
 # The qwen3_5 model_type needs transformers >= 4.58, which is NOT in
 # vllm/vllm-openai:latest yet — use the qwen3_5-cu130 tag instead.
@@ -21,6 +31,10 @@ pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3.5-4B
 
+  # Step 1: qualitative split — quality / acceptance-rate numbers.
+  # tp_size=2 + concurrency=32 trades aa_timing fidelity for ~30x wall-clock
+  # speedup; acceptance-length (AL) is concurrency-independent and is the
+  # primary metric we care about for this split.
   task_0:
     script: common/specdec_bench/run.sh
     args:
@@ -28,14 +42,13 @@ pipeline:
       - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
       - --engine VLLM
       - --speculative_algorithm NONE
-      - --tp_size 1
+      - --tp_size 2
       - --ep_size 1
-      - --concurrency 1
-      - --num_requests 80
+      - --concurrency 32
       - --output_length 4096
       - --aa_timing
       - --show_progress
-      - --save_dir /scratchspace/specdec_bench
+      - --save_dir /scratchspace/qwen35_4b_none_vllm/qualitative
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       - HF_LOCAL: /hf-local
@@ -43,5 +56,42 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: 2
       container: vllm/vllm-openai:qwen3_5-cu130
+
+  # Step 2: throughput_32k split — long-context throughput.
+  # `--num_requests 80` caps the run at 80 samples (split has 1,536) so it fits
+  # in the 4h Slurm time-limit; each 32K-input sample takes ~60-90s.
+  # tp_size=2 doubles the KV-cache budget across 2 GPUs; concurrency=8 keeps
+  # 8 * 32K = 256K tokens of in-flight KV under that doubled budget.
+  task_1:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
+      - --engine VLLM
+      - --speculative_algorithm NONE
+      - --tp_size 2
+      - --ep_size 1
+      - --concurrency 8
+      - --num_requests 80
+      - --output_length 4096
+      - --max_seq_len 40960
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/qwen35_4b_none_vllm/throughput_32k
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 2
+      container: vllm/vllm-openai:qwen3_5-cu130
+
+# S3 upload is intentionally not a task in this YAML — the bench pipeline only
+# writes results to /scratchspace/qwen35_4b_none_vllm/<split>/. The
+# pensieve-intern specdec_bench workflow's wrap_up stage owns harvesting these
+# from lustre and publishing them to the team S3 vault with provenance stamps
+# (jira_ticket + huggingface_model_id) for the "official record" tracking.

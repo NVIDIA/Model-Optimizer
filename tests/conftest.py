@@ -44,8 +44,22 @@ def pytest_addoption(parser):
     )
 
 
+# Default per-test `call` wall-clock cap (seconds) by top-level tests/ subdirectory
+# Every collectible test group must be listed here else collection errors occur
+# A test can override its cap by adding ``@pytest.mark.timeout(...)``
+_DEFAULT_TIMEOUT = {
+    "examples": 300,
+    "gpu": 120,
+    "gpu_megatron": 120,
+    "gpu_trtllm": 60,
+    "gpu_vllm": 60,
+    "regression": 180,
+    "unit": 60,
+}
+
+
 def pytest_collection_modifyitems(config, items):
-    """Skip tests with specific markers unless their corresponding flag is provided."""
+    """Skip flag-gated tests and apply a default per-test timeout based on the test directory."""
     skip_marks = [
         ("manual", "--run-manual"),
         ("release", "--run-release"),
@@ -57,6 +71,33 @@ def pytest_collection_modifyitems(config, items):
             for item in items:
                 if mark_name in item.keywords:
                     item.add_marker(skipper)
+
+    tests_root = Path(__file__).parent
+    for item in items:
+        if item.get_closest_marker("timeout") is not None or not item.path.is_relative_to(
+            tests_root
+        ):
+            continue
+        # First path component under tests/ is the group dir (unit, gpu, examples, ...).
+        # Crash loudly (rather than silently skip) if a group has no configured default, so a
+        # newly added tests/<group>/ must be given an explicit timeout in the mapping above.
+        group = item.path.relative_to(tests_root).parts[0]
+        if group not in _DEFAULT_TIMEOUT:
+            raise pytest.UsageError(
+                f"tests/{group}/ has no default timeout; add '{group}' to "
+                "_DEFAULT_TIMEOUT in tests/conftest.py."
+            )
+        item.add_marker(pytest.mark.timeout(_DEFAULT_TIMEOUT[group]))
+
+
+@pytest.fixture
+def tiny_tokenizer():
+    """Real tiny HF tokenizer (vocab=128) shared across unit and gpu test lanes."""
+    # Lazy import: transformers_models.py runs ``pytest.importorskip("transformers")``
+    # at module load, which we don't want to trigger at conftest import time.
+    from _test_utils.torch.transformers_models import get_tiny_tokenizer
+
+    return get_tiny_tokenizer()
 
 
 @pytest.fixture

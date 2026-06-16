@@ -65,14 +65,14 @@ DTYPE_MAP = {
 
 
 @torch.inference_mode()
-def generate_image(pipe, prompt, image_name, torch_autocast=False):
+def generate_image(pipe, prompt, image_name, torch_autocast=False, num_inference_steps=30):
     context = torch.autocast("cuda") if torch_autocast else nullcontext()
     seed = 42
     with context:
         image = pipe(
             prompt,
             output_type="pil",
-            num_inference_steps=30,
+            num_inference_steps=num_inference_steps,
             generator=torch.Generator("cuda").manual_seed(seed),
         ).images[0]
     image.save(image_name)
@@ -186,6 +186,12 @@ def main():
         help="Use torch.autocast() during inference or benchmarking",
     )
     parser.add_argument("--skip-image", action="store_true", help="Skip image generation")
+    parser.add_argument(
+        "--num-inference-steps",
+        type=int,
+        default=30,
+        help="Number of denoising steps for image generation (lower is faster; tests use few).",
+    )
     args = parser.parse_args()
 
     image_name = args.save_image_as if args.save_image_as else f"{args.model}.png"
@@ -235,7 +241,9 @@ def main():
             )
 
         if not args.skip_image:
-            generate_image(pipe, args.prompt, image_name, args.torch_autocast)
+            generate_image(
+                pipe, args.prompt, image_name, args.torch_autocast, args.num_inference_steps
+            )
         return
 
     backbone.to("cuda")
@@ -322,7 +330,7 @@ def main():
     pipe.to("cuda")
 
     if not args.skip_image:
-        generate_image(pipe, args.prompt, image_name, args.torch_autocast)
+        generate_image(pipe, args.prompt, image_name, args.torch_autocast, args.num_inference_steps)
         print(f"Image generated using {args.model} model saved as {image_name}")
 
     if args.benchmark:

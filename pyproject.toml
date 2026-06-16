@@ -82,7 +82,7 @@ hf = [
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
-    "transformers>=4.56,<5.8",                                                        # Should match modelopt/torch/__init__.py and noxfile.py
+    "transformers>=4.56,<5.10",                                                       # Should match modelopt/torch/__init__.py and noxfile.py
     "wonderwords",
 ]
 
@@ -210,6 +210,7 @@ extend-ignore = [
 "examples/*" = ["D"]
 "noxfile.py" = ["D", "E501"]
 "tests/*" = ["B017", "D", "E402", "PT012"]
+".agents/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
 "*/_[a-zA-Z]*" = ["D"] # Private packages (_abc/*.py) or modules (_xyz.py)
 "*.ipynb" = [
     "D",
@@ -235,7 +236,6 @@ extend-ignore = [
     "N803",
     "N806",
 ] # triton kernel style
-"examples/deepseek/ds_kernel.py" = ["N803", "N806", "E731"] # triton style
 
 [tool.ruff.lint.pycodestyle]
 max-line-length = 120 # Line length limit for comments and docstrings
@@ -306,6 +306,8 @@ skips = [
 # print execution time for 50 slowest tests and generate coverage reports
 addopts = "-v -ra --instafail --cov-report=term-missing --cov-report=html --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=50 --strict-markers"
 pythonpath = ["tests/"]
+# Apply per-test timeouts (see tests/conftest.py) to the test call only, not fixture setup/teardown
+timeout_func_only = true
 markers = [
     "integration: Tests that require external services or other non-hermetic dependencies",
     "manual: Only run when --run-manual is given",

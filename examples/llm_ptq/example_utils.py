@@ -42,6 +42,9 @@ from transformers import (
     ProcessorMixin,
 )
 
+from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
+
 try:
     from huggingface_hub import snapshot_download
 except ImportError:
@@ -50,6 +53,54 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
+
+# TODO: Refactor into the config system.
+_QWEN36_AUTOQ_DISABLED_LAYERS = ("*shared_expert_gate*",)
+_VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
+
+
+def _is_qwen_model(model) -> bool:
+    """Return True when model/config identifiers indicate a Qwen-family model."""
+    candidates = [type(model).__name__]
+    config = getattr(model, "config", None)
+    configs = [
+        config,
+        getattr(config, "text_config", None),
+        getattr(config, "language_config", None),
+    ]
+    for cfg in configs:
+        if cfg is None:
+            continue
+        candidates.append(type(cfg).__name__)
+        model_type = getattr(cfg, "model_type", None)
+        if model_type is not None:
+            candidates.append(str(model_type))
+        architectures = getattr(cfg, "architectures", ()) or ()
+        if isinstance(architectures, str):
+            architectures = (architectures,)
+        candidates.extend(str(architecture) for architecture in architectures)
+    return any("qwen" in candidate.lower() for candidate in candidates)
+
+
+def _get_auto_quantize_disabled_layers(model) -> list[str]:
+    """Return layer patterns that should be excluded from AutoQuantize search."""
+    disabled_layers = [
+        entry["quantizer_name"]
+        for entry in _default_disabled_quantizer_cfg
+        if "parent_class" not in entry and entry["quantizer_name"] != "*lm_head*"
+    ]
+    if _is_qwen_model(model):
+        disabled_layers.extend(p for p in _QWEN36_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    if is_multimodal_model(model):
+        disabled_layers.extend(p for p in _VLM_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    return disabled_layers
+
+
+def _get_auto_quantize_cost_excluded_patterns(model) -> list[str]:
+    """Return layer patterns excluded only from AutoQuantize cost accounting."""
+    if is_multimodal_model(model):
+        return list(_VLM_AUTOQ_DISABLED_LAYERS)
+    return []
 
 
 def run_nemotron_vl_preview(
@@ -133,7 +184,6 @@ def is_nemotron_vl(model_or_config):
     # Try to get config from model, or use directly if it's a config
     if hasattr(model_or_config, "config"):
         config = model_or_config.config
-        from modelopt.torch.export.model_utils import is_multimodal_model
 
         if not is_multimodal_model(model_or_config):
             return False
@@ -312,13 +362,13 @@ def get_inlined_mtp_prefixes(config: Any) -> list[str]:
 def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
     """Invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
     ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
-    ``{"mtp", "mtp.layers.0"}``. Caller must filter out inlined keys; otherwise
-    ``"model.layers.78.eh_proj.weight"`` would emit ``"model"`` as a prefix.
+    ``{"mtp", "mtp.layers.0"}``. ``"model"`` top-level is dropped to avoid the
+    ``"model*"`` wildcard covering the whole backbone.
     """
     prefixes: set[str] = set()
     for key in keys:
         parts = key.split(".")
-        if parts:
+        if parts and parts[0] != "model":
             prefixes.add(parts[0])
         for i, part in enumerate(parts):
             if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
@@ -533,6 +583,25 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
         module.__dict__.pop("weight", None)
 
 
+def get_original_hf_quant_method(config) -> str | None:
+    """Return the checkpoint's original ``quantization_config.quant_method``, if any.
+
+    Returns e.g. ``"mxfp4"`` for native MXFP4 checkpoints (OpenAI's gpt-oss family), or
+    ``None`` for unquantized models. Handles ``quantization_config`` stored as a dict or a
+    config object, and the nested ``text_config`` of multi-modal models.
+    """
+    for cfg in (config, getattr(config, "text_config", None)):
+        quant_cfg = getattr(cfg, "quantization_config", None)
+        method = (
+            quant_cfg.get("quant_method")
+            if isinstance(quant_cfg, dict)
+            else getattr(quant_cfg, "quant_method", None)
+        )
+        if method:
+            return str(method)
+    return None
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -598,6 +667,12 @@ def get_model(
             # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
             device_map = None
 
+        if hf_config.model_type == "t5":
+            # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
+            # position-bias buffers across GPUs, which non-deterministically produces NaN
+            # activations during calibration on multi-GPU machines (see HF transformers #21093).
+            device_map = None
+
         # Helper function to check if model has pack-quantized config
         def has_pack_quantized_config(config):
             # Check top-level quantization_config
@@ -630,6 +705,29 @@ def get_model(
                     trust_remote_code=trust_remote_code,
                     dtype="auto",
                 )
+        elif get_original_hf_quant_method(hf_config) == "mxfp4":
+            # Native MXFP4 checkpoints (e.g. openai/gpt-oss-*) must be dequantized to
+            # plain BF16 experts (``GptOssExperts``) so ModelOpt can insert and export
+            # quantizers: the packed-kernel experts wrapper (``Mxfp4GptOssExperts``,
+            # used when the optional ``kernels`` package is present) is not supported by
+            # the unified HF export. Force dequantization regardless of whether
+            # ``kernels`` is installed.
+            # Local import: ``Mxfp4Config`` only exists in newer Transformers (gpt-oss support);
+            # importing it at module scope would break example_utils for users on older
+            # Transformers running unrelated (non-MXFP4) models.
+            from transformers import Mxfp4Config
+
+            # Load with a *sequential* device map (not "auto"): the MXFP4->BF16 dequant
+            # runs inside Transformers' threaded weight loader, and an "auto"/balanced
+            # split across multiple GPUs trips a CUDA illegal-memory access during dequant
+            # materialization. Sequential keeps each shard's dequant on a single device
+            # (the whole model lands on one GPU when it fits there).
+            model_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path,
+                device_map="cpu" if device == "cpu" else "sequential",
+                **model_kwargs,
+            )
         else:
             architecture = hf_config.architectures[0]
 
@@ -850,22 +948,37 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print("No custom model files found to copy")
 
 
-def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
-    """Check if quant_cfg has a layerwise_checkpoint_dir that should be auto-resolved to a unique subpath."""
-    algorithm = quant_cfg.get("algorithm")
+def _layerwise_checkpoint_dir_location(algorithm) -> tuple[str, str] | None:
+    """Return ``("flat"/"nested", checkpoint_dir)`` for the layerwise checkpoint dir, or None."""
     if not isinstance(algorithm, dict):
-        return False
-    return algorithm.get("layerwise_checkpoint_dir") is not None
+        return None
+    flat = algorithm.get("layerwise_checkpoint_dir")
+    if flat is not None:
+        return "flat", flat
+    nested = algorithm.get("layerwise") or {}
+    ckpt = nested.get("checkpoint_dir") if isinstance(nested, dict) else None
+    return ("nested", ckpt) if ckpt is not None else None
 
 
-def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> dict:
-    """Append a unique ``<model_name>_<config_hash>`` subdirectory to layerwise_checkpoint_dir.
+def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
+    """Check if quant_cfg has a layerwise checkpoint_dir that should be auto-resolved to a unique subpath."""
+    return _layerwise_checkpoint_dir_location(quant_cfg.get("algorithm")) is not None
+
+
+def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]:
+    """Append a unique ``<model_name>_<config_hash>`` subdirectory to the layerwise checkpoint_dir.
 
     Allows a single recipe to be reused across models without checkpoint collisions.
+    Supports both the legacy flat ``layerwise_checkpoint_dir`` and the nested
+    ``layerwise.checkpoint_dir`` shape, writing back to whichever the user provided.
     Must only be called when :func:`needs_checkpoint_path_update` returns True.
+
+    Returns ``(updated_quant_cfg, resolved_path)`` so the caller can log or
+    reference the resolved path without re-deriving the dict shape.
     """
-    algorithm = quant_cfg["algorithm"]
-    base_dir = algorithm["layerwise_checkpoint_dir"]
+    location = _layerwise_checkpoint_dir_location(quant_cfg["algorithm"])
+    assert location is not None  # guaranteed by needs_checkpoint_path_update
+    shape, base_dir = location
 
     name = model_path.rstrip("/")
     if "/" in name and not os.path.isabs(name):
@@ -874,9 +987,12 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> dict:
         name = Path(name).name
 
     config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
+    resolved = os.path.join(base_dir, f"{name}_{config_hash}")
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"]["layerwise_checkpoint_dir"] = os.path.join(
-        base_dir, f"{name}_{config_hash}"
-    )
-    return quant_cfg
+    algo = quant_cfg["algorithm"]
+    if "layerwise_checkpoint_dir" in algo:
+        algo["layerwise_checkpoint_dir"] = resolved
+    if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
+        algo["layerwise"]["checkpoint_dir"] = resolved
+    return quant_cfg, resolved

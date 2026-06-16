@@ -1,4 +1,3 @@
-# NOTE: Make sure this file is consistent with .gitlab/tests.yml
 name: Unit tests
 
 on:
@@ -13,11 +12,12 @@ on:
       - "pyproject.toml"
       - "tests/unit/**"
       - "tools/launcher/**"
+      - "tools/mcp/**"
+      - ".agents/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
     # On-demand
-
 
 concurrency:
   # Cancel previous runs if new commit is pushed
@@ -56,10 +56,12 @@ jobs:
             pyproject.toml
             tests/unit/**
             tools/launcher/**
+            tools/mcp/**
+            .agents/skills/**
   linux:
     needs: [check-dco]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
@@ -67,43 +69,48 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: pip install nox uv && nox -s "unit-3.12(torch_211, tf_latest)"
+        run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
           fail_ci_if_error: true
+          # Skip GPG/SHASUM integrity check of the Codecov CLI: its key import
+          # intermittently fails (codecov/codecov-action#1876), which would
+          # otherwise hard-fail this required job on a transient infra blip.
+          skip_validation: true
           verbose: true
   windows:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run unit tests (without coverage)
-        run: pip install nox uv && nox -s "unit-3.12(torch_211, tf_latest)"
+        run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
   multi-version:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {nox_session: "unit-3.10(torch_211, tf_latest)", python_version: "3.10"}
-          - {nox_session: "unit-3.11(torch_211, tf_latest)", python_version: "3.11"}
-          - {nox_session: "unit-3.13(torch_211, tf_latest)", python_version: "3.13"}
-          - {nox_session: "unit-3.14(torch_211, tf_latest)", python_version: "3.14"}
+          - {nox_session: "unit-3.10(torch_212, tf_latest)", python_version: "3.10"}
+          - {nox_session: "unit-3.11(torch_212, tf_latest)", python_version: "3.11"}
+          - {nox_session: "unit-3.13(torch_212, tf_latest)", python_version: "3.13"}
+          - {nox_session: "unit-3.14(torch_212, tf_latest)", python_version: "3.14"}
           - {nox_session: "unit-3.12(torch_28, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_29, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_210, tf_latest)", python_version: "3.12"}
-          - {nox_session: "unit-3.12(torch_211, tf_min)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_211, tf_latest)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_212, tf_min)", python_version: "3.12"}
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
@@ -115,7 +122,7 @@ jobs:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -142,10 +149,50 @@ jobs:
           uv venv .venv
           uv pip install -e . pytest
           uv run python3 -m pytest -v
+  mcp:
+    if: needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Run modelopt-mcp tests
+        working-directory: tools/mcp
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv .venv
+          # Install the sibling launcher package first; it's a runtime
+          # dep declared in tools/mcp/pyproject.toml as `modelopt-launcher`
+          # but uv resolves the source via [tool.uv.sources] to a local
+          # editable path. -e on both packages keeps the install cheap
+          # and matches the dev-mode install in tools/mcp/README.md.
+          uv pip install -e ../launcher
+          uv pip install -e . pytest
+          uv run python3 -m pytest -v
+  skills:
+    if: needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Run skill gate tests
+        # Skill gate tests are stdlib-only and hermetic (no GPU/cluster/network),
+        # so they run in their own lightweight job rather than the main unit lane.
+        # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
+        run: |
+          pip install pytest
+          python -m pytest .agents/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher]
+    needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher, mcp, skills]
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
@@ -154,6 +201,8 @@ jobs:
             needs.windows.result != 'success' ||
             needs.multi-version.result != 'success' ||
             needs.partial-install.result != 'success' ||
-            needs.launcher.result != 'success'
+            needs.launcher.result != 'success' ||
+            needs.mcp.result != 'success' ||
+            needs.skills.result != 'success'
           )) }}
         run: exit 1

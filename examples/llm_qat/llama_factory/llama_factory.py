@@ -35,15 +35,16 @@ from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokeni
 from wrapt import register_post_import_hook
 
 import modelopt.torch.opt as mto
-from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
 
 logger = logging.get_logger(__name__)
 
+_model_init_kwargs: dict[str, Any] = {}
+
 
 @dataclass
 class QuantizationArguments:
-    quant_cfg: str | None = None
+    recipe: str | None = None
     calib_size: int = 512
     compress: bool = False
 
@@ -125,6 +126,8 @@ def patch_load_module(module):
         config = load_config(model_args)
 
         patch_config(config, tokenizer, model_args, init_kwargs, is_trainable)
+        global _model_init_kwargs
+        _model_init_kwargs = init_kwargs.copy()
 
         assert not model_args.enable_liger_kernel, "Liger kernel is currently not supported."
         assert not model_args.use_unsloth, "Unsloth is currently not supported."
@@ -192,8 +195,8 @@ def create_patch_module(quant_args=None, distill_args=None):
     into LLaMA-Factory's training pipeline without modifying the original code.
 
     Args:
-        quant_args: SimpleNamespace containing quantization parameters
-        distill_args: SimpleNamespace containing distillation parameters
+        quant_args: QuantizationArguments containing quantization parameters
+        distill_args: DistillationArguments containing distillation parameters
 
     Returns:
         function: Patch function that modifies the trainer class
@@ -216,12 +219,9 @@ def create_patch_module(quant_args=None, distill_args=None):
                 if distill_args and distill_args.distill:
                     teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
                         distill_args.teacher_model,
+                        **_model_init_kwargs,
                     )
-                    distill_config = {
-                        "teacher_model": teacher_model,
-                        "criterion": LMLogitsLoss(),
-                    }
-                    modelopt_trainer_args["distill_config"] = distill_config
+                    modelopt_trainer_args["distill_args"] = {"teacher_model": teacher_model}
                 super().__init__(*args, **modelopt_trainer_args, **kwargs)
 
         # Replace the trainer class in the module
