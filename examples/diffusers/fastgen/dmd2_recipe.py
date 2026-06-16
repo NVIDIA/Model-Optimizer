@@ -718,12 +718,12 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             )
 
         if os.path.isfile(ema_path) and self._dmd_pipeline.ema is not None:
-            ema_state = torch.load(ema_path, map_location="cpu", weights_only=False)
+            ema_state = torch.load(ema_path, map_location="cpu")
             self._dmd_pipeline.ema.load_state_dict(ema_state)
             if is_main_process():
                 logging.info("[DMD2] restored ema_shadow <- %s", ema_path)
         if os.path.isfile(state_path):
-            state = torch.load(state_path, map_location="cpu", weights_only=False)
+            state = torch.load(state_path, map_location="cpu")
             self._dmd_pipeline._iteration = int(state.get("iteration", 0))
             if is_main_process():
                 logging.info(
@@ -736,7 +736,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if self._discriminator is not None:
             disc_path = os.path.join(ckpt_dir, "discriminator.pt")
             if os.path.isfile(disc_path):
-                disc_state = torch.load(disc_path, map_location="cpu", weights_only=False)
+                disc_state = torch.load(disc_path, map_location="cpu")
                 self._discriminator.load_state_dict(disc_state)
                 if is_main_process():
                     logging.info("[DMD2] restored discriminator <- %s", disc_path)
@@ -745,7 +745,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if self._discriminator_optimizer is not None:
             disc_opt_path = os.path.join(ckpt_dir, "discriminator_optimizer.pt")
             if os.path.isfile(disc_opt_path):
-                disc_opt_state = torch.load(disc_opt_path, map_location="cpu", weights_only=False)
+                disc_opt_state = torch.load(disc_opt_path, map_location="cpu")
                 self._discriminator_optimizer.load_state_dict(disc_opt_state)
                 if is_main_process():
                     logging.info("[DMD2] restored discriminator optimizer <- %s", disc_opt_path)

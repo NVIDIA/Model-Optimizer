@@ -50,7 +50,7 @@
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--recipe` | `str` | `None` | Path to a quantization recipe YAML file (built-in or custom). Built-in recipes can be specified by relative path, e.g. 'general/ptq/nvfp4_default-kv_fp8'. Replaces the deprecated --quant_cfg flag. |
-| `--quant_cfg` | `modelopt.torch.quantization.config.QuantizeConfig` | `None` | Deprecated: pre-quantize the model with a separate quantization step instead. Specify the quantization format for PTQ/QAT by name (e.g. NVFP4_DEFAULT_CFG). |
+| `--quant_cfg` | `str` | `None` | Deprecated: pre-quantize the model with a separate quantization step instead. Specify the quantization format for PTQ/QAT by name (e.g. NVFP4_DEFAULT_CFG). |
 | `--calib_size` | `int` | `512` | Specify the calibration size for quantization. The calibration dataset is used to setup the quantization scale parameters for PTQ/QAT. |
 | `--compress` | `bool` | `False` | Whether to compress the model weights after quantization for QLoRA. This is useful for reducing the model size. |
 | `--calib_batch_size` | `int` | `1` | Batch size for calibration data during quantization. |

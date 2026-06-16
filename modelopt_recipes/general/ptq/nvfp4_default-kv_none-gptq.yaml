@@ -29,8 +29,9 @@ metadata:
 quantize:
   algorithm:
     method: gptq
-    layerwise: true
-    layerwise_checkpoint_dir: output/layerwise_ckpts/
+    layerwise:
+      enable: true
+      checkpoint_dir: output/layerwise_ckpts/
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*weight_quantizer'

@@ -1,22 +1,16 @@
-# EAGLE3 streaming speculative decoding for Kimi-K2.5-NVFP4 on GB200/Blackwell
-# (HSG). This is the streaming config that actually runs end-to-end: on CW H100
-# the ~551 GB model needed cpu-offload (-> ~1 tok/s -> vLLM EngineCore
-# TimeoutError), so the working path is GB200.
+# EAGLE3 streaming speculative decoding for Kimi-K2.5-NVFP4 on GB200/Blackwell.
 #
-# Why GB200: nodes have only 4 GPUs each (vs CW's 8), but 192 GB/GPU and native
-# NVFP4. Kimi-K2.5-NVFP4 (~551 GB) fits at TP=4 on ONE node (4 x 192 = 768 GB,
-# ~138 GB/GPU of weights) with NO cpu-offload. So here: node 0 = vllm serve
-# (TP=4, whole node), node 1 = EAGLE3 trainer (fake base), 4 GPUs each, 2 nodes.
+# Requires GB200: native NVFP4 + 192 GB/GPU fits the ~551 GB model at TP=4 on one node.
+# node 0 = vllm serve (TP=4), node 1 = EAGLE3 trainer (fake base); 4 GPUs each.
 #
-# Capture ids: kimi_k25 (deepseek_v3 arch), 61 layers. aux states are indexed
-# by layer INPUT (0..60); the final layer is NOT capturable, so the base is 60.
-# captured = [2,30,58] aux + [60] base = 4, matching the trainer's 3-aux+base.
+# Capture ids: deepseek_v3 arch, 61 layers, indexed by layer input (0..60);
+# [2,30,58] aux + [60] base (final layer not capturable).
 #
-# Run ON the HSG login node (paramiko can't reach HSG through the sss proxy):
-#   export SLURM_HOST=localhost SLURM_ACCOUNT=coreai_dlalgo_modelopt \
+# Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
 #          SLURM_PARTITION=batch \
-#          SLURM_HF_LOCAL=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local \
-#          SLURM_JOB_DIR=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/haoguo/experiments \
+#          SLURM_HF_LOCAL=<hf_models_dir> \
+#          SLURM_JOB_DIR=<experiments_dir> \
 #          NEMORUN_HOME=$PWD
 #   uv run launch.py --yaml examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3.yaml \
 #          identity=$HOME/.ssh/id_ecdsa detach=True --yes
@@ -40,8 +34,7 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      # HSG QOS (QOSMinGRES) requires whole-node GPU allocation (4 on GB200),
-      # so request 4 even though make_dataset is CPU-only.
+      # The cluster QOS requires whole-node GPU alloc (4) even though make_dataset is CPU-only.
       gpus_per_node: 4
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
@@ -55,10 +48,6 @@ pipeline:
       - model.trust_remote_code=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
-      # Keep concurrent in-flight requests low: a 64-wide flood made cold NVFP4
-      # MoE kernels/flashinfer autotune stall a worker past vLLM's engine<->worker
-      # timeout, killing EngineCore (TimeoutError) mid-serve -> 500s -> trainer abort.
-      - data.streaming_prefetch=8
       - training.output_dir=/scratchspace/eagle3
       - training.training_seq_len=4096
       - training.disable_tqdm=true
@@ -68,31 +57,28 @@ pipeline:
       - eagle.eagle_use_torch_compile=false
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
-      # No spaces in values: nemo_run emits `export FOO=value` unquoted.
+      # No spaces: nemo_run emits `export FOO=value` unquoted.
       - EAGLE_CAPTURE_IDS: "[2,30,58,60]"
       - SERVE_TP: "4"
-      # Kimi-K2.5-NVFP4 ~138 GB weights/GPU at TP=4; GB200 has 184 GB. The model's
-      # native max_seq_len is 262144, whose KV cache OOMs (first attempt died with
-      # 183/184 GB used). Cap context to the training seq len and leave headroom
-      # for activation spikes during the profiling forward.
-      - SERVE_MAX_MODEL_LEN: "4096"
-      # Small batches: smaller per-step MoE compute stays under the engine timeout.
+      # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
+      - STREAMING_NUM_WORKERS: "1"
+      # > training_seq_len: room for prompt + the 1-token decode fetch (else vLLM 400s at the cap).
+      - SERVE_MAX_MODEL_LEN: "4160"
       - SERVE_MAX_NUM_SEQS: "4"
       - SERVE_GPU_MEM_UTIL: "0.8"
       - SERVE_READY_TIMEOUT: "2400"
       - SERVE_EXTRA_ARGS: "--trust-remote-code"
-      # The killer was "RPC call to sample_tokens timed out" — a worker stalls on
-      # the first real serving step (cold NVFP4 MoE kernels) past vLLM's default
-      # execute-model timeout, so EngineCore dies. Extend the timeouts that govern
-      # that path (seconds). VLLM_RPC_TIMEOUT (ms) is a different RPC and didn't help.
+      # Cold NVFP4-MoE kernels stall the first serving step past vLLM's default execute-model timeout; raise it (seconds).
       - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
       - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 2
+      # Pin nodes into one NVL72 block (latency nicety here; essential when trainers do cross-node DDP).
+      segment: 2
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: vllm/vllm-openai:latest
+      container: vllm/vllm-openai:v0.22.0-aarch64
 
   # Step 3: Benchmark speculative decoding (VLLM backend, Kimi served at TP=4)
   task_2:
@@ -116,4 +102,4 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: vllm/vllm-openai:latest
+      container: vllm/vllm-openai:v0.22.0-aarch64

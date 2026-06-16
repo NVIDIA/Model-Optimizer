@@ -1,5 +1,8 @@
 # GitHub Teams defined at https://github.com/orgs/NVIDIA/teams/modelopt-devs/teams
 
+# Default owner for any path not matched by a more specific rule below
+* @NVIDIA/modelopt-devs
+
 # Configuration files
 .github @NVIDIA/modelopt-setup-codeowners
 .gitlab @NVIDIA/modelopt-setup-codeowners
@@ -13,6 +16,7 @@ noxfile.py @NVIDIA/modelopt-setup-codeowners
 uv.lock @NVIDIA/modelopt-setup-codeowners
 
 # Library
+modelopt @NVIDIA/modelopt-setup-codeowners
 modelopt/deploy @NVIDIA/modelopt-deploy-codeowners
 modelopt/onnx @NVIDIA/modelopt-onnx-codeowners
 modelopt/onnx/autocast @NVIDIA/modelopt-onnx-autocast-codeowners
@@ -36,7 +40,9 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 # Examples
 /README.md @NVIDIA/modelopt-examples-codeowners
 /examples @NVIDIA/modelopt-examples-codeowners
+/examples/alpamayo @NVIDIA/modelopt-examples-alpamayo-codeowners
 /examples/cnn_qat @NVIDIA/modelopt-examples-cnn_qat-codeowners
+/examples/dataset @NVIDIA/modelopt-examples-megatron-codeowners
 /examples/deepseek @NVIDIA/modelopt-deploy-codeowners
 /examples/diffusers @NVIDIA/modelopt-examples-diffusers-codeowners
 /examples/gpt-oss @NVIDIA/modelopt-examples-gpt-oss-codeowners
