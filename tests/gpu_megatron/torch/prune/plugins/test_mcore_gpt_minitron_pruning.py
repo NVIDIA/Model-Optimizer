@@ -24,7 +24,9 @@ from _test_utils.torch.megatron.utils import (
 )
 from _test_utils.torch.misc import compare_outputs, set_seed
 from _test_utils.torch.nas_prune.minitron_common import prune_minitron
+from megatron.core.transformer.attention import SelfAttention
 from megatron.core.transformer.identity_op import IdentityOp
+from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 
 import modelopt.torch.nas as mtn
 from modelopt.torch.nas.conversion import export_searchspace
@@ -494,6 +496,134 @@ def _test_mcore_gpt_pruning_moe(ckpt_dir, rank, size):
 
 def test_mcore_gpt_pruning_moe(dist_workers, tmp_path):
     dist_workers.run(partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores"))
+
+
+def _test_mcore_qwen35_gdn_moe_pruning(rank, size):
+    # Qwen3.5-like hybrid MoE LM: GatedDeltaNet + gated full-attention layers. Only hidden_size,
+    # moe_ffn_hidden_size, moe_shared_expert_intermediate_size and num_moe_experts are pruned;
+    # attention/GDN internal heads and the fused output gate are kept.
+    set_seed(SEED)
+    hidden_size = ffn_hidden_size = 64
+    vocab_size, max_sequence_length, batch_size, channel_divisor = 64, 16, 2, 16
+    # 2 layers per pipeline stage (linear_attention_freq=2 -> 1 GatedDeltaNet + 1 gated attention)
+    num_layers = min(size * 2, 8)
+
+    model = get_mcore_gpt_model(
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=num_layers,
+        hidden_size=hidden_size,
+        num_attention_heads=4,
+        num_query_groups=2,
+        ffn_hidden_size=ffn_hidden_size,
+        vocab_size=vocab_size,
+        max_sequence_length=max_sequence_length,
+        normalization="RMSNorm",
+        experimental_attention_variant="gated_delta_net",
+        num_moe_experts=4,
+        moe_ffn_hidden_size=32,
+        moe_shared_expert_intermediate_size=64,
+    ).cuda()
+
+    def forward_loop(m):
+        for _ in range(5):
+            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
+
+    pruned_hidden, pruned_moe_ffn, pruned_moe_shared, pruned_experts = 32, 16, 32, 2
+    model, _ = prune_minitron(
+        model,
+        {
+            "export_config": {
+                "hidden_size": pruned_hidden,
+                "moe_ffn_hidden_size": pruned_moe_ffn,
+                "moe_shared_expert_intermediate_size": pruned_moe_shared,
+                "num_moe_experts": pruned_experts,
+            }
+        },
+        {"forward_loop": forward_loop},
+        channel_divisor,
+    )
+
+    for layer in model.decoder.layers:
+        sa = layer.self_attention
+        if isinstance(sa, SelfAttention):  # gated full attention
+            assert sa.linear_qkv.weight.shape[1] == pruned_hidden
+            assert sa.linear_proj.weight.shape[0] == pruned_hidden
+        else:  # GatedDeltaNet
+            assert sa.in_proj.weight.shape[1] == pruned_hidden
+            assert sa.out_proj.weight.shape[0] == pruned_hidden
+        moe = layer.mlp
+        assert moe.router.weight.shape == (pruned_experts, pruned_hidden)
+        assert len(moe.experts.local_experts) == pruned_experts
+        for expert in moe.experts.local_experts:
+            assert expert.linear_fc2.weight.shape == (pruned_hidden, pruned_moe_ffn)
+        assert moe.shared_experts.linear_fc2.weight.shape == (pruned_hidden, pruned_moe_shared)
+    assert model.config.hidden_size == pruned_hidden
+    assert model.config.moe_ffn_hidden_size == pruned_moe_ffn
+    assert model.config.num_moe_experts == pruned_experts
+
+    # Forward pass works on the pruned model
+    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
+    run_mcore_inference(model, prompt_tokens, pruned_hidden)
+
+
+def test_mcore_qwen35_gdn_moe_pruning(dist_workers):
+    dist_workers.run(_test_mcore_qwen35_gdn_moe_pruning)
+
+
+def _test_mcore_mla_pruning(rank, size):
+    # MLA (DeepSeek-style Multi-Latent Attention) LM. Only hidden_size and ffn_hidden_size are
+    # pruned; Q/KV latent ranks and head dims are kept.
+    set_seed(SEED)
+    hidden_size = ffn_hidden_size = 64
+    vocab_size, max_sequence_length, batch_size, channel_divisor = 64, 16, 2, 16
+    num_layers = min(size * 2, 8)
+
+    model = get_mcore_gpt_model(
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=num_layers,
+        hidden_size=hidden_size,
+        num_attention_heads=4,
+        ffn_hidden_size=ffn_hidden_size,
+        vocab_size=vocab_size,
+        max_sequence_length=max_sequence_length,
+        normalization="RMSNorm",
+        transformer_impl="transformer_engine",
+        multi_latent_attention=True,
+    ).cuda()
+
+    def forward_loop(m):
+        for _ in range(5):
+            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
+
+    pruned_hidden, pruned_ffn = hidden_size // 2, ffn_hidden_size // 2
+    model, _ = prune_minitron(
+        model,
+        {"export_config": {"hidden_size": pruned_hidden, "ffn_hidden_size": pruned_ffn}},
+        {"forward_loop": forward_loop},
+        channel_divisor,
+    )
+
+    for layer in model.decoder.layers:
+        sa = layer.self_attention
+        assert isinstance(sa, MLASelfAttention)
+        # input projections reading hidden_size and the separate input layernorm are pruned
+        assert sa.linear_q_down_proj.weight.shape[1] == pruned_hidden
+        assert sa.linear_kv_down_proj.weight.shape[1] == pruned_hidden
+        assert sa.linear_proj.weight.shape[0] == pruned_hidden
+        assert layer.input_layernorm.weight.shape[0] == pruned_hidden
+        assert layer.mlp.linear_fc2.weight.shape == (pruned_hidden, pruned_ffn)
+    assert model.config.hidden_size == pruned_hidden
+    assert model.config.ffn_hidden_size == pruned_ffn
+
+    # Forward pass works on the pruned model
+    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
+    run_mcore_inference(model, prompt_tokens, pruned_hidden)
+
+
+def test_mcore_mla_pruning(dist_workers):
+    dist_workers.run(_test_mcore_mla_pruning)
 
 
 def test_generate_search_space_combos():
