@@ -15,6 +15,7 @@
 
 """Tests for modelopt/torch/export/plugins/hf_checkpoint_utils.py"""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -23,7 +24,7 @@ pytest.importorskip("huggingface_hub")
 hf_hub_errors = pytest.importorskip("huggingface_hub.errors")
 LocalEntryNotFoundError = hf_hub_errors.LocalEntryNotFoundError
 
-from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.export import copy_hf_ckpt_remote_code, sanitize_hf_config_for_deployment
 
 
 def test_copy_hf_ckpt_remote_code_local_dir(tmp_path):
@@ -118,3 +119,86 @@ def test_copy_hf_ckpt_remote_code_hub_id_offline_missing_cache_raises(tmp_path, 
         pytest.raises(RuntimeError, match="HF_HUB_OFFLINE"),
     ):
         copy_hf_ckpt_remote_code("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", tmp_path / "dst")
+
+
+def test_sanitize_hf_config_for_deployment_adds_rope_theta_to_llama3_rope_parameters():
+    """Transformers 5.x requires rope_theta inside llama3 rope_parameters."""
+    config_data = {
+        "rope_theta": 500000,
+        "rope_parameters": {
+            "rope_type": "llama3",
+            "factor": 8.0,
+            "original_max_position_embeddings": 4096,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+        },
+    }
+
+    sanitize_hf_config_for_deployment(config_data, SimpleNamespace(config=SimpleNamespace()))
+
+    assert config_data["rope_parameters"]["rope_theta"] == 500000
+
+
+def test_sanitize_hf_config_for_deployment_uses_model_rope_theta_for_rope_parameters():
+    """Use model.config.rope_theta when save_pretrained omits the top-level field."""
+    config_data = {
+        "rope_parameters": {
+            "rope_type": "llama3",
+            "factor": 8.0,
+            "original_max_position_embeddings": 4096,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+        },
+    }
+    model = SimpleNamespace(config=SimpleNamespace(rope_theta=500000))
+
+    sanitize_hf_config_for_deployment(config_data, model)
+
+    assert config_data["rope_parameters"]["rope_theta"] == 500000
+
+
+def test_sanitize_hf_config_for_deployment_adds_rope_theta_to_llama3_rope_scaling():
+    """Legacy rope_scaling metadata is normalized for llama3 configs as well."""
+    config_data = {
+        "rope_scaling": {
+            "type": "llama3",
+            "factor": 8.0,
+            "original_max_position_embeddings": 4096,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+        },
+    }
+    model = SimpleNamespace(config=SimpleNamespace(rope_theta=500000))
+
+    sanitize_hf_config_for_deployment(config_data, model)
+
+    assert config_data["rope_scaling"]["rope_theta"] == 500000
+
+
+def test_sanitize_hf_config_for_deployment_keeps_existing_rope_theta():
+    """Existing rope_theta in rope metadata is not overwritten."""
+    config_data = {
+        "rope_theta": 500000,
+        "rope_parameters": {
+            "rope_type": "llama3",
+            "rope_theta": 1000000,
+        },
+    }
+
+    sanitize_hf_config_for_deployment(config_data, SimpleNamespace(config=SimpleNamespace()))
+
+    assert config_data["rope_parameters"]["rope_theta"] == 1000000
+
+
+def test_sanitize_hf_config_for_deployment_ignores_non_llama3_rope_parameters():
+    """Only llama3 RoPE parameters need the Transformers 5.x compatibility fix."""
+    config_data = {
+        "rope_theta": 500000,
+        "rope_parameters": {
+            "rope_type": "default",
+        },
+    }
+
+    sanitize_hf_config_for_deployment(config_data, SimpleNamespace(config=SimpleNamespace()))
+
+    assert "rope_theta" not in config_data["rope_parameters"]

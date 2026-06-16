@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 import torch
 from huggingface_hub import snapshot_download
@@ -165,3 +166,35 @@ def copy_non_safetensor_files_from_ckpt(src: str | os.PathLike, dst: str | os.Pa
         if entry.endswith(".safetensors") or entry == "model.safetensors.index.json":
             continue
         shutil.copy2(sp, dst)
+
+
+def _get_rope_theta(config_data: dict[str, Any], model: Any) -> Any:
+    rope_theta = config_data.get("rope_theta")
+    if rope_theta is not None:
+        return rope_theta
+
+    model_config = getattr(model, "config", None)
+    if model_config is None:
+        return None
+
+    return getattr(model_config, "rope_theta", None)
+
+
+def _sanitize_llama3_rope_config(config_data: dict[str, Any], model: Any) -> None:
+    rope_theta = _get_rope_theta(config_data, model)
+    if rope_theta is None:
+        return
+
+    for key in ("rope_parameters", "rope_scaling"):
+        rope_config = config_data.get(key)
+        if not isinstance(rope_config, dict):
+            continue
+
+        rope_type = rope_config.get("rope_type", rope_config.get("type"))
+        if rope_type == "llama3" and "rope_theta" not in rope_config:
+            rope_config["rope_theta"] = rope_theta
+
+
+def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -> None:
+    """Sanitize exported Hugging Face config metadata for deployment runtimes."""
+    _sanitize_llama3_rope_config(config_data, model)
