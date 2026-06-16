@@ -63,7 +63,17 @@ parser.add_argument(
     "Conversation i uses modes[i %% len(modes)], giving an even mix across the dataset. "
     "Empty (default) sends no thinking_mode, preserving behavior for models without it.",
 )
+parser.add_argument(
+    "--output-format",
+    type=str,
+    default="oai",
+    choices=["oai", "sharegpt"],
+    help="Output chat format: 'oai' writes the OpenAI standard ({'messages': [{role, "
+    "content}, ...]}); 'sharegpt' writes the legacy {'conversations': [...]} key. Both "
+    "use role/content message dicts.",
+)
 args = parser.parse_args()
+MESSAGES_KEY = "messages" if args.output_format == "oai" else "conversations"
 
 # Parse the thinking-mode cycle; empty -> no thinking_mode injected.
 THINKING_MODES = [m.strip() for m in args.thinking_modes.split(",") if m.strip()]
@@ -144,7 +154,7 @@ def generate_data(messages, idx, system_prompt):
                     return
                 to_write = {"conversation_id": idx}
             else:
-                to_write = {"conversation_id": idx, "conversations": output_messages}
+                to_write = {"conversation_id": idx, MESSAGES_KEY: output_messages}
                 if thinking_mode:
                     to_write["thinking_mode"] = thinking_mode
             with open(args.output_path, "a") as f:
@@ -210,7 +220,17 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=args.num_threads) as exec
     for idx, sample in enumerate(data):
         if idx in finished_ids:
             continue
-        future = executor.submit(generate_data, sample["conversations"], idx, system_prompt)
+        # Accept both ShareGPT ("conversations") and OAI-chat ("messages") prompt datasets
+        # (e.g. Speculative-Decoding-Dataset-v2 uses "messages"). generate_data already
+        # handles the from/value and role/content message shapes.
+        sample_messages = sample.get("conversations")
+        if sample_messages is None:
+            sample_messages = sample.get("messages")
+        if sample_messages is None:
+            raise KeyError(
+                f"sample {idx} has neither 'conversations' nor 'messages'; keys: {list(sample)}"
+            )
+        future = executor.submit(generate_data, sample_messages, idx, system_prompt)
         futures.append(future)
 
     for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
