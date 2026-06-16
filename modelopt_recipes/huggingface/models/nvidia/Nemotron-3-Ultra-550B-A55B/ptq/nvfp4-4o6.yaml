@@ -10,6 +10,12 @@
 # Ultra NVFP4 with Four-Over-Six (4/6) on routed-expert weights (arXiv:2512.02010).
 # Weights: 4/6 NVFP4, per-block M=6 vs M=4 selected by MSE. Activations: dynamic NVFP4 (NOT MSE).
 # Shared experts + mamba in/out_proj + KV cache: FP8. Everything else: BF16.
+
+imports:
+  nvfp4_four_over_six: configs/numerics/nvfp4_four_over_six
+  nvfp4: configs/numerics/nvfp4
+  fp8: configs/numerics/fp8
+
 metadata:
   recipe_type: ptq
   description: Ultra NVFP4 with Four-Over-Six (4/6) MSE-selected weights on routed experts (W4A4, block 16); dynamic NVFP4 activations (not MSE); shared
@@ -30,46 +36,46 @@ quantize:
     # MoE routed experts: 4/6 NVFP4 weights (MSE), dynamic NVFP4 activations.
     - quantizer_name: '*mixer.experts.*weight_quantizer'
       enable: true
-      cfg: configs/numerics/nvfp4_four_over_six
+      cfg: {$import: nvfp4_four_over_six}
     - quantizer_name: '*mixer.experts.*input_quantizer'
       enable: true
-      cfg: configs/numerics/nvfp4
+      cfg: {$import: nvfp4}
     - quantizer_name: '*mlp.experts*weight_quantizer'
       enable: true
-      cfg: configs/numerics/nvfp4_four_over_six
+      cfg: {$import: nvfp4_four_over_six}
     - quantizer_name: '*mlp.experts*input_quantizer'
       enable: true
-      cfg: configs/numerics/nvfp4
+      cfg: {$import: nvfp4}
 
     # MoE shared experts: FP8 per-tensor.
     - quantizer_name: '*mixer.shared_experts.*weight_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
     - quantizer_name: '*mixer.shared_experts.*input_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
     - quantizer_name: '*mlp.shared_experts*weight_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
     - quantizer_name: '*mlp.shared_experts*input_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
 
     # Mamba mixer linears: FP8 per-tensor.
     - quantizer_name: '*mixer.in_proj*weight_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
     - quantizer_name: '*mixer.in_proj*input_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
     - quantizer_name: '*mixer.out_proj*weight_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
     - quantizer_name: '*mixer.out_proj*input_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
 
     # KV cache: FP8.
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
-      cfg: configs/numerics/fp8
+      cfg: {$import: fp8}
