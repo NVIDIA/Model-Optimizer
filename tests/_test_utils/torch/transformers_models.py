@@ -31,7 +31,6 @@ from transformers import (
     GptOssConfig,
     LlamaConfig,
     NemotronConfig,
-    NemotronHConfig,
     PreTrainedModel,
     Qwen3Config,
     Qwen3MoeConfig,
@@ -220,6 +219,10 @@ def create_tiny_nemotron_dir(
 ##### NEMOTRON-H (Mamba + Attention + MoE/MLP hybrid) #####
 def get_tiny_nemotron_h(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
+
+    # Lazy import — NemotronHConfig only exists in newer transformers builds, and this
+    # module is imported broadly (including by the min-transformers CI job).
+    from transformers import NemotronHConfig
 
     # Tiny NemotronH hybrid. hybrid_override_pattern letters: M=Mamba, E=MoE/FFN, *=Attention.
     # "ME*E" matches the NemotronH default and exercises Mamba + MoE + attention layers.
