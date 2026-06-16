@@ -77,7 +77,7 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 ```bash
 ./launch_train.sh \
     --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml \
-    model.model_name_or_path=meta-llama/Llama-3.2-1B \
+    model.model_name_or_path=meta-llama/Llama-3.2-1B-Instruct \
     data.data_path=input_conversations/train.jsonl \
     training.output_dir=ckpts/llama-3.2-1b-online
 ```
@@ -122,7 +122,7 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 ```bash
 ./launch_train.sh \
     --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml \
-    model.model_name_or_path=meta-llama/Llama-3.2-1B \
+    model.model_name_or_path=meta-llama/Llama-3.2-1B-Instruct \
     data.offline_data_path=$HIDDEN_STATES_DIR \
     training.output_dir=ckpts/llama-3.2-1b-offline
 ```
