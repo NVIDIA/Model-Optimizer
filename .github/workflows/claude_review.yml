@@ -186,11 +186,14 @@ jobs:
                `gh pr view $PR_NUMBER --repo $REPO --json title,body,baseRefName,headRefName,files,additions,deletions,changedFiles,author`
             2. Get the diff **scoped to prioritized paths** — do NOT pull the full diff on a
                large PR (a 50+ file diff is a huge payload that slows every later step):
-               - First diff `modelopt/` and `examples/`:
-                 `git diff <BASE REF>...HEAD -- modelopt/ examples/`
+               - First diff `modelopt/` and `examples/`. Use a **two-dot** diff against the
+                 base tip — the checkout is shallow (`fetch-depth: 1`), so the merge base is
+                 absent and three-dot (`<BASE REF>...HEAD`) would fail with "no merge base":
+                 `git diff <BASE REF> HEAD -- modelopt/ examples/`
                - Then, only if budget remains, `tests/` and anything else relevant.
-               - Use the metadata from step 1 to decide which files are worth a scoped diff;
-                 ignore lock/generated/data files unless the change there is the PR's point.
+               - Use the metadata from step 1 (the authoritative changed-file list) to decide
+                 which files are worth a scoped diff; ignore lock/generated/data files unless
+                 the change there is the PR's point.
             3. For each significant changed file, read the changed hunks plus ~40 lines of
                surrounding context; open the full file only when composition/restore logic
                demands it (see the investigation budget above).
