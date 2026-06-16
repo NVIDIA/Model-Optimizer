@@ -343,9 +343,8 @@ def _make_static_quantizer_46(
 class TestNVFP4StaticFourOverSixExport:
     """4/6 static export normalizes block scales by 256 (not 448) and stays finite.
 
-    The only difference from the default NVFP4 export is the FP8 normalization max:
-    weight_scale_2 = global_amax / (6 * 256) instead of / (6 * 448), and per block the
-    export picks the M=4 scale (M=6 scale * 6/4) when it lowers reconstruction MSE.
+    weight_scale_2 = global_amax / (6 * 256) instead of / (6 * 448). The per-block M=6/M=4
+    choice is made by MSE calibration (baked into _amax); export reads _amax as-is.
     """
 
     def test_scale_2_normalizes_by_256(self):
@@ -378,22 +377,26 @@ class TestNVFP4StaticFourOverSixExport:
         assert torch.isfinite(ws2).all(), "weight_scale_2 (FP32) must be finite"
         assert torch.isfinite(deq.float()).all(), "dequantized weight must be finite"
 
-    def test_selected_high_precision_scale_is_m6_or_m4(self):
-        """Each high-precision per-block scale is either the M=6 candidate or its 6/4 multiple."""
+    def test_export_reads_amax_no_reselection(self):
+        """Export reads _amax as-is (no re-selection): per-block scale == _amax / 6.
+
+        MSE calibration bakes the M=4 choice into _amax (selected blocks × 6/4); export
+        must pass it straight through.
+        """
         weight = _layer1_routed_expert_like(32, 128, n_outliers=6, seed=7)
         block_max = _per_block_max(weight)
         global_amax = block_max.max()
         amax = block_max.clamp(min=1e-30)
-        q = _make_static_quantizer_46(amax, global_amax)
+
+        # Simulate MSE picking M=4 on every other block (amax scaled by 6/4).
+        baked = amax.clone()
+        baked[:, ::2] *= FP4_E2M1_MAX / FP4_E2M1_MAX_M4
+        q = _make_static_quantizer_46(baked, global_amax)
 
         ws2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q)
         selected, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
             q, weight, ws2, keep_high_precision=True
         )
-
-        # Static-path M=6 baseline per-block scale = per_block_amax / 6 (no zero blocks here).
-        m6 = (amax.float() / FP4_E2M1_MAX).view_as(selected)
-        m4 = m6 * (FP4_E2M1_MAX / FP4_E2M1_MAX_M4)
-        is_m6 = torch.isclose(selected, m6, rtol=1e-5)
-        is_m4 = torch.isclose(selected, m4, rtol=1e-5)
-        assert (is_m6 | is_m4).all(), "Selected scale is neither the M=6 nor the M=4 candidate."
+        assert torch.allclose(
+            selected, (baked.float() / FP4_E2M1_MAX).view_as(selected), rtol=1e-5
+        ), "Export did not reproduce the baked per-block amax."

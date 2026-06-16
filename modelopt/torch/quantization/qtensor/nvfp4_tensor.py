@@ -166,16 +166,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
             expected_shape = (*weight.shape[:-1], num_blocks_per_row)
             per_block_scale = per_block_scale.view(expected_shape)
 
-            if is_four_over_six:
-                per_block_scale = cls._select_four_over_six_scale(
-                    weight,
-                    per_block_scale,
-                    weights_scaling_factor_2,
-                    block_size,
-                    per_block_scale_max,
-                    fp8_max_for_normalization=fp8_max_for_normalization,
-                )
-
+            # 4/6 M=4/M=6 is folded into _amax during MSE weight calibration.
             if not keep_high_precision:
                 per_block_scale = _cast_per_block_scale_to_fp8(
                     per_block_scale,
@@ -228,11 +219,8 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
 
-        if four_over_six:
-            per_block_scale = cls._select_four_over_six_scale(
-                input, per_block_scale, weights_scaling_factor_2, block_size
-            )
-
+        # four_over_six only selects the 256 FP8 normalization (via scaling_factor_2);
+        # the M=4/M=6 choice is made during MSE calibration.
         if not keep_high_precision:
             per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale)
         return per_block_scale, weights_scaling_factor_2
@@ -242,92 +230,6 @@ class NVFP4QTensor(BaseQuantizedTensor):
         """Returns per tensor weight scaling factor."""
         m_fp8 = FP8_E4M3_MAX_46 if four_over_six else FP8_E4M3_MAX
         return reduce_amax(input).float() / (FP4_E2M1_MAX * m_fp8)
-
-    @classmethod
-    def _select_four_over_six_scale(
-        cls,
-        weight: torch.Tensor,
-        per_block_scale_m6: torch.Tensor,
-        weights_scaling_factor_2: torch.Tensor,
-        block_size: int,
-        per_block_scale_max: torch.Tensor | None = None,
-        fp8_max_for_normalization: float = FP8_E4M3_MAX,
-    ) -> torch.Tensor:
-        """Pick M=4 or M=6 per block by per-block MSE (paper §3.1, arXiv:2512.02010v5).
-
-        Both candidates share the per-block amax: the M=4 scale equals the M=6 scale times 6/4.
-        We round both candidates onto the E2M1 grid (after F8 quantization of the block scale)
-        and pick whichever yields lower per-block MSE against the BF16/F32 weight values.
-
-        Inputs:
-            weight: original weight tensor [..., features], features divisible by block_size.
-            per_block_scale_m6: F32 per-block scale under the default M=6 rule.
-                Shape [..., num_blocks].
-            weights_scaling_factor_2: per-tensor F32 alpha. Must already use the 4/6-adjusted
-                denominator (FP4_E2M1_MAX * FP8_E4M3_MAX_46), set by get_weights_scaling_factor_2*.
-            block_size: block length (16 for NVFP4).
-            per_block_scale_max: optional max scale value for the static-export F8 rescale
-                (see _cast_per_block_scale_to_fp8). Pass-through only.
-
-        Returns the per-block scale in F32, with M=4 blocks scaled by 6/4 vs M=6 blocks.
-        Same shape as per_block_scale_m6. The caller is responsible for the subsequent
-        F8_E4M3 cast.
-        """
-        ratio = FP4_E2M1_MAX / FP4_E2M1_MAX_M4  # 1.5
-        per_block_scale_m4 = per_block_scale_m6 * ratio
-
-        # Round candidate per-block scales to F8_E4M3 precision before scoring — the saved scales
-        # are F8 quantized, so MSE under F8-rounded scales is what eventually gets deployed.
-        scale_m6_f8 = _cast_per_block_scale_to_fp8(
-            per_block_scale_m6,
-            per_block_scale_max,
-            fp8_max_for_normalization=fp8_max_for_normalization,
-        ).to(torch.float32)
-        scale_m4_f8 = _cast_per_block_scale_to_fp8(
-            per_block_scale_m4,
-            per_block_scale_max,
-            fp8_max_for_normalization=fp8_max_for_normalization,
-        ).to(torch.float32)
-
-        # Quantize-then-dequantize both candidates on the actual weight, compare per-block MSE.
-        alpha = weights_scaling_factor_2.to(weight.device).to(torch.float32)
-        deq_m6 = cls._fake_quant_to_e2m1(weight, scale_m6_f8, alpha, block_size)
-        deq_m4 = cls._fake_quant_to_e2m1(weight, scale_m4_f8, alpha, block_size)
-
-        w_blocks = weight.to(torch.float32).view(*weight.shape[:-1], -1, block_size)
-        mse_m6 = ((w_blocks - deq_m6) ** 2).mean(dim=-1)
-        mse_m4 = ((w_blocks - deq_m4) ** 2).mean(dim=-1)
-        chose_m4 = mse_m4 < mse_m6
-
-        return torch.where(chose_m4, per_block_scale_m4, per_block_scale_m6)
-
-    @classmethod
-    def _fake_quant_to_e2m1(
-        cls,
-        weight: torch.Tensor,
-        per_block_scale_f32: torch.Tensor,
-        alpha: torch.Tensor,
-        block_size: int,
-    ) -> torch.Tensor:
-        """Round-trip quantize one candidate (scale_block ⊗ alpha) and return dequantized blocks.
-
-        Reuses ``_cast_fp4`` for the E2M1 rounding so the per-block MSE scoring matches the
-        deployed NVFP4 quantization exactly. Returns shape [..., num_blocks, block_size] in float32.
-        """
-        device = weight.device
-        w_blocks = weight.to(torch.float32).view(*weight.shape[:-1], -1, block_size)
-        scale = per_block_scale_f32.view(*per_block_scale_f32.shape, 1).to(device)
-        alpha_v = alpha.to(torch.float32)
-        if alpha_v.dim() == 0:
-            divisor = scale * alpha_v
-        else:
-            divisor = scale * alpha_v.view(*alpha_v.shape, *([1] * (scale.dim() - alpha_v.dim())))
-        # Quantize to signed E2M1 codes, then map each code back to its FP4 value via
-        # e2m1_values (code = (sign << 3) + magnitude ordinal). searchsorted in _cast_fp4
-        # saturates at ordinal 7 (= 6.0), so out-of-range magnitudes clamp naturally.
-        codes = cls._cast_fp4(w_blocks / divisor)
-        fp4_vals = cls.get_e2m1_values(device)[codes.long()]
-        return fp4_vals * divisor
 
     @classmethod
     def get_activation_scaling_factor(cls, quantizer):
