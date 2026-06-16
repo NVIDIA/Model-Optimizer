@@ -784,6 +784,9 @@ class TensorQuantizer(nn.Module):
         elif self._block_sizes.get("scale_bits") == (4, 3):
             # NVFP4 default quantization
             # Return real quantized tensor and store scales inside TensorQuantizer
+            # Note: 4/6 is not supported via mtq.compress -- the per-block M=4/M=6 choice
+            # baked into _amax by MSE calibration is not preserved here. Use mtq.quantize
+            # + export for 4/6.
             outputs, _weights_scaling_factor, _weights_scaling_factor_2 = NVFP4QTensor.quantize(
                 inputs,
                 self._block_sizes[-1],
@@ -793,7 +796,6 @@ class TensorQuantizer(nn.Module):
                     else None
                 ),
                 try_tensorrt=True,
-                four_over_six=bool(self._block_sizes.get("four_over_six", False)),
             )
             buffer_to_register["_scale"] = _weights_scaling_factor
             buffer_to_register["_double_scale"] = _weights_scaling_factor_2

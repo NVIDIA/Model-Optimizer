@@ -177,11 +177,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         else:
             # Dynamic path: compute from weight tensor
             return cls.get_weights_scaling_factor(
-                weight,
-                block_size,
-                weights_scaling_factor_2,
-                keep_high_precision,
-                four_over_six=is_four_over_six,
+                weight, block_size, weights_scaling_factor_2, keep_high_precision
             )
 
     @classmethod
@@ -191,7 +187,6 @@ class NVFP4QTensor(BaseQuantizedTensor):
         block_size: int,
         weights_scaling_factor_2: torch.Tensor | None = None,
         keep_high_precision: bool = False,
-        four_over_six: bool = False,
     ):
         """Returns quantized per block weight scaling factor from weight tensor.
 
@@ -199,9 +194,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         For quantizers with pre-computed amax, use get_weights_scaling_factor_from_quantizer.
         """
         if weights_scaling_factor_2 is None:
-            weights_scaling_factor_2 = cls.get_weights_scaling_factor_2(
-                input, four_over_six=four_over_six
-            )
+            weights_scaling_factor_2 = cls.get_weights_scaling_factor_2(input)
 
         # Get per_block amax
         assert block_size != 0, "Block size is zero. Cannot return per_block amax for given input."
@@ -219,17 +212,14 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
 
-        # four_over_six only selects the 256 FP8 normalization (via scaling_factor_2);
-        # the M=4/M=6 choice is made during MSE calibration.
         if not keep_high_precision:
             per_block_scale = _cast_per_block_scale_to_fp8(per_block_scale)
         return per_block_scale, weights_scaling_factor_2
 
     @classmethod
-    def get_weights_scaling_factor_2(cls, input: torch.Tensor, four_over_six: bool = False):
+    def get_weights_scaling_factor_2(cls, input: torch.Tensor):
         """Returns per tensor weight scaling factor."""
-        m_fp8 = FP8_E4M3_MAX_46 if four_over_six else FP8_E4M3_MAX
-        return reduce_amax(input).float() / (FP4_E2M1_MAX * m_fp8)
+        return reduce_amax(input).float() / (FP4_E2M1_MAX * FP8_E4M3_MAX)
 
     @classmethod
     def get_activation_scaling_factor(cls, quantizer):
@@ -283,7 +273,6 @@ class NVFP4QTensor(BaseQuantizedTensor):
         weights_scaling_factor_2: torch.Tensor | None = None,
         keep_high_precision: bool = False,
         try_tensorrt: bool = False,
-        four_over_six: bool = False,
     ):
         """Converting a tensor to a quantized format based on NVFP4 quantization.
 
@@ -293,10 +282,6 @@ class NVFP4QTensor(BaseQuantizedTensor):
             weights_scaling_factor (torch.Tensor): The scaling factor for the weights.
             weights_scaling_factor_2 (torch.Tensor): The scaling factor for the weights.
             keep_high_precision (bool): Whether to keep output scales at high precision.
-            four_over_six (bool): Enable per-block M=4 vs M=6 adaptive selection
-                (paper arXiv:2512.02010v5 §3.1). Only consulted when
-                ``weights_scaling_factor`` is None — otherwise the caller-provided scale
-                already encodes the M choice.
 
         Returns:
         tuple: Contains quantized data, quantized per block scaling factor, and per tensor scaling factor.
@@ -309,16 +294,13 @@ class NVFP4QTensor(BaseQuantizedTensor):
         input = reduce_block_padding(input, block_sizes={-1: block_size})
 
         if weights_scaling_factor_2 is None:
-            weights_scaling_factor_2 = cls.get_weights_scaling_factor_2(
-                input, four_over_six=four_over_six
-            )
+            weights_scaling_factor_2 = cls.get_weights_scaling_factor_2(input)
 
         # try call trtllm fp4 quantization if possible
         if (
             fp4_compatible()
             and weights_scaling_factor is None
             and try_tensorrt
-            and not four_over_six
             and block_size == 16
             and input.is_cuda
             and input.dtype in [torch.half, torch.bfloat16]
@@ -347,7 +329,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
         if weights_scaling_factor is None:
             weights_scaling_factor, _ = cls.get_weights_scaling_factor(
-                input, block_size, weights_scaling_factor_2, four_over_six=four_over_six
+                input, block_size, weights_scaling_factor_2
             )
 
         # Reshape the weight and scale factors

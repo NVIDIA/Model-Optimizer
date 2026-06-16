@@ -21,7 +21,14 @@ imports:
   w4a4_nvfp4_nvfp4_four_over_six: configs/ptq/units/w4a4_nvfp4_nvfp4_four_over_six
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
 
-algorithm: max
+# 4/6 per-block M=6 vs M=4 is selected by MSE (amax multipliers [1.0, 1.5]) on the
+# static weight quantizers; dynamic activation quantizers are not MSE-calibrated.
+algorithm:
+  method: mse
+  fp8_scale_sweep: false
+  start_multiplier: 1.0
+  stop_multiplier: 1.5
+  step_size: 0.5
 quant_cfg:
   - $import: base_disable_all
   - $import: w4a4_nvfp4_nvfp4_four_over_six

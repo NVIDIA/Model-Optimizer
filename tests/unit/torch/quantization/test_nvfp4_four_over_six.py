@@ -69,11 +69,15 @@ class TestIsFourOverSix:
 
 class TestScalingFactor2:
     def test_256_vs_448_denominator(self):
-        torch.manual_seed(0)
-        w = torch.randn(8, 4 * BLOCK_SIZE)
-        wsf2_default = NVFP4QTensor.get_weights_scaling_factor_2(w, four_over_six=False)
-        wsf2_46 = NVFP4QTensor.get_weights_scaling_factor_2(w, four_over_six=True)
-        # wsf2 = amax / (6 * m_fp8); only m_fp8 differs (448 vs 256).
+        # 4/6 selects the 256 FP8 normalization via the static quantizer path.
+        global_amax = torch.tensor(2.0)
+        q_default = SimpleNamespace(block_sizes={-1: BLOCK_SIZE}, global_amax=global_amax)
+        q_46 = SimpleNamespace(
+            block_sizes={-1: BLOCK_SIZE, "four_over_six": True}, global_amax=global_amax
+        )
+        wsf2_default = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q_default)
+        wsf2_46 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q_46)
+        # wsf2 = global_amax / (6 * m_fp8); only m_fp8 differs (448 vs 256).
         assert torch.allclose(wsf2_46 / wsf2_default, torch.tensor(448.0 / 256.0), rtol=1e-6)
 
 
@@ -81,9 +85,7 @@ class TestRoundTripScales:
     def test_no_zero_or_nan_scales(self):
         torch.manual_seed(1)
         weight = torch.cat([torch.randn(4, BLOCK_SIZE), torch.full((4, BLOCK_SIZE), 1e-12)], dim=0)
-        per_block_scale, _ = NVFP4QTensor.get_weights_scaling_factor(
-            weight, BLOCK_SIZE, four_over_six=True
-        )
+        per_block_scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, BLOCK_SIZE)
         s = per_block_scale.float()
         assert torch.isfinite(s).all(), f"Non-finite 4/6 scales: {s.tolist()}"
         assert (s > 0).all(), f"Zero 4/6 scales: {s.tolist()}"
