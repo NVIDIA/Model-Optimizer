@@ -30,7 +30,6 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig, choices
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
     FP4_E2M1_MAX,
-    FP4_E2M1_MAX_M4,
     FP8_E4M3_MAX,
     FP8_E4M3_MAX_46,
     NVFP4QTensor,
@@ -44,10 +43,6 @@ class TestConstants:
         assert FP8_E4M3_MAX == 448.0
         assert FP8_E4M3_MAX_46 == 256.0
         assert FP4_E2M1_MAX == 6.0
-        assert FP4_E2M1_MAX_M4 == 4.0
-
-    def test_m4_over_m6_ratio_is_1_5(self):
-        assert FP4_E2M1_MAX / FP4_E2M1_MAX_M4 == 1.5
 
 
 class TestIsFourOverSix:

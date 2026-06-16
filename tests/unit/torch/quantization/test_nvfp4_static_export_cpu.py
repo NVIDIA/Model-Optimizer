@@ -24,7 +24,7 @@ from modelopt.torch.export.quant_utils import QUANTIZATION_NVFP4, to_quantized_w
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import FP4_E2M1_MAX, FP4_E2M1_MAX_M4
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import FP4_E2M1_MAX
 
 BLOCK_SIZE = 16
 FP4_VALUES = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
@@ -388,9 +388,9 @@ class TestNVFP4StaticFourOverSixExport:
         global_amax = block_max.max()
         amax = block_max.clamp(min=1e-30)
 
-        # Simulate MSE picking M=4 on every other block (amax scaled by 6/4).
+        # Simulate MSE picking M=4 on every other block (amax scaled by 6/4 = 1.5).
         baked = amax.clone()
-        baked[:, ::2] *= FP4_E2M1_MAX / FP4_E2M1_MAX_M4
+        baked[:, ::2] *= 1.5
         q = _make_static_quantizer_46(baked, global_amax)
 
         ws2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q)

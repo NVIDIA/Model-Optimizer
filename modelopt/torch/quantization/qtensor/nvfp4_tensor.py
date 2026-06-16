@@ -28,7 +28,6 @@ e2m1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -
 # Four Over Six (4/6) adaptive block scaling — paper arXiv:2512.02010v5.
 # scales to either 4 or 6 per block, therefore the FP8 block scales are either 448 or 256.
 FP4_E2M1_MAX = 6.0
-FP4_E2M1_MAX_M4 = 4.0
 FP8_E4M3_MAX = 448.0
 FP8_E4M3_MAX_46 = 256.0
 
