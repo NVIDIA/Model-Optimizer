@@ -1502,8 +1502,8 @@ def _fused_experts_wrapper_class(module):
       ``MixtralExperts``, ``Qwen2MoeExperts``, ``Qwen3MoeExperts``,
       ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``, ``JambaExperts``,
       ``OlmoeExperts``, etc.
-    * non-gated (``_QuantNonGatedFusedExperts``): a 3-D ``up_proj`` and no
-      ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
+    * non-gated (``_QuantNonGatedFusedExperts``): a 3-D ``up_proj`` with no
+      ``gate_proj`` and no ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
 
     Returns ``None`` for non-standard layouts (DBRX, GptOss, GraniteMoE,
     Llama4TextExperts) which have their own explicit registrations.
@@ -1518,7 +1518,14 @@ def _fused_experts_wrapper_class(module):
         return _QuantFusedExperts
     up = getattr(module, "up_proj", None)
     if isinstance(up, (nn.Parameter, Tensor)) and up.dim() == 3:
-        return _QuantNonGatedFusedExperts
+        # Strictly single up_proj/down_proj only. A split-gated container with a
+        # separate gate projection (3-D gate_proj or gate_up_proj) makes three
+        # F.linear calls per expert, which would break _QuantNonGatedFusedExperts'
+        # two-call toggle and its up_proj-storage expert-index recovery. Such a
+        # layout is unsupported here (falls through to None) rather than silently
+        # mis-quantizing the wrong projection.
+        if getattr(module, "gate_proj", None) is None and gate_up is None:
+            return _QuantNonGatedFusedExperts
     return None
 
 

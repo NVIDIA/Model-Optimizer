@@ -24,7 +24,7 @@ pytest.importorskip("transformers")
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import _export_fused_experts
-from modelopt.torch.export.quant_utils import get_quant_config
+from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
 from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
@@ -1189,5 +1189,55 @@ class TestNonGatedFusedExperts:
         try:
             converted = QuantModuleRegistry.convert(model.moe.experts)
             assert set(weight_attr_names(converted)) == {"up_proj", "down_proj"}
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def test_split_gated_layout_not_claimed_as_nongated(self):
+        """A fused container with a separate 3-D gate_proj (split-gated: three
+        F.linear calls per expert) must NOT be claimed by the non-gated wrapper,
+        whose two-call toggle and up_proj-storage index recovery assume exactly
+        two projections. It is left unsupported (None) rather than mis-quantized."""
+
+        class _SplitGatedExperts(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.num_experts = NUM_EXPERTS
+                self.gate_proj = nn.Parameter(
+                    torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+                )
+                self.up_proj = nn.Parameter(
+                    torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+                )
+                self.down_proj = nn.Parameter(
+                    torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02
+                )
+                self.act_fn = nn.SiLU()
+
+        module = _SplitGatedExperts()
+        assert _fused_experts_wrapper_class(module) is None
+        assert _is_fused_experts_module(module) is False
+
+    def test_get_quant_config_resolves_nongated_experts(self):
+        """get_quant_config must detect the non-gated experts as quantized. The
+        up_proj weight name does not resolve to its quantizers (they live on the
+        gate_up_proj sentinel list), but down_proj anchors both has_quantizers
+        (down_proj_input_quantizer) and format detection (down_proj_weight_quantizers),
+        so the produced config is correct."""
+        model = _TinyNonGatedMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                m(torch.randn(1, 4, HIDDEN_DIM))
+
+        try:
+            mtq.quantize(model, self._nongated_fp8_cfg(), forward_loop=forward_loop)
+            # Format resolves (via down_proj) instead of QUANTIZATION_NONE (None).
+            assert get_quantization_format(model.moe.experts) is not None
+            # The non-gated experts are reflected in the produced quant config.
+            quant = get_quant_config(model)["quantization"]
+            assert quant.get("quant_algo") is not None
         finally:
             self._cleanup_registry(expert_type)
