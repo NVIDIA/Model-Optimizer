@@ -652,15 +652,18 @@ def get_model(
         # activations during calibration on multi-GPU machines (see HF transformers #21093).
         device_map = None
 
-    # Helper function to check if model has pack-quantized config
+    # Helper function to check if model has pack-quantized config. Checks both the top-level
+    # config and the nested ``text_config`` of multi-modal models (e.g. kimi k2.5), and handles
+    # ``quantization_config`` stored as either a dict or a config object.
     def has_pack_quantized_config(config):
-        # Check top-level quantization_config
-        if hasattr(config, "quantization_config"):
-            if config.quantization_config.get("format", None) == "pack-quantized":
-                return True
-        # Check nested text_config.quantization_config (for multi-modal models like kimi k2.5)
-        if hasattr(config, "text_config") and hasattr(config.text_config, "quantization_config"):
-            if config.text_config.quantization_config.get("format", None) == "pack-quantized":
+        for cfg in (config, getattr(config, "text_config", None)):
+            quant_cfg = getattr(cfg, "quantization_config", None)
+            fmt = (
+                quant_cfg.get("format")
+                if isinstance(quant_cfg, dict)
+                else getattr(quant_cfg, "format", None)
+            )
+            if fmt == "pack-quantized":
                 return True
         return False
 
@@ -704,6 +707,8 @@ def get_model(
             **model_kwargs,
         )
     else:
+        if not hf_config.architectures:
+            raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
         if not hasattr(transformers, architecture) or "Deepseek" in architecture:
