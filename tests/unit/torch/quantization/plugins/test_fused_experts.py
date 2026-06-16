@@ -367,7 +367,7 @@ class TestExportFusedExperts:
             # FP4 quantization step. Patching here avoids needing CUDA / FP4.
             seen = {}  # (expert_idx, proj_name) -> amax tensor
 
-            def _spy_export(wrapper, dtype):
+            def _spy_export(wrapper, dtype, **_kwargs):
                 # Identify which expert/projection this wrapper belongs to by
                 # matching the weight tensor against the fused parameters.
                 w = wrapper.weight.data
@@ -465,7 +465,7 @@ class TestExportFusedExperts:
 
             seen = {}
 
-            def _spy_export(wrapper, dtype):
+            def _spy_export(wrapper, dtype, **_kwargs):
                 w = wrapper.weight.data
                 wq = wrapper.weight_quantizer
                 amax = wq._amax.detach().clone() if hasattr(wq, "_amax") else None
@@ -558,16 +558,6 @@ def _calibrate_two_moe_blocks(parent):
     mtq.quantize(parent, _moe_fp8_quant_cfg(), forward_loop=forward_loop)
 
 
-def _clear_fused_experts_caches():
-    """Clear function-static alias caches in both export entry points."""
-    _export_fused_experts.__dict__.pop("_tied_unpacked_cache", None)
-    # _export_fused_experts internally calls _export_quantized_weight per per-expert
-    # wrapper; clear that cache too so each test sees a pristine state.
-    from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-
-    _export_quantized_weight.__dict__.pop("_tied_weight_alias_cache", None)
-
-
 class TestExportFusedExpertsTiedDedup:
     @staticmethod
     def _cleanup_registry(mod_type):
@@ -576,15 +566,28 @@ class TestExportFusedExpertsTiedDedup:
 
     def test_per_expert_buffers_share_data_ptr_for_tied_fused_experts(self):
         """Two tied FusedExperts modules: every per-expert .weight + scale buffer shares data_ptr."""
-        _clear_fused_experts_caches()
         parent = _build_two_moe_blocks(tie=True)
         expert_type = type(parent.encoder.experts)
         self._cleanup_registry(expert_type)
         try:
             _calibrate_two_moe_blocks(parent)
 
-            _export_fused_experts(parent.encoder.experts, torch.float16)
-            _export_fused_experts(parent.decoder.experts, torch.float16)
+            # Per-call dedup caches threaded through both export calls; int keys
+            # for per-expert wrapper dedup, tuple keys for module-level dedup.
+            tied_cache: dict = {}
+            moe_tied_cache: dict = {}
+            _export_fused_experts(
+                parent.encoder.experts,
+                torch.float16,
+                _moe_tied_cache=moe_tied_cache,
+                _tied_cache=tied_cache,
+            )
+            _export_fused_experts(
+                parent.decoder.experts,
+                torch.float16,
+                _moe_tied_cache=moe_tied_cache,
+                _tied_cache=tied_cache,
+            )
 
             for idx in range(NUM_EXPERTS):
                 enc_expert = getattr(parent.encoder.experts, str(idx))
@@ -604,15 +607,29 @@ class TestExportFusedExpertsTiedDedup:
 
     def test_per_expert_buffers_have_independent_data_ptrs_for_untied_fused_experts(self):
         """Two untied FusedExperts modules: per-expert buffers stay independent (no false-positive alias)."""
-        _clear_fused_experts_caches()
         parent = _build_two_moe_blocks(tie=False)
         expert_type = type(parent.encoder.experts)
         self._cleanup_registry(expert_type)
         try:
             _calibrate_two_moe_blocks(parent)
 
-            _export_fused_experts(parent.encoder.experts, torch.float16)
-            _export_fused_experts(parent.decoder.experts, torch.float16)
+            # Same fresh caches as the positive case — confirms that even with
+            # dedup enabled, untied modules with distinct source data_ptrs do
+            # not get falsely aliased.
+            tied_cache: dict = {}
+            moe_tied_cache: dict = {}
+            _export_fused_experts(
+                parent.encoder.experts,
+                torch.float16,
+                _moe_tied_cache=moe_tied_cache,
+                _tied_cache=tied_cache,
+            )
+            _export_fused_experts(
+                parent.decoder.experts,
+                torch.float16,
+                _moe_tied_cache=moe_tied_cache,
+                _tied_cache=tied_cache,
+            )
 
             for idx in range(NUM_EXPERTS):
                 enc_expert = getattr(parent.encoder.experts, str(idx))

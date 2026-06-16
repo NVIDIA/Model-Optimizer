@@ -115,11 +115,6 @@ def test_sync_tied_input_amax_no_op_for_untied_modules():
     assert torch.allclose(dec_q.amax, torch.tensor(5.0))
 
 
-def _clear_export_quantized_weight_cache():
-    """Clear the function-static alias cache; isolates each test from prior session state."""
-    _export_quantized_weight.__dict__.pop("_tied_weight_alias_cache", None)
-
-
 def _calibrate_through_both_children(parent):
     """Insert NVFP4 quantizers and run a one-shot forward through both children for calibration."""
 
@@ -133,14 +128,16 @@ def _calibrate_through_both_children(parent):
 
 def test_export_quantized_weight_aliases_packed_weight_for_tied_linears():
     """Tied Linears share data_ptr for packed .weight and scale buffers after export."""
-    _clear_export_quantized_weight_cache()
-
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec)
     _calibrate_through_both_children(parent)
 
-    _export_quantized_weight(enc, torch.float16, "weight")
-    _export_quantized_weight(dec, torch.float16, "weight")
+    # Per-call dedup cache (the production pattern: caller owns the cache, scoped
+    # to one export invocation). Threaded through both sides of the tied pair so
+    # the alias step at the end of _export_quantized_weight catches the dedup.
+    tied_cache: dict = {}
+    _export_quantized_weight(enc, torch.float16, "weight", _tied_cache=tied_cache)
+    _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
 
     assert enc.weight.data_ptr() == dec.weight.data_ptr()
     for scale_attr in ("weight_scale", "weight_scale_2"):
@@ -150,24 +147,24 @@ def test_export_quantized_weight_aliases_packed_weight_for_tied_linears():
 
 def test_export_quantized_weight_no_alias_for_untied_linears():
     """Untied Linears keep independent data_ptrs after export — no false-positive aliasing."""
-    _clear_export_quantized_weight_cache()
-
     parent = torch.nn.Module()
     parent.encoder = torch.nn.Linear(16, 32, bias=False)
     parent.decoder = torch.nn.Linear(16, 32, bias=False)
     assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
     _calibrate_through_both_children(parent)
 
-    _export_quantized_weight(parent.encoder, torch.float16, "weight")
-    _export_quantized_weight(parent.decoder, torch.float16, "weight")
+    # Same fresh cache shape as the positive case — confirms that even with
+    # dedup enabled, untied modules with distinct source data_ptrs do not get
+    # falsely aliased.
+    tied_cache: dict = {}
+    _export_quantized_weight(parent.encoder, torch.float16, "weight", _tied_cache=tied_cache)
+    _export_quantized_weight(parent.decoder, torch.float16, "weight", _tied_cache=tied_cache)
 
     assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
 
 
 def test_export_quantized_weight_skips_alias_when_one_tied_side_is_unquantized():
     """Unquantized side early-returns; its .weight stays at the original shared Parameter."""
-    _clear_export_quantized_weight_cache()
-
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec)
     original_shared_data_ptr = enc.weight.data_ptr()
@@ -176,8 +173,9 @@ def test_export_quantized_weight_skips_alias_when_one_tied_side_is_unquantized()
     # is_enabled is a read-only property; .disable() is the canonical bypass.
     dec.weight_quantizer.disable()
 
-    _export_quantized_weight(enc, torch.float16, "weight")
-    _export_quantized_weight(dec, torch.float16, "weight")
+    tied_cache: dict = {}
+    _export_quantized_weight(enc, torch.float16, "weight", _tied_cache=tied_cache)
+    _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
 
     assert enc.weight.data_ptr() != original_shared_data_ptr  # encoder got fresh packed
     assert dec.weight.data_ptr() == original_shared_data_ptr  # decoder untouched

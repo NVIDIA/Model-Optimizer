@@ -514,20 +514,27 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
 
 
 def _export_quantized_weight(
-    sub_module: nn.Module, dtype: torch.dtype, weight_name: str = "weight"
+    sub_module: nn.Module,
+    dtype: torch.dtype,
+    weight_name: str = "weight",
+    _tied_cache: dict[int, nn.Module] | None = None,
 ):
     """For the given weight attr of the sub_module, export the quantization info of it.
 
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
 
-    Tied-weight dedup: the setattr below replaces ``.weight`` with a fresh
-    ``nn.Parameter`` wrapping packed bytes, breaking any HF-level tie.
-    We capture ``weight.data_ptr()`` before the replacement and consult a
-    function-local cache at the end; on cache hit, ``weight`` / ``weight_scale`` /
-    ``weight_scale_2`` are re-pointed at the previously-processed module so the
-    downstream data_ptr dedup catches them. Uses memory identity only — no
-    ``_tied_weights_keys`` lookup, no-op for non-tied modules.
+    Tied-weight dedup is opt-in via ``_tied_cache``: the setattr below replaces
+    ``.weight`` with a fresh ``nn.Parameter`` wrapping packed bytes, breaking
+    any HF-level tie. When the caller passes a ``_tied_cache`` dict (keyed by
+    the pre-pack ``weight.data_ptr()``), the alias step at the end re-points
+    ``weight`` / ``weight_scale`` / ``weight_scale_2`` at a previously-processed
+    module sharing the same source memory so the downstream data_ptr dedup can
+    collapse them. The cache is owned by the caller (typically
+    ``_export_transformers_checkpoint``) and scoped to one export invocation;
+    when ``_tied_cache`` is ``None`` (the default) the alias step is skipped
+    entirely. Uses memory identity only — no ``_tied_weights_keys`` lookup,
+    no-op for non-tied modules.
     """
     quantization_format = get_quantization_format(sub_module)
     if quantization_format == QUANTIZATION_NONE:
@@ -722,26 +729,27 @@ def _export_quantized_weight(
     # source weight memory, alias the packed weight + scale buffers so the
     # downstream data_ptr dedup in postprocess_state_dict can collapse them.
     # input_scale is safe to alias because sync_tied_input_amax (earlier in
-    # this export) already max-merged the per-side amaxes.
-    _cache = _export_quantized_weight.__dict__.setdefault("_tied_weight_alias_cache", {})
-    _prior = _cache.get(_tied_source_data_ptr)
-    if _prior is not None and _prior is not sub_module:
-        if hasattr(_prior, weight_name):
-            setattr(sub_module, weight_name, getattr(_prior, weight_name))
-        for _attr in (
-            quantizer_attrs.weight_scale,
-            quantizer_attrs.weight_scale_2,
-            quantizer_attrs.input_scale,
-        ):
-            if _attr is None or not hasattr(_prior, _attr):
-                continue
-            if _attr in sub_module._buffers:
-                del sub_module._buffers[_attr]
-            elif hasattr(sub_module, _attr):
-                delattr(sub_module, _attr)
-            sub_module.register_buffer(_attr, getattr(_prior, _attr))
-    else:
-        _cache[_tied_source_data_ptr] = sub_module
+    # this export) already max-merged the per-side amaxes. Gated on the
+    # caller-owned _tied_cache so the dedup state is scoped to one export.
+    if _tied_cache is not None:
+        _prior = _tied_cache.get(_tied_source_data_ptr)
+        if _prior is not None and _prior is not sub_module:
+            if hasattr(_prior, weight_name):
+                setattr(sub_module, weight_name, getattr(_prior, weight_name))
+            for _attr in (
+                quantizer_attrs.weight_scale,
+                quantizer_attrs.weight_scale_2,
+                quantizer_attrs.input_scale,
+            ):
+                if not hasattr(_prior, _attr):
+                    continue
+                if _attr in sub_module._buffers:
+                    del sub_module._buffers[_attr]
+                elif hasattr(sub_module, _attr):
+                    delattr(sub_module, _attr)
+                sub_module.register_buffer(_attr, getattr(_prior, _attr))
+        else:
+            _tied_cache[_tied_source_data_ptr] = sub_module
 
     torch.cuda.empty_cache()
 
@@ -822,6 +830,12 @@ def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
 def sync_tied_input_amax(model: nn.Module) -> int:
     """Max-merge input_quantizer amaxes across modules sharing a weight ``data_ptr``.
 
+    Mutates ``model`` in place: overwrites the ``.amax`` buffer on every
+    affected ``input_quantizer`` with the per-group maximum. Intended to
+    run as part of an export pipeline that already replaces weights with
+    packed bytes downstream — i.e. the model is not expected to be reused
+    after this helper runs.
+
     Closes the loop on ``input_scale`` for HF-tied modules whose forward
     paths see different activation distributions (encoder vs decoder in
     YOCO-style models). Must run BEFORE per-module export so the merged
@@ -894,6 +908,14 @@ def _process_quantized_modules(
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
 ) -> None:
+    # Per-call tied-weight dedup caches. Created fresh on every invocation
+    # so cache state is scoped to one export and cannot leak into a later
+    # call (a process-global cache would carry stale entries whose data_ptr
+    # keys can be recycled by PyTorch's allocator across exports — silent
+    # false-positive aliasing). int keys hold dense Linear / per-expert
+    # wrapper dedup; tuple keys hold MoE fused-experts module dedup.
+    _tied_cache: dict[int, nn.Module] = {}
+    _moe_tied_cache: dict[tuple[int, int], nn.Module] = {}
     """Process all quantized modules in model, export weights in-place.
 
     This function iterates through all modules in the model and exports quantized weights
@@ -942,7 +964,12 @@ def _process_quantized_modules(
             # which get_quantization_format's singular-weight_quantizer check misses. Handle
             # it explicitly before the format gate so fused-experts get split + quantized.
             with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                _export_fused_experts(sub_module, dtype)
+                _export_fused_experts(
+                    sub_module,
+                    dtype,
+                    _moe_tied_cache=_moe_tied_cache,
+                    _tied_cache=_tied_cache,
+                )
         elif get_quantization_format(sub_module) != QUANTIZATION_NONE:
             # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":
@@ -950,7 +977,7 @@ def _process_quantized_modules(
             if is_quantlinear(sub_module):
                 try:
                     with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                        _export_quantized_weight(sub_module, dtype)
+                        _export_quantized_weight(sub_module, dtype, _tied_cache=_tied_cache)
                 except AssertionError as e:
                     raise AssertionError(
                         f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
@@ -978,7 +1005,7 @@ def _process_quantized_modules(
                 else:
                     try:
                         with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                            _export_quantized_weight(sub_module, dtype)
+                            _export_quantized_weight(sub_module, dtype, _tied_cache=_tied_cache)
                     except AssertionError as e:
                         raise AssertionError(
                             f"Failed to export embedding '{name}' (type={type(sub_module).__name__}): {e}"
@@ -1001,7 +1028,9 @@ def _process_quantized_modules(
                 # Export the quantized weights
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
-                        _export_quantized_weight(sub_module, dtype, weight_name)
+                        _export_quantized_weight(
+                            sub_module, dtype, weight_name, _tied_cache=_tied_cache
+                        )
 
 
 def _export_transformers_checkpoint(
@@ -1555,7 +1584,7 @@ def export_hf_checkpoint(
 
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(
-            model, dtype, canonical_tied_naming=canonical_tied_naming
+            model, dtype, canonical_tied_naming=canonical_tied_naming, **kwargs
         )
 
         # Only treat the export as quantized when at least one quant_algo field is set.
