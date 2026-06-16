@@ -236,6 +236,14 @@ extend-ignore = [
     "N803",
     "N806",
 ] # triton kernel style
+"modelopt/torch/kernels/quantization/attention/*" = [
+    "N803",
+    "N806",
+] # triton kernel style
+"modelopt/torch/kernels/quantization/common/*" = [
+    "N803",
+    "N806",
+] # triton kernel style
 
 [tool.ruff.lint.pycodestyle]
 max-line-length = 120 # Line length limit for comments and docstrings

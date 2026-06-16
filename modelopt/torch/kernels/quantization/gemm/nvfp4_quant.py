@@ -16,9 +16,10 @@
 """Composable Triton JIT functions for NVFP4 (E2M1) fake quantization.
 
 Single source of truth for FP4 decision-boundary rounding.  Used by:
-  - ``fp4_kernel.py``         (standalone blockwise fake quant)
-  - ``fp4_kernel_hopper.py``  (Hopper block-pointer variant)
-  - ``gptq_fused_kernel.py``  (fused GPTQ scalar path)
+  - ``fp4_kernel.py``              (standalone blockwise fake quant)
+  - ``fp4_kernel_hopper.py``       (Hopper block-pointer variant)
+  - ``gptq_fused_kernel.py``       (fused GPTQ scalar path)
+  - ``../attention/p_qdq.py``      (softmax-P qdq in the flash-attention kernel)
 
 FP4 (E2M1) representable magnitudes: {0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
 """
@@ -73,9 +74,13 @@ def nvfp4_scalar_quant(
     Quantizes each element independently: divide by scale, round to nearest
     FP4 (E2M1) value via ``fp4_round_magnitude``, multiply by scale.
 
+    All ops are element-wise, so any shape works with a broadcastable
+    ``scale`` (e.g. a [M, B, 16] tile with [M, B, 1] per-block scales, as
+    used by the attention softmax-P qdq).
+
     Args:
         x:     [N] float32 tensor of values to quantize (already in registers).
-        scale: float32 scalar block scale.
+        scale: float32 scalar block scale (or broadcastable tensor of scales).
         N:     Compile-time number of elements.
 
     Returns:
@@ -131,9 +136,13 @@ def nvfp4_scalar_qdq(
     :func:`fp8_quantize_scale`, then quantizes each element to the nearest
     FP4 (E2M1) value.
 
+    All ops are element-wise, so any shape works with a broadcastable
+    ``block_amax``.
+
     Args:
         x:            [N] float32 tensor of values to quantize.
-        block_amax:   Per-block amax (absolute maximum of the block).
+        block_amax:   Per-block amax (absolute maximum of the block);
+                      scalar or broadcastable tensor.
         global_scale: Pre-computed ``global_amax / (6.0 * 448.0)``.
         N:            Compile-time number of elements.
 

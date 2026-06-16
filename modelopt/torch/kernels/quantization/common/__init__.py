@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Quantization-specific attention kernel pieces.
+"""Shared composable Triton JIT fake-quantization functions.
 
-``p_qdq.py`` holds the softmax-P (``p_bmm_quantizer``) quant-dequant
-``@triton.jit`` helpers invoked by the unified flash-attention kernel in
-``common/attention/triton_fa.py`` under its ``P_QDQ`` constexpr guard.
-Only NVFP4 needs a P-specific helper (tiling and block-amax policy on top of
-``quantization/gemm/nvfp4_quant.py``); the FP8 mode uses
-``quantization/common/fp8_quant.fp8_scalar_qdq`` directly.
+Format-level building blocks (FP8 E4M3, NVFP4/E2M1) reused across the gemm
+and attention kernel packages.
 """

@@ -42,6 +42,8 @@ import triton.language as tl
 _apply_sparse_nm_to_qk_tile: Any = None
 _is_dense_region: Any = None
 _skip_softmax_decision: Any = None
+_p_qdq_fp8: Any = None
+_p_qdq_nvfp4: Any = None
 
 
 def _load_sparsity_helpers() -> None:
@@ -60,6 +62,20 @@ def _load_sparsity_helpers() -> None:
         _apply_sparse_nm_to_qk_tile = _nm
         _is_dense_region = _dense
         _skip_softmax_decision = _skip
+
+
+def _load_p_qdq_helpers() -> None:
+    global _p_qdq_fp8, _p_qdq_nvfp4
+    if _p_qdq_fp8 is None:
+        from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4 as _nvfp4
+        from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _fp8
+
+        _p_qdq_fp8 = _fp8
+        _p_qdq_nvfp4 = _nvfp4
+
+
+# Maps the public p_qdq option to the kernel's P_QDQ constexpr.
+_P_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
 
 
 LOG2E: float = 1.44269504088896
@@ -246,6 +262,8 @@ def _attn_fwd(
     DENSE_RECENT_TOKENS: tl.constexpr = 64,  # Recent KV tokens kept dense (BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
+    P_QDQ: tl.constexpr = 0,  # Fake quant-dequant of softmax P: 0=off, 1=FP8 E4M3, 2=NVFP4
+    p_qdq_scale=1.0,  # Per-tensor scale for softmax qdq (runtime scalar; amax/448 or amax/(6*448))
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
     Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
     MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
@@ -382,6 +400,14 @@ def _attn_fwd(
             correction = tl.math.exp2(row_max - m_new)
             row_sum = row_sum * correction + l_new
             acc = acc * correction[:, None]
+
+            # --- Optional softmax quant-dequant (emulates quantized P @ V) ---
+            # row_sum keeps the unquantized p: deployment kernels compute the
+            # softmax denominator in fp32 and only feed quantized P to BMM2.
+            if P_QDQ == 1:
+                p = _p_qdq_fp8(p, p_qdq_scale)
+            elif P_QDQ == 2:
+                p = _p_qdq_nvfp4(p, p_qdq_scale, BLOCK_M, BLOCK_N)
 
             # Load V and accumulate
             if IS_PAGED:
@@ -806,6 +832,8 @@ class _Attention(torch.autograd.Function):
         dense_recent_tokens,
         skip_softmax_threshold,
         measure_sparsity,
+        p_qdq_mode,
+        p_qdq_scale,
         k_cache,
         v_cache,
         block_table,
@@ -903,6 +931,8 @@ class _Attention(torch.autograd.Function):
             "DENSE_RECENT_TOKENS": dense_recent_tokens,
             "APPLY_SKIP_SOFTMAX": apply_skip,
             "SKIP_THRESHOLD_LOG2": skip_threshold_log2,
+            "P_QDQ": p_qdq_mode,
+            "p_qdq_scale": p_qdq_scale,
             "Sparsity_total": sparsity_total,
             "Sparsity_skipped": sparsity_skipped,
             "MEASURE_SPARSITY": do_measure,
@@ -1106,6 +1136,8 @@ class _Attention(torch.autograd.Function):
             None,  # dense_recent_tokens
             None,  # skip_softmax_threshold
             None,  # measure_sparsity
+            None,  # p_qdq_mode
+            None,  # p_qdq_scale
             None,  # k_cache
             None,  # v_cache
             None,  # block_table
@@ -1132,6 +1164,8 @@ def attention(
     dense_recent_tokens: int = 64,
     skip_softmax_threshold: float | None = None,
     measure_sparsity: bool = False,
+    p_qdq: str | None = None,
+    p_qdq_scale: float = 1.0,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1169,6 +1203,26 @@ def attention(
             and skipped tiles via atomic counters. The counts are stored as
             ``_sparsity_total`` and ``_sparsity_skipped`` attributes on the
             returned output tensor.
+        p_qdq: Fake quant-dequant of the softmax probabilities ``P``
+            before the ``P @ V`` matmul (BMM2), emulating quantized attention.
+            ``"fp8"`` round-trips P through FP8 E4M3 with a static per-tensor
+            scale (amax = 1.0, exact since the kernel's unnormalized P is in
+            [0, 1]). ``"nvfp4"`` applies the two-level NVFP4 recipe: E2M1
+            elements with one FP8 E4M3 scale per 16 elements along the key
+            dimension (the BMM2 contraction axis; every autotuned BLOCK_N is
+            a multiple of 16). The softmax denominator stays unquantized, as
+            in deployment kernels. The backward pass uses the straight-through
+            estimator: gradients are computed from the unquantized P, matching
+            QAT references that keep the backward dots in high precision.
+            Set to ``None`` to disable.
+        p_qdq_scale: Per-tensor quantization scale for the softmax qdq
+            (standard convention ``q = cast(p / scale) * scale``). For FP8
+            this is ``amax / 448``; for NVFP4 it is the global scale
+            ``amax / (6 * 448)``. The default of 1.0 corresponds to an
+            effective amax of 448 (FP8) or 6 * 448 (NVFP4) — a direct cast
+            of the kernel's unnormalized P in [0, 1]. A runtime scalar —
+            user-set or calibrated values do not recompile the kernel.
+            Out-of-range values saturate.
         k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
             When provided, K/V are read from paged cache via block_table
             instead of from contiguous k/v tensors.
@@ -1186,7 +1240,20 @@ def attention(
         require grad, because the saved ``k``/``v`` are dummy tensors in paged
         mode and dK/dV would be silently incorrect.
     """
+    # Both loaders must run unconditionally: Triton computes a kernel's
+    # dependency hash once, on the first call, walking the full AST. If the
+    # qdq helpers were still None at that point, their source would be
+    # permanently excluded from the cache key and later edits to them would
+    # silently reuse stale compiled kernels from the on-disk cache.
     _load_sparsity_helpers()
+    _load_p_qdq_helpers()
+    if p_qdq not in _P_QDQ_MODES:
+        raise ValueError(
+            f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
+        )
+    p_qdq_mode = _P_QDQ_MODES[p_qdq]
+    if p_qdq_mode and not (math.isfinite(p_qdq_scale) and p_qdq_scale > 0):
+        raise ValueError(f"p_qdq_scale must be a finite positive value, got {p_qdq_scale}")
     sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
     return _Attention.apply(
         q,
@@ -1206,6 +1273,8 @@ def attention(
         dense_recent_tokens,
         skip_softmax_threshold,
         measure_sparsity,
+        p_qdq_mode,
+        p_qdq_scale,
         k_cache,
         v_cache,
         block_table,

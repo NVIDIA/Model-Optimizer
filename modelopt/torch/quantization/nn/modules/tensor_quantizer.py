@@ -530,6 +530,26 @@ class TensorQuantizer(nn.Module):
         )
 
     @property
+    def is_fp8(self):
+        """Check if is per-tensor FP8 E4M3 (no block scales, no per-channel axis)."""
+        return self._num_bits == (4, 3) and self._block_sizes is None and self._axis is None
+
+    @property
+    def is_nvfp4_dynamic(self):
+        """Check if is dynamic NVFP4: E2M1 with E4M3 per-block scales computed dynamically.
+
+        Mirror of ``is_nvfp4_static`` for the dynamic-scale layout; like it, this does
+        not constrain the block size. Consumers that require a specific block size
+        (e.g. the block-16 Triton kernels) check ``block_sizes[-1]`` downstream.
+        """
+        return (
+            self._block_sizes is not None
+            and self._block_sizes.get("type", None) == "dynamic"
+            and self._num_bits == (2, 1)
+            and self._block_sizes.get("scale_bits", None) == (4, 3)
+        )
+
+    @property
     def is_nvfp4_static(self):
         """True for E2M1 weights + E4M3 per-block scales in static layout (format-only check)."""
         return (
