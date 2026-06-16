@@ -22,6 +22,7 @@ calibration (arXiv:2512.02010).
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import modelopt.torch.quantization as mtq
@@ -153,3 +154,14 @@ class TestStaticQuantizerFourOverSixThreading:
 
     def test_default_threads_448(self, monkeypatch):
         assert self._captured_fp8_max(monkeypatch, four_over_six=False) == 448.0
+
+
+class TestCompressUnsupported:
+    """mtq.compress (TensorQuantizer._real_quantize) must reject 4/6: the per-block
+    M=4/M=6 choice baked into amax by MSE calibration is not preserved by real quantization.
+    """
+
+    def test_real_quantize_raises_for_four_over_six(self):
+        q = TestStaticQuantizerFourOverSixThreading._make_static_quantizer(four_over_six=True)
+        with pytest.raises(NotImplementedError, match="Four-Over-Six"):
+            q._real_quantize(torch.randn(1, 4 * BLOCK_SIZE))
