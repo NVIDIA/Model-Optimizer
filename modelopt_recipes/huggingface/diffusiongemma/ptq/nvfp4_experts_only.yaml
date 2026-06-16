@@ -14,29 +14,33 @@
 # limitations under the License.
 
 # DiffusionGemma-specific PTQ recipe for the ``nvfp4_experts_only`` qformat.
-# Equivalent to the general ``nvfp4_experts_only`` preset
-# (``configs/ptq/presets/model/nvfp4_experts_only``) with the
+# Same numerics as the general ``nvfp4_experts_only-kv_fp8_cast`` preset
+# (``configs/ptq/presets/model/nvfp4_experts_only-kv_fp8_cast``) with the
 # self-conditioning network additionally disabled, applied via the local
 # ``disabled_quantizers`` unit that splices in the standard default plus
-# ``*self_conditioning*``.
+# ``*self_conditioning*``. Matches the ``--qformat nvfp4_experts_only``
+# behavior in ``hf_ptq.py``, which defaults ``--kv_cache_qformat=fp8_cast``.
 
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   experts_nvfp4: configs/ptq/units/experts_nvfp4
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
   disabled_quantizers: huggingface/diffusiongemma/ptq/disabled_quantizers
 
 metadata:
   recipe_type: ptq
   description: >-
-    DiffusionGemma PTQ recipe (nvfp4_experts_only): same numerics as the
-    general nvfp4_experts_only preset (dynamic W4A4 NVFP4 on MoE experts only;
-    attention and dense MLP stay bf16), with the self-conditioning network
-    additionally disabled so text-only calibration doesn't trip on its
-    uncalibrated quantizers.
+    DiffusionGemma PTQ recipe (nvfp4_experts_only): dynamic W4A4 NVFP4 on MoE
+    experts only with FP8 KV-cache cast (constant-amax); attention Q/K/V/O
+    projections and dense MLP stay bf16. Matches the general
+    ``nvfp4_experts_only-kv_fp8_cast`` preset with the self-conditioning
+    network additionally disabled so text-only calibration doesn't trip on
+    its uncalibrated quantizers.
 
 quantize:
   algorithm: max
   quant_cfg:
     - $import: base_disable_all
     - $import: experts_nvfp4
+    - $import: kv_fp8_cast
     - $import: disabled_quantizers

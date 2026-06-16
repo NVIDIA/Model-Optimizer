@@ -774,7 +774,6 @@ def export_quantized(
                     full_model,
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
-                    canonical_tied_naming=args.canonical_tied_naming,
                 )
 
                 if args.qformat == "w4a16_nvfp4":
@@ -1258,19 +1257,6 @@ def parse_args() -> argparse.Namespace:
         default=512,
     )
     parser.add_argument("--export_path", default="exported_model")
-    parser.add_argument(
-        "--canonical_tied_naming",
-        type=lambda s: s.lower() in ("1", "true", "yes"),
-        default=False,
-        help=(
-            "If True, reorder the exported state_dict so tied-weight aliases "
-            "dedup to the canonical side declared in the model's HF "
-            "_tied_weights_keys (e.g. decoder-side for DiffusionGemma4). Off "
-            "by default to avoid renaming exported keys for models whose "
-            "downstream consumers expect the legacy (registration-order) "
-            "winner."
-        ),
-    )
     parser.add_argument(
         "--dataset",
         help=(

@@ -796,9 +796,17 @@ def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
 
     Lets the downstream first-wins data_ptr dedup keep canonical names.
     Uses both regex patterns and substring matchers from
-    :func:`_collect_canonical_tied_patterns`. No-op when the model
-    declares no dict-style ``_tied_weights_keys``.
+    :func:`_collect_canonical_tied_patterns`. Gated on the model class
+    name to scope the reorder to DiffusionGemma; other tied
+    encoder-decoder models that ship dict-style ``_tied_weights_keys``
+    can be added to the allowlist here. Mirrors the ``model_type``
+    dispatch used for the Whisper and Nemotron-VL branches elsewhere
+    in this file.
     """
+    model_type = type(model).__name__.lower()
+    if "diffusiongemma" not in model_type and "diffusion_gemma" not in model_type:
+        return state_dict
+
     canonical_patterns, side_substrings = _collect_canonical_tied_patterns(model)
     if not canonical_patterns and not side_substrings:
         return state_dict
@@ -908,14 +916,6 @@ def _process_quantized_modules(
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
 ) -> None:
-    # Per-call tied-weight dedup caches. Created fresh on every invocation
-    # so cache state is scoped to one export and cannot leak into a later
-    # call (a process-global cache would carry stale entries whose data_ptr
-    # keys can be recycled by PyTorch's allocator across exports — silent
-    # false-positive aliasing). int keys hold dense Linear / per-expert
-    # wrapper dedup; tuple keys hold MoE fused-experts module dedup.
-    _tied_cache: dict[int, nn.Module] = {}
-    _moe_tied_cache: dict[tuple[int, int], nn.Module] = {}
     """Process all quantized modules in model, export weights in-place.
 
     This function iterates through all modules in the model and exports quantized weights
@@ -928,6 +928,14 @@ def _process_quantized_modules(
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
             If True, modules with base_layer attribute are skipped.
     """
+    # Per-call tied-weight dedup caches. Created fresh on every invocation
+    # so cache state is scoped to one export and cannot leak into a later
+    # call (a process-global cache would carry stale entries whose data_ptr
+    # keys can be recycled by PyTorch's allocator across exports — silent
+    # false-positive aliasing). int keys hold dense Linear / per-expert
+    # wrapper dedup; tuple keys hold MoE fused-experts module dedup.
+    _tied_cache: dict[int, nn.Module] = {}
+    _moe_tied_cache: dict[tuple[int, int], nn.Module] = {}
     fsdp_module_to_reshard = None
 
     for name, sub_module in model.named_modules():
@@ -1037,7 +1045,6 @@ def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
     is_modelopt_qlora: bool = False,
-    canonical_tied_naming: bool = False,
     **kwargs,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Exports the torch model to the packed checkpoint with original HF naming.
@@ -1190,14 +1197,11 @@ def _export_transformers_checkpoint(
     kv_cache_max_bound = 448
     kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
 
-    # Optionally reorder so canonical-side tied keys (per HF's
-    # _tied_weights_keys) iterate first into postprocess_state_dict's
-    # first-wins data_ptr dedup. Off by default to avoid renaming exported
-    # keys for models whose downstream consumers expect the legacy
-    # (registration-order) winner; opt in for models where matching HF's
-    # own naming convention matters (e.g. DiffusionGemma4 → decoder names).
-    if canonical_tied_naming:
-        quantized_state_dict = _reorder_canonical_first(quantized_state_dict, model)
+    # Reorder so canonical-side tied keys (per HF's _tied_weights_keys)
+    # iterate first into postprocess_state_dict's first-wins data_ptr dedup.
+    # Self-gated to DiffusionGemma inside _reorder_canonical_first; no-op
+    # for every other model.
+    quantized_state_dict = _reorder_canonical_first(quantized_state_dict, model)
 
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
@@ -1536,7 +1540,6 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
-    canonical_tied_naming: bool = False,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1556,11 +1559,6 @@ def export_hf_checkpoint(
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
-        canonical_tied_naming: If True, reorder the state_dict so tied-weight
-            aliases dedup to the canonical side declared in the model's HF
-            ``_tied_weights_keys`` (e.g. decoder-side for DiffusionGemma4).
-            Off by default to avoid renaming exported keys for models whose
-            downstream consumers expect the legacy (registration-order) winner.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
@@ -1583,9 +1581,7 @@ def export_hf_checkpoint(
         return
 
     try:
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
-            model, dtype, canonical_tied_naming=canonical_tied_naming, **kwargs
-        )
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
 
         # Only treat the export as quantized when at least one quant_algo field is set.
         # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
