@@ -28,6 +28,7 @@ from collections.abc import Callable
 import onnx
 
 import modelopt.onnx.utils as onnx_utils
+from modelopt.onnx.autocast.logging_config import logger
 from modelopt.onnx.utils import get_opset_version
 
 
@@ -113,6 +114,73 @@ def walk_subgraphs_recursive(
             elif attr.type == onnx.AttributeProto.GRAPHS:
                 for subgraph in attr.graphs:
                     walk_subgraphs_recursive(subgraph, callback, parent_node=node, is_subgraph=True)
+
+
+def clear_types_and_shapes_recursive(
+    graph: onnx.GraphProto, clear_shapes: bool = True, is_subgraph: bool = False
+) -> None:
+    """Recursively clear type/shape information for a graph and all its subgraphs.
+
+    Resets intermediate (``value_info``) and output tensor types to ``UNDEFINED`` -- and, when
+    ``clear_shapes`` is True, replaces concrete dimensions with a symbolic ``"unk"`` placeholder --
+    so that a subsequent :func:`modelopt.onnx.utils.infer_types` re-derives types (and shapes) from
+    the operator graph instead of trusting stale annotations. For subgraphs, input types/shapes are
+    cleared as well so that they are propagated from the parent graph.
+
+    Note: this clears in place but does not change tensor *rank*. It cannot repair a stale rank (e.g.
+    a leftover rank-0 scalar on a tensor that is really rank-2+); see
+    :func:`modelopt.onnx.utils._reconcile_stale_output_shapes` for that.
+
+    Args:
+        graph: The ONNX graph to clear types and shapes for.
+        clear_shapes: If True, also clear shape information. Pass False to keep shapes when only
+            types will be re-inferred (mirrors standalone type inference).
+        is_subgraph: Whether this is a subgraph (True) or the main graph (False).
+    """
+
+    def _clear_callback(g: onnx.GraphProto, parent: onnx.NodeProto, is_sub: bool) -> None:
+        logger.debug(f"Clearing types/shapes in {'subgraph' if is_sub else 'main graph'}: {g.name}")
+
+        # Clear type/shape information for inputs (only for subgraphs, not main graph inputs)
+        if is_sub:
+            for inp in g.input:
+                if inp.type.HasField("tensor_type"):
+                    inp.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+                    if clear_shapes:
+                        for idx, d in enumerate(inp.type.tensor_type.shape.dim):
+                            if d.dim_value:
+                                inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
+
+        if is_sub:
+            # Identify which tensors are produced by nodes in this subgraph
+            subgraph_outputs = set()
+            for node in g.node:
+                subgraph_outputs.update(node.output)
+
+            # Clear value_info only for intermediates produced by nodes in this subgraph
+            for vi in g.value_info:
+                if vi.name in subgraph_outputs:
+                    vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+                    if clear_shapes:
+                        for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                            if d.dim_value:
+                                vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+        else:
+            for vi in g.value_info:
+                vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+                for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                    if d.dim_value:
+                        vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+
+        # Clear outputs for both main graph and subgraphs
+        for out in g.output:
+            out.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+            if clear_shapes:
+                for idx, d in enumerate(out.type.tensor_type.shape.dim):
+                    if d.dim_value:
+                        out.type.tensor_type.shape.dim[idx].dim_param = "unk"
+
+    walk_subgraphs_recursive(graph, _clear_callback, is_subgraph=is_subgraph)
 
 
 def get_op_types_not_supported_in_low_precision(
