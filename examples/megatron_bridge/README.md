@@ -302,6 +302,9 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 > E.g. for Qwen3-8B with 36 layers and 8 GPUs, you can set both to 3 to get 3-5-5-5-5-5-5-3 layers per GPU.
 
 > [!NOTE]
+> NAS-based pruning requires ~2x the GPU memory of Manual pruning because it needs to simultaneously hold original model while evaluating each pruned candidate.
+
+> [!NOTE]
 > If pruning a Nemotron model and you want to save the pruned model back in HF format, please downgrade to `transformers<5` via `python -m pip install "transformers<5"` before pruning.
 
 ## Resources

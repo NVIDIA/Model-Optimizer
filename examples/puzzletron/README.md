@@ -43,7 +43,7 @@ python -m pytest tests/gpu/torch/puzzletron/test_puzzletron.py -k "Qwen3-8B"
 
 - For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use a single GPU.
 
-- To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
+- To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Puzzle-KD-Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
 
 ```bash
 hf auth login --token <your token>
@@ -51,15 +51,17 @@ hf auth login --token <your token>
 
 ## Compress the Model
 
-1. Download and prepare the [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
+1. Download and prepare the dataset.
 
-   dataset split: "code", "math", "stem", "chat", excluding reasoning samples (2.62GB)
+   **Default (recommended):** Use the prebuilt [Puzzle-KD-Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2) (~3 GB disk required).
 
    ```bash
    python -m modelopt.torch.puzzletron.dataset.prepare_dataset \
-      --dataset_name nvidia/Nemotron-Post-Training-Dataset-v2 \
-      --output_dir path/to/Nemotron-Post-Training-Dataset-v2
+      --dataset_name nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2 \
+      --output_dir path/to/Puzzle-KD-Nemotron-Post-Training-Dataset-v2
    ```
+
+   > **Note:** Alternatively, you can derive the dataset from the raw [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) by passing `--dataset_name nvidia/Nemotron-Post-Training-Dataset-v2`. This downloads the full raw dataset (~136 GB) before filtering it down to the same ~2.6 GB result. Only do this if you need to reproduce the preprocessing from scratch.
 
 2. Specify the `puzzle_dir`, `input_hf_model_path`, `dataset_path`, `intermediate_size_list`, and `target_memory` arguments in the [llama-3_1-8B_pruneffn_memory.yaml](./configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml) configuration file.
 
