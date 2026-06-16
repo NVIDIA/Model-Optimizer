@@ -276,10 +276,20 @@ async def _load_ultrachat_conversations(
     ds = ds.shuffle(seed=42)
     yield len(ds)
     for i in range(len(ds)):
-        prompt = ds[i]["prompt"].strip()
         prompt_id = ds[i]["prompt_id"].strip()
-        if prompt:
-            msgs = [{"role": "user", "content": prompt}]
+        # UltraChat records carry the full multi-turn conversation in "messages";
+        # fall back to the single-turn "prompt" only if it is unavailable.
+        raw_msgs = ds[i].get("messages") or []
+        msgs = [
+            {"role": turn["role"], "content": turn["content"].strip()}
+            for turn in raw_msgs
+            if turn.get("content", "").strip()
+        ]
+        if not msgs:
+            prompt = ds[i]["prompt"].strip()
+            if prompt:
+                msgs = [{"role": "user", "content": prompt}]
+        if msgs:
             if not prompt_id:
                 prompt_id = id_for_conversation(msgs)
             prompt_id = f"ultrachat-{split_name}-{prompt_id}"
