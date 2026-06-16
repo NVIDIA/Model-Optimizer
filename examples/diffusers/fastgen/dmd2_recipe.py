@@ -351,6 +351,13 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             fake_score_steps = 0
 
             for batch_group in self.step_scheduler:
+                # Read the live step counter so the student / fake-score phase matches a clean
+                # run exactly, including the first step after a resume. StepScheduler yields the
+                # batch then increments ``step``, so ``self.step_scheduler.step`` here is the step
+                # being processed; a ``global_step`` carried from the previous iteration lagged
+                # the phase by one, which made the first post-resume step take the student branch
+                # where a clean run takes fake_score.
+                global_step = int(self.step_scheduler.step)
                 is_student_phase = (global_step % cfg.student_update_freq) == 0
 
                 if is_student_phase:
@@ -456,8 +463,6 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                 else:
                     epoch_fake_score_loss += group_loss_mean
                     fake_score_steps += 1
-
-                global_step = int(self.step_scheduler.step)
 
                 if (
                     self.log_every
