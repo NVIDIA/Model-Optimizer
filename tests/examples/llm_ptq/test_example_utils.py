@@ -159,3 +159,38 @@ def test_load_mtp_weights_no_mtp_returns_empty(tmp_path):
     prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
     assert prefixes == []
     assert orphans == {}
+
+
+# ---------- get_original_hf_quant_method -------------------------------------
+# get_model uses this to detect native MXFP4 checkpoints (e.g. openai/gpt-oss-*) and load
+# them dequantized to BF16 GptOssExperts (so ModelOpt can quantize/export the experts).
+
+
+def test_get_original_hf_quant_method_mxfp4_dict():
+    # gpt-oss layout: quantization_config is a plain dict carrying quant_method.
+    cfg = SimpleNamespace(
+        quantization_config={"quant_method": "mxfp4", "modules_to_not_convert": []}
+    )
+    assert example_utils.get_original_hf_quant_method(cfg) == "mxfp4"
+
+
+def test_get_original_hf_quant_method_object():
+    # Some configs expose quantization_config as an object with a quant_method attribute.
+    cfg = SimpleNamespace(quantization_config=SimpleNamespace(quant_method="fp8"))
+    assert example_utils.get_original_hf_quant_method(cfg) == "fp8"
+
+
+def test_get_original_hf_quant_method_nested_text_config():
+    # Multi-modal models nest the quantization_config under text_config.
+    cfg = SimpleNamespace(
+        text_config=SimpleNamespace(quantization_config={"quant_method": "mxfp4"})
+    )
+    assert example_utils.get_original_hf_quant_method(cfg) == "mxfp4"
+
+
+def test_get_original_hf_quant_method_none_for_unquantized():
+    assert example_utils.get_original_hf_quant_method(SimpleNamespace()) is None
+    assert (
+        example_utils.get_original_hf_quant_method(SimpleNamespace(quantization_config=None))
+        is None
+    )

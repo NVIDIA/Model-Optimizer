@@ -22,6 +22,7 @@ from .graph import *
 from .import_utils import *
 from .list import *
 from .logging import *
+from .loss_mask import *
 from .network import *
 from .perf import *
 from .regex import *

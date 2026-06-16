@@ -33,9 +33,11 @@ import argparse
 import dataclasses
 import os
 
+import fsdp2_buffer_patch
 import torch
 import transformers
 from eagle_utils import (
+    DFlashFSDP2ShardedSDExportCallback,
     EagleTrainerWithAccLog,
     EagleTrainingPlot,
     LoRAWarmupCallback,
@@ -63,6 +65,9 @@ from modelopt.torch.utils.distributed import is_master, local_rank
 
 torch.manual_seed(0)
 mto.enable_huggingface_checkpointing()
+
+if os.environ.get("PATCH_FSDP2_BUFFERS_TF457") == "1":
+    fsdp2_buffer_patch.apply()
 
 
 # HF-compatible TrainingArguments with our speculative-decoding extensions, auto-derived
@@ -145,6 +150,23 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
         )
 
 
+def _is_hf_format_checkpoint(checkpoint: str | None) -> bool:
+    """True if the checkpoint dir holds consolidated HF weights (from_pretrained-loadable).
+
+    FSDP2 SHARDED_STATE_DICT checkpoints contain only distributed shards
+    (``pytorch_model_fsdp_*/``), no ``model.safetensors`` — those return False, signalling
+    the caller to load the base model and resume via the Trainer instead. This inspects the
+    on-disk format of the *resume* checkpoint, which is a property of the existing bytes and
+    is independent of the current run's save mode (the two can differ across runs), so it's
+    intentionally separate from the save-time FSDP state-dict-type gate used for the export
+    callback.
+    """
+    if not checkpoint:
+        return False
+    hf_files = ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json")
+    return any(os.path.isfile(os.path.join(checkpoint, f)) for f in hf_files)
+
+
 def train():
     config_path, dry_run, overrides = _parse_cli()
     recipe = load_recipe(config_path, overrides=overrides)
@@ -181,7 +203,13 @@ def train():
 
     use_offline_training = recipe.data.mode != "online"
 
-    if checkpoint:
+    # Resume path depends on the existing checkpoint's on-disk format: consolidated HF
+    # weights load via from_pretrained; FSDP sharded checkpoints load the base model and
+    # resume through the Trainer.
+    checkpoint_is_hf = _is_hf_format_checkpoint(checkpoint)
+
+    if checkpoint_is_hf:
+        assert checkpoint is not None  # guaranteed by checkpoint_is_hf
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
                 checkpoint, dtype="auto", trust_remote_code=recipe.model.trust_remote_code
@@ -190,6 +218,11 @@ def train():
             checkpoint, trust_remote_code=recipe.model.trust_remote_code
         )
     else:
+        if checkpoint:
+            print_rank_0(
+                f"Checkpoint {checkpoint} is not in HF format (FSDP distributed checkpoint). "
+                f"Loading base model and resuming via Trainer."
+            )
         model_name_or_path = recipe.model.model_name_or_path
         if model_name_or_path is None:
             raise ValueError(
@@ -245,20 +278,6 @@ def train():
             )
         return
 
-    # Move any remaining CPU buffers to CUDA so DDP (NCCL-only) can broadcast
-    # them.  We iterate named_buffers and reassign via the owning module to
-    # keep the module tree consistent.  Parameters are left on CPU — the HF
-    # Trainer will move them during init.
-    if torch.cuda.is_available():
-        _target_dev = torch.device("cuda", 0)
-        for name, buf in list(model.named_buffers()):
-            if buf.device.type == "cpu":
-                parts = name.split(".")
-                mod = model
-                for p in parts[:-1]:
-                    mod = getattr(mod, p)
-                setattr(mod, parts[-1], buf.to(_target_dev))
-
     print_rank_0("Loading dataset...")
     is_dflash = isinstance(recipe, ModelOptDFlashRecipe)
     data_module = make_speculative_data_module(
@@ -267,7 +286,6 @@ def train():
         train_len=training_args.training_seq_len,
         answer_only_loss=training_args.answer_only_loss,
         shift_labels=not is_dflash,
-        seed=training_args.seed,
     )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
@@ -277,13 +295,10 @@ def train():
         and recipe.eagle.eagle_base_lora_warmup_steps > 0
     ):
         callbacks.append(LoRAWarmupCallback(recipe.eagle.eagle_base_lora_warmup_steps))
-    if recipe.data.mode == "streaming":
-        # Skip-on-resume happens inside the dataset (no re-fetch from server);
-        # disable HF Trainer's own data skip so the offset isn't applied twice.
-        from modelopt.torch.speculative.plugins.hf_streaming_dataset import StreamingResumeCallback
-
-        training_args.ignore_data_skip = True
-        callbacks.append(StreamingResumeCallback())
+    # Leave training_args.ignore_data_skip at its default (False). The dataset is
+    # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
+    # level (accelerate.skip_first_batches) without re-fetching them, landing at the
+    # exact data position. Setting it True would restart the data order from the top.
 
     trainer = EagleTrainerWithAccLog(
         model=model,
@@ -293,12 +308,35 @@ def train():
         **data_module,
     )
 
+    if os.environ.get("PATCH_FSDP2_BUFFERS_TF457") == "1":
+        fsdp2_buffer_patch.patch_accelerator(trainer.accelerator)
+
+    # DFlash: export the draft submodule after each checkpoint save — but only under FSDP2
+    # SHARDED_STATE_DICT, where checkpoints are distributed shards the post-training
+    # export_hf_checkpoint.py pass can't read. Gate by reading the live FSDP state dict
+    # type off the accelerator; full-state-dict runs (DDP, single-device, FSDP2
+    # FULL_STATE_DICT) use the launcher's post-run export instead.
+    if isinstance(recipe, ModelOptDFlashRecipe):
+        fsdp_plugin = getattr(trainer.accelerator.state, "fsdp_plugin", None)
+        sd_type = str(getattr(fsdp_plugin, "state_dict_type", "") or "")
+        if "SHARDED_STATE_DICT" in sd_type:
+            trainer.add_callback(DFlashFSDP2ShardedSDExportCallback())
+            print_rank_0("DFlash: FSDP2 SHARDED_STATE_DICT — enabling per-save draft export.")
+        else:
+            print_rank_0(
+                f"DFlash: checkpoints use {sd_type or 'a full state dict'}; relying on the "
+                "launcher's post-run export (no per-save export callback added)."
+            )
+
     # Manually enable this to return loss in eval
     trainer.can_return_loss = True
     # Make sure label_smoother is None
     assert trainer.label_smoother is None, (
         "label_smoother is not supported in speculative decoding!"
     )
+
+    # Diagnostic (no-op unless DFLASH_LOG_PARAM_DTYPES=1): verifies FSDP2 dtype sync.
+    fsdp2_buffer_patch.log_param_dtypes(trainer.model)
 
     print_rank_0("Start training...")
     trainer.train(resume_from_checkpoint=checkpoint)
