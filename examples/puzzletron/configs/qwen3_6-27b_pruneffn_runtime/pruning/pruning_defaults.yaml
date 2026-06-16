@@ -1,0 +1,42 @@
+defaults:
+  - /validate_model_defaults
+
+model_name_or_path: ${teacher_dir}
+experiment_id: ${pruning.eval_samples}samples_diverse_mini
+activations_log_dir: ???
+activation_hooks_kwargs: ???
+
+descriptor: ${descriptor}
+
+# Data:
+# "Activation scoring" pass: a single forward sweep that accumulates channel /
+# KV-head importance via the activation hooks. 16384 samples (= 16 * 1024) at
+# block_size 16384 is ~268M tokens in one pass (~38% of the train split's ~698M
+# tokens; well under the ~42.6k-sample ceiling). val split is 'train' (below);
+# inherits block_size 16384.
+eval_samples: 16384
+micro_batch_size: 1
+# How often (in batches) to checkpoint the activation-hook state for resume.
+# Larger = fewer writes / less I/O overhead (coarser resume granularity).
+activation_checkpoint_interval: 2000
+dataset_path: ${dataset_path}
+val_dataset_name: train
+
+# Prune ckpts
+pruned_ckpts_output_dir: ${puzzle_dir}/pruning/${pruning.experiment_id}
+
+## FFN pruning
+ffn_list:
+mlp_init_mode: "PruneByActivationsLog"
+
+## KV-heads pruning
+n_heads_in_group_list:
+gqa_init_mode: "AverageKV"
+
+## Hidden dimension pruning
+hidden_size_list:
+hidden_size_init_mode: "PruneByChannelRanking"
+linear_init_mode: "FromTeacher"
+
+mlp_init_config_yaml:
+  activations_log_dir: ${pruning.activations_log_dir}

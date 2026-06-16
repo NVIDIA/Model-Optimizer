@@ -271,12 +271,33 @@ class _Qwen3P5BaseModelDescriptor(ModelDescriptor):
             _wrap_qwen3p5_text_runtime_config(config_data)
 
     @classmethod
-    def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
-        text_config = config.get("text_config", config)
-        layer_types = text_config.get("layer_types", [])
+    def runtime_vllm_benchmark_args(cls, config: Any) -> list[str]:
+        # ``config`` may be a dict or a SimpleNamespace (built from config.json).
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        # The runtime benchmark config is wrapped as a multimodal ``qwen3_5``
+        # config (with a nested ``text_config``) so vLLM's AnyModel can resolve
+        # it. Restrict initialization to the language model so the benchmark
+        # loads a pure text model (no vision tower). The generative runner is
+        # selected automatically by vLLM's ``AnyModelConfig`` from the base
+        # architecture (``Qwen3_5ForCausalLM``); do NOT pass ``--runner
+        # generate`` here, as that both disables that auto-detection (which only
+        # runs when ``runner == "auto"``) and is rejected by ModelConfig
+        # validation before the AnyModel hook runs.
+        args = ["--language-model-only"]
+        text_config = _get(config, "text_config", config)
+        layer_types = _get(text_config, "layer_types", [])
         if "linear_attention" in layer_types:
-            return ["--mamba-cache-mode", "align"]
-        return []
+            # Qwen3.5's linear-attention (mamba) layers only support
+            # ``--mamba-cache-mode=align`` (the base model rejects ``all``), and
+            # that mode's ``preprocess_mamba`` asserts prefix caching is enabled.
+            # ``vllm bench latency`` defaults prefix caching OFF, so enable it
+            # explicitly or the benchmark aborts during the warmup step.
+            args += ["--mamba-cache-mode", "align", "--enable-prefix-caching"]
+        return args
 
 
 @ModelDescriptorFactory.register_decorator("qwen3_6_text")
@@ -346,12 +367,33 @@ class Qwen3P5TextModelDescriptor(_Qwen3P5BaseModelDescriptor):
         return model
 
     @classmethod
-    def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
-        text_config = config.get("text_config", config)
-        layer_types = text_config.get("layer_types", [])
+    def runtime_vllm_benchmark_args(cls, config: Any) -> list[str]:
+        # ``config`` may be a dict or a SimpleNamespace (built from config.json).
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        # The runtime benchmark config is wrapped as a multimodal ``qwen3_5``
+        # config (with a nested ``text_config``) so vLLM's AnyModel can resolve
+        # it. Restrict initialization to the language model so the benchmark
+        # loads a pure text model (no vision tower). The generative runner is
+        # selected automatically by vLLM's ``AnyModelConfig`` from the base
+        # architecture (``Qwen3_5ForCausalLM``); do NOT pass ``--runner
+        # generate`` here, as that both disables that auto-detection (which only
+        # runs when ``runner == "auto"``) and is rejected by ModelConfig
+        # validation before the AnyModel hook runs.
+        args = ["--language-model-only"]
+        text_config = _get(config, "text_config", config)
+        layer_types = _get(text_config, "layer_types", [])
         if "linear_attention" in layer_types:
-            return ["--mamba-cache-mode", "align"]
-        return []
+            # Qwen3.5's linear-attention (mamba) layers only support
+            # ``--mamba-cache-mode=align`` (the base model rejects ``all``), and
+            # that mode's ``preprocess_mamba`` asserts prefix caching is enabled.
+            # ``vllm bench latency`` defaults prefix caching OFF, so enable it
+            # explicitly or the benchmark aborts during the warmup step.
+            args += ["--mamba-cache-mode", "align", "--enable-prefix-caching"]
+        return args
 
     @staticmethod
     def init_rotary_embedding(model, runtime):

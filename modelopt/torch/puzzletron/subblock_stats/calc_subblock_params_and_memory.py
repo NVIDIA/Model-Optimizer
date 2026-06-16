@@ -22,11 +22,8 @@ considering various data types, batch sizes, and sequence lengths.
 """
 
 import copy
-import json
 import math
-from pathlib import Path
 
-import numpy as np
 import torch
 from transformers import PretrainedConfig
 
@@ -55,8 +52,6 @@ __all__ = [
     "calculate_non_block_params",
     "calculate_subblock_memory",
     "calculate_subblock_params",
-    "estimate_num_active_experts",
-    "load_moe_stats",
 ]
 
 
@@ -65,12 +60,10 @@ def calculate_subblock_memory(
     batch_size: int,
     prefill_seq_len: int,
     generation_seq_len: int,
-    prefill_queue_size: int,
     n_embd: int,
     n_head: int,
     weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
-    allocate_prefill_query: bool,
     model_config: PretrainedConfig,
     descriptor: type[ModelDescriptor],
 ) -> float | dict[str, float]:
@@ -83,12 +76,10 @@ def calculate_subblock_memory(
         batch_size: Batch size for memory estimate.
         prefill_seq_len: Sequence length for prefill phase.
         generation_seq_len: Sequence length for generation phase (token-by-token).
-        prefill_queue_size: Token queue size for prefill attention memory allocation.
         n_embd: Embedding (hidden) dimension.
         n_head: Number of attention heads (used for non-FFN).
         weights_dtype: PyTorch dtype for model weights.
         kv_cache_dtype: PyTorch dtype for KV cache.
-        allocate_prefill_query: Whether to allocate query cache for prefill tokens.
         model_config: HuggingFace-style config instance describing the model.
         descriptor: Model descriptor type (for puzzletron model types).
 
@@ -122,12 +113,10 @@ def calculate_subblock_memory(
                 batch_size,
                 prefill_seq_len,
                 generation_seq_len,
-                prefill_queue_size,
                 n_embd,
                 n_head,
                 weights_dtype,
                 kv_cache_dtype,
-                allocate_prefill_query,
             )
     raise_unknown_subblock_config_error(subblock_config)
 
@@ -208,127 +197,52 @@ def calc_subblock_active_params(
     model_config: PretrainedConfig,
     descriptor: type[ModelDescriptor],
     n_embd: int,
-    moe_stats_file: str,
-    batch_size: int,
-    block_idx: int,
 ) -> int:
     """Calculate the number of "active" parameters for a subblock (FFN, Attention, or MoE).
 
     For non-MoE subblocks, simply calls `calculate_subblock_params` to count all parameters.
-    For MoE (Mixture-of-Experts) FFN subblocks, estimates the expected number of active parameters
-    per batch by leveraging expert activation statistics (from a given stats file) and calculating
-    the expected number of active experts, then multiplies by the number of parameters per expert.
+    For MoE (Mixture-of-Experts) FFN subblocks, the active parameter count is deterministic:
+    the router selects a fixed ``num_experts_per_tok`` experts per token, so it is the router
+    plus the always-on shared expert plus ``num_experts_per_tok`` routed experts.
 
     Args:
         sublayer_config: The subblock configuration (either FFNConfig or AttentionConfig).
         model_config: The Hugging Face model configuration.
         descriptor: The ModelDescriptor class corresponding to this model family.
         n_embd: The embedding size (hidden dimension).
-        moe_stats_file: Path to file containing expert activation probabilities.
-        batch_size: The batch size used for the estimate.
-        block_idx: The index of the block/subblock within the network, used to index into the stats.
 
     Returns:
-        The expected number of "active" parameters for the given subblock.
+        The number of "active" parameters for the given subblock.
     """
     if not (isinstance(sublayer_config, FFNConfig) and sublayer_config.is_moe):
         return calculate_subblock_params(model_config, sublayer_config, descriptor)
-    return estimate_moe_active_params(
-        sublayer_config, n_embd, moe_stats_file, batch_size, block_idx
-    )
+    return estimate_moe_active_params(sublayer_config, n_embd)
 
 
-def load_moe_stats(stats_file: str) -> dict:
-    """Load MoE (Mixture-of-Experts) routing statistics from a file.
+def estimate_moe_active_params(subblock_config: FFNConfig, n_embd: int) -> int:
+    """Compute the number of active parameters for a Mixture-of-Experts (MoE) FFN subblock.
 
-    This function reads a JSON file containing expert activation probabilities or counts for each MoE block.
-    It returns the normalized probability distributions over experts for each block, as a list of numpy arrays.
-
-    Args:
-        stats_file: Path to the JSON file containing expert routing statistics for each block.
-
-    Returns:
-        A list where each element is a numpy array containing the normalized probability
-        distribution over experts for the corresponding block. If a block's expert list is empty,
-        its entry is 0.
-    """
-    with open(stats_file) as f:
-        stats = json.load(f)
-    return [
-        np.array(expert_probs) / np.sum(expert_probs) if len(expert_probs) > 0 else 0
-        for expert_probs in stats
-    ]
-
-
-def estimate_num_active_experts(
-    dist_over_experts: np.ndarray, batch_size: int, num_experts: int
-) -> int:
-    """Estimate the expected number of active experts in a Mixture-of-Experts (MoE) layer.
-
-    This function computes the expected number of unique experts that are selected at least once when performing
-    inference with a given batch size. It assumes, for each input in the batch, an expert is chosen with probability
-    given by `dist_over_experts` (typically a vector of probabilities for each expert). For a batch of size B, the
-    expected number of active (i.e., selected at least once) experts is computed.
-
-    Args:
-        dist_over_experts: A 1D array of probabilities for each expert.
-        batch_size: The number of samples in the batch.
-        num_experts: The maximum number of experts to consider (fewer if `dist_over_experts` is shorter).
-
-    Returns:
-        The expected number of experts selected at least once across the batch.
-    """
-    # cut the tail and renormalize
-    dist_over_experts = np.sort(dist_over_experts)[::-1][:num_experts]
-    dist_over_experts = dist_over_experts / (dist_over_experts.sum())
-    # calculate the probability of at least one expert being active
-    # (expectation on indicators is the expected number of active experts)
-    return (1 - (1 - dist_over_experts) ** batch_size).sum()
-
-
-def estimate_moe_active_params(
-    subblock_config: FFNConfig,
-    n_embd: int,
-    moe_stats_file: Path | str,
-    batch_size: int,
-    block_idx: int,
-) -> int:
-    """Estimate the expected number of active (used) parameters for a Mixture-of-Experts (MoE) FFN subblock.
+    Active experts per token are fixed by the router's top-k (``num_experts_per_tok``), so the
+    active parameter count is deterministic: the router, the always-on shared expert, and
+    ``num_experts_per_tok`` routed experts.
 
     Args:
         subblock_config: The FFNConfig for the MoE subblock (with .moe field configured).
         n_embd: The embedding dimension (input and output size per expert).
-        moe_stats_file: Path to the JSON file containing routing/selection probabilities for experts.
-        batch_size: Batch size to simulate/extrapolate expected expert use.
-        block_idx: The index of the block/layer whose expert routing statistics should be used.
 
     Returns:
-        Estimated number of parameters actively used for the current batch and expert selection statistics.
+        Number of parameters actively used per token.
     """
-    assert Path(moe_stats_file).exists()
-    # if not Path(moe_stats_file).exists(): # if path is not provided, should we assume uniform distribution?
-    #     return calculate_subblock_params(subblock_config, n_embd, n_head=None)
-    moe_stats = load_moe_stats(moe_stats_file)
-    dist_over_experts = moe_stats[block_idx]
     num_experts = subblock_config.moe.num_local_experts
-
-    expected_num_active_experts = estimate_num_active_experts(
-        dist_over_experts, batch_size, num_experts
-    )
+    num_active_experts = subblock_config.moe.num_experts_per_tok
     expert_dim = subblock_config.moe.expert_intermediate_dim
     shared_expert_dim = subblock_config.moe.shared_expert_intermediate_dim
     num_linear_layers = 3  # all moe experts have 3 linear layers
 
     router_num_params = n_embd * num_experts
-    expected_num_active_experts_params = (
-        num_linear_layers * expert_dim * n_embd * expected_num_active_experts
-    )
+    active_expert_num_params = num_linear_layers * expert_dim * n_embd * num_active_experts
     shared_expert_num_params = num_linear_layers * shared_expert_dim * n_embd
-
-    expected_total_params = (
-        router_num_params + expected_num_active_experts_params + shared_expert_num_params
-    )
-    return expected_total_params
+    return router_num_params + active_expert_num_params + shared_expert_num_params
 
 
 def calculate_attention_memory(
@@ -338,18 +252,12 @@ def calculate_attention_memory(
     batch_size: int,
     prefill_seq_len: int,
     generation_seq_len: int,
-    prefill_queue_size: int,
     n_embd: int,
     n_head: int,
     weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
-    allocate_prefill_query: bool,
 ) -> dict[str, float]:
-    """allocate_prefill_query: infery-llm style.
-
-    Infery used a unified Wqkv matrix, so before extracting the kv-cache,
-    the query also had to be kept in-memory, once per layer.
-    """
+    """Estimate attention subblock memory (KV cache + weights) in MiB."""
     seq_len = prefill_seq_len + generation_seq_len
     if (
         attention_config.is_llama4
@@ -358,14 +266,11 @@ def calculate_attention_memory(
         seq_len = min(seq_len, attention_chunk_size)
 
     kv_dim = calculate_kv_dim(attention_config.num_key_value_heads, n_head, n_embd)
-    total_num_tokens = seq_len * (batch_size + prefill_queue_size)
+    total_num_tokens = seq_len * batch_size
     kv_cache_size = total_num_tokens * kv_dim
-    query_prefill_size = seq_len * n_embd if allocate_prefill_query else 0
     num_params = calculate_subblock_params(model_config, attention_config, descriptor)
     total_memory = (
-        kv_cache_size * sizeof_dtype(kv_cache_dtype)
-        + query_prefill_size * sizeof_dtype(weights_dtype)
-        + num_params * sizeof_dtype(weights_dtype)
+        kv_cache_size * sizeof_dtype(kv_cache_dtype) + num_params * sizeof_dtype(weights_dtype)
     ) / 2**20
     kv_cache_memory = kv_cache_size * sizeof_dtype(kv_cache_dtype) / 2**20
     return {"memory_mib": total_memory, "kv_cache_memory_mib": kv_cache_memory}

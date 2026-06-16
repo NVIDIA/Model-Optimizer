@@ -6,16 +6,16 @@ defaults:
   - override hydra/hydra_logging: disabled
   - _self_
 
-puzzle_dir: /workspace/puzzle_dir
+puzzle_dir: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen/puzzle_dir
 descriptor: qwen3_5
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json
 
 # Input Hugging Face model to compress
-input_hf_model_path: /workspace/hf_models/Qwen/Qwen3.5-0.8B
+input_hf_model_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/hf_cache/Qwen/Qwen3.5-0.8B/
 
 # Dataset path for pruning, NAS scoring, and bypass distillation
-dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
+dataset_path: /lustre/fsw/portfolios/coreai/users/dkorzekwa/experiments/12_15_anymodel_for_modelopt/datasets/Nemotron-Post-Training-Dataset-v2
 
 skip_realize_model: false
 
@@ -33,7 +33,7 @@ scoring:
   teacher_dir: ${to_path:${teacher_dir}}
   output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
 
-  eval_samples: 16
+  eval_samples: 128
   micro_batch_size: 1
   seed: 42
   shuffle_seed: 444
@@ -41,28 +41,26 @@ scoring:
 
 calc_subblock_stats:
   batch_sizes: [1]
-  prefill_seq_len: 512
-  generation_seq_len: 128
-  num_active_tokens_override:
-  prefill_queue_size: 0
-  allocate_prefill_query: false
+  prefill_seq_len: 8192
+  generation_seq_len: 8192
   runtime_stats:
     backend: vllm
-    enabled: false
+    enabled: true
     num_warmup_iters: 1
     num_iters: 3
-  benchmark_iterations:
   merge_with_existing_stats: false
   subblock_stats_filename: "subblock_stats.json"
-  moe_stats_filename: "moe_stats.json"
 
-# FFN alternatives for Qwen3.5-0.8B. Teacher intermediate size is 3584.
+# FFN alternatives for Qwen3.5-0.8B. Teacher intermediate size is 3584;
+# search the i/8 * 3584 grid for i in 1..7 (448-step multiples, all strictly
+# pruned). The unpruned 3584 width stays reachable via the teacher block and
+# the FFN no-op. Keep this list in sync with the bypass `configs` below.
 pruning:
   pruning_mixin:
     _target_: modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
     layer_descriptor:
       _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor.Qwen3P5VLFFNIntermediateLayerDescriptor
-  intermediate_size_list: [3072, 2048]
+  intermediate_size_list: [448, 896, 1344, 1792, 2240, 2688, 3136]
 
 mip:
   single_block_replacement_validation_dir: ${to_path:${scoring.output_dir}}
@@ -108,7 +106,7 @@ realize_model:
   solutions_path:
 
   skip_validation: false
-  eval_samples: 16
+  eval_samples: 128
   micro_batch_size: 1
   seed: 42
   shuffle_seed: 444

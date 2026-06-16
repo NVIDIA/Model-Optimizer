@@ -48,7 +48,11 @@ from ..sewing_kit.passage import InputArgs
 from ..sewing_kit.utils import distributed_recv_obj, distributed_send_obj, fake_tensor
 from ..tools.checkpoint_utils import init_module_with_state_dict
 from ..utils.dummy_modules import DummyBlock
-from .validation import _organize_outputs, calculate_batch_outputs
+from .validation import (
+    _organize_outputs,
+    calculate_batch_outputs,
+    calculate_batch_outputs_flash_kd,
+)
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -211,20 +215,32 @@ def calculate_losses_pipeline(
                 targets = all_targets[i_batch].to(model_device)
 
                 target_hidden_states = None
-                target_logits = None
                 if target_hidden_states_per_batch is not None:
                     target_hidden_states = target_hidden_states_per_batch[i_batch]
                     target_hidden_states = target_hidden_states.to(hidden_states.device)
-                    target_logits = target_lm_head(target_hidden_states)
 
                 if just_model_forward:
                     batch_outputs = {"lm_loss": [-1.0] * len(targets)}
+                elif target_hidden_states is not None:
+                    # Teacher-similarity scoring via the vocab-chunked flash path:
+                    # computes CE + KD without materializing full [b, t, vocab]
+                    # teacher logits / fp32 softmax tensors (which OOM at large
+                    # vocab). The teacher logits are streamed from
+                    # target_hidden_states @ lm_head_weight.T inside the kernel.
+                    batch_outputs = calculate_batch_outputs_flash_kd(
+                        hidden_states=hidden_states,
+                        target_hidden_states=target_hidden_states,
+                        logits=logits,
+                        teacher_lm_head_weight=target_lm_head.weight,
+                        targets=targets,
+                        calc_on_cpu=calc_on_cpu,
+                    )
                 else:
                     batch_outputs = calculate_batch_outputs(
                         hidden_states,
-                        target_hidden_states,
+                        None,
                         logits,
-                        target_logits,
+                        None,
                         targets,
                         return_hidden_states,
                         calculate_full_score_ablations,
@@ -237,8 +253,6 @@ def calculate_losses_pipeline(
                 del logits, hidden_states, targets
                 if target_hidden_states is not None:
                     del target_hidden_states
-                if target_logits is not None:
-                    del target_logits
 
             # Free output tensor memory on all ranks
             del output

@@ -50,6 +50,14 @@ class RuntimeConfig:
     batch_size: int
     num_iters: int
     num_warmup_iters: int
+    # vLLM benchmark concurrency (``--max-num-seqs``). ``None`` keeps the
+    # historical single-stream behavior (max-num-seqs=1), in which the
+    # ``batch_size`` prompts run one at a time. Set this to ``batch_size`` (or
+    # higher) so the prompts run concurrently and the measured latency reflects
+    # true batched throughput. Note the KV cache for ``max_num_seqs`` concurrent
+    # sequences at ``prefill_seq_len + generation_seq_len`` must fit in GPU
+    # memory, which bounds the usable value at long context.
+    max_num_seqs: int | None = None
 
     def model_config_value(self, key: str, default: Any = None) -> Any:
         """Return a descriptor-specific benchmark config value."""

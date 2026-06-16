@@ -19,7 +19,6 @@
 import copy
 import dataclasses
 import json
-import warnings
 from functools import partial
 from itertools import product
 from pathlib import Path
@@ -76,7 +75,6 @@ def calculate_subblock_stats(
     batch_size: int,
     prefill_seq_len: int,
     generation_seq_len: int,
-    prefill_queue_size: int,
     n_embd: int,
     n_head: int,
     vocab_size: int,
@@ -85,8 +83,6 @@ def calculate_subblock_stats(
     weights_dtype: torch.dtype,
     activations_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
-    allocate_prefill_query: bool,
-    moe_stats_file: str | Path | None = None,
 ) -> dict:
     if runtime_stats_enabled:
         from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
@@ -100,7 +96,6 @@ def calculate_subblock_stats(
             batch_size=batch_size,
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,
-            prefill_queue_size=prefill_queue_size,
             n_embd=n_embd,
             n_head=n_head,
             vocab_size=vocab_size,
@@ -135,6 +130,7 @@ def calculate_subblock_stats(
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,
             batch_size=batch_size,
+            cache_dir=Path(master_puzzle_dir) / "runtime_cache",
         )
 
     sorted_subblock_config = sorted(
@@ -166,12 +162,10 @@ def calculate_subblock_stats(
             batch_size,
             prefill_seq_len,
             generation_seq_len,
-            prefill_queue_size,
             n_embd,
             n_head,
             weights_dtype,
             kv_cache_dtype,
-            allocate_prefill_query,
             model_config=layer_model_config,
             descriptor=descriptor,
         )
@@ -179,18 +173,14 @@ def calculate_subblock_stats(
             subblock_memory = {"memory_mib": subblock_memory, "kv_cache_memory_mib": 0.0}
 
         subblock_params = calculate_subblock_params(layer_model_config, subblock_config, descriptor)
-        if moe_stats_file is not None:
-            subblock_active_params = calc_subblock_active_params(
-                subblock_config,
-                layer_model_config,
-                descriptor,
-                n_embd,
-                moe_stats_file,
-                batch_size,
-                parent_layer_indices[0],
-            )
-        else:
-            subblock_active_params = subblock_params
+        # For dense subblocks this equals subblock_params; for MoE it is the deterministic
+        # top-k active-parameter count (router + shared expert + num_experts_per_tok experts).
+        subblock_active_params = calc_subblock_active_params(
+            subblock_config,
+            layer_model_config,
+            descriptor,
+            n_embd,
+        )
         subblock_stats["subblocks"].append(
             {
                 "subblock_config": subblock_config,
@@ -239,16 +229,65 @@ def launch_calc_subblock_stats(cfg: DictConfig) -> None:
         batch_sizes=cfg.calc_subblock_stats.batch_sizes,
         prefill_seq_len=cfg.calc_subblock_stats.prefill_seq_len,
         generation_seq_len=cfg.calc_subblock_stats.generation_seq_len,
-        num_active_tokens_override=cfg.calc_subblock_stats.get("num_active_tokens_override", None),
-        prefill_queue_size=cfg.calc_subblock_stats.prefill_queue_size,
-        allocate_prefill_query=cfg.calc_subblock_stats.get("allocate_prefill_query", False),
         runtime_stats_enabled=cfg.calc_subblock_stats.get("runtime_stats", {}).get(
             "enabled", False
         ),
         merge_with_existing_stats=cfg.calc_subblock_stats.merge_with_existing_stats,
         subblock_stats_filename=cfg.calc_subblock_stats.subblock_stats_filename,
-        moe_stats_filename=cfg.calc_subblock_stats.moe_stats_filename,
     )
+
+
+def _arg_signature(args: dict) -> tuple:
+    """Identity of a computed stats entry.
+
+    Captures the knobs that distinguish one configuration from another while
+    ignoring ``gpu`` (host-dependent) and the derived sequence lengths.
+    """
+    return (
+        args["batch_size"],
+        str(args["weights_dtype"]),
+        str(args["activations_dtype"]),
+        str(args["kv_cache_dtype"]),
+        args["n_embd"],
+    )
+
+
+def _subblock_stats_already_complete(
+    existing_stats: list,
+    batch_sizes: Iterable[int],
+    data_types: list,
+    model_hidden_sizes: Iterable[int],
+    runtime_stats_enabled: bool,
+) -> bool:
+    """Whether ``existing_stats`` already covers every configuration this run would compute.
+
+    When runtime benchmarking is enabled, the bf16 entries (the only ones for
+    which runtime is ever measured) must additionally already carry runtime
+    measurements, otherwise the expensive vLLM step still needs to run.
+    """
+    by_signature = {_arg_signature(entry["args"]): entry for entry in existing_stats}
+
+    for batch_size, (
+        weights_dtype,
+        activations_dtype,
+        kv_cache_dtype,
+    ), model_hidden_size in product(batch_sizes, data_types, model_hidden_sizes):
+        signature = (
+            batch_size,
+            str(weights_dtype),
+            str(activations_dtype),
+            str(kv_cache_dtype),
+            model_hidden_size,
+        )
+        entry = by_signature.get(signature)
+        if entry is None:
+            return False
+        # Runtime is only measured for the bf16 configuration (see the
+        # ``curr_runtime_stats_enabled`` guard below); require it to be present.
+        runtime_expected = runtime_stats_enabled and weights_dtype == torch.bfloat16
+        if runtime_expected and not entry["args"].get("runtime_stats", False):
+            return False
+    return True
 
 
 def calculate_subblock_stats_for_puzzle_dir(
@@ -261,13 +300,9 @@ def calculate_subblock_stats_for_puzzle_dir(
     batch_sizes: Iterable[int] = (1, 8, 16, 32, 64, 128, 256),
     prefill_seq_len: int = 2048,
     generation_seq_len: int = 2048,
-    num_active_tokens_override: int | None = None,
-    prefill_queue_size: int = 0,  # it's an infery-llm thing
-    allocate_prefill_query: bool = False,
     runtime_stats_enabled: bool = False,  # Compute runtime statistics.
     merge_with_existing_stats: bool = False,
     subblock_stats_filename: str = "subblock_stats.json",
-    moe_stats_filename: str = "moe_stats.json",
 ) -> None:
     # ==== START === Setup for attach-helper ====
     # import sys
@@ -291,27 +326,6 @@ def calculate_subblock_stats_for_puzzle_dir(
     lm_config = descriptor.get_language_model_config(model_config)
     subblock_configs = _load_subblock_configs(master_puzzle_dir, ffn_hidden_sizes)
 
-    subblock_stats_file = master_puzzle_dir / subblock_stats_filename
-    if subblock_stats_file.exists() and not merge_with_existing_stats:
-        raise ValueError(
-            f"Subblock stats file {subblock_stats_file} already exists and `merge_with_existing_stats` was set to False."
-        )
-
-    if subblock_stats_file.exists():
-        with open(subblock_stats_file) as f:
-            subblock_stats = json.load(f)
-    else:
-        subblock_stats = []
-
-    moe_stats_file = master_puzzle_dir / moe_stats_filename
-    if not moe_stats_file.exists():
-        warnings.warn(
-            f"MOE stats file {moe_stats_file} does not exist, can't calculate num active params"
-        )
-        moe_stats_file = None
-
-    subblock_stats_args = {immutabledict(x["args"]) for x in subblock_stats}
-
     data_types = [
         ("nvfp4", "nvfp4", "nvfp4"),
         (torch.int8, torch.int8, torch.int8),
@@ -319,17 +333,47 @@ def calculate_subblock_stats_for_puzzle_dir(
         (torch.bfloat16, torch.bfloat16, torch.bfloat16),
     ]
 
-    model_hidden_sizes = model_hidden_sizes + [
+    model_hidden_sizes = list(model_hidden_sizes) + [
         lm_config.hidden_size
     ]  # add a teacher model hidden size
+
+    subblock_stats_file = master_puzzle_dir / subblock_stats_filename
+
+    # Resume support: the runtime (vLLM) benchmark is by far the most expensive
+    # part of this step, so make it skippable on re-runs just like teacher
+    # conversion, pruning, and bypass distillation. If a previous run already
+    # produced stats for every (batch_size, dtype, hidden_size) configuration we
+    # would compute -- and, when runtime benchmarking is enabled, the relevant
+    # entries already carry runtime measurements -- there is nothing to do.
+    if subblock_stats_file.exists():
+        with open(subblock_stats_file) as f:
+            subblock_stats = json.load(f)
+
+        if _subblock_stats_already_complete(
+            subblock_stats, batch_sizes, data_types, model_hidden_sizes, runtime_stats_enabled
+        ):
+            mprint(
+                f"Subblock stats file {subblock_stats_file} already covers all requested "
+                f"configurations{' (incl. runtime measurements)' if runtime_stats_enabled else ''}; "
+                "skipping recomputation. Delete the file to force a rebuild."
+            )
+            return
+
+        if not merge_with_existing_stats:
+            raise ValueError(
+                f"Subblock stats file {subblock_stats_file} already exists, is incomplete, and "
+                "`merge_with_existing_stats` was set to False."
+            )
+    else:
+        subblock_stats = []
+
+    subblock_stats_args = {immutabledict(x["args"]) for x in subblock_stats}
+
     for batch_size, (
         weights_dtype,
         activations_dtype,
         kv_cache_dtype,
     ), model_hidden_size in product(batch_sizes, data_types, model_hidden_sizes):
-        if num_active_tokens_override is not None:
-            prefill_seq_len = generation_seq_len = int(num_active_tokens_override / batch_size / 2)
-
         curr_runtime_stats_enabled = (
             runtime_stats_enabled if weights_dtype == torch.bfloat16 else False
         )
@@ -344,7 +388,6 @@ def calculate_subblock_stats_for_puzzle_dir(
             batch_size=batch_size,
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,
-            prefill_queue_size=prefill_queue_size,
             n_embd=model_hidden_size,
             n_head=lm_config.num_attention_heads,
             vocab_size=lm_config.vocab_size,
@@ -353,8 +396,6 @@ def calculate_subblock_stats_for_puzzle_dir(
             weights_dtype=weights_dtype,
             activations_dtype=activations_dtype,
             kv_cache_dtype=kv_cache_dtype,
-            allocate_prefill_query=allocate_prefill_query,
-            moe_stats_file=moe_stats_file,
         )
 
         if immutabledict(curr_subblock_stats["args"]) in subblock_stats_args:

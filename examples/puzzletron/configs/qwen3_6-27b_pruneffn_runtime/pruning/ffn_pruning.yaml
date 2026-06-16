@@ -1,0 +1,18 @@
+defaults:
+  - pruning_defaults
+
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/ffn_${pruning.activation_hooks_kwargs.method}/${pruning.experiment_id}
+
+pruning_mixin:
+  _target_: modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+  layer_descriptor:
+    _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor.Qwen3P5VLFFNIntermediateLayerDescriptor
+
+hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook}
+activation_hooks_kwargs:
+  method: iterative
+  target_layer: "mlp.down_proj"
+  layer_input_descriptors_path:
+
+intermediate_size_list: [256] # teacher_intermediate_size is 17408; overridden by the main config
+mlp_init_mode: "PruneByActivationsLog"

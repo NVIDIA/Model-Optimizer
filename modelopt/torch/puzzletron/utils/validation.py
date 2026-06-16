@@ -34,11 +34,13 @@ from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsW
 from typing_extensions import Self
 
 from ..tools import kd_model
+from .flash_kd import flash_ce_kd_loss
 
 __all__ = [
     "LowMemorySparseTensor",
     "calculate_losses",
     "calculate_batch_outputs",
+    "calculate_batch_outputs_flash_kd",
     "cosine_embedding_loss",
     "normalized_mse_loss",
     "mse_loss",
@@ -219,6 +221,69 @@ def calculate_batch_outputs(
     return batch_outputs
 
 
+def calculate_batch_outputs_flash_kd(
+    hidden_states: torch.Tensor,
+    target_hidden_states: torch.Tensor,
+    logits: torch.Tensor,
+    teacher_lm_head_weight: torch.Tensor,
+    targets: torch.Tensor,
+    temperature: float = 1.0,
+    ignore_index: int = -1,
+    chunk_size: int = 16384,
+    calc_on_cpu: bool = False,
+) -> dict:
+    """Memory-efficient teacher-similarity scoring for large-vocab models.
+
+    Equivalent in spirit to :func:`calculate_batch_outputs` with teacher targets,
+    but it never materializes the full ``[b, t, vocab]`` teacher logits or fp32
+    softmax tensors. Instead CE (``lm_loss``) and KD (``kl_div``) are computed by
+    streaming over the vocab dimension via :func:`flash_ce_kd_loss`, while the
+    cheap hidden-state similarity metrics (including the MIP objective
+    ``cosine_embedding_loss_hidden_states``) are computed as before.
+
+    Shapes: ``hidden_states``/``target_hidden_states`` are ``[b, t, d]``,
+    ``logits`` is ``[b, t, vocab]``, ``teacher_lm_head_weight`` is ``[vocab, d]``,
+    ``targets`` is ``[b, t]``. Per-sample reductions match the originals:
+    ``lm_loss`` and ``kl_div`` are the per-token losses averaged over ``t``.
+    """
+    if calc_on_cpu:
+        hidden_states = hidden_states.cpu()
+        target_hidden_states = target_hidden_states.cpu()
+        logits = logits.cpu()
+        teacher_lm_head_weight = teacher_lm_head_weight.cpu()
+        targets = targets.cpu()
+
+    b, t, vocab = logits.shape
+    ce_per_token, kd_per_token = flash_ce_kd_loss(
+        logits.reshape(b * t, vocab),
+        target_hidden_states.reshape(b * t, -1),
+        teacher_lm_head_weight,
+        targets.reshape(b * t),
+        temperature=temperature,
+        ignore_index=ignore_index,
+        chunk_size=chunk_size,
+    )
+    # Per-sample = mean over the t tokens (ignored tokens contribute 0 to CE,
+    # matching F.cross_entropy(..., reduction="none").mean(dim=-1); KD counts all
+    # tokens, matching the original kl_div metric's division by num_tokens).
+    batch_outputs = {
+        "lm_loss": ce_per_token.reshape(b, t).mean(dim=1).tolist(),
+        "kl_div": kd_per_token.reshape(b, t).mean(dim=1).tolist(),
+    }
+    batch_outputs.update(_calculate_token_accuracy(logits, targets))
+    # Hidden-state metrics (target_logits=None skips the heavy full-vocab block).
+    batch_outputs.update(
+        _calculate_teacher_similarity_scores(
+            hidden_states,
+            target_hidden_states,
+            logits,
+            target_logits=None,
+            calculate_full_score_ablations=False,
+        )
+    )
+    return batch_outputs
+
+
 def _organize_outputs(
     outputs_per_batch: list[dict],
 ) -> tuple[dict[str, dict], list[torch.Tensor] | None]:
@@ -262,12 +327,15 @@ def _calculate_per_sample_lm_loss(
     return per_sample_lm_loss
 
 
-def _calculate_ground_truth_based_scores(
+def _calculate_token_accuracy(
     logits: torch.Tensor,
     targets: torch.Tensor,
 ) -> dict[str, list[float]]:
-    scores = {"lm_loss": _calculate_per_sample_lm_loss(logits, targets)}
+    """Fraction of tokens whose target is within the model's top-k predictions.
 
+    Uses ``topk`` over the vocab (cheap: no full-vocab fp32 materialization).
+    """
+    scores = {}
     for top_k in (1, 5, 10):
         top_k_predictions = logits.topk(top_k, dim=-1).indices  # [b, t, top_k]
         is_target_in_predictions = (targets.unsqueeze(-1) == top_k_predictions).any(
@@ -275,7 +343,15 @@ def _calculate_ground_truth_based_scores(
         )  # [b, t]
         fraction_model_predicted_target = is_target_in_predictions.float().mean(dim=-1)  # [b]
         scores[f"token_accuracy_top_{top_k}"] = fraction_model_predicted_target.tolist()
+    return scores
 
+
+def _calculate_ground_truth_based_scores(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+) -> dict[str, list[float]]:
+    scores = {"lm_loss": _calculate_per_sample_lm_loss(logits, targets)}
+    scores.update(_calculate_token_accuracy(logits, targets))
     return scores
 
 

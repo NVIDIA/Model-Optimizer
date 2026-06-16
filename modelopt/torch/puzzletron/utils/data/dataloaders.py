@@ -15,8 +15,11 @@
 
 """DataLoader utilities for language model training and validation."""
 
+import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
+from pathlib import Path
 from typing import Protocol, TypeVar
 
 import datasets
@@ -141,6 +144,57 @@ def create_train_dataloader(
     )
 
 
+def _realized_cache_path(
+    realized_cache_dir: str | Path | None,
+    *,
+    dataset: str | Mapping[str, Dataset],
+    dataset_name: str,
+    tokenizer: PreTrainedTokenizerBase,
+    block_size: int,
+    micro_batch_size: int,
+    varlen: bool,
+    content_field: str,
+    fim_rate: float,
+    fim_spm_rate: float,
+    seed: int,
+    shuffle_seed: int | None,
+    source_datasets_to_discard: Sequence[str],
+    bos_rate: float,
+    eval_samples: int | None,
+    load_dataset_fn: LoadDatasetFn,
+) -> Path | None:
+    """Content-addressed path for a realized validation set, or ``None`` to disable caching.
+
+    Caching is only possible when ``dataset`` is a path string (an already-loaded
+    dataset object can't be hashed reliably). The key captures every input that
+    changes the realized (tokenized + packed) examples, so a different block_size,
+    eval_samples, split, seed, tokenizer, or dataset produces a different file and
+    never reuses a stale one.
+    """
+    if realized_cache_dir is None or not isinstance(dataset, str):
+        return None
+    key = {
+        "dataset": dataset,
+        "dataset_name": dataset_name,
+        "tokenizer": getattr(tokenizer, "name_or_path", str(tokenizer)),
+        "vocab_size": getattr(tokenizer, "vocab_size", None),
+        "block_size": block_size,
+        "micro_batch_size": micro_batch_size,
+        "varlen": varlen,
+        "content_field": content_field,
+        "fim_rate": fim_rate,
+        "fim_spm_rate": fim_spm_rate,
+        "seed": seed,
+        "shuffle_seed": shuffle_seed,
+        "source_datasets_to_discard": list(source_datasets_to_discard or ()),
+        "bos_rate": bos_rate,
+        "eval_samples": eval_samples,
+        "loader": getattr(load_dataset_fn, "__name__", str(load_dataset_fn)),
+    }
+    digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return Path(realized_cache_dir) / f"realized_val-{digest}.pt"
+
+
 def create_validation_dataloader(
     accelerator: Accelerator | None,
     seed: int,
@@ -159,61 +213,97 @@ def create_validation_dataloader(
     bos_rate: float = 1.0,
     varlen: bool = True,
     shuffle_seed: int | None = None,
+    realized_cache_dir: str | Path | None = None,
 ):
     if accelerator is None:
         accelerator = Printer()
 
     if accelerator.is_main_process:
-        if isinstance(dataset, str):
-            dataset = load_dataset_fn(dataset, content_field, keep_in_memory)
-
-        if isinstance(dataset, datasets.Dataset | torch.utils.data.Dataset):
-            valid_data = dataset
-            mprint(
-                "#### Path to specific dataset was given (not DatasetDict), taking it as-is ####"
-            )
-        else:
-            assert isinstance(dataset, datasets.DatasetDict)
-            if dataset_name == "__auto__":
-                val_split_options = []
-                for val_key_prefix in ("val", "test"):
-                    if len(val_split_options) == 0:
-                        val_split_options = [
-                            split
-                            for split in dataset  # DatasetDict is dict-like and supports direct iteration
-                            if split.lower().startswith(val_key_prefix)
-                        ]
-                assert len(val_split_options) == 1, (
-                    f"Expected exactly one validation split, got {val_split_options=} ({dataset.keys()=})"
-                )
-                val_split = val_split_options[0]
-                mprint(f"Inferred validation split automatically: '{val_split}'")
-            else:
-                val_split = dataset_name
-                mprint(f"Validation split explicitly chosen: '{val_split}'")
-            valid_data = dataset[val_split]
-
-        if shuffle_seed is not None:
-            mprint(f"Shuffling with {shuffle_seed=}")
-            valid_data = valid_data.shuffle(seed=shuffle_seed)
-
-        valid_dataset = ConstantLengthDataset(
-            tokenizer,
-            valid_data,
-            infinite=False,
-            seq_length=block_size * micro_batch_size if varlen else block_size,
+        # Content-addressed on-disk cache of the realized (tokenized + packed)
+        # validation set. Realizing it is single-process and expensive at long
+        # block_size, so a cache hit skips both the raw load and the packing. The
+        # key is GPU-count independent, so a file written by a 1-GPU run is reused
+        # as-is by a multi-GPU run.
+        cache_path = _realized_cache_path(
+            realized_cache_dir,
+            dataset=dataset,
+            dataset_name=dataset_name,
+            tokenizer=tokenizer,
+            block_size=block_size,
+            micro_batch_size=micro_batch_size,
+            varlen=varlen,
             content_field=content_field,
             fim_rate=fim_rate,
             fim_spm_rate=fim_spm_rate,
             seed=seed,
+            shuffle_seed=shuffle_seed,
             source_datasets_to_discard=source_datasets_to_discard,
             bos_rate=bos_rate,
-            # return_cu_seqlens=varlen,
-            # seqlen_cap=block_size if varlen else None
+            eval_samples=eval_samples,
+            load_dataset_fn=load_dataset_fn,
         )
-        if varlen and eval_samples is not None:
-            eval_samples = eval_samples // micro_batch_size
-        val_offloaded_dataset = realize_dataset_in_memory(valid_dataset, eval_samples)
+        if cache_path is not None and cache_path.exists():
+            mprint(f"Loading realized validation dataset from cache: {cache_path}")
+            val_offloaded_dataset = torch.load(cache_path, weights_only=False)
+        else:
+            if isinstance(dataset, str):
+                dataset = load_dataset_fn(dataset, content_field, keep_in_memory)
+
+            if isinstance(dataset, datasets.Dataset | torch.utils.data.Dataset):
+                valid_data = dataset
+                mprint(
+                    "#### Path to specific dataset was given (not DatasetDict), taking it as-is ####"
+                )
+            else:
+                assert isinstance(dataset, datasets.DatasetDict)
+                if dataset_name == "__auto__":
+                    val_split_options = []
+                    for val_key_prefix in ("val", "test"):
+                        if len(val_split_options) == 0:
+                            val_split_options = [
+                                split
+                                for split in dataset  # DatasetDict is dict-like and supports direct iteration
+                                if split.lower().startswith(val_key_prefix)
+                            ]
+                    assert len(val_split_options) == 1, (
+                        f"Expected exactly one validation split, got {val_split_options=} ({dataset.keys()=})"
+                    )
+                    val_split = val_split_options[0]
+                    mprint(f"Inferred validation split automatically: '{val_split}'")
+                else:
+                    val_split = dataset_name
+                    mprint(f"Validation split explicitly chosen: '{val_split}'")
+                valid_data = dataset[val_split]
+
+            if shuffle_seed is not None:
+                mprint(f"Shuffling with {shuffle_seed=}")
+                valid_data = valid_data.shuffle(seed=shuffle_seed)
+
+            valid_dataset = ConstantLengthDataset(
+                tokenizer,
+                valid_data,
+                infinite=False,
+                seq_length=block_size * micro_batch_size if varlen else block_size,
+                content_field=content_field,
+                fim_rate=fim_rate,
+                fim_spm_rate=fim_spm_rate,
+                seed=seed,
+                source_datasets_to_discard=source_datasets_to_discard,
+                bos_rate=bos_rate,
+                # return_cu_seqlens=varlen,
+                # seqlen_cap=block_size if varlen else None
+            )
+            if varlen and eval_samples is not None:
+                eval_samples = eval_samples // micro_batch_size
+            val_offloaded_dataset = realize_dataset_in_memory(valid_dataset, eval_samples)
+
+            if cache_path is not None:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                # Atomic write so a killed run can't leave a half-written cache.
+                tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+                torch.save(val_offloaded_dataset, tmp_path)
+                tmp_path.replace(cache_path)
+                mprint(f"Saved realized validation dataset to cache: {cache_path}")
 
         valid_data_len = len(val_offloaded_dataset)
         mprint(f"num validation examples = {valid_data_len}")

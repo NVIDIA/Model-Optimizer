@@ -83,5 +83,3 @@ def launch_build_library_and_stats(cfg: DictConfig) -> None:
     mprint(f"  - {cfg.puzzle_dir}/replacement_library.json")
     mprint(f"  - {cfg.puzzle_dir}/single_sequence_replacement_solutions.json")
     mprint(f"  - {cfg.puzzle_dir}/{cfg.calc_subblock_stats.subblock_stats_filename}")
-    if hasattr(cfg.calc_subblock_stats, "moe_stats_filename"):
-        mprint(f"  - {cfg.puzzle_dir}/{cfg.calc_subblock_stats.moe_stats_filename}")

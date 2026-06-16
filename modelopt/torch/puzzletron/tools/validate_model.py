@@ -158,7 +158,9 @@ def validate_model(
         checkpoint_manager = ScoringCheckpointManager(
             checkpoint_dir=args.activations_log_dir,
             activation_hooks=activation_hooks,
-            checkpoint_interval=50,  # Save every 50 batches
+            # Save activation-hook state every N batches (for resume). Configurable
+            # via the pruning config; larger = fewer writes / less I/O overhead.
+            checkpoint_interval=args.get("activation_checkpoint_interval", 50),
         )
 
         # Load existing checkpoint if available
@@ -257,6 +259,7 @@ def prepare_dataloader(
         varlen=args.varlen,
         shuffle_seed=args.shuffle_seed,
         load_dataset_fn=args.load_dataset_fn,
+        realized_cache_dir=args.get("realized_dataset_cache_dir", None),
     )
 
     return val_dataloader

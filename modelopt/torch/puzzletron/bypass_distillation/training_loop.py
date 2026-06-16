@@ -204,7 +204,9 @@ def _step_stitched_module_optimizer(
     return clipped_count
 
 
-def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
+def launch_bypass_distillation(
+    hydra_cfg: DictConfig, num_nodes: int = 1, node_index: int = 0
+) -> None:
     """Top-level entry point for bypass distillation stage.
 
     Runs sewing-kit pipeline-parallel per-block knowledge distillation.
@@ -218,10 +220,21 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
 
     Args:
         hydra_cfg: The full Hydra configuration with a 'bypass' section.
+        num_nodes: total number of nodes splitting the sweep (for multi-node runs).
+        node_index: this node's index in ``[0, num_nodes)``. Each node trains an
+            interleaved subset of ``bypass.configs``; coordination across nodes is
+            implicit via the shared ``bypass_runs`` dir + skip-if-complete.
     """
+    if not (0 <= node_index < num_nodes):
+        raise ValueError(f"node_index {node_index} must be in [0, {num_nodes})")
+
     configs_list = hydra_cfg.bypass.get("configs", None)
 
     if not configs_list:
+        # Single config mode — only node 0 runs it (nothing to split).
+        if node_index != 0:
+            mprint(f"Node {node_index}/{num_nodes}: single bypass config handled by node 0, skipping")
+            return
         # Single config mode — run once with whatever is in bypass already
         set_experiment_id(hydra_cfg)
         set_experiment_dir(hydra_cfg)
@@ -243,8 +256,19 @@ def launch_bypass_distillation(hydra_cfg: DictConfig) -> None:
     )
     base_keys_to_learn = hydra_cfg.bypass.model_factory.keys_to_learn
 
-    mprint(f"Starting bypass distillation sweep ({len(configs_list)} configs)")
-    for i, override in enumerate(configs_list):
+    # Each node trains an interleaved subset of the sweep; original indices are
+    # preserved for logging and experiment-id derivation. Coordination across
+    # nodes is implicit (shared bypass_runs dir + skip-if-complete below).
+    sweep = list(enumerate(configs_list))
+    if num_nodes > 1:
+        sweep = [(i, override) for (i, override) in sweep if i % num_nodes == node_index]
+        mprint(
+            f"Node {node_index}/{num_nodes} handling bypass configs "
+            f"{[i for i, _ in sweep]} of {len(configs_list)}"
+        )
+
+    mprint(f"Starting bypass distillation sweep ({len(sweep)} of {len(configs_list)} configs)")
+    for i, override in sweep:
         mprint(f"Bypass config {i + 1}/{len(configs_list)}: {override}")
 
         hydra_cfg.bypass.model.model_config_overrides = OmegaConf.create(
@@ -1101,6 +1125,7 @@ def run_bypassed_training(cfg: DictConfig):
                     "source_datasets_to_discard", tuple()
                 ),
                 bos_rate=cfg.bypass.data.bos_rate,
+                realized_cache_dir=cfg.bypass.data.get("realized_cache_dir", None),
             )
 
         # set_experiment_id / set_experiment_dir already ran above (before

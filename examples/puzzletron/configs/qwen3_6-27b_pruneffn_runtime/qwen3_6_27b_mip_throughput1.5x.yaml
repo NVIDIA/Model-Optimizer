@@ -1,0 +1,13 @@
+defaults:
+  - qwen3_6_27b_pruneffn_runtime
+  - _self_
+
+# Headline run target: ~1.5x teacher throughput (target_latency_ratio = 1/1.5).
+mip:
+  output_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions_throughput1.5x}
+  human_constraints:
+    - target_latency_ratio: 0.6667
+
+calc_subblock_stats:
+  runtime_stats:
+    enabled: true

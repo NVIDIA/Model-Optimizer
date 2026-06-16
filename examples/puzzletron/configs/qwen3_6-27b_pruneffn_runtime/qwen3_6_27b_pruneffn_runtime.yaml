@@ -1,0 +1,154 @@
+defaults:
+  - pruning/ffn_pruning@pruning
+  - validate_solutions_defaults@scoring
+  - validate_solutions_defaults@realize_model
+  - bypass: defaults
+  - override hydra/hydra_logging: disabled
+  - _self_
+
+puzzle_dir: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen/puzzle_dir_qwen3_6_27b
+descriptor: qwen3_6
+teacher_dir: ${puzzle_dir}/ckpts/teacher/
+replacement_library_path: ${puzzle_dir}/replacement_library.json
+
+# Input Hugging Face model to compress (multimodal VL variant, model_type: qwen3_6).
+# Accepts a local path, an HF repo id ("Qwen/Qwen3.6-27B"), or a full URL. When it
+# is not an existing local path, the pipeline auto-runs snapshot_download(repo_id=...)
+# on rank 0 (other ranks wait at a barrier) during teacher conversion; URLs are
+# parsed down to "<org>/<model>". Make sure HF_HOME / HF_HUB_CACHE point at the
+# lustre hf_cache (not read-only $HOME), and export HF_TOKEN if the repo is gated.
+input_hf_model_path: https://huggingface.co/Qwen/Qwen3.6-27B
+
+# Dataset path for pruning, NAS scoring, and bypass distillation.
+# Pre-tokenized copy (token_ids column) produced by tools/pretokenize_dataset.py
+# from Puzzle-KD-Nemotron-Post-Training-Dataset-v2, so the slow chat-template +
+# tokenization is skipped at run time (only packing remains). Splits: train /
+# validation. All stages use block_size 16384 (validate_model_defaults +
+# bypass/defaults). Train split is ~698M tokens, so the activation pass (val
+# split 'train') is capped at ~42.6k samples at this block size.
+dataset_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/Nemotron-Post-Training-Dataset-v2-qwen36-tokenized
+
+skip_realize_model: false
+
+build_replacement_library:
+  add_ffn_no_ops: true
+  add_attention_no_ops: true
+
+scoring:
+  descriptor: ${descriptor}
+  solutions_to_validate:
+  skip_existing_solutions: true
+
+  replacement_library_path: ${replacement_library_path}
+  solutions_path: ${to_path:${puzzle_dir}/single_sequence_replacement_solutions.json}
+  teacher_dir: ${to_path:${teacher_dir}}
+  output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
+
+  # Single-block-replacement scoring: one forward per (layer, replacement)
+  # candidate per sample on the full 27B, so this is the cost-sensitive knob.
+  eval_samples: 128
+  micro_batch_size: 1
+  seed: 42
+  shuffle_seed: 444
+  dataset_path: ${dataset_path}
+
+# Runtime stats operating point, matched to the Shopify "Pulse" workload:
+# prefill-dominated long context (ISL ~127K / OSL ~25K median). We benchmark a
+# large prefill with a modest (but still long) decode so the throughput MIP
+# weights prefill cost heavily while keeping the autoregressive benchmark
+# tractable. batch_sizes stays [1] because the benchmark harness pins
+# --max-num-seqs 1 (batch>1 would serialize, not batch).
+calc_subblock_stats:
+  batch_sizes: [1]
+  prefill_seq_len: 131072
+  generation_seq_len: 8192
+  runtime_stats:
+    backend: vllm
+    enabled: true
+    num_warmup_iters: 3
+    num_iters: 7
+    # Single-stream latency proxy (max-num-seqs=1) by default. For TRUE batched /
+    # offline-throughput measurement, set max_num_seqs to the concurrency you
+    # want and raise batch_sizes to match, e.g. batch_sizes: [8] + max_num_seqs: 8.
+    # Caveat: the KV cache for max_num_seqs concurrent sequences at
+    # prefill_seq_len + generation_seq_len must fit one GPU, so at ISL 131072 only
+    # a small batch fits (~6 GB/seq for the 11-block bench model). For batched
+    # throughput, also drop prefill_seq_len (e.g. 16384) so a larger batch fits.
+    # max_num_seqs:
+  merge_with_existing_stats: false
+  subblock_stats_filename: "subblock_stats.json"
+
+# FFN alternatives for Qwen3.6-27B (teacher intermediate size is 17408; all
+# entries are strictly pruned). The unpruned 17408 width stays reachable via the
+# teacher block and the FFN no-op. Keep this list in sync with the bypass
+# `configs` below.
+pruning:
+  pruning_mixin:
+    _target_: modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+    layer_descriptor:
+      _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor.Qwen3P5VLFFNIntermediateLayerDescriptor
+  intermediate_size_list: [16384, 14336, 12288, 10240, 8192, 7168, 6144, 5120, 4096, 3072, 2048]
+
+# Default objective: maximize throughput. There is no target_throughput_ratio,
+# but throughput is inversely proportional to runtime_ms at a fixed (batch,
+# gen_len), so 1.5x teacher throughput == target_latency_ratio 0.6667. The MIP
+# minimizes the hidden-state cosine-embedding loss subject to that speedup.
+mip:
+  single_block_replacement_validation_dir: ${to_path:${scoring.output_dir}}
+  subblock_stats_path: ${to_path:${puzzle_dir}/${calc_subblock_stats.subblock_stats_filename}}
+  output_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions_throughput1.5x}
+  gathered_metrics_path:
+  puzzle_profile:
+
+  objective: metrics.cosine_embedding_loss_hidden_states
+  bigger_is_better: false
+
+  # batch_size + generation_seq_len are required to realize human_constraints
+  # (run_puzzle.py asserts both are present).
+  subblock_stats_args:
+    - batch_size: 1
+      generation_seq_len: 8192
+      weights_dtype: torch.bfloat16
+      activations_dtype: torch.bfloat16
+      kv_cache_dtype: torch.bfloat16
+
+  human_constraints:
+    - target_latency_ratio: 0.6667 # ~1.5x teacher throughput
+
+  mip_constraints:
+  metric_overrides:
+  max_seconds_per_solution: 300 # 64 layers -> larger MIP than the 0.8B
+
+  report_additional_costs:
+    - stats.memory_mib
+    - stats.num_params
+    - stats.num_kv_heads
+    - stats.has_attention
+    - stats.has_ffn
+    - stats.kv_cache_memory_mib
+    - stats.attention_memory_mib
+    - stats.ffn_memory_mib
+    - stats.ffn_num_params
+    - stats.attention_num_params
+
+realize_model:
+  descriptor: ${descriptor}
+  teacher_dir: ${to_path:${teacher_dir}}
+  tokenizer_name: ${to_path:${teacher_dir}}
+  replacement_library_path: ${replacement_library_path}
+  save_models: true
+  solutions_path:
+
+  skip_validation: false
+  eval_samples: 128
+  micro_batch_size: 1
+  seed: 42
+  shuffle_seed: 444
+  dataset_path: ${dataset_path}
+
+# vLLM latency stats launch many subprocesses, so keep the process group alive.
+nccl_timeout_minutes: ${timedelta_minutes:180}
+
+hydra:
+  run:
+    dir: ${puzzle_dir}/hydra_logs/${now:%Y-%m-%d}/${now:%H-%M-%S}
