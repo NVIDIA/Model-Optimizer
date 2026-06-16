@@ -34,6 +34,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="test-host",
             port=22,
             account="test_account",
@@ -77,6 +78,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="host",
             port=22,
             account="acct",
@@ -112,6 +114,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="login.cluster.com",
             port=30022,
             account="acct",
@@ -150,6 +153,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="h",
             port=22,
             account="my_acct",
@@ -195,6 +199,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="h",
             port=22,
             account="a",
@@ -222,3 +227,42 @@ class TestBuildSlurmExecutor:
         # Should not crash; mounts should still include scratch + modelopt + title
         mounts = mock_executor.call_args[1]["container_mounts"]
         assert len(mounts) >= 3
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_requeue_sets_param_and_bumps_retries(self, mock_tunnel, mock_executor):
+        mock_tunnel.return_value = MagicMock()
+        executor = mock_executor.return_value
+        executor.retries = 0
+        executor.additional_parameters = {}
+
+        slurm_config = MagicMock(
+            requeue=True,
+            host="h",
+            port=22,
+            account="a",
+            partition="b",
+            container="c",
+            modelopt_install_path="/m",
+            container_mounts=[],
+            srun_args=[],
+            nodes=1,
+            ntasks_per_node=1,
+            gpus_per_node=1,
+            array=None,
+        )
+
+        build_slurm_executor(
+            user="u",
+            identity=None,
+            slurm_config=slurm_config,
+            experiment_id="e",
+            job_dir="/j",
+            task_name="t",
+            packager=MagicMock(),
+        )
+
+        # requeue=True flags the additional parameter and bumps retries above 0 so
+        # nemo-run's sbatch wrapper actually issues `scontrol requeue` on preemption.
+        assert executor.additional_parameters["requeue"] is True
+        assert executor.retries == 3

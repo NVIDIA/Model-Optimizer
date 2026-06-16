@@ -35,3 +35,4 @@ class DFlashModel(DynamicModule):
         self.dflash_num_anchors = config.dflash_num_anchors
         self.dflash_report_acc = config.dflash_report_acc
         self.dflash_use_torch_compile = config.dflash_use_torch_compile
+        self.dflash_export_rope_scaling = config.dflash_export_rope_scaling

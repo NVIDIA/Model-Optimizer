@@ -1,7 +1,17 @@
-# EAGLE3 streaming speculative decoding pipeline for Qwen3-8B — MULTI-NODE.
+# EAGLE3 streaming speculative decoding pipeline for gpt-oss-20b — MULTI-NODE.
 #
 # task_1 splits N nodes into K serve replicas + (N-K) DDP trainers via SERVE_NODES;
 # see common/eagle3/train_eagle_streaming.sh for dispatch, rendezvous, and sharding.
+#
+# gpt-oss-20b notes (vs the dense Qwen3-8B example):
+#   - MoE (32 experts, 4 active/token) shipped MXFP4-quantized. The serve already
+#     passes --no-enable-flashinfer-autotune (added for NVFP4/MXFP4 MoE: the autotuner
+#     re-tunes on the first serving step and can stall a worker past vLLM's
+#     execute-model timeout, killing EngineCore). H100 has no FP4 HW, so vLLM
+#     dequant/emulates MXFP4 on Hopper.
+#   - 24 hidden layers -> default_eagle_aux_layer_ids(24)=[1,11,20]; vLLM capture ids
+#     are each +1 plus the final layer 24 -> EAGLE_CAPTURE_IDS="[2,12,21,24]".
+#   - gpt_oss is native in recent transformers/vLLM (no --trust-remote-code needed).
 #
 # 3-step pipeline:
 #   task_0: Build input conversations (jsonl)
@@ -9,16 +19,16 @@
 #   task_2: Benchmark — evaluate speculative decoding speedup via VLLM
 #
 # Usage:
-#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_eagle3_multi_node.yaml --yes
+#   uv run launch.py --yaml examples/openai/gpt-oss-20b/hf_streaming_eagle3_multi_node.yaml --yes
 
-job_name: Qwen3-8B_EAGLE3_streaming_multi_node
+job_name: gpt-oss-20b_EAGLE3_streaming_multi_node
 pipeline:
   allow_to_fail: false
   skip: false
   note:
 
   global_vars:
-    hf_model: /hf-local/Qwen/Qwen3-8B
+    hf_model: /hf-local/openai/gpt-oss-20b
 
   # Step 1: Build input conversations
   task_0:
@@ -34,29 +44,39 @@ pipeline:
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
   # Step 2: Streaming EAGLE3 training — 2 serve replicas (TP=2) + 2 trainer nodes (2 GPU each).
-  # Capture ids: default_eagle_aux_layer_ids(36)=[1,17,32] +1, plus final layer 36.
+  # Capture ids: default_eagle_aux_layer_ids(24)=[1,11,20] +1, plus final layer 24.
   task_1:
     script: common/eagle3/train_eagle_streaming.sh
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
+      # Supervise only the assistant content, not the prompt. gpt-oss's Harmony chat
+      # template is mostly fixed structural/boilerplate tokens (system prompt, channel
+      # markers); training over the full sequence (answer_only_loss=false) lets the draft
+      # trivially memorize that boilerplate -> inflated train_acc that does NOT translate
+      # to real spec-decode acceptance. The training-only chat template adds {% generation %}
+      # tags around the assistant content so the tokenizer can emit the assistant mask
+      # (it tokenizes byte-identically to the stock template otherwise).
+      - training.answer_only_loss=true
+      - data.chat_template=examples/openai/gpt-oss-20b/chat_template_train.jinja
       - training.output_dir=/scratchspace/eagle3
       - training.training_seq_len=4096
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
-      - training.max_steps=5000
+      - training.max_steps=2000
       - eagle.eagle_use_torch_compile=false
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       # No spaces: nemo_run emits `export FOO=value` unquoted.
-      - EAGLE_CAPTURE_IDS: "[2,18,33,36]"
+      - EAGLE_CAPTURE_IDS: "[2,12,21,24]"
       - SERVE_TP: "2"
       # K serve replica nodes (Slurm nodes 0..K-1); the rest are trainers.
       - SERVE_NODES: "2"
-      # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
+      # Per-rank in-flight fetches; keep low so the cold MXFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
       - STREAMING_NUM_WORKERS: "4"
     slurm_config:
       _factory_: "slurm_factory"
@@ -78,6 +98,12 @@ pipeline:
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
       - --concurrency 32
+      # gpt-oss emits Harmony channel tags (<|channel|>analysis...<|channel|>final...)
+      # in raw output. The MT-bench multi-turn loop re-feeds each answer as the next
+      # turn's assistant message; gpt-oss's chat template rejects content containing
+      # channel tags. --postprocess gptoss extracts just the final-channel text before
+      # re-feeding. (Affects only chat history, not the acceptance-length measurement.)
+      - --postprocess gptoss
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:

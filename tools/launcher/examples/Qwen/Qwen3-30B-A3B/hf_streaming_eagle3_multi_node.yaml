@@ -1,7 +1,20 @@
-# EAGLE3 streaming speculative decoding pipeline for Qwen3-8B — MULTI-NODE.
+# EAGLE3 streaming speculative decoding pipeline for Qwen3-30B-A3B — MULTI-NODE.
 #
 # task_1 splits N nodes into K serve replicas + (N-K) DDP trainers via SERVE_NODES;
 # see common/eagle3/train_eagle_streaming.sh for dispatch, rendezvous, and sharding.
+#
+# Qwen3-30B-A3B notes (vs the dense Qwen3-8B example):
+#   - MoE: 128 experts, 8 active/token, shipped in BF16 (NOT quantized, unlike
+#     gpt-oss MXFP4). The serve still passes --no-enable-flashinfer-autotune
+#     unconditionally; it is a no-op cost here since there is no FP4 re-tuning.
+#   - 48 hidden layers -> default_eagle_aux_layer_ids(48)=[1,23,44]; vLLM capture ids
+#     are each +1 plus the final layer 48 -> EAGLE_CAPTURE_IDS="[2,24,45,48]".
+#   - sliding_window is null (use_sliding_window=false), so the draft has no
+#     sliding-window leak. We still use a fake base (lm_head + embed_tokens only):
+#     streaming trains only the EAGLE3 draft on hidden states from the live serve,
+#     so the trainer never needs the 30B base transformer layers. This matches the
+#     gpt-oss streaming examples and keeps the draft config off Qwen3MoeConfig.
+#   - qwen3_moe is native in recent transformers/vLLM (no --trust-remote-code needed).
 #
 # 3-step pipeline:
 #   task_0: Build input conversations (jsonl)
@@ -9,16 +22,16 @@
 #   task_2: Benchmark — evaluate speculative decoding speedup via VLLM
 #
 # Usage:
-#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_eagle3_multi_node.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-30B-A3B/hf_streaming_eagle3_multi_node.yaml --yes
 
-job_name: Qwen3-8B_EAGLE3_streaming_multi_node
+job_name: Qwen3-30B-A3B_EAGLE3_streaming_multi_node
 pipeline:
   allow_to_fail: false
   skip: false
   note:
 
   global_vars:
-    hf_model: /hf-local/Qwen/Qwen3-8B
+    hf_model: /hf-local/Qwen/Qwen3-30B-A3B
 
   # Step 1: Build input conversations
   task_0:
@@ -34,12 +47,16 @@ pipeline:
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
 
   # Step 2: Streaming EAGLE3 training — 2 serve replicas (TP=2) + 2 trainer nodes (2 GPU each).
-  # Capture ids: default_eagle_aux_layer_ids(36)=[1,17,32] +1, plus final layer 36.
+  # Capture ids: default_eagle_aux_layer_ids(48)=[1,23,44] +1, plus final layer 48.
   task_1:
     script: common/eagle3/train_eagle_streaming.sh
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
+      # Streaming trains only the EAGLE3 draft on hidden states from the live serve; the
+      # trainer never runs the base transformer layers, so load a fake base (lm_head +
+      # embed_tokens only). Consistent with the gpt-oss streaming examples.
+      - model.use_fake_base_for_offline=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
       - training.output_dir=/scratchspace/eagle3
@@ -47,17 +64,20 @@ pipeline:
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
-      - training.max_steps=5000
+      - training.max_steps=2000
       - eagle.eagle_use_torch_compile=false
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       # No spaces: nemo_run emits `export FOO=value` unquoted.
-      - EAGLE_CAPTURE_IDS: "[2,18,33,36]"
+      - EAGLE_CAPTURE_IDS: "[2,24,45,48]"
       - SERVE_TP: "2"
       # K serve replica nodes (Slurm nodes 0..K-1); the rest are trainers.
       - SERVE_NODES: "2"
-      # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
+      # Per-rank in-flight fetches; keep low so the cold MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
       - STREAMING_NUM_WORKERS: "4"
+      # Qwen3-30B-A3B default ctx is 40960 -> full-len KV cache is wasteful for the
+      # 30B serve; we train at seq_len 4096, so cap it.
+      - SERVE_MAX_MODEL_LEN: "8192"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 4
@@ -73,7 +93,9 @@ pipeline:
       - --draft_length 3
       - --output_length 4096
       - --engine VLLM
-      - --tp_size 1
+      # Qwen3-30B-A3B is ~60 GB in BF16 -> does not fit one 80 GB GPU; serve the
+      # benchmark target with TP=2 (gpus_per_node: 2 below).
+      - --tp_size 2
       - --ep_size 1
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
@@ -84,5 +106,5 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: 2
       container: vllm/vllm-openai:latest
