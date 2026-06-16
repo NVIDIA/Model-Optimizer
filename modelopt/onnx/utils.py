@@ -1907,8 +1907,12 @@ def _reconcile_stale_output_shapes(model: onnx.ModelProto) -> int:
     if not outputs:
         return 0
 
-    def _sig(shape: onnx.TensorShapeProto | None) -> bytes | None:
-        return None if shape is None else shape.SerializeToString()
+    def _outputs_with_shapes(m: onnx.ModelProto) -> dict[str, onnx.TensorShapeProto]:
+        return {
+            o.name: o.type.tensor_type.shape
+            for o in m.graph.output
+            if o.type.tensor_type.HasField("shape")
+        }
 
     def _is_stale(declared: onnx.TensorShapeProto | None, inferred: onnx.TensorShapeProto | None):
         # Only treat a declaration as stale when inference contradicts it: a different
@@ -1946,35 +1950,26 @@ def _reconcile_stale_output_shapes(model: onnx.ModelProto) -> int:
     try:
         from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
-        inferred_model = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
-        inferred = {
-            o.name: o.type.tensor_type.shape
-            for o in inferred_model.graph.output
-            if o.type.tensor_type.HasField("shape")
-        }
+        inferred = _outputs_with_shapes(SymbolicShapeInference.infer_shapes(model, auto_merge=True))
     except Exception as e:
         logger.debug("Symbolic shape inference unavailable/failed: %s", e)
     if not inferred:
         try:
-            inferred_model = infer_shapes(model, strict_mode=False, data_prop=True)
-            inferred = {
-                o.name: o.type.tensor_type.shape
-                for o in inferred_model.graph.output
-                if o.type.tensor_type.HasField("shape")
-            }
+            inferred = _outputs_with_shapes(infer_shapes(model, strict_mode=False, data_prop=True))
         except Exception as e:
             logger.debug("ONNX shape inference for output reconciliation failed: %s", e)
 
     changed = 0
     for o in outputs:
         decl = declared[o.name]
+        inf = inferred.get(o.name)
         # Adopt the inferred shape only when the declaration is genuinely stale; otherwise
         # restore the declared shape (never leaving a graph output shapeless).
-        new_shape = inferred.get(o.name) if _is_stale(decl, inferred.get(o.name)) else decl
-        if new_shape is not None:
-            o.type.tensor_type.shape.CopyFrom(new_shape)
-        if _sig(decl) != _sig(new_shape):
+        if _is_stale(decl, inf):
+            o.type.tensor_type.shape.CopyFrom(inf)
             changed += 1
+        elif decl is not None:
+            o.type.tensor_type.shape.CopyFrom(decl)
     return changed
 
 
