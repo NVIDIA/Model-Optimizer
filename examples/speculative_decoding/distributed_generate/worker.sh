@@ -20,10 +20,15 @@ BACKEND="$2"
 JOBS_PER_NODE="$3"
 SYSTEM_PROMPT="$4"
 
+# Optional model-specific serve flags via env, appended to the serve command. E.g. for
+# MiniMax-M3: VLLM_SERVE_EXTRA_ARGS="--block-size 128 --language-model-only" (--block-size
+# 128 is mandatory for M3's MSA sparse attention; --language-model-only skips the vision
+# encoder for text-only synthesis; KV cache stays bf16 — M3's MSA fused kernel rejects
+# fp8 KV).
 if [ "$BACKEND" == "vllm" ]; then
-    vllm serve /model/  --tensor-parallel-size 8 --served-model-name model --port 8000 --host 0.0.0.0 --trust-remote-code &
+    vllm serve /model/  --tensor-parallel-size 8 --served-model-name model --port 8000 --host 0.0.0.0 --trust-remote-code ${VLLM_SERVE_EXTRA_ARGS:-} &
 else
-    python3 -m sglang.launch_server --model-path /model --served-model-name model --tp 8 --port 8000 --host 0.0.0.0 --trust-remote-code &
+    python3 -m sglang.launch_server --model-path /model --served-model-name model --tp 8 --port 8000 --host 0.0.0.0 --trust-remote-code ${SGLANG_SERVE_EXTRA_ARGS:-} &
 fi
 # Wait for server to start up by polling the health endpoint
 echo "Waiting for server to start..."
@@ -58,6 +63,11 @@ if [ "$mpi_rank" -eq 0 ]; then
 
         if [ -n "$SYSTEM_PROMPT" ]; then
             cmd+=" --system_prompt $SYSTEM_PROMPT"
+        fi
+        # Optional: cycle thinking modes for a mixed dataset (e.g. MiniMax-M3
+        # THINKING_MODES="enabled,disabled,adaptive").
+        if [ -n "${THINKING_MODES:-}" ]; then
+            cmd+=" --thinking-modes $THINKING_MODES"
         fi
         echo "Running command: $cmd"
         eval $cmd

@@ -54,7 +54,19 @@ parser.add_argument(
     "--log_empty_conversations", action="store_true", help="Log empty conversations"
 )
 parser.add_argument("--system_prompt", nargs="+", type=str, default="", help="System prompt")
+parser.add_argument(
+    "--thinking-modes",
+    type=str,
+    default="",
+    help="Comma-separated thinking modes to cycle through per conversation, passed to the "
+    "server via chat_template_kwargs (e.g. 'enabled,disabled,adaptive' for MiniMax-M3). "
+    "Conversation i uses modes[i %% len(modes)], giving an even mix across the dataset. "
+    "Empty (default) sends no thinking_mode, preserving behavior for models without it.",
+)
 args = parser.parse_args()
+
+# Parse the thinking-mode cycle; empty -> no thinking_mode injected.
+THINKING_MODES = [m.strip() for m in args.thinking_modes.split(",") if m.strip()]
 
 
 if args.data_path.endswith("jsonl"):
@@ -72,6 +84,14 @@ client = OpenAI(
 def generate_data(messages, idx, system_prompt):
     try:
         model_name = args.model
+
+        # Cycle thinking modes per conversation for an even mix across the dataset (e.g.
+        # MiniMax-M3 enabled/disabled/adaptive). Passed via chat_template_kwargs; empty
+        # list -> not sent.
+        thinking_mode = THINKING_MODES[idx % len(THINKING_MODES)] if THINKING_MODES else None
+        extra_body = (
+            {"chat_template_kwargs": {"thinking_mode": thinking_mode}} if thinking_mode else {}
+        )
 
         if args.chat:
             output_messages = []
@@ -105,6 +125,7 @@ def generate_data(messages, idx, system_prompt):
                         messages=output_messages,
                         max_tokens=args.max_tokens,
                         temperature=args.temperature,
+                        extra_body=extra_body,
                     )
                     if response.choices[0].finish_reason == "length":
                         break
@@ -124,6 +145,8 @@ def generate_data(messages, idx, system_prompt):
                 to_write = {"conversation_id": idx}
             else:
                 to_write = {"conversation_id": idx, "conversations": output_messages}
+                if thinking_mode:
+                    to_write["thinking_mode"] = thinking_mode
             with open(args.output_path, "a") as f:
                 # write in share gpt format
                 f.write(json.dumps(to_write) + "\n")
