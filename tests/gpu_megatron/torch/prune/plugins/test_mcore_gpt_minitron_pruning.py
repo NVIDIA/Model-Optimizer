@@ -591,6 +591,7 @@ def _test_mcore_qwen35_gdn_moe_pruning(rank, size):
         assert moe.shared_experts.linear_fc2.weight.shape == (pruned_hidden, pruned_moe_shared)
     assert model.config.hidden_size == pruned_hidden
     assert model.config.moe_ffn_hidden_size == pruned_moe_ffn
+    assert model.config.moe_shared_expert_intermediate_size == pruned_moe_shared
     assert model.config.num_moe_experts == pruned_experts
 
 
@@ -654,6 +655,8 @@ def _test_mcore_latent_moe_pruning(rank, size):
             assert expert.linear_fc1.weight.shape[1] == latent_size
             assert expert.linear_fc2.weight.shape == (latent_size, pruned_moe_ffn)
     assert model.config.hidden_size == pruned_hidden
+    assert model.config.moe_ffn_hidden_size == pruned_moe_ffn
+    assert model.config.num_moe_experts == pruned_experts
 
 
 def test_mcore_latent_moe_pruning(dist_workers):

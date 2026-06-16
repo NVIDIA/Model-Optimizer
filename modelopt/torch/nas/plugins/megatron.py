@@ -604,7 +604,7 @@ class _DynamicSelfAttention(_DynamicAttention):
     """
 
     def _prunes_attention_heads(self) -> bool:
-        return not self.config.attention_output_gate
+        return not getattr(self.config, "attention_output_gate", False)
 
     def _setup(self, *, hidden_size: TracedHp):
         """Setup the SelfAttention dynamic module with global hidden_size hparam."""
@@ -679,7 +679,8 @@ class _DynamicGatedDeltaNet(_DynamicAttention):
 class _DynamicMLASelfAttention(_DynamicAttention):
     """An MLA (DeepSeek et al.) layer with dynamic hyperparams (prunes hidden_size only).
 
-    Q/KV latent ranks, head dims and the input layernorm (a separate module, not fused) stay static.
+    Q/KV latent ranks and head dims stay static (the separate input layernorm is pruned to
+    hidden_size by _DynamicTransformerLayer, not here).
     """
 
     _has_fused_input_layernorm = False
