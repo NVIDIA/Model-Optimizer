@@ -143,7 +143,7 @@ class KDTrainer(ModelOptHFTrainer):
             temperature=distill_args.temperature, reduction="none"
         )
         self._teacher_prepared = False
-        self._eval_kd_loss_totals = None
+        self._eval_ce_loss_totals = None
 
         if self.use_liger_kernel:
             self._liger_temperature = distill_args.temperature
@@ -188,7 +188,7 @@ class KDTrainer(ModelOptHFTrainer):
             yield
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """Train on KD loss and evaluate on CE loss with KD as a metric."""
+        """Train and evaluate on KD loss, with eval CE tracked as a metric."""
         self._ensure_teacher_prepared()
         kd_inputs = {k: v for k, v in inputs.items() if k != "labels"}
         labels = inputs.get("labels")
@@ -206,7 +206,8 @@ class KDTrainer(ModelOptHFTrainer):
             loss = kd_loss
         else:
             batch_size = find_batch_size(inputs)
-            self._record_eval_kd_loss(kd_loss, batch_size)
+            self._record_eval_ce_loss(loss, batch_size)
+            loss = kd_loss
 
         return (loss, outputs) if return_outputs else loss
 
@@ -315,8 +316,8 @@ class KDTrainer(ModelOptHFTrainer):
         ignore_keys=None,
         metric_key_prefix="eval",
     ):
-        """Add KD loss as a secondary evaluation metric."""
-        self._eval_kd_loss_totals = None
+        """Add CE loss as a secondary evaluation metric."""
+        self._eval_ce_loss_totals = None
         output = super().evaluation_loop(
             dataloader,
             description,
@@ -324,20 +325,20 @@ class KDTrainer(ModelOptHFTrainer):
             ignore_keys=ignore_keys,
             metric_key_prefix=metric_key_prefix,
         )
-        if self._eval_kd_loss_totals is not None:
-            output.metrics[f"{metric_key_prefix}_kd_loss"] = self._get_eval_kd_loss()
+        if self._eval_ce_loss_totals is not None:
+            output.metrics[f"{metric_key_prefix}_ce_loss"] = self._get_eval_ce_loss()
         return output
 
-    def _record_eval_kd_loss(self, loss, batch_size):
+    def _record_eval_ce_loss(self, loss, batch_size):
         count = loss.new_tensor(float(batch_size or 1))
         totals = torch.stack([loss.detach() * count, count])
-        self._eval_kd_loss_totals = (
+        self._eval_ce_loss_totals = (
             totals
-            if self._eval_kd_loss_totals is None
-            else self._eval_kd_loss_totals + totals.to(self._eval_kd_loss_totals.device)
+            if self._eval_ce_loss_totals is None
+            else self._eval_ce_loss_totals + totals.to(self._eval_ce_loss_totals.device)
         )
 
-    def _get_eval_kd_loss(self):
-        totals = self.accelerator.gather_for_metrics(self._eval_kd_loss_totals)
+    def _get_eval_ce_loss(self):
+        totals = self.accelerator.gather_for_metrics(self._eval_ce_loss_totals)
         totals = totals.reshape(-1, 2).sum(dim=0)
         return (totals[0] / totals[1].clamp(min=1)).item()
