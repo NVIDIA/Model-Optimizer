@@ -6,7 +6,8 @@ Changelog
 
 **Deprecations**
 
-- Consolidated ``examples/vlm_ptq`` into ``examples/llm_ptq``. Vision-language model PTQ now shares the ``hf_ptq.py`` entry point and ``scripts/huggingface_example.sh``; pass ``--vlm`` to bootstrap VLM-specific dependencies (e.g. VILA via ``examples/llm_ptq/requirements-vila.txt``) and run the TensorRT-LLM multimodal quickstart smoke test. The ``examples/vlm_ptq/scripts/huggingface_example.sh`` entry point is deprecated: it now prints a warning and forwards to the ``llm_ptq`` script with ``--vlm``, and will be removed in a future release. See `examples/llm_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#vlm-quantization>`__.
+- Consolidated ``examples/vlm_ptq`` into ``examples/llm_ptq``. Vision-language model PTQ now shares the ``hf_ptq.py`` entry point and ``scripts/huggingface_example.sh``; pass ``--vlm`` to run the TensorRT-LLM multimodal quickstart smoke test. The ``examples/vlm_ptq/scripts/huggingface_example.sh`` entry point is deprecated: it now prints a warning and forwards to the ``llm_ptq`` script with ``--vlm``, and will be removed in a future release. See `examples/llm_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#vlm-quantization>`__.
+- Dropped VILA / NVILA vision-language model support in ``examples/llm_ptq``. VILA's modeling code requires ``transformers<=4.50.0``, which conflicts with ModelOpt's minimum supported ``transformers`` version. The VILA-specific bootstrap (repo clone, ``requirements-vila.txt``) and loading paths in ``example_utils.py`` have been removed.
 
 **New Features**
 

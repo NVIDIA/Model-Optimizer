@@ -84,30 +84,6 @@ if [ "${REMOVE_EXISTING_MODEL_CONFIG,,}" = "true" ]; then
     rm -f $MODEL_CONFIG
 fi
 
-# VILA vision-language models are not yet on the HF model zoo and require the original
-# VILA repo plus an older transformers. Only triggered for VLM runs (--vlm) on VILA models.
-if $VLM && [[ "${MODEL_NAME,,}" == *"vila"* ]]; then
-    # Check transformers version - must be <= 4.50.0
-    CURRENT_TRANSFORMERS_VERSION=$(pip show transformers | grep Version | cut -d' ' -f2)
-    if [ "$(printf '%s\n' "4.50.0" "$CURRENT_TRANSFORMERS_VERSION" | sort -V | head -n1)" = "4.50.0" ] && [ "$CURRENT_TRANSFORMERS_VERSION" != "4.50.0" ]; then
-        echo "ERROR: transformers version $CURRENT_TRANSFORMERS_VERSION is not supported." >&2
-        echo "VILA requires transformers<=4.50.0" >&2
-        echo "Please refer to examples/llm_ptq/requirements-vila.txt for the supported versions." >&2
-        echo "You also need to download VILA repository from https://github.com/Efficient-Large-Model/VILA.git and checkout ec7fb2c264920bf004fd9fa37f1ec36ea0942db5" >&2
-        exit 1
-    fi
-
-    pip install -r requirements-vila.txt
-    # Clone original VILA repo
-    if [ ! -d "$(dirname "$MODEL_PATH")/VILA" ]; then
-        echo "VILA repository is needed until it is added to HF model zoo. Cloning the repository parallel to $MODEL_PATH..."
-        git clone https://github.com/Efficient-Large-Model/VILA.git "$(dirname "$MODEL_PATH")/VILA" && \
-	cd "$(dirname "$MODEL_PATH")/VILA" && \
-	git checkout ec7fb2c264920bf004fd9fa37f1ec36ea0942db5 && \
-	cd "$script_dir/.."
-    fi
-fi
-
 PTQ_ARGS=""
 
 if $CALIB_WITH_IMAGES; then
@@ -259,12 +235,12 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
             fi
             QUICK_START_MULTIMODAL=$TRT_LLM_CODE_PATH/examples/llm-api/quickstart_multimodal.py
             if [ -f "$QUICK_START_MULTIMODAL" ]; then
-                python3 $QUICK_START_MULTIMODAL --model_dir $SAVE_PATH --modality image
+                python3 "$QUICK_START_MULTIMODAL" --model_dir "$SAVE_PATH" --modality image
             else
                 echo "Warning: $QUICK_START_MULTIMODAL cannot be found. Please set TRT_LLM_CODE_PATH to the TRT-LLM code path or test the quantized checkpoint $SAVE_PATH with the TRT-LLM repo directly."
             fi
         else
-            python run_tensorrt_llm.py --checkpoint_dir=$SAVE_PATH $RUN_ARGS
+            python run_tensorrt_llm.py --checkpoint_dir="$SAVE_PATH" $RUN_ARGS
         fi
     fi
 fi

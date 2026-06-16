@@ -118,6 +118,11 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper<sup>9</sup> | ✅ | ❌ | ❌ | ❌ | - |
 | Nemotron-3 | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Llava (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | - |
+| Phi-3-vision, Phi-4-multimodal (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | ✅ |
+| Qwen2, 2.5-VL (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | ✅ |
+| Gemma 3 (VLM)<sup>11</sup> | ✅ | - | - | - | - |
+| Nemotron VL (VLM)<sup>11,13</sup> | ✅ | - | - | - | ✅ |
 
 > *This is a subset of the models supported. For the full list please check the [TensorRT-LLM support matrix](https://nvidia.github.io/TensorRT-LLM/reference/precision.html#support-matrix)*
 
@@ -130,34 +135,20 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
 > *<sup>9.</sup>Running Whisper model with transformers>=5.0 requires [torchcodec](https://github.com/meta-pytorch/torchcodec?tab=readme-ov-file#installing-cuda-enabled-torchcodec) and other system packages (e.g. ffmpeg).* \
-> *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).*
+> *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).* \
+> *<sup>11.</sup>Vision-language model (VLM): only the language model is quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).* \
+> *<sup>12.</sup>For VLMs, `int8_sq` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
+> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
 > You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
 
-### Vision Language Model (VLM) Supported Models
-
-PTQ for vision-language models is handled by the same `hf_ptq.py` entry point and shell script as
-LLMs — the language model is quantized while the vision encoder is kept in high precision. Pass
-`--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).
-
-| Model | fp8 | int8_sq<sup>1</sup> | int4_awq | w4a8_awq<sup>2</sup> | nvfp4<sup>3</sup> |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| Llava | ✅ | ✅ | ✅ | ✅ | - |
-| VILA<sup>4</sup> | ✅ | ✅ | ✅ | ✅ | - |
-| Phi-3-vision, Phi-4-multimodal | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Qwen2, 2.5-VL | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Gemma3 | ✅ | - | - | - | - |
-| Nemotron VL<sup>5</sup> | ✅ | - | - | - | ✅ |
-
-> *<sup>1.</sup>Only TensorRT-LLM checkpoint export is supported. Not compatible with the TensorRT-LLM torch backend.* \
-> *<sup>2.</sup>The w4a8_awq is an experimental quantization scheme that may result in a higher accuracy penalty.* \
-> *<sup>3.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later.* \
-> *<sup>4.</sup>VILA requires `transformers<=4.50.0` and the original VILA repo; the shell script bootstraps both (see [`requirements-vila.txt`](./requirements-vila.txt)).* \
-> *<sup>5.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).*
-
-> *For detailed TensorRT-LLM torch backend multimodal support, please refer to [this doc](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md#multimodal-feature-support-matrix-pytorch-backend).*
+> *Vision-language models (VLMs) are listed in the support matrix above (rows marked `(VLM)`). PTQ for
+> VLMs is handled by the same `hf_ptq.py` entry point and shell script as LLMs — the language model is
+> quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see
+> [VLM quantization](#vlm-quantization)). For detailed TensorRT-LLM torch backend multimodal support,
+> please refer to [this doc](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md#multimodal-feature-support-matrix-pytorch-backend).*
 
 ## Framework Scripts
 
@@ -268,18 +259,15 @@ The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_
 
 #### VLM quantization
 
-Vision-language models are quantized through the same script. Add `--vlm` so the script bootstraps
-any VLM-specific dependencies (e.g. VILA) and runs the TensorRT-LLM multimodal quickstart as the
-deploy smoke test instead of the text-only one:
+Vision-language models are quantized through the same script. Add `--vlm` so the script runs the
+TensorRT-LLM multimodal quickstart as the deploy smoke test instead of the text-only one:
 
 ```bash
 scripts/huggingface_example.sh --model <Hugging Face model card or checkpoint> --quant fp8 --vlm
 ```
 
 Supported `--quant` values for VLMs are `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, and `w4a8_awq` (see
-[VLM Supported Models](#vision-language-model-vlm-supported-models)). For VILA models the script
-additionally installs [`requirements-vila.txt`](./requirements-vila.txt) and clones the VILA repo
-next to the checkpoint.
+the `(VLM)` rows in the [Support Matrix](#hugging-face-supported-models)).
 
 > *This consolidates the former `examples/vlm_ptq` example, which now forwards here.*
 

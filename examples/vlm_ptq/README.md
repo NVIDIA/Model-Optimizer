@@ -20,10 +20,9 @@ prints a deprecation warning and forwards to the command above.
 
 | Topic | New location |
 | :--- | :--- |
-| Supported VLMs / support matrix | [llm_ptq/README.md#vision-language-model-vlm-supported-models](../llm_ptq/README.md#vision-language-model-vlm-supported-models) |
+| Supported VLMs / support matrix | [llm_ptq/README.md#hugging-face-supported-models](../llm_ptq/README.md#hugging-face-supported-models) |
 | VLM quantization workflow (`--vlm`) | [llm_ptq/README.md#vlm-quantization](../llm_ptq/README.md#vlm-quantization) |
 | Image-text calibration (`--calib_with_images`) | [llm_ptq/README.md#vlm-calibration-with-image-text-pairs-eg-nemotron-vl](../llm_ptq/README.md#vlm-calibration-with-image-text-pairs-eg-nemotron-vl) |
-| VILA dependencies | [llm_ptq/requirements-vila.txt](../llm_ptq/requirements-vila.txt) |
 | Megatron-Bridge VLM PTQ | [examples/megatron_bridge/](../megatron_bridge/README.md) |
 
 ## Resources

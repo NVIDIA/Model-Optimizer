@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 import warnings
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -297,9 +296,6 @@ def is_speculative(hf_config):
 
 def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
     print(f"Initializing tokenizer from {ckpt_path}")
-
-    if "vila" in ckpt_path.lower():
-        ckpt_path += "/llm"
 
     tokenizer = AutoTokenizer.from_pretrained(
         ckpt_path, trust_remote_code=trust_remote_code, **kwargs
@@ -616,13 +612,6 @@ def get_model(
     if device == "cpu":
         device_map = "cpu"
 
-    # Add VILA to sys.path before loading config if needed
-    if "vila" in ckpt_path.lower():
-        vila_path = os.path.join(ckpt_path, "..", "VILA")
-        if vila_path not in sys.path:
-            sys.path.append(vila_path)
-        from llava.model import LlavaLlamaConfig, LlavaLlamaModel  # noqa: F401
-
     # Prepare config kwargs for loading
     config_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
 
@@ -644,147 +633,133 @@ def get_model(
 
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
-    # Don't set torch_dtype for VILA models as they handle it explicitly in their builder
-    if "vila" not in ckpt_path.lower():
-        model_kwargs.setdefault("dtype", "auto")
+    model_kwargs.setdefault("dtype", "auto")
 
-    if "vila" in ckpt_path.lower():
-        hf_vila = AutoModel.from_pretrained(
+    if use_seq_device_map:
+        device_map = "sequential"
+        # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
+        max_memory = get_max_memory()
+        max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
+        model_kwargs["max_memory"] = max_memory
+
+    if hf_config.model_type == "bart":
+        # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
+        device_map = None
+
+    if hf_config.model_type == "t5":
+        # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
+        # position-bias buffers across GPUs, which non-deterministically produces NaN
+        # activations during calibration on multi-GPU machines (see HF transformers #21093).
+        device_map = None
+
+    # Helper function to check if model has pack-quantized config
+    def has_pack_quantized_config(config):
+        # Check top-level quantization_config
+        if hasattr(config, "quantization_config"):
+            if config.quantization_config.get("format", None) == "pack-quantized":
+                return True
+        # Check nested text_config.quantization_config (for multi-modal models like kimi k2.5)
+        if hasattr(config, "text_config") and hasattr(config.text_config, "quantization_config"):
+            if config.text_config.quantization_config.get("format", None) == "pack-quantized":
+                return True
+        return False
+
+    if is_speculative(hf_config):
+        model = AutoModelForCausalLM.from_pretrained(
             ckpt_path,
             device_map=device_map,
             **model_kwargs,
         )
-        model = hf_vila.llm
+    elif has_pack_quantized_config(hf_config):
+        from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
+
+        with patch_compressed_linear_loading():
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path,
+                device_map="auto",
+                trust_remote_code=trust_remote_code,
+                dtype="auto",
+            )
+    elif get_original_hf_quant_method(hf_config) == "mxfp4":
+        # Native MXFP4 checkpoints (e.g. openai/gpt-oss-*) must be dequantized to
+        # plain BF16 experts (``GptOssExperts``) so ModelOpt can insert and export
+        # quantizers: the packed-kernel experts wrapper (``Mxfp4GptOssExperts``,
+        # used when the optional ``kernels`` package is present) is not supported by
+        # the unified HF export. Force dequantization regardless of whether
+        # ``kernels`` is installed.
+        # Local import: ``Mxfp4Config`` only exists in newer Transformers (gpt-oss support);
+        # importing it at module scope would break example_utils for users on older
+        # Transformers running unrelated (non-MXFP4) models.
+        from transformers import Mxfp4Config
+
+        # Load with a *sequential* device map (not "auto"): the MXFP4->BF16 dequant
+        # runs inside Transformers' threaded weight loader, and an "auto"/balanced
+        # split across multiple GPUs trips a CUDA illegal-memory access during dequant
+        # materialization. Sequential keeps each shard's dequant on a single device
+        # (the whole model lands on one GPU when it fits there).
+        model_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            ckpt_path,
+            device_map="cpu" if device == "cpu" else "sequential",
+            **model_kwargs,
+        )
     else:
-        if use_seq_device_map:
-            device_map = "sequential"
-            # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
-            max_memory = get_max_memory()
-            max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
+        architecture = hf_config.architectures[0]
+
+        if not hasattr(transformers, architecture) or "Deepseek" in architecture:
+            if not hasattr(transformers, architecture):
+                warnings.warn(
+                    f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
+                    "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
+                )
+            assert trust_remote_code, (
+                "Please set trust_remote_code to True if you want to use this architecture"
+            )
+
+            # Use AutoModelForCausalLM for causal LMs, AutoModel for encoder-decoder models
+            if getattr(hf_config, "is_encoder_decoder", False):
+                auto_model_module = AutoModel
+            else:
+                auto_model_module = AutoModelForCausalLM
+            from_config = auto_model_module.from_config
+        else:
+            auto_model_module = getattr(transformers, architecture)
+            from_config = auto_model_module._from_config
+
+        with init_empty_weights(include_buffers=True):
+            # When computing the device_map, assuming bfloat16 precision by default,
+            # unless specified by the hf_config.
+            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
+            model_kwargs2 = model_kwargs.copy()
+            if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
+                model_kwargs2.pop("trust_remote_code", None)
+            model_kwargs2["dtype"] = torch_dtype
+            model_kwargs2.pop("max_memory", None)
+            model = from_config(hf_config, **model_kwargs2)
+
+        max_memory = get_max_memory()
+        inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
+
+        on_cpu = "cpu" in inferred_device_map.values()
+
+        if on_cpu:
+            for _device in max_memory:
+                if isinstance(_device, int):
+                    max_memory[_device] *= gpu_mem_percentage
+
+            print(
+                "Model does not fit to the GPU mem. "
+                f"We apply the following memory limit for calibration: \n{max_memory}\n"
+                "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
+                "reduce the calibration `batch_size` manually."
+            )
             model_kwargs["max_memory"] = max_memory
 
-        if hf_config.model_type == "bart":
-            # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
-            device_map = None
-
-        if hf_config.model_type == "t5":
-            # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
-            # position-bias buffers across GPUs, which non-deterministically produces NaN
-            # activations during calibration on multi-GPU machines (see HF transformers #21093).
-            device_map = None
-
-        # Helper function to check if model has pack-quantized config
-        def has_pack_quantized_config(config):
-            # Check top-level quantization_config
-            if hasattr(config, "quantization_config"):
-                if config.quantization_config.get("format", None) == "pack-quantized":
-                    return True
-            # Check nested text_config.quantization_config (for multi-modal models like kimi k2.5)
-            if hasattr(config, "text_config") and hasattr(
-                config.text_config, "quantization_config"
-            ):
-                if config.text_config.quantization_config.get("format", None) == "pack-quantized":
-                    return True
-            return False
-
-        if is_speculative(hf_config):
-            model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path,
-                device_map=device_map,
-                **model_kwargs,
-            )
-        elif has_pack_quantized_config(hf_config):
-            from modelopt.torch.quantization.plugins.huggingface import (
-                patch_compressed_linear_loading,
-            )
-
-            with patch_compressed_linear_loading():
-                model = AutoModelForCausalLM.from_pretrained(
-                    ckpt_path,
-                    device_map="auto",
-                    trust_remote_code=trust_remote_code,
-                    dtype="auto",
-                )
-        elif get_original_hf_quant_method(hf_config) == "mxfp4":
-            # Native MXFP4 checkpoints (e.g. openai/gpt-oss-*) must be dequantized to
-            # plain BF16 experts (``GptOssExperts``) so ModelOpt can insert and export
-            # quantizers: the packed-kernel experts wrapper (``Mxfp4GptOssExperts``,
-            # used when the optional ``kernels`` package is present) is not supported by
-            # the unified HF export. Force dequantization regardless of whether
-            # ``kernels`` is installed.
-            # Local import: ``Mxfp4Config`` only exists in newer Transformers (gpt-oss support);
-            # importing it at module scope would break example_utils for users on older
-            # Transformers running unrelated (non-MXFP4) models.
-            from transformers import Mxfp4Config
-
-            # Load with a *sequential* device map (not "auto"): the MXFP4->BF16 dequant
-            # runs inside Transformers' threaded weight loader, and an "auto"/balanced
-            # split across multiple GPUs trips a CUDA illegal-memory access during dequant
-            # materialization. Sequential keeps each shard's dequant on a single device
-            # (the whole model lands on one GPU when it fits there).
-            model_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
-            model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path,
-                device_map="cpu" if device == "cpu" else "sequential",
-                **model_kwargs,
-            )
-        else:
-            architecture = hf_config.architectures[0]
-
-            if not hasattr(transformers, architecture) or "Deepseek" in architecture:
-                if not hasattr(transformers, architecture):
-                    warnings.warn(
-                        f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
-                        "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
-                    )
-                assert trust_remote_code, (
-                    "Please set trust_remote_code to True if you want to use this architecture"
-                )
-
-                # Use AutoModelForCausalLM for causal LMs, AutoModel for encoder-decoder models
-                if getattr(hf_config, "is_encoder_decoder", False):
-                    auto_model_module = AutoModel
-                else:
-                    auto_model_module = AutoModelForCausalLM
-                from_config = auto_model_module.from_config
-            else:
-                auto_model_module = getattr(transformers, architecture)
-                from_config = auto_model_module._from_config
-
-            with init_empty_weights(include_buffers=True):
-                # When computing the device_map, assuming bfloat16 precision by default,
-                # unless specified by the hf_config.
-                torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
-                model_kwargs2 = model_kwargs.copy()
-                if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
-                    model_kwargs2.pop("trust_remote_code", None)
-                model_kwargs2["dtype"] = torch_dtype
-                model_kwargs2.pop("max_memory", None)
-                model = from_config(hf_config, **model_kwargs2)
-
-            max_memory = get_max_memory()
-            inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
-
-            on_cpu = "cpu" in inferred_device_map.values()
-
-            if on_cpu:
-                for _device in max_memory:
-                    if isinstance(_device, int):
-                        max_memory[_device] *= gpu_mem_percentage
-
-                print(
-                    "Model does not fit to the GPU mem. "
-                    f"We apply the following memory limit for calibration: \n{max_memory}\n"
-                    "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
-                    "reduce the calibration `batch_size` manually."
-                )
-                model_kwargs["max_memory"] = max_memory
-
-            model = auto_model_module.from_pretrained(
-                ckpt_path,
-                device_map=device_map,
-                **model_kwargs,
-            )
+        model = auto_model_module.from_pretrained(
+            ckpt_path,
+            device_map=device_map,
+            **model_kwargs,
+        )
     model.eval()
     if has_pack_quantized_config(hf_config):
         _unpack_compressed_linear_weights(model, ckpt_path)
