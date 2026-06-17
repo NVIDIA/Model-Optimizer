@@ -740,6 +740,9 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        # Step-3.5 QuantMoELinear reconstructs packed MoE tensors from child
+        # expert QuantLinears after export. Fill missing input amax here, before
+        # named_modules() reaches those children, so every expert emits input_scale.
         if type(sub_module).__name__ == "QuantMoELinear" and hasattr(sub_module, "experts"):
             set_expert_quantizer_amax(list(sub_module.experts), quantizer_attrs="input_quantizer")
             continue

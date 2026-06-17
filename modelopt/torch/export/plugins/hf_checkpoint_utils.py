@@ -76,6 +76,7 @@ def _get_num_nextn_predict_layers(config_data: dict[str, Any], model: Any) -> in
 
 
 def _get_rope_theta(config_data: dict[str, Any], model: Any) -> Any:
+    """Return rope_theta from exported config data or the in-memory model config."""
     rope_theta = config_data.get("rope_theta")
     if rope_theta is not None:
         return rope_theta
@@ -88,6 +89,7 @@ def _get_rope_theta(config_data: dict[str, Any], model: Any) -> Any:
 
 
 def _sanitize_llama3_rope_config(config_data: dict[str, Any], model: Any) -> None:
+    """Fill missing llama3 rope_theta in rope config metadata when available."""
     rope_theta = _get_rope_theta(config_data, model)
     if rope_theta is None:
         return
@@ -105,10 +107,11 @@ def _sanitize_llama3_rope_config(config_data: dict[str, Any], model: Any) -> Non
 def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -> None:
     """Sanitize exported Hugging Face config metadata for deployment runtimes.
 
-    Transformers 5.x validates that ``len(layer_types) == num_hidden_layers``.
-    Some checkpoints include MTP/next-token-prediction layer entries after the
-    main decoder layer entries. Those extra entries are not part of
-    ``num_hidden_layers`` and make deployment stacks fail while loading config.
+    Fix conservative deployment-only config incompatibilities:
+
+    * add missing llama3 ``rope_theta`` metadata when available;
+    * trim trailing MTP/next-token-prediction ``layer_types`` entries only when
+      the mismatch is exactly explained by next-token-prediction metadata.
     """
     _sanitize_llama3_rope_config(config_data, model)
 
