@@ -6,53 +6,48 @@ This skill exposes it as a slash command for AI coding agents.
 For full environment setup, model configuration, and algorithm details see
 [examples/puzzletron/README.md](../../examples/puzzletron/README.md).
 
-## Using with AI agents
-
 > **Experimental:** AI agent integration is an experimental feature and may change.
 
-| Agent | How to invoke |
-|---|---|
-| **Claude Code** | `/puzzletron <command>` in the chat |
+Run `/puzzletron` with no arguments to see available commands.
 
-## Commands
+## Running the MIP sweep
 
-### `mip_sweep <nproc_per_node>`
-
-Runs the MIP sweep across multiple compression rates. `nproc_per_node` is the number of GPUs per node.
+Start the sweep by telling the agent how many GPUs per node to use:
 
 ```text
 /puzzletron mip_sweep 4
 ```
 
-Output is streamed live and also written to `./log.txt`.
-
-### `mip_sweep progress`
-
-Parses `./log.txt` and prints a structured progress report: prep steps, per-compression-rate
-sub-steps, and a timing summary with elapsed and estimated remaining time.
+Output is streamed live and also written to `./log.txt`. While it runs (or after it finishes),
+check progress with:
 
 ```text
 /puzzletron mip_sweep progress
 ```
 
-Example output:
+Example output when complete:
 
 ```text
 Overall: Puzzletron step 7/8 — MIP sweep (6 compression rates)
 ──────────────────────────────────────────────────────────────
-  Status      Phase                             Elapsed
+  Status      Phase                              Elapsed
 ──────────────────────────────────────────────────────────────
-  [DONE]      Prep (teacher memory + rate list)     <1s
-  [DONE]      compression_rate=0.5               3m 52s
-  [RUNNING]   compression_rate=0.6 — validating (47/128 batches)   1m 14s
-  [ ]         compression_rate=0.7               pending
-  [ ]         compression_rate=0.8               pending
-  [ ]         compression_rate=0.9               pending
-  [ ]         compression_rate=1.0               pending
+  [DONE]      Prep (teacher memory + rate list)       <1s
+  [DONE]      compression_rate=0.5                3m 52s
+  [DONE]      compression_rate=0.6                4m 41s
+  [DONE]      compression_rate=0.7                4m 46s
+  [DONE]      compression_rate=0.8                3m 55s
+  [DONE]      compression_rate=0.9                3m 55s
+  [DONE]      compression_rate=1.0                3m 59s
 ──────────────────────────────────────────────────────────────
   Started:   08:05:30
-  Now:       08:10:56
-  Elapsed:   5m 26s
-  Completed: 1/6 compression rates  (avg 3m 52s/rate)
-  Remaining: ~19m 22s estimated
+  Finished:  08:30:38
+  Elapsed:   25m 8s
+  Completed: 6/6 compression rates  (avg 4m 11s/rate)
+  Remaining: done estimated
+
+  Results:   /workspace/puzzle_dir/mip_sweep_results.csv
 ```
+
+While running, the report shows which rate is active, sub-step detail (MIP solver node count
+or validation batch progress), and an estimated time remaining based on completed rates.
