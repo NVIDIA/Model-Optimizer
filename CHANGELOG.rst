@@ -11,8 +11,9 @@ Changelog
 
 **Deprecations**
 
-- Consolidated ``examples/vlm_ptq`` into ``examples/llm_ptq``. Vision-language model PTQ now shares the ``hf_ptq.py`` entry point and ``scripts/huggingface_example.sh``; pass ``--vlm`` to run the TensorRT-LLM multimodal quickstart smoke test. The ``examples/vlm_ptq/scripts/huggingface_example.sh`` entry point is deprecated: it now prints a warning and forwards to the ``llm_ptq`` script with ``--vlm``, and will be removed in a future release. See `examples/llm_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#vlm-quantization>`__.
-- Dropped VILA / NVILA vision-language model support in ``examples/llm_ptq``. VILA's modeling code requires ``transformers<=4.50.0``, which conflicts with ModelOpt's minimum supported ``transformers`` version. The VILA-specific bootstrap (repo clone, ``requirements-vila.txt``) and loading paths in ``example_utils.py`` have been removed.
+- Renamed ``examples/llm_ptq`` to ``examples/hf_ptq`` to reflect that it covers Hugging Face LLM **and** VLM PTQ. A relative symlink ``examples/llm_ptq`` -> ``hf_ptq`` keeps existing paths and commands working; it will be removed in a future release. Please update references to the new ``examples/hf_ptq`` path.
+- Consolidated ``examples/vlm_ptq`` into ``examples/hf_ptq``. Vision-language model PTQ now shares the ``hf_ptq.py`` entry point and ``scripts/huggingface_example.sh``; pass ``--vlm`` to run the TensorRT-LLM multimodal quickstart smoke test. The ``examples/vlm_ptq/scripts/huggingface_example.sh`` entry point is deprecated: it now prints a warning and forwards to the ``hf_ptq`` script with ``--vlm``, and will be removed in a future release. See `examples/hf_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq#vlm-quantization>`__.
+- Dropped VILA / NVILA vision-language model support in ``examples/hf_ptq``. VILA's modeling code requires ``transformers<=4.50.0``, which conflicts with ModelOpt's minimum supported ``transformers`` version. The VILA-specific bootstrap (repo clone, ``requirements-vila.txt``) and loading paths in ``example_utils.py`` have been removed.
 
 **New Features**
 

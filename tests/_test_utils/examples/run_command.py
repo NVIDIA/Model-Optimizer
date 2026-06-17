@@ -69,7 +69,7 @@ def run_llm_ptq_command(*, model: str, quant: str, vlm: bool = False, **kwargs):
 
     cmd_parts = ["scripts/huggingface_example.sh", "--no-verbose"]
     if vlm:
-        # VLM PTQ shares the llm_ptq entry point; --vlm runs the multimodal deploy smoke test.
+        # VLM PTQ shares the hf_ptq entry point; --vlm runs the multimodal deploy smoke test.
         cmd_parts.append("--vlm")
     cmd_parts = extend_cmd_parts(cmd_parts, **kwargs)
-    run_example_command(cmd_parts, "llm_ptq")
+    run_example_command(cmd_parts, "hf_ptq")

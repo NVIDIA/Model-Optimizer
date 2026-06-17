@@ -17,7 +17,7 @@
 
 This exercises the exact combination that silently regressed (nvbug 6295279 / 6295242):
 a transposed-quantize MoE (``GptOssExperts``) with **static-block** NVFP4 weight quantizers
--- which is what ``examples/llm_ptq --cast_mxfp4_to_nvfp4`` produces via
+-- which is what ``examples/hf_ptq --cast_mxfp4_to_nvfp4`` produces via
 ``force_weight_quantizers_static`` -- calibrated with a forward loop.
 
 The regression (the unconditional ``weight_only_quantize`` from #1560 feeding the
@@ -43,7 +43,7 @@ from modelopt.torch.quantization.config import NVFP4_DEFAULT_CFG
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 
 # The cast helpers live next to the example script, not in the ``modelopt`` package.
-_LLM_PTQ_DIR = Path(__file__).resolve().parents[4] / "examples" / "llm_ptq"
+_LLM_PTQ_DIR = Path(__file__).resolve().parents[4] / "examples" / "hf_ptq"
 if str(_LLM_PTQ_DIR) not in sys.path:
     sys.path.insert(0, str(_LLM_PTQ_DIR))
 

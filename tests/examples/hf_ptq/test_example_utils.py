@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end unit tests for ``examples/llm_ptq/example_utils.load_mtp_weights``.
+"""End-to-end unit tests for ``examples/hf_ptq/example_utils.load_mtp_weights``.
 
 One test per supported on-disk MTP convention (inlined-orphaned, inlined-in-state-dict,
 separate-file-standalone, separate-file-indexed) plus a negative case.

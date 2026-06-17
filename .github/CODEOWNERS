@@ -48,7 +48,7 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 /examples/gpt-oss @NVIDIA/modelopt-examples-gpt-oss-codeowners
 /examples/llm_distill @NVIDIA/modelopt-torch-distill-codeowners
 /examples/llm_eval @NVIDIA/modelopt-examples-llm_ptq-codeowners
-/examples/llm_ptq @NVIDIA/modelopt-examples-llm_ptq-codeowners
+/examples/hf_ptq @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/llm_qat @NVIDIA/modelopt-examples-llm_qat-codeowners
 /examples/llm_sparsity @NVIDIA/modelopt-torch-sparsity-codeowners
 /examples/megatron_bridge @NVIDIA/modelopt-examples-megatron-codeowners
