@@ -54,6 +54,9 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ``KDTrainer`` / ``QADTrainer`` evaluation now reports KD as the primary
+  ``eval_loss`` and CE as ``eval_ce_loss``; the previous secondary
+  ``eval_kd_loss`` metric is removed.
 - Reorganize custom CUDA / Triton kernels under ``modelopt.torch.kernels`` into ``common/attention``, ``quantization/{conv,gemm}``, and ``sparsity/attention``. High-level APIs (``mtq.quantize``, ``mtsa.sparsify``, etc.) are unchanged, but **any code importing directly from the kernel subpackages must be updated**: there is no backwards-compatibility shim; the old import paths will raise ``ImportError`` / ``ModuleNotFoundError``. Migration table:
 
   - ``from modelopt.torch.kernels import IS_AVAILABLE, attention, attention_calibrate, register_triton_attention`` → ``from modelopt.torch.kernels.common.attention import ...``
