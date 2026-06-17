@@ -164,6 +164,7 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/nvfp4_experts_only-kv_fp8_cast",
     "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
     "general/ptq/nvfp4_mlp_only-kv_fp8",
+    "general/ptq/nvfp4_mlp_only-kv_fp8-novit",
     "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
     "general/ptq/nvfp4_omlp_only-kv_fp8",
     "general/ptq/nvfp4_omlp_only-kv_fp8_cast",
