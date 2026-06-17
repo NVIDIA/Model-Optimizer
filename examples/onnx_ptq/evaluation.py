@@ -87,7 +87,8 @@ class LocalImageNetDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         path, label = self.samples[idx]
-        image = Image.open(path).convert("RGB")
+        with Image.open(path) as img:
+            image = img.convert("RGB")
         if self.transform:
             image = self.transform(image)
         return image, label
