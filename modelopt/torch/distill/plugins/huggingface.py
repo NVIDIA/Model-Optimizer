@@ -199,17 +199,12 @@ class KDTrainer(ModelOptHFTrainer):
             with student_context():
                 outputs = model(**kd_inputs)
         else:
-            loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
+            ce_loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
+            batch_size = find_batch_size(inputs)
+            self._record_eval_ce_loss(ce_loss, batch_size)
 
         kd_loss = self._compute_kd_loss(outputs, labels, kd_inputs, **kwargs)
-        if is_training:
-            loss = kd_loss
-        else:
-            batch_size = find_batch_size(inputs)
-            self._record_eval_ce_loss(loss, batch_size)
-            loss = kd_loss
-
-        return (loss, outputs) if return_outputs else loss
+        return (kd_loss, outputs) if return_outputs else kd_loss
 
     def _compute_kd_loss(self, outputs, labels, inputs, **kwargs):
         """Run teacher forward and compute KD loss.
