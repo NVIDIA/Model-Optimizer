@@ -48,15 +48,3 @@ http://127.0.0.1:8888/lab
 | `nvidia-modelopt` | from source (`lmikaelyan/compress-vlms`) | Pruning, distillation, PTQ |
 | `lmms-eval` | v0.7.1 | VLM accuracy benchmarks (§1.6: MathVista / BLINK / RealWorldQA) |
 | `python-Levenshtein` | latest | Required by lmms-eval string metrics |
-
-### Known issues patched in the Dockerfile
-
-**lmms-eval v0.7.1 — `OpenAIProvider` double URL bug**
-`lmms_eval/llm_judge/providers/openai.py` has a wrong default for `OPENAI_API_URL`:
-it includes `/chat/completions` in the base URL, causing the OpenAI client to
-append `/chat/completions` a second time (`POST …/v1/chat/completions/v1/chat/completions`).
-The Dockerfile patches this with `sed` after the clone. If you install lmms-eval
-manually (outside Docker), apply the same fix or set the env var before running evals:
-```bash
-export OPENAI_API_URL=http://localhost:8000/v1
-```
