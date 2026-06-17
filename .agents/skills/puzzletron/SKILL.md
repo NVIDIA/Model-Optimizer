@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: End-to-end workflow for model pruning and MIP-based optimization. Use `mip_sweep` to run the MIP sweep. Usage: /puzzletron <command>
+description: "End-to-end workflow for model pruning and MIP-based optimization. Use `mip_sweep` to run the MIP sweep. Usage: /puzzletron <command>"
 license: Apache-2.0
 ---
 
