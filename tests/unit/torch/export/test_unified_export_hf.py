@@ -24,12 +24,12 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import (
+from modelopt.torch.export.model_utils import (
     _collect_canonical_tied_patterns,
-    _export_quantized_weight,
     _reorder_canonical_first,
-    sync_tied_input_amax,
 )
+from modelopt.torch.export.quant_utils import sync_tied_input_amax
+from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 
 
 def test_collect_canonical_tied_patterns_dict_style():

@@ -23,6 +23,54 @@ import torch
 import torch.nn as nn
 
 
+def _alias_per_expert_subtree_from_prior(module: nn.Module, prior: nn.Module, n: int) -> None:
+    """Build per-expert subtree on ``module`` by aliasing ``prior``'s packed buffers.
+
+    For each expert ``idx`` in ``0..n-1``, creates ``module.{idx}.{gate,up,down}_proj``
+    sub-modules whose ``weight`` / ``weight_scale`` / ``weight_scale_2`` /
+    ``input_scale`` are aliased to the prior side's already-packed tensors.
+    data_ptr equality is preserved so the downstream
+    ``postprocess_state_dict`` dedup collapses the duplicates at write time.
+    Called by ``_export_fused_experts`` on the tied-experts cache-hit fast path.
+    """
+    for _idx in range(n):
+        _prior_expert = getattr(prior, str(_idx), None)
+        if _prior_expert is None:
+            continue
+        _cur_expert = nn.Module()
+        for _proj_name in ("gate_proj", "up_proj", "down_proj"):
+            _prior_proj = getattr(_prior_expert, _proj_name, None)
+            if _prior_proj is None:
+                continue
+            _cur_proj = nn.Module()
+            if hasattr(_prior_proj, "weight"):
+                _cur_proj.weight = _prior_proj.weight
+            for _attr in ("weight_scale", "weight_scale_2", "input_scale"):
+                if hasattr(_prior_proj, _attr):
+                    _cur_proj.register_buffer(_attr, getattr(_prior_proj, _attr))
+            _cur_expert.add_module(_proj_name, _cur_proj)
+        module.add_module(str(_idx), _cur_expert)
+
+
+def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
+    """Remove the 3-D fused source params and per-expert quantizer ModuleLists.
+
+    Called once the per-expert subtree exists (either via the fast-path
+    aliases or via the full unpack/pack path) so the redundant fused form
+    doesn't appear in the exported state_dict alongside the per-expert form.
+    """
+    for attr in (
+        "gate_up_proj",
+        "down_proj",
+        "gate_up_proj_weight_quantizers",
+        "gate_up_proj_input_quantizer",
+        "down_proj_weight_quantizers",
+        "down_proj_input_quantizer",
+    ):
+        if hasattr(module, attr):
+            delattr(module, attr)
+
+
 def _export_fused_experts(
     module: nn.Module,
     dtype: torch.dtype,
@@ -73,47 +121,15 @@ def _export_fused_experts(
     _source_key = (module.gate_up_proj.data_ptr(), module.down_proj.data_ptr())
 
     # Tied-experts fast path: if this exact (gate_up, down) source-tensor pair
-    # has been processed before, build the per-expert subtree by aliasing the
-    # prior module's already-packed buffers directly — no unpacking, no per-
-    # expert packing, no transient buffers thrown away. Functionally equivalent
-    # to the bottom alias step below; that step exists for the cache-miss path
-    # only (where we register and become the prior for any later tied module).
+    # has been processed before, alias all per-expert buffers directly from the
+    # prior module — no unpacking, no per-expert packing, no transient buffers
+    # thrown away. Cache miss falls through to the full unpack/pack below and
+    # registers this module as the prior for any later tied module.
     if _moe_tied_cache is not None:
         _prior = _moe_tied_cache.get(_source_key)
         if _prior is not None and _prior is not module:
-            for _idx in range(n):
-                _prior_expert = getattr(_prior, str(_idx), None)
-                if _prior_expert is None:
-                    continue
-                _cur_expert = nn.Module()
-                for _proj_name in ("gate_proj", "up_proj", "down_proj"):
-                    _prior_proj = getattr(_prior_expert, _proj_name, None)
-                    if _prior_proj is None:
-                        continue
-                    _cur_proj = nn.Module()
-                    if hasattr(_prior_proj, "weight"):
-                        # Alias the Parameter — same data_ptr as the prior side's
-                        # packed bytes; downstream postprocess_state_dict dedup
-                        # collapses the duplicate at write time.
-                        _cur_proj.weight = _prior_proj.weight
-                    for _attr in ("weight_scale", "weight_scale_2", "input_scale"):
-                        if hasattr(_prior_proj, _attr):
-                            _cur_proj.register_buffer(_attr, getattr(_prior_proj, _attr))
-                    _cur_expert.add_module(_proj_name, _cur_proj)
-                module.add_module(str(_idx), _cur_expert)
-            # Source-tensor cleanup mirrors the normal path's end-of-function
-            # step so the source 3-D Parameters and quantizer ModuleLists don't
-            # land in the exported state_dict.
-            for attr in (
-                "gate_up_proj",
-                "down_proj",
-                "gate_up_proj_weight_quantizers",
-                "gate_up_proj_input_quantizer",
-                "down_proj_weight_quantizers",
-                "down_proj_input_quantizer",
-            ):
-                if hasattr(module, attr):
-                    delattr(module, attr)
+            _alias_per_expert_subtree_from_prior(module, _prior, n)
+            _delete_fused_moe_source_attrs(module)
             return
 
     # 1. Shared input quantizers — one per projection type, shared across all experts.
@@ -234,16 +250,7 @@ def _export_fused_experts(
         module.add_module(str(idx), expert)
 
     # 4. Remove fused params and quantizer lists — replaced by per-expert submodules
-    for attr in (
-        "gate_up_proj",
-        "down_proj",
-        "gate_up_proj_weight_quantizers",
-        "gate_up_proj_input_quantizer",
-        "down_proj_weight_quantizers",
-        "down_proj_input_quantizer",
-    ):
-        if hasattr(module, attr):
-            delattr(module, attr)
+    _delete_fused_moe_source_attrs(module)
 
     # 5. Register this module in the dedup cache so any later tied module
     # (same source data_ptr pair) takes the fast path at the top of this

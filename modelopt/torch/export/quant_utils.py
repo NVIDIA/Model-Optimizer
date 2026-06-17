@@ -1479,3 +1479,79 @@ def has_quantized_modules(model: nn.Module) -> bool:
         get_quantization_format(sub_module) != QUANTIZATION_NONE
         for _, sub_module in model.named_modules()
     )
+
+
+def sync_tied_input_amax(model: nn.Module) -> int:
+    """Max-merge input_quantizer amaxes across modules sharing a weight ``data_ptr``.
+
+    Mutates ``model`` in place: overwrites the ``.amax`` buffer on every
+    affected ``input_quantizer`` with the per-group maximum. Intended to
+    run as part of an export pipeline that already replaces weights with
+    packed bytes downstream — i.e. the model is not expected to be reused
+    after this helper runs.
+
+    Closes the loop on ``input_scale`` for HF-tied modules whose forward
+    paths see different activation distributions (encoder vs decoder in
+    YOCO-style models). Must run BEFORE per-module export so the merged
+    amax flows into ``input_scale`` derivation. Handles both dense
+    Linears (keyed by ``weight.data_ptr()``) and fused MoE (keyed by
+    ``(gate_up_proj, down_proj)`` data_ptr tuple). Returns the number of
+    tied groups merged.
+    """
+    from collections import defaultdict
+
+    by_dp: dict = defaultdict(list)
+    for _, m in model.named_modules():
+        # Fused MoE: 3-D source tensors with shared input quantizers
+        if (
+            hasattr(m, "gate_up_proj_input_quantizer")
+            and hasattr(m, "gate_up_proj")
+            and hasattr(m, "down_proj")
+            and m.gate_up_proj.dim() == 3
+        ):
+            key = ("moe", m.gate_up_proj.data_ptr(), m.down_proj.data_ptr())
+            by_dp[key].append(m)
+        # Dense quantized Linear with an input_quantizer
+        elif (
+            hasattr(m, "input_quantizer")
+            and hasattr(m, "weight")
+            and isinstance(m.weight, torch.nn.Parameter)
+        ):
+            by_dp[("dense", m.weight.data_ptr())].append(m)
+
+    def _merge(quantizers: list) -> bool:
+        """Max-merge amaxes across the quantizer list. Returns True on merge."""
+        valid = [
+            q
+            for q in quantizers
+            if q is not None
+            and getattr(q, "is_enabled", False)
+            and getattr(q, "_amax", None) is not None
+            and not q._amax.is_meta
+        ]
+        if len(valid) < 2:
+            return False
+        # Require scalar (per-tensor) amax — matches preprocess_linear_fusion.
+        if any(q._amax.numel() != 1 for q in valid):
+            warn(
+                "sync_tied_input_amax: non-scalar input_quantizer amax encountered "
+                "in a tied group; skipping. Only per-tensor input quantizers are "
+                "supported for tied-modules merging."
+            )
+            return False
+        merged = torch.max(torch.stack([q.amax for q in valid]))
+        for q in valid:
+            q.amax = merged.clone()
+        return True
+
+    synced = 0
+    for key, modules in by_dp.items():
+        if len(modules) < 2:
+            continue
+        if key[0] == "moe":
+            for q_name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+                if _merge([getattr(m, q_name, None) for m in modules]):
+                    synced += 1
+        elif _merge([m.input_quantizer for m in modules]):
+            synced += 1
+    return synced
