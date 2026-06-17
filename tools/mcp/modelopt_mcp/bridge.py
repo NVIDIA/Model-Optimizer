@@ -83,6 +83,20 @@ def _find_launcher_examples_dir() -> Path | None:
     return None
 
 
+def _launcher_not_installed(argv: list[str]) -> dict:
+    """Structured failure when the ``modelopt-launcher`` binary is not on PATH."""
+    return {
+        "ok": False,
+        "reason": "launcher_not_installed",
+        "diagnostic": (
+            "`modelopt-launcher` was not found on PATH. "
+            "Install it with `pip install modelopt-launcher` or "
+            "`uv tool install modelopt-launcher` and retry."
+        ),
+        "argv": argv,
+    }
+
+
 # ---------------------------------------------------------------------------
 # list_examples
 # ---------------------------------------------------------------------------
@@ -556,13 +570,16 @@ def submit_job_impl(
         # group so an MCP server restart / SIGINT doesn't SIGHUP the
         # in-flight launcher.
         # B603 false positive — argv is a controlled list built above.
-        proc = subprocess.Popen(  # nosec B603
-            argv,
-            env=child_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(  # nosec B603
+                argv,
+                env=child_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            return _launcher_not_installed(argv)
         return {
             "ok": True,
             "executor": "docker",
@@ -590,6 +607,8 @@ def submit_job_impl(
             timeout=300,
             check=False,
         )
+    except FileNotFoundError:
+        return _launcher_not_installed(argv)
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
@@ -767,6 +786,8 @@ def _submit_job_dry_run(
             timeout=60,
             check=False,
         )
+    except FileNotFoundError:
+        return {**_launcher_not_installed(argv), "dry_run": True}
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,

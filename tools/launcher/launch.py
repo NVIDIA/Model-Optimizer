@@ -53,15 +53,18 @@ register_factory("slurm_factory", slurm_factory)
 
 LAUNCHER_DIR = _pkg.PACKAGE_DIR  # tools/launcher/ (dev or installed)
 
-# MODELOPT_ROOT is only available in a dev checkout (tools/launcher/../..):
-# when running as an installed console script the cluster container already
-# has modelopt pre-installed, so we skip packaging it from source.
+# Detect dev checkout by probing the actual MODELOPT_ROOT, not the symlink
+# path (which doesn't exist yet in a clean checkout). When running as an
+# installed console script the cluster container already has modelopt
+# pre-installed, so we skip packaging it from source.
 MODELOPT_ROOT = os.path.dirname(os.path.dirname(LAUNCHER_DIR))
-_modelopt_src = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer", "modelopt")
-_has_modelopt_src = os.path.isdir(_modelopt_src)
+_has_modelopt_src = os.path.isdir(os.path.join(MODELOPT_ROOT, "modelopt"))
 
-# Ensure modules/Model-Optimizer symlink exists so the packager can resolve
-# modules/Model-Optimizer/* patterns in dev mode.
+# Symlink path used by the PatternPackager to resolve modules/Model-Optimizer/*
+# patterns; only valid in dev mode. Initialized to None so --clean in installed
+# mode gets a clear error instead of a NameError.
+_mo_symlink: str | None = None
+
 if _has_modelopt_src:
     _mo_symlink = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer")
     if not os.path.exists(_mo_symlink):
@@ -69,6 +72,8 @@ if _has_modelopt_src:
         os.symlink(
             os.path.relpath(MODELOPT_ROOT, os.path.join(LAUNCHER_DIR, "modules")), _mo_symlink
         )
+
+_modelopt_src = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer", "modelopt")
 
 EXPERIMENT_TITLE = "cicd"
 DEFAULT_SLURM_ENV, DEFAULT_LOCAL_ENV = get_default_env(EXPERIMENT_TITLE)
@@ -114,6 +119,8 @@ def launch(
 ) -> None:
     """Launch ModelOpt jobs on Slurm or locally with Docker."""
     if clean:
+        if _mo_symlink is None:
+            raise ValueError("--clean requires a dev checkout; modelopt source not found.")
         examples_dir = os.path.join(_mo_symlink, "examples")
         print(f"Cleaning {examples_dir} with git clean -xdf ...")
         subprocess.run(["git", "clean", "-xdf", "."], cwd=examples_dir, check=True)  # nosec B603 B607

@@ -17,4 +17,6 @@
 
 import os as _os
 
+__all__ = ["PACKAGE_DIR"]
+
 PACKAGE_DIR: str = _os.path.dirname(_os.path.abspath(__file__))
