@@ -33,9 +33,16 @@ import os
 import subprocess  # nosec B404
 import warnings
 
+import modelopt_launcher as _pkg
 import nemo_run as run
-from core import SandboxPipeline, get_default_env, register_factory, run_jobs, set_slurm_config_type
-from slurm_config import SlurmConfig, slurm_factory
+from modelopt_launcher.core import (
+    SandboxPipeline,
+    get_default_env,
+    register_factory,
+    run_jobs,
+    set_slurm_config_type,
+)
+from modelopt_launcher.slurm_config import SlurmConfig, slurm_factory
 
 set_slurm_config_type(SlurmConfig)
 register_factory("slurm_factory", slurm_factory)
@@ -44,33 +51,49 @@ register_factory("slurm_factory", slurm_factory)
 # Launcher-specific configuration
 # ---------------------------------------------------------------------------
 
-LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
-MODELOPT_ROOT = os.path.dirname(os.path.dirname(LAUNCHER_DIR))
+LAUNCHER_DIR = _pkg.PACKAGE_DIR  # tools/launcher/ (dev or installed)
 
-# Ensure modules/Model-Optimizer symlink exists (points to parent Model-Optimizer root)
-_mo_symlink = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer")
-if not os.path.exists(_mo_symlink):
-    os.makedirs(os.path.join(LAUNCHER_DIR, "modules"), exist_ok=True)
-    os.symlink(os.path.relpath(MODELOPT_ROOT, os.path.join(LAUNCHER_DIR, "modules")), _mo_symlink)
+# MODELOPT_ROOT is only available in a dev checkout (tools/launcher/../..):
+# when running as an installed console script the cluster container already
+# has modelopt pre-installed, so we skip packaging it from source.
+MODELOPT_ROOT = os.path.dirname(os.path.dirname(LAUNCHER_DIR))
+_modelopt_src = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer", "modelopt")
+_has_modelopt_src = os.path.isdir(_modelopt_src)
+
+# Ensure modules/Model-Optimizer symlink exists so the packager can resolve
+# modules/Model-Optimizer/* patterns in dev mode.
+if _has_modelopt_src:
+    _mo_symlink = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer")
+    if not os.path.exists(_mo_symlink):
+        os.makedirs(os.path.join(LAUNCHER_DIR, "modules"), exist_ok=True)
+        os.symlink(
+            os.path.relpath(MODELOPT_ROOT, os.path.join(LAUNCHER_DIR, "modules")), _mo_symlink
+        )
 
 EXPERIMENT_TITLE = "cicd"
 DEFAULT_SLURM_ENV, DEFAULT_LOCAL_ENV = get_default_env(EXPERIMENT_TITLE)
 
-packager = run.PatternPackager(
-    include_pattern=[
+_include_pattern = ["examples/*", "common/*"]
+_relative_path = [LAUNCHER_DIR, LAUNCHER_DIR]
+
+if _has_modelopt_src:
+    _include_pattern = [
         "modules/Megatron-LM/megatron/*",
         "modules/Megatron-LM/examples/*",
         "modules/Megatron-LM/*.py",
         "modules/Model-Optimizer/modelopt/*",
         "modules/Model-Optimizer/modelopt_recipes/*",
         "modules/Model-Optimizer/examples/*",
-        "examples/*",
-        "common/*",
-    ],
-    relative_path=[LAUNCHER_DIR] * 8,
+        *_include_pattern,
+    ]
+    _relative_path = [LAUNCHER_DIR] * 6 + _relative_path
+
+packager = run.PatternPackager(
+    include_pattern=_include_pattern,
+    relative_path=_relative_path,
 )
 
-MODELOPT_SRC_PATH = os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt")
+MODELOPT_SRC_PATH = _modelopt_src if _has_modelopt_src else None
 
 
 # ---------------------------------------------------------------------------
@@ -125,5 +148,10 @@ def launch(
     )
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console script entry point for the ``modelopt-launcher`` command."""
     run.cli.main(launch)
+
+
+if __name__ == "__main__":
+    main()
