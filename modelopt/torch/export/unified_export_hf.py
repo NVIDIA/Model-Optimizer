@@ -740,6 +740,10 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        if type(sub_module).__name__ == "QuantMoELinear" and hasattr(sub_module, "experts"):
+            set_expert_quantizer_amax(list(sub_module.experts), quantizer_attrs="input_quantizer")
+            continue
+
         # Preprocessing: restore unpacked weight so the export path can read
         # the live quantizer state. Falls through to the export branches below.
         if hasattr(sub_module, "weight_packed") or (
