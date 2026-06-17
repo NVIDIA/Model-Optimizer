@@ -1,0 +1,49 @@
+# Megatron-Bridge PTQ for nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.
+#
+# Mirrors the user-provided reference command:
+#   torchrun --nproc_per_node 8 examples/quantization/quantize.py \
+#     --hf-model-id /models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+#     --calib-size 4 --export-quant-cfg nvfp4 \
+#     --megatron-save-path /models/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-MLM \
+#     --pp 4 --tp 2 --ep 2 --trust-remote-code
+#
+# Cluster shape: 2 nodes x 4 GPUs = 8 ranks (matches --nproc_per_node 8 on
+# 8-GPU-per-node hardware; on 4-GPU-per-node clusters, multi-node torchrun
+# rendezvous is derived from SLURM_NODELIST inside quantize.sh).
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/megatron_bridge_ptq.yaml --yes
+
+job_name: Nemotron-3-Nano_megatron_bridge_PTQ
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Megatron-Bridge PTQ on Nano-30B-A3B (nvfp4): 2 nodes x 4 GPUs, TP=2 PP=4 EP=2"
+
+  global_vars:
+    output_dir: /cicd/megatron-bridge
+
+  task_0:
+    script: common/megatron_bridge/quantize/quantize.sh
+    environment:
+      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - OUTPUT_DIR: <<global_vars.output_dir>>
+      - MEGATRON_SAVE_PATH: <<global_vars.output_dir>>/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-MLM
+      - EXPORT_QUANT_CFG: nvfp4
+      - CALIB_SIZE: "4"
+      - TP: "2"
+      - PP: "4"
+      - EP: "2"
+      - ETP: "1"
+      - TRUST_REMOTE_CODE: "true"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 2
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      time: "04:00:00"

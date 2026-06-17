@@ -1,0 +1,51 @@
+# Megatron-Bridge PTQ for nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16.
+#
+# Follows https://github.com/NVIDIA-NeMo/Nemotron/blob/main/docs/nemotron/ultra3/quantization.md:
+#   python examples/quantization/quantize.py \
+#     --hf-model-id $HF_MODEL \
+#     --export-quant-cfg $RECIPE_YAML \
+#     --megatron-save-path $MEGATRON_SAVE_PATH \
+#     --pp 9 --tp 8 --ep 8 --trust-remote-code
+#
+# 108-layer model. Doc requires --pp 9 (12 layers/stage) to fit calibration state.
+# World size = TP * PP = 8 * 9 = 72. Cluster shape: 18 nodes x 4 GPUs = 72 ranks.
+# Doc also recommends PYTORCH_ALLOC_CONF=expandable_segments:True for allocator headroom.
+#
+# The recipe YAML is the Super-NVFP4 max-calib config (verbatim path from the doc).
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16/megatron_bridge_ptq.yaml --yes
+
+job_name: Nemotron-3-Ultra-550B_megatron_bridge_PTQ
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Megatron-Bridge PTQ on Ultra-550B (super-nvfp4-max-calib): 18 nodes x 4 GPUs, TP=8 PP=9 EP=8"
+
+  global_vars:
+    output_dir: /cicd/megatron-bridge
+
+  task_0:
+    script: common/megatron_bridge/quantize/quantize.sh
+    environment:
+      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
+      - OUTPUT_DIR: <<global_vars.output_dir>>
+      - MEGATRON_SAVE_PATH: <<global_vars.output_dir>>/NVIDIA-Nemotron-3-Ultra-550B-A55B-super-nvfp4-max-calib
+      - EXPORT_QUANT_CFG: /opt/venv/lib/python3.12/site-packages/modelopt_recipes/models/Nemotron-3-Super-120B-A12B/super-nvfp4-max-calib.yaml
+      - TP: "8"
+      - PP: "9"
+      - EP: "8"
+      - ETP: "1"
+      - TRUST_REMOTE_CODE: "true"
+      - PYTORCH_ALLOC_CONF: "expandable_segments:True"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 18
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      time: "12:00:00"

@@ -1,0 +1,46 @@
+# Megatron-Bridge HF export for nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (NVFP4).
+#
+# Follows https://github.com/NVIDIA-NeMo/Nemotron/blob/main/docs/nemotron/super3/quantization.md:
+#   torchrun --nproc_per_node=16 examples/quantization/export.py \
+#     --hf-model-id $HF_MODEL --megatron-load-path $MEGATRON_SAVE_PATH \
+#     --export-dir $EXPORT_DIR --pp 8 --dtype bfloat16 --trust-remote-code
+#
+# Cluster shape: 2 nodes x 4 GPUs = 8 ranks (TP=1, PP=8, EP=1, ETP=1).
+# 88 layers / PP=8 = 11 layers/stage. The HF exporter does not gather TP-sharded
+# weights — TP is dropped to 1 for export.
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/megatron_bridge_export.yaml --yes
+
+job_name: Nemotron-3-Super-120B_megatron_bridge_export
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Megatron-Bridge HF export for Super-120B mamba_moe_nvfp4_conservative: 2 nodes x 4 GPUs, TP=1 PP=8"
+
+  global_vars:
+    output_dir: /cicd/megatron-bridge
+
+  task_0:
+    script: common/megatron_bridge/export/export.sh
+    environment:
+      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+      - MEGATRON_LOAD_PATH: <<global_vars.output_dir>>/NVIDIA-Nemotron-3-Super-120B-A12B-mamba_moe_nvfp4_conservative
+      - EXPORT_DIR: /cicd/export/NVIDIA-Nemotron-3-Super-120B-A12B-mamba_moe_nvfp4_conservative-HF
+      - TP: "1"
+      - PP: "8"
+      - EP: "1"
+      - ETP: "1"
+      - DTYPE: bfloat16
+      - TRUST_REMOTE_CODE: "true"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 2
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      time: "02:00:00"
