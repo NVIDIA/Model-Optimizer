@@ -73,7 +73,7 @@ def load_cpp_extension(
     else:
         if os.name == "nt":
             # Define USE_CUDA so PyTorch's compiled_autograd.h takes its Windows-safe branch;
-            # otherwise nvcc + MSVC fail with "error C2872: 'std': ambiguous symbol".
+            # otherwise, nvcc + MSVC fail with "error C2872: 'std': ambiguous symbol".
             # See https://github.com/pytorch/pytorch/issues/148317
             for key in ("extra_cflags", "extra_cuda_cflags"):
                 flags = list(load_kwargs.get(key, []))
