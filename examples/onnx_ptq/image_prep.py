@@ -63,6 +63,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.calibration_data_size < 1:
+        raise ValueError("--calibration_data_size must be >= 1")
 
     if args.model_name is not None:
         import timm  # optional dependency: only required when --model_name is set
@@ -89,12 +91,22 @@ def main():
 
     if os.path.isdir(args.imagenet_path):
         all_images = sorted(Path(args.imagenet_path, "train").rglob("*.JPEG"))
+        if len(all_images) < args.calibration_data_size:
+            raise ValueError(
+                f"Requested {args.calibration_data_size} images, but only "
+                f"{len(all_images)} found under {Path(args.imagenet_path, 'train')}"
+            )
         rng = np.random.default_rng(0)
         chosen = rng.choice(len(all_images), size=args.calibration_data_size, replace=False)
         images = [Image.open(all_images[i]).convert("RGB") for i in chosen]
     else:
         dataset = load_dataset(args.imagenet_path)
         images = dataset["train"][0 : args.calibration_data_size]["image"]
+        if len(images) < args.calibration_data_size:
+            raise ValueError(
+                f"Requested {args.calibration_data_size} images, but only {len(images)} "
+                f"available in '{args.imagenet_path}' train split"
+            )
 
     calib_tensor = np.stack([transforms(image).numpy() for image in images], axis=0)
     if args.fp16:
