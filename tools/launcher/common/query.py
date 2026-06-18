@@ -94,9 +94,7 @@ parser.add_argument(
 parser.add_argument("--data-split", type=str, default="train", help="HF dataset split")
 parser.add_argument("--save", type=str, default=None, help="path to store the generated output.")
 parser.add_argument("--num-shards", type=int, default=1000, help="number of shards.")
-parser.add_argument(
-    "--shard-id", type=int, default=None, help="single shard id to process."
-)
+parser.add_argument("--shard-id", type=int, default=None, help="single shard id to process.")
 parser.add_argument("--shard-id-begin", type=int, default=0, help="the shard id to start.")
 parser.add_argument(
     "--shard-id-step", type=int, default=1, help="the step that the shard id progress."
@@ -220,8 +218,10 @@ if args.save is not None:
     print(f"Create save dir: {args.save}")
     os.makedirs(args.save, exist_ok=True)
 
-shard_ids = [args.shard_id] if args.shard_id is not None else range(
-    args.shard_id_begin, args.num_shards, args.shard_id_step
+shard_ids = (
+    [args.shard_id]
+    if args.shard_id is not None
+    else range(args.shard_id_begin, args.num_shards, args.shard_id_step)
 )
 
 for shard_id in shard_ids:
