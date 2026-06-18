@@ -43,7 +43,7 @@ Overall: Puzzletron step 7/8 — MIP sweep (6 compression rates)
   Started:   08:05:30
   Finished:  08:30:38
   Elapsed:   25m 8s
-  Completed: 6/6 compression rates  (avg 4m 11s/rate)
+  Completed: 6/6 compression rates
   Remaining: done estimated
 
   Results:   /workspace/puzzle_dir/mip_sweep_results.csv
@@ -51,3 +51,43 @@ Overall: Puzzletron step 7/8 — MIP sweep (6 compression rates)
 
 While running, the report shows which rate is active, sub-step detail (MIP solver node count
 or validation batch progress), and an estimated time remaining based on completed rates.
+
+## Running the full pipeline
+
+To run all 8 pipeline steps (not just the MIP sweep):
+
+```text
+/puzzletron all 2
+```
+
+Check progress with:
+
+```text
+/puzzletron all progress
+```
+
+Example output while running:
+
+```text
+Overall: Puzzletron full pipeline (steps 1–8)
+────────────────────────────────────────────────────────────────────
+  Status      Step  Description                          Elapsed
+────────────────────────────────────────────────────────────────────
+  [DONE]            1/8: starting puzzletron pipeline      0m 0s
+  [DONE]            2/8: converting model to Puzzletron heterogeneous format (single-gpu)    0m 26s
+  [DONE]            3/8: scoring pruning activations (multi-gpu)     9m 9s
+  [DONE]            4/8: pruning the model and saving pruned checkpoints (single-gpu)    0m 57s
+  [DONE]            5/8: building replacement library and subblock statistics (single-gpu)    0m 26s
+  [RUNNING]         6/8: calculating one block scores (multi-gpu) (76/352 solutions)   27m 53s
+  [ ]               7/8: pending
+  [ ]               8/8: pending
+────────────────────────────────────────────────────────────────────
+  Started:   00:08:50
+  Finished:  00:47:41 (in progress)
+  Elapsed:   38m 51s
+  Completed: 5/8 steps
+  Remaining: 105m 38s estimated
+```
+
+Step 6 progress is tracked via completed `solution_N.json` files on disk for an accurate
+remaining estimate. Step 7 (MIP sweep) shows per-rate progress once it starts.
