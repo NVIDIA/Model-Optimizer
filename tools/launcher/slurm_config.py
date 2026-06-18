@@ -45,6 +45,7 @@ class SlurmConfig:
     container_mounts: Optional[list[str]] = None
     srun_args: Optional[list[str]] = None
     array: Optional[str] = None
+    requeue: bool = False
     nodes: int = 1
     ntasks_per_node: int = 1
     gpus_per_node: int = 1
@@ -74,6 +75,7 @@ def slurm_factory(
     ],
     srun_args: list[str] = ["--no-container-mount-home"],
     array: Optional[str] = None,
+    requeue: bool = False,
     time: str = "04:00:00",
     segment: Optional[int] = None,
 ) -> SlurmConfig:
@@ -91,6 +93,7 @@ def slurm_factory(
         container_mounts=container_mounts,
         srun_args=srun_args,
         array=array,
+        requeue=requeue,
         time=time,
         segment=segment,
     )

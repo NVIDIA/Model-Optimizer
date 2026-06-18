@@ -94,9 +94,15 @@ parser.add_argument(
 parser.add_argument("--data-split", type=str, default="train", help="HF dataset split")
 parser.add_argument("--save", type=str, default=None, help="path to store the generated output.")
 parser.add_argument("--num-shards", type=int, default=1000, help="number of shards.")
+parser.add_argument(
+    "--shard-id", type=int, default=None, help="single shard id to process."
+)
 parser.add_argument("--shard-id-begin", type=int, default=0, help="the shard id to start.")
 parser.add_argument(
     "--shard-id-step", type=int, default=1, help="the step that the shard id progress."
+)
+parser.add_argument(
+    "--num-samples", "--num_samples", type=int, default=None, help="maximum samples to process."
 )
 parser.add_argument("--num-proc", type=int, default=32, help="number of processes (concurrency).")
 parser.add_argument("--temperature", type=float, default=0.0, help="temperature.")
@@ -207,26 +213,40 @@ if os.path.isfile(args.data):
 else:
     dataset = load_dataset(args.data, split=args.data_split)
 
-if args.num_shards * 100 > len(dataset):
+if args.shard_id is None and args.num_shards * 100 > len(dataset):
     args.num_shards = max(1, min(16, len(dataset) // 100))
 
 if args.save is not None:
     print(f"Create save dir: {args.save}")
     os.makedirs(args.save, exist_ok=True)
 
-for shard_id in range(args.shard_id_begin, args.num_shards, args.shard_id_step):
-    file_path = args.save + f"/train-{shard_id + 1:05}-{args.num_shards:05}.jsonl"
+shard_ids = [args.shard_id] if args.shard_id is not None else range(
+    args.shard_id_begin, args.num_shards, args.shard_id_step
+)
 
-    if os.path.exists(file_path):
+for shard_id in shard_ids:
+    if args.shard_id is None:
+        file_path = args.save + f"/train-{shard_id + 1:05}-{args.num_shards:05}.jsonl"
+        done_path = f"{file_path}.done"
+    else:
+        file_path = args.save + f"/shard_{shard_id}.jsonl"
+        done_path = args.save + f"/shard_{shard_id}.done"
+
+    if os.path.exists(file_path) and os.path.exists(done_path):
         continue
 
     shard = dataset.shard(num_shards=args.num_shards, index=shard_id)
+    if args.num_samples is not None:
+        shard = shard.select(range(min(args.num_samples, len(shard))))
     print(len(shard), file_path)
 
+    num_proc = min(args.num_proc, len(shard))
     if shard_id % 2 == 0:
-        shard = shard.map(disable_thinking_column, num_proc=args.num_proc)
-    updated_shard = shard.map(synthesize, num_proc=args.num_proc)
+        shard = shard.map(disable_thinking_column, num_proc=num_proc)
+    updated_shard = shard.map(synthesize, num_proc=num_proc)
     updated_shard.to_json(file_path)
+    with open(done_path, "w") as done_file:
+        done_file.write("done\n")
     print(updated_shard[0])
 
     if early_termination:
