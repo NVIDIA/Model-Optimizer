@@ -40,6 +40,7 @@ Parse the second word of args.
 Run the following Bash command, substituting `<nproc_per_node>` with the parsed value:
 
 ```bash
+export PYTHONPATH=$PYTHONPATH:/workspace/Model-Optimizer && \
 torchrun --nproc_per_node <nproc_per_node> examples/puzzletron/main.py \
   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml \
   --mip-only 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
