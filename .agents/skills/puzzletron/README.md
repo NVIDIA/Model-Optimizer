@@ -10,19 +10,19 @@ For full environment setup, model configuration, and algorithm details see
 
 Run `/puzzletron` with no arguments to see available commands.
 
-## Running the MIP sweep
+## Running the MIP step
 
-Start the sweep by telling the agent how many GPUs per node to use:
+Start the MIP step by telling the agent how many GPUs per node to use:
 
 ```text
-/puzzletron mip_sweep 4
+/puzzletron mip 4
 ```
 
 Output is streamed live and also written to `./log.txt`. While it runs (or after it finishes),
 check progress with:
 
 ```text
-/puzzletron mip_sweep progress
+/puzzletron mip progress
 ```
 
 Example output when complete:

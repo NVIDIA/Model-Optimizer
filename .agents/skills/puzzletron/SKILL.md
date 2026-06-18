@@ -11,15 +11,15 @@ license: Apache-2.0
 **STEP 1 — Check args before doing anything else. This is MANDATORY.**
 
 - If args are **empty**, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
-- If the first word of args does **not exactly match** `mip_sweep` or `all`, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
+- If the first word of args does **not exactly match** `mip` or `all`, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
 
 ---
 
 **Puzzletron** — end-to-end workflow for model pruning and MIP-based optimization.
 
 Available commands:
-- `mip_sweep <nproc_per_node>` — Run the MIP sweep (nproc_per_node: number of GPUs per node)
-- `mip_sweep progress` — Show live MIP sweep progress with timing summary
+- `mip <nproc_per_node>` — Run the MIP step (nproc_per_node: number of GPUs per node)
+- `mip progress` — Show live MIP progress with timing summary
 - `all <nproc_per_node>` — Run the full Puzzletron pipeline (nproc_per_node: number of GPUs per node)
 - `all progress` — Show live full pipeline progress with timing summary
 
@@ -258,17 +258,17 @@ if results_match:
 PYEOF
 ```
 
-## Command: mip_sweep
+## Command: mip
 
 Parse `nproc_per_node` from args using either positional or flag syntax:
-- Positional: second word is a number, e.g. `mip_sweep 2`
-- Flag: `--nproc_per_node <value>` anywhere in args, e.g. `mip_sweep --nproc_per_node 2`
+- Positional: second word is a number, e.g. `mip 2`
+- Flag: `--nproc_per_node <value>` anywhere in args, e.g. `mip --nproc_per_node 2`
 
-- If the second word is exactly `progress`, execute the **mip_sweep progress** sub-command below.
+- If the second word is exactly `progress`, execute the **mip progress** sub-command below.
 - If no `nproc_per_node` value can be found, ask the user: "Please provide the number of GPUs per node (nproc_per_node)." and **STOP**.
-- Otherwise use the parsed value and run the sweep.
+- Otherwise use the parsed value and run the MIP step.
 
-### mip_sweep \<nproc_per_node\>
+### mip \<nproc_per_node\>
 
 Run the following Bash command, substituting `<nproc_per_node>` with the parsed value:
 
@@ -281,7 +281,7 @@ torchrun --nproc_per_node <nproc_per_node> examples/puzzletron/main.py \
 
 Stream output to the user as it arrives. When the command finishes, report the exit code.
 
-### mip_sweep progress
+### mip progress
 
 Run the following Python script verbatim. Do not modify it. Present the output to the user wrapped in a fenced code block (``` ... ```).
 
@@ -295,7 +295,7 @@ try:
     lines = open(LOG).readlines()
     text = ''.join(lines)
 except FileNotFoundError:
-    print("No log.txt found. Run /puzzletron mip_sweep first.")
+    print("No log.txt found. Run /puzzletron mip first.")
     sys.exit(0)
 
 def norm(r): return str(float(r))
