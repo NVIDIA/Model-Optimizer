@@ -39,4 +39,5 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 8
       container: vllm/vllm-openai:latest
+      array: "0-15"
       requeue: true

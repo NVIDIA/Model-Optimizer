@@ -214,6 +214,19 @@ else:
 if args.shard_id is None and args.num_shards * 100 > len(dataset):
     args.num_shards = max(1, min(16, len(dataset) // 100))
 
+# Apply --num-samples globally BEFORE sharding so the cap bounds total output,
+# not per-shard output (coderabbit:query.py:241).
+if args.num_samples is not None:
+    dataset = dataset.select(range(min(args.num_samples, len(dataset))))
+
+# Validate --shard-id once at the interface boundary (coderabbit:query.py:225).
+# dataset.shard(index=...) raises a confusing ValueError on out-of-range ids;
+# fail loud with a clear message instead.
+if args.shard_id is not None and not (0 <= args.shard_id < args.num_shards):
+    parser.error(
+        f"--shard-id {args.shard_id} out of range [0, {args.num_shards})"
+    )
+
 if args.save is not None:
     print(f"Create save dir: {args.save}")
     os.makedirs(args.save, exist_ok=True)
@@ -236,8 +249,6 @@ for shard_id in shard_ids:
         continue
 
     shard = dataset.shard(num_shards=args.num_shards, index=shard_id)
-    if args.num_samples is not None:
-        shard = shard.select(range(min(args.num_samples, len(shard))))
     print(len(shard), file_path)
 
     num_proc = min(args.num_proc, len(shard))
