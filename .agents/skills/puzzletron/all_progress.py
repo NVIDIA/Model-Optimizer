@@ -30,11 +30,6 @@ except FileNotFoundError:
     sys.exit(0)
 
 
-def norm(r):
-    """Normalize a compression rate to a canonical float string."""
-    return str(float(r))
-
-
 def fmt(s):
     """Format seconds as 'Xm Ys', or '—' if None."""
     return f"{int(s) // 60}m {int(s) % 60}s" if s is not None else "—"
@@ -64,11 +59,8 @@ seen_steps = {e[0]: (e[2], e[3]) for e in step_events}
 last_step_num = max(seen_steps.keys()) if seen_steps else 0
 
 pipeline_complete_ts = None
-for line in lines:
-    ts = get_ts(line)
-    if ts and "sweep.py:292" in line:
-        pipeline_complete_ts = ts
-        break
+if last_step_num == total_steps and total_steps in seen_steps:
+    pipeline_complete_ts = seen_steps[total_steps][1]
 
 cur_detail = ""
 step_remaining = None
@@ -94,23 +86,6 @@ elif cbc_matches:
     nodes, secs = cbc_matches[-1]
     cur_detail = f" (MIP solver: {int(nodes):,} nodes, {float(secs):.1f}s)"
 
-rates_match = re.search(r"Compression rates: \[(.*?)\]", text)
-all_rates = [norm(r.strip()) for r in rates_match.group(1).split(",")] if rates_match else []
-rate_start = {}
-for line in lines:
-    if "sweep.py:258" in line:
-        m = re.search(r"compression_rate=([\d.]+)", line)
-        if m:
-            r = norm(m.group(1))
-            if r in all_rates and r not in rate_start:
-                rate_start[r] = get_ts(line)
-rate_done = set()
-for i, r in enumerate(all_rates[:-1]):
-    if all_rates[i + 1] in rate_start:
-        rate_done.add(r)
-if pipeline_complete_ts and all_rates and all_rates[-1] in rate_start:
-    rate_done.add(all_rates[-1])
-
 pipeline_start = step_events[0][3] if step_events else None
 end_ts = pipeline_complete_ts or now
 total_elapsed = int((end_ts - pipeline_start).total_seconds()) if pipeline_start else 0
@@ -125,20 +100,6 @@ if not pipeline_complete_ts and cur_step_start_ts:
     elif batch_matches and int(cur_b) > 0 and int(cur_b) < int(total_b):
         rate_per_batch = cur_step_elapsed / int(cur_b)
         step_remaining = rate_per_batch * (int(total_b) - int(cur_b))
-    elif all_rates and last_step_num == 7:
-        done_count_r = len(rate_done)
-        remaining_count_r = len(all_rates) - done_count_r
-        rate_elapsed = {}
-        for i, r in enumerate(all_rates):
-            if r not in rate_start:
-                continue
-            if i + 1 < len(all_rates) and all_rates[i + 1] in rate_start:
-                rate_elapsed[r] = int(
-                    (rate_start[all_rates[i + 1]] - rate_start[r]).total_seconds()
-                )
-        avg_r = sum(rate_elapsed.values()) / len(rate_elapsed) if rate_elapsed else None
-        if avg_r and remaining_count_r:
-            step_remaining = avg_r * remaining_count_r
 
 print(f"\nOverall: Puzzletron full pipeline (steps 1–{total_steps})")  # noqa: RUF001
 print(DIV)
@@ -155,8 +116,6 @@ for i, (snum, (sdesc, sts)) in enumerate(step_ts_list):
     detail = ""
     if is_last and not is_done:
         detail = cur_detail
-        if snum == 7 and all_rates:
-            detail = f" ({len(rate_done)}/{len(all_rates)} rates done)"
     label = f"{snum}/{total_steps}: {sdesc}{detail}"
     status = "[DONE]" if is_done else "[RUNNING]"
     print(
@@ -167,13 +126,6 @@ for snum in range(last_step_num + 1, total_steps + 1):
     print(f"  {'[ ]':<10}  {'':<4}  {f'{snum}/{total_steps}: pending':<34}  {'':>8}")
 
 print(DIV)
-if all_rates and last_step_num >= 7:
-    print(f"  MIP rates: {len(rate_done)}/{len(all_rates)} done", end="")
-    running_rate = next((r for r in all_rates if r in rate_start and r not in rate_done), None)
-    if running_rate:
-        print(f"  (running: {running_rate})", end="")
-    print()
-
 done_steps = len([s for s in seen_steps if s != last_step_num or pipeline_complete_ts])
 step_durations = []
 for i, (snum, (sdesc, sts)) in enumerate(step_ts_list):
@@ -184,29 +136,12 @@ for i, (snum, (sdesc, sts)) in enumerate(step_ts_list):
         step_durations.append(int((next_ts - sts).total_seconds()))
 avg_step_s = sum(step_durations) / len(step_durations) if step_durations else None
 
-CONFIG_PATH = (
-    "examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml"
-)
-sweep_enabled = True
-sweep_n_rates = 6
-try:
-    cfg_text = open(CONFIG_PATH).read()
-    _en_m = re.search(r"sweep:\s*\n\s+enabled:\s*(true|false)", cfg_text)
-    if _en_m:
-        sweep_enabled = _en_m.group(1) == "true"
-    _rates_m = re.search(r"memory_compression_rates:\s*\[([^\]]+)\]", cfg_text)
-    if _rates_m:
-        sweep_n_rates = len(_rates_m.group(1).split(","))
-except Exception:
-    pass
-effective_n_rates = len(all_rates) if all_rates else sweep_n_rates
-RATE_S = 250  # ~4m 10s per compression rate (historical)
-
 
 def step_est(snum):
     """Estimate duration in seconds for a pending pipeline step."""
     if snum == 7:
-        return (RATE_S * effective_n_rates) if sweep_enabled else 120
+        # Step 7 in the full pipeline is a single MIP solve (~5m), not a sweep
+        return 296
     elif snum == 8:
         return 60
     return avg_step_s or 0
@@ -233,5 +168,7 @@ print(f"  Elapsed:   {fmt(total_elapsed)}")
 print(f"  Completed: {done_steps}/{total_steps} steps")
 print(f"  Remaining: {est_rem} estimated")
 results_match = re.search(r"Results written to: (\S+)", text)
+if not results_match:
+    results_match = re.search(r"\[run_puzzle\.py:335\]\s+(\S+)", text)
 if results_match:
     print(f"\n  Results:   {results_match.group(1)}")
