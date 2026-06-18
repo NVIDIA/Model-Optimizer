@@ -78,15 +78,15 @@ Overall: Puzzletron full pipeline (steps 1–8)
   [DONE]            3/8: scoring pruning activations (multi-gpu)     9m 9s
   [DONE]            4/8: pruning the model and saving pruned checkpoints (single-gpu)    0m 57s
   [DONE]            5/8: building replacement library and subblock statistics (single-gpu)    0m 26s
-  [RUNNING]         6/8: calculating one block scores (multi-gpu) (76/352 solutions)   27m 53s
+  [RUNNING]         6/8: calculating one block scores (multi-gpu) (270/352 solutions)   100m 6s
   [ ]               7/8: pending
   [ ]               8/8: pending
 ────────────────────────────────────────────────────────────────────
   Started:   00:08:50
-  Finished:  00:47:41 (in progress)
-  Elapsed:   38m 51s
+  Finished:  01:59:54 (in progress)
+  Elapsed:   111m 4s
   Completed: 5/8 steps
-  Remaining: 105m 38s estimated
+  Remaining: 56m 24s estimated
 ```
 
 Step 6 progress is tracked via completed `solution_N.json` files on disk for an accurate
