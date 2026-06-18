@@ -97,6 +97,8 @@ if not all_rates:
     print(f"  Elapsed:   {fmt(total_elapsed)}")
     print(f"  Remaining: {'done' if complete_ts else 'calculating...'}")
     results_match = re.search(r"Results written to: (\S+)", text)
+    if not results_match:
+        results_match = re.search(r"\[run_puzzle\.py:335\]\s+(\S+)", text)
     if results_match:
         print(f"\n  Results:   {results_match.group(1)}")
     sys.exit(0)
@@ -157,16 +159,16 @@ print(f"\nOverall: Puzzletron step 7/8 — MIP sweep ({len(all_rates)} compressi
 print(DIV)
 print(f"  {'Status':<10}  {'Phase':<32}  {'Elapsed':>8}")
 print(DIV)
-print(f"  [DONE]      {'Prep (teacher memory + rate list)':<32}  {'<1s':>8}")
+print(f"  {'[DONE]':<10}  {'Prep (teacher memory + rate list)':<32}  {'<1s':>8}")
 for r in all_rates:
     if r not in rate_start:
-        print(f"  [ ]         {f'compression_rate={r}':<32}  {'pending':>8}")
+        print(f"  {'[ ]':<10}  {f'compression_rate={r}':<32}  {'pending':>8}")
     elif r == running_rate:
         print(
-            f"  [RUNNING]   {f'compression_rate={r}{cur_detail}':<32}  {fmt(rate_elapsed.get(r)):>8}"
+            f"  {'[RUNNING]':<10}  {f'compression_rate={r}{cur_detail}':<32}  {fmt(rate_elapsed.get(r)):>8}"
         )
     else:
-        print(f"  [DONE]      {f'compression_rate={r}':<32}  {fmt(rate_elapsed.get(r)):>8}")
+        print(f"  {'[DONE]':<10}  {f'compression_rate={r}':<32}  {fmt(rate_elapsed.get(r)):>8}")
 print(DIV)
 finished_str = (
     complete_ts.strftime("%H:%M:%S") if complete_ts else now.strftime("%H:%M:%S") + " (in progress)"
