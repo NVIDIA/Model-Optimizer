@@ -211,16 +211,41 @@ for i, (snum, (sdesc, sts)) in enumerate(step_ts_list):
         step_durations.append(int((next_ts - sts).total_seconds()))
 if step_durations:
     avg_step_s = sum(step_durations) / len(step_durations)
-remaining_steps_after = total_steps - last_step_num  # steps not yet started after current
+
+# Parse config for sweep settings to estimate step 7 duration
+CONFIG_PATH = 'examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml'
+sweep_enabled = True
+sweep_n_rates = 6
+try:
+    cfg_text = open(CONFIG_PATH).read()
+    _en_m = re.search(r'sweep:\s*\n\s+enabled:\s*(true|false)', cfg_text)
+    if _en_m:
+        sweep_enabled = _en_m.group(1) == 'true'
+    _rates_m = re.search(r'memory_compression_rates:\s*\[([^\]]+)\]', cfg_text)
+    if _rates_m:
+        sweep_n_rates = len(_rates_m.group(1).split(','))
+except Exception:
+    pass
+# Prefer actual rate count from log if step 7 has already started
+effective_n_rates = len(all_rates) if all_rates else sweep_n_rates
+RATE_S = 250  # ~4m 10s per compression rate (historical)
+
+def step_est(snum):
+    if snum == 7:
+        return (RATE_S * effective_n_rates) if sweep_enabled else 120
+    elif snum == 8:
+        return 60
+    return avg_step_s or 0
+
 if pipeline_complete_ts:
     est_rem = "done"
 elif step_remaining is not None:
-    future_est = (avg_step_s * remaining_steps_after) if avg_step_s else 0
-    est_rem = fmt(step_remaining + future_est)
-elif avg_step_s:
-    est_rem = fmt(avg_step_s * (remaining_steps_after + 1))
+    future_s = sum(step_est(s) for s in range(last_step_num + 1, total_steps + 1))
+    est_rem = fmt(step_remaining + future_s)
 else:
-    est_rem = "calculating..."
+    cur_s = step_est(last_step_num)
+    future_s = cur_s + sum(step_est(s) for s in range(last_step_num + 1, total_steps + 1))
+    est_rem = fmt(future_s) if (cur_s or future_s) else "calculating..."
 
 print(f"  Started:   {pipeline_start.strftime('%H:%M:%S') if pipeline_start else '—'}")
 print(f"  Finished:  {pipeline_complete_ts.strftime('%H:%M:%S') if pipeline_complete_ts else now.strftime('%H:%M:%S') + ' (in progress)'}")
