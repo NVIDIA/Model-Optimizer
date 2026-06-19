@@ -56,11 +56,7 @@ dflash:
   dflash_num_anchors: 512
   dflash_use_torch_compile: false
   dflash_self_logit_distillation: true
-  # Position-loss weighting defaults to D-PACE (dynamic, confidence-derived).
-  dflash_dpace_alpha: 0.5
-  # To use the static exponential decay instead, uncomment:
-  #   dflash_loss_objective: decay
-  #   dflash_loss_decay_factor: 4.0   # gamma: 7 for block_size=16, 5 for 10, 4 for 8
+  dflash_loss_decay_factor: 4.0
   dflash_architecture_config:
     num_hidden_layers: 5
     # mask_token_id: auto-detected from model vocab (override for specific models)
