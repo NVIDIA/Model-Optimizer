@@ -122,8 +122,20 @@ for i, (snum, (sdesc, sts)) in enumerate(step_ts_list):
         f"  {status:<10}  {'':<4}  {label:<34}  {fmt(elapsed) if elapsed is not None else '—':>8}"
     )
 
+_STEP_NAMES = {
+    1: "starting puzzletron pipeline",
+    2: "converting model to Puzzletron heterogeneous format (single-gpu)",
+    3: "scoring pruning activations (multi-gpu)",
+    4: "pruning the model and saving pruned checkpoints (single-gpu)",
+    5: "building replacement library and subblock statistics (single-gpu)",
+    6: "calculating one block scores (multi-gpu)",
+    7: "running MIP and realizing models (multi-gpu)",
+    8: "puzzletron pipeline completed (multi-gpu)",
+}
+
 for snum in range(last_step_num + 1, total_steps + 1):
-    print(f"  {'[ ]':<10}  {'':<4}  {f'{snum}/{total_steps}: pending':<34}  {'':>8}")
+    desc = _STEP_NAMES.get(snum, "pending")
+    print(f"  {'[ ]':<10}  {'':<4}  {f'{snum}/{total_steps}: {desc}':<34}  {'':>8}")
 
 print(DIV)
 done_steps = len([s for s in seen_steps if s != last_step_num or pipeline_complete_ts])

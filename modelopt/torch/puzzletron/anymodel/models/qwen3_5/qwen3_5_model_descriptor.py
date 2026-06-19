@@ -114,23 +114,48 @@ class Qwen3_5ModelDescriptor(ModelDescriptor):
     def get_weight_groups(
         cls, layer_names: Iterable[str], num_hidden_layers: int
     ) -> Dict[str, List[str]]:
-        """Filter out vision/MTP weights before grouping."""
+        """Filter out vision/MTP weights before grouping.
+
+        get_weight_groups is called from two places with different name formats:
+        - convert_model_weights: original VLM checkpoint names (model.language_model.*)
+        - _save_checkpoint: already-converted state dict names (model.*)
+
+        Predicates use model.* format. When original names are detected we remap
+        internally for matching but restore originals in the returned groups so
+        that the param_to_file lookup in convert_model_weights still works.
+        """
+        _lm_prefix = "model.language_model."
         text_names = [n for n in layer_names if not n.startswith(_NON_TEXT_PREFIXES)]
-        return super().get_weight_groups(text_names, num_hidden_layers)
+
+        if not any(n.startswith(_lm_prefix) for n in text_names):
+            # Already-converted names — pass through directly.
+            return super().get_weight_groups(text_names, num_hidden_layers)
+
+        # Original checkpoint names: remap to model.* for predicate matching,
+        # then un-remap so returned groups contain the original names.
+        name_map: Dict[str, str] = {}  # remapped → original
+        remapped = []
+        for n in text_names:
+            r = "model." + n[len(_lm_prefix) :] if n.startswith(_lm_prefix) else n
+            name_map[r] = n
+            remapped.append(r)
+
+        groups_remapped = super().get_weight_groups(remapped, num_hidden_layers)
+        return {group: [name_map[r] for r in names] for group, names in groups_remapped.items()}
 
     @staticmethod
     def layer_name_predicates(num_layers: int) -> Dict[str, re.Pattern]:
-        # Predicates match ORIGINAL checkpoint names (model.language_model.*).
-        # convert_weight_name remaps them to model.* after grouping.
+        # Predicates use converted model.* names (matching Qwen3_5ForCausalLM).
+        # get_weight_groups normalises original checkpoint names before matching.
         layer_name_patterns = {
-            "embeddings": re.compile(r"^model\.language_model\.embed_tokens\.weight$"),
-            "lm_head": re.compile(r"^(model\.language_model\.norm\.weight|lm_head\.weight)$"),
+            "embeddings": re.compile(r"^model\.embed_tokens\.weight$"),
+            "lm_head": re.compile(r"^(model\.norm\.weight|lm_head\.weight)$"),
         }
 
         def build_ffn_predicates() -> Dict[str, re.Pattern]:
             return {
                 f"block_{layer_idx}_ffn": re.compile(
-                    rf"^model\.language_model\.layers\.{layer_idx}\.(post_attention_layernorm\.weight"
+                    rf"^model\.layers\.{layer_idx}\.(post_attention_layernorm\.weight"
                     r"|mlp\.up_proj\.weight"
                     r"|mlp\.gate_proj\.weight"
                     r"|mlp\.down_proj\.weight)$"
@@ -141,7 +166,7 @@ class Qwen3_5ModelDescriptor(ModelDescriptor):
         def build_attention_predicates() -> Dict[str, re.Pattern]:
             return {
                 f"block_{layer_idx}_attention": re.compile(
-                    rf"^model\.language_model\.layers\.{layer_idx}\.(input_layernorm\.weight"
+                    rf"^model\.layers\.{layer_idx}\.(input_layernorm\.weight"
                     # full_attention (Qwen3_5Attention) weights
                     r"|self_attn\.q_proj\.weight"
                     r"|self_attn\.k_proj\.weight"

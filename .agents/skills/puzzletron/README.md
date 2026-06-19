@@ -43,8 +43,8 @@ Overall: Puzzletron full pipeline (steps 1–8)
   [DONE]            4/8: pruning the model and saving pruned checkpoints (single-gpu)    0m 57s
   [DONE]            5/8: building replacement library and subblock statistics (single-gpu)    0m 26s
   [RUNNING]         6/8: calculating one block scores (multi-gpu) (270/352 solutions)   100m 6s
-  [ ]               7/8: pending
-  [ ]               8/8: pending
+  [ ]               7/8: running MIP and realizing models (multi-gpu)
+  [ ]               8/8: puzzletron pipeline completed (multi-gpu)
 ────────────────────────────────────────────────────────────────────
   Started:   00:08:50
   Finished:  01:59:54 (in progress)
