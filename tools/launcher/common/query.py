@@ -223,9 +223,7 @@ if args.num_samples is not None:
 # dataset.shard(index=...) raises a confusing ValueError on out-of-range ids;
 # fail loud with a clear message instead.
 if args.shard_id is not None and not (0 <= args.shard_id < args.num_shards):
-    parser.error(
-        f"--shard-id {args.shard_id} out of range [0, {args.num_shards})"
-    )
+    parser.error(f"--shard-id {args.shard_id} out of range [0, {args.num_shards})")
 
 if args.save is not None:
     print(f"Create save dir: {args.save}")
