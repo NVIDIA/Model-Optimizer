@@ -141,6 +141,15 @@ class TestDPaceWeights:
             expected[..., j] = cum[..., j:].sum(dim=-1)
         return expected
 
+    def test_weights_match_hand_computed(self):
+        """Pin Eq.7-8 to a hand-worked example, independent of the implementation.
+
+        conf=[0.8, 0.5], alpha=0.5 -> q~=[0.9, 0.75] -> prefix=[0.9, 0.675]
+        -> w=[0.9+0.675, 0.675]=[1.575, 0.675].
+        """
+        weights = _dpace_position_weights(torch.tensor([[0.8, 0.5]]), alpha=0.5)
+        assert torch.allclose(weights, torch.tensor([[1.575, 0.675]]), atol=1e-6)
+
     def test_weights_match_paper_formula(self):
         """w_j = sum_{m>=j} prod_{i<=m} q~_i with q~_i = (1-a)q_i + a (Eq.7-8)."""
         alpha = 0.5

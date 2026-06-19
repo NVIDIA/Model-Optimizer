@@ -163,6 +163,14 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    @model_validator(mode="after")
+    def _check_dpace_alpha(self) -> "DFlashConfig":
+        # Validate at construction regardless of the active objective, so a bad alpha
+        # is rejected even if it only becomes active after a later objective override.
+        if not 0.0 < self.dflash_dpace_alpha <= 1.0:
+            raise ValueError(f"dflash_dpace_alpha must be in (0, 1], got {self.dflash_dpace_alpha}")
+        return self
+
 
 class MedusaConfig(ModeloptBaseConfig):
     """Medusa config."""
