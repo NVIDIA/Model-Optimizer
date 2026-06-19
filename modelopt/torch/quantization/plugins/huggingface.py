@@ -864,9 +864,20 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     Verified compatible models: Mixtral, Qwen2-MoE, Qwen3-MoE, Qwen3.5-MoE,
     DeepSeek-V3, Jamba, OLMoE.
 
-    Limitation: only works when ``experts_implementation="eager"`` (default).
-    ``batched_mm`` / ``grouped_mm`` backends use ``torch.bmm`` /
-    ``torch._grouped_mm`` instead of ``F.linear`` and are not intercepted.
+    Backends: both the ``eager`` (per-expert ``F.linear``) and ``grouped_mm``
+    (``transformers.integrations.moe._grouped_linear`` →
+    ``torch._grouped_mm`` / ``torch.nn.functional.grouped_mm`` / fallback)
+    forwards are intercepted. The same per-expert weight quantizers and shared
+    input quantizers are used for both, so calibration in either backend yields
+    an identical exported checkpoint. Only one backend's hook fires per forward
+    (selected by ``config._experts_implementation``), so installing both is safe.
+
+    Limitation: the ``grouped_mm`` path assumes the non-transposed weight layout
+    ``(num_experts, out_dim, in_dim)`` used by all standard fused experts. The
+    transposed layout (e.g. GptOss, which has its own quantized wrapper) is not
+    handled here. ``batched_mm`` (``torch.bmm``) and ``sonicmoe`` (opaque CUDA
+    kernel) backends are not intercepted; ``normalize_experts_impl_on_the_fly``
+    redirects them to ``grouped_mm`` before calibration.
     """
 
     def _get_expert_idx_from_gate_up(self, weight: torch.Tensor) -> int:
@@ -899,6 +910,27 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         self._register_temp_attribute("_down_proj_linear", False)
         self._register_temp_attribute("_current_expert_idx", 0)
+        # Cumulative tokens-per-expert offsets of the current grouped_mm forward,
+        # stashed so local-Hessian capture can split the expert-sorted batch.
+        self._register_temp_attribute("_grouped_offs", None)
+
+    @property
+    def _running_grouped_mm(self) -> bool:
+        """Whether this module's forward dispatches to the ``grouped_mm`` backend."""
+        cfg = getattr(self, "config", None)
+        return getattr(cfg, "_experts_implementation", None) == "grouped_mm"
+
+    def _quantize_grouped_weight(self, weight: torch.Tensor, quantizers: nn.ModuleList):
+        """Fake-quantize a fused 3-D weight ``(num_experts, out, in)`` per expert.
+
+        Each expert slice passes through its own weight quantizer (collecting
+        ``amax`` during calibration, fake-quantizing afterwards), matching the
+        eager per-expert ``F.linear`` semantics. Returns ``weight`` untouched when
+        every quantizer is disabled so passthrough stays exact (and cheap).
+        """
+        if all(not q.is_enabled for q in quantizers):
+            return weight
+        return torch.stack([quantizers[idx](weight[idx]) for idx in range(self.num_experts)], dim=0)
 
     @property
     def functionals_to_replace(self):
@@ -920,9 +952,45 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             self._down_proj_linear = not self._down_proj_linear
             return _orig_linear(input, weight, bias)
 
-        return [
-            (torch.nn.functional, "linear", _quantized_linear),
-        ]
+        replacements: list[tuple] = [(torch.nn.functional, "linear", _quantized_linear)]
+
+        # grouped_mm backend: HF's grouped_mm_experts_forward calls the module-level
+        # _grouped_linear exactly twice (gate_up then down) with the FULL 3-D weight
+        # in the same (num_experts, out, in) layout as eager F.linear, so the same
+        # per-expert weight quantizers / shared input quantizers apply. Only one
+        # backend's hook fires per forward, so patching both F.linear and
+        # _grouped_linear is safe.
+        try:
+            import transformers.integrations.moe as _moe
+        except ImportError:
+            _moe = None
+        if _moe is not None and hasattr(_moe, "_grouped_linear"):
+            _orig_grouped_linear = _moe._grouped_linear
+
+            def _quantized_grouped_linear(input, weight, offs, bias=None, is_transposed=False):
+                assert not is_transposed, (
+                    "_QuantFusedExperts grouped_mm quantization only supports the "
+                    "non-transposed (num_experts, out_dim, in_dim) weight layout."
+                )
+                # Recorded before quantizing input so the local-Hessian forward
+                # pre-hook on the input quantizer can split the expert-sorted batch.
+                self._grouped_offs = offs
+                if self._down_proj_linear:
+                    input = self.down_proj_input_quantizer(input)
+                    weight = self._quantize_grouped_weight(weight, self.down_proj_weight_quantizers)
+                else:
+                    input = self.gate_up_proj_input_quantizer(input)
+                    weight = self._quantize_grouped_weight(
+                        weight, self.gate_up_proj_weight_quantizers
+                    )
+                self._down_proj_linear = not self._down_proj_linear
+                return _orig_grouped_linear(
+                    input, weight, offs, bias=bias, is_transposed=is_transposed
+                )
+
+            replacements.append((_moe, "_grouped_linear", _quantized_grouped_linear))
+
+        return replacements
 
     def forward(self, *args, **kwargs):
         self._down_proj_linear = False
@@ -1516,36 +1584,45 @@ def register_fused_experts_on_the_fly(model):
             QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantFusedExperts)
 
 
-def force_eager_experts_impl_on_the_fly(model):
-    """Force HF fused-experts modules onto the eager ``F.linear``-based forward.
+def normalize_experts_impl_on_the_fly(model):
+    """Redirect HF fused-experts modules onto a quantization-supported backend.
 
     HF transformers 5.0+ decorates fused-experts forwards with
-    ``@use_experts_implementation``, which may dispatch to ``torch._grouped_mm``
-    or ``torch.bmm`` backends. Those backends bypass ``F.linear`` and so bypass
-    ``_QuantFusedExperts``'s input/weight quantizer hooks — calibration silently
-    does nothing, no ``input_scale`` / ``amax`` is collected, and the exported
-    checkpoint produces garbage at inference.
+    ``@use_experts_implementation``, which dispatches on
+    ``config._experts_implementation``. ``_QuantFusedExperts`` intercepts the
+    ``eager`` (per-expert ``F.linear``) and ``grouped_mm``
+    (``transformers.integrations.moe._grouped_linear``) forwards. The remaining
+    backends — ``batched_mm`` (``torch.bmm``), ``sonicmoe`` (opaque CUDA kernel),
+    ``kernels``/hub, etc. — bypass those hooks, so calibration silently collects
+    nothing and the exported checkpoint produces garbage at inference.
 
-    Sets ``config._experts_implementation = "eager"`` on the model config (and
-    recursively on ``text_config`` / ``vision_config`` / ``audio_config`` /
-    ``speech_config``) whenever a fused-experts module is present.
+    To avoid that while keeping the fast grouped path, this redirects any
+    unsupported backend to ``grouped_mm`` (which has a CPU / old-HW fallback, so
+    it is universally runnable). ``eager``, ``grouped_mm`` and the unset/``None``
+    default (which dispatches to the model's eager ``F.linear`` forward) are left
+    untouched. Applied to the model config and recursively to
+    ``text_config`` / ``vision_config`` / ``audio_config`` / ``speech_config``
+    whenever a fused-experts module is present.
     """
     if not any(_is_fused_experts_module(m) for m in model.modules()):
         return
 
     nested_cfg_attrs = ("text_config", "vision_config", "audio_config", "speech_config")
+    # Backends already intercepted by _QuantFusedExperts (None => eager F.linear forward).
+    supported_impls = (None, "eager", "grouped_mm")
 
-    def _force(cfg):
+    def _normalize(cfg):
         if cfg is None:
             return
         if hasattr(cfg, "_experts_implementation"):
-            cfg._experts_implementation = "eager"
+            if cfg._experts_implementation not in supported_impls:
+                cfg._experts_implementation = "grouped_mm"
         for sub in nested_cfg_attrs:
             if hasattr(cfg, sub):
-                _force(getattr(cfg, sub))
+                _normalize(getattr(cfg, sub))
 
     if hasattr(model, "config"):
-        _force(model.config)
+        _normalize(model.config)
 
 
 def _is_supported_hf_model(model):
@@ -1775,7 +1852,7 @@ CUSTOM_MODEL_PLUGINS.update(
         register_dbrx_moe_on_the_fly,
         register_step3p5_moe_on_the_fly,
         register_fused_experts_on_the_fly,
-        force_eager_experts_impl_on_the_fly,
+        normalize_experts_impl_on_the_fly,
         register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,

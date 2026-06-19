@@ -746,6 +746,33 @@ def _register_local_hessian_input_hooks(model, name_to_module, capture, block_si
 
         return _expert_hook
 
+    def _make_grouped_expert_hook(expert_module, weight_name, quantizers, enabled):
+        """Per-expert capture for the grouped_mm backend.
+
+        ``grouped_mm_experts_forward`` feeds the input quantizer a single
+        expert-sorted batch ``(S, cin)`` rather than one call per expert, so we
+        split it back into per-expert chunks using ``_grouped_offs`` (cumulative
+        tokens-per-expert, stashed by the _QuantFusedExperts grouped interceptor).
+        Rows beyond ``offs[-1]`` (EP sentinels) belong to no expert and are skipped.
+        """
+
+        def _expert_hook(_input_quantizer, args):
+            if not args:
+                return
+            offs = expert_module._grouped_offs
+            if offs is None:
+                return
+            x = args[0]
+            weight = getattr(expert_module, weight_name)
+            start = 0
+            for idx, end in enumerate(offs.tolist()):
+                if end > start:
+                    if idx in enabled:
+                        capture(quantizers[idx], weight[idx], x[start:end])
+                    start = end
+
+        return _expert_hook
+
     for name, module in name_to_module.items():
         if is_quantized_linear(module) and isinstance(module.weight_quantizer, TensorQuantizer):
             with enable_weight_access_and_writeback(module, model, name_to_module):
@@ -784,9 +811,16 @@ def _register_local_hessian_input_hooks(model, name_to_module, capture, block_si
                     # Snapshot which experts are enabled now, before the caching forward silences
                     # all weight quantizers — so we don't capture (and discard) disabled experts.
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
+                    # grouped_mm feeds one expert-sorted batch per projection; eager feeds one
+                    # call per expert keyed by _current_expert_idx.
+                    make_hook = (
+                        _make_grouped_expert_hook
+                        if getattr(module, "_running_grouped_mm", False)
+                        else _make_expert_hook
+                    )
                     handles.append(
                         input_quantizer.register_forward_pre_hook(
-                            _make_expert_hook(module, weight_name, quantizers, enabled)
+                            make_hook(module, weight_name, quantizers, enabled)
                         )
                     )
     return handles
