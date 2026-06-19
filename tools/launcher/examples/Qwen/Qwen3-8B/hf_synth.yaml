@@ -1,0 +1,43 @@
+# Standalone vLLM data synthesis for Qwen3-8B.
+#
+# Usage:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_synth.yaml --yes
+
+job_name: qwen3-8b-synth
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+    output_dir: /scratchspace/modelopt/qwen3-8b-synth-v1
+
+  task_0:
+    script: common/vllm/query.sh
+    args:
+      - --model
+      - <<global_vars.hf_model>>
+      - --tensor-parallel-size
+      - "8"
+      - --trust-remote-code
+      - --enforce-eager
+      - --gpu-memory-utilization
+      - "0.95"
+      - --max-model-len
+      - "4096"
+      - --
+      - --data
+      - nvidia/Speculative-Decoding-Multilingual-Prompt-v2
+      - --save
+      - <<global_vars.output_dir>>
+      - --shard-id
+      - $SLURM_ARRAY_TASK_ID
+      - --num-shards
+      - "16"
+    environment:
+      - VLLM_STARTUP_TIMEOUT: "1800"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:latest
+      array: "0-15"
+      requeue: true
