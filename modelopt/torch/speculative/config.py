@@ -16,6 +16,7 @@
 """Configurations for speculative decoding modes."""
 
 from copy import deepcopy
+from typing import Literal
 
 from pydantic import model_validator
 
@@ -107,8 +108,8 @@ class DFlashConfig(ModeloptBaseConfig):
         "Only used when dflash_loss_objective='decay'.",
     )
 
-    dflash_loss_objective: str = ModeloptField(
-        default="decay",
+    dflash_loss_objective: Literal["decay", "dpace"] = ModeloptField(
+        default="dpace",
         description="Block-position loss weighting objective. 'decay' uses the static "
         "exponential decay of dflash_loss_decay_factor (DFlash, arXiv:2602.06036 Eq.4). "
         "'dpace' uses dynamic, confidence-derived per-position weights "
