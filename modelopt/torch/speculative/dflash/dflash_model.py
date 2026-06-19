@@ -37,11 +37,6 @@ class DFlashModel(DynamicModule):
         self.dflash_loss_decay_factor = config.dflash_loss_decay_factor
         self.dflash_loss_objective = config.dflash_loss_objective
         self.dflash_dpace_alpha = config.dflash_dpace_alpha
-        if self.dflash_loss_objective not in ("decay", "dpace"):
-            raise ValueError(
-                f"dflash_loss_objective must be 'decay' or 'dpace', got "
-                f"{self.dflash_loss_objective!r}"
-            )
         if self.dflash_loss_objective == "dpace" and not 0.0 < self.dflash_dpace_alpha <= 1.0:
             raise ValueError(
                 f"dflash_dpace_alpha must be in (0, 1] for the D-PACE objective, got "

@@ -162,7 +162,7 @@ See [`modelopt_recipes/general/speculative_decoding/dflash.yaml`](../../../model
 | `dflash.dflash_block_size` | 8 | Block size for parallel prediction |
 | `dflash.dflash_num_anchors` | 512 | Random anchor positions per sample (see below) |
 | `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables, see below) |
-| `dflash.dflash_loss_objective` | `decay` | Position weighting: `decay` (static) or `dpace` (dynamic, see below) |
+| `dflash.dflash_loss_objective` | `dpace` | Position weighting: `decay` (static) or `dpace` (dynamic, see below) |
 | `dflash.dflash_dpace_alpha` | 0.5 | D-PACE smoothing factor in (0, 1]; only used when objective is `dpace` |
 | `dflash.dflash_self_logit_distillation` | true | Use target model logits as soft labels (vs hard CE) |
 | `dflash.dflash_mask_token_id` | auto | Token ID for masked positions (see note below) |
@@ -248,11 +248,12 @@ early positions higher because they gate acceptance of all later positions.
 
 ### D-PACE (Dynamic Position-Aware Cross-Entropy)
 
-Set `dflash.dflash_loss_objective: dpace` to replace the static decay with **D-PACE**
-([arXiv:2605.18810](https://arxiv.org/abs/2605.18810)), which derives per-position weights
-from a differentiable surrogate of expected accepted block length. Where static decay uses
-a fixed schedule, D-PACE adapts to the draft's own per-position confidence and shifts
-training signal toward whichever positions currently limit acceptance as the drafter improves.
+**D-PACE** ([arXiv:2605.18810](https://arxiv.org/abs/2605.18810)) is the default position-weighting
+objective (`dflash_loss_objective: dpace`). It derives per-position weights from a differentiable
+surrogate of expected accepted block length. Where the static decay above uses a fixed schedule,
+D-PACE adapts to the draft's own per-position confidence and shifts training signal toward
+whichever positions currently limit acceptance as the drafter improves. Set
+`dflash_loss_objective: decay` to fall back to the static schedule.
 
 For each block, let `q_i = exp(-CE_i)` be the draft confidence on the target token at
 predicted position `i`. D-PACE smooths it (Eq.7) and weights each position by the suffix-sum

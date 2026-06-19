@@ -180,6 +180,13 @@ class TestDPaceWeights:
         with pytest.raises(ValueError, match="dflash_dpace_alpha"):
             _dpace_position_weights(torch.rand(1, 4), alpha=1.5)
 
+    def test_default_objective_is_dpace(self):
+        """D-PACE is the default objective (alpha=0.5) when none is specified."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", _get_dflash_config())])
+        assert model.dflash_loss_objective == "dpace"
+        assert model.dflash_dpace_alpha == 0.5
+
     def test_convert_with_dpace_objective(self):
         """Convert with the dpace objective wires the attributes onto the model."""
         model = get_tiny_llama(num_hidden_layers=4)
