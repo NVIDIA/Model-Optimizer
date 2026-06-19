@@ -7,7 +7,15 @@ job_name: qwen3-8b-synth
 pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3-8B
-    output_dir: /scratchspace/modelopt/qwen3-8b-synth-v1
+    # ``/hf-local/`` is the container bind-mount to the team-folder's
+    # hf-local/ tree (same path on every cluster — the launcher mounts
+    # the per-cluster team folder there). Persistent on disk, cluster-
+    # agnostic in the YAML, and exactly the path
+    # ``modelopt-storage publish`` reads when promoting to the
+    # ``internal_hf`` pensieve-artifact category — publish stays a
+    # metadata-only op. synth_run's resume loop sees prior shards
+    # across re-dispatches because the mount is stable.
+    output_dir: /hf-local/modelopt/qwen3-8b-synth-v1
 
   task_0:
     script: common/vllm/query.sh
