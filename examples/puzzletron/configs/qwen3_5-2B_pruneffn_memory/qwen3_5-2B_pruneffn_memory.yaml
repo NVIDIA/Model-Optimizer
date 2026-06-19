@@ -9,7 +9,7 @@ input_hf_model_path: /workspace/hf_models/Qwen3.5-2B
 dataset_path: /workspace/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2
 
 # Working directory for compression outputs
-puzzle_dir: /workspace/puzzle_dir
+puzzle_dir: /workspace/puzzle_dir_qwen3_5-2B
 
 # MIP memory constraint (in MiB)
 mip:

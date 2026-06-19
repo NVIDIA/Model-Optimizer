@@ -17,12 +17,11 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, Iterable, List
 
 from torch import nn
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5DecoderLayer,
-    Qwen3_5ForCausalLM,
     Qwen3_5TextRotaryEmbedding,
 )
 
@@ -38,6 +37,10 @@ __all__ = [
     "Qwen3_5FFNIntermediateLayerDescriptor",
     "Qwen3_5KVHeadsLayerDescriptor",
 ]
+
+# Weight prefixes that belong to the vision encoder and MTP head — not part of the
+# text model and skipped during subblock conversion.
+_NON_TEXT_PREFIXES = ("model.visual.", "mtp.")
 
 
 @ModelDescriptorFactory.register_decorator("qwen3_5")
@@ -86,15 +89,14 @@ class Qwen3_5ModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def init_rotary_embedding(model, runtime):
-        # model is Qwen3_5ForConditionalGeneration; text model is at model.model.language_model
-        text_config = Qwen3_5ModelDescriptor.get_language_model_config(model.config)
-        model.model.language_model.rotary_emb = Qwen3_5TextRotaryEmbedding(config=text_config).to(
+        # After conversion the model is Qwen3_5ForCausalLM; text model is at model.model
+        model.model.rotary_emb = Qwen3_5TextRotaryEmbedding(config=model.config).to(
             device=runtime.device
         )
 
     @staticmethod
     def input_embedding_name():
-        return "model.language_model.embed_tokens"
+        return "model.embed_tokens"
 
     @staticmethod
     def output_embedding_name():
@@ -102,18 +104,27 @@ class Qwen3_5ModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def final_norm_name():
-        return "model.language_model.norm"
+        return "model.norm"
 
     @staticmethod
     def layer_block_name(index: int):
-        return f"model.language_model.layers.{index}"
+        return f"model.layers.{index}"
+
+    @classmethod
+    def get_weight_groups(
+        cls, layer_names: Iterable[str], num_hidden_layers: int
+    ) -> Dict[str, List[str]]:
+        """Filter out vision/MTP weights before grouping."""
+        text_names = [n for n in layer_names if not n.startswith(_NON_TEXT_PREFIXES)]
+        return super().get_weight_groups(text_names, num_hidden_layers)
 
     @staticmethod
     def layer_name_predicates(num_layers: int) -> Dict[str, re.Pattern]:
+        # Predicates match ORIGINAL checkpoint names (model.language_model.*).
+        # convert_weight_name remaps them to model.* after grouping.
         layer_name_patterns = {
             "embeddings": re.compile(r"^model\.language_model\.embed_tokens\.weight$"),
             "lm_head": re.compile(r"^(model\.language_model\.norm\.weight|lm_head\.weight)$"),
-            "vision_encoding": re.compile(r"^model\.visual\..*"),
         }
 
         def build_ffn_predicates() -> Dict[str, re.Pattern]:
@@ -159,7 +170,7 @@ class Qwen3_5ModelDescriptor(ModelDescriptor):
 @dataclass
 class Qwen3_5FFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
     down_proj_name: str = "mlp.down_proj"
-    ffn_prefix_name: str = "model.language_model.layers.{layer_idx}.mlp"
+    ffn_prefix_name: str = "model.layers.{layer_idx}.mlp"
     linear_weight_names: List[str] = field(
         default_factory=lambda: ["down_proj", "gate_proj", "up_proj"]
     )
@@ -168,7 +179,7 @@ class Qwen3_5FFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
 @dataclass
 class Qwen3_5KVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
     o_proj_name: str = "self_attn.o_proj"
-    attn_prefix_name: str = "model.language_model.layers.{layer_idx}.self_attn"
+    attn_prefix_name: str = "model.layers.{layer_idx}.self_attn"
     qkvo_weight_names: List[str] = field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
     )
