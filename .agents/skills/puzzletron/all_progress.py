@@ -77,10 +77,10 @@ if sol_dir_match:
     sol_list_match = re.search(r"'solutions_to_validate': \[([\d, ]+)\]", text)
     if sol_list_match:
         sol_total = len(sol_list_match.group(1).split(","))
+pct, cur_b, total_b = batch_matches[-1] if batch_matches else (None, None, None)
 if sol_done is not None and sol_total:
     cur_detail = f" ({sol_done}/{sol_total} solutions)"
 elif batch_matches:
-    pct, cur_b, total_b = batch_matches[-1]
     cur_detail = f" ({cur_b}/{total_b} batches)"
 elif cbc_matches:
     nodes, secs = cbc_matches[-1]
@@ -97,7 +97,7 @@ if not pipeline_complete_ts and cur_step_start_ts:
     if sol_done and sol_total and sol_done > 0:
         rate_per_sol = cur_step_elapsed / sol_done
         step_remaining = rate_per_sol * (sol_total - sol_done)
-    elif batch_matches and int(cur_b) > 0 and int(cur_b) < int(total_b):
+    elif cur_b is not None and total_b is not None and int(cur_b) > 0 and int(cur_b) < int(total_b):
         rate_per_batch = cur_step_elapsed / int(cur_b)
         step_remaining = rate_per_batch * (int(total_b) - int(cur_b))
 
