@@ -37,6 +37,7 @@ Parse `nproc_per_node` from args using either positional or flag syntax:
 
 - If the second word is exactly `progress`, execute the **all progress** sub-command below.
 - If no `nproc_per_node` value can be found, ask the user: "Please provide the number of GPUs per node (nproc_per_node)." and **STOP**.
+- If the value does not match `^[0-9]+$`, ask the user: "nproc_per_node must be a positive integer." and **STOP**.
 - Otherwise use the parsed value and run the full pipeline.
 
 ### all \<nproc_per_node\>
@@ -68,6 +69,7 @@ Parse `nproc_per_node` from args using either positional or flag syntax:
 
 - If the second word is exactly `progress`, execute the **mip progress** sub-command below.
 - If no `nproc_per_node` value can be found, ask the user: "Please provide the number of GPUs per node (nproc_per_node)." and **STOP**.
+- If the value does not match `^[0-9]+$`, ask the user: "nproc_per_node must be a positive integer." and **STOP**.
 - Otherwise use the parsed value and run the MIP step.
 
 ### mip \<nproc_per_node\>
