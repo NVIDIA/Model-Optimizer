@@ -54,7 +54,7 @@ all_rates = [norm(r.strip()) for r in rates_match.group(1).split(",")] if rates_
 complete_ts = None
 for line in lines:
     ts = get_ts(line)
-    if ts and ("sweep.py:292" in line or "Puzzletron Progress 8/8" in line):
+    if ts and ("Results written to:" in line or "Puzzletron Progress 8/8" in line):
         complete_ts = ts
         break
 
@@ -106,12 +106,11 @@ if not all_rates:
 # ── Sweep enabled: per-rate progress ─────────────────────────────────────────
 rate_start = {}
 for line in lines:
-    if "sweep.py:258" in line:
-        m = re.search(r"compression_rate=([\d.]+)", line)
-        if m:
-            r = norm(m.group(1))
-            if r in all_rates and r not in rate_start:
-                rate_start[r] = get_ts(line)
+    m = re.search(r"compression_rate=([\d.]+)", line)
+    if m:
+        r = norm(m.group(1))
+        if r in all_rates and r not in rate_start:
+            rate_start[r] = get_ts(line)
 
 sweep_start = rate_start.get(all_rates[0]) if all_rates else None
 
