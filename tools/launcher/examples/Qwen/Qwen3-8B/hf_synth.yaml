@@ -7,7 +7,14 @@ job_name: qwen3-8b-synth
 pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3-8B
-    output_dir: /scratchspace/modelopt/qwen3-8b-synth-v1
+    # synth_run downstream contract (OMNIML-5233): output_dir must be a
+    # stable absolute path under the target cluster team's hf-local/ tree
+    # so resume sees prior shards across re-dispatches AND so the final
+    # publish step is metadata-only (no re-copy out of /scratchspace).
+    # Path matches the bot's modelopt-storage.yaml per_cluster_team_folder
+    # for cw_dfw / oci_hsg / oci_nrt:
+    #   /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt
+    output_dir: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local/modelopt/qwen3-8b-synth-v1
 
   task_0:
     script: common/vllm/query.sh
