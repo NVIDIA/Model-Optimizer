@@ -1,0 +1,15 @@
+defaults:
+  - pruning_defaults
+
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/attn_${pruning.activation_hooks_kwargs.method}/${pruning.experiment_id}
+
+activation_hooks_kwargs:
+  method: independent_kv_head_contribution
+  optimize_for: memory
+  target_layer: "self_attn.o_proj"
+  layer_input_descriptors_path:
+
+# Qwen3.5-2B has 2 KV heads in full_attention layers; only 1 grouping is possible.
+# KV-head pruning is not the primary compression method for this model.
+n_heads_in_group_list: [2]
+gqa_init_mode: "PruneKVHeads"

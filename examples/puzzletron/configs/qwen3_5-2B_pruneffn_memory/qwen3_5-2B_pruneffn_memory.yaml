@@ -1,0 +1,22 @@
+defaults:
+  - qwen3_5
+  - _self_
+
+# Input Hugging Face model to compress
+input_hf_model_path: /workspace/hf_models/Qwen3.5-2B
+
+# Dataset path for pruning and NAS scoring
+dataset_path: /workspace/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2
+
+# Working directory for compression outputs
+puzzle_dir: /workspace/puzzle_dir
+
+# MIP memory constraint (in MiB)
+mip:
+  human_constraints:
+    target_memory: 20_000 # 20 GiB
+
+# FFN intermediate sizes to search over (heterogeneous architecture)
+# teacher_intermediate_size is 6144
+pruning:
+  intermediate_size_list: [1280, 2560, 3584, 5120]
