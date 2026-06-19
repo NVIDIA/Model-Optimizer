@@ -103,7 +103,23 @@ class DFlashConfig(ModeloptBaseConfig):
     dflash_loss_decay_factor: float = ModeloptField(
         default=0.0,
         description="Gamma for exponential loss decay weighting (paper Eq.4). "
-        "Suggested: 7 for block_size=16, 5 for 10, 4 for 8. 0 disables.",
+        "Suggested: 7 for block_size=16, 5 for 10, 4 for 8. 0 disables. "
+        "Only used when dflash_loss_objective='decay'.",
+    )
+
+    dflash_loss_objective: str = ModeloptField(
+        default="decay",
+        description="Block-position loss weighting objective. 'decay' uses the static "
+        "exponential decay of dflash_loss_decay_factor (DFlash, arXiv:2602.06036 Eq.4). "
+        "'dpace' uses dynamic, confidence-derived per-position weights "
+        "(D-PACE, arXiv:2605.18810 Eq.8).",
+    )
+
+    dflash_dpace_alpha: float = ModeloptField(
+        default=0.5,
+        description="D-PACE asymmetric smoothing factor alpha in (0, 1] (paper Eq.7). Used only "
+        "when dflash_loss_objective='dpace'. Stable in [0.3, 0.7]; alpha=0 is degenerate "
+        "(cumulative product vanishes) and alpha->1 removes the adaptive signal.",
     )
 
     dflash_num_anchors: int = ModeloptField(

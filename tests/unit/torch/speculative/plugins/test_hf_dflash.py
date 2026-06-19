@@ -24,6 +24,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
@@ -38,6 +39,7 @@ from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashModule,
     HFDFlashModel,
+    _dpace_position_weights,
     build_target_layer_ids,
 )
 from modelopt.torch.speculative.utils import AcceptanceRateValidation
@@ -114,6 +116,94 @@ class TestDFlashConvert:
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
+
+
+class TestDPaceWeights:
+    """Test the D-PACE position-weighting objective (arXiv:2605.18810)."""
+
+    @staticmethod
+    def _reference_weights(conf, alpha):
+        """Paper closed form computed by explicit summation (Eq.7-8).
+
+        q~_i = (1-a)q_i + a; C_m = prod_{i<=m} q~_i; w_j = sum_{m>=j} C_m.
+        Deliberately a plain double loop so it is an independent oracle for the
+        vectorized implementation under test.
+        """
+        smoothed = alpha + (1.0 - alpha) * conf
+        length = smoothed.shape[-1]
+        cum = torch.ones_like(smoothed)
+        running = torch.ones(smoothed.shape[:-1])
+        for m in range(length):
+            running = running * smoothed[..., m]
+            cum[..., m] = running
+        expected = torch.zeros_like(smoothed)
+        for j in range(length):
+            expected[..., j] = cum[..., j:].sum(dim=-1)
+        return expected
+
+    def test_weights_match_paper_formula(self):
+        """w_j = sum_{m>=j} prod_{i<=m} q~_i with q~_i = (1-a)q_i + a (Eq.7-8)."""
+        alpha = 0.5
+        conf = torch.tensor([[0.9, 0.6, 0.3, 0.8]])
+        weights = _dpace_position_weights(conf, alpha)
+        assert torch.allclose(weights, self._reference_weights(conf, alpha), atol=1e-6)
+
+    def test_mask_makes_invalid_positions_noops(self):
+        """Invalid positions neither shrink the prefix product nor add to the sum."""
+        alpha = 0.5
+        conf = torch.tensor([[0.9, 0.2, 0.3, 0.8]])
+        mask = torch.tensor([[1.0, 0.0, 1.0, 1.0]])
+        masked = _dpace_position_weights(conf, alpha, valid_mask=mask)
+        # Dropping the invalid slot entirely must give the same weights at the kept slots.
+        kept = _dpace_position_weights(conf[:, [0, 2, 3]], alpha)
+        assert torch.allclose(masked[:, [0, 2, 3]], kept, atol=1e-6)
+
+    def test_weights_are_detached(self):
+        """Weights must carry no gradient (paper Eq.9 detaches them)."""
+        conf = torch.rand(2, 3, 5, requires_grad=True)
+        weights = _dpace_position_weights(conf, 0.5)
+        assert not weights.requires_grad
+
+    def test_weights_monotonic_nonincreasing(self):
+        """Suffix-sum of positive prefix products is non-increasing along the block."""
+        conf = torch.rand(4, 8).clamp(0.05, 0.99)
+        weights = _dpace_position_weights(conf, 0.5)
+        assert torch.all(weights[:, :-1] >= weights[:, 1:] - 1e-6)
+
+    def test_smoothing_keeps_later_weights_nonzero(self):
+        """With alpha>0, q~_i >= alpha so cumulative products cannot vanish."""
+        conf = torch.zeros(1, 6)  # worst case: zero confidence everywhere
+        weights = _dpace_position_weights(conf, alpha=0.5)
+        assert torch.all(weights > 0)
+
+    def test_invalid_alpha_raises(self):
+        with pytest.raises(ValueError, match="dflash_dpace_alpha"):
+            _dpace_position_weights(torch.rand(1, 4), alpha=1.5)
+
+    def test_convert_with_dpace_objective(self):
+        """Convert with the dpace objective wires the attributes onto the model."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_loss_objective"] = "dpace"
+        config["dflash_dpace_alpha"] = 0.3
+        mtsp.convert(model, [("dflash", config)])
+        assert model.dflash_loss_objective == "dpace"
+        assert model.dflash_dpace_alpha == 0.3
+
+    def test_convert_rejects_bad_objective(self):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_loss_objective"] = "nope"
+        with pytest.raises(ValueError, match="dflash_loss_objective"):
+            mtsp.convert(model, [("dflash", config)])
+
+    def test_convert_rejects_degenerate_alpha(self):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_loss_objective"] = "dpace"
+        config["dflash_dpace_alpha"] = 0.0
+        with pytest.raises(ValueError, match="dflash_dpace_alpha"):
+            mtsp.convert(model, [("dflash", config)])
 
 
 class TestDFlashSaveRestore:
