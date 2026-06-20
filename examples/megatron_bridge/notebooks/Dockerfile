@@ -26,4 +26,8 @@ RUN git clone https://github.com/NVIDIA/Model-Optimizer.git /dli/Model-Optimizer
 RUN git clone https://github.com/EvolvingLMMs-Lab/lmms-eval.git /dli/lmms-eval && \
     cd /dli/lmms-eval && git checkout v0.7.1 && \
     pip install --root-user-action ignore -e . && \
-    pip install --root-user-action ignore python-Levenshtein
+    pip install --root-user-action ignore python-Levenshtein && \
+    # Fix bug in v0.7.1: OpenAIProvider default OPENAI_API_URL includes
+    # /chat/completions causing the OpenAI client to double-append that path.
+    sed -i 's|os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions/v1")|os.getenv("OPENAI_API_URL", "https://api.openai.com/v1")|' \
+        /dli/lmms-eval/lmms_eval/llm_judge/providers/openai.py
