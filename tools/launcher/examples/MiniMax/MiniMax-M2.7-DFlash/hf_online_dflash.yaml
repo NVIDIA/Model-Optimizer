@@ -53,7 +53,6 @@ pipeline:
       - dflash.dflash_self_logit_distillation=true
       - dflash.dflash_block_size=8
       - dflash.dflash_num_anchors=512
-      - dflash.dflash_loss_decay_factor=4.0
       - dflash.dflash_architecture_config.num_hidden_layers=5
       # Mask token id. The draft reuses the target's embed_tokens, so this must be an id
       # that exists in the target embedding; 200054 is a reserved row in MiniMax-M2.7.
