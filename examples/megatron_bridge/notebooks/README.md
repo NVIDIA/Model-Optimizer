@@ -40,6 +40,7 @@ Go to https://huggingface.co/nvidia/Cosmos-Reason2-2B and request access. You wi
 docker run --gpus all \
   --shm-size=16GB \
   -p 8888:8888 \
+  -p 6006:6006 \
   --rm -it \
   -e HF_TOKEN=<YOUR_HF_TOKEN> \
   -v <BASE_PATH>/Model-Optimizer:/dli/Model-Optimizer \
