@@ -37,7 +37,6 @@ pipeline:
       - training.answer_only_loss=true
       - dflash.dflash_block_size=8
       - dflash.dflash_num_anchors=512
-      - dflash.dflash_loss_decay_factor=4
       - dflash.dflash_mask_token_id=248070
       - dflash.dflash_architecture_config.num_hidden_layers=5
       - dflash.dflash_architecture_config.num_attention_heads=32

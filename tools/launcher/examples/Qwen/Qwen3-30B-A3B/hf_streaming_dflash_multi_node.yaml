@@ -79,7 +79,6 @@ pipeline:
       - training.report_to=none
       - dflash.dflash_block_size=16
       - dflash.dflash_num_anchors=512
-      - dflash.dflash_loss_decay_factor=7
       # Qwen3 has no tokenizer mask token; use a reserved vocab slot (151669).
       - dflash.dflash_mask_token_id=151669
       - dflash.dflash_architecture_config.num_hidden_layers=5
