@@ -1,7 +1,7 @@
 # Adding a New Model to Puzzletron with Claude
 
 This tutorial shows the full conversation between a user and Claude when adding
-Qwen3.5-2B support to Puzzletron. Use it as a guide for how to interact with Claude
+Qwen3.5-0.8B support to Puzzletron. Use it as a guide for how to interact with Claude
 when you want to compress a model that Puzzletron doesn't yet support.
 
 ---
@@ -12,12 +12,12 @@ when you want to compress a model that Puzzletron doesn't yet support.
 
 The user starts simply — download the model and run the pipeline.
 
-> **User:** can you download <https://huggingface.co/Qwen/Qwen3.5-2B> to /workspace/hf_models/...
+> **User:** can you download <https://huggingface.co/Qwen/Qwen3.5-0.8B> to /workspace/hf_models/...
 
 Claude downloads the model using `huggingface-cli`:
 
 ```text
-Successfully downloaded 13 files to /workspace/hf_models/Qwen3.5-2B
+Successfully downloaded 13 files to /workspace/hf_models/Qwen3.5-0.8B
 ```
 
 > **User:** run puzzletron all for this model
@@ -50,7 +50,7 @@ Claude confirms the model now loads:
 
 ```python
 from transformers import AutoConfig
-config = AutoConfig.from_pretrained("/workspace/hf_models/Qwen3.5-2B")
+config = AutoConfig.from_pretrained("/workspace/hf_models/Qwen3.5-0.8B")
 print(config.model_type)  # qwen3_5  ✓
 ```
 
@@ -58,7 +58,7 @@ print(config.model_type)  # qwen3_5  ✓
 
 ### Step 3: Implement the descriptor, converter, and configs
 
-> **User:** ok, implement the descriptor and compression example config for Qwen3.5-2B
+> **User:** ok, implement the descriptor and compression example config for Qwen3.5-0.8B
 
 Claude implements everything in one go:
 
@@ -68,10 +68,10 @@ Claude implements everything in one go:
 
 **Registration** (`anymodel/models/__init__.py`): gated behind `transformers >= 4.57.0`
 
-**Compression example config** (`examples/puzzletron/configs/qwen3_5-2B_pruneffn_memory/`):
+**Compression example config** (`examples/puzzletron/configs/qwen3_5-0.8b_pruneffn_memory/`):
 
-`intermediate_size_list` chosen by scaling the Qwen3-8B ratios (~21 %, 42 %, 60 %, 81 %
-of teacher) to the 2B's `intermediate_size = 6144`:
+`intermediate_size_list` chosen by scaling the Llama-3.1-8B ratios (~21 %, 42 %, 60 %, 83 %
+of teacher) to the 0.8B's `intermediate_size = 3584`:
 
 ```text
 [1280, 2560, 3584, 5120]
@@ -95,10 +95,32 @@ print('qwen3_5' in ModelDescriptorFactory.CLASS_MAPPING)  # True  ✓
 
 ### Step 4: Run the pipeline
 
-> **User:** run puzzletron all for Qwen3.5-2B on 4 GPUs
+> **User:** run puzzletron all for Qwen3.5-0.8B on 4 GPUs
 
-Claude constructs the `torchrun` command directly with the Qwen3.5-2B config path and runs the full pipeline. The user monitors progress with:
+Claude constructs the `torchrun` command directly with the Qwen3.5-0.8B config path and runs the full pipeline. The user monitors progress with:
 
 ```text
 /puzzletron all progress
 ```
+
+Example output mid-run:
+
+```text
+Overall: Puzzletron full pipeline (steps 1–8)
+────────────────────────────────────────────────────────────────────
+  Status      Step  Description                          Elapsed
+────────────────────────────────────────────────────────────────────
+  [DONE]            1/8: starting puzzletron pipeline      0m 1s
+  [DONE]            2/8: converting model to Puzzletron heterogeneous format (single-gpu)     0m 3s
+  [DONE]            3/8: scoring pruning activations (multi-gpu)     0m 56s
+  [DONE]            4/8: pruning the model and saving pruned checkpoints (single-gpu)     0m 10s
+  [DONE]            5/8: building replacement library and subblock statistics (single-gpu)     0m 10s
+  [RUNNING]         6/8: calculating one block scores (multi-gpu) (127/264 solutions)    20m 6s
+  [ ]               7/8: running MIP and realizing models (multi-gpu)
+  [ ]               8/8: puzzletron pipeline completed (multi-gpu)
+────────────────────────────────────────────────────────────────────
+  Started:   10:35:54
+  Elapsed:   21m 26s  |  Remaining: ~28m estimated
+```
+
+Steps 1–5 typically complete in under 2 minutes. Step 6 (one-block scoring) is the longest step — it scores all candidate solutions using a proxy metric (cosine embedding loss on hidden states). The number of solutions depends on the model size and `intermediate_size_list`; for Qwen3.5-0.8B with 4 sizes across 28 layers it is 264. Use `eval_samples` in the base YAML to trade off speed vs. score quality (default 128; 8 is useful for quick iteration).
