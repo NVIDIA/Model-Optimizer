@@ -949,3 +949,70 @@ class TestNormalizeFusedExpertsQuantizerName:
             _normalize_fused_experts_quantizer_name("moe.layers.3.gate.weight")
             == "moe.layers.3.gate.weight"
         )
+
+
+# ---------------------------------------------------------------------------
+# Reproduction + fix guard for the low_memory_mode fused-MoE meta-device bug:
+# HF checkpoints store experts as separate per-expert projections that
+# load_checkpoint_and_dispatch does not fuse, leaving the 3-D fused params on meta.
+# ---------------------------------------------------------------------------
+def _write_separate_expert_checkpoint(tmp_path):
+    """Write a checkpoint with SEPARATE per-expert weights; return the fused refs."""
+    from safetensors.torch import save_file
+
+    gate_up_ref = torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+    down_ref = torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02
+    state_dict = {"moe.gate.weight": torch.randn(NUM_EXPERTS, HIDDEN_DIM) * 0.02}
+    for e in range(NUM_EXPERTS):
+        state_dict[f"moe.experts.{e}.gate_proj.weight"] = gate_up_ref[
+            e, :INTERMEDIATE_DIM, :
+        ].contiguous()
+        state_dict[f"moe.experts.{e}.up_proj.weight"] = gate_up_ref[
+            e, INTERMEDIATE_DIM:, :
+        ].contiguous()
+        state_dict[f"moe.experts.{e}.down_proj.weight"] = down_ref[e].contiguous()
+    save_file(state_dict, str(tmp_path / "model.safetensors"))
+    return gate_up_ref, down_ref
+
+
+class TestLowMemoryFusedExpertsLoading:
+    def test_low_memory_load_materializes_fused_experts(self, tmp_path):
+        """Raw accelerate load raises on meta (the bug); ModelOpt fuses first, so the
+        production (quantized) path loads correct fused tensors and dispatch succeeds."""
+        pytest.importorskip("accelerate")
+        from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+
+        from modelopt.torch.quantization.plugins.accelerate import (
+            _materialize_fused_experts_from_checkpoint,
+        )
+
+        gate_up_ref, down_ref = _write_separate_expert_checkpoint(tmp_path)
+
+        # Reproduction: raw load leaves the fused params on meta and dispatch raises.
+        with init_empty_weights():
+            broken = _TinyMoEModel()
+        with pytest.raises((NotImplementedError, ValueError), match="meta"):
+            load_checkpoint_and_dispatch(broken, str(tmp_path), device_map={"": "cpu"})
+
+        # Fix, in production order: quantize so experts become the _QuantFusedExperts
+        # wrapper, then materialize before dispatch.
+        with init_empty_weights():
+            model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        if QuantModuleRegistry.get(expert_type) is not None:
+            QuantModuleRegistry.unregister(expert_type)
+        register_fused_experts_on_the_fly(model)
+        try:
+            model.moe.experts = QuantModuleRegistry.convert(model.moe.experts)
+            _materialize_fused_experts_from_checkpoint(model, str(tmp_path))
+            load_checkpoint_and_dispatch(model, str(tmp_path), device_map={"": "cpu"})
+
+            experts = model.moe.experts
+            assert torch.allclose(experts.gate_up_proj, gate_up_ref)
+            assert torch.allclose(experts.down_proj, down_ref)
+            # storage-offset expert-index recovery must survive the param swap
+            for i in range(NUM_EXPERTS):
+                assert experts._get_expert_idx_from_gate_up(experts.gate_up_proj[i]) == i
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
