@@ -104,6 +104,21 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             },
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
         }
+    elif quant_algo == "FP8_PB":
+        # 128x128 block-wise weight-only FP8 (DeepSeek/Qwen-style block FP8).
+        # Weight-only: no input_activations entry; activations stay dynamic at
+        # serve time. ``block_structure`` carries the 2D block shape (e.g.
+        # [128, 128]).
+        gs = group_size or 128
+        return {
+            "weights": {
+                "dynamic": False,
+                "num_bits": 8,
+                "type": "float",
+                "strategy": "block",
+                "block_structure": [gs, gs],
+            },
+        }
     else:
         warnings.warn(
             f"Unsupported quantization algorithm '{quant_algo}' in "
@@ -165,6 +180,26 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
 
     original_quantization_details = input_config.get("quantization", {})
     quant_algo_value = original_quantization_details.get("quant_algo")
+
+    # FP8_PB (128x128 block-wise weight-only FP8) is consumed as a native
+    # DeepSeek/Qwen-style block-FP8 checkpoint rather than via the
+    # compressed-tensors ``config_groups`` schema. Emit the flat ``quant_method:
+    # "fp8"`` config that vLLM/SGLang expect (weights stored as fp8_e4m3 with a
+    # per-block ``weight_scale_inv``; activations quantized dynamically at runtime).
+    if quant_algo_value == "FP8_PB":
+        group_size = original_quantization_details.get("group_size") or 128
+        exclude_modules = original_quantization_details.get("exclude_modules") or []
+        fp8_config: dict[str, Any] = {
+            "quant_method": "fp8",
+            "fmt": "e4m3",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [group_size, group_size],
+            "modules_to_not_convert": exclude_modules,
+        }
+        producer_info = input_config.get("producer")
+        if producer_info:
+            fp8_config["producer"] = producer_info
+        return fp8_config
 
     # This structure is derived based on the example for "FP8" and "NVFP4"
     # TODO: Handle other quantization algorithms

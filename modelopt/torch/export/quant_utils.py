@@ -758,6 +758,12 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
+        elif v == "fp8_pb_wo":
+            # 128x128 block-wise weight-only FP8 (DeepSeek/Qwen-style block FP8).
+            layer_config = {
+                "quant_algo": "FP8_PB",
+                "group_size": block_size_value,
+            }
         else:
             layer_config = {"quant_algo": v}
 
