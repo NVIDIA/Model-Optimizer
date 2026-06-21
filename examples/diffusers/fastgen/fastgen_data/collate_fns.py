@@ -15,28 +15,26 @@
 
 """DMD2 text-to-image collate + dataloader builder for the fastgen example.
 
-Thin wrappers over **stock** ``nemo_automodel`` (no AutoModel patch required):
+Self-contained on **stock** ``nemo_automodel`` (no AutoModel patch required):
 
-* :func:`collate_fn_text_to_image` calls the stock collate, then re-adds the two
-  DMD2-specific outputs the stock path omits: ``text_embeddings_mask`` (stacked from the
-  per-item ``prompt_embeds_mask`` that the vendored :class:`TextToImageDataset` emits, since
-  the stock ``collate_fn_production`` does not stack that key) and an optional broadcast
-  ``negative_text_embeddings`` for classifier-free guidance.
+* :func:`collate_fn_text_to_image` builds the DMD2 batch directly from the vendored
+  :class:`TextToImageDataset` per-item output (``image_latents`` / ``text_embeddings`` /
+  ``text_embeddings_mask`` + an optional broadcast ``negative_text_embeddings`` for CFG). It
+  deliberately does **not** call the stock ``collate_fn_production``: released
+  ``nemo_automodel`` (0.4.0) unconditionally stacks model-specific token keys
+  (``clip_tokens`` / ``t5_tokens``) that the Qwen-Image cache does not produce, which would
+  raise ``KeyError``. The vendored dataset and this collate are a matched pair, so coupling
+  them directly keeps the example self-contained on stock 0.4.0.
 * :func:`build_text_to_image_multiresolution_dataloader` builds the vendored dataset + the
-  stock bucket sampler + a ``StatefulDataLoader``, optionally binding a static negative-prompt
-  embedding into the collate via ``functools.partial``.
-
-This replaces a full vendored copy of the upstream ``collate_fns.py``: only the DMD2 delta
-lives here; everything else is imported from the installed stock package.
+  stock bucket sampler (:class:`SequentialBucketSampler`) + a ``StatefulDataLoader``,
+  optionally binding a static negative-prompt embedding into the collate via
+  ``functools.partial``.
 """
 
 import functools
 import logging
 
 import torch
-from nemo_automodel.components.datasets.diffusion.collate_fns import (
-    collate_fn_text_to_image as _stock_collate_fn_text_to_image,
-)
 from nemo_automodel.components.datasets.diffusion.sampler import SequentialBucketSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -50,10 +48,10 @@ def collate_fn_text_to_image(
     negative_text_embeddings: torch.Tensor | None = None,
     negative_text_embeddings_mask: torch.Tensor | None = None,
 ) -> dict:
-    """Stock text-to-image collate + DMD2 ``text_embeddings_mask`` and CFG negatives.
+    """Build the DMD2 text-to-image batch (latents + text embeddings/mask + CFG negatives).
 
     Args:
-        batch: Samples from :class:`TextToImageDataset`.
+        batch: Samples from :class:`TextToImageDataset` (pre-encoded ``prompt_embeds`` path).
         negative_text_embeddings: Optional static negative-prompt embedding of shape
             ``[seq, dim]``. When provided it is broadcast across the batch and attached as
             ``negative_text_embeddings`` (shape ``[B, seq, dim]``); consumed by DMD2 CFG and
@@ -61,14 +59,44 @@ def collate_fn_text_to_image(
         negative_text_embeddings_mask: Optional mask for the negative embedding.
 
     Returns:
-        The stock collate output plus ``text_embeddings_mask`` and (when provided) the
-        broadcast ``negative_text_embeddings`` / ``negative_text_embeddings_mask``.
+        Dict with ``image_latents`` / ``text_embeddings`` / ``text_embeddings_mask`` (and, when
+        provided, the broadcast ``negative_text_embeddings`` / ``negative_text_embeddings_mask``).
     """
-    image_batch = _stock_collate_fn_text_to_image(batch)
+    if "prompt_embeds" not in batch[0]:
+        raise NotImplementedError(
+            "On-the-fly text encoding is not supported; preprocess to pre-encoded `prompt_embeds`."
+        )
 
-    # Stock ``collate_fn_production`` does not stack ``prompt_embeds_mask``; recover the
-    # ``text_embeddings_mask`` the DMD2 pipeline expects from the per-item masks.
-    if "text_embeddings_mask" not in image_batch and batch and "prompt_embeds_mask" in batch[0]:
+    # Bucket sampling yields one resolution per batch.
+    resolutions = {tuple(item["crop_resolution"].tolist()) for item in batch}
+    assert len(resolutions) == 1, f"Mixed resolutions in batch: {resolutions}"
+
+    # Stack only the keys the DMD2 pipeline consumes, straight from the vendored dataset's
+    # per-item output. We do NOT call the stock ``collate_fn_production`` (see module docstring):
+    # released nemo_automodel 0.4.0 unconditionally stacks ``clip_tokens`` / ``t5_tokens``, which
+    # the Qwen-Image cache omits.
+    image_batch = {
+        "image_latents": torch.stack([item["latent"] for item in batch]),
+        "data_type": "image",
+        "text_embeddings": torch.stack([item["prompt_embeds"] for item in batch]),
+        "metadata": {
+            "prompts": [item["prompt"] for item in batch],
+            "image_paths": [item["image_path"] for item in batch],
+            "bucket_ids": [item["bucket_id"] for item in batch],
+            "aspect_ratios": [item["aspect_ratio"] for item in batch],
+            "crop_resolution": torch.stack([item["crop_resolution"] for item in batch]),
+            "original_resolution": torch.stack([item["original_resolution"] for item in batch]),
+            "crop_offset": torch.stack([item["crop_offset"] for item in batch]),
+        },
+    }
+
+    # Optional model-specific embedding fields, when a dataset provides them.
+    for key in ("pooled_prompt_embeds", "clip_hidden"):
+        if key in batch[0]:
+            image_batch[key] = torch.stack([item[key] for item in batch])
+
+    # DMD2 text mask: the stock production collate does not stack ``prompt_embeds_mask``.
+    if "prompt_embeds_mask" in batch[0]:
         image_batch["text_embeddings_mask"] = torch.stack(
             [item["prompt_embeds_mask"] for item in batch]
         )

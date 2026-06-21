@@ -21,6 +21,15 @@ shipped in the `nvidia-modelopt` pip package. Install the example dependencies w
 pip install -r examples/diffusers/fastgen/requirements.txt
 ```
 
+> [!TIP]
+> Prefer not to install `nemo_automodel` yourself? Use the **NeMo AutoModel container**, which
+> bundles it (with the diffusion extras) — then you only need a source checkout of Model-Optimizer
+> for the `examples/` tree and can skip the `pip install` above:
+>
+> ```bash
+> docker run --gpus all -it --rm --shm-size=8g nvcr.io/nvidia/nemo-automodel:26.04
+> ```
+
 The DMD2 data loading (`fastgen_data/`) and raw-image preprocessing (`preprocess/`) are
 **vendored into this example** (from NeMo-AutoModel, Apache-2.0) so that **no modifications to
 `nemo_automodel` are required**. The entry points put this directory on `sys.path`, so the
