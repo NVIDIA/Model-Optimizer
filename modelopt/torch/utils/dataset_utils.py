@@ -27,6 +27,7 @@ from warnings import warn
 import requests
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -521,6 +522,7 @@ def get_dataset_dataloader(
     device: torch.device | None = None,
     include_labels: bool = False,
     apply_chat_template: bool = False,
+    distributed_kwargs: dict | None = None,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
@@ -537,6 +539,9 @@ def get_dataset_dataloader(
         include_labels: Whether to include labels in the dataloader.
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).
+        distributed_kwargs: When provided (e.g. ``{"num_replicas": world_size, "rank": rank}``),
+            shard the dataset across ranks with a ``DistributedSampler``. ``drop_last=False``
+            keeps per-rank batch counts equal so ranks do not hang on collectives (e.g. FSDP2).
 
     Returns:
         An instance of dataloader.
@@ -598,7 +603,14 @@ def get_dataset_dataloader(
             }
         )
 
-    calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
+    sampler = (
+        DistributedSampler(tokenized_dataset, shuffle=False, drop_last=False, **distributed_kwargs)
+        if distributed_kwargs
+        else None
+    )
+    calib_dataloader = DataLoader(
+        tokenized_dataset, batch_size=batch_size, shuffle=False, sampler=sampler
+    )
 
     return calib_dataloader
 

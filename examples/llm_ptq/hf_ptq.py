@@ -72,7 +72,7 @@ from modelopt.torch.export import (
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
-from modelopt.torch.quantization.utils import is_quantized, patch_fsdp_mp_dtypes
+from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
@@ -83,9 +83,8 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.distributed import fsdp_aware_forward_loop, shard_dataloader
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
-from modelopt.torch.utils.model_load_utils import parallel_load_and_prepare_fsdp2
+from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -290,9 +289,10 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
+            distributed_kwargs=(
+                {"num_replicas": args.world_size, "rank": args.rank} if args.use_fsdp2 else None
+            ),
         )
-    if args.use_fsdp2 and calib_dataloader is not None and isinstance(calib_dataloader, DataLoader):
-        calib_dataloader = shard_dataloader(calib_dataloader, args.rank, args.world_size)
     return calib_dataloader, first_text_speech_dataset
 
 
@@ -685,11 +685,10 @@ def mono_quantize(
             # Those kwargs must be consumed by the *full* VLM model, not the extracted language_model.
             if args.calib_with_images and is_nemotron_vl_model:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
-            elif args.use_fsdp2:
-                calibrate_loop = fsdp_aware_forward_loop(
-                    language_model, calib_dataloader, args.device
-                )
             else:
+                # FSDP2 shards each decoder layer in place, so a standard forward through
+                # the (unwrapped) root still hits the per-layer FSDP2 hooks — no special
+                # forward loop needed.
                 calibrate_loop = create_forward_loop(
                     dataloader=calib_dataloader,
                     allowed_non_tensor_keys={"base_model_outputs"}
@@ -937,7 +936,7 @@ def post_quantize(
         )
         return
 
-    if args.verbose:
+    if args.verbose and args.is_main:
         try:
             mtq.print_quant_summary(full_model, args.export_path)
             save_expert_token_count_table(full_model, args.export_path)
@@ -1585,5 +1584,4 @@ if __name__ == "__main__":
                 "(multi-format auto-quantize)."
             )
 
-    with patch_fsdp_mp_dtypes():
-        main(args)
+    main(args)

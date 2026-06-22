@@ -838,6 +838,8 @@ def _export_transformers_checkpoint(
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
     else:
+        # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
+        # A sharded non-FSDP2 model (TP/PP) would export an incomplete checkpoint here.
         quantized_state_dict = model.state_dict()
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
@@ -1263,6 +1265,9 @@ def export_hf_checkpoint(
 
         _sanitize_generation_config_for_save(model)
 
+        # TODO: Parallelize the disk write across ranks (each writes a disjoint shard
+        # subset) so we're not bound by single-process write speed and rank 0 doesn't
+        # have to hold the full state dict (OOM risk for large models).
         try:
             model.save_pretrained(
                 export_dir,

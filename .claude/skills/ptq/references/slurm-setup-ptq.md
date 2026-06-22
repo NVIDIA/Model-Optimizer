@@ -79,7 +79,7 @@ torchrun \
         --use_fsdp2
 ```
 
-Add `--cpu_offload` when the per-rank decoder shard approaches GPU capacity (200B+ at low rank count). Layer detection is automatic; no YAML config needed.
+When the per-rank decoder shard approaches GPU capacity (200B+ at low rank count), either add more nodes (more ranks → smaller shard per rank) or add `--cpu_offload`. Layer detection is automatic; no YAML config needed.
 
 Use the multi-node template from `skills/common/slurm-setup.md` section 4 as the job script wrapper.
 
