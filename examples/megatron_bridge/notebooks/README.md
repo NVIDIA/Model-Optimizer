@@ -51,9 +51,10 @@ docker run --gpus all \
   --ServerApp.password=''
 ```
 
-## 5. SSH tunnel (from your local machine)
+## 5. SSH tunnel (from your local machine) for enabling Tensorboard visualization
 ```bash
-ssh -N -L 8888:g242-p33-0094:8888 nvdl-code-01
+ssh -L 6006:localhost:6006 <your-username>@<remote-host>
+
 ```
 
 ## 6. Open in browser
