@@ -102,10 +102,10 @@ pipeline:
       - dflash.dflash_mask_token_id=200061
       # YaRN rope_scaling injected at EXPORT time only (config.json field; draft weights
       # unchanged) -> tunable per export. original_max_position_embeddings = training_seq_len
-      # (8192). Default factor 24 -> 8192*24 = 196608 served context (matches M2.7's target).
-      # For M3's full 1M context use factor 128 (8192*128 = 1048576).
+      # (8192). factor 128 -> 8192*128 = 1048576 = M3's full 1M context. (Use factor 24 ->
+      # 196608 to match M2.7's served target instead.)
       - dflash.dflash_export_rope_scaling.type=yarn
-      - dflash.dflash_export_rope_scaling.factor=24.0
+      - dflash.dflash_export_rope_scaling.factor=128.0
       - dflash.dflash_export_rope_scaling.original_max_position_embeddings=8192
       - dflash.dflash_export_rope_scaling.beta_fast=1.0
       - dflash.dflash_export_rope_scaling.beta_slow=1.0
