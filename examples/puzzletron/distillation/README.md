@@ -59,23 +59,64 @@ export PYTHONPATH="$(pwd):/opt/Megatron-Bridge/src:/opt/Megatron-Bridge/3rdparty
 
 ### Minimal example
 
-Distill a `nemo2` teacher into an `llama` student on a single GPU, using the default YAML:
+Distill a `llama` teacher into an `pruned llama` student on a single node:
 
 ```bash
-torchrun --nproc_per_node=1 examples/puzzletron/distillation/distill.py \
-    --student llama \
-    --teacher nemo2 \
-    --teacher-checkpoint /path/to/nemotron3-hf
+torchrun --nproc-per-node=8  examples/puzzletron/distillation/distill.py \
+--student llama \
+--teacher llama \
+--student-checkpoint /puzzletron/workspaces/Llama-3.1-8B-Instruct/mip/puzzle_solutions/target_memory_78000MiB-num_params_7G/solutions--checkpoints/solution_0/ \
+--teacher-checkpoint /puzzletron/workspaces/Llama-3.1-8B-Instruct/ckpts/teacher/   \
+--config-file examples/puzzletron/distillation/kd-container-llama.yaml \
+--tensor-model-parallel-size 1 \
+--pipeline-model-parallel-size 8 \
+--expert-model-parallel-size 1 \
+--expert-tensor-parallel-size 1 \
+train.train_iters=1000 \
+checkpoint.save=/puzzletron/workspaces/Llama-3.1-8B-Instruct/kd/puzzle_solutions/target_memory_78000MiB-num_params_7G-intermediate/ \
+logger.wandb_exp_name=Llama-3.1-8B-Instruct-target_memory_78000MiB-num_params_7G-intermediate
 ```
 
-### From local checkpoints with a custom config
+Distill a `qwen3` teacher into an `pruned qwen` student on a single node (to fit into single gpu we limit the sequence length):
 
 ```bash
-torchrun --nproc_per_node=8 examples/puzzletron/distillation/distill.py \
-    --student llama --student-checkpoint /path/to/student-hf \
-    --teacher nemo2 --teacher-checkpoint /path/to/teacher-hf \
-    --config-file examples/puzzletron/distillation/kd-container-nemotron3.yaml
+torchrun --nproc-per-node=8  examples/puzzletron/distillation/distill.py \
+--student qwen \
+--teacher qwen \
+--student-checkpoint /puzzletron/workspaces/Qwen3-8B/mip/puzzle_solutions/target_memory_78000MiB-num_params_8G/solutions--checkpoints/solution_0/ \
+--teacher-checkpoint /puzzletron/workspaces/Qwen3-8B/ckpts/teacher/ \
+--config-file examples/puzzletron/distillation/kd-container-qwen.yaml \
+--tensor-model-parallel-size 1 \
+--pipeline-model-parallel-size 4 \
+--expert-model-parallel-size 1 \
+--expert-tensor-parallel-size 1 \
+train.train_iters=1000 \
+checkpoint.save=/puzzletron/workspaces/Qwen3-8B/kd/puzzle_solutions/target_memory_78000MiB-num_params_8G/ \
+logger.wandb_exp_name=Qwen3-8B-intermediate \
+model.seq_length=1024 \
+dataset.seq_length=1024
 ```
+
+Distill a `gpt-oss` teacher into an `pruned gpt-oss` student on a single node (to fit into single gpu we limit the sequence length):
+
+```bash
+torchrun --nproc-per-node=8  examples/puzzletron/distillation/distill.py \
+--student gptoss \
+--teacher gptoss \
+--student-checkpoint /puzzletron/workspaces/any_model_gpt_oss_20b/mip/puzzle_solutions/stats_num_params_10914757184/solutions--checkpoints/solution_0/ \
+--teacher-checkpoint /puzzletron/workspaces/any_model_gpt_oss_20b/ckpts/teacher \
+--config-file examples/puzzletron/distillation/kd-container-qwen.yaml \
+--tensor-model-parallel-size 1 \
+--pipeline-model-parallel-size 4 \
+--expert-model-parallel-size 1 \
+--expert-tensor-parallel-size 1 \
+train.train_iters=1000 \
+checkpoint.save=/puzzletron/workspaces/any_model_gpt_oss_20b/kd/puzzle_solutions/stats_num_params_10914757184/solutions--checkpoints/solution_0/ \
+logger.wandb_exp_name=GptOss-20b-intermediate \
+model.seq_length=1024 \
+dataset.seq_length=1024
+```
+
 
 ### Heterogeneous student + teacher (e.g. GPT-OSS → Nemotron-H)
 

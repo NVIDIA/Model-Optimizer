@@ -123,7 +123,7 @@ class GPTOSSBridge(MegatronModelBridge):
         provider.glu_linear_offset = 1.0
 
         provider.softmax_type = "learnable"
-        provider.window_size = (128, 0)
+        provider.window_size = (hf_pretrained.config.sliding_window - 1, 0)
         provider.window_attn_skip_freq = 2
 
         # GPT-OSS uses intermediate_size for MoE FFN hidden size

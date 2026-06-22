@@ -284,11 +284,16 @@ def block_config_to_mcore_overrides(
                         "moe_ffn_hidden_size",
                         getattr(moe_cfg, "expert_intermediate_dim", None),
                     )
-                    _set_if_not_none(
-                        config_overrides,
-                        "moe_shared_expert_intermediate_size",
-                        getattr(moe_cfg, "shared_expert_intermediate_dim", None),
-                    )
+                    if moe_shared_expert_intermediate_omitted:
+                        # MoEConfig defaults shared_expert_intermediate_dim to 8192 when the
+                        # JSON key is absent; GPT-OSS and similar models have no shared expert.
+                        config_overrides["moe_shared_expert_intermediate_size"] = None
+                    else:
+                        _set_if_not_none(
+                            config_overrides,
+                            "moe_shared_expert_intermediate_size",
+                            getattr(moe_cfg, "shared_expert_intermediate_dim", None),
+                        )
             else:
                 # Dense MLP: override per-layer FFN hidden size if specified.
                 intermediate_size = getattr(ffn, "intermediate_size", None)
@@ -344,10 +349,14 @@ def get_overrides_for_layer(
     if typed is None:
         return None
 
+    raw_bc = block_configs[layer_idx]
+    shared_expert_omitted = _moe_shared_expert_intermediate_omitted(raw_bc)
+
     overrides = block_config_to_mcore_overrides(
         typed[layer_idx],
         num_attention_heads=num_attention_heads,
         hidden_size=hidden_size,
+        moe_shared_expert_intermediate_omitted=shared_expert_omitted,
     )
 
     if strict_mamba_slot and not overrides.attention_no_op and not overrides.mlp_no_op:
@@ -369,3 +378,16 @@ def _set_if_not_none(d: dict, key: str, value: Any) -> None:
     """Add key → value to dict only if value is not None."""
     if value is not None:
         d[key] = value
+
+
+def _moe_shared_expert_intermediate_omitted(block_config: BlockConfig | dict) -> bool:
+    """Return True when the raw block config omits shared_expert_intermediate_dim."""
+    if not isinstance(block_config, dict):
+        return False
+    ffn = block_config.get("ffn")
+    if not isinstance(ffn, dict):
+        return False
+    moe = ffn.get("moe")
+    if not isinstance(moe, dict):
+        return False
+    return "shared_expert_intermediate_dim" not in moe

@@ -13,7 +13,13 @@
 model:
   # Heterogeneous AnyModel / per-layer MoE: distinct checkpoint keys per global layer.
   hetereogenous_dist_checkpoint: true
-
+  expert_model_parallel_size: 1
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: false
+  use_shared_experts: false
   pipeline_dtype: torch.bfloat16
   seq_length: &seqlen 4096
 
@@ -23,6 +29,8 @@ model:
     logit_layers:
       - output_layer
       - output_layer
+    intermediate_layer_pairs:
+      - [decoder.final_layernorm, decoder.final_layernorm]
     skip_lm_loss: true
     kd_loss_scale: 1.0
     logit_kl_temperature: 1.0
@@ -79,27 +87,11 @@ ddp:
   use_distributed_optimizer: false
 
 # ---------------------------------------------------------------------------
-# Dataset
-#
-# Provide either ``per_split_data_args_path`` (path to a JSON describing the
-# per-split blends) OR ``blend_per_split`` (inline list of [paths, weights]
-# tuples for train / valid / test). Override these via Hydra-style CLI args
-# or a downstream YAML.
-#
-# Example inline blend_per_split:
-#   blend_per_split:
-#     - - - /path/to/train_shard_00_text_document
-#         - /path/to/train_shard_01_text_document
-#       - [0.5, 0.5]
-#     - - - /path/to/valid_text_document
-#       - [1.0]
-#     - - - /path/to/test_text_document
-#       - [1.0]
+# Dataset (mock blend — replace with real blend / per_split_data_args_path for production)
 # ---------------------------------------------------------------------------
 dataset:
   seq_length: *seqlen
-  per_split_data_args_path: null  # e.g. /path/to/blend_spec.json
-  path_to_cache: ./outputs/datasets_cache
+  path_to_cache: /puzzletron/workspaces/datasets_cache
   random_seed: 1234
   reset_attention_mask: False
   reset_position_ids: False
@@ -109,9 +101,18 @@ dataset:
   dataloader_type: "cyclic"
   skip_getting_attention_mask_from_dataset: True
   num_workers: 1
-  blend: null
   split: null
-  blend_per_split: null
+  blend: null
+  blend_per_split: 
+    - - - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Llama-3.1-8B-Instruct/puzzle_kd-train_text_document
+      - [1.0]
+
+    # Validation
+    - - - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Llama-3.1-8B-Instruct/puzzle_kd-valid_text_document
+      - [1.0]
+    # Test (same blend as validation in source tuple)
+    - - - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Llama-3.1-8B-Instruct/puzzle_kd-valid_text_document
+      - [1.0]
 
 # ---------------------------------------------------------------------------
 # Tokenizer (override to NullTokenizer + vocab_size for mock-token runs)
@@ -127,7 +128,7 @@ checkpoint:
   save_interval: 100
   save: ./outputs/kd-checkpoints
   load: ./outputs/kd-checkpoints
-  most_recent_k: 3
+  most_recent_k: 5
   ckpt_format: torch_dist
   async_save: true
   fully_parallel_save: true
@@ -140,11 +141,10 @@ logger:
   log_interval: 1
   tensorboard_dir: ./outputs/tb
   log_timers_to_tensorboard: true
-  # Optional Weights & Biases logging — leave null to disable, or override per run.
-  wandb_project: null
-  wandb_exp_name: null
-  wandb_entity: null
-  wandb_save_dir: ./outputs/wandb
+  wandb_project: ???
+  wandb_exp_name: ???
+  wandb_entity: ???
+  wandb_save_dir: ???
 
 # ---------------------------------------------------------------------------
 # RNG / distributed / precision
