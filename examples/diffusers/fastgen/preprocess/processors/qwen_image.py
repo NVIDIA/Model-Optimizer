@@ -161,14 +161,19 @@ class QwenImageProcessor(BaseModelProcessor):
         pipeline = models["pipeline"]
 
         with torch.no_grad():
-            prompt_embeds, _ = pipeline.encode_prompt(
+            prompt_embeds, prompt_embeds_mask = pipeline.encode_prompt(
                 prompt=prompt,
                 device=device,
             )
 
-        return {
-            "prompt_embeds": prompt_embeds.detach().cpu().to(torch.bfloat16),
-        }
+        # Persist the attention mask Qwen-Image's encode_prompt returns (as the docstring
+        # promises, and as the negative-prompt path already does). Without it the dataset falls
+        # back to an all-ones mask, which is only exact when the cached embeds are trimmed to the
+        # real prompt length; keeping the true mask makes the contract explicit and robust.
+        encodings = {"prompt_embeds": prompt_embeds.detach().cpu().to(torch.bfloat16)}
+        if prompt_embeds_mask is not None:
+            encodings["prompt_embeds_mask"] = prompt_embeds_mask.detach().cpu().to(torch.long)
+        return encodings
 
     def verify_latent(
         self,
@@ -237,7 +242,7 @@ class QwenImageProcessor(BaseModelProcessor):
         Returns:
             Dict to save with torch.save()
         """
-        return {
+        cache = {
             # Image latent
             "latent": latent,
             # Text embeddings
@@ -253,3 +258,8 @@ class QwenImageProcessor(BaseModelProcessor):
             # Model info
             "model_type": self.model_type,
         }
+        # Carry the positive-prompt attention mask through to the cache when present, so the
+        # dataset uses the real mask instead of synthesizing an all-ones one.
+        if "prompt_embeds_mask" in text_encodings:
+            cache["prompt_embeds_mask"] = text_encodings["prompt_embeds_mask"]
+        return cache

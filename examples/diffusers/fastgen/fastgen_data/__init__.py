@@ -15,22 +15,26 @@
 
 """Self-contained DMD2 dataloaders for the fastgen example.
 
-The DMD2 data path is expressed as **thin wrappers over stock** ``nemo_automodel`` (@ e42584e3,
-Apache-2.0) so the published example does not depend on local *modifications* to AutoModel:
+The DMD2 data path builds on stock ``nemo_automodel`` (@ e42584e3, Apache-2.0) where it is
+model-agnostic and reimplements the rest, so the published example does not depend on local
+*modifications* to AutoModel:
 
-* ``collate_fns.py`` — the collate fn + dataloader builder, written as wrappers that import the
-  unpatched upstream ``collate_fns`` / ``sampler`` and add only the DMD2 delta
-  (``text_embeddings_mask`` + optional broadcast negative-prompt embedding).
-* ``text_to_image_dataset.py`` — a faithful vendored copy of the upstream dataset reader (its
-  change emits ``prompt_embeds_mask`` and is interleaved with cache loading, so it is carried
-  verbatim rather than wrapped).
+* ``collate_fns.py`` — the collate fn + dataloader builder. It reuses the upstream
+  ``SequentialBucketSampler`` but builds the DMD2 batch itself (``image_latents`` /
+  ``text_embeddings`` / ``text_embeddings_mask`` + the optional broadcast negative-prompt
+  embedding) directly from the vendored dataset's per-item output. It deliberately does **not**
+  call upstream ``collate_fn_production``, which stacks model-specific token keys
+  (``clip_tokens`` / ``t5_tokens``) that the Qwen-Image cache does not produce.
+* ``text_to_image_dataset.py`` — a faithful vendored copy of the upstream dataset reader (built
+  on the upstream ``BaseMultiresolutionDataset``); its change emits ``prompt_embeds_mask``
+  interleaved with cache loading, so it is carried verbatim rather than wrapped.
 
 The training configs reference these via ``_target_: fastgen_data.build_*`` once
 ``dmd2_finetune.py`` has put this directory on ``sys.path`` (source-checkout flow).
 """
 
 # Runtime soft-guard: the data path imports UNPATCHED upstream helpers
-# (``nemo_automodel.components.datasets.diffusion.{collate_fns,sampler,base_dataset}``).
+# (``nemo_automodel.components.datasets.diffusion.{sampler,base_dataset}``).
 # Convert a missing-helper ImportError into an actionable message naming the supported range.
 try:
     from .collate_fns import (
@@ -42,7 +46,7 @@ except ImportError as exc:  # pragma: no cover - environment guard
     raise ImportError(
         "fastgen_data could not import its dependencies. It requires a stock "
         "nemo_automodel>=0.4.0,<1.0 install (it imports the unpatched upstream helpers "
-        "nemo_automodel.components.datasets.diffusion.{collate_fns,sampler,base_dataset}). "
+        "nemo_automodel.components.datasets.diffusion.{sampler,base_dataset}). "
         "Install the example dependencies with:\n"
         "    pip install -r examples/diffusers/fastgen/requirements.txt\n"
         f"Underlying import error: {exc!r}"
@@ -58,9 +62,9 @@ __all__ = [
 def _warn_if_unsupported_upstream() -> None:
     """Soft-warn (never raise) if the installed ``nemo_automodel`` is outside the tested range.
 
-    The vendored data/preprocessing code imports unpatched upstream helpers (``collate_fns``,
-    ``sampler``, ``base_dataset``, ``multi_tier_bucketing``); an out-of-range version may have
-    moved them. This complements the hard import guard above with a clear, non-fatal signal.
+    The vendored data/preprocessing code imports unpatched upstream helpers (``sampler``,
+    ``base_dataset``, ``multi_tier_bucketing``); an out-of-range version may have moved them.
+    This complements the hard import guard above with a clear, non-fatal signal.
     """
     import logging
 
@@ -79,7 +83,7 @@ def _warn_if_unsupported_upstream() -> None:
             logging.getLogger(__name__).warning(
                 "fastgen_data: installed nemo_automodel %s is outside the tested range "
                 "(>=0.4.0,<1.0). The vendored data/preprocessing code imports unpatched upstream "
-                "helpers (collate_fns, sampler, base_dataset, multi_tier_bucketing); if imports "
+                "helpers (sampler, base_dataset, multi_tier_bucketing); if imports "
                 "fail or behavior drifts, pin nemo_automodel to the supported range.",
                 raw or "<unknown>",
             )

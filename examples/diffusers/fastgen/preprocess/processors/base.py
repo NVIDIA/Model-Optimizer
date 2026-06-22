@@ -187,5 +187,7 @@ class BaseModelProcessor(ABC):
             Scaling factor (typically from vae.config.scaling_factor)
         """
         if "vae" in models and hasattr(models["vae"], "config"):
-            return models["vae"].config.scaling_factor
+            scaling_factor = getattr(models["vae"].config, "scaling_factor", None)
+            if scaling_factor is not None:
+                return scaling_factor
         return 0.18215  # Default for most models

@@ -59,7 +59,11 @@ def main() -> None:
         default="",
         help='Negative prompt to encode (default "" = unconditional)',
     )
-    parser.add_argument("--device", default="cuda", help="Device for the text encoder")
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device for the text encoder (default: cuda if available, else cpu)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
