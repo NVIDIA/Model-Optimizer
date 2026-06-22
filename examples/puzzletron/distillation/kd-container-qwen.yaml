@@ -92,7 +92,7 @@ ddp:
 dataset:
   seq_length: 4096
   path_to_cache: /puzzletron/workspaces/datasets_cache
-  random_seed: 1234
+  random_seed: &seed 42
   reset_attention_mask: False
   reset_position_ids: False
   eod_mask_loss: False
@@ -150,7 +150,7 @@ logger:
 # RNG / distributed / precision
 # ---------------------------------------------------------------------------
 rng:
-  seed: 42
+  seed: *seed
 
 dist:
   distributed_timeout_minutes: 180
