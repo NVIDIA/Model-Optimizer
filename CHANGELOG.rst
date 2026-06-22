@@ -93,6 +93,10 @@ Changelog
 **Deprecations**
 
 - Deprecate the public ``QuantizationArgumentsWithConfig`` name in ``modelopt.torch.quantization.plugins.transformers_trainer``; it now aliases ``QuantizationArguments`` and will be removed in a future release.
+- Deprecate ``examples/llm_autodeploy``. The AutoQuant + TensorRT-LLM AutoDeploy
+  workflow it demonstrates will be removed in a future release; use TensorRT-LLM's
+  `AutoDeploy <https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy>`_
+  directly together with ModelOpt PTQ in ``examples/llm_ptq``.
 
 **Bug Fixes**
 
