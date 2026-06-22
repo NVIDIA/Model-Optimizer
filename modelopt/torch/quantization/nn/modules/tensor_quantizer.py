@@ -56,6 +56,7 @@ from ...qtensor import (
 )
 from ...tensor_quant import (
     dynamic_block_quant,
+    dynamic_int_block_quant,
     fake_tensor_quant,
     fp4_cast_ste,
     int_cast_ste,
@@ -703,31 +704,6 @@ class TensorQuantizer(nn.Module):
             raise ValueError(f"Unsupported bias type: {self.bias_type}")
         return bias
 
-    def _fake_dynamic_int_block_quantize(self, inputs, block_size, bias):
-        """Fake quantize INT blocks with a per-forward max scale."""
-        if bias is not None:
-            raise NotImplementedError("Dynamic INT block quantization does not support bias.")
-
-        original_last_dim = inputs.shape[-1]
-        if original_last_dim % block_size != 0:
-            pad_width = block_size - original_last_dim % block_size
-            inputs = F.pad(inputs, (0, pad_width), "constant", 0)
-
-        blocked_shape = (*inputs.shape[:-1], -1, block_size)
-        blocked_inputs = inputs.reshape(blocked_shape)
-        amax = quant_utils.reduce_amax(blocked_inputs, axis=-1, keepdims=True).detach()
-        outputs = fake_tensor_quant(
-            blocked_inputs,
-            amax,
-            None,
-            self._num_bits,
-            self._unsigned,
-            self._narrow_range,
-            self._trt_high_precision_dtype,
-            self._pass_through_bwd,
-        ).reshape(inputs.shape)
-        return outputs[..., :original_last_dim]
-
     def _is_real_quantize_support(self):
         """Check if real quantization is supported for this quant config."""
         return (
@@ -844,7 +820,16 @@ class TensorQuantizer(nn.Module):
 
             bias = self._get_bias(inputs)
             if isinstance(self._num_bits, int) and self.block_sizes.get("scale_bits") is None:
-                outputs = self._fake_dynamic_int_block_quantize(inputs, block_size, bias)
+                outputs = dynamic_int_block_quant(
+                    inputs,
+                    block_size,
+                    bias,
+                    self._num_bits,
+                    self._unsigned,
+                    self._narrow_range,
+                    self._trt_high_precision_dtype,
+                    self._pass_through_bwd,
+                )
             else:
                 outputs = dynamic_block_quant(
                     inputs,
