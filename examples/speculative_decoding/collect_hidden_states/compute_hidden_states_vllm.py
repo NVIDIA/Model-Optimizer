@@ -111,6 +111,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--tp", type=int, default=None, help="Tensor parallel size.")
     parser.add_argument(
+        "--block-size",
+        type=int,
+        default=None,
+        help="KV cache block size. Some models require a specific value — e.g. MiniMax-M3's "
+        "MSA sparse attention mandates 128. Default (None) lets vLLM choose.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Skip the vision encoder for text-only dumps (multimodal models, e.g. MiniMax-M3).",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph / torch.compile. Needed for MiniMax-M3: its MSA sparse "
+        "kernel JIT-recompiles per shape and a recompile can exceed the executor RPC "
+        "timeout under cudagraph capture, hanging the engine.",
+    )
+    parser.add_argument(
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
     )
     add_aux_layers_args(parser)
@@ -168,7 +187,12 @@ def main(args: argparse.Namespace) -> None:
     # Resolve the aux-layer indices and append the final-layer output. vLLM saves the
     # final (un-normed) hidden state when ``num_hidden_layers`` is passed as a layer id.
     config = AutoConfig.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
-    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    # Vision-language / wrapped configs (e.g. MiniMax-M3's MiniMaxM3VLConfig) nest the
+    # text model's layer count under text_config / llm_config rather than at the top level.
+    text_config = getattr(config, "text_config", None) or getattr(config, "llm_config", None)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None) or getattr(
+        text_config, "num_hidden_layers", None
+    )
     if num_hidden_layers is None:
         raise ValueError(f"model config has no 'num_hidden_layers' attribute: {config}")
     aux_layer_ids = _resolve_aux_layers_standalone(
@@ -244,12 +268,23 @@ def main(args: argparse.Namespace) -> None:
     storage_path.mkdir(parents=True, exist_ok=True)
     atexit.register(shutil.rmtree, storage_path, ignore_errors=True)
 
+    # Model-specific extras (e.g. MiniMax-M3 mandates block_size=128 for MSA sparse
+    # attention; --language-model-only skips the vision encoder for text-only dumps).
+    extra_llm_kwargs = {}
+    if args.block_size is not None:
+        extra_llm_kwargs["block_size"] = args.block_size
+    if args.language_model_only:
+        extra_llm_kwargs["language_model_only"] = True
+    if args.enforce_eager:
+        extra_llm_kwargs["enforce_eager"] = True
+
     llm = LLM(
         model=args.model,
         tensor_parallel_size=tp,
         max_model_len=args.max_seq_len,
         trust_remote_code=args.trust_remote_code,
         enable_chunked_prefill=False,  # required by extract_hidden_states
+        **extra_llm_kwargs,
         # With prefix caching on, vLLM serves shared prefixes from cache in block-sized
         # chunks and the hidden-state connector only emits the freshly-computed suffix, so
         # the dumped hidden_states come out short by N*block_size vs the full input_ids /
