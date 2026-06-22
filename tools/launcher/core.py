@@ -312,7 +312,7 @@ def build_slurm_executor(
         container_mounts=container_mounts,
         array=slurm_config.array,
         time=slurm_config.time,
-        mem="0",
+        mem=getattr(slurm_config, "mem", None) or "0",
         retries=0,
         packager=packager,
         srun_args=slurm_config.srun_args,
