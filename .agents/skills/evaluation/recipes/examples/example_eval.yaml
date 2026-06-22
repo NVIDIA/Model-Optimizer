@@ -6,7 +6,7 @@
 # references define benchmark requirements and YAML fragments, this file
 # defines the deployment + operational conventions.
 #
-# Includes (default): gpqa_diamond_aa_v3 (simple-evals harness, n_samples=16).
+# Includes (default): ns_gpqa (nemo-skills harness, num_repeats=16, AA mcq-4choices).
 # Add more AA tasks per recipes/tasks/aa/ and the AA suite rule in SKILL.md.
 #
 # Usage:
@@ -35,7 +35,7 @@
 # `huggingface_hub.snapshot_download`) and point `checkpoint_path` at it.
 #
 # Run a single task:
-#   nel run --config ... -t gpqa_diamond_aa_v3
+#   nel run --config ... -t ns_gpqa
 #
 # Canary (2 samples): use this before a full run to validate logs and tune
 # parallelism.
@@ -91,6 +91,9 @@ deployment:
   # model as `/checkpoint` and eval requests 404 ("model does not exist").
   # For MoE models, add `--enable-expert-parallel` to the command.
   # For models with custom code, add `--trust-remote-code` to the command.
+  # `--model-loader-extra-config` enables multithreaded checkpoint loading (on by
+  # default below) — cuts large-checkpoint load from tens of minutes to a few;
+  # tune num_threads to the checkpoint size / shared-FS read bandwidth.
   # After filling in evaluation `parallelism` values (top-level + per-task),
   # append `--max-num-seqs N` to the command where
   # N = ceil(max_parallelism / data_parallel_size).
@@ -102,6 +105,7 @@ deployment:
     --tensor-parallel-size 1
     --data-parallel-size 1
     --max-model-len 131072
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}'
     --max-num-batched-tokens 8192
     --enable-chunked-prefill
 evaluation:
@@ -153,14 +157,17 @@ evaluation:
               # --max-model-len >= 393216. Uncomment for DeepSeek V4.
               # reasoning_effort: max
   tasks:
-  # Reasoning (chat endpoint, 8 repeats, short)
-    - name: gpqa_diamond_aa_v3
-      container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
+  # Reasoning (chat endpoint, short). nemo-skills GPQA on the AA 4-choice MCQ
+  # prompt (golden Nemotron-3-Ultra harness); repeat count kept at this recipe's
+  # prior value of 16.
+    - name: ns_gpqa
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
       nemo_evaluator_config:
         config:
           params:
             extra:
-              n_samples: 16
+              num_repeats: 16
+              args: "++prompt_config=eval/aai/mcq-4choices"
 
 export:
   # Use LITERAL values below — NOT ${deployment.*} / ${evaluation.*} cross-refs.

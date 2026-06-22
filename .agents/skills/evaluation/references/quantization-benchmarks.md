@@ -17,10 +17,10 @@ to precision loss. The Artificial Analysis (AA) Index v2 suite under
 
 | Recipe | Benchmark | What it measures | Quant sensitivity |
 |--------|-----------|------------------|-------------------|
-| `tasks/mmlu_pro.md` | MMLU-Pro (`mmlu_pro_aa_v3`, simple-evals) | General knowledge (10-choice) | Low — knowledge recall is robust to precision loss; cheap sanity check, not a regression detector |
+| `tasks/mmlu_pro.md` | MMLU-Pro (`ns_mmlu_pro`, nemo-skills, `num_repeats: 1`) | General knowledge (10-choice boxed) | Low — knowledge recall is robust to precision loss; cheap sanity check, not a regression detector |
 | `tasks/aime_2025.md` | AIME 2025 (`AIME_2025_aa_v2`, simple-evals) | Competition math (`n_samples: 64`) | High — single-token errors in long chains-of-thought cascade into wrong final answers |
 | `tasks/livecodebench.md` | LiveCodeBench v6 (`ns_livecodebench`, nemo-skills) | Code generation (`num_repeats: 8`) | High — code is brittle to single-token errors (one wrong identifier = test failure) |
-| `tasks/aa/gpqa_diamond.md` | GPQA Diamond (`gpqa_diamond_aa_v3`, simple-evals) | Hard science MCQ (`n_samples: 16`) | High — MCQ format but answers require multi-step reasoning that quantization can derail |
+| `tasks/aa/gpqa_diamond.md` | GPQA Diamond (`ns_gpqa`, nemo-skills, `num_repeats: 16`) | Hard science MCQ (4-choice) | High — MCQ format but answers require multi-step reasoning that quantization can derail |
 | `tasks/aa/hle.md` | HLE | Humanity's Last Exam, text-only, judge-scored | High — hard reasoning at the frontier; small precision losses move borderline answers |
 | `tasks/aa/lcr.md` | LCR | Long-context reasoning (~120K input, judge-scored) | Very high — KV-cache and attention quant error accumulate across the full context window |
 | `tasks/aa/scicode.md` | SciCode | Multi-step scientific code + sandbox execution | Very high — reasoning + code + sandbox stacked; errors compound across subtasks |
@@ -52,8 +52,8 @@ to precision loss. The Artificial Analysis (AA) Index v2 suite under
 - **Repeat / sample counts** in the task recipes are tuned for low variance —
   do **not** lower them for quant comparisons, or noise will mask real
   regressions. The field name differs by harness: `n_samples` for simple-evals
-  (AIME `64`, GPQA `16`) and tau2-bench (Tau2 `8`); `num_repeats` for
-  nemo-skills (AA-LCR `16`, LiveCodeBench/SciCode `8`, IFBench `5`).
+  (AIME `64`) and tau2-bench (Tau2 `8`); `num_repeats` for nemo-skills
+  (AA-LCR/GPQA `16`, LiveCodeBench/SciCode `8`, IFBench `5`, MMLU-Pro `1`).
 - **Judge / user-simulator endpoints** are required by AA-LCR, HLE AA, and
   Tau2-Bench Telecom. Keep the judge and (for Tau2) user-simulator models
   fixed across baseline and quantized runs for apples-to-apples comparison.

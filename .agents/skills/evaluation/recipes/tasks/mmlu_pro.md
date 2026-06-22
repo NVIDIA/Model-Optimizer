@@ -2,19 +2,28 @@
 
 ## Task Details
 
-- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/simple_evals.html#simple-evals-mmlu-pro-aa-v3>
+- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html#nemo-skills-ns-mmlu-pro>
 
 ## Params
+
+nemo-skills `ns_mmlu_pro` on the AA 10-choice boxed MCQ prompt
+(`++prompt_config=eval/aai/mcq-10choices-boxed`), `num_repeats: 1`.
 
 ## YAML Fragment
 
 Use this inside the top-level `evaluation.tasks` list:
 
 ```yaml
-- name: mmlu_pro_aa_v3
-  container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
+- name: ns_mmlu_pro
+  container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
+  nemo_evaluator_config:
+    config:
+      params:
+        extra:
+          num_repeats: 1
+          args: "++prompt_config=eval/aai/mcq-10choices-boxed"  # pragma: allowlist secret
 ```
 
-## Score Extraction
+## Score Extraction from mlflow
 
-Result (0-1): `mmlu_pro_score_micro`
+Result (0-100): `mmlu-pro_pass_at_1_symbolic_correct`  (note the hyphen in `mmlu-pro`)

@@ -13,6 +13,14 @@ they're config, not secrets, so they don't need exporting. Only `api_key`
 (`INFERENCE_API_KEY`) is exported and read by the harness. Keep the judge fixed
 across comparable runs.
 
+`hle_strict_judge: true` (inside the `judge` block) enables strict judging.
+
+**Don't add `++server.enable_soft_fail=True` for a self-deployed model.** In
+nemo-skills 0.7.0 it forces the client to load a tokenizer from the served model
+name, which 404s when that name isn't a real HF repo (failing the run). If you
+need soft-fail, also set `++tokenizer` to an HF id or a container-loadable local
+tokenizer.
+
 ## YAML Fragment
 
 Use this inside the top-level `evaluation.tasks` list:
@@ -30,6 +38,7 @@ Use this inside the top-level `evaluation.tasks` list:
             model_id: <HLE_JUDGE_MODEL_ID>   # from .env; recommended GPT-4o
             url: <NS_JUDGE_URL>              # from .env (/v1 base)
             api_key: INFERENCE_API_KEY       # env-var name; exported, read by harness
+            hle_strict_judge: true
 ```
 
 ## Score Extraction from mlflow
