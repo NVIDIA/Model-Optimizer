@@ -123,4 +123,25 @@ Overall: Puzzletron full pipeline (steps 1–8)
   Elapsed:   21m 26s  |  Remaining: ~28m estimated
 ```
 
-Steps 1–5 typically complete in under 2 minutes. Step 6 (one-block scoring) is the longest step — it scores all candidate solutions using a proxy metric (cosine embedding loss on hidden states). The number of solutions depends on the model size and `intermediate_size_list`; for Qwen3.5-0.8B with 4 sizes across 28 layers it is 264. Use `eval_samples` in the base YAML to trade off speed vs. score quality (default 128; 8 is useful for quick iteration).
+Step 6 (one-block scoring) is the longest step — it scores all candidate solutions using a proxy metric (cosine embedding loss on hidden states). The number of solutions depends on the model size and `intermediate_size_list`; for Qwen3.5-0.8B with 4 sizes across 28 layers it is 264. Use `eval_samples` in the base YAML to trade off speed vs. score quality (default 128; 8 is useful for quick iteration).
+
+---
+
+### Step 5: Check the compressed model accuracy
+
+Once the pipeline completes, check the accuracy of the MIP-selected compressed model against the teacher:
+
+```text
+/puzzletron mip losses
+```
+
+Example output for Qwen3.5-0.8B:
+
+| Metric | Teacher | Compressed (solution_0) |
+|---|---|---|
+| `lm_loss` | 1.1067 | 3.8808 |
+| `token_accuracy_top_1` | 0.7365 | 0.2915 |
+| `token_accuracy_top_5` | 0.9079 | 0.5500 |
+| `token_accuracy_top_10` | 0.9399 | 0.6451 |
+
+The results are read from `<puzzle_dir>/mip/puzzle_solutions/<target>/solutions--validation/solution_0.json` (and `teacher.json` in the same directory).

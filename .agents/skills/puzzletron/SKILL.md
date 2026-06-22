@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model. Usage: /puzzletron <command>"
+description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model. Usage: /puzzletron <command> [args]"
 license: Apache-2.0
 ---
 
@@ -20,6 +20,7 @@ license: Apache-2.0
 Available commands:
 - `mip <nproc_per_node>` — Run the MIP step (nproc_per_node: number of GPUs per node)
 - `mip progress` — Show live MIP progress with timing summary
+- `mip losses` — Show teacher vs. compressed model accuracy for the MIP solution
 - `all <nproc_per_node>` — Run the full Puzzletron pipeline (nproc_per_node: number of GPUs per node)
 - `all progress` — Show live full pipeline progress with timing summary
 - `add-model <hf_model_path>` — Implement descriptor, converter, and configs for an unsupported model
@@ -69,6 +70,7 @@ Parse `nproc_per_node` from args using either positional or flag syntax:
 - Flag: `--nproc_per_node <value>` anywhere in args, e.g. `mip --nproc_per_node 2`
 
 - If the second word is exactly `progress`, execute the **mip progress** sub-command below.
+- If the second word is exactly `losses`, execute the **mip losses** sub-command below.
 - If no `nproc_per_node` value can be found, ask the user: "Please provide the number of GPUs per node (nproc_per_node)." and **STOP**.
 - If the value does not match `^[0-9]+$`, ask the user: "nproc_per_node must be a positive integer." and **STOP**.
 - Otherwise use the parsed value and run the MIP step.
@@ -92,6 +94,14 @@ Run the following Bash command. Present the output to the user wrapped in a fenc
 
 ```bash
 python3 .agents/skills/puzzletron/mip_progress.py
+```
+
+### mip losses
+
+Run the following Bash command. Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+```bash
+python3 .agents/skills/puzzletron/mip_losses.py
 ```
 
 ## Command: add-model

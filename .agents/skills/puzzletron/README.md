@@ -98,6 +98,23 @@ Overall: Puzzletron step 7/8 — MIP sweep (6 compression rates)
 While running, the report shows which rate is active, sub-step detail (MIP solver node count
 or validation batch progress), and an estimated time remaining based on completed rates.
 
+## Checking compressed model accuracy
+
+After the pipeline completes, view the teacher vs. compressed model accuracy for the MIP solution:
+
+```text
+/puzzletron mip losses
+```
+
+Example output:
+
+| Metric | Teacher | Compressed (solution_0) |
+|---|---|---|
+| `lm_loss` | 1.1067 | 3.8808 |
+| `token_accuracy_top_1` | 0.7365 | 0.2915 |
+| `token_accuracy_top_5` | 0.9079 | 0.5500 |
+| `token_accuracy_top_10` | 0.9399 | 0.6451 |
+
 ## Adding support for a new model
 
 See [adding_new_model_tutorial.md](adding_new_model_tutorial.md) for a step-by-step walkthrough
