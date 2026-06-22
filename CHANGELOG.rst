@@ -26,6 +26,7 @@ Changelog
   - **GatedDeltaNet** (linear attention) and **gated attention** (``attention_output_gate``), such as Qwen3.5 (hybrid GatedDeltaNet + gated-attention) language models, including MoE variants — attention / linear-attention heads are not pruned.
   - **Multi-Latent Attention (MLA)**, such as DeepSeek — MLA latent ranks are not pruned.
   - **Latent MoE**, such as Nemotron-3-Super — ``hidden_size`` pruning resizes the latent projections while the MoE latent dim itself is not pruned.
+- Add Minitron pruning support for the language model part of vision-language models (e.g. Qwen3-VL, Qwen3.5-VL, Gemma3-VL) via ``examples/megatron_bridge/prune_minitron.py``. The language model is pruned while the vision tower is left intact and the full VLM is saved back; ``hidden_size`` is not pruned if it is shared with the vision projector.
 - Add NVFP4 Four-Over-Six (4/6) weight quantization (``mtq.NVFP4_FOUR_OVER_SIX_CFG``): MSE weight calibration picks, per block, between an M=6 and an M=4 dynamic range (the choice is folded into the FP8 per-block scales), with the ``four_over_six: true`` flag normalizing those scales by 256 (vs 448) for M=4 headroom. Supported via ``mtq.quantize`` and HF / Megatron export only -- **not** ``mtq.compress``, which does not preserve the per-block M=4/M=6 choice
 - Add dLLM (tied-weight PTQ and HF-checkpoint export) support for diffusion-based encoder-decoder LLMs (e.g. DiffusionGemma) whose encoder/decoder stacks share parameters via HF ``_tied_weights_keys``.
 

@@ -174,13 +174,13 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 | **Algorithm** | **Model** | **Pruning Constraints** |
 | :---: | :---: | :---: |
-| Minitron | Megatron-core<sup>1</sup> (M-Bridge, M-LM) based dense / MoE / hybrid Mamba-Transformer LLMs<sup>2</sup> | **Auto:** one or more of `params`, `active_params`, `memory_mb` <br>**Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`<sup>3</sup>, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values |
+| Minitron | Megatron-core<sup>1</sup> (M-Bridge, M-LM) based dense / MoE / hybrid Mamba-Transformer LLMs (and the language model of VLMs)<sup>2</sup> | **Auto:** one or more of `params`, `active_params`, `memory_mb` <br>**Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`<sup>3</sup>, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values |
 | Puzzletron | Hugging Face based dense / MoE / hybrid Mamba-Transformer LLMs & VLMs<sup>4</sup> | **Target:** one or more of `target_memory`, `num_params`, `target_latency_seconds`<br>**Heterogeneous (per-layer) search dimensions:**<sup>5</sup> FFN `intermediate_size` (different sizes per layer), attention `op`/`no_op` (selective attention-layer removal) and KV heads (GQA grouping), `hidden_size`, and MoE `num_experts` (expert removal) |
 | FastNAS | Computer Vision models | `flops`, `params` |
 
 > *<sup>1.</sup>Hugging Face models can be imported into M-Bridge/M-LM format as long as they are [supported](https://docs.nvidia.com/nemo/megatron-bridge/latest/index.html#supported-models) by the framework.*
 
-> *<sup>2.</sup>Language model part of VLMs can be pruned as well.*
+> *<sup>2.</sup>The language model of vision-language models (e.g. Qwen3-VL, Qwen3.5-VL, Gemma3-VL) can be pruned as well; the vision tower is left intact. `hidden_size` is not pruned for VLMs as it is shared with the vision projector. See the [Megatron-Bridge pruning example](../megatron_bridge/README.md#pruning).*
 
 > *<sup>3.</sup>`num_attention_heads` pruning is not supported for some attention types — GatedDeltaNet (linear attention), gated attention (`attention_output_gate`, e.g. Qwen3.5) and Multi-Latent Attention (MLA, e.g. DeepSeek); for these only `hidden_size` is pruned.*
 

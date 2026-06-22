@@ -103,7 +103,13 @@ def load_mbridge_model_from_hf(
     model = provider.provide_distributed_model(wrap_with_ddp=False)
     assert len(model) == 1
     unwrapped_model = unwrap_model(model[0])
-    assert isinstance(unwrapped_model, (GPTModel, MambaModel))
+    # VLMs (e.g. Qwen3-VL) wrap the language model as ``.language_model``; the pruning target is the
+    # inner GPTModel/MambaModel, but we still return the full wrapper so callers can save the VLM.
+    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
+    assert isinstance(language_model, (GPTModel, MambaModel)), (
+        f"Expected a GPTModel/MambaModel (optionally wrapped as .language_model), "
+        f"got {type(unwrapped_model)}"
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(
         hf_model_name_or_path, trust_remote_code=trust_remote_code

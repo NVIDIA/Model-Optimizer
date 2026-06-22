@@ -18,20 +18,17 @@ from pathlib import Path
 
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.transformers_models import create_tiny_gemma3_dir, create_tiny_qwen3_dir
-from transformers import AutoModelForCausalLM
-
-
-@pytest.mark.parametrize(
-    "create_tiny_model_dir",
-    [
-        create_tiny_qwen3_dir,
-        # Gemma3 exercises the sliding/full attention ``layer_types`` pruning path.
-        create_tiny_gemma3_dir,
-    ],
+from _test_utils.torch.transformers_models import (
+    create_tiny_gemma3vl_dir,
+    create_tiny_qwen3_5_vl_dir,
+    create_tiny_qwen3_dir,
+    create_tiny_qwen3vl_dir,
 )
-def test_prune_minitron(tmp_path: Path, num_gpus, create_tiny_model_dir):
-    teacher_hf_path, teacher_model = create_tiny_model_dir(
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+
+
+def test_prune_minitron(tmp_path: Path, num_gpus):
+    teacher_hf_path, teacher_model = create_tiny_qwen3_dir(
         tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=num_gpus
     )
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
@@ -58,3 +55,59 @@ def test_prune_minitron(tmp_path: Path, num_gpus, create_tiny_model_dir):
     pruned_model = AutoModelForCausalLM.from_pretrained(pruned_model_path)
     pruned_params = sum(p.numel() for p in pruned_model.parameters())
     assert pruned_params <= prune_target_params
+
+
+@pytest.mark.parametrize(
+    "create_tiny_vlm_dir",
+    [
+        # Qwen3-VL: standard attention LM + deepstack vision injection (indices must be preserved
+        # during depth pruning and remapped to the renumbered layers).
+        create_tiny_qwen3vl_dir,
+        # Gemma3-VL: sliding/full attention LM (exercises the ``layer_types`` pruning path) with a
+        # multimodal projector (no deepstack).
+        create_tiny_gemma3vl_dir,
+        # Qwen3.5-VL (dense): hybrid GatedDeltaNet (linear attention) + gated full-attention LM.
+        create_tiny_qwen3_5_vl_dir,
+    ],
+)
+def test_prune_minitron_vlm(tmp_path: Path, num_gpus, create_tiny_vlm_dir):
+    teacher_hf_path, teacher_model = create_tiny_vlm_dir(
+        tmp_path,
+        with_tokenizer=True,
+        return_model=True,
+        num_hidden_layers=4 * num_gpus,  # >= 4 per PP stage so depth is prunable and stays balanced
+        intermediate_size=128,
+    )
+    language_model_params = sum(p.numel() for p in teacher_model.model.language_model.parameters())
+    prune_target_params = int(language_model_params * 0.7)
+
+    pruned_model_path = tmp_path / "pruned"
+    prune_command_parts = extend_cmd_parts(
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
+        hf_model_name_or_path=teacher_hf_path,
+        output_hf_path=pruned_model_path,
+        pp_size=num_gpus,
+        calib_dataset_name="cnn_dailymail",
+        calib_num_samples=8,
+        seq_length=16,
+        prune_target_params=prune_target_params,
+        prune_score_func="mmlu_1pct_bs32",
+        ss_channel_divisor=4,
+        # Allow depth pruning (the primary param lever once hidden_size is fixed for VLMs).
+        max_depth_pruning=0.6,
+        hparams_to_skip="num_attention_heads",
+        top_k=1,
+    )
+    run_example_command(prune_command_parts, example_path="megatron_bridge")
+    assert (pruned_model_path / "config.json").exists()
+
+    # from_pretrained (default strict load) verifies the saved weights match the pruned config.
+    pruned_model = AutoModelForImageTextToText.from_pretrained(pruned_model_path)
+    # Language model pruned to the param target; vision tower preserved.
+    pruned_lm_params = sum(p.numel() for p in pruned_model.model.language_model.parameters())
+    assert pruned_lm_params <= prune_target_params
+    assert hasattr(pruned_model.config, "vision_config")
+    # deepstack indices (if any, e.g. Qwen3-VL) must remain valid for the (depth-pruned) LM.
+    deepstack = getattr(pruned_model.config.vision_config, "deepstack_visual_indexes", None)
+    if deepstack:
+        assert all(0 <= i < pruned_model.config.text_config.num_hidden_layers for i in deepstack)

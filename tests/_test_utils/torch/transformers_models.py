@@ -23,11 +23,12 @@ from _test_utils.torch.misc import set_seed
 transformers = pytest.importorskip("transformers")
 from transformers import (
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     AutoModelForQuestionAnswering,
     AutoTokenizer,
     BertConfig,
     DeepseekV3Config,
-    Gemma3TextConfig,
+    Gemma3Config,
     GptOssConfig,
     LlamaConfig,
     NemotronConfig,
@@ -133,11 +134,8 @@ def create_tiny_qwen3_moe_dir(
 
 ##### Qwen3-VL #####
 def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
-    # Lazy imports — Qwen3VL classes live under transformers.models.qwen3_vl which
-    # may not exist in older transformers builds, and this module is imported by
-    # every test that uses transformers_models.py.
+    # Lazy imports — Qwen3VL requires transformers>=4.57
     from transformers import Qwen3VLConfig
-    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
     set_seed(SEED)
 
@@ -145,6 +143,7 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
     # Pass config_kwargs to override for multi-GPU tests (e.g. num_attention_heads=num_gpus,
     # num_key_value_heads=num_gpus, hidden_size=num_gpus*head_dim).
     text_kwargs = {
+        "dtype": torch.bfloat16,
         "hidden_size": 32,
         "intermediate_size": 32,
         "num_hidden_layers": 2,
@@ -167,21 +166,146 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
         "spatial_merge_size": 1,
         "temporal_patch_size": 1,
         "out_hidden_size": text_kwargs["hidden_size"],  # must match text hidden_size
+        # Single deepstack injection (the bridge requires len <= num language-model layers, so keep
+        # this small for tiny models; defaults to [8, 16, 24] which needs >= 3 layers).
+        "deepstack_visual_indexes": [0],
     }
-    cfg = Qwen3VLConfig(text_config=text_kwargs, vision_config=vision_kwargs)
-    return Qwen3VLForConditionalGeneration(cfg)
+    cfg = Qwen3VLConfig(text_config=text_kwargs, vision_config=vision_kwargs, dtype=torch.bfloat16)
+    return AutoModelForImageTextToText.from_config(cfg)
 
 
 def create_tiny_qwen3vl_dir(
-    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
-) -> Path:
+    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+) -> Path | tuple[Path, PreTrainedModel]:
     qwen3vl_dir = Path(tmp_path) / "tiny_qwen3vl"
     if with_tokenizer:
         tokenizer = get_tiny_tokenizer()
         tokenizer.save_pretrained(qwen3vl_dir)
         config_kwargs["vocab_size"] = tokenizer.vocab_size
-    get_tiny_qwen3vl(**config_kwargs).save_pretrained(qwen3vl_dir)
-    return qwen3vl_dir
+    tiny_qwen3vl = get_tiny_qwen3vl(**config_kwargs)
+    tiny_qwen3vl.save_pretrained(qwen3vl_dir)
+
+    if return_model:
+        return qwen3vl_dir, tiny_qwen3vl
+    else:
+        return qwen3vl_dir
+
+
+##### Gemma3-VL #####
+def get_tiny_gemma3vl(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+
+    # Gemma3 language model config (config_kwargs override the text side, e.g. num_hidden_layers).
+    # layer_types auto-generates (sliding/full attention) so that pruning code path is exercised.
+    text_kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "max_position_embeddings": 32,
+        "sliding_window": 16,
+        "vocab_size": 32,
+    }
+    text_kwargs.update(config_kwargs)
+    text_kwargs.setdefault("query_pre_attn_scalar", text_kwargs["head_dim"])
+    # Tiny SigLIP vision tower; the multimodal projector maps it to the text hidden size.
+    vision_kwargs = {
+        "hidden_size": 16,
+        "intermediate_size": 16,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "image_size": 16,
+        "patch_size": 8,
+        "num_channels": 3,
+    }
+    cfg = Gemma3Config(
+        text_config=text_kwargs,
+        vision_config=vision_kwargs,
+        mm_tokens_per_image=4,  # (image_size / patch_size) ** 2 = (16 / 8) ** 2
+        image_token_index=1,  # must be < vocab_size; not exercised by text-only calibration
+        boi_token_index=2,
+        eoi_token_index=3,
+        dtype=torch.bfloat16,
+    )
+    return AutoModelForImageTextToText.from_config(cfg)
+
+
+def create_tiny_gemma3vl_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+) -> Path | tuple[Path, PreTrainedModel]:
+    gemma3vl_dir = Path(tmp_path) / "tiny_gemma3vl"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(gemma3vl_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    tiny_gemma3vl = get_tiny_gemma3vl(**config_kwargs)
+    tiny_gemma3vl.save_pretrained(gemma3vl_dir)
+
+    if return_model:
+        return gemma3vl_dir, tiny_gemma3vl
+    else:
+        return gemma3vl_dir
+
+
+##### Qwen3.5-VL (dense, hybrid GatedDeltaNet + gated attention) #####
+def get_tiny_qwen3_5_vl(**config_kwargs) -> PreTrainedModel:
+    from transformers import Qwen3_5Config
+
+    set_seed(SEED)
+
+    # Dense Qwen3.5-VL language model: hybrid GatedDeltaNet (linear attention) + gated full-attention
+    # layers (layer_types auto-generates every-4th full attention). config_kwargs override the text side.
+    text_kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 16,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+        # GatedDeltaNet linear-attention dims (kept small for tiny models).
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_key_head_dim": 16,
+        "linear_value_head_dim": 16,
+        "linear_conv_kernel_dim": 4,
+    }
+    text_kwargs.update(config_kwargs)
+    vision_kwargs = {
+        "hidden_size": 16,
+        "intermediate_size": 16,
+        "depth": 2,
+        "num_heads": 2,
+        "patch_size": 16,
+        "out_hidden_size": text_kwargs["hidden_size"],  # must match text hidden_size
+        # Qwen3.5-VL does not use deepstack injection (unlike Qwen3-VL); empty list => no deepstack
+        # mergers (the attribute must still be present for the bridge's vision config).
+        "deepstack_visual_indexes": [],
+    }
+    cfg = Qwen3_5Config(text_config=text_kwargs, vision_config=vision_kwargs, dtype=torch.bfloat16)
+    return AutoModelForImageTextToText.from_config(cfg)
+
+
+def create_tiny_qwen3_5_vl_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+) -> Path | tuple[Path, PreTrainedModel]:
+    qwen3_5_vl_dir = Path(tmp_path) / "tiny_qwen3_5_vl"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(qwen3_5_vl_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    tiny_qwen3_5_vl = get_tiny_qwen3_5_vl(**config_kwargs)
+    tiny_qwen3_5_vl.save_pretrained(qwen3_5_vl_dir)
+
+    if return_model:
+        return qwen3_5_vl_dir, tiny_qwen3_5_vl
+    else:
+        return qwen3_5_vl_dir
 
 
 ##### NEMOTRON #####
@@ -340,50 +464,6 @@ def create_tiny_gpt_oss_dir(
         config_kwargs["vocab_size"] = tokenizer.vocab_size
     get_tiny_gpt_oss(**config_kwargs).save_pretrained(gpt_oss_dir)
     return gpt_oss_dir
-
-
-##### Gemma3 #####
-def get_tiny_gemma3(**config_kwargs) -> PreTrainedModel:
-    set_seed(SEED)
-
-    # head_dim is independent of hidden_size / num_attention_heads in Gemma3.
-    # layer_types is left to auto-generate (all `sliding_attention` for tiny layer
-    # counts) so the sliding/full attention layer_types code path is still exercised.
-    kwargs = {
-        "dtype": torch.bfloat16,
-        "hidden_size": 32,
-        "intermediate_size": 32,
-        "num_hidden_layers": 2,
-        "num_attention_heads": 4,
-        "num_key_value_heads": 2,
-        "head_dim": 8,
-        "max_position_embeddings": 32,
-        "sliding_window": 16,
-        "vocab_size": 32,
-    }
-    kwargs.update(**config_kwargs)
-    # query_pre_attn_scalar sets the attention scale (1/sqrt(query_pre_attn_scalar)); default it
-    # to head_dim (Gemma3's convention for all sizes except 27B) unless the caller overrides it,
-    # so overriding head_dim alone stays consistent.
-    kwargs.setdefault("query_pre_attn_scalar", kwargs["head_dim"])
-    return AutoModelForCausalLM.from_config(Gemma3TextConfig(**kwargs))
-
-
-def create_tiny_gemma3_dir(
-    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
-) -> Path | tuple[Path, PreTrainedModel]:
-    gemma3_dir = Path(tmp_path) / "tiny_gemma3"
-    if with_tokenizer:
-        tokenizer = get_tiny_tokenizer()
-        tokenizer.save_pretrained(gemma3_dir)
-        config_kwargs["vocab_size"] = tokenizer.vocab_size
-    tiny_gemma3 = get_tiny_gemma3(**config_kwargs)
-    tiny_gemma3.save_pretrained(gemma3_dir)
-
-    if return_model:
-        return gemma3_dir, tiny_gemma3
-    else:
-        return gemma3_dir
 
 
 ##### LLAMA #####

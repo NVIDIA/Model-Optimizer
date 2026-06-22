@@ -46,7 +46,7 @@ import re
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
@@ -291,6 +291,34 @@ def main(args: argparse.Namespace):
         init_model_parallel=True,
         moe_grouped_gemm=False,
     )
+
+    # For VLMs (e.g. Qwen3-VL), only the language model is pruned; the vision tower is left intact.
+    # hidden_size is shared with the vision->LM projector, so it is never pruned here (follow-up).
+    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
+    is_vlm = language_model is not unwrapped_model
+    # 1-indexed LM layer numbers that depth pruning must keep (see protected_layers handling below).
+    protected_layers: set[int] = set()
+    if is_vlm:
+        print_rank_0(
+            "VLM detected: pruning model.language_model only (hidden_size pruning skipped)."
+        )
+        if args.prune_export_config and "hidden_size" in args.prune_export_config:
+            raise ValueError(
+                "Pruning 'hidden_size' is not supported for VLMs (shared with the vision projector)."
+            )
+        args.hparams_to_skip = sorted({*args.hparams_to_skip, "hidden_size"})
+
+        # Deepstack-injected LM layers (Qwen3-VL): the vision tower feeds features into specific LM
+        # layers (``vision_config.deepstack_visual_indexes``, 0-indexed). Those layers must survive
+        # depth pruning so the (unpruned) vision tower's deepstack mergers still line up; protect
+        # them (as 1-indexed layer numbers) and remap the indices after pruning.
+        vision_cfg = getattr(bridge.hf_pretrained.config, "vision_config", None)
+        deepstack_indexes = list(getattr(vision_cfg, "deepstack_visual_indexes", None) or [])
+        protected_layers = {idx + 1 for idx in deepstack_indexes}
+
+    # Calibration runs the pruning target (the language model) directly. For VLMs this is the
+    # extracted ``language_model``; text-only calibration uses its own embedding and works under
+    # pipeline parallelism via ``megatron_prefill`` (which handles inter-stage send/recv).
     forward_loop = get_megatron_calibration_forward_loop(
         tokenizer,
         dataset_name=args.calib_dataset_name,
@@ -304,6 +332,9 @@ def main(args: argparse.Namespace):
     pruning_config = {
         "forward_loop": forward_loop,
         "checkpoint": args.prune_intermediate_ckpt,
+        # Layers that depth pruning must keep (empty set => no constraint). For VLMs this protects
+        # the deepstack-injected LM layers so the vision tower stays consistent.
+        "protected_layers": protected_layers or None,
     }
     if args.prune_export_config is not None:
         # Less restrictive search space for manual pruning
@@ -379,16 +410,18 @@ def main(args: argparse.Namespace):
         pruning_config["seq_length"] = args.seq_length
     print_rank_0(f"Pruning constraints: {pruning_constraints}")
 
-    unwrapped_model, pruning_scores = mtp.prune(  # in-place pruning
-        unwrapped_model,
+    # Prune the language model in place (for VLMs this mutates unwrapped_model.language_model, so the
+    # full wrapper is still saved below); for plain LMs language_model is unwrapped_model itself.
+    language_model, pruning_scores = mtp.prune(  # in-place pruning
+        language_model,
         mode=[("mcore_minitron", ss_config)],  # type: ignore[arg-type]
         constraints=pruning_constraints,
         dummy_input=None,
         config=pruning_config,
     )
     # Remove unnecessary modelopt_state since ckpt is homogeneous
-    if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=unwrapped_model):
-        mto.ModeloptStateManager.remove_state(unwrapped_model)
+    if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=language_model):
+        mto.ModeloptStateManager.remove_state(language_model)
     if isinstance(provider, MambaModelProvider):
         hybrid_key = (
             "hybrid_override_pattern"
@@ -425,42 +458,65 @@ def main(args: argparse.Namespace):
         hf_cfg = AutoConfig.from_pretrained(
             args.output_hf_path, trust_remote_code=args.trust_remote_code
         )
-        mcore_cfg = unwrapped_model.config
+        mcore_cfg = language_model.config
+        # For VLMs the language-model fields live under hf_cfg.text_config; write back there.
+        text_cfg = getattr(hf_cfg, "text_config", hf_cfg)
 
-        hf_cfg.hidden_size = mcore_cfg.hidden_size
-        hf_cfg.intermediate_size = mcore_cfg.ffn_hidden_size
-        hf_cfg.num_attention_heads = mcore_cfg.num_attention_heads
-        hf_cfg.head_dim = mcore_cfg.kv_channels
-        hf_cfg.num_key_value_heads = mcore_cfg.num_query_groups
-        if hasattr(hf_cfg, "mamba_num_heads"):
-            hf_cfg.mamba_num_heads = mcore_cfg.mamba_num_heads
-        if hasattr(hf_cfg, "mamba_head_dim"):
-            hf_cfg.mamba_head_dim = mcore_cfg.mamba_head_dim
-        if hasattr(hf_cfg, "moe_intermediate_size"):
-            hf_cfg.moe_intermediate_size = mcore_cfg.moe_ffn_hidden_size
-        if hasattr(hf_cfg, "moe_shared_expert_intermediate_size"):
-            hf_cfg.moe_shared_expert_intermediate_size = (
+        text_cfg.hidden_size = mcore_cfg.hidden_size
+        text_cfg.intermediate_size = mcore_cfg.ffn_hidden_size
+        text_cfg.num_attention_heads = mcore_cfg.num_attention_heads
+        text_cfg.head_dim = mcore_cfg.kv_channels
+        text_cfg.num_key_value_heads = mcore_cfg.num_query_groups
+        if hasattr(text_cfg, "mamba_num_heads"):
+            text_cfg.mamba_num_heads = mcore_cfg.mamba_num_heads
+        if hasattr(text_cfg, "mamba_head_dim"):
+            text_cfg.mamba_head_dim = mcore_cfg.mamba_head_dim
+        if hasattr(text_cfg, "moe_intermediate_size"):
+            text_cfg.moe_intermediate_size = mcore_cfg.moe_ffn_hidden_size
+        if hasattr(text_cfg, "moe_shared_expert_intermediate_size"):
+            text_cfg.moe_shared_expert_intermediate_size = (
                 mcore_cfg.moe_shared_expert_intermediate_size
             )
-        if hasattr(hf_cfg, "num_experts"):
-            hf_cfg.num_experts = mcore_cfg.num_moe_experts
-        if hasattr(hf_cfg, "n_routed_experts"):
-            hf_cfg.n_routed_experts = mcore_cfg.num_moe_experts
-        if hasattr(hf_cfg, "n_shared_experts"):
-            hf_cfg.n_shared_experts = (
+        if hasattr(text_cfg, "num_experts"):
+            text_cfg.num_experts = mcore_cfg.num_moe_experts
+        if hasattr(text_cfg, "n_routed_experts"):
+            text_cfg.n_routed_experts = mcore_cfg.num_moe_experts
+        if hasattr(text_cfg, "n_shared_experts"):
+            text_cfg.n_shared_experts = (
                 mcore_cfg.moe_shared_expert_intermediate_size // mcore_cfg.moe_ffn_hidden_size
             )
-        if hasattr(hf_cfg, "layer_types"):
-            kept_layer_nums = pruning_scores["sorted_layers"][: mcore_cfg.num_layers]  # 1-indexed
-            hf_cfg.layer_types = [
-                lt for i, lt in enumerate(hf_cfg.layer_types) if i + 1 in kept_layer_nums
+        # 1-indexed original layer numbers kept after depth pruning, in ascending (original) order.
+        # sorted_layers is None when no layer scores were collected (depth pruning impossible), in
+        # which case all layers are kept and the mapping is the identity.
+        sorted_layers = pruning_scores["sorted_layers"]
+        kept_layer_nums = (
+            sorted(sorted_layers[: mcore_cfg.num_layers])
+            if sorted_layers is not None
+            else list(range(1, mcore_cfg.num_layers + 1))
+        )
+        if hasattr(text_cfg, "layer_types"):
+            text_cfg.layer_types = [
+                lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
+            ]
+        # Remap VLM deepstack indices (0-indexed LM layers) to the pruned/renumbered layers. The
+        # protected_layers constraint above guarantees every deepstack layer survived, so each index
+        # maps to its new compacted position; the vision tower's mergers stay aligned.
+        vision_cfg = getattr(hf_cfg, "vision_config", None)
+        if (
+            is_vlm
+            and vision_cfg is not None
+            and getattr(vision_cfg, "deepstack_visual_indexes", None)
+        ):
+            vision_cfg.deepstack_visual_indexes = [
+                kept_layer_nums.index(idx + 1) for idx in vision_cfg.deepstack_visual_indexes
             ]
         if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
             hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
-        hf_cfg.num_hidden_layers = mcore_cfg.num_layers
+        text_cfg.num_hidden_layers = mcore_cfg.num_layers
 
         # Save dummy pruned HF model to get the correct bridge for saving pruned weights
-        AutoModelForCausalLM.from_config(
+        dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
+        dummy_model_cls.from_config(
             hf_cfg, trust_remote_code=args.trust_remote_code
         ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
         pruned_bridge = AutoBridge.from_hf_pretrained(

@@ -310,6 +310,18 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 > [!NOTE]
 > If pruning a Nemotron model and you want to save the pruned model back in HF format, please downgrade to `transformers<5` via `python -m pip install "transformers<5"` before pruning.
 
+### Vision-Language Models (VLMs)
+
+For a vision-language model (e.g. Qwen3-VL, Qwen3.5-VL, Gemma3-VL), `prune_minitron.py` automatically prunes only the **language model** and leaves the vision tower intact, then saves the full VLM back. All the pruning modes above (parameter count, active parameter count, memory footprint, and manual `export_config`) work unchanged — the only difference is that `hidden_size` is never pruned for VLMs (it is shared with the vision projector).
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path Qwen/Qwen3-VL-8B-Instruct \
+    --prune_target_params 6e9 \
+    --output_hf_path /tmp/Qwen3-VL-8B-Pruned
+```
+
 ## Resources
 
 - 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)

@@ -244,8 +244,13 @@ def megatron_prefill(
         logits_dtype = torch.float32
 
     # All PP ranks must participate in the broadcast to stay in sync.
+    # VLM wrappers (e.g. Qwen3VLModel) hold the output layer on the inner language_model, so the
+    # vocab size lives there rather than on the wrapper itself.
+    vocab_size = getattr(model, "vocab_size", None)
+    if vocab_size is None:
+        vocab_size = getattr(model, "language_model", model).vocab_size
     result = broadcast_from_last_pipeline_stage(
-        [batch_size, seq_length, model.vocab_size], logits_dtype, logits
+        [batch_size, seq_length, vocab_size], logits_dtype, logits
     )
     return None if skip_return_logits else result
 

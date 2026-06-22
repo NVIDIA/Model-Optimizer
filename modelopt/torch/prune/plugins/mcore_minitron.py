@@ -225,6 +225,10 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.20).
         Only top (1 - max_depth_pruning) choices will be considered.
     - `hparams_to_skip`: List of hparams to skip during the search (default: None).
+    - `protected_layers`: Set of 1-indexed layer numbers that must never be dropped during depth
+        pruning (default: None). Used e.g. for VLM deepstack-injection layers, which the vision
+        tower feeds into and so must be kept. Works for both ``export_config`` and metric-based
+        pruning. Requires the target ``num_layers`` >= ``len(protected_layers)``.
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     - `seq_length`: Sequence length for KV-cache memory estimate (default: 4096).
         Only used with the ``memory_mb`` constraint.
@@ -250,6 +254,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "max_width_pruning": 0.40,
             "max_depth_pruning": 0.20,
             "hparams_to_skip": None,
+            "protected_layers": None,
             "top_k": 10,
             # Memory footprint config (only used with memory_mb constraint)
             "seq_length": 4096,
@@ -319,10 +324,16 @@ class MCoreMinitronSearcher(BaseSearcher):
             if hp.is_configurable:
                 # Make sure configurable hparams are the ones with right names else implementation needs to be fixed!
                 assert hp_name in SUPPORTED_HPARAMS, f"[ImplError] Invalid hparam {hp_name}!"
-                if export_config is not None and hp_name in export_config:
-                    assert export_config[hp_name] in hp.choices, (
-                        f"Invalid choice {export_config[hp_name]} for {n}! Available choices: {hp.choices}"
-                    )
+            # Validate requested export_config values are achievable for *every* matching hparam,
+            # including non-configurable ones. A value outside `choices` (e.g. not aligned to the
+            # search-space divisor) would otherwise be silently ignored while model.config is still
+            # overwritten, producing a checkpoint whose weights don't match its config.
+            if export_config is not None and hp_name in export_config:
+                assert export_config[hp_name] in hp.choices, (
+                    f"Invalid choice {export_config[hp_name]} for {n}! Available choices: "
+                    f"{hp.choices}. Manual export_config values must match the search-space "
+                    "granularity (see the *_divisor settings)."
+                )
             hp.reset_choices()  # Make sure ConcatHparam choices are updated after modify()
 
         assert isinstance(self.model, _DynamicMCoreLanguageModel), (
@@ -366,6 +377,20 @@ class MCoreMinitronSearcher(BaseSearcher):
                 for layer, _ in sorted(self.layer_scores.items(), key=lambda x: x[1], reverse=True)
             ]
             assert sorted(self.sorted_layers) == list(range(1, self.model.config.num_layers + 1))
+
+            # Force protected layers (e.g. VLM deepstack-injection layers) to the front of the
+            # importance ranking so depth pruning never drops them (drop set is sorted_layers[N:]).
+            # Relative order within each group is preserved (stable partition).
+            protected = self.config["protected_layers"]
+            if protected:
+                protected = set(protected)
+                assert protected <= set(self.sorted_layers), (
+                    f"protected_layers {sorted(protected)} must be 1-indexed layer numbers in "
+                    f"1..{self.model.config.num_layers}"
+                )
+                self.sorted_layers = [ln for ln in self.sorted_layers if ln in protected] + [
+                    ln for ln in self.sorted_layers if ln not in protected
+                ]
         else:
             assert (
                 self.constraints.keys() == {"export_config"}
@@ -422,6 +447,12 @@ class MCoreMinitronSearcher(BaseSearcher):
             if num_layers_hp.active != num_layers_hp.max:
                 assert self.sorted_layers is not None
                 layers_to_drop = self.sorted_layers[num_layers_hp.active :]
+                protected = self.config["protected_layers"]
+                if protected:
+                    assert not (set(layers_to_drop) & set(protected)), (
+                        f"Cannot depth-prune to {num_layers_hp.active} layers while protecting "
+                        f"{sorted(protected)}: target num_layers must be >= {len(set(protected))}."
+                    )
                 drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
 
         # Update model config with pruned architecture
@@ -794,13 +825,42 @@ def get_mcore_minitron_config(
     return config
 
 
+def _inherit_base_model_rules(model: nn.Module, rules: dict) -> dict:
+    """Let registered model subclasses inherit their base ``SUPPORTED_MODELS`` rule.
+
+    Model subclasses (e.g. VLM language models like ``Qwen3VLGPTModel``) are registered under their
+    own ``DMRegistry`` key but share the dynamic class (and thus the search-space rule schema) of
+    their base ``GPTModel``/``MambaModel``. ``MCoreMinitronConfig`` only defines rule fields for the
+    base classes, so without this a subclass module would have no matching rule and get *frozen*
+    during conversion (disabling width/depth pruning). Copy the base rule onto the subclass key.
+    """
+    rules = dict(rules)
+    for base_cls, base_key in SUPPORTED_MODELS.items():
+        base_rule = rules.get(base_key)
+        if base_rule is None:
+            continue
+        # GPTModel/MambaModel are siblings (not subclasses of each other), so isinstance uniquely
+        # assigns each module to its base; the subclass shares the base's dynamic class and hence its
+        # rule schema. A subclass registered under its own key but absent from rules inherits it here.
+        for mod in model.modules():
+            if not isinstance(mod, base_cls) or type(mod) not in DMRegistry:
+                continue
+            key = DMRegistry.get_key(type(mod))
+            if key not in rules:
+                rules[key] = base_rule
+    return rules
+
+
 def _convert_model_to_dynamic_space(
     model: nn.Module, config: ModeloptBaseConfig | None = None
 ) -> DynamicSpace:
     """Create a dynamic space for the model (in-place)."""
     dynamic_space = DynamicSpace(model)
     dynamic_space._should_be_converted = lambda mod: isinstance(mod, tuple(SUPPORTED_MODELS.keys()))
-    dynamic_space.convert_to_dynamic(config.model_dump() if config else None, DMRegistry)
+    rules = config.model_dump() if config else None
+    if rules is not None:
+        rules = _inherit_base_model_rules(model, rules)
+    dynamic_space.convert_to_dynamic(rules, DMRegistry)
     if not dynamic_space.is_configurable():
         raise ApplyModeError(
             "The model does not contain any configurable hyperparameters! Please check the"
