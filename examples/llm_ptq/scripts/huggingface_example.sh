@@ -86,6 +86,10 @@ fi
 
 PTQ_ARGS=""
 
+if $CALIB_WITH_IMAGES; then
+    PTQ_ARGS+=" --calib_with_images "
+fi
+
 if [ "$LOW_MEMORY_MODE" = "true" ]; then
     PTQ_ARGS+=" --low_memory_mode "
 fi
@@ -223,7 +227,21 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
     # Only run the deploy+generate smoke test when "quant" is explicitly requested. Eval tasks
     # (lm_eval/mmlu/simple_eval) deploy the checkpoint themselves, so it is redundant there.
     if [[ $TASKS =~ "quant" ]]; then
-        python run_tensorrt_llm.py --checkpoint_dir=$SAVE_PATH $RUN_ARGS
+        if $VLM; then
+            # VLMs use the TRT-LLM multimodal quickstart for the deploy smoke test.
+            if [ -z "$TRT_LLM_CODE_PATH" ]; then
+                TRT_LLM_CODE_PATH=/app/tensorrt_llm # default path for the TRT-LLM release docker image
+                echo "Setting default TRT_LLM_CODE_PATH to $TRT_LLM_CODE_PATH."
+            fi
+            QUICK_START_MULTIMODAL=$TRT_LLM_CODE_PATH/examples/llm-api/quickstart_multimodal.py
+            if [ -f "$QUICK_START_MULTIMODAL" ]; then
+                python3 "$QUICK_START_MULTIMODAL" --model_dir "$SAVE_PATH" --modality image
+            else
+                echo "Warning: $QUICK_START_MULTIMODAL cannot be found. Please set TRT_LLM_CODE_PATH to the TRT-LLM code path or test the quantized checkpoint $SAVE_PATH with the TRT-LLM repo directly."
+            fi
+        else
+            python run_tensorrt_llm.py --checkpoint_dir="$SAVE_PATH" $RUN_ARGS
+        fi
     fi
 fi
 

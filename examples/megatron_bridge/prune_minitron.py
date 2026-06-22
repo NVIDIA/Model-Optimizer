@@ -256,6 +256,9 @@ def get_args() -> argparse.Namespace:
             raise ValueError("--prune_export_config must parse to a dictionary.")
         args.prune_export_config = prune_export_config
 
+    if args.inference_batch_size is None:
+        args.inference_batch_size = args.calib_batch_size
+
     print_args(args)
 
     return args
@@ -374,11 +377,7 @@ def main(args: argparse.Namespace):
         pruning_config["hparams_to_skip"] = args.hparams_to_skip
         pruning_config["top_k"] = args.top_k
         # memory_mb constraint requires batch_size and seq_length
-        pruning_config["batch_size"] = (
-            args.inference_batch_size
-            if args.inference_batch_size is not None
-            else args.calib_batch_size
-        )
+        pruning_config["batch_size"] = args.inference_batch_size
         pruning_config["seq_length"] = args.seq_length
     print_rank_0(f"Pruning constraints: {pruning_constraints}")
 

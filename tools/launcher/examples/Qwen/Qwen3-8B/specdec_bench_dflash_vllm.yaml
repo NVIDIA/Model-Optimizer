@@ -1,0 +1,107 @@
+# SPEED-bench DFlash speculative-decoding run for Qwen3-8B via vLLM.
+#
+# Mirror of Qwen3.5-4B/specdec_bench_dflash_vllm.yaml. The draft model
+# (`modelopt/Qwen3-8B-DFlash-bs8-seq4096-150000`) is an INTERNAL NVIDIA
+# checkpoint — NOT on HuggingFace Hub. It is staged on cw_dfw at
+# `/hf-local/modelopt/Qwen3-8B-DFlash-bs8-seq4096-150000` by the Epic's
+# prep_inputs stage (OMNIML-5058). The HF Hub check returns 404 here
+# and that is the expected state — cell.md Step 1's PRIVATE_DRAFT_ORGS
+# branch covers it.
+#
+# Container: `vllm/vllm-openai:v0.22.1`+ is required. DFlash
+# (`vllm/v1/spec_decode/dflash.py`) landed in vLLM v0.22.0.
+#
+# Cells in OMNIML-5057 (t0_d3 / t0_d7 / t1_d3 / t1_d7) override per-cell
+# knobs (temperature, block_size, save_dir, num_requests, max_seq_len)
+# via `pipeline.task_N.args+=[...]` at slurm-invoke time — no per-cell
+# file is committed (post-#1564 convention).
+#
+# Qwen3-8B note: `max_position_embeddings = 40960`. vLLM rejects
+# `--max_seq_len > 40960` without `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`,
+# and even with that override Qwen3-8B asserts beyond 40960. The
+# throughput_32k split contains rows whose prompts exceed 40960 tokens
+# (e.g. ~45,981 on row 52) — those rows will fail. Acceptable per
+# cell.md "Shape (2)" recovery contract: ship qualitative-only and
+# null the throughput_32k AL fields. See OMNIML-5060 Notes for the
+# 2026-06-15 correction documenting this.
+#
+# Slurm run on cw_dfw (per-cell invocation example, t0_d7):
+#   uv run slurm.py \
+#     --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/specdec_bench_dflash_vllm.yaml \
+#     --yes detach=true \
+#     pipeline.task_0.args+=["--temperature 0","--block_size 8","--save_dir /scratchspace/<sweep>/qualitative"] \
+#     pipeline.task_1.args+=["--temperature 0","--block_size 8","--save_dir /scratchspace/<sweep>/throughput_32k","--num_requests 80","--max_seq_len 40960"]
+#
+# Reference run: cicd_1781655951 (OMNIML-5060, cw_dfw) produced
+#   qualitative   Average_AL = 3.4849
+#   throughput_32k Average_AL = null (Shape (2), overlong-prompt rows skipped)
+# See OMNIML-5060 INTERN-ARTIFACTS worklog for the full payload.
+
+job_name: Qwen3-8B_specdec_bench_dflash_vllm
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+    draft_model: /hf-local/modelopt/Qwen3-8B-DFlash-bs8-seq4096-150000
+
+  # task_0: SPEED qualitative split — quality / acceptance-rate numbers.
+  # tp_size=2 + concurrency=32 trades aa_timing fidelity for ~30x
+  # wall-clock speedup; acceptance-length (AL) is concurrency-independent
+  # and is the primary metric we care about for this split.
+  task_0:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
+      - --engine VLLM
+      - --speculative_algorithm DFLASH
+      - --draft_model_dir <<global_vars.draft_model>>
+      - --block_size 8
+      - --tp_size 2
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/{sweep_name_default}/qualitative
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 2
+      container: vllm/vllm-openai:v0.22.1
+
+  # task_1: SPEED throughput_32k split — long-context throughput.
+  # `--num_requests 80` caps the run at 80 samples (split has 1,536) so
+  # it fits in the 4h Slurm time-limit. tp_size=2 doubles the KV-cache
+  # budget across 2 GPUs; concurrency=8 keeps 8 * 32K = 256K tokens of
+  # in-flight KV under that doubled budget.
+  task_1:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
+      - --engine VLLM
+      - --speculative_algorithm DFLASH
+      - --draft_model_dir <<global_vars.draft_model>>
+      - --block_size 8
+      - --tp_size 2
+      - --ep_size 1
+      - --concurrency 8
+      - --num_requests 80
+      - --output_length 4096
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/{sweep_name_default}/throughput_32k
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 2
+      container: vllm/vllm-openai:v0.22.1

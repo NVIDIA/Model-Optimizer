@@ -216,6 +216,55 @@ def create_tiny_nemotron_dir(
     return nemotron_dir
 
 
+##### NEMOTRON-H (Mamba + Attention + MoE/MLP hybrid) #####
+def get_tiny_nemotron_h(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+
+    # Lazy import — NemotronHConfig only exists in newer transformers builds, and this
+    # module is imported broadly (including by the min-transformers CI job).
+    from transformers import NemotronHConfig
+
+    # Tiny NemotronH hybrid. hybrid_override_pattern letters: M=Mamba, E=MoE/FFN, *=Attention.
+    # "ME*E" matches the NemotronH default and exercises Mamba + MoE + attention layers.
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 4,
+        "hybrid_override_pattern": "ME*E",
+        "num_attention_heads": 8,
+        "num_key_value_heads": 4,
+        "head_dim": 8,
+        "mamba_num_heads": 8,
+        "mamba_head_dim": 16,
+        "ssm_state_size": 32,
+        "n_groups": 2,
+        "conv_kernel": 4,
+        # MoE
+        "n_routed_experts": 8,
+        "num_experts_per_tok": 2,
+        "moe_intermediate_size": 64,
+        "n_shared_experts": 1,
+        "moe_shared_expert_intermediate_size": 32,
+        "vocab_size": 32,
+        "max_position_embeddings": 32,
+    }
+    kwargs.update(**config_kwargs)
+    return AutoModelForCausalLM.from_config(NemotronHConfig(**kwargs))
+
+
+def create_tiny_nemotron_h_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    nemotron_h_dir = Path(tmp_path) / "tiny_nemotron_h"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(nemotron_h_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_nemotron_h(**config_kwargs).save_pretrained(nemotron_h_dir)
+    return nemotron_h_dir
+
+
 ##### DeepSeek V3 #####
 def get_tiny_deepseek_v3(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
