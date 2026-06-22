@@ -126,7 +126,8 @@ rate_elapsed = {}
 for i, r in enumerate(all_rates):
     if r not in rate_start:
         continue
-    end = rate_start[all_rates[i + 1]] if i + 1 < len(all_rates) else (complete_ts or now)
+    next_rate = all_rates[i + 1] if i + 1 < len(all_rates) else None
+    end = rate_start[next_rate] if next_rate and next_rate in rate_start else (complete_ts or now)
     rate_elapsed[r] = int((end - rate_start[r]).total_seconds())
 
 running_rate = next((r for r in all_rates if r in rate_start and r not in rate_done), None)

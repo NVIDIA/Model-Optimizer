@@ -100,16 +100,25 @@ or validation batch progress), and an estimated time remaining based on complete
 
 ## Checking compressed model accuracy
 
-After the pipeline completes, view the teacher vs. compressed model accuracy for the MIP solution:
+Two commands are available depending on whether you ran a single constrained MIP solve or a sweep:
+
+**Single constrained run** — teacher vs. solution_0 at the configured target memory:
 
 ```text
 /puzzletron mip losses
 ```
 
-Example output:
+**Sweep** — accuracy across all compression rates from the sweep CSV:
+
+```text
+/puzzletron mip sweep losses
+```
+
+Example `mip losses` output for Qwen3.5-0.8B (target 10,000 MiB):
 
 | Metric | Teacher | Compressed (solution_0) |
 |---|---|---|
+| `target_memory` | 20,389 MiB | 10,000 MiB |
 | `lm_loss` | 1.1067 | 3.8808 |
 | `token_accuracy_top_1` | 0.7365 | 0.2915 |
 | `token_accuracy_top_5` | 0.9079 | 0.5500 |
