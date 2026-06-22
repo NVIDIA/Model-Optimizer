@@ -23,6 +23,7 @@ Environment variables:
     SLURM_HOST          Slurm login node hostname (required for remote jobs)
     SLURM_ACCOUNT       Slurm account/partition billing (default: from YAML)
     SLURM_JOB_DIR       Remote directory for job artifacts
+    SLURM_USER          Remote Slurm/SSH username (default: local login name)
     SLURM_HF_LOCAL      Path to HuggingFace model cache on the cluster
     HF_TOKEN            HuggingFace API token
     NEMORUN_HOME        NeMo Run home directory (default: current working directory)
@@ -33,9 +34,16 @@ import os
 import subprocess  # nosec B404
 import warnings
 
+import modelopt_launcher as _pkg
 import nemo_run as run
-from core import SandboxPipeline, get_default_env, register_factory, run_jobs, set_slurm_config_type
-from slurm_config import SlurmConfig, slurm_factory
+from modelopt_launcher.core import (
+    SandboxPipeline,
+    get_default_env,
+    register_factory,
+    run_jobs,
+    set_slurm_config_type,
+)
+from modelopt_launcher.slurm_config import SlurmConfig, slurm_factory
 
 set_slurm_config_type(SlurmConfig)
 register_factory("slurm_factory", slurm_factory)
@@ -44,33 +52,54 @@ register_factory("slurm_factory", slurm_factory)
 # Launcher-specific configuration
 # ---------------------------------------------------------------------------
 
-LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
-MODELOPT_ROOT = os.path.dirname(os.path.dirname(LAUNCHER_DIR))
+LAUNCHER_DIR = _pkg.PACKAGE_DIR  # tools/launcher/ (dev or installed)
 
-# Ensure modules/Model-Optimizer symlink exists (points to parent Model-Optimizer root)
-_mo_symlink = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer")
-if not os.path.exists(_mo_symlink):
-    os.makedirs(os.path.join(LAUNCHER_DIR, "modules"), exist_ok=True)
-    os.symlink(os.path.relpath(MODELOPT_ROOT, os.path.join(LAUNCHER_DIR, "modules")), _mo_symlink)
+# Detect dev checkout by probing the actual MODELOPT_ROOT, not the symlink
+# path (which doesn't exist yet in a clean checkout). When running as an
+# installed console script the cluster container already has modelopt
+# pre-installed, so we skip packaging it from source.
+MODELOPT_ROOT = os.path.dirname(os.path.dirname(LAUNCHER_DIR))
+_has_modelopt_src = os.path.isdir(os.path.join(MODELOPT_ROOT, "modelopt"))
+
+# Symlink path used by the PatternPackager to resolve modules/Model-Optimizer/*
+# patterns; only valid in dev mode. Initialized to None so --clean in installed
+# mode gets a clear error instead of a NameError.
+_mo_symlink: str | None = None
+
+if _has_modelopt_src:
+    _mo_symlink = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer")
+    if not os.path.exists(_mo_symlink):
+        os.makedirs(os.path.join(LAUNCHER_DIR, "modules"), exist_ok=True)
+        os.symlink(
+            os.path.relpath(MODELOPT_ROOT, os.path.join(LAUNCHER_DIR, "modules")), _mo_symlink
+        )
+
+_modelopt_src = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer", "modelopt")
 
 EXPERIMENT_TITLE = "cicd"
 DEFAULT_SLURM_ENV, DEFAULT_LOCAL_ENV = get_default_env(EXPERIMENT_TITLE)
 
-packager = run.PatternPackager(
-    include_pattern=[
+_include_pattern = ["examples/*", "common/*"]
+_relative_path = [LAUNCHER_DIR, LAUNCHER_DIR]
+
+if _has_modelopt_src:
+    _include_pattern = [
         "modules/Megatron-LM/megatron/*",
         "modules/Megatron-LM/examples/*",
         "modules/Megatron-LM/*.py",
         "modules/Model-Optimizer/modelopt/*",
         "modules/Model-Optimizer/modelopt_recipes/*",
         "modules/Model-Optimizer/examples/*",
-        "examples/*",
-        "common/*",
-    ],
-    relative_path=[LAUNCHER_DIR] * 8,
+        *_include_pattern,
+    ]
+    _relative_path = [LAUNCHER_DIR] * 6 + _relative_path
+
+packager = run.PatternPackager(
+    include_pattern=_include_pattern,
+    relative_path=_relative_path,
 )
 
-MODELOPT_SRC_PATH = os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt")
+MODELOPT_SRC_PATH = _modelopt_src if _has_modelopt_src else None
 
 
 # ---------------------------------------------------------------------------
@@ -84,13 +113,18 @@ def launch(
     job_dir: str = os.environ.get("SLURM_JOB_DIR", os.path.expanduser("~/experiments")),
     pipeline: SandboxPipeline = None,
     hf_local: str = None,  # noqa: RUF013
-    user: str = getpass.getuser(),
+    user: str | None = None,
     identity: str = None,  # noqa: RUF013
     detach: bool = False,
     clean: bool = False,
 ) -> None:
     """Launch ModelOpt jobs on Slurm or locally with Docker."""
+    if user is None:
+        user = os.environ.get("SLURM_USER", getpass.getuser())
+
     if clean:
+        if _mo_symlink is None:
+            raise ValueError("--clean requires a dev checkout; modelopt source not found.")
         examples_dir = os.path.join(_mo_symlink, "examples")
         print(f"Cleaning {examples_dir} with git clean -xdf ...")
         subprocess.run(["git", "clean", "-xdf", "."], cwd=examples_dir, check=True)  # nosec B603 B607
@@ -125,5 +159,10 @@ def launch(
     )
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console script entry point for the ``modelopt-launcher`` command."""
     run.cli.main(launch)
+
+
+if __name__ == "__main__":
+    main()
