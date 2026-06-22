@@ -745,31 +745,34 @@ def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(distributed_se
         pytest.skip("Transformer Engine is not installed")
 
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
-    model = _gpt_model_provider(
-        tp_size=1,
-        hidden_size=32,
-        meta_device=True,
-        transformer_impl="modelopt",
-    )
-    decoder_layers = model.decoder.layers
-    decoder_len = len(decoder_layers)
-    output_layer = model.output_layer
+    try:
+        model = _gpt_model_provider(
+            tp_size=1,
+            hidden_size=32,
+            meta_device=True,
+            transformer_impl="modelopt",
+        )
+        decoder_layers = model.decoder.layers
+        decoder_len = len(decoder_layers)
+        output_layer = model.output_layer
 
-    discovered_layers = get_mcore_layerwise_calibration_layers(model)
+        discovered_layers = get_mcore_layerwise_calibration_layers(model)
 
-    assert discovered_layers is not None
-    assert len(discovered_layers) == decoder_len + 1
-    assert discovered_layers[-1] is output_layer
-    assert len(decoder_layers) == decoder_len
-    assert all(layer is not output_layer for layer in decoder_layers)
+        assert discovered_layers is not None
+        assert len(discovered_layers) == decoder_len + 1
+        assert discovered_layers[-1] is output_layer
+        assert len(decoder_layers) == decoder_len
+        assert all(layer is not output_layer for layer in decoder_layers)
 
-    assert LayerActivationCollector.is_supported(model)
-    discovered_layers = LayerActivationCollector.get_decoder_layers(model)
-    assert discovered_layers is not None
-    assert len(discovered_layers) == decoder_len + 1
-    assert discovered_layers[-1] is output_layer
-    assert len(decoder_layers) == decoder_len
-    assert all(layer is not output_layer for layer in decoder_layers)
+        assert LayerActivationCollector.is_supported(model)
+        discovered_layers = LayerActivationCollector.get_decoder_layers(model)
+        assert discovered_layers is not None
+        assert len(discovered_layers) == decoder_len + 1
+        assert discovered_layers[-1] is output_layer
+        assert len(decoder_layers) == decoder_len
+        assert all(layer is not output_layer for layer in decoder_layers)
+    finally:
+        destroy_model_parallel()
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
