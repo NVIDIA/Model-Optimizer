@@ -1471,7 +1471,8 @@ def _is_fused_experts_module(module):
 
     Detects the standardized HuggingFace transformers 5.0+ fused expert pattern:
     ``gate_up_proj`` (3-D parameter), ``down_proj`` (3-D parameter), ``num_experts``,
-    and ``act_fn``.  Matches ``MixtralExperts``, ``Qwen2MoeExperts``,
+    and ``act_fn`` (or ``_apply_gate`` for clamped-swiglu experts such as
+    ``MiniMaxM3VLExperts``).  Matches ``MixtralExperts``, ``Qwen2MoeExperts``,
     ``Qwen3MoeExperts``, ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``,
     ``JambaExperts``, ``OlmoeExperts``, etc.
 
@@ -1480,7 +1481,9 @@ def _is_fused_experts_module(module):
     """
     if not hasattr(module, "gate_up_proj") or not hasattr(module, "down_proj"):
         return False
-    if not hasattr(module, "num_experts") or not hasattr(module, "act_fn"):
+    if not hasattr(module, "num_experts") or not (
+        hasattr(module, "act_fn") or hasattr(module, "_apply_gate")
+    ):
         return False
     gate_up = getattr(module, "gate_up_proj")
     down = getattr(module, "down_proj")
