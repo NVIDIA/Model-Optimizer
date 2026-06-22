@@ -472,16 +472,15 @@ def main(args: argparse.Namespace):
             text_cfg.n_shared_experts = (
                 mcore_cfg.moe_shared_expert_intermediate_size // mcore_cfg.moe_ffn_hidden_size
             )
-        # 1-indexed original layer numbers kept after depth pruning, in ascending (original) order.
-        # sorted_layers is None when no layer scores were collected (depth pruning impossible), in
-        # which case all layers are kept and the mapping is the identity.
-        sorted_layers = pruning_scores["sorted_layers"]
-        kept_layer_nums = (
-            sorted(sorted_layers[: mcore_cfg.num_layers])
-            if sorted_layers is not None
-            else list(range(1, mcore_cfg.num_layers + 1))
-        )
         if hasattr(text_cfg, "layer_types"):
+            # Keep layer_types for the layers that survived depth pruning (1-indexed). sorted_layers
+            # is None when no layer scores were collected (no depth pruning) -> all layers kept.
+            sorted_layers = pruning_scores["sorted_layers"]
+            kept_layer_nums = (
+                set(sorted_layers[: mcore_cfg.num_layers])
+                if sorted_layers is not None
+                else set(range(1, mcore_cfg.num_layers + 1))
+            )
             text_cfg.layer_types = [
                 lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
             ]

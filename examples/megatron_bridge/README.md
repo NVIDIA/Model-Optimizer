@@ -312,7 +312,10 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 
 ### Vision-Language Models (VLMs)
 
-For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `prune_minitron.py` automatically prunes only the **language model** and leaves the vision tower intact, then saves the full VLM back. All the pruning modes above (parameter count, active parameter count, memory footprint, and manual `export_config`) work unchanged — the only difference is that `hidden_size` is never pruned for VLMs (it is shared with the vision projector).
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `prune_minitron.py` automatically prunes only the **language model** and leaves the vision tower intact, then saves the full VLM back. All the pruning modes above (parameter count, active parameter count, memory footprint, and manual `export_config`) work unchanged, with two VLM-specific caveats:
+
+- The `--prune_target_params` / `--prune_target_active_params` / `--prune_target_memory_mb` targets (and `export_config` dimensions) apply to the **language model only** — the (unpruned) vision tower's parameters are *not* counted, so the full saved VLM will be larger than the target.
+- `hidden_size` is never pruned for VLMs (it is shared with the vision projector).
 
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \

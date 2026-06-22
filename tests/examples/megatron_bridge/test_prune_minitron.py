@@ -59,11 +59,8 @@ def test_prune_minitron(tmp_path: Path, num_gpus):
 @pytest.mark.parametrize(
     "create_tiny_vlm_dir",
     [
-        # Gemma3-VL: sliding/full attention LM (exercises the ``layer_types`` pruning path) with a
-        # multimodal projector (no deepstack).
-        create_tiny_gemma3vl_dir,
-        # Qwen3.5-VL (dense): hybrid GatedDeltaNet (linear attention) + gated full-attention LM.
-        create_tiny_qwen3_5_vl_dir,
+        create_tiny_gemma3vl_dir,  # sliding/full attention LM with a multimodal projector
+        create_tiny_qwen3_5_vl_dir,  # dense - hybrid GatedDeltaNet (linear attention) + gated full-attention LM
     ],
 )
 def test_prune_minitron_vlm(tmp_path: Path, num_gpus, create_tiny_vlm_dir):
@@ -99,11 +96,11 @@ def test_prune_minitron_vlm(tmp_path: Path, num_gpus, create_tiny_vlm_dir):
 
     # from_pretrained (default strict load) verifies the saved weights match the pruned config.
     pruned_model = AutoModelForImageTextToText.from_pretrained(pruned_model_path)
-    # Language model pruned to the param target; vision tower preserved.
     pruned_lm_params = sum(p.numel() for p in pruned_model.model.language_model.parameters())
+    # Language model is pruned to the param target.
     assert pruned_lm_params <= prune_target_params
+    # Everything outside the language model (vision tower, projector, lm_head) is left untouched.
     assert hasattr(pruned_model.config, "vision_config")
-    # deepstack indices (if any, e.g. Qwen3-VL) must remain valid for the (depth-pruned) LM.
-    deepstack = getattr(pruned_model.config.vision_config, "deepstack_visual_indexes", None)
-    if deepstack:
-        assert all(0 <= i < pruned_model.config.text_config.num_hidden_layers for i in deepstack)
+    teacher_non_lm = sum(p.numel() for p in teacher_model.parameters()) - language_model_params
+    pruned_non_lm = sum(p.numel() for p in pruned_model.parameters()) - pruned_lm_params
+    assert pruned_non_lm == teacher_non_lm
