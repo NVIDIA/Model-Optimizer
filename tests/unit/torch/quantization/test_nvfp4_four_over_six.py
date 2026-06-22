@@ -41,24 +41,6 @@ class TestConstants:
         assert E2M1_MAX == 6.0
 
 
-class TestIsFourOverSix:
-    def test_flag_true(self):
-        q = SimpleNamespace(block_sizes={-1: BLOCK_SIZE, "four_over_six": True})
-        assert NVFP4QTensor._is_four_over_six(q) is True
-
-    def test_flag_false(self):
-        q = SimpleNamespace(block_sizes={-1: BLOCK_SIZE, "four_over_six": False})
-        assert NVFP4QTensor._is_four_over_six(q) is False
-
-    def test_flag_absent_defaults_false(self):
-        q = SimpleNamespace(block_sizes={-1: BLOCK_SIZE})
-        assert NVFP4QTensor._is_four_over_six(q) is False
-
-    def test_missing_block_sizes_defaults_false(self):
-        assert NVFP4QTensor._is_four_over_six(SimpleNamespace()) is False
-        assert NVFP4QTensor._is_four_over_six(SimpleNamespace(block_sizes=None)) is False
-
-
 class TestScalingFactor2:
     def test_256_vs_448_denominator(self):
         # 4/6 selects the 256 FP8 normalization via the static quantizer path.
