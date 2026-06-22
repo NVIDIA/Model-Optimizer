@@ -24,10 +24,8 @@ RUN git clone https://github.com/NVIDIA/Model-Optimizer.git /dli/Model-Optimizer
     python -m pip uninstall -y nvidia-modelopt && \
     pip install -e .
 
-# Install aiperf for inference performance benchmarking (§7)
-RUN pip install --root-user-action ignore --ignore-installed aiperf
 
-# Install lmms-eval for VLM evaluation (§5.6 — MathVista / BLINK / RealWorldQA)
+# Install lmms-eval for VLM evaluation (§6 BLINK / RealWorldQA)
 RUN git clone https://github.com/EvolvingLMMs-Lab/lmms-eval.git /dli/lmms-eval && \
     cd /dli/lmms-eval && git checkout v0.7.1 && \
     pip install --root-user-action ignore -e . && \
