@@ -168,6 +168,12 @@ def _postprocess_safetensors(
        ``_quantization_metadata`` so inference runtimes can detect and handle
        quantized layers.
 
+    All of these target single-file deployment runtimes (e.g. ComfyUI) and are
+    opt-in; ModelOpt itself reads the quant config from ``config.json`` on reload. If
+    the caller passes none of ``merged_base_safetensor_path``, ``padding_strategy``,
+    ``enable_swizzle_layout``, or ``enable_layerwise_quant_metadata``, this function
+    does nothing and leaves the standard exported checkpoint untouched.
+
     Args:
         export_dir: Directory containing the saved ``.safetensors`` file(s).
         pipe: The diffusion pipeline / model.  Used to infer the model type
@@ -181,11 +187,11 @@ def _postprocess_safetensors(
                 file to produce a single-file checkpoint compatible with ComfyUI.
                 Value should be the path to a full base model ``.safetensors``
                 file (e.g. ``"path/to/ltx-2-19b-dev.safetensors"``).
-            enable_layerwise_quant_metadata (bool, optional): When True
-                (default), includes per-layer ``_quantization_metadata`` in the
-                checkpoint metadata so that inference runtimes (e.g., ComfyUI)
-                can identify which layers are quantized and in what format. Set
-                to False to skip.
+            enable_layerwise_quant_metadata (bool, optional): When True, embeds
+                ``quantization_config`` and per-layer ``_quantization_metadata`` in the
+                safetensors header so single-file runtimes (e.g., ComfyUI) can identify
+                which layers are quantized and in what format. Defaults to False (no
+                header metadata; this alone leaves the export untouched).
             enable_swizzle_layout (bool, optional): When True, rearranges NVFP4
                 block scales from ModelOpt's flat layout to cuBLAS 2-D tiled
                 layout. Required for runtimes that consume cuBLAS block-scaled
@@ -198,9 +204,22 @@ def _postprocess_safetensors(
 
     """
     merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
-    enable_layerwise_quant_metadata: bool = kwargs.get("enable_layerwise_quant_metadata", True)
+    enable_layerwise_quant_metadata: bool = kwargs.get("enable_layerwise_quant_metadata", False)
     enable_swizzle_layout: bool = kwargs.get("enable_swizzle_layout", False)
     padding_strategy: str | None = kwargs.get("padding_strategy")
+
+    # This post-processing only produces single-file deployment checkpoints (e.g.
+    # ComfyUI): merging with a base checkpoint, NVFP4 padding/swizzling, and embedding
+    # quant metadata in the safetensors header. None of it is read back by ModelOpt
+    # (the diffusers reload uses ``config.json``), so if the user has not opted into any
+    # of these options there is nothing to do — leave the exported checkpoint untouched.
+    if not (
+        merged_base_safetensor_path is not None
+        or padding_strategy is not None
+        or enable_swizzle_layout
+        or enable_layerwise_quant_metadata
+    ):
+        return
 
     safetensor_files = sorted(export_dir.glob("*.safetensors"))
     if not safetensor_files:
