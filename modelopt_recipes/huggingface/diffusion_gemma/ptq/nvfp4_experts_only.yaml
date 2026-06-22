@@ -25,7 +25,7 @@ imports:
   base_disable_all: configs/ptq/units/base_disable_all
   experts_nvfp4: configs/ptq/units/experts_nvfp4
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
-  disabled_quantizers: huggingface/diffusiongemma/ptq/disabled_quantizers
+  disabled_quantizers: huggingface/diffusion_gemma/ptq/disabled_quantizers
 
 metadata:
   recipe_type: ptq
