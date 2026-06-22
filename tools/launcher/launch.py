@@ -23,6 +23,7 @@ Environment variables:
     SLURM_HOST          Slurm login node hostname (required for remote jobs)
     SLURM_ACCOUNT       Slurm account/partition billing (default: from YAML)
     SLURM_JOB_DIR       Remote directory for job artifacts
+    SLURM_USER          Remote Slurm/SSH username (default: local login name)
     SLURM_HF_LOCAL      Path to HuggingFace model cache on the cluster
     HF_TOKEN            HuggingFace API token
     NEMORUN_HOME        NeMo Run home directory (default: current working directory)
@@ -84,12 +85,15 @@ def launch(
     job_dir: str = os.environ.get("SLURM_JOB_DIR", os.path.expanduser("~/experiments")),
     pipeline: SandboxPipeline = None,
     hf_local: str = None,  # noqa: RUF013
-    user: str = getpass.getuser(),
+    user: str | None = None,
     identity: str = None,  # noqa: RUF013
     detach: bool = False,
     clean: bool = False,
 ) -> None:
     """Launch ModelOpt jobs on Slurm or locally with Docker."""
+    if user is None:
+        user = os.environ.get("SLURM_USER", getpass.getuser())
+
     if clean:
         examples_dir = os.path.join(_mo_symlink, "examples")
         print(f"Cleaning {examples_dir} with git clean -xdf ...")

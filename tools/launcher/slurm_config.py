@@ -47,6 +47,7 @@ class SlurmConfig:
     ntasks_per_node: int = 1
     gpus_per_node: int = 1
     time: str = "04:00:00"
+    mem: str = "0"
     local: bool = False
 
 
@@ -68,6 +69,7 @@ def slurm_factory(
     srun_args: list[str] = ["--no-container-mount-home"],
     array: Optional[str] = None,
     time: str = "04:00:00",
+    mem: str = os.environ.get("SLURM_MEM", "0"),
 ) -> SlurmConfig:
     """Generic Slurm factory — configure via environment variables or CLI overrides."""
     return SlurmConfig(
@@ -84,4 +86,5 @@ def slurm_factory(
         srun_args=srun_args,
         array=array,
         time=time,
+        mem=mem,
     )
