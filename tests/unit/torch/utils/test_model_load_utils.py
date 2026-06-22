@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pure-function tests for ``modelopt.torch.utils.model_load_utils``."""
+"""Pure-function tests for ``modelopt.torch.utils.plugins.model_load_utils``."""
 
 import json
 
@@ -21,7 +21,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from modelopt.torch.utils.model_load_utils import read_safetensors_subset, weight_map_for
+from modelopt.torch.utils.plugins.model_load_utils import read_safetensors_subset, weight_map_for
 
 
 def test_weight_map_for_sharded(tmp_path):
