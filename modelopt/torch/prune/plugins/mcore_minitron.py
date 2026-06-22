@@ -225,10 +225,6 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.20).
         Only top (1 - max_depth_pruning) choices will be considered.
     - `hparams_to_skip`: List of hparams to skip during the search (default: None).
-    - `protected_layers`: Set of 1-indexed layer numbers that must never be dropped during depth
-        pruning (default: None). Used e.g. for VLM deepstack-injection layers, which the vision
-        tower feeds into and so must be kept. Works for both ``export_config`` and metric-based
-        pruning. Requires the target ``num_layers`` >= ``len(protected_layers)``.
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     - `seq_length`: Sequence length for KV-cache memory estimate (default: 4096).
         Only used with the ``memory_mb`` constraint.
@@ -254,7 +250,6 @@ class MCoreMinitronSearcher(BaseSearcher):
             "max_width_pruning": 0.40,
             "max_depth_pruning": 0.20,
             "hparams_to_skip": None,
-            "protected_layers": None,
             "top_k": 10,
             # Memory footprint config (only used with memory_mb constraint)
             "seq_length": 4096,
@@ -377,20 +372,6 @@ class MCoreMinitronSearcher(BaseSearcher):
                 for layer, _ in sorted(self.layer_scores.items(), key=lambda x: x[1], reverse=True)
             ]
             assert sorted(self.sorted_layers) == list(range(1, self.model.config.num_layers + 1))
-
-            # Force protected layers (e.g. VLM deepstack-injection layers) to the front of the
-            # importance ranking so depth pruning never drops them (drop set is sorted_layers[N:]).
-            # Relative order within each group is preserved (stable partition).
-            protected = self.config["protected_layers"]
-            if protected:
-                protected = set(protected)
-                assert protected <= set(self.sorted_layers), (
-                    f"protected_layers {sorted(protected)} must be 1-indexed layer numbers in "
-                    f"1..{self.model.config.num_layers}"
-                )
-                self.sorted_layers = [ln for ln in self.sorted_layers if ln in protected] + [
-                    ln for ln in self.sorted_layers if ln not in protected
-                ]
         else:
             assert (
                 self.constraints.keys() == {"export_config"}
@@ -447,12 +428,6 @@ class MCoreMinitronSearcher(BaseSearcher):
             if num_layers_hp.active != num_layers_hp.max:
                 assert self.sorted_layers is not None
                 layers_to_drop = self.sorted_layers[num_layers_hp.active :]
-                protected = self.config["protected_layers"]
-                if protected:
-                    assert not (set(layers_to_drop) & set(protected)), (
-                        f"Cannot depth-prune to {num_layers_hp.active} layers while protecting "
-                        f"{sorted(protected)}: target num_layers must be >= {len(set(protected))}."
-                    )
                 drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
 
         # Update model config with pruned architecture

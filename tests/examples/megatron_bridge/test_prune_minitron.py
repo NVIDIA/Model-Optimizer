@@ -22,7 +22,6 @@ from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
     create_tiny_qwen3_5_vl_dir,
     create_tiny_qwen3_dir,
-    create_tiny_qwen3vl_dir,
 )
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
@@ -60,9 +59,6 @@ def test_prune_minitron(tmp_path: Path, num_gpus):
 @pytest.mark.parametrize(
     "create_tiny_vlm_dir",
     [
-        # Qwen3-VL: standard attention LM + deepstack vision injection (indices must be preserved
-        # during depth pruning and remapped to the renumbered layers).
-        create_tiny_qwen3vl_dir,
         # Gemma3-VL: sliding/full attention LM (exercises the ``layer_types`` pruning path) with a
         # multimodal projector (no deepstack).
         create_tiny_gemma3vl_dir,

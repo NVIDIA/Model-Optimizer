@@ -180,7 +180,7 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 > *<sup>1.</sup>Hugging Face models can be imported into M-Bridge/M-LM format as long as they are [supported](https://docs.nvidia.com/nemo/megatron-bridge/latest/index.html#supported-models) by the framework.*
 
-> *<sup>2.</sup>The language model of vision-language models (e.g. Qwen3-VL, Qwen3.5-VL, Gemma3-VL) can be pruned as well; the vision tower is left intact. `hidden_size` is not pruned for VLMs as it is shared with the vision projector. See the [Megatron-Bridge pruning example](../megatron_bridge/README.md#pruning).*
+> *<sup>2.</sup>The language model of vision-language models (e.g. Qwen3.5-VL, Gemma3-VL) can be pruned as well; the vision tower is left intact. `hidden_size` is not pruned for VLMs as it is shared with the vision projector. See the [Megatron-Bridge pruning example](../megatron_bridge/README.md#pruning).*
 
 > *<sup>3.</sup>`num_attention_heads` pruning is not supported for some attention types — GatedDeltaNet (linear attention), gated attention (`attention_output_gate`, e.g. Qwen3.5) and Multi-Latent Attention (MLA, e.g. DeepSeek); for these only `hidden_size` is pruned.*
 

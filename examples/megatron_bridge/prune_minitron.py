@@ -296,8 +296,6 @@ def main(args: argparse.Namespace):
     # hidden_size is shared with the vision->LM projector, so it is never pruned here (follow-up).
     language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
     is_vlm = language_model is not unwrapped_model
-    # 1-indexed LM layer numbers that depth pruning must keep (see protected_layers handling below).
-    protected_layers: set[int] = set()
     if is_vlm:
         print_rank_0(
             "VLM detected: pruning model.language_model only (hidden_size pruning skipped)."
@@ -307,14 +305,6 @@ def main(args: argparse.Namespace):
                 "Pruning 'hidden_size' is not supported for VLMs (shared with the vision projector)."
             )
         args.hparams_to_skip = sorted({*args.hparams_to_skip, "hidden_size"})
-
-        # Deepstack-injected LM layers (Qwen3-VL): the vision tower feeds features into specific LM
-        # layers (``vision_config.deepstack_visual_indexes``, 0-indexed). Those layers must survive
-        # depth pruning so the (unpruned) vision tower's deepstack mergers still line up; protect
-        # them (as 1-indexed layer numbers) and remap the indices after pruning.
-        vision_cfg = getattr(bridge.hf_pretrained.config, "vision_config", None)
-        deepstack_indexes = list(getattr(vision_cfg, "deepstack_visual_indexes", None) or [])
-        protected_layers = {idx + 1 for idx in deepstack_indexes}
 
     # Calibration runs the pruning target (the language model) directly. For VLMs this is the
     # extracted ``language_model``; text-only calibration uses its own embedding and works under
@@ -332,9 +322,6 @@ def main(args: argparse.Namespace):
     pruning_config = {
         "forward_loop": forward_loop,
         "checkpoint": args.prune_intermediate_ckpt,
-        # Layers that depth pruning must keep (empty set => no constraint). For VLMs this protects
-        # the deepstack-injected LM layers so the vision tower stays consistent.
-        "protected_layers": protected_layers or None,
     }
     if args.prune_export_config is not None:
         # Less restrictive search space for manual pruning
@@ -497,18 +484,6 @@ def main(args: argparse.Namespace):
         if hasattr(text_cfg, "layer_types"):
             text_cfg.layer_types = [
                 lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
-            ]
-        # Remap VLM deepstack indices (0-indexed LM layers) to the pruned/renumbered layers. The
-        # protected_layers constraint above guarantees every deepstack layer survived, so each index
-        # maps to its new compacted position; the vision tower's mergers stay aligned.
-        vision_cfg = getattr(hf_cfg, "vision_config", None)
-        if (
-            is_vlm
-            and vision_cfg is not None
-            and getattr(vision_cfg, "deepstack_visual_indexes", None)
-        ):
-            vision_cfg.deepstack_visual_indexes = [
-                kept_layer_nums.index(idx + 1) for idx in vision_cfg.deepstack_visual_indexes
             ]
         if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
             hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
