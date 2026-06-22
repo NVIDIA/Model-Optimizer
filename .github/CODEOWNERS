@@ -46,7 +46,6 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 /examples/deepseek @NVIDIA/modelopt-deploy-codeowners
 /examples/diffusers @NVIDIA/modelopt-examples-diffusers-codeowners
 /examples/gpt-oss @NVIDIA/modelopt-examples-gpt-oss-codeowners
-/examples/llm_autodeploy @NVIDIA/modelopt-deploy-codeowners
 /examples/llm_distill @NVIDIA/modelopt-torch-distill-codeowners
 /examples/llm_eval @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/llm_ptq @NVIDIA/modelopt-examples-llm_ptq-codeowners
