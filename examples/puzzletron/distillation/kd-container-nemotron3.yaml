@@ -20,7 +20,7 @@ model:
   # sequence_parallel: true
   # use_shared_experts: false
   pipeline_dtype: torch.bfloat16
-  seq_length: &seqlen 4096
+  seq_length: &seq_length_anchor 4096
 
   cross_entropy_fusion_impl: native
 
@@ -89,9 +89,9 @@ ddp:
 # Dataset (mock blend — replace with real blend / per_split_data_args_path for production)
 # ---------------------------------------------------------------------------
 dataset:
-  seq_length: *seqlen
+  seq_length: *seq_length_anchor
   path_to_cache: /puzzletron/workspaces/datasets_cache
-  random_seed: &seed 1234
+  random_seed: &seed 42
   reset_attention_mask: False
   reset_position_ids: False
   eod_mask_loss: False
@@ -146,7 +146,7 @@ checkpoint:
 logger:
   log_interval: 1
   log_timers_to_tensorboard: true
-  wandb_project: nemotron3_distillation
+  wandb_project: ???
   wandb_entity: ???
   wandb_exp_name: ???
   tensorboard_dir: ???

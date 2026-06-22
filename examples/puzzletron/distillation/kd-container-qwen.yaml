@@ -21,7 +21,7 @@ model:
   sequence_parallel: false
   use_shared_experts: false
   pipeline_dtype: torch.bfloat16
-  seq_length: 4096
+  seq_length: &seq_length_anchor 4096
 
   cross_entropy_fusion_impl: native
 
@@ -90,7 +90,7 @@ ddp:
 # Dataset (mock blend — replace with real blend / per_split_data_args_path for production)
 # ---------------------------------------------------------------------------
 dataset:
-  seq_length: 4096
+  seq_length: *seq_length_anchor
   path_to_cache: /puzzletron/workspaces/datasets_cache
   random_seed: &seed 42
   reset_attention_mask: False
