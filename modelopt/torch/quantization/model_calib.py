@@ -1948,8 +1948,7 @@ def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
         algo_kwargs = {k: v for k, v in algo_kwargs.items() if k in accepted}
     calib_func(model, forward_loop=forward_loop, **algo_kwargs)
 
-    if method == "max":
-        _convert_to_static_block_quantizers(model)
+    _convert_to_static_block_quantizers(model)
 
 
 def _compute_block_scales(quantizer):
