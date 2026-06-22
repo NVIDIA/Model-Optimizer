@@ -507,7 +507,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         return {
             k: v
             for k, v in block_sizes.items()
-            if k not in ["type", "scale_bits", "scale_block_sizes"]
+            if k not in ["type", "scale_bits", "scale_block_sizes", "four_over_six"]
         }
 
     @field_validator("block_sizes")

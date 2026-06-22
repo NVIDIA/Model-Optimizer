@@ -20,16 +20,11 @@ import torch
 from ..backends.utils import fp4_compatible
 from ..qtensor.base_qtensor import BaseQuantizedTensor
 from ..utils import reduce_amax, reduce_block_amax, reduce_block_padding
+from ..utils.numeric_utils import E2M1_MAX, E4M3_MAX, fp8_max_for_normalization
 
 # Define conversion tables
 e2m1_bounds = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5])
 e2m1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
-
-# Four Over Six (4/6) adaptive block scaling — paper arXiv:2512.02010v5.
-# scales to either 4 or 6 per block, therefore the FP8 block scales are either 448 or 256.
-FP4_E2M1_MAX = 6.0
-FP8_E4M3_MAX = 448.0
-FP8_E4M3_MAX_46 = 256.0
 
 __all__ = ["NVFP4QTensor"]
 
@@ -37,7 +32,7 @@ __all__ = ["NVFP4QTensor"]
 def _cast_per_block_scale_to_fp8(
     per_block_scale: torch.Tensor,
     per_block_scale_max: torch.Tensor | None = None,
-    fp8_max_for_normalization: float = FP8_E4M3_MAX,
+    fp8_max_for_normalization: float = E4M3_MAX,
 ) -> torch.Tensor:
     """Clamp to FP8 E4M3FN range [2**-9, 448] and cast — avoids underflow→0 / overflow→NaN.
 
@@ -48,11 +43,11 @@ def _cast_per_block_scale_to_fp8(
     """
     if per_block_scale_max is not None:
         per_block_scale = per_block_scale.float() * fp8_max_for_normalization / per_block_scale_max
-    return per_block_scale.clamp(min=2**-9, max=FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+    return per_block_scale.clamp(min=2**-9, max=E4M3_MAX).to(torch.float8_e4m3fn)
 
 
 class NVFP4QTensor(BaseQuantizedTensor):
-    """Implements the INT4 quantization on tensors for more efficient storage or computation.
+    """Implements the NVFP4 quantization on tensors for more efficient storage or computation.
 
     Attributes:
         quantized_data (torch.Tensor): The quantized data stored as a packed uint8 tensor.
@@ -90,12 +85,6 @@ class NVFP4QTensor(BaseQuantizedTensor):
         return global_amax
 
     @classmethod
-    def _is_four_over_six(cls, weight_quantizer) -> bool:
-        """Return True if 4/6 adaptive block scaling is enabled on this quantizer."""
-        bs = getattr(weight_quantizer, "block_sizes", None) or {}
-        return bool(bs.get("four_over_six", False))
-
-    @classmethod
     def get_weights_scaling_factor_2_from_quantizer(cls, weight_quantizer):
         """Returns per tensor weight scaling factor from the weight_quantizer.
 
@@ -108,15 +97,15 @@ class NVFP4QTensor(BaseQuantizedTensor):
         Returns:
             The global scaling factor as a float tensor.
         """
-        m_fp8 = FP8_E4M3_MAX_46 if cls._is_four_over_six(weight_quantizer) else FP8_E4M3_MAX
+        m_fp8 = fp8_max_for_normalization(weight_quantizer)
         global_amax = cls._get_static_global_amax(weight_quantizer)
         if global_amax is not None:
-            return global_amax.float() / (FP4_E2M1_MAX * m_fp8)
+            return global_amax.float() / (E2M1_MAX * m_fp8)
         else:
             assert hasattr(weight_quantizer, "_amax"), (
                 "Weight quantizer does not have attribute amax"
             )
-            return weight_quantizer._amax.float() / (FP4_E2M1_MAX * m_fp8)
+            return weight_quantizer._amax.float() / (E2M1_MAX * m_fp8)
 
     @classmethod
     def get_weights_scaling_factor_from_quantizer(
@@ -147,17 +136,14 @@ class NVFP4QTensor(BaseQuantizedTensor):
                 weight_quantizer
             )
 
-        is_four_over_six = cls._is_four_over_six(weight_quantizer)
-        fp8_max_for_normalization = FP8_E4M3_MAX_46 if is_four_over_six else FP8_E4M3_MAX
-
         if cls._is_static_quantizer(weight_quantizer):
             # Static path: use pre-computed per-block amax values from quantizer
             global_amax = cls._get_static_global_amax(weight_quantizer).float()
             per_block_amax = weight_quantizer._amax.float()
 
             # Compute scales in float
-            per_block_scale_max = global_amax / FP4_E2M1_MAX
-            per_block_scale = per_block_amax / FP4_E2M1_MAX
+            per_block_scale_max = global_amax / E2M1_MAX
+            per_block_scale = per_block_amax / E2M1_MAX
             per_block_scale[per_block_scale == 0] = 1.0
 
             # Reshape per_block_scale to match weight's block structure
@@ -170,7 +156,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
                 per_block_scale = _cast_per_block_scale_to_fp8(
                     per_block_scale,
                     per_block_scale_max,
-                    fp8_max_for_normalization=fp8_max_for_normalization,
+                    fp8_max_for_normalization=fp8_max_for_normalization(weight_quantizer),
                 )
             return per_block_scale, weights_scaling_factor_2
         else:
@@ -206,7 +192,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         per_block_amax = reduce_block_amax(input, block_sizes={-1: block_size}).float()
         # Get per-block-scale (default M=6)
         per_block_scale = per_block_amax / (
-            FP4_E2M1_MAX * weights_scaling_factor_2.to(per_block_amax.device)
+            E2M1_MAX * weights_scaling_factor_2.to(per_block_amax.device)
         )
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
@@ -218,7 +204,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def get_weights_scaling_factor_2(cls, input: torch.Tensor):
         """Returns per tensor weight scaling factor."""
-        return reduce_amax(input).float() / (FP4_E2M1_MAX * FP8_E4M3_MAX)
+        return reduce_amax(input).float() / (E2M1_MAX * E4M3_MAX)
 
     @classmethod
     def get_activation_scaling_factor(cls, quantizer):
@@ -232,7 +218,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         if amax is None:
             return None
 
-        activation_scaling_factor = amax.float() / (quantizer.maxbound * FP8_E4M3_MAX)
+        activation_scaling_factor = amax.float() / (quantizer.maxbound * E4M3_MAX)
 
         assert torch.all(activation_scaling_factor > 0), (
             f" activation scaling factor {activation_scaling_factor} not positive."

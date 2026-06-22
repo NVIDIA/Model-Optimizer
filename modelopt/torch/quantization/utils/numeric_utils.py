@@ -38,6 +38,7 @@ __all__ = [
 E8M0_BIAS = 127  # E8M0 stores k_j as uint8 with bias 127
 E2M1_MAX = 6.0
 E4M3_MAX = 448.0
+E4M3_MAX_46 = 256.0  # 4 Over 6 max FP8 scale
 E4M3_KMAX = 8
 E4M3_KMIN = -9  # E4M3 represents 2^k exactly for k in [-9, 8]
 # E2M1 magnitude grid indexed by the low 3 bits of an FP4 nibble.
@@ -175,3 +176,9 @@ def mxfp4_to_nvfp4_per_block_amax(blocks: torch.Tensor, e8m0_scales: torch.Tenso
     per_block_amax_mxfp4 = torch.where(in_range, closed_form_ideal, data_derived)
     # Each MXFP4 block of 32 splits into two NVFP4 blocks of 16 sharing k_j.
     return per_block_amax_mxfp4.repeat_interleave(2, dim=-1)
+
+
+def fp8_max_for_normalization(quantizer) -> float:
+    """FP8 normalization max: 256 for 4/6, else 448."""
+    bs = getattr(quantizer, "block_sizes", None) or {}
+    return E4M3_MAX_46 if bool(bs.get("four_over_six", False)) else E4M3_MAX

@@ -28,21 +28,17 @@ import torch
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, choices
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
-    FP4_E2M1_MAX,
-    FP8_E4M3_MAX,
-    FP8_E4M3_MAX_46,
-    NVFP4QTensor,
-)
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils.numeric_utils import E2M1_MAX, E4M3_MAX, E4M3_MAX_46
 
 BLOCK_SIZE = 16
 
 
 class TestConstants:
     def test_fp8_and_e2m1_constants(self):
-        assert FP8_E4M3_MAX == 448.0
-        assert FP8_E4M3_MAX_46 == 256.0
-        assert FP4_E2M1_MAX == 6.0
+        assert E4M3_MAX == 448.0
+        assert E4M3_MAX_46 == 256.0
+        assert E2M1_MAX == 6.0
 
 
 class TestIsFourOverSix:
@@ -74,7 +70,9 @@ class TestScalingFactor2:
         wsf2_default = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q_default)
         wsf2_46 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q_46)
         # wsf2 = global_amax / (6 * m_fp8); only m_fp8 differs (448 vs 256).
-        assert torch.allclose(wsf2_46 / wsf2_default, torch.tensor(448.0 / 256.0), rtol=1e-6)
+        assert torch.allclose(
+            wsf2_46 / wsf2_default, torch.tensor(E4M3_MAX / E4M3_MAX_46), rtol=1e-6
+        )
 
 
 class TestRoundTripScales:
@@ -145,10 +143,10 @@ class TestStaticQuantizerFourOverSixThreading:
         return captured["fp8_max"]
 
     def test_four_over_six_threads_256(self, monkeypatch):
-        assert self._captured_fp8_max(monkeypatch, four_over_six=True) == 256.0
+        assert self._captured_fp8_max(monkeypatch, four_over_six=True) == E4M3_MAX_46
 
     def test_default_threads_448(self, monkeypatch):
-        assert self._captured_fp8_max(monkeypatch, four_over_six=False) == 448.0
+        assert self._captured_fp8_max(monkeypatch, four_over_six=False) == E4M3_MAX
 
 
 class TestCompressUnsupported:

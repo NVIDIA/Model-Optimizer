@@ -61,6 +61,7 @@ from ...tensor_quant import (
     static_blockwise_fp4_fake_quant,
 )
 from ...utils import is_torch_export_mode
+from ...utils.numeric_utils import fp8_max_for_normalization
 from ..functional import normalized_hadamard_transform
 
 __all__ = [
@@ -1457,15 +1458,12 @@ class NVFP4StaticQuantizer(TensorQuantizer):
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self.amax is not None:
-            fp8_max_for_normalization = (
-                256.0 if self.block_sizes.get("four_over_six", False) else 448.0
-            )
             return static_blockwise_fp4_fake_quant(
                 inputs,
                 self.amax,
                 self.global_amax,  # Can be None, will be computed internally
                 True,  # quantize_block_scales
-                fp8_max_for_normalization,
+                fp8_max_for_normalization(self),
                 inputs.dtype,
                 self._pass_through_bwd,
             )
