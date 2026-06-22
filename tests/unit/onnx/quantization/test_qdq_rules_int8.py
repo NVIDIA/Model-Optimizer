@@ -25,9 +25,11 @@ from _test_utils.onnx.lib_test_models import (
     build_conv_isinf_model,
     build_conv_layernorm_model,
     build_convtranspose_conv_residual_model,
+    build_matmul_1xn_model,
     build_r1a_model,
     build_resnet_block,
     build_resnet_block_with_downsample,
+    build_small_grouped_conv_model,
     export_as_onnx,
 )
 
@@ -282,3 +284,54 @@ def test_conv_layernorm_quantization(tmp_path):
         f"LayerNorm activation input should come from DequantizeLinear, "
         f"but comes from {producer.op}. Conv->LayerNorm output quantization is missing!"
     )
+
+
+@pytest.mark.parametrize("target_dla", [False, True])
+def test_target_dla_conv(tmp_path, target_dla):
+    model = build_small_grouped_conv_model()
+    onnx_path = os.path.join(tmp_path, "model.onnx")
+    onnx.save(model, onnx_path)
+
+    quantize(onnx_path, quantize_mode="int8", high_precision_dtype="fp16", target_dla=target_dla)
+
+    # Output model should be produced in the same tmp_path
+    output_onnx_path = onnx_path.replace(".onnx", ".quant.onnx")
+
+    # Check that quantized explicit model is generated
+    assert os.path.isfile(output_onnx_path)
+
+    # Load the output model and check QDQ node placements
+    graph = gs.import_onnx(onnx.load(output_onnx_path))
+
+    # Check quantized nodes
+    conv_nodes = [n for n in graph.nodes if "Conv" in n.op]
+    mul_nodes = [n for n in graph.nodes if "Mul" in n.op]
+    if target_dla:
+        # Check that all Convs and Mul nodes are quantized
+        assert assert_nodes_are_quantized(conv_nodes)
+        assert assert_nodes_are_quantized(mul_nodes)
+    else:
+        # Check that only the 1st Conv is quantized
+        assert assert_nodes_are_quantized([conv_nodes[0]])
+        assert assert_nodes_are_not_quantized(mul_nodes)
+
+
+@pytest.mark.parametrize("target_dla", [False, True])
+def test_target_dla_matmul(tmp_path, target_dla):
+    model = build_matmul_1xn_model()
+    onnx_path = os.path.join(tmp_path, "model.onnx")
+    onnx.save(model, onnx_path)
+
+    quantize(onnx_path, quantize_mode="int8", high_precision_dtype="fp16", target_dla=target_dla)
+
+    output_onnx_path = onnx_path.replace(".onnx", ".quant.onnx")
+    assert os.path.isfile(output_onnx_path)
+
+    graph = gs.import_onnx(onnx.load(output_onnx_path))
+    matmul_nodes = [n for n in graph.nodes if n.op == "MatMul"]
+    if target_dla:
+        # Check that MatMul is quantized
+        assert assert_nodes_are_quantized(matmul_nodes)
+    else:
+        # GEMV detection excludes the MatMul (m=1) from quantization.
+        assert assert_nodes_are_not_quantized(matmul_nodes)

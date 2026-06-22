@@ -301,6 +301,14 @@ def get_parser() -> argparse.ArgumentParser:
         ),
     )
     argparser.add_argument(
+        "--target_dla",
+        action="store_true",
+        help=(
+            "If set, enables Q/DQ nodes to be placed in all tensors for optimal DLA deployment. This only has "
+            "effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution."
+        ),
+    )
+    argparser.add_argument(
         "--autotune",
         nargs="?",
         const="default",
@@ -494,6 +502,7 @@ def main():
         calibrate_per_node=args.calibrate_per_node,
         direct_io_types=args.direct_io_types,
         opset=args.opset,
+        target_dla=args.target_dla,
         autotune=autotune_enabled,
         autotune_output_dir=args.autotune_output_dir,
         autotune_num_schemes_per_region=args.autotune_schemes_per_region,
