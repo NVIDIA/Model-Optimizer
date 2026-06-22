@@ -51,6 +51,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "MCoreLayerOverrides",
+    "block_config_to_mcore_overrides",
+    "get_overrides_for_layer",
+    "load_block_configs",
+]
+
 
 # ---------------------------------------------------------------------------
 # Per-layer override container
@@ -128,7 +135,7 @@ def load_block_configs(
         return None
 
     converter_cls = ConverterFactory.get(converter_name)
-    if converter_cls is None:
+    if isinstance(converter_cls, str):
         logger.warning(
             "Unknown AnyModel converter '%s'. Cannot generate block_configs. "
             "Valid converters can be listed with ConverterFactory.list().",

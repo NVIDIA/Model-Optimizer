@@ -65,7 +65,9 @@ from _common import (
     configure_logging,
     run_entrypoint,
 )
+from layer_patchers import mbridge_patcher
 from megatron.bridge.utils.common_utils import print_rank_0
+from provider_patch import apply_distillation_patch, apply_patch
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -109,8 +111,6 @@ def main(args: argparse.Namespace) -> None:
     # Step 4: Apply class-level provider patches (one-time setup)
     # ------------------------------------------------------------------
     logger.info("Step 4: Applying provider patches")
-    from provider_patch import apply_distillation_patch, apply_patch
-
     apply_patch()
     apply_distillation_patch()
 
@@ -131,8 +131,6 @@ def main(args: argparse.Namespace) -> None:
     print_rank_0(f"  HF output path   : {args.output_hf_checkpoint}")
 
     os.makedirs(args.output_hf_checkpoint + "/subblocks_safetensors", exist_ok=True)
-
-    from layer_patchers import mbridge_patcher
 
     with mbridge_patcher(
         block_configs=student_block_configs,
@@ -161,6 +159,8 @@ def main(args: argparse.Namespace) -> None:
         "chat_template.jinja",
     ]:
         src = Path(student_path) / fname
+        if not src.is_file():
+            continue
         dst = Path(args.output_hf_checkpoint) / fname
         shutil.copy(src, dst)
         print_rank_0(f"  ✅ Copied {fname}")
@@ -207,7 +207,7 @@ def _parse_args() -> argparse.Namespace:
         choices=sorted(MODEL_REGISTRY),
         help=(
             "Student model key. Determines the HuggingFace model ID (used when "
-            "--student-checkpoint is omitted) and the AnyModel converter for block_configs."
+            "--student-hf-checkpoint is omitted) and the AnyModel converter for block_configs."
         ),
     )
     parser.add_argument(

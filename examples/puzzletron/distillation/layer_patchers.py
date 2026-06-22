@@ -58,6 +58,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "NoOpRMSNorm",
+    "NoOpWithBias",
+    "mbridge_patcher",
+]
+
 
 # ---------------------------------------------------------------------------
 # Thread-local patcher state

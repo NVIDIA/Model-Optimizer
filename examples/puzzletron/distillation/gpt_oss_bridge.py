@@ -185,10 +185,6 @@ class GPTOSSBridge(MegatronModelBridge):
         converted_weights_dict: dict[str, torch.Tensor],
         hf_state_dict: Mapping[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        num_experts = self.hf_config.num_local_experts
-        ep_size = parallel_state.get_expert_model_parallel_world_size()
-        experts_per_rank = num_experts // ep_size
-
         try:
             layer_idx = extract_layer_idx_from_param(task.param_name)
             expert_number = extract_expert_number_from_param(task.param_name)

@@ -148,9 +148,6 @@ from megatron.bridge.training.utils.omegaconf_utils import (
 from megatron.bridge.utils.common_utils import get_rank_safe
 from omegaconf import OmegaConf
 
-from modelopt.torch.puzzletron.anymodel.converter import *  # noqa: F403
-from modelopt.torch.puzzletron.anymodel.model_descriptor import *  # noqa: F403
-
 configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -618,9 +615,6 @@ def main(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error("Error during distillation: %s", e)
         raise e
-    finally:
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
 
 
 # ---------------------------------------------------------------------------

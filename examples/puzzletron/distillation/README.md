@@ -207,7 +207,7 @@ files copied verbatim from `--student-hf-checkpoint`
 
 ## Layout
 
-```
+```text
 examples/puzzletron/distillation/
 ├── README.md                       # this file
 ├── distill.py                      # KD entrypoint (HF -> Bridge -> distill loop)

@@ -33,14 +33,14 @@ From ``provider_patch``:
     set_provider_block_configs  — Attach block_configs to a provider instance.
 """
 
-from block_config_utils import (
+from .block_config_utils import (
     MCoreLayerOverrides,
     block_config_to_mcore_overrides,
     get_overrides_for_layer,
     load_block_configs,
 )
-from layer_patchers import NoOpWithBias, mbridge_patcher
-from provider_patch import apply_patch, remove_patch, set_provider_block_configs
+from .layer_patchers import NoOpWithBias, mbridge_patcher
+from .provider_patch import apply_patch, remove_patch, set_provider_block_configs
 
 __all__ = [
     "MCoreLayerOverrides",
