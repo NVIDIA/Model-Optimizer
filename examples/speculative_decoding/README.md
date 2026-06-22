@@ -4,7 +4,7 @@
 
 Speculative decoding accelerates auto-regressive generation in large language models (LLMs) by leveraging a lightweight draft model to predict the next γ tokens. The main LLM then verifies these candidate tokens in a single forward pass. If the draft model correctly predicts α tokens, the LLM can accept and generate α+1 tokens per verification step, significantly improving generation speed.
 
-This folder contains an end-to-end runnable speculative decoding fine‑tuning pipeline in which Llama‑3.2‑1B (Hugging Face) is trained on the [UltraChat-200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset.
+This folder contains an end-to-end runnable speculative decoding fine‑tuning pipeline in which Llama‑3.2‑1B (Hugging Face) is trained on the [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset.
 
 This example focuses on training with Hugging Face. To train with Megatron‑LM, see the [Megatron‑LM example](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt).
 
@@ -45,7 +45,7 @@ pip install -r requirements.txt
 
 ### Data Preparation
 
-We support a range of input datasets. In this example, we will use the [UltraChat-200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset.
+We support a range of input datasets. In this example, we will use the [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset.
 
 ```bash
 python ../dataset/make_dataset.py -f ../dataset/example_data_config.yaml --full-conversations
@@ -208,8 +208,6 @@ In addition to the default dataset, we support adding several other commonly use
 
 - MTBench (for debugging)
 - ShareGPT
-- UltraChat
-- Daring-Anteater
 - Magpie (Full 1M, and 500k and 300k filtered)
 - Nemotron Post-Training Dataset V2
 

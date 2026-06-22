@@ -5,10 +5,6 @@ outputs:
       - name: "sharegpt"
         splits:
           all: 0
-      - name: "ultrachat"
-        splits:
-          train_gen: 25000
-          train_sft: 25000
       - name: "mtbench"
         splits:
           all: 0
