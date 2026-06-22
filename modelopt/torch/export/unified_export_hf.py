@@ -414,7 +414,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     #    the later gate up fusion.
     # Fuse pre_quant_scale to the linear weights if possible
     if quantization_format is not None and "nvfp4_awq" in quantization_format.lower():
-        fuse_prequant_to_linear(model)
+        fuse_prequant_to_linear(model, fuse_grouped_heads=True)
 
     # Pre-process MoE experts
     for name, module in model.named_modules():
