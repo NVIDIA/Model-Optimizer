@@ -1,0 +1,125 @@
+# DFlash offline speculative decoding training for MiniMax-M3 (427B VL-MoE, 26B active).
+#
+# 2-step pipeline (mirrors MiniMax-M2.7-DFlash/hf_offline_dflash.yaml). Offline is the
+# chosen path for M3 — online FSDP2 training streams the 427B base forward at every step
+# and is too slow at scale:
+#   task_0: Dump base-model hidden states once via vLLM extract_hidden_states.
+#   task_1: Train the DFlash draft on the dump (FakeBaseModel — loads only lm_head +
+#           embed_tokens, not the full 427B base).
+#
+# M3-specific notes (differ from M2.7), all validated 2026-06-22:
+#   * Dump serves MiniMax-M3-MXFP8 (NVIDIA-published quant) single-node TP8 on H100. M3
+#     is not in stable vLLM yet -> image vllm/vllm-openai:minimax-m3.
+#   * --block-size 128 is MANDATORY for M3's MSA sparse attention.
+#   * --language-model-only skips the vision encoder (text-only synth/dump).
+#   * --enforce-eager + VLLM_RPC_TIMEOUT=1800000 are REQUIRED: M3's MSA Triton kernel
+#     (_gqa_sparse_fwd_kernel) JIT-recompiles per input shape; under cudagraph capture a
+#     recompile blows the executor RPC timeout (sample_tokens timeout -> EngineDead hang).
+#     Eager mode + a long RPC timeout avoids the hang. KV cache stays bf16 (M3's MSA fused
+#     kernel rejects fp8 KV).
+#   * Training FakeBaseModel reads lm_head + embed_tokens from the bf16 M3 (real weights;
+#     these tensors are not what MXFP8 quantizes, so dump@MXFP8 / train@bf16 logits stay
+#     consistent). Per Ye Yu: adhere to published bf16/MXFP8 ckpts, do not self-quantize.
+#   * Sequence length 8192 (not M2.7's 4096) end-to-end: synth, dump, training — captures
+#     full <mm:think> reasoning across the enabled/disabled/adaptive mode mix.
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+#
+# Usage:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/MiniMax/MiniMax-M3-DFlash/hf_offline_dflash.yaml --yes
+
+job_name: MiniMax-M3-DFlash_offline
+pipeline:
+  global_vars:
+    # bf16 base — used by training's FakeBaseModel (lm_head + embed_tokens) and tokenizer.
+    hf_model: /hf-local/MiniMaxAI/MiniMax-M3
+    # NVIDIA-published MXFP8 quant — used only to serve the dump single-node TP8 on H100.
+    dump_model: /hf-local/MiniMaxAI/MiniMax-M3-MXFP8
+
+  # Step 1: Dump base-model hidden states via vLLM extract_hidden_states (TP=8, MXFP8).
+  task_0:
+    script: common/eagle3/dump_offline_data_vllm.sh
+    args:
+      # Synthetic data from the M3 synth campaign (default.jsonl, 3-way thinking-mode mix),
+      # cleaned + uploaded. Update the suffix once the cleaned set is published.
+      - --input-data /hf-local/modelopt/MiniMax-M3-synthetic-data
+      - --output-dir /scratchspace/dflash_minimax_m3_hidden_states
+      # Must match the draft model's num_hidden_layers (recipe default: 5).
+      - --aux-layers dflash
+      - --answer-only-loss
+      - --chat-template examples/MiniMax/MiniMax-M3-DFlash/chat_template_train.jinja
+      - --max-seq-len 8192
+      - --tp 8
+      # M3 MSA requirements (see header).
+      - --block-size 128
+      - --language-model-only
+      - --enforce-eager
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.dump_model>>
+      - TRUST_REMOTE_CODE: "1"
+      # Survive MSA Triton-kernel JIT recompiles without an executor RPC timeout.
+      - VLLM_RPC_TIMEOUT: "1800000"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:minimax-m3
+
+  # Step 2: Train DFlash offline on the dumped hidden states. FakeBaseModel avoids loading
+  # the full 427B — only lm_head + embed_tokens are read from the bf16 checkpoint.
+  task_1:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.trust_remote_code=true
+      - model.use_fake_base_for_offline=true
+      - data.mode=offline
+      - data.offline_data_path=/scratchspace/dflash_minimax_m3_hidden_states
+      - data.chat_template=examples/MiniMax/MiniMax-M3-DFlash/chat_template_train.jinja
+      - training.output_dir=/scratchspace/dflash_minimax_m3_offline
+      - training.num_train_epochs=10
+      # bs=1 @ 8192 keeps the activation footprint of M2.7's bs=2 @ 4096 (bs*seqlen equal).
+      - training.per_device_train_batch_size=1
+      - training.learning_rate=1.2e-3
+      - training.warmup_steps=100
+      - training.training_seq_len=8192
+      - training.logging_steps=100
+      - training.save_steps=400
+      - training.disable_tqdm=true
+      - training.dp_shard_size=1
+      - training.answer_only_loss=true
+      - training.ddp_timeout=3600
+      - training.bf16=false
+      - dflash.dflash_self_logit_distillation=true
+      - dflash.dflash_block_size=8
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=4.0
+      - dflash.dflash_architecture_config.num_hidden_layers=5
+      # Mask token id: in M3, 200054 is a real special token, so the first unused reserved
+      # embedding row is 200061 (M2.7 used 200054).
+      - dflash.dflash_mask_token_id=200061
+      # YaRN rope_scaling injected at EXPORT time only (config.json field; draft weights
+      # unchanged) -> tunable per export. original_max_position_embeddings = training_seq_len
+      # (8192). Default factor 24 -> 8192*24 = 196608 served context (matches M2.7's target).
+      # For M3's full 1M context use factor 128 (8192*128 = 1048576).
+      - dflash.dflash_export_rope_scaling.type=yarn
+      - dflash.dflash_export_rope_scaling.factor=24.0
+      - dflash.dflash_export_rope_scaling.original_max_position_embeddings=8192
+      - dflash.dflash_export_rope_scaling.beta_fast=1.0
+      - dflash.dflash_export_rope_scaling.beta_slow=1.0
+      - dflash.dflash_export_rope_scaling.mscale=1.0
+      - dflash.dflash_export_rope_scaling.mscale_all_dim=1.0
+    environment:
+      - NUM_NODES: "8"
+      # Offline training uses a lightweight FakeBaseModel, so plain DDP suffices (no
+      # ACCELERATE_CONFIG / FSDP2 patches). OVERRIDE_TRANSFORMERS pins 4.52.4 for the
+      # MiniMax-M3 config load.
+      - OVERRIDE_TRANSFORMERS: "4.52.4"
+      - MIXED_PRECISION: "no"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 8
+      ntasks_per_node: 1
+      gpus_per_node: 8
