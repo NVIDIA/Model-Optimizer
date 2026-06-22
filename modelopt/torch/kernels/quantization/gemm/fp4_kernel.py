@@ -24,6 +24,8 @@ import torch
 import triton
 import triton.language as tl
 
+from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
+
 from .nvfp4_quant import nvfp4_scalar_quant
 
 __all__ = ["compute_fp4_scales", "fp4_dequantize", "static_blockwise_fp4_fake_quant"]
@@ -36,8 +38,6 @@ _TORCH_TO_TL_DTYPE = {
     torch.half: tl.float16,
     torch.bfloat16: tl.bfloat16,
 }
-
-FP8_E4M3_MAX = 448.0
 
 
 def _torch_dtype_to_tl(dtype: torch.dtype):
@@ -213,7 +213,7 @@ def compute_fp4_scales(
     amax: torch.Tensor,
     global_amax: torch.Tensor | None = None,
     quantize_block_scales: bool = True,
-    fp8_max_for_normalization: float = FP8_E4M3_MAX,
+    fp8_max_for_normalization: float = E4M3_MAX,
 ) -> torch.Tensor:
     """Compute per-block FP4 scales from amax values.
 
@@ -240,7 +240,7 @@ def compute_fp4_scales(
             global_amax = reduce_amax(amax, axis=None, keepdims=False, squeeze_scalar=True)
 
         global_amax = global_amax.float()
-        scale_fp8_quant_amax = global_amax * (FP8_E4M3_MAX / fp8_max_for_normalization) / 6.0
+        scale_fp8_quant_amax = global_amax * (E4M3_MAX / fp8_max_for_normalization) / 6.0
         scale = scaled_e4m3_impl(scale, scale_fp8_quant_amax)
 
     return scale
@@ -251,7 +251,7 @@ def static_blockwise_fp4_fake_quant(
     amax: torch.Tensor,
     global_amax: torch.Tensor | None = None,
     quantize_block_scales: bool = True,
-    fp8_max_for_normalization: float = FP8_E4M3_MAX,
+    fp8_max_for_normalization: float = E4M3_MAX,
     out_dtype: torch.dtype | None = None,
 ):
     """Static blockwise FP4 fake quantization using Triton kernel.
