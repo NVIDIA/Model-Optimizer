@@ -27,6 +27,7 @@ Changelog
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
+
 *Quantization*
 
 - Add NVFP4 W4A16 weight-only quantization (``w4a16_nvfp4``): FP4 weights with group_size=16, BF16 activations, no calibration forward pass required. Use ``mtq.W4A16_NVFP4_CFG`` or ``--qformat w4a16_nvfp4`` in ``hf_ptq.py``. vLLM deployment support is in progress.

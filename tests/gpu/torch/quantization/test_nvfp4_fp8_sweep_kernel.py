@@ -41,8 +41,8 @@ from modelopt.torch.quantization.calib import NVFP4MSECalibrator
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 from modelopt.torch.quantization.model_calib import _LocalHessianAccumulator
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import FP8_E4M3_MAX
 from modelopt.torch.quantization.tensor_quant import static_blockwise_fp4_fake_quant
+from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
 
 BLOCK_SIZE = 16
 
@@ -178,7 +178,7 @@ def test_sweep_stores_fp32_amax_and_preserves_output_dtype(dtype, triton_enabled
         amax = cal.compute_amax()
 
     assert amax.dtype == torch.float32
-    xq = static_blockwise_fp4_fake_quant(x, amax, global_amax, True, FP8_E4M3_MAX, x.dtype)
+    xq = static_blockwise_fp4_fake_quant(x, amax, global_amax, True, E4M3_MAX, x.dtype)
     assert xq.dtype == x.dtype
 
 

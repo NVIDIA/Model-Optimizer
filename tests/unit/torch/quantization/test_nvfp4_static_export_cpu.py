@@ -24,7 +24,7 @@ from modelopt.torch.export.quant_utils import QUANTIZATION_NVFP4, to_quantized_w
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import FP4_E2M1_MAX
+from modelopt.torch.quantization.utils.numeric_utils import E2M1_MAX
 
 BLOCK_SIZE = 16
 FP4_VALUES = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
@@ -397,6 +397,6 @@ class TestNVFP4StaticFourOverSixExport:
         selected, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
             q, weight, ws2, keep_high_precision=True
         )
-        assert torch.allclose(
-            selected, (baked.float() / FP4_E2M1_MAX).view_as(selected), rtol=1e-5
-        ), "Export did not reproduce the baked per-block amax."
+        assert torch.allclose(selected, (baked.float() / E2M1_MAX).view_as(selected), rtol=1e-5), (
+            "Export did not reproduce the baked per-block amax."
+        )
