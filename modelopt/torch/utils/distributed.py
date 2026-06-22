@@ -29,9 +29,6 @@ import torch
 import torch.distributed
 from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from tqdm import tqdm
 
 __all__ = [
     "DistributedProcessGroup",
@@ -39,13 +36,11 @@ __all__ = [
     "backend",
     "barrier",
     "fsdp2_wrap",
-    "fsdp_aware_forward_loop",
     "is_available",
     "is_fsdp2_model",
     "is_initialized",
     "is_master",
     "rank",
-    "shard_dataloader",
     "size",
 ]
 
@@ -263,64 +258,6 @@ def fsdp2_wrap(model, shard_root=False, mp_policy=None, cpu_offload: bool = Fals
         config.architectures = architectures
 
     return decoder_layers
-
-
-def shard_dataloader(loader, rank: int, world_size: int):
-    """Wrap a DataLoader with a DistributedSampler so each rank sees a unique shard.
-
-    ``drop_last=False`` keeps per-rank batch counts equal (else a rank exits
-    calibration early and hangs the others on FSDP2 collectives), at the cost of the
-    sampler repeating up to ``world_size - 1`` samples to pad the even split.
-
-    Forwards all non-sampler DataLoader settings from ``loader`` (workers, pinning,
-    prefetch, init fn, generator, ...).
-    """
-    sampler = DistributedSampler(
-        loader.dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False,
-        drop_last=False,
-    )
-    return DataLoader(
-        loader.dataset,
-        batch_size=loader.batch_size,
-        sampler=sampler,
-        collate_fn=loader.collate_fn,
-        num_workers=loader.num_workers,
-        pin_memory=loader.pin_memory,
-        timeout=loader.timeout,
-        worker_init_fn=loader.worker_init_fn,
-        multiprocessing_context=loader.multiprocessing_context,
-        generator=loader.generator,
-        prefetch_factor=loader.prefetch_factor,
-        persistent_workers=loader.persistent_workers,
-        pin_memory_device=getattr(loader, "pin_memory_device", ""),
-    )
-
-
-def fsdp_aware_forward_loop(wrapped_model, dataloader, device=None):
-    """Build an ``mtq.quantize`` ``forward_loop`` that respects FSDP wrapping.
-
-    ``mtq.quantize`` hands ``forward_loop`` the *unwrapped* inner module, and calling
-    that bypasses FSDP's pre/post-forward hooks (no all-gather/reshard) — breaking
-    calibration. This closure ignores that argument and calls the captured *wrapped*
-    model instead.
-
-    TODO: ``transformers_trainer.py`` (QLoRA path) has the same logic inlined in
-    ``_quantize_model``; consolidate it onto this helper.
-    """
-
-    def calibrate(_unwrapped_model):
-        for batch in tqdm(dataloader, desc="Calibrating", disable=not is_master()):
-            if device is not None:
-                batch = {
-                    k: (v.to(device) if isinstance(v, torch.Tensor) else v)
-                    for k, v in batch.items()
-                }
-            wrapped_model(**batch)
-
-    return calibrate
 
 
 def broadcast_state_dict(
