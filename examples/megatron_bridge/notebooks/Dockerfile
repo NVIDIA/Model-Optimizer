@@ -3,7 +3,8 @@ FROM nvcr.io/nvidia/nemo:26.04.00
 # Install Jupyter - pin to new version as needed
 RUN pip install --root-user-action ignore \
     jupyterlab==4.4.10 \
-    ipywidgets==8.1.7 && \
+    ipywidgets==8.1.7 \
+    huggingface_hub==1.20.1 && \
     jupyter labextension disable "@jupyterlab/apputils-extension:announcements"
 ENV SHELL /bin/bash
 
@@ -14,6 +15,7 @@ RUN apt-get update && \
 
 # Disable python warnings to improve student experience
 ENV PYTHONWARNINGS="ignore::FutureWarning,ignore::UserWarning,ignore::SyntaxWarning"
+ENV TRANSFORMERS_VERBOSITY=error
 
 
 # Install Model-Optimizer from source, using branch lmikaelyan/compress-vlms
