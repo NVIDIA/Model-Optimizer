@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval. Usage: /puzzletron <command> [args]"
+description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu). Usage: /puzzletron <command> [args]"
 license: Apache-2.0
 ---
 
@@ -25,7 +25,9 @@ Available commands:
 - `all <nproc_per_node>` — Run the full Puzzletron pipeline (nproc_per_node: number of GPUs per node)
 - `all progress` — Show live full pipeline progress with timing summary
 - `add-model <hf_model_path>` — Implement descriptor, converter, and configs for an unsupported model
-- `eval mmlu <hf_model_path> [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); add `--limit N` for a smoke test
+- `eval list [puzzle_dir]` — List all available checkpoints (teacher + sweep solutions) with their index numbers; auto-discovers puzzle_dir if omitted
+- `eval progress [puzzle_dir]` — Show per-checkpoint MMLU eval status and accuracy; auto-discovers puzzle_dir if omitted
+- `eval mmlu <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); pass index from `eval list` or a direct path; add `--limit N` for a smoke test
 
 Usage: `/puzzletron <command> [args]`
 
@@ -117,14 +119,43 @@ python3 .agents/skills/puzzletron/mip_sweep.py
 
 ## Command: eval
 
-- If the second word is not exactly `mmlu`, tell the user: "Unknown eval sub-command. Available: `mmlu`." and **STOP**.
+- If the second word is not exactly `list`, `progress`, or `mmlu`, tell the user: "Unknown eval sub-command. Available: `list`, `progress`, `mmlu`." and **STOP**.
+
+### eval list
+
+Parse `puzzle_dir` from args (third word or `--puzzle_dir <value>`). It is optional.
+
+Run the following Bash command, including `<puzzle_dir>` as an argument when provided, or omitting it to trigger auto-discovery:
+
+```bash
+python3 .agents/skills/puzzletron/eval_list.py [<puzzle_dir>]
+```
+
+Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+### eval progress
+
+Parse `puzzle_dir` from args (third word or `--puzzle_dir <value>`). It is optional.
+
+Run the following Bash command, including `<puzzle_dir>` as an argument when provided, or omitting it to trigger auto-discovery:
+
+```bash
+python3 .agents/skills/puzzletron/eval_progress.py [<puzzle_dir>]
+```
+
+Present the output to the user wrapped in a fenced code block (``` ... ```).
 
 ### eval mmlu
 
 Parse args:
-- `hf_model_path` — third word (positional) or `--hf_model_path <value>`. If missing, ask: "Please provide the HuggingFace model path (local or hub)." and **STOP**.
+- `index_or_path` — third word. If missing, ask: "Please provide a checkpoint index (from `eval list`) or a direct HF model path." and **STOP**.
+- `--puzzle_dir <dir>` — optional; used when resolving an index.
+- If `index_or_path` matches `^[0-9]+$`, resolve it to a path by running `python3 .agents/skills/puzzletron/eval_list.py [<puzzle_dir>]` and picking the Nth entry (0-based) from the output lines. If the index is out of range, tell the user and **STOP**.
+- Otherwise treat `index_or_path` as a literal `hf_model_path`.
 - `--limit <N>` — optional integer; omit the flag entirely if not provided.
 - `--batch_size <B>` — optional integer; default `4` if not provided.
+
+Derive `output_path` as `<hf_model_path>/eval_results/mmlu` (always; not user-configurable).
 
 Run the following Bash command, substituting the parsed values:
 
@@ -135,10 +166,19 @@ PYTHONPATH=.:$PYTHONPATH python examples/llm_eval/lm_eval_hf.py \
   --tasks mmlu \
   --num_fewshot 5 \
   --batch_size <batch_size> \
+  --output_path <hf_model_path>/eval_results/mmlu \
   [--limit <N>]
 ```
 
 (Replace `[--limit <N>]` with the actual `--limit <N>` flag when provided, or omit it.)
+
+**Note on output file location:** lm_eval does not write results directly into `--output_path`. It creates a subdirectory named after the full model path with `/` replaced by `__`, then writes `results_<timestamp>.json` inside it. For example, for a model at `/workspace/foo/bar`, results land at:
+
+```text
+<output_path>/__workspace__foo__bar/results_<timestamp>.json
+```
+
+`eval_progress.py` handles this automatically via a recursive glob.
 
 Stream output to the user as it arrives. When the command finishes:
 - Report the exit code.
