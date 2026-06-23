@@ -870,9 +870,8 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
     The non-gated variant (``up_proj`` instead of ``gate_up_proj``, used by
     NemotronH) is handled by :class:`_QuantNonGatedFusedExperts` via the
-    ``_first_proj_attr`` / ``_is_gated`` hooks below; the per-expert quantizer
-    ModuleLists keep the ``gate_up_proj_*`` names in both cases so the shared
-    calibration / conversion / export machinery treats them uniformly.
+    ``_first_proj_attr`` / ``_is_gated`` hooks below; each layout names the
+    first-projection quantizers after its backing parameter.
     """
 
     # Name of the 3-D weight parameter feeding the first ``F.linear`` per expert.
@@ -881,6 +880,14 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     _first_proj_attr = "gate_up_proj"
     # Whether the first projection packs a gate half that must be split on export.
     _is_gated = True
+
+    @property
+    def _first_proj_input_quantizer_attr(self) -> str:
+        return f"{self._first_proj_attr}_input_quantizer"
+
+    @property
+    def _first_proj_weight_quantizers_attr(self) -> str:
+        return f"{self._first_proj_attr}_weight_quantizers"
 
     def _get_expert_idx_from_gate_up(self, weight: torch.Tensor) -> int:
         """Recover expert index from a first-projection weight slice's storage offset.
@@ -906,8 +913,12 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
     def _setup(self):
         n = self.num_experts
-        self.gate_up_proj_input_quantizer = TensorQuantizer()
-        self.gate_up_proj_weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
+        setattr(self, self._first_proj_input_quantizer_attr, TensorQuantizer())
+        setattr(
+            self,
+            self._first_proj_weight_quantizers_attr,
+            nn.ModuleList([TensorQuantizer() for _ in range(n)]),
+        )
         self.down_proj_input_quantizer = TensorQuantizer()
         self.down_proj_weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
 
@@ -929,8 +940,8 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             else:
                 idx = self._get_expert_idx_from_gate_up(weight)
                 self._current_expert_idx = idx
-                input = self.gate_up_proj_input_quantizer(input)
-                weight = self.gate_up_proj_weight_quantizers[idx](weight)
+                input = getattr(self, self._first_proj_input_quantizer_attr)(input)
+                weight = getattr(self, self._first_proj_weight_quantizers_attr)[idx](weight)
             self._down_proj_linear = not self._down_proj_linear
             return _orig_linear(input, weight, bias)
 
@@ -950,7 +961,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
         quantizers without this override.
         """
         for weight_name, quantizers_name in (
-            (self._first_proj_attr, "gate_up_proj_weight_quantizers"),
+            (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
             ("down_proj", "down_proj_weight_quantizers"),
         ):
             weight = getattr(self, weight_name, None)
@@ -965,11 +976,11 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         The base ``fold_weight`` only handles singular ``*_weight_quantizer``
         attributes. Fused experts use ``nn.ModuleList`` of per-expert quantizers
-        (``gate_up_proj_weight_quantizers``, ``down_proj_weight_quantizers``),
+        (``<first_proj>_weight_quantizers``, ``down_proj_weight_quantizers``),
         which would otherwise be skipped, leaving ``_amax`` on every quantizer.
         """
         for weight_name, quantizers_name in (
-            (self._first_proj_attr, "gate_up_proj_weight_quantizers"),
+            (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
             ("down_proj", "down_proj_weight_quantizers"),
         ):
             weight = getattr(self, weight_name, None)
@@ -998,6 +1009,17 @@ class _QuantNonGatedFusedExperts(_QuantFusedExperts):
 
     _first_proj_attr = "up_proj"
     _is_gated = False
+
+
+def _get_fused_experts_quantizer_attr_names(module):
+    """Return quantizer attribute names for a converted fused-experts module."""
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    return (
+        f"{first_proj_attr}_input_quantizer",
+        f"{first_proj_attr}_weight_quantizers",
+        "down_proj_input_quantizer",
+        "down_proj_weight_quantizers",
+    )
 
 
 def _is_quant_fused_experts_module(module):

@@ -830,10 +830,12 @@ def _process_quantized_modules(
         ):
             sub_module.unpack_weight()
 
-        if hasattr(sub_module, "gate_up_proj_weight_quantizers"):
-            # _QuantFusedExperts uses plural `gate_up_proj_weight_quantizers` (ModuleList),
-            # which get_quantization_format's singular-weight_quantizer check misses. Handle
-            # it explicitly before the format gate so fused-experts get split + quantized.
+        first_proj_attr = getattr(sub_module, "_first_proj_attr", "gate_up_proj")
+        if hasattr(sub_module, f"{first_proj_attr}_weight_quantizers"):
+            # _QuantFusedExperts uses plural `<first_proj>_weight_quantizers`
+            # (ModuleList), which get_quantization_format's singular-weight_quantizer
+            # check misses. Handle it explicitly before the format gate so fused-experts
+            # get split + quantized.
             with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                 _export_fused_experts(
                     sub_module,
@@ -937,6 +939,10 @@ def _export_transformers_checkpoint(
     for _, sub_module in model.named_modules():
         if is_moe(sub_module) and hasattr(sub_module, "experts"):
             expert_linear_names = get_expert_linear_names(sub_module)
+            first_proj_attr = getattr(sub_module.experts, "_first_proj_attr", "gate_up_proj")
+            has_fused_experts_quantizers = hasattr(
+                sub_module.experts, f"{first_proj_attr}_weight_quantizers"
+            )
             for linear_name in expert_linear_names:
                 # Handle DBRX experts specifically
                 if "QuantDbrxExperts" in type(sub_module.experts).__name__:
@@ -949,7 +955,7 @@ def _export_transformers_checkpoint(
                                 modules=list(linear_modulelist),
                                 quantizer_attrs=["input_quantizer"],
                             )
-                elif hasattr(sub_module.experts, "gate_up_proj_weight_quantizers"):
+                elif has_fused_experts_quantizers:
                     # _QuantFusedExperts: amax fallback is handled in _export_fused_experts
                     break
                 elif (

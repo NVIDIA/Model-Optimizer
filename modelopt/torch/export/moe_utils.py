@@ -60,12 +60,16 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
     doesn't appear in the exported state_dict alongside the per-expert form.
     """
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    first_proj_weight_quantizers_attr = f"{first_proj_attr}_weight_quantizers"
+    first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
     for attr in (
         "gate_up_proj",
         first_proj_attr,
         "down_proj",
         "gate_up_proj_weight_quantizers",
+        first_proj_weight_quantizers_attr,
         "gate_up_proj_input_quantizer",
+        first_proj_input_quantizer_attr,
         "down_proj_weight_quantizers",
         "down_proj_input_quantizer",
     ):
@@ -143,14 +147,15 @@ def _export_fused_experts(
             return
 
     # 1. Shared input quantizers — one per projection type, shared across all experts.
-    gate_up_input_q = module.gate_up_proj_input_quantizer
+    first_proj_input_q = getattr(module, f"{first_proj_attr}_input_quantizer")
+    first_proj_weight_quantizers = getattr(module, f"{first_proj_attr}_weight_quantizers")
     down_input_q = module.down_proj_input_quantizer
 
-    gate_up = getattr(module, first_proj_attr).data  # first projection (gate_up or up)
+    first_proj = getattr(module, first_proj_attr).data  # gate_up_proj or up_proj
     down = module.down_proj.data
 
     # 2-3. Split + export each per-expert projection.
-    fused_dim0 = gate_up.shape[1]  # gated: 2 * expert_dim; non-gated: expert_dim
+    fused_dim0 = first_proj.shape[1]  # gated: 2 * expert_dim; non-gated: expert_dim
 
     for idx in range(n):
         expert = nn.Module()
@@ -165,17 +170,17 @@ def _export_fused_experts(
         # mismatched weight_scale_2 and garbled MoE output at inference.
         # Non-gated experts have no gate/up fusion, so this shared-amax step is
         # skipped — their single up_proj uses the generic per-projection fallback.
-        gate_up_q = module.gate_up_proj_weight_quantizers[idx]
+        first_proj_q = first_proj_weight_quantizers[idx]
         if (
             is_gated
-            and getattr(gate_up_q, "is_enabled", False)
+            and getattr(first_proj_q, "is_enabled", False)
             and (
-                not hasattr(gate_up_q, "_amax")
-                or gate_up_q._amax is None
-                or torch.all(gate_up_q._amax == 0)
+                not hasattr(first_proj_q, "_amax")
+                or first_proj_q._amax is None
+                or torch.all(first_proj_q._amax == 0)
             )
         ):
-            gate_up_q.amax = gate_up[idx].abs().amax().to(torch.float32)
+            first_proj_q.amax = first_proj[idx].abs().amax().to(torch.float32)
             warnings.warn(
                 f"Expert {idx} gate_up_proj weight quantizer was not calibrated "
                 f"(amax missing or zero). Using fused-tensor amax as fallback "
@@ -186,28 +191,36 @@ def _export_fused_experts(
 
         if is_gated:
             projections = [
-                ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0, True),
-                ("up_proj", gate_up[idx, expert_dim:, :], expert_dim, fused_dim0, True),
+                ("gate_proj", first_proj[idx, :expert_dim, :], 0, fused_dim0, True),
+                ("up_proj", first_proj[idx, expert_dim:, :], expert_dim, fused_dim0, True),
                 ("down_proj", down[idx], 0, down.shape[1], False),
             ]
         else:
             # Non-gated: the single up_proj maps 1:1 to its weight quantizer, so it
             # is exported whole (no dim-0 split, no shared gate/up weight_scale_2).
             projections = [
-                ("up_proj", gate_up[idx], 0, fused_dim0, True),
+                ("up_proj", first_proj[idx], 0, fused_dim0, True),
                 ("down_proj", down[idx], 0, down.shape[1], False),
             ]
 
-        for proj_name, weight_slice, fused_start, fused_total, is_gate_up in projections:
+        for (
+            proj_name,
+            weight_slice,
+            fused_start,
+            fused_total,
+            uses_first_proj_quantizers,
+        ) in projections:
             w_quantizer_src = (
-                module.gate_up_proj_weight_quantizers[idx]
-                if is_gate_up
+                first_proj_weight_quantizers[idx]
+                if uses_first_proj_quantizers
                 else module.down_proj_weight_quantizers[idx]
             )
-            i_quantizer = gate_up_input_q if is_gate_up else down_input_q
+            i_quantizer = first_proj_input_q if uses_first_proj_quantizers else down_input_q
 
             # gate/up share a weight quantizer — clone so each gets independent amax.
-            w_quantizer = copy.deepcopy(w_quantizer_src) if is_gate_up else w_quantizer_src
+            w_quantizer = (
+                copy.deepcopy(w_quantizer_src) if uses_first_proj_quantizers else w_quantizer_src
+            )
 
             # For per-channel amax (dim >= 1), proportionally slice dim-0
             # to match the split weight.

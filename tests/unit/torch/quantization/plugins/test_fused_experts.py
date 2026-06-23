@@ -1149,9 +1149,8 @@ class TestNormalizeFusedExpertsQuantizerName:
 
 # ---------------------------------------------------------------------------
 # Tests for the non-gated fused-experts path (NemotronH NemotronHExperts):
-# single up_proj (no gate half) + down_proj. Quantizers reuse the gate_up_proj_*
-# sentinel names so calibration / conversion / export treat it uniformly; only
-# the backing weight (up_proj) and the export (no gate/up split) differ.
+# single up_proj (no gate half) + down_proj. Quantizers are named after the
+# backing weights: up_proj_* and down_proj_*.
 # ---------------------------------------------------------------------------
 class TestNonGatedFusedExperts:
     @staticmethod
@@ -1177,10 +1176,11 @@ class TestNonGatedFusedExperts:
             assert isinstance(converted, _QuantNonGatedFusedExperts)
             assert converted._first_proj_attr == "up_proj"
             assert converted._is_gated is False
-            # Quantizer attributes keep the gate_up_proj_* sentinel names.
-            assert hasattr(converted, "gate_up_proj_input_quantizer")
-            assert hasattr(converted, "gate_up_proj_weight_quantizers")
-            assert len(converted.gate_up_proj_weight_quantizers) == NUM_EXPERTS
+            assert hasattr(converted, "up_proj_input_quantizer")
+            assert hasattr(converted, "up_proj_weight_quantizers")
+            assert not hasattr(converted, "gate_up_proj_input_quantizer")
+            assert not hasattr(converted, "gate_up_proj_weight_quantizers")
+            assert len(converted.up_proj_weight_quantizers) == NUM_EXPERTS
             assert len(converted.down_proj_weight_quantizers) == NUM_EXPERTS
         finally:
             self._cleanup_registry(expert_type)
@@ -1233,7 +1233,7 @@ class TestNonGatedFusedExperts:
             "quant_cfg": [
                 {"quantizer_name": "*", "enable": False},
                 {
-                    "quantizer_name": "*gate_up_proj_input_quantizer",
+                    "quantizer_name": "*up_proj_input_quantizer",
                     "cfg": {"num_bits": 8, "axis": None},
                 },
                 {
@@ -1241,7 +1241,7 @@ class TestNonGatedFusedExperts:
                     "cfg": {"num_bits": 8, "axis": None},
                 },
                 {
-                    "quantizer_name": "*gate_up_proj_weight_quantizer",
+                    "quantizer_name": "*up_proj_weight_quantizer",
                     "cfg": {"num_bits": 8, "axis": 0},
                 },
                 {
@@ -1265,10 +1265,10 @@ class TestNonGatedFusedExperts:
         try:
             mtq.quantize(model, self._nongated_fp8_cfg(), forward_loop=forward_loop)
             experts = model.moe.experts
-            assert experts.gate_up_proj_input_quantizer.amax is not None
+            assert experts.up_proj_input_quantizer.amax is not None
             assert experts.down_proj_input_quantizer.amax is not None
             for idx in range(NUM_EXPERTS):
-                assert experts.gate_up_proj_weight_quantizers[idx].amax is not None
+                assert experts.up_proj_weight_quantizers[idx].amax is not None
                 assert experts.down_proj_weight_quantizers[idx].amax is not None
         finally:
             self._cleanup_registry(expert_type)
@@ -1300,16 +1300,16 @@ class TestNonGatedFusedExperts:
                 assert expert_mod.up_proj.weight.shape == (INTERMEDIATE_DIM, HIDDEN_DIM)
                 assert expert_mod.down_proj.weight.shape == (HIDDEN_DIM, INTERMEDIATE_DIM)
 
-            # Fused params and the gate_up sentinel quantizer list are removed.
+            # Fused params and per-expert quantizer lists are removed.
             assert not hasattr(converted, "up_proj")
             assert not hasattr(converted, "down_proj")
-            assert not hasattr(converted, "gate_up_proj_weight_quantizers")
+            assert not hasattr(converted, "up_proj_weight_quantizers")
+            assert not hasattr(converted, "down_proj_weight_quantizers")
         finally:
             self._cleanup_registry(expert_type)
 
     def test_enumeration_yields_up_and_down_proj(self):
-        """weight_attr_names must yield up_proj (whose quantizers live on the
-        gate_up_proj sentinel list) and down_proj for non-gated experts."""
+        """weight_attr_names must yield up_proj and down_proj for non-gated experts."""
         model = _TinyNonGatedMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)
@@ -1346,11 +1346,7 @@ class TestNonGatedFusedExperts:
         assert _is_fused_experts_module(module) is False
 
     def test_get_quant_config_resolves_nongated_experts(self):
-        """get_quant_config must detect the non-gated experts as quantized. The
-        up_proj weight name does not resolve to its quantizers (they live on the
-        gate_up_proj sentinel list), but down_proj anchors both has_quantizers
-        (down_proj_input_quantizer) and format detection (down_proj_weight_quantizers),
-        so the produced config is correct."""
+        """get_quant_config must detect the non-gated experts as quantized."""
         model = _TinyNonGatedMoEModel()
         expert_type = type(model.moe.experts)
         self._cleanup_registry(expert_type)

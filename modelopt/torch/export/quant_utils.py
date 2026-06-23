@@ -1495,7 +1495,7 @@ def sync_tied_input_amax(model: nn.Module) -> int:
     YOCO-style models). Must run BEFORE per-module export so the merged
     amax flows into ``input_scale`` derivation. Handles both dense
     Linears (keyed by ``weight.data_ptr()``) and fused MoE (keyed by
-    ``(gate_up_proj, down_proj)`` data_ptr tuple). Returns the number of
+    ``(<first_proj>, down_proj)`` data_ptr tuple). Returns the number of
     tied groups merged.
     """
     from collections import defaultdict
@@ -1503,13 +1503,16 @@ def sync_tied_input_amax(model: nn.Module) -> int:
     by_dp: dict = defaultdict(list)
     for _, m in model.named_modules():
         # Fused MoE: 3-D source tensors with shared input quantizers
+        first_proj_attr = getattr(m, "_first_proj_attr", "gate_up_proj")
+        first_proj = getattr(m, first_proj_attr, None)
+        first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
         if (
-            hasattr(m, "gate_up_proj_input_quantizer")
-            and hasattr(m, "gate_up_proj")
+            hasattr(m, first_proj_input_quantizer_attr)
+            and first_proj is not None
             and hasattr(m, "down_proj")
-            and m.gate_up_proj.dim() == 3
+            and first_proj.dim() == 3
         ):
-            key = ("moe", m.gate_up_proj.data_ptr(), m.down_proj.data_ptr())
+            key = ("moe", first_proj.data_ptr(), m.down_proj.data_ptr())
             by_dp[key].append(m)
         # Dense quantized Linear with an input_quantizer
         elif (
@@ -1549,7 +1552,8 @@ def sync_tied_input_amax(model: nn.Module) -> int:
         if len(modules) < 2:
             continue
         if key[0] == "moe":
-            for q_name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+            first_proj_attr = getattr(modules[0], "_first_proj_attr", "gate_up_proj")
+            for q_name in (f"{first_proj_attr}_input_quantizer", "down_proj_input_quantizer"):
                 if _merge([getattr(m, q_name, None) for m in modules]):
                     synced += 1
         elif _merge([m.input_quantizer for m in modules]):

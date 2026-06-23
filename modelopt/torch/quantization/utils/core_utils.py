@@ -238,7 +238,7 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     - custom per-weight quantizer (e.g. ``Llama4TextExperts`` with ``gate_up_proj`` +
       ``gate_up_proj_weight_quantizer``).
     - fused-experts ``nn.ModuleList`` quantizers (``_QuantFusedExperts`` with
-      ``gate_up_proj`` + ``gate_up_proj_weight_quantizers`` plural list).
+      ``<first_proj>`` + ``<first_proj>_weight_quantizers`` plural list).
     """
     # standard: "weight" + "weight_quantizer" (singular) or "weight_quantizers" (plural)
     if getattr(module, "weight", None) is not None:
@@ -254,13 +254,13 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
             continue
         if representative_weight_quantizer(module, name) is not None:
             yield name
-        elif name == getattr(module, "_first_proj_attr", None) and isinstance(
-            getattr(module, "gate_up_proj_weight_quantizers", None), nn.ModuleList
+        elif (
+            name == getattr(module, "_first_proj_attr", None)
+            and name != "gate_up_proj"
+            and isinstance(getattr(module, "gate_up_proj_weight_quantizers", None), nn.ModuleList)
         ):
-            # Non-gated fused experts (e.g. NemotronH): the first projection is
-            # named ``up_proj`` but its per-expert quantizers live on the
-            # ``gate_up_proj_weight_quantizers`` sentinel list, so the name-derived
-            # lookup above misses it. Yield it explicitly.
+            # Backward compatibility for older non-gated fused-experts wrappers that
+            # kept first-projection quantizers under the gate_up_proj sentinel name.
             yield name
 
 
