@@ -147,7 +147,7 @@ class QuantCustomModule(OriginalModule):
 | Fused 2D weights (experts stacked in rows) | Two-level expansion | `_QuantDbrxExpertGLU` |
 | Fused weights + `forward(x, expert_id)` | Expand + reconstruct on export | `_QuantMoELinear` (Step3.5) |
 
-For the full guide, see `examples/hf_ptq/moe.md`.
+For the full guide, see `examples/hf_ptq/README.md`.
 
 **Critical: always check the weight layout.** `nn.Linear` expects `(out_features, in_features)` — the last dimension must be `in_features`. If the fused tensor is `(num_experts, in_dim, out_dim)`, you must transpose (`.T`) when copying. Getting this wrong silently corrupts quantization scales. Inspect the original forward pass to determine which dimension is which.
 

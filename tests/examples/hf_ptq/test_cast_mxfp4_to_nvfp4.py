@@ -26,9 +26,9 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-_LLM_PTQ_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
-if str(_LLM_PTQ_DIR) not in sys.path:
-    sys.path.insert(0, str(_LLM_PTQ_DIR))
+_HF_PTQ_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
+if str(_HF_PTQ_DIR) not in sys.path:
+    sys.path.insert(0, str(_HF_PTQ_DIR))
 
 import cast_mxfp4_to_nvfp4 as cast
 

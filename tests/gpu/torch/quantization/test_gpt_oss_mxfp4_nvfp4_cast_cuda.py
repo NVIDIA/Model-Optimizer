@@ -43,9 +43,9 @@ from modelopt.torch.quantization.config import NVFP4_DEFAULT_CFG
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 
 # The cast helpers live next to the example script, not in the ``modelopt`` package.
-_LLM_PTQ_DIR = Path(__file__).resolve().parents[4] / "examples" / "hf_ptq"
-if str(_LLM_PTQ_DIR) not in sys.path:
-    sys.path.insert(0, str(_LLM_PTQ_DIR))
+_HF_PTQ_DIR = Path(__file__).resolve().parents[4] / "examples" / "hf_ptq"
+if str(_HF_PTQ_DIR) not in sys.path:
+    sys.path.insert(0, str(_HF_PTQ_DIR))
 
 from cast_mxfp4_to_nvfp4 import apply_to_model, force_weight_quantizers_static
 

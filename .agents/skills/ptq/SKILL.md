@@ -105,7 +105,7 @@ For remote: use `remote_run` from `remote_exec.sh` (see `skills/common/remote-ex
 
 ### 4B — Launcher: supported model on SLURM or local Docker
 
-Write a YAML config using `common/hf_ptq/hf_ptq.sh`. See `references/launcher-guide.md` for the full template.
+Write a YAML config using `common/hf/ptq.sh`. See `references/launcher-guide.md` for the full template.
 
 ```bash
 cd tools/launcher

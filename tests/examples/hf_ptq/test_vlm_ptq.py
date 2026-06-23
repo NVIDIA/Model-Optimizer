@@ -15,9 +15,9 @@
 
 import pytest
 from _test_utils.examples.models import QWEN_VL_PATH
-from _test_utils.examples.run_command import run_llm_ptq_command
+from _test_utils.examples.run_command import run_hf_ptq_command
 
 
 @pytest.mark.parametrize("quant", ["fp8", "int8_sq", "nvfp4"])
 def test_qwen_vl(quant):
-    run_llm_ptq_command(model=QWEN_VL_PATH, quant=quant, vlm=True)
+    run_hf_ptq_command(model=QWEN_VL_PATH, quant=quant, vlm=True)

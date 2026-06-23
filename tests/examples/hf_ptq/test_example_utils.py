@@ -22,7 +22,7 @@ import json
 from types import SimpleNamespace
 
 import torch
-from _test_utils.examples.llm_ptq_example_utils import example_utils
+from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import save_file
 
 
