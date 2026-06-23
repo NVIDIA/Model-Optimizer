@@ -411,10 +411,6 @@ class ExportManager:
                         f"Invalid padding_strategy: {padding!r}. Expected 'row' or 'row_col'."
                     )
                 kwargs["padding_strategy"] = padding
-        # The diffusion transformer is large (~20B params); the unified export's
-        # layerwise-metadata post-processing does not support sharded safetensors, so
-        # save each component as a single file (no *.safetensors.index.json).
-        kwargs.setdefault("max_shard_size", "200GB")
         export_hf_checkpoint(pipe, export_dir=self.config.hf_ckpt_dir, **kwargs)
         self.logger.info("HuggingFace checkpoint export completed successfully")
 

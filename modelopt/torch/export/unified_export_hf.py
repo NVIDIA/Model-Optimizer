@@ -88,9 +88,9 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import get_language_model_from_vl, is_multimodal_model
+from .model_utils import _reorder_canonical_first, get_language_model_from_vl, is_multimodal_model
 from .moe_utils import _export_fused_experts
-from .plugins import SpeculativeDecodingExporter, has_spec_opt
+from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
@@ -104,6 +104,7 @@ from .quant_utils import (
     maybe_transpose_expert_weight_dimensions,
     postprocess_state_dict,
     preprocess_linear_fusion,
+    sync_tied_input_amax,
     to_quantized_weight,
 )
 
@@ -168,6 +169,12 @@ def _postprocess_safetensors(
        ``_quantization_metadata`` so inference runtimes can detect and handle
        quantized layers.
 
+    All of these target single-file deployment runtimes (e.g. ComfyUI) and are
+    opt-in; ModelOpt itself reads the quant config from ``config.json`` on reload. If
+    the caller passes none of ``merged_base_safetensor_path``, ``padding_strategy``,
+    ``enable_swizzle_layout``, or ``enable_layerwise_quant_metadata``, this function
+    does nothing and leaves the standard exported checkpoint untouched.
+
     Args:
         export_dir: Directory containing the saved ``.safetensors`` file(s).
         pipe: The diffusion pipeline / model.  Used to infer the model type
@@ -181,11 +188,11 @@ def _postprocess_safetensors(
                 file to produce a single-file checkpoint compatible with ComfyUI.
                 Value should be the path to a full base model ``.safetensors``
                 file (e.g. ``"path/to/ltx-2-19b-dev.safetensors"``).
-            enable_layerwise_quant_metadata (bool, optional): When True
-                (default), includes per-layer ``_quantization_metadata`` in the
-                checkpoint metadata so that inference runtimes (e.g., ComfyUI)
-                can identify which layers are quantized and in what format. Set
-                to False to skip.
+            enable_layerwise_quant_metadata (bool, optional): When True, embeds
+                ``quantization_config`` and per-layer ``_quantization_metadata`` in the
+                safetensors header so single-file runtimes (e.g., ComfyUI) can identify
+                which layers are quantized and in what format. Defaults to False (no
+                header metadata; this alone leaves the export untouched).
             enable_swizzle_layout (bool, optional): When True, rearranges NVFP4
                 block scales from ModelOpt's flat layout to cuBLAS 2-D tiled
                 layout. Required for runtimes that consume cuBLAS block-scaled
@@ -198,9 +205,22 @@ def _postprocess_safetensors(
 
     """
     merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
-    enable_layerwise_quant_metadata: bool = kwargs.get("enable_layerwise_quant_metadata", True)
+    enable_layerwise_quant_metadata: bool = kwargs.get("enable_layerwise_quant_metadata", False)
     enable_swizzle_layout: bool = kwargs.get("enable_swizzle_layout", False)
     padding_strategy: str | None = kwargs.get("padding_strategy")
+
+    # This post-processing only produces single-file deployment checkpoints (e.g.
+    # ComfyUI): merging with a base checkpoint, NVFP4 padding/swizzling, and embedding
+    # quant metadata in the safetensors header. None of it is read back by ModelOpt
+    # (the diffusers reload uses ``config.json``), so if the user has not opted into any
+    # of these options there is nothing to do — leave the exported checkpoint untouched.
+    if not (
+        merged_base_safetensor_path is not None
+        or padding_strategy is not None
+        or enable_swizzle_layout
+        or enable_layerwise_quant_metadata
+    ):
+        return
 
     safetensor_files = sorted(export_dir.glob("*.safetensors"))
     if not safetensor_files:
@@ -514,12 +534,27 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
 
 
 def _export_quantized_weight(
-    sub_module: nn.Module, dtype: torch.dtype, weight_name: str = "weight"
+    sub_module: nn.Module,
+    dtype: torch.dtype,
+    weight_name: str = "weight",
+    _tied_cache: dict[int, nn.Module] | None = None,
 ):
     """For the given weight attr of the sub_module, export the quantization info of it.
 
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
+
+    Tied-weight dedup is opt-in via ``_tied_cache``: the setattr below replaces
+    ``.weight`` with a fresh ``nn.Parameter`` wrapping packed bytes, breaking
+    any HF-level tie. When the caller passes a ``_tied_cache`` dict (keyed by
+    the pre-pack ``weight.data_ptr()``), the alias step at the end re-points
+    ``weight`` / ``weight_scale`` / ``weight_scale_2`` at a previously-processed
+    module sharing the same source memory so the downstream data_ptr dedup can
+    collapse them. The cache is owned by the caller (typically
+    ``_export_transformers_checkpoint``) and scoped to one export invocation;
+    when ``_tied_cache`` is ``None`` (the default) the alias step is skipped
+    entirely. Uses memory identity only — no ``_tied_weights_keys`` lookup,
+    no-op for non-tied modules.
     """
     quantization_format = get_quantization_format(sub_module)
     if quantization_format == QUANTIZATION_NONE:
@@ -528,6 +563,13 @@ def _export_quantized_weight(
     block_size = get_weight_block_size(sub_module, weight_name)
     quantizer_attrs = quantizer_attr_names(weight_name)
     weight: nn.Parameter = getattr(sub_module, weight_name)
+
+    # Capture source identity BEFORE any tensor-creating operation below.
+    # For HF-tied weights this matches across all modules sharing the
+    # underlying Parameter; the cache lookup at the end of this function
+    # uses it to detect ties whose Python identity is about to be broken
+    # by the setattr on `weight_name` further down.
+    _tied_source_data_ptr = weight.data_ptr()
     weight_quantizer: TensorQuantizer | SequentialQuantizer = getattr(
         sub_module, quantizer_attrs.weight_quantizer
     )
@@ -703,6 +745,32 @@ def _export_quantized_weight(
     if weight_scale is not None:
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
+    # Tied-weight dedup: if a previously-processed module shared the same
+    # source weight memory, alias the packed weight + scale buffers so the
+    # downstream data_ptr dedup in postprocess_state_dict can collapse them.
+    # input_scale is safe to alias because sync_tied_input_amax (earlier in
+    # this export) already max-merged the per-side amaxes. Gated on the
+    # caller-owned _tied_cache so the dedup state is scoped to one export.
+    if _tied_cache is not None:
+        _prior = _tied_cache.get(_tied_source_data_ptr)
+        if _prior is not None and _prior is not sub_module:
+            if hasattr(_prior, weight_name):
+                setattr(sub_module, weight_name, getattr(_prior, weight_name))
+            for _attr in (
+                quantizer_attrs.weight_scale,
+                quantizer_attrs.weight_scale_2,
+                quantizer_attrs.input_scale,
+            ):
+                if not hasattr(_prior, _attr):
+                    continue
+                if _attr in sub_module._buffers:
+                    del sub_module._buffers[_attr]
+                elif hasattr(sub_module, _attr):
+                    delattr(sub_module, _attr)
+                sub_module.register_buffer(_attr, getattr(_prior, _attr))
+        else:
+            _tied_cache[_tied_source_data_ptr] = sub_module
+
     torch.cuda.empty_cache()
 
 
@@ -723,6 +791,14 @@ def _process_quantized_modules(
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
             If True, modules with base_layer attribute are skipped.
     """
+    # Per-call tied-weight dedup caches. Created fresh on every invocation
+    # so cache state is scoped to one export and cannot leak into a later
+    # call (a process-global cache would carry stale entries whose data_ptr
+    # keys can be recycled by PyTorch's allocator across exports — silent
+    # false-positive aliasing). int keys hold dense Linear / per-expert
+    # wrapper dedup; tuple keys hold MoE fused-experts module dedup.
+    _tied_cache: dict[int, nn.Module] = {}
+    _moe_tied_cache: dict[tuple[int, int], nn.Module] = {}
     fsdp_module_to_reshard = None
 
     for name, sub_module in model.named_modules():
@@ -740,6 +816,13 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        # Step-3.5 QuantMoELinear reconstructs packed MoE tensors from child
+        # expert QuantLinears after export. Fill missing input amax here, before
+        # named_modules() reaches those children, so every expert emits input_scale.
+        if type(sub_module).__name__ == "QuantMoELinear" and hasattr(sub_module, "experts"):
+            set_expert_quantizer_amax(list(sub_module.experts), quantizer_attrs="input_quantizer")
+            continue
+
         # Preprocessing: restore unpacked weight so the export path can read
         # the live quantizer state. Falls through to the export branches below.
         if hasattr(sub_module, "weight_packed") or (
@@ -747,12 +830,19 @@ def _process_quantized_modules(
         ):
             sub_module.unpack_weight()
 
-        if hasattr(sub_module, "gate_up_proj_weight_quantizers"):
-            # _QuantFusedExperts uses plural `gate_up_proj_weight_quantizers` (ModuleList),
-            # which get_quantization_format's singular-weight_quantizer check misses. Handle
-            # it explicitly before the format gate so fused-experts get split + quantized.
+        first_proj_attr = getattr(sub_module, "_first_proj_attr", "gate_up_proj")
+        if hasattr(sub_module, f"{first_proj_attr}_weight_quantizers"):
+            # _QuantFusedExperts uses plural `<first_proj>_weight_quantizers`
+            # (ModuleList), which get_quantization_format's singular-weight_quantizer
+            # check misses. Handle it explicitly before the format gate so fused-experts
+            # get split + quantized.
             with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                _export_fused_experts(sub_module, dtype)
+                _export_fused_experts(
+                    sub_module,
+                    dtype,
+                    _moe_tied_cache=_moe_tied_cache,
+                    _tied_cache=_tied_cache,
+                )
         elif get_quantization_format(sub_module) != QUANTIZATION_NONE:
             # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":
@@ -760,7 +850,7 @@ def _process_quantized_modules(
             if is_quantlinear(sub_module):
                 try:
                     with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                        _export_quantized_weight(sub_module, dtype)
+                        _export_quantized_weight(sub_module, dtype, _tied_cache=_tied_cache)
                 except AssertionError as e:
                     raise AssertionError(
                         f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
@@ -788,7 +878,7 @@ def _process_quantized_modules(
                 else:
                     try:
                         with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                            _export_quantized_weight(sub_module, dtype)
+                            _export_quantized_weight(sub_module, dtype, _tied_cache=_tied_cache)
                     except AssertionError as e:
                         raise AssertionError(
                             f"Failed to export embedding '{name}' (type={type(sub_module).__name__}): {e}"
@@ -811,11 +901,16 @@ def _process_quantized_modules(
                 # Export the quantized weights
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
-                        _export_quantized_weight(sub_module, dtype, weight_name)
+                        _export_quantized_weight(
+                            sub_module, dtype, weight_name, _tied_cache=_tied_cache
+                        )
 
 
 def _export_transformers_checkpoint(
-    model: nn.Module, dtype: torch.dtype | None = None, is_modelopt_qlora: bool = False, **kwargs
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    **kwargs,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Exports the torch model to the packed checkpoint with original HF naming.
 
@@ -844,6 +939,10 @@ def _export_transformers_checkpoint(
     for _, sub_module in model.named_modules():
         if is_moe(sub_module) and hasattr(sub_module, "experts"):
             expert_linear_names = get_expert_linear_names(sub_module)
+            first_proj_attr = getattr(sub_module.experts, "_first_proj_attr", "gate_up_proj")
+            has_fused_experts_quantizers = hasattr(
+                sub_module.experts, f"{first_proj_attr}_weight_quantizers"
+            )
             for linear_name in expert_linear_names:
                 # Handle DBRX experts specifically
                 if "QuantDbrxExperts" in type(sub_module.experts).__name__:
@@ -856,12 +955,17 @@ def _export_transformers_checkpoint(
                                 modules=list(linear_modulelist),
                                 quantizer_attrs=["input_quantizer"],
                             )
-                elif hasattr(sub_module.experts, "gate_up_proj_weight_quantizers"):
+                elif has_fused_experts_quantizers:
                     # _QuantFusedExperts: amax fallback is handled in _export_fused_experts
                     break
-                elif "QuantGptOssExperts" in type(sub_module.experts).__name__:
-                    # Handle GPT-OSS experts specifically
-                    # GPT-OSS experts use gate_up_proj and down_proj
+                elif (
+                    "QuantGptOssExperts" in type(sub_module.experts).__name__
+                    or "QuantLlama4TextExperts" in type(sub_module.experts).__name__
+                ):
+                    # Handle GPT-OSS / Llama4 fused experts specifically.
+                    # Both use gate_up_proj and down_proj with singular input quantizers
+                    # (gate_up_proj_input_quantizer/down_proj_input_quantizer); the actual
+                    # amax fallback and weight export is performed in _process_quantized_modules.
                     gpt_oss_linear_names = ["gate_up_proj", "down_proj"]
                     for linear_name in gpt_oss_linear_names:
                         if hasattr(sub_module.experts, linear_name):
@@ -935,6 +1039,15 @@ def _export_transformers_checkpoint(
             f"Taking element-wise max of amaxes for serving-engine fusion."
         )
 
+    # Merge per-side input_quantizer amaxes BEFORE _process_quantized_modules,
+    # so the merged value flows into input_scale derivation downstream.
+    synced_input = sync_tied_input_amax(model)
+    if synced_input:
+        print(
+            f"sync_tied_input_amax: max-merged input_quantizer amaxes across "
+            f"{synced_input} tied module group(s)"
+        )
+
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
 
@@ -952,6 +1065,13 @@ def _export_transformers_checkpoint(
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
     kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+
+    # Reorder so canonical-side tied keys (per HF's _tied_weights_keys)
+    # iterate first into postprocess_state_dict's first-wins data_ptr dedup.
+    # Self-gated to DiffusionGemma inside _reorder_canonical_first; no-op
+    # for every other model.
+    quantized_state_dict = _reorder_canonical_first(quantized_state_dict, model)
+
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
     )
@@ -1442,7 +1562,7 @@ def export_hf_checkpoint(
         return
 
     try:
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
 
         # Only treat the export as quantized when at least one quant_algo field is set.
         # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
@@ -1492,6 +1612,8 @@ def export_hf_checkpoint(
 
         with open(original_config) as file:
             config_data = json.load(file)
+
+        sanitize_hf_config_for_deployment(config_data, model)
 
         if hf_quant_config is not None:
             config_data["quantization_config"] = hf_quant_config

@@ -74,6 +74,55 @@ logger = logging.getLogger(__name__)
 __all__ = ["HFDFlashModel"]
 
 
+def _dpace_position_weights(
+    confidences: torch.Tensor, alpha: float, valid_mask: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Compute detached D-PACE per-position weights from draft confidences.
+
+    Derived from D-PACE (arXiv:2605.18810). The paper factorizes the per-position
+    weight (Fig. 2 / Eq. 8) into a *cumulative confidence* times a *continuation
+    value*, which is equivalently the suffix sum of the cumulative confidences::
+
+        C_j = prod_{i<=j} q~_i                 # cumulative confidence (Eq. 8)
+        w_j = sum_{m>=j} C_m                    # = C_j * continuation value f~_j
+
+    Each confidence is asymmetrically smoothed toward 1 (Eq. 7)::
+
+        q~_i = (1 - alpha) * q_i + alpha,   alpha in (0, 1],
+
+    so the floor ``q~_i >= alpha`` keeps every cumulative product (hence every
+    weight) strictly positive. We evaluate the suffix sum from its definition as
+    ``total - exclusive_prefix_sum`` of ``C`` rather than reversing the tensor.
+    Positions with ``valid_mask == 0`` are multiplicative no-ops in ``C`` and
+    contribute nothing to the sum, matching the per-token loss mask. Weights are
+    detached (Eq. 9): they reweight the cross-entropy without adding gradient.
+
+    Args:
+        confidences: ``[..., L]`` draft confidence ``q_i = exp(-CE_i)`` per position.
+        alpha: smoothing factor in (0, 1]; raises if outside that range.
+        valid_mask: optional ``[..., L]`` 0/1 mask; ``None`` treats all positions valid.
+
+    Returns:
+        Detached weights with the same shape and dtype as ``confidences``.
+    """
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError(f"dflash_dpace_alpha must be in (0, 1], got {alpha}")
+
+    with torch.no_grad():
+        smoothed = alpha + (1.0 - alpha) * confidences.float()  # Eq. 7
+        if valid_mask is not None:
+            keep = valid_mask.to(torch.bool)
+            smoothed = torch.where(keep, smoothed, torch.ones_like(smoothed))
+        cum_conf = torch.cumprod(smoothed, dim=-1)  # Eq. 8 cumulative confidence C_j
+        if valid_mask is not None:
+            cum_conf = cum_conf * keep.to(cum_conf.dtype)
+        # Suffix sum w_j = sum_{m>=j} C_m, written as total minus the exclusive
+        # prefix sum so no axis reversal is needed (Eq. 8).
+        inclusive = torch.cumsum(cum_conf, dim=-1)
+        weights = inclusive[..., -1:] - inclusive + cum_conf
+        return weights.to(dtype=confidences.dtype)
+
+
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFDFlashModel(DFlashModel):
     """DFlash Model for HuggingFace transformers."""
@@ -132,25 +181,44 @@ class HFDFlashModel(DFlashModel):
         self.dflash_config.hidden_size = base_config.hidden_size
         self.dflash_config.vocab_size = base_config.vocab_size
 
-        # Inherit architecture settings from base model when not specified by user.
-        # Static defaults (hidden_act, attention_bias, etc.) are in dflash/default_config.py.
-        # NOTE: rope_scaling is intentionally excluded. DFlash draft uses Qwen3
-        # RotaryEmbedding which only supports standard RoPE. Inheriting M-RoPE
-        # config from multimodal models (e.g. Qwen3.5) would be incorrect.
-        _base_model_attrs = [
+        # Inherit architecture settings from base model when not specified by user
+        # (setdefault). Static defaults (hidden_act, attention_bias, etc.) are in
+        # dflash/default_config.py.
+        _setdefault_attrs = [
             "max_position_embeddings",
             "intermediate_size",
             "num_attention_heads",
             "num_key_value_heads",
-            "rope_theta",
-            "rope_type",
-            "rope_interleaved",
             "rms_norm_eps",
         ]
-        for attr in _base_model_attrs:
+        for attr in _setdefault_attrs:
             if not hasattr(self.dflash_config, attr) or getattr(self.dflash_config, attr) is None:
                 if hasattr(base_config, attr):
                     setattr(self.dflash_config, attr, getattr(base_config, attr))
+
+        # RoPE base settings are ENFORCED to match the base model (not setdefault): the
+        # DFlash draft injects the target's KV into every layer, so its RoPE base must
+        # match the target's for the injected positions to align — and the exporter writes
+        # the base model's rope_theta. Letting dflash_architecture_config override these
+        # would make training (draft rope) and inference (base rope) disagree, so we
+        # overwrite any user value and warn. (rope_scaling is intentionally NOT inherited:
+        # DFlash uses standard Qwen3 RotaryEmbedding; the long-context YaRN scaling is
+        # added only at export via dflash_export_rope_scaling.)
+        for attr in ("rope_theta", "rope_type", "rope_interleaved"):
+            if not hasattr(base_config, attr):
+                continue
+            base_val = getattr(base_config, attr)
+            user_val = getattr(self.dflash_config, attr, None)
+            if user_val is not None and user_val != base_val:
+                logger.warning(
+                    "DFlash: ignoring dflash_architecture_config.%s=%r and enforcing the "
+                    "base model's value %r — the draft injects the target's KV, so its RoPE "
+                    "base must match the target's.",
+                    attr,
+                    user_val,
+                    base_val,
+                )
+            setattr(self.dflash_config, attr, base_val)
 
         self.dflash_config.head_dim = getattr(
             self.dflash_config,
@@ -349,14 +417,40 @@ class HFDFlashModel(DFlashModel):
 
         binary_eval_mask = weight_mask.view(-1)
 
-        # Optional loss decay
-        if self.dflash_loss_decay_factor > 0:
+        flat_logits = logits.view(-1, logits.size(-1))
+        flat_targets = target_ids.view(-1)
+
+        # Non-KD loss is per-token cross-entropy; compute it once (grad enabled) so the
+        # D-PACE confidences below can reuse it instead of a second CE pass. The KD path
+        # (base_logits is not None) optimizes KL, so its confidences need a dedicated
+        # no_grad CE pass.
+        loss_per_token = None
+        if base_logits is None:
+            loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+
+        # Block-position loss weighting: dynamic D-PACE weights or static exponential decay.
+        if self.dflash_loss_objective == "dpace" and block_size > 1:
+            # Draft confidence q_i = exp(-CE) on the target-selected token, over the
+            # predicted positions (slot 0 is the given anchor, already masked above).
+            # Weights are detached (paper Eq.9), so this adds the documented ~2.3%
+            # training overhead without altering the cross-entropy gradient.
+            with torch.no_grad():
+                conf_ce = (
+                    loss_per_token.detach()
+                    if loss_per_token is not None
+                    else F.cross_entropy(flat_logits, flat_targets, reduction="none")
+                ).view(bsz, n_blocks, block_size)
+                confidences = torch.exp(-conf_ce[..., 1:].float())
+                dpace = torch.ones_like(weight_mask)
+                dpace[..., 1:] = _dpace_position_weights(
+                    confidences, self.dflash_dpace_alpha, valid_mask=weight_mask[..., 1:]
+                )
+            weight_mask = weight_mask * dpace
+        elif self.dflash_loss_decay_factor > 0:
             k = torch.arange(block_size, device=device).view(1, 1, -1)
             decay = torch.exp(-(k - 1).clamp(min=0).float() / self.dflash_loss_decay_factor)
             weight_mask = weight_mask * decay
 
-        flat_logits = logits.view(-1, logits.size(-1))
-        flat_targets = target_ids.view(-1)
         flat_weights = weight_mask.view(-1)
         valid_count = flat_weights.sum() + 1e-6
 
@@ -375,7 +469,6 @@ class HFDFlashModel(DFlashModel):
                 kd_loss = -(target_soft * draft_logsoft).sum(dim=-1)
                 loss = (kd_loss * flat_weights).sum() / valid_count
             else:
-                loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
                 loss = (loss_per_token * flat_weights).sum() / valid_count
 
             with torch.no_grad():

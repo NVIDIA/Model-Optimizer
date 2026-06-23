@@ -376,11 +376,15 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "initializer_range": getattr(base_config, "initializer_range", 0.02),
             "attention_bias": getattr(draft_config, "attention_bias", False),
             "attention_dropout": getattr(draft_config, "attention_dropout", 0.0),
-            "rope_theta": getattr(
-                draft_config, "rope_theta", getattr(base_config, "rope_theta", 1000000.0)
+            # Inherit the target's rope_theta: DFlash injects the target's KV into every
+            # draft layer, so the draft's RoPE base must match the target's. (The draft
+            # arch config carries no rope_theta of its own.)
+            "rope_theta": (
+                getattr(base_config, "rope_theta", None)
+                if getattr(base_config, "rope_theta", None) is not None
+                else getattr(draft_config, "rope_theta", 1000000.0)
             ),
-            # DFlash draft uses standard Qwen3 RoPE, not M-RoPE from multimodal models.
-            # z-lab uses null; vLLM handles null rope_scaling correctly.
+            # YaRN long-context scaling is injected below (see the rope_scaling block).
             "rope_scaling": None,
             "tie_word_embeddings": False,
             "torch_dtype": str(getattr(base_config, "torch_dtype", torch.bfloat16)).replace(
@@ -394,6 +398,12 @@ class DFlashExporter(SpeculativeDecodingExporter):
             config["layer_types"] = draft_config.layer_types
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
+
+        # Inject the export-time YaRN rope_scaling from the dflash_export_rope_scaling
+        # config field (empty dict disables). Mirrors eagle's eagle_export_rope_scaling.
+        export_rope_scaling = getattr(self.model, "dflash_export_rope_scaling", None)
+        if export_rope_scaling:
+            config["rope_scaling"] = export_rope_scaling
 
         return config
 

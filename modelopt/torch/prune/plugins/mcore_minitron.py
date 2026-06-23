@@ -58,6 +58,7 @@ from modelopt.torch.nas.plugins.megatron import (
     HAS_HYBRID,
     HAS_MAMBA,
     SUPPORTED_MODELS,
+    _DynamicAttention,
     _DynamicMambaLayer,
     _DynamicMambaMixer,
     _DynamicMCoreLanguageModel,
@@ -895,7 +896,7 @@ class ImportanceEstimatorRegistry:
                 _register_hidden_size_importance(module, self)
             elif isinstance(module, (_DynamicTransformerLayer, _DynamicMambaLayer)):
                 _register_depth_cosine_importance(module, self)
-            elif isinstance(module, _DynamicSelfAttention):
+            elif isinstance(module, _DynamicSelfAttention) and module._prunes_attention_heads():
                 _register_self_attention_importance(module, self)
             elif isinstance(module, _DynamicMLP):
                 _register_mlp_importance(module, self)
@@ -1094,13 +1095,23 @@ def _register_hidden_size_importance(
 
     for layer in module.decoder.layers:
         if isinstance(layer, _DynamicTransformerLayer):
-            if isinstance(layer.self_attention, _DynamicSelfAttention):
-                # input_layernorm is fused into self_attention.linear_qkv
-                registry.register_hook(
-                    layer.self_attention.linear_qkv,
-                    partial(_fused_ln_linear_forward_hook, module),
-                    hook_type="forward",
-                )
+            if isinstance(layer.self_attention, _DynamicAttention):
+                attn = layer.self_attention
+                if attn._has_fused_input_layernorm:
+                    # input layernorm is fused into the attention's input projection
+                    # (linear_qkv / GDN in_proj)
+                    registry.register_hook(
+                        getattr(attn, attn._column_proj_name),
+                        partial(_fused_ln_linear_forward_hook, module),
+                        hook_type="forward",
+                    )
+                else:
+                    # MLA: input layernorm is a separate module before the attention
+                    registry.register_hook(
+                        layer.input_layernorm,
+                        partial(_layernorm_forward_hook, module),
+                        hook_type="forward",
+                    )
 
             if isinstance(layer.mlp, _DynamicMoELayer):
                 # MoE layers have a separate pre_mlp_layernorm (TENorm, not IdentityOp)

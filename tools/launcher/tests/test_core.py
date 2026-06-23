@@ -35,6 +35,9 @@ from core import (
     SandboxTask,
     SandboxTask0,
     SandboxTask1,
+    SandboxTask2,
+    SandboxTask3,
+    SandboxTask4,
     create_task_from_yaml,
     get_default_env,
     register_factory,
@@ -185,8 +188,17 @@ class TestSetSlurmConfigType:
             host: str = "test"
 
         set_slurm_config_type(MockSlurmConfig)
-        assert SandboxTask.__annotations__["slurm_config"] is MockSlurmConfig
-        assert SandboxTask.__dataclass_fields__["slurm_config"].type is MockSlurmConfig
+        for task_cls in (
+            SandboxTask,
+            SandboxTask0,
+            SandboxTask1,
+            SandboxTask2,
+            SandboxTask3,
+            SandboxTask4,
+        ):
+            assert task_cls.__annotations__["slurm_config"] is MockSlurmConfig
+            assert task_cls.__dataclass_fields__["slurm_config"].type is MockSlurmConfig
+            assert task_cls.__init__.__annotations__["slurm_config"] is MockSlurmConfig
 
 
 class TestGetDefaultEnv:
