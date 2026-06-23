@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -293,8 +294,6 @@ def get_tiny_qwen_image_transformer(**config_kwargs):
     # `pooled_projection_dim` is present in the published config.json but was removed
     # from the constructor in newer diffusers: from_pretrained tolerates the extra
     # config key, but a direct constructor call raises TypeError.
-    import inspect
-
     accepted = set(inspect.signature(QwenImageTransformer2DModel.__init__).parameters)
     kwargs = {k: v for k, v in kwargs.items() if k in accepted}
     return QwenImageTransformer2DModel(**kwargs)

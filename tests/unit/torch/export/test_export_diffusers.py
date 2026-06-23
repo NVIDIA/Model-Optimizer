@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
 
 import pytest
 import torch
+import torch.nn as nn
 from _test_utils.torch.diffusers_models import (
     get_tiny_dit,
     get_tiny_flux,
@@ -27,8 +29,12 @@ from _test_utils.torch.diffusers_models import (
 pytest.importorskip("diffusers")
 
 import modelopt.torch.export.unified_export_hf as unified_export_hf
+import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.export.diffusers_utils import generate_diffusion_dummy_inputs
+from modelopt.torch.export.diffusers_utils import (
+    generate_diffusion_dummy_inputs,
+    hide_quantizers_from_state_dict,
+)
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 
@@ -129,13 +135,6 @@ def test_svdquant_diffusers_export_promotes_clean_keys():
     NVFP4 end-to-end coverage lives in the GPU test
     ``tests/examples/diffusers/test_export_diffusers_hf_ckpt.py`` (``qwen_nvfp4_svdquant``).
     """
-    import copy
-
-    import torch.nn as nn
-
-    import modelopt.torch.quantization as mtq
-    from modelopt.torch.export.diffusers_utils import hide_quantizers_from_state_dict
-
     torch.manual_seed(0)
     model = nn.Sequential(nn.Linear(64, 64), nn.Linear(64, 64))
 
@@ -165,6 +164,5 @@ def test_svdquant_diffusers_export_promotes_clean_keys():
     unified_export_hf._remove_promoted_quantizer_tensors(model)
     keys_after = set(model.state_dict().keys())
     assert not any(
-        k.endswith((".svdquant_lora_a", ".svdquant_lora_b", ".pre_quant_scale"))
-        for k in keys_after
+        k.endswith((".svdquant_lora_a", ".svdquant_lora_b", ".pre_quant_scale")) for k in keys_after
     )

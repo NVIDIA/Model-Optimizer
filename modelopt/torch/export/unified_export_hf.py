@@ -1022,17 +1022,25 @@ def _fuse_qkv_linears_diffusion(
 
 
 def _detect_svdquant_rank(component: nn.Module) -> int | None:
-    """Return the SVDQuant low-rank dimension from the first SVDQuant linear, if any.
+    """Return the single SVDQuant low-rank dimension shared by the SVDQuant linears.
 
-    ``svdquant_lora_a`` has shape ``(rank, in_features)``, so its first dimension
-    is the low-rank size.
+    ``svdquant_lora_a`` has shape ``(rank, in_features)``, so its first dimension is
+    the low-rank size. A single global ``lora_rank`` is written to the checkpoint
+    config, so all SVDQuant linears are expected to share one rank; an inconsistency
+    is raised rather than silently recording one module's rank for all. Returns
+    ``None`` when no SVDQuant LoRA factors are present.
     """
+    ranks: set[int] = set()
     for _, sub_module in component.named_modules():
         weight_quantizer = getattr(sub_module, "weight_quantizer", None)
         lora_a = getattr(weight_quantizer, "svdquant_lora_a", None)
         if lora_a is not None:
-            return int(lora_a.shape[0])
-    return None
+            ranks.add(int(lora_a.shape[0]))
+    if not ranks:
+        return None
+    if len(ranks) > 1:
+        raise ValueError(f"Inconsistent SVDQuant ranks across modules: {sorted(ranks)}")
+    return next(iter(ranks))
 
 
 def _promote_quantizer_tensors_to_module(component: nn.Module) -> None:
@@ -1177,48 +1185,55 @@ def _export_diffusers_checkpoint(
             # main safetensors under clean, AWQ-aligned keys.
             _promote_quantizer_tensors_to_module(component)
 
-            # Build quantization config
-            quant_config = get_quant_config(component, is_modelopt_qlora=False)
-            if quant_config:
-                quantization_details = quant_config.get("quantization", {})
-                # Record the SVDQuant low-rank size so consumers know the LoRA shape.
-                if quantization_details.get("quant_algo") == "NVFP4_SVD":
-                    svdquant_rank = _detect_svdquant_rank(component)
-                    if svdquant_rank is not None:
-                        quantization_details["lora_rank"] = svdquant_rank
-            hf_quant_config = convert_hf_quant_config_format(quant_config) if quant_config else None
+            # Build the quantization config + save inside try/finally so the temporary
+            # promoted buffers are always removed, even if save / post-process / config
+            # update raises (keeps the live module reusable for a repeated export).
+            try:
+                quant_config = get_quant_config(component, is_modelopt_qlora=False)
+                if quant_config:
+                    quantization_details = quant_config.get("quantization", {})
+                    # Record the SVDQuant low-rank size so consumers know the LoRA shape.
+                    if quantization_details.get("quant_algo") == "NVFP4_SVD":
+                        svdquant_rank = _detect_svdquant_rank(component)
+                        if svdquant_rank is not None:
+                            quantization_details["lora_rank"] = svdquant_rank
+                hf_quant_config = (
+                    convert_hf_quant_config_format(quant_config) if quant_config else None
+                )
 
-            # Save the component
-            # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
-            # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
-            if hasattr(component, "save_pretrained"):
-                with hide_quantizers_from_state_dict(component):
-                    component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
-            else:
-                with hide_quantizers_from_state_dict(component):
-                    _save_component_state_dict_safetensors(component, component_export_dir)
+                # Save the component
+                # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
+                # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
+                if hasattr(component, "save_pretrained"):
+                    with hide_quantizers_from_state_dict(component):
+                        component.save_pretrained(
+                            component_export_dir, max_shard_size=max_shard_size
+                        )
+                else:
+                    with hide_quantizers_from_state_dict(component):
+                        _save_component_state_dict_safetensors(component, component_export_dir)
 
-            # Post-process — merge, metadata, padding, swizzle
-            _postprocess_safetensors(
-                component_export_dir,
-                pipe,
-                hf_quant_config=hf_quant_config,
-                **kwargs,
-            )
+                # Post-process — merge, metadata, padding, swizzle
+                _postprocess_safetensors(
+                    component_export_dir,
+                    pipe,
+                    hf_quant_config=hf_quant_config,
+                    **kwargs,
+                )
 
-            # Update config.json with quantization info
-            if hf_quant_config is not None:
-                config_path = component_export_dir / "config.json"
-                if config_path.exists():
-                    with open(config_path) as file:
-                        config_data = json.load(file)
-                    config_data["quantization_config"] = hf_quant_config
-                    with open(config_path, "w") as file:
-                        json.dump(config_data, file, indent=4)
-
-            # Drop the temporary promoted export buffers so the live module is
-            # unchanged after export (supports repeated export / module reuse).
-            _remove_promoted_quantizer_tensors(component)
+                # Update config.json with quantization info
+                if hf_quant_config is not None:
+                    config_path = component_export_dir / "config.json"
+                    if config_path.exists():
+                        with open(config_path) as file:
+                            config_data = json.load(file)
+                        config_data["quantization_config"] = hf_quant_config
+                        with open(config_path, "w") as file:
+                            json.dump(config_data, file, indent=4)
+            finally:
+                # Drop the temporary promoted export buffers so the live module is
+                # unchanged after export (supports repeated export / module reuse).
+                _remove_promoted_quantizer_tensors(component)
         # Non-quantized component: just save as-is
         elif hasattr(component, "save_pretrained"):
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)

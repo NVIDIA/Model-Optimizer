@@ -15,6 +15,7 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
+import inspect
 import json
 import warnings
 from collections.abc import Callable
@@ -25,8 +26,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file, safe_open
-
-from .layer_utils import is_quantlinear
 
 DiffusionPipeline: type[Any] | None
 ModelMixin: type[Any] | None
@@ -361,8 +360,6 @@ def generate_diffusion_dummy_inputs(
         # Only pass kwargs the installed QwenImageTransformer2DModel.forward accepts
         # (signatures vary across diffusers versions); prevents the strict QKV-fusion
         # dummy forward from failing on an unexpected keyword argument.
-        import inspect
-
         try:
             accepted = set(inspect.signature(model.forward).parameters)
             dummy_inputs = {k: v for k, v in dummy_inputs.items() if k in accepted}
