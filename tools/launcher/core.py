@@ -397,19 +397,34 @@ def build_docker_executor(
 def _git_info(path):
     """Get git commit hash and branch for a directory."""
     try:
-        git_path = os.path.join(path, ".git")
-        if os.path.isdir(git_path):
-            git_dir = git_path
-        elif os.path.isfile(git_path):
-            with open(git_path, encoding="utf-8") as file:
-                marker = file.read().strip()
-            if not marker.startswith("gitdir:"):
+        worktree_dir = os.path.abspath(path)
+        while True:
+            git_path = os.path.join(worktree_dir, ".git")
+            if os.path.isdir(git_path):
+                git_dir = git_path
+                break
+            if os.path.isfile(git_path):
+                with open(git_path, encoding="utf-8") as file:
+                    marker = file.read().strip()
+                if not marker.startswith("gitdir:"):
+                    return "unknown", "unknown"
+                git_dir = marker.removeprefix("gitdir:").strip()
+                if not os.path.isabs(git_dir):
+                    git_dir = os.path.normpath(os.path.join(worktree_dir, git_dir))
+                break
+
+            parent = os.path.dirname(worktree_dir)
+            if parent == worktree_dir:
                 return "unknown", "unknown"
-            git_dir = marker.removeprefix("gitdir:").strip()
-            if not os.path.isabs(git_dir):
-                git_dir = os.path.normpath(os.path.join(path, git_dir))
-        else:
-            return "unknown", "unknown"
+            worktree_dir = parent
+
+        common_dir = git_dir
+        commondir_path = os.path.join(git_dir, "commondir")
+        if os.path.exists(commondir_path):
+            with open(commondir_path, encoding="utf-8") as file:
+                common_dir = file.read().strip()
+            if not os.path.isabs(common_dir):
+                common_dir = os.path.normpath(os.path.join(git_dir, common_dir))
 
         with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as file:
             head = file.read().strip()
@@ -418,13 +433,16 @@ def _git_info(path):
 
         ref = head.removeprefix("ref:").strip()
         branch = ref.removeprefix("refs/heads/")
-        ref_path = os.path.join(git_dir, *ref.split("/"))
         commit = ""
-        if os.path.exists(ref_path):
-            with open(ref_path, encoding="utf-8") as file:
-                commit = file.read().strip()
-        else:
-            packed_refs = os.path.join(git_dir, "packed-refs")
+        for refs_dir in (git_dir, common_dir):
+            ref_path = os.path.join(refs_dir, *ref.split("/"))
+            if os.path.exists(ref_path):
+                with open(ref_path, encoding="utf-8") as file:
+                    commit = file.read().strip()
+                break
+
+        if not commit:
+            packed_refs = os.path.join(common_dir, "packed-refs")
             if os.path.exists(packed_refs):
                 with open(packed_refs, encoding="utf-8") as file:
                     for line in file:
