@@ -46,6 +46,12 @@ def cp_split_sequence(input_ids: torch.Tensor, cp_group) -> tuple[torch.Tensor, 
     Returns ``(local_input_ids, local_position_ids)`` for this CP rank; inverse is
     :func:`cp_gather_logits`. Sequence length must be divisible by ``2 * cp_size``.
     """
+    cp_size = torch.distributed.get_world_size(cp_group)
+    if input_ids.shape[-1] % (2 * cp_size) != 0:
+        raise ValueError(
+            f"Context parallelism requires sequence length divisible by 2 * cp_size "
+            f"(= {2 * cp_size}), got {input_ids.shape[-1]}."
+        )
     # .contiguous(): get_batch_on_this_cp_rank reshapes via .view(), which rejects expand()'s stride-0 view.
     position_ids = (
         torch.arange(input_ids.shape[-1], dtype=torch.long, device=input_ids.device)
@@ -68,6 +74,10 @@ def cp_gather_logits(local_logits: torch.Tensor, cp_group, global_seq_len: int) 
     the chunks back into ``[B, global_seq_len, vocab]``.
     """
     cp_size = torch.distributed.get_world_size(cp_group)
+    if global_seq_len % (2 * cp_size) != 0:
+        raise ValueError(
+            f"global_seq_len (= {global_seq_len}) must be divisible by 2 * cp_size (= {2 * cp_size})."
+        )
     chunk = global_seq_len // (2 * cp_size)
     gathered = [torch.empty_like(local_logits) for _ in range(cp_size)]
     torch.distributed.all_gather(gathered, local_logits.contiguous(), group=cp_group)

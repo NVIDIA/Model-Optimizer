@@ -731,7 +731,9 @@ def get_dataloader_from_dataset(
 ) -> DataLoader:
     """Wrap a pre-tokenized torch Dataset in a DataLoader, with optional DistributedSampler."""
     if distributed:
-        sampler = DistributedSampler(dataset, **(sampler_kwargs or {}))
+        # Default the sampler's shuffle to this function's ``shuffle`` (DistributedSampler otherwise
+        # defaults to True); an explicit ``sampler_kwargs["shuffle"]`` still wins.
+        sampler = DistributedSampler(dataset, **{"shuffle": shuffle, **(sampler_kwargs or {})})
         return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
