@@ -767,6 +767,7 @@ def _export_quantized_weight(
                 setattr(sub_module, weight_name, getattr(_prior, weight_name))
             for _attr in (
                 quantizer_attrs.weight_scale,
+                quantizer_attrs.weight_scale_inv,
                 quantizer_attrs.weight_scale_2,
                 quantizer_attrs.input_scale,
             ):

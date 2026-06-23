@@ -143,21 +143,6 @@ def test_get_quantization_format(config, expected):
         ),
         (
             {
-                "layer1.quantization": "fp8_pb_wo",  # 128x128 block-wise FP8
-                "layer1.awq_block_size": 128,
-                "layer2.quantization": "fp8_pb_wo",
-                "layer2.awq_block_size": 128,
-                "layer8.quantization": None,
-            },
-            {
-                "quant_algo": "FP8_PB",
-                "kv_cache_quant_algo": None,
-                "group_size": 128,
-                "exclude_modules": ["layer8"],
-            },
-        ),
-        (
-            {
                 "layer1.quantization": "fp8_pb_w8a8",  # 128x128 block-wise FP8 (W8A8)
                 "layer1.awq_block_size": 128,
                 "layer2.quantization": "fp8_pb_w8a8",
@@ -549,4 +534,54 @@ def test_qwen3_moe_nvfp4_experts_only_export_exclude_modules(tmp_path):
     # Routed experts should NOT be excluded
     assert not is_excluded("model.layers.0.mlp.experts.0.down_proj"), (
         f"Routed experts should not be excluded, got patterns: {exclude_modules}"
+    )
+
+
+def test_fp8_pb_w8a8_export_uses_weight_scale_inv(tmp_path):
+    """W8A8 block-FP8 (FP8_PB) export stores per-block scales as weight_scale_inv
+    (DeepSeek/Qwen convention) and drops the plain weight_scale; activations are
+    dynamic so no input_scale is stored."""
+    from safetensors import safe_open
+
+    model = get_tiny_qwen3_moe().to("cuda")
+    model.config.architectures = ["Qwen3MoeForCausalLM"]
+
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "block_sizes": {-1: 128, -2: 128}, "axis": None},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*input_quantizer",
+                "cfg": {
+                    "num_bits": (4, 3),
+                    "block_sizes": {-1: 128, "type": "dynamic"},
+                    "axis": None,
+                },
+                "enable": True,
+            },
+            {"quantizer_name": "*lm_head*", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    dummy_inputs = {k: v.to("cuda") for k, v in model.dummy_inputs.items()}
+    mtq.quantize(model, cfg, lambda m: m(**dummy_inputs))
+
+    export_dir = tmp_path / "fp8_pb_w8a8"
+    export_hf_checkpoint(model, export_dir=export_dir)
+
+    keys = set()
+    for st in export_dir.glob("*.safetensors"):
+        with safe_open(st, framework="pt") as f:
+            keys.update(f.keys())
+
+    assert any(k.endswith(".weight_scale_inv") for k in keys), (
+        "block FP8 must store weight_scale_inv"
+    )
+    assert not any(k.endswith(".weight_scale") for k in keys), "plain weight_scale must be dropped"
+    assert not any(k.endswith(".input_scale") for k in keys), (
+        "dynamic activations store no input_scale"
     )
