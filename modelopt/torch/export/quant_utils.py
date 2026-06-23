@@ -538,8 +538,9 @@ def get_quantization_format(module) -> str | None:
                     and block_sizes.get("scale_bits") == (8, 0)
                 ):
                     return QUANTIZATION_MXFP8
-                # Block FP8 (serves as W8A8). _REAL = pre-packed weights; _WO/_W8A8
-                # = fake-quant PTQ (_W8A8 also calibrates activations). All -> FP8_PB.
+                # Block FP8. _REAL = pre-packed weights; else fake-quant PTQ.
+                # Input quantizer enabled -> W8A8 (dynamic activations at serve);
+                # disabled -> FP8_PB_WO (unchanged from main).
                 if not weight_quantizer.fake_quant:
                     return QUANTIZATION_FP8_PB_REAL
                 if input_quantizer is not None and input_quantizer.is_enabled:
@@ -763,15 +764,9 @@ def process_layer_quant_config(layer_config_dict):
                 "group_size": block_size_value,
             }
         elif v == "fp8_pb_w8a8":
-            # Block-wise FP8 W8A8 -> flat quant_method: fp8 (dynamic activations).
+            # Block-wise FP8 W8A8 -> flat quant_method: fp8.
             layer_config = {
                 "quant_algo": "FP8_PB",
-                "group_size": block_size_value,
-            }
-        elif v == "fp8_pb_wo":
-            # Block-wise weight-only FP8 -> weights-only config (no activation quant).
-            layer_config = {
-                "quant_algo": "FP8_PB_WO",
                 "group_size": block_size_value,
             }
         else:

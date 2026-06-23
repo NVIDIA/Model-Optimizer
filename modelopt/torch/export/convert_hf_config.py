@@ -117,18 +117,6 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
                 "block_structure": [gs, gs],
             },
         }
-    elif quant_algo == "FP8_PB_WO":
-        # Block-wise weight-only FP8 (no activation quantization).
-        gs = group_size or 128
-        return {
-            "weights": {
-                "dynamic": False,
-                "num_bits": 8,
-                "type": "float",
-                "strategy": "block",
-                "block_structure": [gs, gs],
-            },
-        }
     else:
         warnings.warn(
             f"Unsupported quantization algorithm '{quant_algo}' in "
@@ -238,12 +226,6 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
             "targets": ["Linear"],
         }
-        new_config["config_groups"] = {"group_0": config_group_details}
-    elif quant_algo_value == "FP8_PB_WO":
-        # Weight-only block FP8: weights-only group, no activation indicators.
-        group_size = original_quantization_details.get("group_size") or 128
-        config_group_details = _quant_algo_to_group_config("FP8_PB_WO", group_size)
-        config_group_details["targets"] = ["Linear"]
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "MIXED_PRECISION":
         quantized_layers = original_quantization_details.get("quantized_layers", {})

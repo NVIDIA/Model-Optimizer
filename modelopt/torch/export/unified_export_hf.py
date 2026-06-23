@@ -79,7 +79,6 @@ from .model_config import (
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PB_W8A8,
-    QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -745,7 +744,7 @@ def _export_quantized_weight(
 
     # Register the corrected weight scale as a buffer.
     if weight_scale is not None:
-        if quantization_format in (QUANTIZATION_FP8_PB_WO, QUANTIZATION_FP8_PB_W8A8):
+        if quantization_format == QUANTIZATION_FP8_PB_W8A8:
             # Flat quant_method: fp8 expects the per-block scale as weight_scale_inv.
             # Value (= amax/448) is the dequant multiplier; do NOT invert. Drop the
             # plain weight_scale buffer so no stale key remains.
