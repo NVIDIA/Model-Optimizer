@@ -31,6 +31,7 @@ Changelog
   - The exported state_dict is also **reordered (decoder keys win instead of encoder)** so canonical-side keys per HF's ``_tied_weights_keys`` declaration win the data_ptr dedup; gated to the DiffusionGemma model class in ``_reorder_canonical_first``, no-op for every other model.
   - New DiffusionGemma model-specific recipe under ``modelopt_recipes/huggingface/diffusion_gemma/ptq/`` (``nvfp4_experts_only.yaml`` + its ``disabled_quantizers.yaml`` unit) adds the ``*self_conditioning*`` exclude on top of the standard default, leaving the shared ``default_disabled_quantizers`` unit clean for non-diffusion models — pattern matches the existing ``phi4mm`` / ``nemotron_vl`` model-specific recipes.
   - ``hf_ptq.py`` also unwraps ``ModelOutput`` dataclasses from ``.generate()`` so the preview decode works on diffusion models. Non-tied models see no behavioral change.
+- Add ``examples/minimax_m3/hf_ptq_mixed_mxfp8_nvfp4.py``, a wrapper that exports MiniMax-M3 as a mixed-precision checkpoint: it drives ``examples/llm_ptq/hf_ptq.py`` to quantize the routed experts to NVFP4 from the BF16 source, then merges them onto the vendor MXFP8 base (non-expert tensors pass through unchanged) into a ModelOpt ``MIXED_PRECISION`` HF checkpoint. Unrecognized arguments are forwarded to ``hf_ptq.py``.
 
 **Bug Fixes**
 
