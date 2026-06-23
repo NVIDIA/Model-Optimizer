@@ -59,8 +59,10 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
     aliases or via the full unpack/pack path) so the redundant fused form
     doesn't appear in the exported state_dict alongside the per-expert form.
     """
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for attr in (
         "gate_up_proj",
+        first_proj_attr,
         "down_proj",
         "gate_up_proj_weight_quantizers",
         "gate_up_proj_input_quantizer",
@@ -101,7 +103,7 @@ def _export_fused_experts(
     fused-expert modules share their 3-D source params via HF
     ``_tied_weights_keys``, the unpacking creates fresh per-expert tensors
     that break the tie. With ``_moe_tied_cache`` provided (tuple-keyed by
-    ``(gate_up_proj.data_ptr(), down_proj.data_ptr())``), the alias step
+    ``(<first_proj>.data_ptr(), down_proj.data_ptr())``), the alias step
     at the end re-points the per-expert ``weight`` / ``weight_scale`` /
     ``weight_scale_2`` / ``input_scale`` buffers at a previously-processed
     module sharing the same source memory. ``_tied_cache`` (int-keyed) is
@@ -123,9 +125,12 @@ def _export_fused_experts(
 
     # Capture source tensor identities BEFORE unpacking (the source
     # attrs are deleted at the end of this function).
-    _source_key = (module.gate_up_proj.data_ptr(), module.down_proj.data_ptr())
+    _source_key = (
+        getattr(module, first_proj_attr).data_ptr(),
+        module.down_proj.data_ptr(),
+    )
 
-    # Tied-experts fast path: if this exact (gate_up, down) source-tensor pair
+    # Tied-experts fast path: if this exact (first_proj, down) source-tensor pair
     # has been processed before, alias all per-expert buffers directly from the
     # prior module — no unpacking, no per-expert packing, no transient buffers
     # thrown away. Cache miss falls through to the full unpack/pack below and
