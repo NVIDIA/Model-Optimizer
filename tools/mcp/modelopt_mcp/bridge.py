@@ -35,10 +35,11 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess  # nosec B404
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -52,6 +53,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 _STATUS_FAILURE_WORDS: frozenset[str] = frozenset(
     {"failed", "error", "errored", "cancelled", "canceled"}
 )
+_SAFE_REMOTE_ARTIFACT_PATH = re.compile(r"^[A-Za-z0-9._/@+=:,-]+$")
 
 
 def _find_launcher_examples_dir() -> Path | None:
@@ -1148,6 +1150,19 @@ def provision_passwordless_ssh_dry_run_impl(
     }
 
 
+def _validate_remote_artifact_path(path: str) -> str | None:
+    """Return an error reason when a remote artifact path is unsafe."""
+    parts = path.split("/")
+    posix_path = PurePosixPath(path)
+    if posix_path.is_absolute():
+        return "absolute paths are not supported"
+    if any(part in {"", ".", ".."} for part in parts):
+        return "empty, '.', and '..' path segments are not supported"
+    if not _SAFE_REMOTE_ARTIFACT_PATH.fullmatch(path):
+        return "only letters, digits, '/', '.', '_', '-', '@', '+', '=', ':', and ',' are allowed"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # read_cluster_artifact — wraps nemo_run's tunnel
 # ---------------------------------------------------------------------------
@@ -1229,9 +1244,22 @@ def read_cluster_artifact_impl(
             "bytes": len(content),
         }
 
+    invalid_path_reason = _validate_remote_artifact_path(path)
+    if invalid_path_reason:
+        return {
+            "ok": False,
+            "experiment_id": experiment_id,
+            "path": path,
+            "reason": "invalid_artifact_path",
+            "diagnostic": (
+                "Artifact path must be a relative POSIX path inside the "
+                f"experiment dir: {invalid_path_reason}."
+            ),
+        }
+
     # Mode 2: arbitrary path via the experiment's tunnel. nemo_run's
-    # Experiment loads the executor + tunnel from disk; we rsync the
-    # named relative path into a local tmp dir, then read it back.
+    # Experiment loads the executor + tunnel from disk, then reads the
+    # named relative path.
     try:
         from nemo_run.run.experiment import Experiment
     except ImportError:
@@ -1299,14 +1327,14 @@ def read_cluster_artifact_impl(
             "reason": "no_remote_job_dir",
             "diagnostic": (
                 "Executor / tunnel metadata didn't carry a remote "
-                "job_dir. Pass the full remote path as `path` instead "
-                "of a relative one."
+                "job_dir. Re-submit the experiment with executor metadata "
+                "that includes job_dir, then pass a relative artifact path."
             ),
         }
-    remote_path = path if path.startswith("/") else f"{remote_dir}/{experiment_id}/{path}"
+    remote_path = f"{str(remote_dir).rstrip('/')}/{experiment_id}/{path}"
 
     try:
-        result = tunnel.run(f"cat {remote_path}", warn=True)
+        result = tunnel.run(f"cat -- {shlex.quote(remote_path)}", warn=True)
     except Exception as e:
         return {
             "ok": False,
