@@ -14,6 +14,8 @@
 # limitations under the License.
 """Quantization support for accelerate modified models."""
 
+import glob
+import os
 import warnings
 from contextlib import contextmanager
 from typing import Any
@@ -25,8 +27,11 @@ from accelerate.hooks import AlignDevicesHook, SequentialHook
 from accelerate.utils import get_max_memory, infer_auto_device_map
 from accelerate.utils.dataclasses import CustomDtype
 from accelerate.utils.offload import PrefixedDataset
+from safetensors import safe_open
 
 import modelopt.torch.quantization as mtq
+
+from .huggingface import _is_fused_experts_module
 
 __all__ = ["init_quantized_weights"]
 
@@ -102,6 +107,52 @@ def weight_access_and_writeback_context(module):
             _writeback_params_to_weights_map(mod, hook)
             if was_materialized:
                 hook.post_forward(mod, None)
+
+
+def _materialize_fused_experts_from_checkpoint(model, checkpoint):
+    """Fuse separate on-disk per-expert weights into the meta fused-MoE params.
+
+    load_checkpoint_and_dispatch matches keys verbatim and does not run transformers'
+    expert fusion, so the fused gate_up_proj/down_proj have no on-disk key and stay on
+    meta (dispatch then raises). Rebuild them from the local safetensors before dispatch.
+    Holds every routed expert in CPU RAM, so it does not stream or offload.
+    """
+    fused = [
+        (name, m)
+        for name, m in model.named_modules()
+        if _is_fused_experts_module(m) and m.gate_up_proj.device.type == "meta"
+    ]
+    if not fused:
+        return
+
+    # Map each checkpoint key to its shard (lazy header read, no tensor data).
+    key_to_file = {}
+    for shard in glob.glob(os.path.join(checkpoint, "*.safetensors")):
+        with safe_open(shard, framework="pt") as f:
+            key_to_file.update(dict.fromkeys(f.keys(), shard))
+
+    handles = {}
+
+    def _tensor(key):
+        shard = key_to_file[key]
+        if shard not in handles:
+            handles[shard] = safe_open(shard, framework="pt")
+        return handles[shard].get_tensor(key)
+
+    for name, module in fused:
+        if f"{name}.0.gate_proj.weight" not in key_to_file:
+            continue  # already fused on disk, or an unhandled layout
+        dtype = module.gate_up_proj.dtype
+        gate_up, down = [], []
+        for e in range(module.num_experts):
+            gate = _tensor(f"{name}.{e}.gate_proj.weight")
+            up = _tensor(f"{name}.{e}.up_proj.weight")
+            gate_up.append(torch.cat([gate, up], dim=0))
+            down.append(_tensor(f"{name}.{e}.down_proj.weight"))
+        module.gate_up_proj = torch.nn.Parameter(
+            torch.stack(gate_up).to(dtype), requires_grad=False
+        )
+        module.down_proj = torch.nn.Parameter(torch.stack(down).to(dtype), requires_grad=False)
 
 
 @contextmanager
@@ -224,6 +275,8 @@ def init_quantized_weights(
         mtq.quantize(model, quant_cfg)
         mtq.compress(model, config=mtq.CompressConfig(quant_gemm=quant_gemm))
         _device_map = get_model_device_map(model, gpu_mem_percentage)
+
+        _materialize_fused_experts_from_checkpoint(model, pretrained_model_name_or_path)
 
         return load_checkpoint_and_dispatch(
             model,
