@@ -31,6 +31,7 @@ Changelog
   - The exported state_dict is also **reordered (decoder keys win instead of encoder)** so canonical-side keys per HF's ``_tied_weights_keys`` declaration win the data_ptr dedup; gated to the DiffusionGemma model class in ``_reorder_canonical_first``, no-op for every other model.
   - New DiffusionGemma model-specific recipe under ``modelopt_recipes/huggingface/diffusion_gemma/ptq/`` (``nvfp4_experts_only.yaml`` + its ``disabled_quantizers.yaml`` unit) adds the ``*self_conditioning*`` exclude on top of the standard default, leaving the shared ``default_disabled_quantizers`` unit clean for non-diffusion models — pattern matches the existing ``phi4mm`` / ``nemotron_vl`` model-specific recipes.
   - ``hf_ptq.py`` also unwraps ``ModelOutput`` dataclasses from ``.generate()`` so the preview decode works on diffusion models. Non-tied models see no behavioral change.
+- Add **context-parallel (CP)** support to the shared Megatron-Core inference/calibration utilities. ``get_megatron_calibration_forward_loop`` and ``megatron_mmlu`` now partition each sequence across CP ranks (zigzag load-balanced), and ``megatron_prefill`` accepts a CP-partitioned ``position_ids`` and lets the CP-aware causal attention build the mask; MMLU gathers per-rank logits back to the full sequence for last-token scoring. ``examples/megatron_bridge/quantize.py`` gains a ``--cp_size`` flag.
 
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^

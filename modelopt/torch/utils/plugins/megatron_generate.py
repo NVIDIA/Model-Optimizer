@@ -15,6 +15,8 @@
 
 """A simple generate Megatron (V)LM models."""
 
+import inspect
+
 import torch
 from megatron.core import mpu
 from megatron.core.inference.communication_utils import (
@@ -25,10 +27,55 @@ from megatron.core.inference.communication_utils import (
 from megatron.core.inference.contexts import StaticInferenceContext
 from megatron.core.timers import Timer
 from megatron.core.transformer import MegatronModule
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.utils import get_attr_wrapped_model, get_batch_on_this_cp_rank
 from tqdm import tqdm
 
 __all__ = ["megatron_generate", "megatron_prefill"]
+
+# ``is_hybrid_cp`` exists only in newer Megatron-Core; pass it only if the signature accepts it.
+_CP_BATCH_KWARGS = (
+    {"is_hybrid_cp": False}
+    if "is_hybrid_cp" in inspect.signature(get_batch_on_this_cp_rank).parameters
+    else {}
+)
+
+
+def cp_split_sequence(input_ids: torch.Tensor, cp_group) -> tuple[torch.Tensor, torch.Tensor]:
+    """Partition ``input_ids`` + global ``position_ids`` across the CP group (zigzag layout).
+
+    Returns ``(local_input_ids, local_position_ids)`` for this CP rank; inverse is
+    :func:`cp_gather_logits`. Sequence length must be divisible by ``2 * cp_size``.
+    """
+    # .contiguous(): get_batch_on_this_cp_rank reshapes via .view(), which rejects expand()'s stride-0 view.
+    position_ids = (
+        torch.arange(input_ids.shape[-1], dtype=torch.long, device=input_ids.device)
+        .unsqueeze(0)
+        .expand(input_ids.shape[0], -1)
+        .contiguous()
+    )
+    batch = get_batch_on_this_cp_rank(
+        {"input_ids": input_ids, "position_ids": position_ids},
+        cp_group=cp_group,
+        **_CP_BATCH_KWARGS,
+    )
+    return batch["input_ids"], batch["position_ids"]
+
+
+def cp_gather_logits(local_logits: torch.Tensor, cp_group, global_seq_len: int) -> torch.Tensor:
+    """Reconstruct full-sequence logits from per-CP-rank logits (inverse of :func:`cp_split_sequence`).
+
+    Rank ``r`` holds the zigzag pair ``[chunk_r, chunk_{2*cp_size-1-r}]``; all-gather and re-order
+    the chunks back into ``[B, global_seq_len, vocab]``.
+    """
+    cp_size = torch.distributed.get_world_size(cp_group)
+    chunk = global_seq_len // (2 * cp_size)
+    gathered = [torch.empty_like(local_logits) for _ in range(cp_size)]
+    torch.distributed.all_gather(gathered, local_logits.contiguous(), group=cp_group)
+    chunks: list[torch.Tensor | None] = [None] * (2 * cp_size)
+    for r in range(cp_size):
+        chunks[r] = gathered[r][:, :chunk, :]
+        chunks[2 * cp_size - 1 - r] = gathered[r][:, chunk:, :]
+    return torch.cat(chunks, dim=1)
 
 
 def get_current_memory_info():
@@ -44,19 +91,26 @@ def get_current_memory_info():
     return info
 
 
+@torch.no_grad()
 def megatron_prefill(
     model: MegatronModule,
     input_ids: torch.LongTensor,
     pixel_values: torch.FloatTensor | None = None,
     image_grid_thw: torch.LongTensor | None = None,
     image_sizes: torch.LongTensor | None = None,
+    position_ids: torch.LongTensor | None = None,
     skip_return_logits: bool = False,
 ) -> torch.Tensor:
     """A simple prefill function for Megatron Core V(LM) models.
 
-    Supports TP, PP, SP, and combinations thereof. For PP, activations are communicated
+    Supports TP, PP, SP, CP, EP, and combinations thereof. For PP, activations are communicated
     explicitly between pipeline stages (rather than through get_forward_backward_func)
     so that the training pipeline scheduler does not interfere with inference.
+
+    Under CP (>1) pass each rank its local ``input_ids`` slice (via :func:`cp_split_sequence`); the
+    CP-aware attention handles causal masking internally (requires ``AttnMaskType.causal``). RoPE is
+    applied by the model per CP rank, so ``position_ids`` are only needed for absolute/learned
+    position embeddings.
     """
     if not isinstance(model, MegatronModule):
         raise ValueError("megatron_prefill only supports Megatron Core models.")
@@ -93,20 +147,38 @@ def megatron_prefill(
 
     padded_seq_len = tokens.shape[-1]
 
-    # ModelOpt transformer_spec uses arbitrary attention mask type by default; the causal mask
-    # must be supplied explicitly for prefill.
-    attention_mask = (
-        torch.triu(
-            torch.ones((batch_size, padded_seq_len, padded_seq_len), device=device), diagonal=1
+    cp_size = mpu.get_context_parallel_world_size()
+
+    # Under CP a local triu mask would be wrong for the per-rank zigzag chunks; pass None and let
+    # the CP-aware causal attention build it. Without CP the causal mask must be supplied explicitly.
+    if cp_size > 1:
+        attention_mask = None
+    else:
+        attention_mask = (
+            torch.triu(
+                torch.ones((batch_size, padded_seq_len, padded_seq_len), device=device), diagonal=1
+            )
+            .bool()
+            .view(batch_size, 1, padded_seq_len, padded_seq_len)
         )
-        .bool()
-        .view(batch_size, 1, padded_seq_len, padded_seq_len)
-    )
-    position_ids = (
-        torch.arange(padded_seq_len, dtype=torch.long, device=device)
-        .unsqueeze(0)
-        .expand(batch_size, -1)
-    )
+
+    # position_ids feed only absolute/learned embeddings (RoPE is internal). Default to a contiguous
+    # local range; CP callers pass the partitioned global positions.
+    if position_ids is None:
+        position_ids = (
+            torch.arange(padded_seq_len, dtype=torch.long, device=device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
+    elif num_pad_tokens > 0:
+        # Match the SP token padding so position_ids lines up with `tokens`.
+        position_ids = torch.cat(
+            [
+                position_ids,
+                torch.zeros(batch_size, num_pad_tokens, dtype=position_ids.dtype, device=device),
+            ],
+            dim=-1,
+        )
 
     # For PP, receive activations from the previous stage before calling forward.
     if is_pp and not pp_first:

@@ -32,29 +32,34 @@ def _test_megatron_generate_and_mmlu(rank, size, parallelism):
     elif parallelism == "pp":
         initialize_for_megatron(pipeline_model_parallel_size=size, seed=SEED)
         model = get_mcore_qwen3_600m(pipeline_model_parallel_size=size).cuda().eval()
+    elif parallelism == "cp":
+        initialize_for_megatron(context_parallel_size=size, seed=SEED)
+        model = get_mcore_qwen3_600m(context_parallel_size=size).cuda().eval()
     else:
         raise ValueError(f"Invalid parallelism: {parallelism}")
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
 
-    messages = [
-        {"role": "user", "content": "Give me a short introduction to large language model."}
-    ]
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=True,  # Switches between thinking and non-thinking modes. Default is True.
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to(device="cuda")
-    output_ids = megatron_generate(model, model_inputs["input_ids"])
-    output_text = tokenizer.batch_decode(output_ids)
-    print(rank, output_text)
+    # megatron_generate does not support CP (autoregressive decode is not sequence-partitioned).
+    if parallelism != "cp":
+        messages = [
+            {"role": "user", "content": "Give me a short introduction to large language model."}
+        ]
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,  # Switches between thinking and non-thinking modes. Default is True.
+        )
+        model_inputs = tokenizer([text], return_tensors="pt").to(device="cuda")
+        output_ids = megatron_generate(model, model_inputs["input_ids"])
+        output_text = tokenizer.batch_decode(output_ids)
+        print(rank, output_text)
 
     assert 0.36 < megatron_mmlu(model, tokenizer, fraction=0.1, batch_size=16) < 0.39
 
 
-@pytest.mark.parametrize("parallelism", ["tp", "pp"])
+@pytest.mark.parametrize("parallelism", ["tp", "pp", "cp"])
 def test_megatron_generate_and_mmlu(dist_workers, parallelism, num_gpus):
-    if num_gpus == 1 and parallelism == "pp":
+    if num_gpus == 1 and parallelism != "tp":
         pytest.skip("Skipping as redundant test on 1 GPU")
     dist_workers.run(_test_megatron_generate_and_mmlu, parallelism=parallelism)

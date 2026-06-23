@@ -97,6 +97,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
+    parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
 
     # Quantization arguments
     parser.add_argument(
@@ -263,6 +264,7 @@ def main(args: argparse.Namespace):
             "tensor_model_parallel_size": args.tp_size,
             "pipeline_model_parallel_size": args.pp_size,
             "expert_model_parallel_size": args.ep_size,
+            "context_parallel_size": args.cp_size,
             "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,

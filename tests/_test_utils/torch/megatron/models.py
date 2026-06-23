@@ -293,11 +293,13 @@ def get_mcore_gpt_model(
 def get_mcore_qwen3_600m(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    context_parallel_size: int = 1,
     workspace_dir: str | None = None,
 ) -> GPTModel:
     config = TransformerConfig(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
+        context_parallel_size=context_parallel_size,
         sequence_parallel=False,
         num_layers=28,
         hidden_size=1024,

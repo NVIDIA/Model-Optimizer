@@ -42,12 +42,13 @@
 
 import torch
 from datasets import load_dataset
+from megatron.core import parallel_state as mpu
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer
 
 from .. import distributed as dist
 from .. import print_rank_0
-from .megatron_generate import megatron_prefill
+from .megatron_generate import cp_gather_logits, cp_split_sequence, megatron_prefill
 
 __all__ = ["megatron_mmlu"]
 
@@ -67,6 +68,9 @@ def megatron_mmlu(
     Instead of autoregressively generating tokens, a single prefill forward pass is run per
     batch and the answer is selected as argmax over the four choice token logits at the last
     prompt position. This is the same approach used by lm-evaluation-harness.
+
+    Supports TP, PP, SP, CP, EP, and combinations thereof (via :func:`megatron_prefill`); under CP
+    the per-rank logits are gathered back to the full sequence for the last-token scoring.
 
     Args:
         model: The model to evaluate.
@@ -146,6 +150,9 @@ def megatron_mmlu(
     sorted_encoded = [encoded[i] for i in order]
     sorted_lengths = [lengths[i] for i in order]
 
+    cp_size = mpu.get_context_parallel_world_size()
+    cp_group = mpu.get_context_parallel_group()
+
     # Run inference in global batches.
     predictions: list[str] = [""] * len(encoded)
     n_batches = (len(sorted_encoded) + batch_size - 1) // batch_size
@@ -161,12 +168,24 @@ def megatron_mmlu(
         batch_len = sorted_lengths[batch_start : batch_start + batch_size]
         max_len = max(batch_len)
 
-        # Right-pad to max_len; causal mask means the last real token is unaffected by padding.
-        padded = torch.zeros(len(batch_enc), max_len, dtype=torch.long)
+        # Right-pad to padded_len (causal mask leaves the last real token unaffected); round up to a
+        # multiple of 2 * cp_size so it can be CP-partitioned.
+        padded_len = max_len
+        if cp_size > 1:
+            multiple = 2 * cp_size
+            padded_len = ((max_len + multiple - 1) // multiple) * multiple
+        padded = torch.zeros(len(batch_enc), padded_len, dtype=torch.long)
         for i, (e, seq_len) in enumerate(zip(batch_enc, batch_len)):
             padded[i, :seq_len] = e
 
-        logits = megatron_prefill(model, padded.cuda())  # [B, max_len, vocab]
+        if cp_size > 1:
+            # Split across CP ranks, prefill locally, then gather logits back to the full sequence
+            # so the per-example last-token indexing below is unchanged.
+            local_ids, local_position_ids = cp_split_sequence(padded.cuda(), cp_group)
+            local_logits = megatron_prefill(model, local_ids, position_ids=local_position_ids)
+            logits = cp_gather_logits(local_logits, cp_group, padded_len)  # [B, padded_len, vocab]
+        else:
+            logits = megatron_prefill(model, padded.cuda())  # [B, padded_len, vocab]
 
         for i, seq_len in enumerate(batch_len):
             answer_logits = logits[i, seq_len - 1, choice_ids]

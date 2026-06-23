@@ -26,7 +26,7 @@ from tqdm import tqdm
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
-from .megatron_generate import megatron_prefill
+from .megatron_generate import cp_split_sequence, megatron_prefill
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -74,17 +74,16 @@ def get_megatron_calibration_forward_loop(
     )
 
     def _forward_loop(model: torch.nn.Module) -> None:
-        # ``megatron_prefill`` builds its causal mask + position_ids over the local input
-        # tensor length, so splitting a calibration sequence across CP ranks would silently
-        # produce wrong activations. Calibration sequences are short enough that CP doesn't
-        # help anyway — fail loud rather than ship broken statistics.
         cp_size = mpu.get_context_parallel_world_size()
-        if cp_size != 1:
-            raise RuntimeError(
-                f"get_megatron_calibration_forward_loop requires CP=1, got "
-                f"context_parallel_world_size={cp_size}. Run calibration without CP."
-            )
+        cp_group = mpu.get_context_parallel_group()
         for sample in tqdm(dataloader, disable=not dist.is_master()):
-            megatron_prefill(model, sample["input_ids"], skip_return_logits=True)
+            if cp_size > 1:
+                # Split each sequence across CP ranks (requires seq length divisible by 2 * cp_size).
+                input_ids, position_ids = cp_split_sequence(sample["input_ids"], cp_group)
+                megatron_prefill(
+                    model, input_ids, position_ids=position_ids, skip_return_logits=True
+                )
+            else:
+                megatron_prefill(model, sample["input_ids"], skip_return_logits=True)
 
     return _forward_loop
