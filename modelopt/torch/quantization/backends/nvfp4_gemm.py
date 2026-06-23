@@ -202,8 +202,11 @@ def _nvfp4_availability_check(module, input, args, kwargs):
     if not torch.cuda.is_available() or not fp4_compatible():
         return False
 
+    # Import lazily because backend registration can run while quant_linear is initializing.
+    from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
+
     # Check module type
-    if not getattr(module, "allow_real_quant_gemm", False):
+    if not isinstance(module, RealQuantLinear):
         return False
 
     # Check quantizer presence and configuration
