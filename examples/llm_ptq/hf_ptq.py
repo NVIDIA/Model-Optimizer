@@ -1204,7 +1204,7 @@ def quantize_main(
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--pyt_ckpt_path",
@@ -1464,7 +1464,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
     if args.auto_quantize_bits is not None and args.calib_with_images:
@@ -1497,6 +1497,35 @@ def parse_args() -> argparse.Namespace:
             "--low_memory_mode does not yet support --recipe; the low-memory loader still "
             "initializes quantizers from --qformat/--kv_cache_qformat."
         )
+
+    return args
+
+
+def prepare_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Apply the same post-parse normalization used by the CLI entrypoint."""
+    if args.export_fmt != "hf":
+        warnings.warn("Deprecated. --export_fmt forced to hf.")
+
+    args.dataset = args.dataset.split(",") if isinstance(args.dataset, str) else args.dataset
+    args.calib_size = [int(num_sample) for num_sample in args.calib_size.split(",")]
+
+    if args.specdec_offline_dataset is not None and len(args.calib_size) != 1:
+        raise ValueError(
+            "--specdec_offline_dataset expects a single --calib value, not a comma-separated list."
+        )
+
+    if args.cast_mxfp4_to_nvfp4:
+        qformats = [q.strip() for q in args.qformat.split(",")]
+        if not all("nvfp4" in q for q in qformats):
+            raise ValueError(
+                "--cast_mxfp4_to_nvfp4 requires NVFP4-family --qformat values "
+                f"(got {args.qformat!r}). Use e.g. --qformat nvfp4 or nvfp4_mlp_only."
+            )
+        if args.auto_quantize_bits is not None:
+            raise ValueError(
+                "--cast_mxfp4_to_nvfp4 is not supported with --auto_quantize_bits "
+                "(multi-format auto-quantize)."
+            )
 
     return args
 
@@ -1546,30 +1575,4 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    args = parse_args()
-
-    if args.export_fmt != "hf":
-        warnings.warn("Deprecated. --export_fmt forced to hf.")
-
-    args.dataset = args.dataset.split(",") if isinstance(args.dataset, str) else args.dataset
-    args.calib_size = [int(num_sample) for num_sample in args.calib_size.split(",")]
-
-    if args.specdec_offline_dataset is not None and len(args.calib_size) != 1:
-        raise ValueError(
-            "--specdec_offline_dataset expects a single --calib value, not a comma-separated list."
-        )
-
-    if args.cast_mxfp4_to_nvfp4:
-        qformats = [q.strip() for q in args.qformat.split(",")]
-        if not all("nvfp4" in q for q in qformats):
-            raise ValueError(
-                "--cast_mxfp4_to_nvfp4 requires NVFP4-family --qformat values "
-                f"(got {args.qformat!r}). Use e.g. --qformat nvfp4 or nvfp4_mlp_only."
-            )
-        if args.auto_quantize_bits is not None:
-            raise ValueError(
-                "--cast_mxfp4_to_nvfp4 is not supported with --auto_quantize_bits "
-                "(multi-format auto-quantize)."
-            )
-
-    main(args)
+    main(prepare_args(parse_args()))
