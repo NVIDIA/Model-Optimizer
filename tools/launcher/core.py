@@ -396,25 +396,46 @@ def build_docker_executor(
 
 def _git_info(path):
     """Get git commit hash and branch for a directory."""
-    import subprocess  # nosec B404 - required for fixed git metadata commands; no shell.
-
     try:
-        commit = subprocess.run(  # nosec B603 B607 - fixed git CLI argv; no shell.
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=path,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        branch = subprocess.run(  # nosec B603 B607 - fixed git CLI argv; no shell.
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=path,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        return commit, branch
-    except Exception:
+        git_path = os.path.join(path, ".git")
+        if os.path.isdir(git_path):
+            git_dir = git_path
+        elif os.path.isfile(git_path):
+            with open(git_path, encoding="utf-8") as file:
+                marker = file.read().strip()
+            if not marker.startswith("gitdir:"):
+                return "unknown", "unknown"
+            git_dir = marker.removeprefix("gitdir:").strip()
+            if not os.path.isabs(git_dir):
+                git_dir = os.path.normpath(os.path.join(path, git_dir))
+        else:
+            return "unknown", "unknown"
+
+        with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as file:
+            head = file.read().strip()
+        if not head.startswith("ref:"):
+            return head[:7], "HEAD"
+
+        ref = head.removeprefix("ref:").strip()
+        branch = ref.removeprefix("refs/heads/")
+        ref_path = os.path.join(git_dir, *ref.split("/"))
+        commit = ""
+        if os.path.exists(ref_path):
+            with open(ref_path, encoding="utf-8") as file:
+                commit = file.read().strip()
+        else:
+            packed_refs = os.path.join(git_dir, "packed-refs")
+            if os.path.exists(packed_refs):
+                with open(packed_refs, encoding="utf-8") as file:
+                    for line in file:
+                        if line.startswith(("#", "^")):
+                            continue
+                        sha, _, packed_ref = line.strip().partition(" ")
+                        if packed_ref == ref:
+                            commit = sha
+                            break
+        return (commit[:7] if commit else "unknown"), branch
+    except OSError:
         return "unknown", "unknown"
 
 

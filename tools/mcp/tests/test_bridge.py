@@ -706,6 +706,20 @@ def test_job_status_unknown_id(tmp_path, monkeypatch):
     assert result["reason"] == "experiment_dir_not_found"
 
 
+def test_job_status_unknown_id_reports_launcher_fallback(tmp_path, monkeypatch):
+    """The not-found diagnostic stays in sync with the searched roots."""
+    launcher_dir = tmp_path / "launcher"
+    launcher_dir.mkdir()
+    monkeypatch.delenv("NEMORUN_HOME", raising=False)
+    monkeypatch.setattr(bridge, "_find_launcher_package_dir", lambda: launcher_dir)
+
+    result = bridge.job_status_impl("does_not_exist")
+
+    assert result["ok"] is False
+    assert result["reason"] == "experiment_dir_not_found"
+    assert str(launcher_dir / "experiments") in result["diagnostic"]
+
+
 def test_job_logs_all_tasks(tmp_path, monkeypatch):
     """task=None returns logs for every log_*.out under the experiment dir."""
     exp = tmp_path / "experiments" / "exp_1781000003"

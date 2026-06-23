@@ -933,6 +933,18 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
        for the case where the operator didn't set NEMORUN_HOME at all
        AND the MCP server's cwd differs from where launch.py ran.
     """
+    for root in _experiment_search_roots():
+        direct = root / experiment_id
+        if direct.exists():
+            return direct
+        for nested in root.glob(f"*/{experiment_id}"):
+            if nested.exists():
+                return nested
+    return None
+
+
+def _experiment_search_roots() -> list[Path]:
+    """Return experiment roots searched by status/log tools."""
     roots = []
     nemorun_home = os.environ.get("NEMORUN_HOME")
     if nemorun_home:
@@ -942,14 +954,16 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
     launcher_dir = _find_launcher_package_dir()
     if launcher_dir is not None:
         roots.append(launcher_dir / "experiments")
-    for root in roots:
-        direct = root / experiment_id
-        if direct.exists():
-            return direct
-        for nested in root.glob(f"*/{experiment_id}"):
-            if nested.exists():
-                return nested
-    return None
+    return roots
+
+
+def _experiment_not_found_diagnostic() -> str:
+    """Describe all experiment roots used by _resolve_experiment_dir."""
+    roots = ", ".join(str(root) for root in _experiment_search_roots())
+    return (
+        f"Searched experiment roots: {roots}. Either the id is wrong or "
+        "NEMORUN_HOME isn't set the same as it was at submit time."
+    )
 
 
 def job_status_impl(experiment_id: str) -> dict:
@@ -976,12 +990,7 @@ def job_status_impl(experiment_id: str) -> dict:
             "ok": False,
             "experiment_id": experiment_id,
             "reason": "experiment_dir_not_found",
-            "diagnostic": (
-                "Searched NEMORUN_HOME/experiments/, ./experiments/, "
-                "./local_experiments/ — no match. Either the id is "
-                "wrong or NEMORUN_HOME isn't set the same as it was "
-                "at submit time."
-            ),
+            "diagnostic": _experiment_not_found_diagnostic(),
         }
 
     done_marker = exp_dir / "_DONE"
