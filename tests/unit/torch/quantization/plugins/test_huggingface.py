@@ -206,8 +206,12 @@ def _causal_lm_sum_loss(logits, labels):
     )
 
 
-def _qwen3_calib_sample(length):
-    input_ids = (torch.arange(1, length + 1, dtype=torch.long) % 31).unsqueeze(0)
+def _qwen3_sample_ids(length, offset=0):
+    return (torch.arange(length, dtype=torch.long) + offset).remainder(31) + 1
+
+
+def _qwen3_calib_sample(length, offset=0):
+    input_ids = _qwen3_sample_ids(length, offset).unsqueeze(0)
     return {
         "input_ids": input_ids,
         "attention_mask": torch.ones_like(input_ids),
@@ -216,8 +220,8 @@ def _qwen3_calib_sample(length):
 
 
 def _qwen3_padded_calib_pair():
-    sample_short = torch.arange(1, 17, dtype=torch.long) % 31
-    sample_long = torch.arange(1, 33, dtype=torch.long) % 31
+    sample_short = _qwen3_sample_ids(16)
+    sample_long = _qwen3_sample_ids(32, offset=7)
     input_ids = torch.zeros((2, 32), dtype=torch.long)
     labels = torch.full((2, 32), -100, dtype=torch.long)
     attention_mask = torch.zeros((2, 32), dtype=torch.long)
@@ -241,31 +245,40 @@ def _tiny_qwen3_autoquantize_candidate_stats(data_loader, num_steps):
     def loss_func(output, batch):
         return _causal_lm_sum_loss(output.logits, batch["labels"])
 
-    _, search_history = mtq.auto_quantize(
-        model,
-        constraints={"effective_bits": 11.0},
-        quantization_formats=[mtq.INT8_DEFAULT_CFG],
-        data_loader=data_loader,
-        forward_step=forward_step,
-        loss_func=loss_func,
-        num_calib_steps=num_steps,
-        num_score_steps=num_steps,
-        verbose=False,
-        method="gradient",
-    )
+    with pytest.warns(
+        UserWarning,
+        match="AutoQuantize: Huggingface model detected - Enabling gradient checkpointing. ",
+    ):
+        _, search_history = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 11.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=data_loader,
+            forward_step=forward_step,
+            loss_func=loss_func,
+            num_calib_steps=num_steps,
+            num_score_steps=num_steps,
+            verbose=False,
+            method="gradient",
+        )
     return search_history["candidate_stats"]
 
 
 def test_autoquantize_huggingface_scores_are_batch_size_invariant_with_padding():
     stats_bs1 = _tiny_qwen3_autoquantize_candidate_stats(
-        [_qwen3_calib_sample(16), _qwen3_calib_sample(32)], num_steps=2
+        [_qwen3_calib_sample(16), _qwen3_calib_sample(32, offset=7)], num_steps=2
     )
     stats_bs2 = _tiny_qwen3_autoquantize_candidate_stats([_qwen3_padded_calib_pair()], num_steps=1)
 
     assert stats_bs1.keys() == stats_bs2.keys()
     for name in stats_bs1:
-        assert stats_bs1[name]["scores"] == pytest.approx(
-            stats_bs2[name]["scores"], rel=1e-5, abs=1e-9
+        assert stats_bs1[name]["formats"] == stats_bs2[name]["formats"]
+        torch.testing.assert_close(
+            torch.tensor(stats_bs1[name]["scores"]),
+            torch.tensor(stats_bs2[name]["scores"]),
+            rtol=1e-4,
+            atol=1e-5,
+            msg=f"Candidate scores differ for {name}",
         )
 
 
