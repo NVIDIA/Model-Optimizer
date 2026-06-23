@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 import warnings
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -55,11 +54,7 @@ logger = logging.getLogger(__name__)
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 # TODO: Refactor into the config system.
-_QWEN36_AUTOQ_DISABLED_LAYERS = (
-    "*shared_expert_gate*",
-    "*linear_attn.in_proj_a*",
-    "*linear_attn.in_proj_b*",
-)
+_QWEN36_AUTOQ_DISABLED_LAYERS = ("*shared_expert_gate*",)
 _VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
 
 
@@ -301,9 +296,6 @@ def is_speculative(hf_config):
 
 def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
     print(f"Initializing tokenizer from {ckpt_path}")
-
-    if "vila" in ckpt_path.lower():
-        ckpt_path += "/llm"
 
     tokenizer = AutoTokenizer.from_pretrained(
         ckpt_path, trust_remote_code=trust_remote_code, **kwargs
@@ -587,6 +579,25 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
         module.__dict__.pop("weight", None)
 
 
+def get_original_hf_quant_method(config) -> str | None:
+    """Return the checkpoint's original ``quantization_config.quant_method``, if any.
+
+    Returns e.g. ``"mxfp4"`` for native MXFP4 checkpoints (OpenAI's gpt-oss family), or
+    ``None`` for unquantized models. Handles ``quantization_config`` stored as a dict or a
+    config object, and the nested ``text_config`` of multi-modal models.
+    """
+    for cfg in (config, getattr(config, "text_config", None)):
+        quant_cfg = getattr(cfg, "quantization_config", None)
+        method = (
+            quant_cfg.get("quant_method")
+            if isinstance(quant_cfg, dict)
+            else getattr(quant_cfg, "quant_method", None)
+        )
+        if method:
+            return str(method)
+    return None
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -600,13 +611,6 @@ def get_model(
     device_map = "auto"
     if device == "cpu":
         device_map = "cpu"
-
-    # Add VILA to sys.path before loading config if needed
-    if "vila" in ckpt_path.lower():
-        vila_path = os.path.join(ckpt_path, "..", "VILA")
-        if vila_path not in sys.path:
-            sys.path.append(vila_path)
-        from llava.model import LlavaLlamaConfig, LlavaLlamaModel  # noqa: F401
 
     # Prepare config kwargs for loading
     config_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
@@ -629,124 +633,138 @@ def get_model(
 
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
-    # Don't set torch_dtype for VILA models as they handle it explicitly in their builder
-    if "vila" not in ckpt_path.lower():
-        model_kwargs.setdefault("dtype", "auto")
+    model_kwargs.setdefault("dtype", "auto")
 
-    if "vila" in ckpt_path.lower():
-        hf_vila = AutoModel.from_pretrained(
+    if use_seq_device_map:
+        device_map = "sequential"
+        # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
+        max_memory = get_max_memory()
+        max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
+        model_kwargs["max_memory"] = max_memory
+
+    if hf_config.model_type == "bart":
+        # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
+        device_map = None
+
+    if hf_config.model_type == "t5":
+        # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
+        # position-bias buffers across GPUs, which non-deterministically produces NaN
+        # activations during calibration on multi-GPU machines (see HF transformers #21093).
+        device_map = None
+
+    # Helper function to check if model has pack-quantized config. Checks both the top-level
+    # config and the nested ``text_config`` of multi-modal models (e.g. kimi k2.5), and handles
+    # ``quantization_config`` stored as either a dict or a config object.
+    def has_pack_quantized_config(config):
+        for cfg in (config, getattr(config, "text_config", None)):
+            quant_cfg = getattr(cfg, "quantization_config", None)
+            fmt = (
+                quant_cfg.get("format")
+                if isinstance(quant_cfg, dict)
+                else getattr(quant_cfg, "format", None)
+            )
+            if fmt == "pack-quantized":
+                return True
+        return False
+
+    if is_speculative(hf_config):
+        model = AutoModelForCausalLM.from_pretrained(
             ckpt_path,
             device_map=device_map,
             **model_kwargs,
         )
-        model = hf_vila.llm
-    else:
-        if use_seq_device_map:
-            device_map = "sequential"
-            # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
-            max_memory = get_max_memory()
-            max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
-            model_kwargs["max_memory"] = max_memory
+    elif has_pack_quantized_config(hf_config):
+        from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
 
-        if hf_config.model_type == "bart":
-            # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
-            device_map = None
-
-        if hf_config.model_type == "t5":
-            # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
-            # position-bias buffers across GPUs, which non-deterministically produces NaN
-            # activations during calibration on multi-GPU machines (see HF transformers #21093).
-            device_map = None
-
-        # Helper function to check if model has pack-quantized config
-        def has_pack_quantized_config(config):
-            # Check top-level quantization_config
-            if hasattr(config, "quantization_config"):
-                if config.quantization_config.get("format", None) == "pack-quantized":
-                    return True
-            # Check nested text_config.quantization_config (for multi-modal models like kimi k2.5)
-            if hasattr(config, "text_config") and hasattr(
-                config.text_config, "quantization_config"
-            ):
-                if config.text_config.quantization_config.get("format", None) == "pack-quantized":
-                    return True
-            return False
-
-        if is_speculative(hf_config):
+        with patch_compressed_linear_loading():
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
-                device_map=device_map,
-                **model_kwargs,
+                device_map="auto",
+                trust_remote_code=trust_remote_code,
+                dtype="auto",
             )
-        elif has_pack_quantized_config(hf_config):
-            from modelopt.torch.quantization.plugins.huggingface import (
-                patch_compressed_linear_loading,
+    elif get_original_hf_quant_method(hf_config) == "mxfp4":
+        # Native MXFP4 checkpoints (e.g. openai/gpt-oss-*) must be dequantized to
+        # plain BF16 experts (``GptOssExperts``) so ModelOpt can insert and export
+        # quantizers: the packed-kernel experts wrapper (``Mxfp4GptOssExperts``,
+        # used when the optional ``kernels`` package is present) is not supported by
+        # the unified HF export. Force dequantization regardless of whether
+        # ``kernels`` is installed.
+        # Local import: ``Mxfp4Config`` only exists in newer Transformers (gpt-oss support);
+        # importing it at module scope would break example_utils for users on older
+        # Transformers running unrelated (non-MXFP4) models.
+        from transformers import Mxfp4Config
+
+        # Load with a *sequential* device map (not "auto"): the MXFP4->BF16 dequant
+        # runs inside Transformers' threaded weight loader, and an "auto"/balanced
+        # split across multiple GPUs trips a CUDA illegal-memory access during dequant
+        # materialization. Sequential keeps each shard's dequant on a single device
+        # (the whole model lands on one GPU when it fits there).
+        model_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            ckpt_path,
+            device_map="cpu" if device == "cpu" else "sequential",
+            **model_kwargs,
+        )
+    else:
+        if not hf_config.architectures:
+            raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
+        architecture = hf_config.architectures[0]
+
+        if not hasattr(transformers, architecture) or "Deepseek" in architecture:
+            if not hasattr(transformers, architecture):
+                warnings.warn(
+                    f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
+                    "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
+                )
+            assert trust_remote_code, (
+                "Please set trust_remote_code to True if you want to use this architecture"
             )
 
-            with patch_compressed_linear_loading():
-                model = AutoModelForCausalLM.from_pretrained(
-                    ckpt_path,
-                    device_map="auto",
-                    trust_remote_code=trust_remote_code,
-                    dtype="auto",
-                )
-        else:
-            architecture = hf_config.architectures[0]
-
-            if not hasattr(transformers, architecture) or "Deepseek" in architecture:
-                if not hasattr(transformers, architecture):
-                    warnings.warn(
-                        f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
-                        "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
-                    )
-                assert trust_remote_code, (
-                    "Please set trust_remote_code to True if you want to use this architecture"
-                )
-
-                # Use AutoModelForCausalLM for causal LMs, AutoModel for encoder-decoder models
-                if getattr(hf_config, "is_encoder_decoder", False):
-                    auto_model_module = AutoModel
-                else:
-                    auto_model_module = AutoModelForCausalLM
-                from_config = auto_model_module.from_config
+            # Use AutoModelForCausalLM for causal LMs, AutoModel for encoder-decoder models
+            if getattr(hf_config, "is_encoder_decoder", False):
+                auto_model_module = AutoModel
             else:
-                auto_model_module = getattr(transformers, architecture)
-                from_config = auto_model_module._from_config
+                auto_model_module = AutoModelForCausalLM
+            from_config = auto_model_module.from_config
+        else:
+            auto_model_module = getattr(transformers, architecture)
+            from_config = auto_model_module._from_config
 
-            with init_empty_weights(include_buffers=True):
-                # When computing the device_map, assuming bfloat16 precision by default,
-                # unless specified by the hf_config.
-                torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
-                model_kwargs2 = model_kwargs.copy()
-                if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
-                    model_kwargs2.pop("trust_remote_code", None)
-                model_kwargs2["dtype"] = torch_dtype
-                model_kwargs2.pop("max_memory", None)
-                model = from_config(hf_config, **model_kwargs2)
+        with init_empty_weights(include_buffers=True):
+            # When computing the device_map, assuming bfloat16 precision by default,
+            # unless specified by the hf_config.
+            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
+            model_kwargs2 = model_kwargs.copy()
+            if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
+                model_kwargs2.pop("trust_remote_code", None)
+            model_kwargs2["dtype"] = torch_dtype
+            model_kwargs2.pop("max_memory", None)
+            model = from_config(hf_config, **model_kwargs2)
 
-            max_memory = get_max_memory()
-            inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
+        max_memory = get_max_memory()
+        inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
 
-            on_cpu = "cpu" in inferred_device_map.values()
+        on_cpu = "cpu" in inferred_device_map.values()
 
-            if on_cpu:
-                for _device in max_memory:
-                    if isinstance(_device, int):
-                        max_memory[_device] *= gpu_mem_percentage
+        if on_cpu:
+            for _device in max_memory:
+                if isinstance(_device, int):
+                    max_memory[_device] *= gpu_mem_percentage
 
-                print(
-                    "Model does not fit to the GPU mem. "
-                    f"We apply the following memory limit for calibration: \n{max_memory}\n"
-                    "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
-                    "reduce the calibration `batch_size` manually."
-                )
-                model_kwargs["max_memory"] = max_memory
-
-            model = auto_model_module.from_pretrained(
-                ckpt_path,
-                device_map=device_map,
-                **model_kwargs,
+            print(
+                "Model does not fit to the GPU mem. "
+                f"We apply the following memory limit for calibration: \n{max_memory}\n"
+                "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
+                "reduce the calibration `batch_size` manually."
             )
+            model_kwargs["max_memory"] = max_memory
+
+        model = auto_model_module.from_pretrained(
+            ckpt_path,
+            device_map=device_map,
+            **model_kwargs,
+        )
     model.eval()
     if has_pack_quantized_config(hf_config):
         _unpack_compressed_linear_weights(model, ckpt_path)
@@ -768,7 +786,13 @@ def is_model_on_gpu(model) -> bool:
 
 
 def is_enc_dec(model_type) -> bool:
-    """Return if the model is a encoder-decoder model."""
+    """Return whether the model_type uses encoder-decoder-style preview decode.
+
+    Controls whether ``hf_ptq.py`` slices off the prompt prefix from
+    ``.generate()`` output. ``diffusion_gemma`` is structurally encoder-decoder
+    but returns prompt+canvas concatenated, so it stays OFF this list (AR-style
+    decode applies).
+    """
     return model_type in ["t5", "bart", "whisper"]
 
 
@@ -910,22 +934,37 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print("No custom model files found to copy")
 
 
-def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
-    """Check if quant_cfg has a layerwise_checkpoint_dir that should be auto-resolved to a unique subpath."""
-    algorithm = quant_cfg.get("algorithm")
+def _layerwise_checkpoint_dir_location(algorithm) -> tuple[str, str] | None:
+    """Return ``("flat"/"nested", checkpoint_dir)`` for the layerwise checkpoint dir, or None."""
     if not isinstance(algorithm, dict):
-        return False
-    return algorithm.get("layerwise_checkpoint_dir") is not None
+        return None
+    flat = algorithm.get("layerwise_checkpoint_dir")
+    if flat is not None:
+        return "flat", flat
+    nested = algorithm.get("layerwise") or {}
+    ckpt = nested.get("checkpoint_dir") if isinstance(nested, dict) else None
+    return ("nested", ckpt) if ckpt is not None else None
 
 
-def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> dict:
-    """Append a unique ``<model_name>_<config_hash>`` subdirectory to layerwise_checkpoint_dir.
+def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
+    """Check if quant_cfg has a layerwise checkpoint_dir that should be auto-resolved to a unique subpath."""
+    return _layerwise_checkpoint_dir_location(quant_cfg.get("algorithm")) is not None
+
+
+def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]:
+    """Append a unique ``<model_name>_<config_hash>`` subdirectory to the layerwise checkpoint_dir.
 
     Allows a single recipe to be reused across models without checkpoint collisions.
+    Supports both the legacy flat ``layerwise_checkpoint_dir`` and the nested
+    ``layerwise.checkpoint_dir`` shape, writing back to whichever the user provided.
     Must only be called when :func:`needs_checkpoint_path_update` returns True.
+
+    Returns ``(updated_quant_cfg, resolved_path)`` so the caller can log or
+    reference the resolved path without re-deriving the dict shape.
     """
-    algorithm = quant_cfg["algorithm"]
-    base_dir = algorithm["layerwise_checkpoint_dir"]
+    location = _layerwise_checkpoint_dir_location(quant_cfg["algorithm"])
+    assert location is not None  # guaranteed by needs_checkpoint_path_update
+    shape, base_dir = location
 
     name = model_path.rstrip("/")
     if "/" in name and not os.path.isabs(name):
@@ -934,9 +973,12 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> dict:
         name = Path(name).name
 
     config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
+    resolved = os.path.join(base_dir, f"{name}_{config_hash}")
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"]["layerwise_checkpoint_dir"] = os.path.join(
-        base_dir, f"{name}_{config_hash}"
-    )
-    return quant_cfg
+    algo = quant_cfg["algorithm"]
+    if "layerwise_checkpoint_dir" in algo:
+        algo["layerwise_checkpoint_dir"] = resolved
+    if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
+        algo["layerwise"]["checkpoint_dir"] = resolved
+    return quant_cfg, resolved

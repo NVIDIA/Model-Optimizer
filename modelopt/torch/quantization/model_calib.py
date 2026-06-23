@@ -18,7 +18,7 @@
 import math
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import TypeAlias
 
@@ -43,6 +43,8 @@ from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
+    SHARED_PATTERNS,
+    SharedWeightGlobalAmaxState,
     disable_calib,
     enable_fake_quant,
     enable_quant,
@@ -52,7 +54,6 @@ from .utils import (
     is_quantized_row_parallel_linear,
     persistent_materialization,
     promote_nvfp4_static_quantizers,
-    quantizer_attr_names,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -75,6 +76,10 @@ __all__ = [
 ]
 
 
+def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
+    quantizer(weight)
+
+
 def _is_calibrated_nvfp4_static(q) -> bool:
     """True iff ``q`` is an enabled NVFP4-static weight quantizer with ``_amax`` set."""
     return (
@@ -86,56 +91,65 @@ def _is_calibrated_nvfp4_static(q) -> bool:
 
 
 def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
-    """Collect sibling groups (Q/K/V, gate/up) with calibrated NVFP4-static weight quantizers."""
-    # Inline: layer_utils → quant_utils → model_calib cycle.
+    """Collect name-based sibling groups (Q/K/V, gate/up, w1/w3) of calibrated NVFP4-static linears."""
+    # Inline import: layer_utils -> quant_utils -> model_calib cycle.
     from modelopt.torch.export.layer_utils import _GATE_UP_PAIRS
 
-    # Reuses the existing gate/up pairs and adds Q/K/V (no equivalent constant
-    # in export). Single source for the gate/up half avoids parallel lists.
     patterns: tuple[tuple[str, ...], ...] = (("q_proj", "k_proj", "v_proj"), *_GATE_UP_PAIRS)
     groups: list[list[nn.Module]] = []
-    wq_attr = quantizer_attr_names("weight").weight_quantizer
     for parent in model.modules():
         for sibling_names in patterns:
             members = [
                 child
                 for child in (getattr(parent, n, None) for n in sibling_names)
-                if child is not None and _is_calibrated_nvfp4_static(getattr(child, wq_attr, None))
+                if child is not None
+                and _is_calibrated_nvfp4_static(getattr(child, "weight_quantizer", None))
             ]
             if len(members) >= 2:
                 groups.append(members)
     return groups
 
 
-def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
-    quantizer(weight)
-
-
 @torch.no_grad()
-def _sync_grouped_weight_global_amax(model: nn.Module) -> int:
-    """Unify NVFP4 ``global_amax`` across Q/K/V and gate/up sibling weight quantizers.
+def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
+    """Verify shared NVFP4 state unified each name-based fusible group's weight global_amax.
 
-    Run after ``max_calibrate``. Sibling discovery is name-based via
-    ``_collect_grouped_linears``; non-matching architectures (wqkv, fused
-    qkv_proj, DeepSeek variants, single-Linear fused gate_up_proj) silently
-    fall back to per-module global_amax. Fused-experts containers already
-    share a single quantizer across gate/up halves and need no sync.
+    The default name-based grouping (Q/K/V, gate/up, w1/w3) is kept here as a *check*
+    rather than performed: after attach/populate/promote, the promoted static-NVFP4 weight
+    quantizers in each name group must already share one ``global_amax``. This catches the
+    SharedWeightGlobalAmaxState path failing to form or sync a group it should have (e.g. a
+    default-pattern regression, or an architecture the regexes miss)
+    before the MSE per-block search — computed against ``global_amax`` — bakes in the
+    inconsistency. Run only when the default patterns are in effect (custom
+    ``shared_states`` may intentionally group differently). Members whose ``global_amax``
+    is not materialized (``None``/meta, e.g. an ``init_empty_weights`` model) are skipped.
     """
-    # quant_utils imports back from this module; top-level would cycle.
-    from modelopt.torch.export.quant_utils import preprocess_linear_fusion
-
-    n_groups = 0
     for group in _collect_grouped_linears(model):
-        preprocess_linear_fusion(group)
-        n_groups += 1
-    return n_groups
+        amaxes = [m.weight_quantizer.global_amax for m in group]
+        amaxes = [a for a in amaxes if a is not None and not a.is_meta]
+        if len(amaxes) < 2:
+            continue
+        ref = amaxes[0]
+        assert all(torch.equal(a, ref) for a in amaxes), (
+            "A fusible sibling group (q/k/v or gate/up) was not unified to a shared weight "
+            "global_amax; SharedWeightGlobalAmaxState failed to sync it, so the per-block "
+            "MSE scales would be inconsistent across the group."
+        )
 
 
-@torch.no_grad()
-def _promote_nvfp4_static_quantizers_with_global_amax_sync(model: nn.Module) -> None:
-    """Promote static NVFP4 weight quantizers and sync grouped global amax."""
+def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) -> None:
+    """Finalize quantization from the attached shared state: aggregate, promote, verify.
+
+    Aggregates each fusible group's shared weight ``global_amax`` and promotes it onto the
+    member NVFP4-static quantizers, so siblings read the unified value instead of their own
+    ``_amax``; under the default patterns, verifies the name groups were actually synced.
+    Call once ``_amax`` is final: single-process, or after the distributed amax sync.
+    """
+    SharedWeightGlobalAmaxState.populate(model)
     promote_nvfp4_static_quantizers(model)
-    _sync_grouped_weight_global_amax(model)
+    # Under the default patterns, verify the fusible name groups were actually synced.
+    if weight_patterns == list(SHARED_PATTERNS):
+        _check_grouped_weight_global_amax_synced(model)
 
 
 CalibratorFactory: TypeAlias = Callable[
@@ -250,6 +264,7 @@ def max_calibrate(
     forward_loop: ForwardLoop | None = None,
     distributed_sync=True,
     sync_expert_weight_amax=False,
+    shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ):
     """Calibrate the model using max.
 
@@ -260,10 +275,21 @@ def max_calibrate(
         distributed_sync: Whether to sync input_quantizer amax across distributed processes.
         sync_expert_weight_amax: SequentialMLP only — share one weight amax across all experts
             in a MoE layer (within-rank sync + EP all-reduce when EP>1).
+        shared_states: Optional dict keyed by shared-state name. ``"weight_global_amax"`` is
+            implemented today and accepts ``{"patterns": [...]}``; omitted patterns use
+            ``SHARED_PATTERNS``, while an empty list disables the state.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
     """
+    # Discover fusible sibling groups by name regex and attach the (initially empty) shared
+    # state up front, so parent-level runtime hooks can be installed by future concrete
+    # states. Discovery is structural (a pattern over the module tree), so it needs no
+    # ``_amax``; per-member values are aggregated later by
+    # SharedWeightGlobalAmaxState.populate, after the forward and any cross-rank ``_amax`` sync.
+    weight_patterns = SharedWeightGlobalAmaxState.resolve_patterns(shared_states=shared_states)
+    SharedWeightGlobalAmaxState.attach(model, patterns=weight_patterns)
+
     # Always run weight calibration on the weight tensor directly so every weight
     # quantizer gets ``_amax``, regardless of MoE routing. Downstream algorithms
     # (MSE, AWQ, export) then no longer need to patch in a missing ``_amax``.
@@ -281,14 +307,9 @@ def max_calibrate(
     # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
     _check_nvfp4_static_tp_supported(model)
 
-    # Promote eligible static-block NVFP4 weight quantizers to NVFP4StaticQuantizer so
-    # the static blockwise fake-quant path is used in forward and export picks up the
-    # two-level (per-block + global) scaling. Run before the ``distributed_sync`` early
-    # return so single-process callers also get the promotion. No-op for dynamic-block
-    # / non-NVFP4 configs.
-    _promote_nvfp4_static_quantizers_with_global_amax_sync(model)
-
     if not distributed_sync:
+        # Single-process: _amax is final.
+        _finalize_with_shared_state(model, weight_patterns)
         return
 
     # Check MoE calibration completeness before sync
@@ -405,6 +426,9 @@ def max_calibrate(
                         module.parallel_state.tensor_parallel_group
                     )
 
+    # _amax is now cross-rank consistent across ranks.
+    _finalize_with_shared_state(model, weight_patterns)
+
 
 def _mse_quant_func(x, amax, quantizer):
     """Quantization function for MSE calibration."""
@@ -439,11 +463,13 @@ def _make_weight_mse_calibrator(
     stop_multiplier: float,
     fp8_scale_sweep: bool,
     error_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+    hessian: torch.Tensor | None = None,
 ) -> _Calibrator | None:
     """Create the MSE calibrator for one eligible weight quantizer (``None`` if ineligible).
 
-    ``error_func`` overrides the squared-error metric (local-Hessian's per-block weighting);
-    when set, NVFP4's Triton fast path is bypassed for the reference sweep.
+    ``error_func`` overrides the squared-error metric (local-Hessian's per-block weighting).
+    ``hessian`` (the same per-cin-block metric as a raw tensor) enables NVFP4's Hessian-weighted
+    Triton fast path; ``error_func`` then serves only as the reference fallback.
     """
     if (
         not isinstance(weight_quantizer, TensorQuantizer)
@@ -479,6 +505,7 @@ def _make_weight_mse_calibrator(
                 global_amax=weight_quantizer.global_amax,
                 quant_func=quant_func,
                 error_func=error_func,
+                hessian=hessian,
             )
         # fp8_scale_sweep applies only to registered backends and static NVFP4; skip others.
         return None
@@ -504,6 +531,7 @@ def mse_calibrate(
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
     fp8_scale_sweep: bool = False,
+    shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ):
     """Calibrate weight quantizers using MSE-based amax search.
 
@@ -529,7 +557,7 @@ def mse_calibrate(
     details on the remaining arguments.
     """
     # max_calibrate initializes activations and weights; MSE only refines weights below.
-    max_calibrate(model, forward_loop, distributed_sync)
+    max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
     name_to_module = dict(model.named_modules())
     _mse_calibrate_weights(
         model,
@@ -550,11 +578,14 @@ def _mse_calibrate_weights(
     stop_multiplier: float,
     fp8_scale_sweep: bool,
     error_func_for: Callable[[TensorQuantizer], Callable | None] | None = None,
+    hessian_for: Callable[[TensorQuantizer], torch.Tensor | None] | None = None,
 ):
     """Run MSE weight calibration over all eligible quantizers (shared by mse / local-Hessian).
 
     ``error_func_for`` maps a weight quantizer to an optional per-weight error function
-    (local-Hessian's Hessian metric); ``None`` means plain squared error.
+    (local-Hessian's Hessian metric); ``None`` means plain squared error. ``hessian_for``
+    maps a weight quantizer to the same metric as a raw per-cin-block Hessian tensor,
+    enabling the Hessian-weighted Triton fast path.
     """
     seen_modules: set[int] = set()
     pbar = tqdm(desc="MSE weight calibration")
@@ -565,6 +596,7 @@ def _mse_calibrate_weights(
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
             for weight, weight_quantizer in parent_module.iter_weights_for_calibration():
                 error_func = error_func_for(weight_quantizer) if error_func_for else None
+                hessian = hessian_for(weight_quantizer) if hessian_for else None
                 cal = _make_weight_mse_calibrator(
                     weight_quantizer,
                     step_size,
@@ -572,6 +604,7 @@ def _mse_calibrate_weights(
                     stop_multiplier,
                     fp8_scale_sweep,
                     error_func=error_func,
+                    hessian=hessian,
                 )
                 if cal is None:
                     continue
@@ -601,6 +634,7 @@ class _LocalHessianAccumulator:
         # Not block-divisible -> no Hessian (falls back to plain MSE).
         self.is_enabled = cin % block_size == 0
         self.hessian_per_block: torch.Tensor | None = None
+        self._normalized_hessian: torch.Tensor | None = None
         self.num_samples = 0
 
     @torch.no_grad()
@@ -618,6 +652,20 @@ class _LocalHessianAccumulator:
             self.hessian_per_block += hessian_batch
         self.num_samples += input_tensor.numel() // self.cin
 
+    def normalized_hessian(self) -> torch.Tensor | None:
+        """Per-cin-block Hessian ``H / num_samples`` (``None`` if no samples).
+
+        Shared by both the Triton fast path and the reference ``error_func`` so the two
+        consume one tensor; cached because the accumulated buffer may be freed afterwards.
+        """
+        if (
+            self._normalized_hessian is None
+            and self.hessian_per_block is not None
+            and self.num_samples
+        ):
+            self._normalized_hessian = self.hessian_per_block / self.num_samples
+        return self._normalized_hessian
+
     def build_error_func(
         self, keep_buffer: bool = False
     ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None:
@@ -625,11 +673,11 @@ class _LocalHessianAccumulator:
 
         Frees the raw Hessian buffer unless ``keep_buffer`` (kept for debug inspection).
         """
-        if self.hessian_per_block is None or self.num_samples == 0:
+        hessian = self.normalized_hessian()
+        if hessian is None:
             return None
         cout = self.cout
         bs = self.block_size
-        hessian = self.hessian_per_block / self.num_samples
         if not keep_buffer:
             self.hessian_per_block = None
 
@@ -755,6 +803,7 @@ def local_hessian_calibrate(
     fp8_scale_sweep: bool = True,
     block_size: int = 16,
     debug: bool = False,
+    shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ):
     """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
@@ -790,7 +839,7 @@ def local_hessian_calibrate(
 
     # Phase 1: max-calibrate (also bootstraps dead experts + promotes/syncs NVFP4 static).
     print_rank_0("local_hessian: Running max calibration for all quantizers...")
-    max_calibrate(model, forward_loop, distributed_sync)
+    max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
 
     name_to_module = dict(model.named_modules())
 
@@ -829,10 +878,13 @@ def local_hessian_calibrate(
             "diverge under tensor/data parallelism. Treat local_hessian as single-rank for now."
         )
 
-    # Phase 3: build error funcs and run the shared MSE weight loop.
+    # Phase 3: weight search. Build error_funcs first so build_error_func caches the normalized
+    # Hessian (freeing the raw buffer) before normalized_hessian() reuses it; the fast path
+    # (tensor) and reference fallback (error_func) then share that one tensor.
     error_funcs = {
         qid: acc.build_error_func(keep_buffer=debug) for qid, acc in accumulators.items()
     }
+    hessians = {qid: acc.normalized_hessian() for qid, acc in accumulators.items()}
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
     _mse_calibrate_weights(
         model,
@@ -842,19 +894,24 @@ def local_hessian_calibrate(
         stop_multiplier=stop_multiplier,
         fp8_scale_sweep=fp8_scale_sweep,
         error_func_for=lambda q: error_funcs.get(id(q)),
+        hessian_for=lambda q: hessians.get(id(q)),
     )
 
-    # Free the per-block Hessians (pinned by error_func closures) and the sweep's cached
-    # allocations so export starts from a defragmented allocator.
+    # Release the per-block Hessians (held by the error_func closures, calibrators, and the
+    # accumulators' cache) before empty_cache so export starts defragmented; keep only for debug.
     error_funcs.clear()
+    hessians.clear()
     for module in name_to_module.values():
         if isinstance(module, TensorQuantizer) and isinstance(module._calibrator, MseCalibrator):
             module._calibrator._error_func = None
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
+            if isinstance(module._calibrator, NVFP4MSECalibrator):
+                module._calibrator._hessian = None
     if debug:
         model._local_hessian_accumulators = accumulators
+    else:
+        accumulators.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     print_rank_0("local_hessian: Calibration complete.")
 
@@ -1767,8 +1824,15 @@ def layerwise_calibrate(
     If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
     are saved after each layer completes. On restart, calibration resumes from
     the last completed layer.
+
+    ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
+    whether the cached inputs handed to layer N+1 come from a forward through
+    the just-calibrated layer with quantizers active (True; e.g. GPTQ) or
+    temporarily disabled (False; matches non-layerwise max-calib semantics).
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
+    save_every = calib_kwargs.pop("save_every", 1)
 
     if forward_loop is None:
         raise ValueError(
@@ -1786,7 +1850,11 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
-    ckpt = _CheckpointState.from_folder(checkpoint_dir, num_layers)
+    ckpt = _CheckpointState.from_folder(
+        checkpoint_dir,
+        num_layers,
+        save_every=save_every,
+    )
     start_layer = ckpt.start_layer if ckpt else 0
 
     input_getter = LayerActivationCollector(model)
@@ -1822,19 +1890,37 @@ def layerwise_calibrate(
                             kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
+            is_last = layer_idx + 1 >= num_layers
+
             with persistent_materialization(layer):
+                # qdq_from_prev=False: capture before calib_func so the forward
+                # replay uses the original FP weights. Disable quantizers too in
+                # case any pre-calibration observer behavior would perturb the
+                # captured activations.
+                if not is_last and not qdq_from_prev:
+                    with set_quantizer_by_cfg_context(
+                        layer, [{"quantizer_name": "*", "enable": False}]
+                    ):
+                        next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                            layer, forward_loop
+                        )
+                    # cache_outputs left this layer in "run" mode with an empty
+                    # deque; reset so calib_func's replay hits the real forward.
+                    layer._layerwise_calib.mode = "original"
+
                 calib_func(layer, _layer_forward_loop, **calib_kwargs)
 
-            # Run one more forward to get next layer's inputs and set
-            # output_meta on the just-calibrated layer (via "run" mode).
-            is_last = layer_idx + 1 >= num_layers
-            if not is_last:
-                next_inputs = input_getter.cache_outputs_for_next_layer_calib(layer, forward_loop)
-            else:
-                next_inputs = None
+                # qdq_from_prev=True: capture after calib_func so the next layer
+                # sees QDQ error and any in-place weight updates from this layer.
+                if not is_last and qdq_from_prev:
+                    next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                        layer, forward_loop
+                    )
+                elif is_last:
+                    next_inputs = None
 
-            if ckpt:
-                ckpt.save(layer_idx, layer, model, transformer_layers, next_inputs)
+                if ckpt:
+                    ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
             del layer_inputs
             torch.cuda.empty_cache()
@@ -1858,13 +1944,13 @@ def gptq(
 ):
     """GPTQ quantization.
 
-    Works in two modes depending on ``layerwise`` in the config:
+    Works in two modes depending on ``layerwise.enable`` in the config:
 
-    * **Layerwise** (``layerwise=True``): ``layerwise_calibrate`` calls this
-      function once per decoder layer with updated activations, producing more
-      accurate Hessian estimates.
-    * **Non-layerwise** (``layerwise=False``): called once on the full model.
-      All layers are quantized in parallel from the original activations.
+    * **Layerwise** (``layerwise.enable=True``): ``layerwise_calibrate`` calls
+      this function once per decoder layer with updated activations, producing
+      more accurate Hessian estimates.
+    * **Non-layerwise** (``layerwise.enable=False``): called once on the full
+      model. All layers are quantized in parallel from the original activations.
 
     Per-module steps:
 

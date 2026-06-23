@@ -66,17 +66,18 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 from modelopt.torch.utils.distributed import ParallelState
 
-DS_V3_PATH = Path(__file__).resolve().parent / "DeepSeek-V3/inference"
-DS_V3_2_PATH = Path(__file__).resolve().parent / "DeepSeek-V3.2-Exp/inference"
+# The DeepSeek-V3 / DeepSeek-V3.2-Exp inference repos are cloned into the parent
+# `examples/deepseek` directory (see README), one level up from this script.
+DEEPSEEK_DIR = Path(__file__).resolve().parent.parent
+DS_V3_PATH = DEEPSEEK_DIR / "DeepSeek-V3/inference"
+DS_V3_2_PATH = DEEPSEEK_DIR / "DeepSeek-V3.2-Exp/inference"
 
 if DS_V3_2_PATH.exists():
     sys.path.append(str(DS_V3_2_PATH))
 elif DS_V3_PATH.exists():
     sys.path.append(str(DS_V3_PATH))
 else:
-    raise ValueError(
-        f"DeepSeek-V3 or DeepSeek-V3.2-Exp not found in {Path(__file__).resolve().parent}"
-    )
+    raise ValueError(f"DeepSeek-V3 or DeepSeek-V3.2-Exp not found in {DEEPSEEK_DIR}")
 
 import model as deekseep_model  # noqa: E402
 from kernel import act_quant, fp8_gemm  # noqa: E402

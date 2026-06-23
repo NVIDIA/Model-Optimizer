@@ -26,7 +26,7 @@ Model Optimizer is also integrated with [NVIDIA Megatron-Bridge](https://github.
 
 ## Latest News
 
-- [2026/05/27] [**End-to-end Minitron workflow for Nemotron-3-Nano-30B-A3B**](./examples/pruning/minitron/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16): Pruning + two-phase distillation + FP8 quantization achieving 1.64× vLLM throughput and 2.6× memory reduction.
+- [2026/05/27] [**End-to-end Optimization tutorial for Nemotron-3-Nano-30B-A3B**](./examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16): Pruning + two-phase distillation + FP8 quantization achieving 2.6× vLLM throughput and 2.6× memory reduction.
 - [2026/05/13] [**Puzzletron**](./examples/puzzletron): A new algorithm for heterogeneous pruning & NAS of LLM and VLM models.
 - [2026/04/15] Customer story: [Domyn compresses Colosseum-355B → 260B using ModelOpt's Minitron pruning + distillation](https://www.domyn.com/blog/domyn-large-the-journey-of-a-european-sovereign-ai-model-for-regulated-industries)
 - [2026/03/17] Customer story: [Bielik.AI builds Bielik Minitron 7B (33% smaller, 50% faster, 90% quality retained) using ModelOpt's Minitron pruning + distillation](https://bielik.ai/en/nvidia-gtc-bielik-minitron-premiere/)
@@ -102,12 +102,12 @@ more fine-grained control on installed dependencies or for alternative docker im
 
 | **Technique** | **Description** | **Examples** | **Docs** |
 | :------------: | :------------: | :------------: | :------------: |
-| Post Training Quantization | Compress model size by 2x-4x, speeding up inference while preserving model quality! | \[[LLMs](./examples/llm_ptq/)\] \[[diffusers](./examples/diffusers/)\] \[[VLMs](./examples/vlm_ptq/)\] \[[onnx](./examples/onnx_ptq/)\] \[[windows](./examples/windows/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Quantization Aware Training | Refine accuracy even further with a few training steps! | \[[Hugging Face](./examples/llm_qat/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Pruning | Reduce your model size and accelerate inference by removing unnecessary weights! | \[[General](./examples/pruning/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#pruning)\] | |
-| Distillation | Reduce deployment model size by teaching small models to behave like larger models! | \[[Megatron-Bridge](./examples/llm_distill/README.md#knowledge-distillation-kd-in-nvidia-megatron-bridge-framework)\] \[[Megatron-LM](./examples/llm_distill/README.md#knowledge-distillation-kd-in-nvidia-megatron-lm-framework)\] \[[Hugging Face](./examples/llm_distill/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
-| Speculative Decoding | Train draft modules to predict extra tokens during inference! | \[[Megatron](./examples/speculative_decoding#mlm-example)\] \[[Hugging Face](./examples/speculative_decoding/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html)\] |
-| Sparsity | Efficiently compress your model by storing only its non-zero parameter values and their locations | \[[PyTorch](./examples/llm_sparsity/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/6_sparsity.html)\] |
+| Post Training Quantization | Compress model size by 2x-4x, speeding up inference while preserving model quality! | \[[HF LLMs / VLMs](./examples/llm_ptq/)\] \[[Megatron-Bridge LLMs / VLMs](./examples/megatron_bridge/)\] \[[Diffusers](./examples/diffusers/)\] \[[ONNX](./examples/onnx_ptq/)\] \[[Windows](./examples/windows/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Quantization Aware Training / Distillation | Refine accuracy of quantized models even further with a few training steps! | \[[Hugging Face](./examples/llm_qat/)\] \[[Megatron-Bridge](./examples/megatron_bridge)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Pruning | Reduce your model parameters or memory footprint and accelerate inference by removing unnecessary weights! | \[[General](./examples/pruning/)\] \[[Megatron-Bridge](./examples/megatron_bridge/)\] | |
+| Distillation | Reduce deployment model size by teaching small models to behave like larger models! | \[[Hugging Face](./examples/llm_distill/)\] \[[Megatron-Bridge](./examples/megatron_bridge/)\] \[[Megatron-LM](./examples/llm_distill/README.md#knowledge-distillation-kd-in-nvidia-megatron-lm-framework)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
+| Speculative Decoding | Train draft modules to predict extra tokens during inference! | \[[Hugging Face](./examples/speculative_decoding/)\] \[[Megatron-LM](./examples/speculative_decoding#mlm-example)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html)\] |
+| Sparsity | Efficiently compress your model by storing only its non-zero parameter values and their locations | \[[Hugging Face](./examples/llm_sparsity/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/6_sparsity.html)\] |
 
 </div>
 
@@ -131,8 +131,8 @@ more fine-grained control on installed dependencies or for alternative docker im
 | Model Type | Support Matrix |
 |------------|----------------|
 | LLM Quantization | [View Support Matrix](./examples/llm_ptq/README.md#support-matrix) |
+| VLM Quantization | [View Support Matrix](./examples/llm_ptq/README.md#hugging-face-supported-models) |
 | Diffusers Quantization | [View Support Matrix](./examples/diffusers/README.md#support-matrix) |
-| VLM Quantization | [View Support Matrix](./examples/vlm_ptq/README.md#support-matrix) |
 | ONNX Quantization | [View Support Matrix](./examples/torch_onnx/README.md#onnx-export-supported-llm-models) |
 | Windows Quantization | [View Support Matrix](./examples/windows/README.md#support-matrix) |
 | Quantization Aware Training | [View Support Matrix](./examples/llm_qat/README.md#support-matrix) |

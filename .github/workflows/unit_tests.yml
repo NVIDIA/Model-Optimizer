@@ -12,6 +12,7 @@ on:
       - "pyproject.toml"
       - "tests/unit/**"
       - "tools/launcher/**"
+      - "tools/mcp/**"
       - ".agents/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
@@ -55,6 +56,7 @@ jobs:
             pyproject.toml
             tests/unit/**
             tools/launcher/**
+            tools/mcp/**
             .agents/skills/**
   linux:
     needs: [check-dco]
@@ -147,6 +149,29 @@ jobs:
           uv venv .venv
           uv pip install -e . pytest
           uv run python3 -m pytest -v
+  mcp:
+    if: needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Run modelopt-mcp tests
+        working-directory: tools/mcp
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv .venv
+          # Install the sibling launcher package first; it's a runtime
+          # dep declared in tools/mcp/pyproject.toml as `modelopt-launcher`
+          # but uv resolves the source via [tool.uv.sources] to a local
+          # editable path. -e on both packages keeps the install cheap
+          # and matches the dev-mode install in tools/mcp/README.md.
+          uv pip install -e ../launcher
+          uv pip install -e . pytest
+          uv run python3 -m pytest -v
   skills:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
@@ -167,7 +192,7 @@ jobs:
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher, skills]
+    needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher, mcp, skills]
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
@@ -177,6 +202,7 @@ jobs:
             needs.multi-version.result != 'success' ||
             needs.partial-install.result != 'success' ||
             needs.launcher.result != 'success' ||
+            needs.mcp.result != 'success' ||
             needs.skills.result != 'success'
           )) }}
         run: exit 1

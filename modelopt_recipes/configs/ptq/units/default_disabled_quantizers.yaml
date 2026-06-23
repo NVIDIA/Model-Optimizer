@@ -20,6 +20,10 @@
     enable: false
   - quantizer_name: '*linear_attn.conv1d*'
     enable: false
+  - quantizer_name: '*linear_attn.in_proj_a*'
+    enable: false
+  - quantizer_name: '*linear_attn.in_proj_b*'
+    enable: false
   - quantizer_name: '*lm_head*'
     enable: false
   - quantizer_name: '*mixer.conv1d*'
@@ -35,6 +39,20 @@
   - quantizer_name: '*router*'
     enable: false
   - quantizer_name: 'output.*'
+    enable: false
+  # Multimodal vision branch: keep the vision encoder (SigLIP / ViT) and any
+  # multimodal embedding projection in BF16 by default. Recipes that enable bare
+  # `*weight_quantizer` / `*input_quantizer` or `*mlp*` wildcards otherwise also
+  # match the vision tower (`model.vision_tower.*`, `model.visual.*`) and the
+  # embedding projection (`model.embed_vision.*`); quantizing the vision branch
+  # crashes export / produces garbage image embeddings on VL models (gemma-4,
+  # Qwen3.5-VL — NVBugs 6293731, 6293762, 6294017). A recipe that intentionally
+  # quantizes vision must re-enable these after importing this unit.
+  - quantizer_name: '*embed_vision*'
+    enable: false
+  - quantizer_name: '*vision_tower*'
+    enable: false
+  - quantizer_name: '*visual*'
     enable: false
   - parent_class: 'nn.BatchNorm1d'
     quantizer_name: '*'

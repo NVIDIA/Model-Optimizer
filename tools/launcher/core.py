@@ -154,6 +154,16 @@ class GlobalVariables:
     hf_data: str = None
     hf_local: str = None
     output_dir: str = None
+    # Speculative-decoding draft / assistant model path. SPEED-bench
+    # MTP/EAGLE3/DRAFT_TARGET/DFLASH parent YAMLs reference this via
+    # ``--draft_model_dir <<global_vars.draft_model>>`` on both the
+    # qualitative + throughput_32k tasks so the path lives in one
+    # place. Surfaced on OMNIML-5024: the gemma-4-E4B-it / MTP / vLLM
+    # parent used the indirection but the launcher rejected it with
+    # ``No parameter named 'draft_model' exists`` because the
+    # dataclass schema didn't include the key; the agent worked
+    # around it inline but the canonical YAML stayed broken.
+    draft_model: str = None
 
 
 @dataclass
@@ -268,8 +278,8 @@ def build_slurm_executor(
     # use a LocalTunnel: nemo_run then runs sbatch and copies artifacts via local
     # subprocess/shutil instead of ssh+rsync. This avoids flaky/hanging ssh-to-
     # localhost (e.g. MaxStartups throttling on a shared login node, or clusters
-    # like HSG that are only reachable through an sss proxy so paramiko can't
-    # tunnel in from outside). For real remote hosts, keep the SSHTunnel.
+    # only reachable through a login proxy so paramiko can't tunnel in from
+    # outside). For real remote hosts, keep the SSHTunnel.
     if slurm_config.host in ("localhost", "127.0.0.1"):
         tunnel = run.LocalTunnel(job_dir=job_dir)
     else:
@@ -280,6 +290,15 @@ def build_slurm_executor(
             job_dir=job_dir,
             identity=identity,
         )
+
+    # --segment=<N>: pin all nodes into one topology block (one NVL72 / NVLink domain).
+    # getattr (not attribute access) keeps older/custom SlurmConfig types patched in via
+    # set_slurm_config_type that predate the `segment` field from raising AttributeError.
+    # None -> omit the kwarg entirely so the scheduler places freely (default behavior).
+    optional_kwargs = {}
+    segment = getattr(slurm_config, "segment", None)
+    if segment is not None:
+        optional_kwargs["segment"] = segment
 
     executor = run.SlurmExecutor(
         account=slurm_config.account,
@@ -293,11 +312,21 @@ def build_slurm_executor(
         container_mounts=container_mounts,
         array=slurm_config.array,
         time=slurm_config.time,
-        mem="0",
+        mem=getattr(slurm_config, "mem", None) or "0",
         retries=0,
         packager=packager,
         srun_args=slurm_config.srun_args,
+        # Copy into a fresh dict so the requeue mutation below doesn't leak back into
+        # the shared slurm_config.additional_parameters.
+        additional_parameters=dict(getattr(slurm_config, "additional_parameters", None) or {}),
+        **optional_kwargs,
     )
+    if getattr(slurm_config, "requeue", False):
+        executor.additional_parameters["requeue"] = True
+        # The nemo-run sbatch wrapper only calls `scontrol requeue` when
+        # TORCHX_MAX_RETRIES > SLURM_RESTART_COUNT.  retries=0 (the default)
+        # disables this, so bump it when requeue is requested.
+        executor.retries = max(executor.retries, 3)
     return executor
 
 

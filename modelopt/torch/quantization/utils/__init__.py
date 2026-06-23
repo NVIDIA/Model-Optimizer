@@ -18,15 +18,22 @@
 
 from .core_utils import *
 from .layerwise_calib import LayerActivationCollector
+from .shared_input import *
 
 __all__ = [
     "EXPORT_MODE",
+    "SHARED_PATTERNS",
+    "SHARED_PATTERNS_ACROSS_EXPERTS",
+    "SharedQuantState",
+    "SharedWeightGlobalAmaxState",
     "convert_quantization_axis_to_reduce_axis",
     "export_torch_mode",
+    "find_shared_input_groups",
     "is_quantized",
     "is_quantized_column_parallel_linear",
     "is_quantized_linear",
     "is_quantized_row_parallel_linear",
+    "iter_shared_quant_states",
     "reduce_amax",
     "reduce_sum",
     "replace_function",
