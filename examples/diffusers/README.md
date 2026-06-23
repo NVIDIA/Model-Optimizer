@@ -120,6 +120,8 @@ python quantize.py \
 
 The Wan 2.2 VAE (`AutoencoderKLWan`, shared between the 5B and 14B pipelines) is built from 3D convolutions. When quantizing the VAE with NVFP4, the `Conv3d` layers are automatically dispatched through a custom BF16 WMMA implicit-GEMM kernel with fused FP4 activation quantization. Requires SM80+ (Ampere or newer). See [`modelopt/torch/kernels/quantization/conv/README.md`](../../modelopt/torch/kernels/quantization/conv/README.md) for kernel details.
 
+Passing `--hf-ckpt-dir` additionally exports a Hugging Face checkpoint in which each quantized `Conv3d` weight is serialized in the logical flattened-K NVFP4 schema — each filter `[O, C, kt, kh, kw]` is flattened to `[O, K_flat]`, padded so `K_flat` is a multiple of the block size 16, and stored as packed `weight` (`[O, K_pad/2]` uint8), per-block `weight_scale` (`[O, K_pad/16]` FP8 E4M3), and a scalar `weight_scale_2` — the same convention as NVFP4 `Linear`. The checkpoint stores this logical layout only; kernel-side preparation (scale swizzle, channel alignment) is performed by the downstream deployment runtime.
+
 ```sh
 python quantize.py \
     --model {wan2.2-t2v-14b|wan2.2-t2v-5b} \
@@ -127,7 +129,8 @@ python quantize.py \
     --format fp4 --quant-algo max --collect-method default \
     --model-dtype BFloat16 --trt-high-precision-dtype BFloat16 \
     --batch-size 1 --calib-size 32 --n-steps 30 \
-    --quantized-torch-ckpt-save-path ./wan22_vae_fp4.pt
+    --quantized-torch-ckpt-save-path ./wan22_vae_fp4.pt \
+    --hf-ckpt-dir ./wan22_vae_nvfp4_hf
 ```
 
 #### [LTX-2](https://github.com/Lightricks/LTX-2) FP4

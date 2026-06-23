@@ -340,6 +340,20 @@ def is_quantlinear(module: nn.Module) -> bool:
     )
 
 
+def is_quantconv3d(module: nn.Module) -> bool:
+    """Returns whether the module is a quantized 3D convolution.
+
+    Scoped to ``Conv3d`` (including the diffusers Wan causal Conv3d) for NVFP4
+    weight export. Excludes ``Conv1d``/``Conv2d`` -- whose fake-quant blocks
+    along the last spatial axis rather than the flattened reduction dimension --
+    and all ``ConvTranspose`` variants, which use a transposed
+    ``[in_channels, out_channels // groups, *kernel]`` weight layout that would
+    corrupt the flattened-K scale grouping.
+    """
+    name = type(module).__name__
+    return "Conv3d" in name and "Quant" in name and "Transpose" not in name
+
+
 def dup_kv_weight(v: torch.Tensor, head_size: int, num_head: int, tp_size: int) -> torch.Tensor:
     """Repeat kv heads if tp_size > num_kv_heads."""
     assert tp_size % num_head == 0
