@@ -20,7 +20,6 @@ from torch.autograd import Function
 
 from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.config import FP8_DEFAULT_CFG, find_quant_cfg_entry_by_path
-from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils import reduce_amax
 
@@ -113,7 +112,7 @@ def _fp8_availability_check(module, input, args, kwargs):
         return False
 
     # Check module type
-    if not isinstance(module, RealQuantLinear):
+    if not getattr(module, "allow_real_quant_gemm", False):
         return False
 
     # Check quantizer presence and configuration
