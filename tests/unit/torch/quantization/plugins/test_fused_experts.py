@@ -225,12 +225,17 @@ class TestIsFusedExpertsModule:
         module.act_fn = nn.SiLU()
         assert _is_fused_experts_module(module) is False
 
-    def test_module_missing_act_fn_not_detected(self):
+    def test_module_missing_act_fn_still_detected(self):
+        # act_fn is intentionally not required: some fused-expert modules
+        # (e.g. MiniMaxM3VLExperts) apply a custom gated activation between the
+        # two F.linear calls instead of exposing an act_fn attribute.
+        # _QuantFusedExperts is activation-agnostic, so such modules must still
+        # be detected and quantized.
         module = nn.Module()
         module.gate_up_proj = nn.Parameter(torch.randn(4, 16, 8))
         module.down_proj = nn.Parameter(torch.randn(4, 8, 16))
         module.num_experts = 4
-        assert _is_fused_experts_module(module) is False
+        assert _is_fused_experts_module(module) is True
 
     def test_sparse_moe_block_not_detected_as_fused(self):
         block = _SyntheticSparseMoeBlock()

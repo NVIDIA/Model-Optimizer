@@ -1517,7 +1517,7 @@ def register_sparse_moe_on_the_fly(model):
 def _fused_experts_wrapper_class(module):
     """Return the _QuantFusedExperts subclass for a fused MoE expert container, or None.
 
-    Two 3-D fused layouts are recognized, both requiring ``num_experts`` + ``act_fn``
+    Two 3-D fused layouts are recognized, both requiring ``num_experts``
     and a 3-D ``down_proj`` parameter:
 
     * gated (``_QuantFusedExperts``): a 3-D ``gate_up_proj`` fusing gate+up. Matches
@@ -1529,8 +1529,15 @@ def _fused_experts_wrapper_class(module):
 
     Returns ``None`` for non-standard layouts (DBRX, GptOss, GraniteMoE,
     Llama4TextExperts) which have their own explicit registrations.
+
+    ``act_fn`` is intentionally *not* required. Some fused-expert modules
+    (e.g. ``MiniMaxM3VLExperts``) apply a custom gated activation between the
+    two ``F.linear`` calls instead of exposing an ``act_fn`` attribute.
+    ``_QuantFusedExperts`` is activation-agnostic (it only intercepts the two
+    ``F.linear`` calls), so ``act_fn`` is irrelevant to quantization,
+    calibration, and export.
     """
-    if not hasattr(module, "num_experts") or not hasattr(module, "act_fn"):
+    if not hasattr(module, "num_experts"):
         return None
     down = getattr(module, "down_proj", None)
     if not isinstance(down, (nn.Parameter, Tensor)) or down.dim() != 3:
