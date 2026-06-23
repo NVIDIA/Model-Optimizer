@@ -97,11 +97,12 @@ def test_p_qdq_fa():
         torch.testing.assert_close(output, expected, atol=tol, rtol=tol)
 
     # A user-set (or calibrated) per-tensor amax on the quantizer overrides the
-    # kernel's default of 1.0 and changes the quantization grid.
+    # kernel's default of 1.0 and changes the quantization grid. Use a non-power-of-2
+    # amax (3.0): a power-of-2 change is a fixed point of FP quant and wouldn't differ.
     quant_attention.p_bmm_quantizer.num_bits = (4, 3)
     quant_attention.p_bmm_quantizer.block_sizes = None
     out_default = run()
-    quant_attention.p_bmm_quantizer.amax = torch.tensor(2.0)
+    quant_attention.p_bmm_quantizer.amax = torch.tensor(3.0)
     out_amax = run()
     assert not torch.equal(out_amax, out_default), "user-set amax should change the output"
     torch.testing.assert_close(out_amax, expected, atol=0.1, rtol=0.1)

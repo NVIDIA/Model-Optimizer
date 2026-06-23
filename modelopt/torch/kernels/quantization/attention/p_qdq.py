@@ -25,10 +25,11 @@ the sparsity helpers in ``sparsity/attention/skip_softmax_helpers.py``.
 Only NVFP4 needs a P-specific helper (tiling policy and block amaxes); the
 per-tensor FP8 mode uses ``quantization/common/fp8_quant.fp8_scalar_qdq``
 directly. What is P-specific here: the kernel's online-softmax ``p`` is
-unnormalized and bounded (``0 <= p <= 1``), so the per-tensor amax is
-exactly 1.0 by construction (default scale 1.0 means an effective global
-amax of 6 * 448), block amaxes need no ``abs``, and the NVFP4 scale blocks
-of 16 run along the key dimension — the contraction axis of ``P @ V``.
+unnormalized and bounded (``0 <= p <= 1``, since the max-subtraction caps
+every entry at ``exp2(0) = 1``), so 1 is the theoretical upper bound of its
+amax; block amaxes need no ``abs``; and the NVFP4 scale blocks of 16 run
+along the key dimension — the contraction axis of ``P @ V``. The caller
+(``attention()``) converts the amax to the ``global_scale`` below.
 """
 
 import triton
@@ -49,8 +50,8 @@ def _p_qdq_nvfp4(
     Two-level scaling per the NVFP4 recipe: E2M1 elements with one FP8 E4M3
     scale per 16 contiguous elements along the key dimension (the contraction
     axis of ``P @ V``), and a per-tensor ``global_scale`` (runtime scalar,
-    conventionally ``amax / (6 * 448)``). The default of 1.0 means an
-    effective global amax of 6 * 448 = 2688.
+    ``amax / (6 * 448)``; ``attention()`` derives it from ``p_qdq_amax``,
+    which defaults to 1, the theoretical upper bound of P's amax).
 
     ``p >= 0``, so the block amax is a plain max (no ``abs``), and
     ``nvfp4_scalar_qdq`` guards the degenerate all-zero blocks of fully

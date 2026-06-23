@@ -402,8 +402,8 @@ def _attn_fwd(
             acc = acc * correction[:, None]
 
             # --- Optional softmax quant-dequant (emulates quantized P @ V) ---
-            # row_sum keeps the unquantized p: deployment kernels compute the
-            # softmax denominator in fp32 and only feed quantized P to BMM2.
+            # row_sum keeps the unquantized p: the softmax denominator stays in
+            # fp32 and only the quantized P is fed to BMM2.
             if P_QDQ == 1:
                 p = _p_qdq_fp8(p, p_qdq_scale)
             elif P_QDQ == 2:
@@ -1165,7 +1165,7 @@ def attention(
     skip_softmax_threshold: float | None = None,
     measure_sparsity: bool = False,
     p_qdq: str | None = None,
-    p_qdq_scale: float = 1.0,
+    p_qdq_amax: float = 1.0,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1206,23 +1206,22 @@ def attention(
         p_qdq: Fake quant-dequant of the softmax probabilities ``P``
             before the ``P @ V`` matmul (BMM2), emulating quantized attention.
             ``"fp8"`` round-trips P through FP8 E4M3 with a static per-tensor
-            scale (amax = 1.0, exact since the kernel's unnormalized P is in
-            [0, 1]). ``"nvfp4"`` applies the two-level NVFP4 recipe: E2M1
-            elements with one FP8 E4M3 scale per 16 elements along the key
-            dimension (the BMM2 contraction axis; every autotuned BLOCK_N is
-            a multiple of 16). The softmax denominator stays unquantized, as
-            in deployment kernels. The backward pass uses the straight-through
-            estimator: gradients are computed from the unquantized P, matching
-            QAT references that keep the backward dots in high precision.
+            scale (see ``p_qdq_amax``). ``"nvfp4"`` applies the two-level NVFP4
+            recipe: E2M1 elements with one FP8 E4M3 scale per 16 elements along
+            the key dimension (the BMM2 contraction axis; every autotuned
+            BLOCK_N is a multiple of 16). The softmax denominator stays
+            unquantized. The backward pass uses the straight-through estimator:
+            gradients are computed from the unquantized P, matching QAT
+            references that keep the backward dots in high precision.
             Set to ``None`` to disable.
-        p_qdq_scale: Per-tensor quantization scale for the softmax qdq
-            (standard convention ``q = cast(p / scale) * scale``). For FP8
-            this is ``amax / 448``; for NVFP4 it is the global scale
-            ``amax / (6 * 448)``. The default of 1.0 corresponds to an
-            effective amax of 448 (FP8) or 6 * 448 (NVFP4) — a direct cast
-            of the kernel's unnormalized P in [0, 1]. A runtime scalar —
-            user-set or calibrated values do not recompile the kernel.
-            Out-of-range values saturate.
+        p_qdq_amax: Per-tensor amax for the softmax-P quant-dequant. The
+            kernel's unnormalized P lies in [0, 1] (the max-subtraction caps
+            every entry at ``exp2(0) = 1``), so 1 is the theoretical upper
+            bound of its amax — hence the default of 1.0. It is converted to
+            the standard per-tensor scale internally: ``amax / 448`` for FP8,
+            and the global scale ``amax / (6 * 448)`` for NVFP4. A runtime
+            scalar — user-set or calibrated values do not recompile the
+            kernel. Values above amax saturate.
         k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
             When provided, K/V are read from paged cache via block_table
             instead of from contiguous k/v tensors.
@@ -1252,8 +1251,15 @@ def attention(
             f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
         )
     p_qdq_mode = _P_QDQ_MODES[p_qdq]
-    if p_qdq_mode and not (math.isfinite(p_qdq_scale) and p_qdq_scale > 0):
-        raise ValueError(f"p_qdq_scale must be a finite positive value, got {p_qdq_scale}")
+    # Convert the per-tensor amax to the kernel's scale convention
+    # (``q = cast(p / scale) * scale``): FP8 uses ``amax / 448``; NVFP4 uses the
+    # global scale ``amax / (6 * 448)``. amax=1 (the default, the theoretical
+    # upper bound of P's amax) therefore maps to the standard full-range scale.
+    p_qdq_scale = 1.0
+    if p_qdq_mode:
+        if not (math.isfinite(p_qdq_amax) and p_qdq_amax > 0):
+            raise ValueError(f"p_qdq_amax must be a finite positive value, got {p_qdq_amax}")
+        p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
     sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
     return _Attention.apply(
         q,

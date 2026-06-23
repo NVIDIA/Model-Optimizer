@@ -166,12 +166,11 @@ class _QuantAttention(QuantModule):
         attention_mask = kwargs.pop("attention_mask", None)
         validate_triton_attention_envelope(self, query_states, key_states, attention_mask, **kwargs)
 
-        # A user-set or calibrated per-tensor amax on the p_bmm_quantizer is
-        # converted to the kernel's scale convention (q = cast(p / scale) * scale):
-        # amax / 448 for FP8, amax / (6 * 448) for the NVFP4 global scale. Without
-        # an amax the kernel default scale of 1.0 applies (effective amax 448 /
-        # 6 * 448 respectively).
-        p_qdq_scale = None
+        # Forward a user-set or calibrated per-tensor amax to the kernel, which
+        # converts it to the FP8 / NVFP4 scale. Without one, the kernel default
+        # amax of 1.0 applies -- the theoretical upper bound of the unnormalized
+        # P's amax (P lies in [0, 1]).
+        p_qdq_amax = None
         pq_amax = getattr(self.p_bmm_quantizer, "_amax", None)
         if pq_amax is not None:
             if pq_amax.numel() != 1:
@@ -179,8 +178,7 @@ class _QuantAttention(QuantModule):
                     "p_bmm_quantizer via the Triton attention kernel only supports a "
                     f"per-tensor (scalar) amax, got shape {tuple(pq_amax.shape)}."
                 )
-            divisor = 448.0 if p_qdq == "fp8" else 6.0 * 448.0
-            p_qdq_scale = float(pq_amax) / divisor
+            p_qdq_amax = float(pq_amax)
 
         scaling = kwargs.get("scaling")
         if scaling is None:
@@ -193,7 +191,7 @@ class _QuantAttention(QuantModule):
             attention_mask,
             scaling,
             p_qdq=p_qdq,
-            p_qdq_scale=p_qdq_scale,
+            p_qdq_amax=p_qdq_amax,
         )
 
     @staticmethod

@@ -80,7 +80,7 @@ def _apply_qdq(p, mode, qdq_scale=1.0):
     return _qdq_nvfp4(p, qdq_scale)
 
 
-def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, qdq_scale=1.0):
+def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0):
     """Tile-looped online-softmax reference replicating kernel P_QDQ semantics.
 
     Single sequence: q [s, h, d], k/v [s_kv, h_kv, d] (fp16). Walks KV tiles
@@ -88,7 +88,12 @@ def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, qdq_scale=1.0)
     unquantized, applies qdq to the unnormalized p of each tile, and mirrors
     the kernel's ``p.to(v.dtype)`` cast before the P @ V dot.
     Returns [s, h, d] float32.
+
+    ``amax`` mirrors the kernel's ``p_qdq_amax`` and is converted to the same
+    per-mode scale the wrapper uses: ``amax / 448`` (FP8) or ``amax / (6 * 448)``
+    (NVFP4 global scale).
     """
+    qdq_scale = amax / 448.0 if mode == "fp8" else amax / (6.0 * 448.0)
     s, h, d = q.shape
     s_kv = k.shape[0]
     r = h // k.shape[1]
@@ -216,19 +221,19 @@ class TestSoftmaxQdqForward:
             torch.testing.assert_close(out[b : b + 1].float(), ref, rtol=5e-3, atol=5e-3)
 
     @pytest.mark.parametrize(
-        ("mode", "qdq_scale"),
+        ("mode", "amax"),
         [
-            # Non-power-of-2 ratios vs the default scale of 1.0: a pure power-of-2
-            # rescale is a fixed point of FP quantization (exponent shift only) and
-            # would not change the output. 1/448 (FP8) and 1/2688 (NVFP4) emulate
-            # an amax of 1.0; 5e-4 exercises FP8 saturation (p / scale > 448).
-            ("fp8", 1.0 / 448.0),
-            ("fp8", 5e-4),
-            ("nvfp4", 1.0 / 2688.0),
+            # Non-power-of-2 amax vs the default of 1.0: a pure power-of-2 change
+            # is a fixed point of FP quantization (exponent shift only) and would
+            # not change the output, so use non-power-of-2 values. amax < 1
+            # (0.3) also exercises FP8 saturation (P entries above amax clamp).
+            ("fp8", 0.3),
+            ("fp8", 3.0),
+            ("nvfp4", 0.7),
         ],
     )
-    def test_custom_scale_matches_tile_reference(self, mode, qdq_scale):
-        """User-supplied p_qdq_scale changes the grid and matches the reference."""
+    def test_custom_amax_matches_tile_reference(self, mode, amax):
+        """User-supplied p_qdq_amax changes the grid and matches the reference."""
         seq_len, num_heads, num_kv_heads, head_dim = 128, 4, 2, 64
         scale = 1.0 / (head_dim**0.5)
 
@@ -245,20 +250,20 @@ class TestSoftmaxQdqForward:
             seq_len,
             softmax_scale=scale,
             p_qdq=mode,
-            p_qdq_scale=qdq_scale,
+            p_qdq_amax=amax,
         )
-        ref = qdq_attention_reference(q, k, v, scale, mode, qdq_scale=qdq_scale)
+        ref = qdq_attention_reference(q, k, v, scale, mode, amax=amax)
         torch.testing.assert_close(o.float(), ref, rtol=5e-3, atol=5e-3)
 
-        # The scale knob must actually change the quantization grid.
+        # The amax knob must actually change the quantization grid vs the default (amax=1).
         o_default = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale, p_qdq=mode)
         assert not torch.equal(o, o_default)
 
-    def test_invalid_scale_raises(self):
+    def test_invalid_amax_raises(self):
         q, k, v = make_qkv(8, 2, 2, 32, dtype=torch.float16)
         locs, lens = make_varlen_meta([8])
-        with pytest.raises(ValueError, match="p_qdq_scale"):
-            attention(q, k, v, locs, lens, 8, p_qdq="fp8", p_qdq_scale=0.0)
+        with pytest.raises(ValueError, match="p_qdq_amax"):
+            attention(q, k, v, locs, lens, 8, p_qdq="fp8", p_qdq_amax=0.0)
 
     def test_composes_with_skip_softmax(self):
         """p_qdq composes with the skip-softmax feature in one launch."""

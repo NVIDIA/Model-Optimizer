@@ -160,7 +160,7 @@ def triton_attention_forward(
     scaling: float,
     dropout: float = 0.0,
     p_qdq: str | None = None,
-    p_qdq_scale: float | None = None,
+    p_qdq_amax: float | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
     """Attention forward compatible with HF AttentionInterface.
@@ -181,9 +181,9 @@ def triton_attention_forward(
         p_qdq: Optional softmax fake quant-dequant mode ("fp8" or
             "nvfp4") forwarded to the kernel. Not passed by HF dispatch;
             used by direct callers such as the quantization plugin.
-        p_qdq_scale: Optional per-tensor quantization scale for the
-            softmax qdq; None uses the kernel default of 1.0 (an effective
-            amax of 448 for FP8 / 6 * 448 for NVFP4).
+        p_qdq_amax: Optional per-tensor amax for the softmax-P qdq; None uses
+            the kernel default of 1.0 (the theoretical upper bound of the
+            unnormalized P's amax).
         **kwargs: Reserved for future extensions.
 
     Returns:
@@ -264,8 +264,8 @@ def triton_attention_forward(
 
     if p_qdq is not None:
         kw["p_qdq"] = p_qdq
-        if p_qdq_scale is not None:
-            kw["p_qdq_scale"] = p_qdq_scale
+        if p_qdq_amax is not None:
+            kw["p_qdq_amax"] = p_qdq_amax
 
     o = attention(q, k, v, **kw)
 
