@@ -466,6 +466,7 @@ def _dynamic_block_quantize_forward(
     inputs,
     block_size,
     amax,
+    bias,
     num_bits,
     scale_bits,
     trt_high_precision_dtype=None,
@@ -473,6 +474,17 @@ def _dynamic_block_quantize_forward(
     pass_through_bwd=True,
 ):
     """Forward method."""
+    if isinstance(num_bits, int) and scale_bits is None:
+        return _dynamic_int_block_quantize_forward(
+            ctx,
+            inputs,
+            block_size,
+            bias,
+            num_bits,
+            pass_through_bwd,
+        )
+
+    _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
     if isinstance(num_bits, int):
         # special case for INT dynamic block quantization, e.g. MXINT8
         exponent_bits = 0
@@ -495,14 +507,12 @@ def _dynamic_block_quantize_forward(
     return outputs
 
 
-def dynamic_int_block_quant(
+def _dynamic_int_block_quantize_forward(
+    ctx,
     inputs,
     block_size,
     bias,
     num_bits,
-    unsigned,
-    narrow_range,
-    trt_high_precision_dtype=None,
     pass_through_bwd=True,
 ):
     """Fake quantize INT blocks with a per-forward max scale."""
@@ -516,16 +526,18 @@ def dynamic_int_block_quant(
 
     blocked_shape = (*inputs.shape[:-1], -1, block_size)
     blocked_inputs = inputs.reshape(blocked_shape)
-    amax = reduce_amax(blocked_inputs, axis=-1, keepdims=True).detach()
-    outputs = fake_tensor_quant(
+    block_amax = reduce_amax(blocked_inputs, axis=-1, keepdims=True).detach()
+    if not pass_through_bwd:
+        backward_amax = block_amax.expand_as(blocked_inputs).reshape(inputs.shape)
+        ctx.save_for_backward(
+            inputs[..., :original_last_dim], backward_amax[..., :original_last_dim]
+        )
+    outputs = _tensor_quant(
         blocked_inputs,
-        amax,
-        None,
+        block_amax,
         num_bits,
-        unsigned,
-        narrow_range,
-        trt_high_precision_dtype,
-        pass_through_bwd,
+        unsigned=False,
+        narrow_range=True,
     ).reshape(inputs.shape)
     return outputs[..., :original_last_dim]
 
@@ -585,12 +597,12 @@ class DynamicBlockQuantizationFunction(Function):
         pass_through_bwd=True,
     ):
         """Forward method."""
-        _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
         return _dynamic_block_quantize_forward(
             ctx,
             inputs,
             block_size,
             amax,
+            bias,
             num_bits,
             scale_bits,
             trt_high_precision_dtype,

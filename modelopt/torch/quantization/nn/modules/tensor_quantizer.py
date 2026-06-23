@@ -56,7 +56,6 @@ from ...qtensor import (
 )
 from ...tensor_quant import (
     dynamic_block_quant,
-    dynamic_int_block_quant,
     fake_tensor_quant,
     fp4_cast_ste,
     int_cast_ste,
@@ -818,30 +817,17 @@ class TensorQuantizer(nn.Module):
             if block_size is None:
                 raise ValueError("block size for dynamic quantization not found.")
 
-            bias = self._get_bias(inputs)
-            if isinstance(self._num_bits, int) and self.block_sizes.get("scale_bits") is None:
-                outputs = dynamic_int_block_quant(
-                    inputs,
-                    block_size,
-                    bias,
-                    self._num_bits,
-                    self._unsigned,
-                    self._narrow_range,
-                    self._trt_high_precision_dtype,
-                    self._pass_through_bwd,
-                )
-            else:
-                outputs = dynamic_block_quant(
-                    inputs,
-                    block_size,
-                    amax,
-                    bias,
-                    self._num_bits,
-                    self.block_sizes.get("scale_bits", None),
-                    getattr(self, "_trt_high_precision_dtype", None),
-                    getattr(self, "_onnx_quantizer_type", None),
-                    self._pass_through_bwd,
-                )
+            outputs = dynamic_block_quant(
+                inputs,
+                block_size,
+                amax,
+                self._get_bias(inputs),
+                self._num_bits,
+                self.block_sizes.get("scale_bits", None),
+                getattr(self, "_trt_high_precision_dtype", None),
+                getattr(self, "_onnx_quantizer_type", None),
+                self._pass_through_bwd,
+            )
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
             E, M = self._num_bits  # noqa: N806
