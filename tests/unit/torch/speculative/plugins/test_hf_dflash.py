@@ -19,11 +19,13 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 """
 
 import json
+import logging
 import os
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
@@ -38,6 +40,7 @@ from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashModule,
     HFDFlashModel,
+    _dpace_position_weights,
     build_target_layer_ids,
 )
 from modelopt.torch.speculative.utils import AcceptanceRateValidation
@@ -114,6 +117,148 @@ class TestDFlashConvert:
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
+
+
+class TestDPaceWeights:
+    """Test the D-PACE position-weighting objective (arXiv:2605.18810)."""
+
+    @staticmethod
+    def _reference_weights(conf, alpha):
+        """Paper closed form computed by explicit summation (Eq.7-8).
+
+        q~_i = (1-a)q_i + a; C_m = prod_{i<=m} q~_i; w_j = sum_{m>=j} C_m.
+        Deliberately a plain double loop so it is an independent oracle for the
+        vectorized implementation under test.
+        """
+        smoothed = alpha + (1.0 - alpha) * conf
+        length = smoothed.shape[-1]
+        cum = torch.ones_like(smoothed)
+        running = torch.ones(smoothed.shape[:-1])
+        for m in range(length):
+            running = running * smoothed[..., m]
+            cum[..., m] = running
+        expected = torch.zeros_like(smoothed)
+        for j in range(length):
+            expected[..., j] = cum[..., j:].sum(dim=-1)
+        return expected
+
+    def test_weights_match_paper_formula(self):
+        """Eq.7-8, pinned both to a hand-worked value and an independent loop oracle.
+
+        conf=[0.8, 0.5], alpha=0.5 -> q~=[0.9, 0.75] -> prefix=[0.9, 0.675]
+        -> w=[0.9+0.675, 0.675]=[1.575, 0.675].
+        """
+        hand = _dpace_position_weights(torch.tensor([[0.8, 0.5]]), alpha=0.5)
+        assert torch.allclose(hand, torch.tensor([[1.575, 0.675]]), atol=1e-6)
+        conf = torch.tensor([[0.9, 0.6, 0.3, 0.8]])
+        assert torch.allclose(
+            _dpace_position_weights(conf, 0.5), self._reference_weights(conf, 0.5), atol=1e-6
+        )
+
+    def test_mask_makes_invalid_positions_noops(self):
+        """Invalid positions neither shrink the prefix product nor add to the sum."""
+        alpha = 0.5
+        conf = torch.tensor([[0.9, 0.2, 0.3, 0.8]])
+        mask = torch.tensor([[1.0, 0.0, 1.0, 1.0]])
+        masked = _dpace_position_weights(conf, alpha, valid_mask=mask)
+        # Dropping the invalid slot entirely must give the same weights at the kept slots.
+        kept = _dpace_position_weights(conf[:, [0, 2, 3]], alpha)
+        assert torch.allclose(masked[:, [0, 2, 3]], kept, atol=1e-6)
+
+    def test_weights_are_detached(self):
+        """Weights must carry no gradient (paper Eq.9 detaches them)."""
+        conf = torch.rand(2, 3, 5, requires_grad=True)
+        weights = _dpace_position_weights(conf, 0.5)
+        assert not weights.requires_grad
+
+    def test_invalid_alpha_raises(self):
+        with pytest.raises(ValueError, match="dflash_dpace_alpha"):
+            _dpace_position_weights(torch.rand(1, 4), alpha=1.5)
+
+    def test_default_objective_is_dpace(self):
+        """D-PACE is the default (alpha=0.5); an explicit alpha override is wired through."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", _get_dflash_config())])
+        assert model.dflash_loss_objective == "dpace"
+        assert model.dflash_dpace_alpha == 0.5
+
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_dpace_alpha"] = 0.3
+        mtsp.convert(model, [("dflash", config)])
+        assert model.dflash_dpace_alpha == 0.3
+
+    def test_convert_rejects_bad_objective(self):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_loss_objective"] = "nope"
+        with pytest.raises(ValueError, match="dflash_loss_objective"):
+            mtsp.convert(model, [("dflash", config)])
+
+    def test_convert_rejects_degenerate_alpha(self):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_loss_objective"] = "dpace"
+        config["dflash_dpace_alpha"] = 0.0
+        with pytest.raises(ValueError, match="dflash_dpace_alpha"):
+            mtsp.convert(model, [("dflash", config)])
+
+    def test_convert_dpace_with_decay_factor_warns(self, caplog):
+        """dpace + a non-zero decay factor converts but warns that decay is ignored."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_loss_objective"] = "dpace"
+        config["dflash_loss_decay_factor"] = 4.0
+        with caplog.at_level(logging.WARNING):
+            mtsp.convert(model, [("dflash", config)])
+        assert any("dflash_loss_decay_factor" in r.message for r in caplog.records)
+
+
+class TestDPaceLossIntegration:
+    """Exercise the _compute_loss block-weighting branches on CPU."""
+
+    @staticmethod
+    def _make_inputs(vocab=32, seq_len=SEQ_LEN, n_blocks=2):
+        """Synthetic CPU inputs for _compute_loss (no model forward needed)."""
+        bsz = 1
+        logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab)
+        input_ids = torch.randint(0, vocab, (bsz, seq_len))
+        anchor_positions = torch.tensor([[0, BLOCK_SIZE]])[:, :n_blocks]
+        block_keep_mask = torch.ones(bsz, n_blocks)
+        loss_mask = torch.ones(bsz, seq_len)
+        return logits, input_ids, anchor_positions, block_keep_mask, loss_mask
+
+    def _converted_model(self, objective, **overrides):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_loss_objective"] = objective
+        config.update(overrides)
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    def test_compute_loss_dpace_branch(self):
+        """Default dpace objective produces a finite loss and valid accuracy."""
+        model = self._converted_model("dpace")
+        loss, acc = model._compute_loss(*self._make_inputs())
+        assert torch.isfinite(loss).item() and loss.item() > 0
+        assert 0.0 <= acc <= 1.0
+
+    def test_compute_loss_decay_branch(self):
+        """The static-decay objective path also produces a finite loss."""
+        model = self._converted_model("decay", dflash_loss_decay_factor=4.0)
+        loss, acc = model._compute_loss(*self._make_inputs())
+        assert torch.isfinite(loss).item() and loss.item() > 0
+        assert 0.0 <= acc <= 1.0
+
+    def test_compute_loss_dpace_kd_branch(self):
+        """dpace + KD (base_logits given): confidences use a dedicated no_grad CE pass."""
+        vocab = 32
+        model = self._converted_model("dpace")
+        inputs = self._make_inputs(vocab=vocab)
+        base_logits = torch.randn(1, SEQ_LEN, vocab)
+        loss, acc = model._compute_loss(*inputs, base_logits=base_logits)
+        assert torch.isfinite(loss).item()
+        assert 0.0 <= acc <= 1.0
 
 
 class TestDFlashSaveRestore:

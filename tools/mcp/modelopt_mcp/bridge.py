@@ -60,12 +60,9 @@ def _find_launcher_examples_dir() -> Path | None:
     Strategy (in order):
     1. ``MODELOPT_LAUNCHER_EXAMPLES_DIR`` env override — for tests + ad-hoc
        relocations.
-    2. ``../../launcher/examples/`` from this file — the in-repo layout
-       when running from a Model-Optimizer clone (this is the dev mode
-       AND the uvx-from-git mode, since uvx checks out the whole repo).
-    3. Site-packages install: walk back through the modelopt_launcher
-       package to find its examples/ — fallback for the case where the
-       launcher was pip-installed standalone.
+    2. ``import modelopt_launcher`` — works whether the launcher is
+       installed via pip/uvx or in editable dev mode; ``PACKAGE_DIR``
+       points at ``tools/launcher/``, which contains ``examples/``.
 
     Returns None if no candidate exists; callers surface that as a
     structured failure rather than blowing up.
@@ -75,24 +72,29 @@ def _find_launcher_examples_dir() -> Path | None:
         p = Path(env)
         return p if p.exists() else None
 
-    # In-repo: this file is at tools/mcp/modelopt_mcp/bridge.py;
-    # examples are at tools/launcher/examples/.
-    candidate = _THIS_DIR.parent.parent / "launcher" / "examples"
-    if candidate.exists():
-        return candidate
-
-    # Site-packages fallback: the modelopt-launcher package may carry
-    # its examples next to its core.py.
     try:
         import modelopt_launcher
 
-        pkg_dir = Path(modelopt_launcher.__file__).resolve().parent
-        candidate = pkg_dir / "examples"
+        candidate = Path(modelopt_launcher.PACKAGE_DIR) / "examples"
         if candidate.exists():
             return candidate
     except ImportError:
         pass
     return None
+
+
+def _launcher_not_installed(argv: list[str]) -> dict:
+    """Structured failure when the ``modelopt-launcher`` binary is not on PATH."""
+    return {
+        "ok": False,
+        "reason": "launcher_not_installed",
+        "diagnostic": (
+            "`modelopt-launcher` was not found on PATH. "
+            "Install it with `pip install modelopt-launcher` or "
+            "`uv tool install modelopt-launcher` and retry."
+        ),
+        "argv": argv,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -525,15 +527,14 @@ def submit_job_impl(
     # list never goes through a shell, so quoting bakes literal quote chars
     # into the values that nemo-run's CLI parser sees. Verbatim values
     # carry spaces / special chars safely.
-    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--yes"]
+    argv = ["modelopt-launcher", "--yaml", str(abs_yaml), "--yes"]
     if hf_local:
         argv.append(f"hf_local={hf_local}")
     else:
-        # Slurm mode — `launch.py`'s entrypoint does not accept a
-        # `cluster_host` arg (see tools/launcher/launch.py:82). The host
-        # is sourced via the SLURM_HOST env var, consumed by
-        # `slurm_factory(host=os.environ.get("SLURM_HOST", ""))` in
-        # tools/launcher/slurm_config.py. Propagate via env, not argv.
+        # Slurm mode — the launcher entrypoint does not accept a
+        # `cluster_host` arg. The host is sourced via the SLURM_HOST env
+        # var, consumed by slurm_factory in slurm_config.py.
+        # Propagate via env, not argv.
         if cluster_user:
             argv.append(f"user={cluster_user}")
         if identity:
@@ -545,19 +546,6 @@ def submit_job_impl(
         argv.append(f"job_name={job_name}")
     for k, v in (extra_overrides or {}).items():
         argv.append(f"{k}={v}")
-
-    # Run from the launcher dir so it picks up its own ./core.py etc.
-    launcher_dir = _THIS_DIR.parent.parent / "launcher"
-    if not launcher_dir.exists():
-        return {
-            "ok": False,
-            "reason": "launcher_dir_not_found",
-            "diagnostic": (
-                f"Expected tools/launcher/ at {launcher_dir} but it "
-                f"doesn't exist. modelopt-mcp must be installed from a "
-                f"Model-Optimizer clone or via uvx-from-git."
-            ),
-        }
 
     # Propagate env so submit-side and status-side agree on NEMORUN_HOME.
     # Without this, `launch.py` defaults NEMORUN_HOME to its own cwd
@@ -582,14 +570,16 @@ def submit_job_impl(
         # group so an MCP server restart / SIGINT doesn't SIGHUP the
         # in-flight launcher.
         # B603 false positive — argv is a controlled list built above.
-        proc = subprocess.Popen(  # nosec B603
-            argv,
-            cwd=str(launcher_dir),
-            env=child_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(  # nosec B603
+                argv,
+                env=child_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            return _launcher_not_installed(argv)
         return {
             "ok": True,
             "executor": "docker",
@@ -611,13 +601,14 @@ def submit_job_impl(
     try:
         proc = subprocess.run(  # nosec B603
             argv,
-            cwd=str(launcher_dir),
             env=child_env,
             capture_output=True,
             text=True,
             timeout=300,
             check=False,
         )
+    except FileNotFoundError:
+        return _launcher_not_installed(argv)
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
@@ -754,7 +745,7 @@ def _submit_job_dry_run(
     # blocks on its confirmation prompt — and since we're capturing
     # stdout (no TTY), the prompt would hang until the 60-second
     # timeout fires.
-    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--dryrun", "--yes"]
+    argv = ["modelopt-launcher", "--yaml", str(abs_yaml), "--dryrun", "--yes"]
     if hf_local:
         argv.append(f"hf_local={hf_local}")
     if cluster_user:
@@ -767,19 +758,6 @@ def _submit_job_dry_run(
         argv.append(f"job_name={job_name}")
     for k, v in (extra_overrides or {}).items():
         argv.append(f"{k}={v}")
-
-    launcher_dir = _THIS_DIR.parent.parent / "launcher"
-    if not launcher_dir.exists():
-        return {
-            "ok": False,
-            "dry_run": True,
-            "reason": "launcher_dir_not_found",
-            "diagnostic": (
-                f"Expected tools/launcher/ at {launcher_dir} but it "
-                f"doesn't exist. modelopt-mcp must be installed from a "
-                f"Model-Optimizer clone or via uvx-from-git."
-            ),
-        }
 
     # Propagate env so the launcher's factory resolution matches what
     # the live submit would see (mainly: SLURM_HOST for slurm-factory
@@ -802,13 +780,14 @@ def _submit_job_dry_run(
     try:
         proc = subprocess.run(  # nosec B603
             argv,
-            cwd=str(launcher_dir),
             env=child_env,
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
+    except FileNotFoundError:
+        return {**_launcher_not_installed(argv), "dry_run": True}
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
@@ -886,12 +865,6 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
         candidates.append(Path(nemorun_home) / "experiments" / experiment_id)
     candidates.append(Path.cwd() / "experiments" / experiment_id)
     candidates.append(Path.cwd() / "local_experiments" / experiment_id)
-    # The launcher's own experiments dir — submit_job_impl uses
-    # cwd=str(launcher_dir) for the subprocess, so when NEMORUN_HOME is
-    # unset, launch.py defaults to launcher_dir/experiments/.
-    launcher_dir = _THIS_DIR.parent.parent / "launcher"
-    candidates.append(launcher_dir / "experiments" / experiment_id)
-    candidates.append(launcher_dir / "local_experiments" / experiment_id)
     for c in candidates:
         if c.exists():
             return c
@@ -1214,12 +1187,9 @@ def read_cluster_artifact_impl(
             experiment_id,
             str(job_idx),
         ]
-        launcher_dir = _THIS_DIR.parent.parent / "launcher"
-        cwd = str(launcher_dir) if launcher_dir.exists() else None
         try:
             proc = subprocess.run(  # nosec B603 B607
                 argv,
-                cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=60,

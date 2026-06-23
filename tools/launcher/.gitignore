@@ -13,6 +13,9 @@ local_experiments/
 # uv lock (generated, not portable)
 uv.lock
 
+# Auto-created symlink by launch.py in dev mode
+modules/
+
 # Python cache
 __pycache__/
 

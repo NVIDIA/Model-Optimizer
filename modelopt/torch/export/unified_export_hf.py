@@ -90,7 +90,7 @@ from .model_config import (
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
 from .moe_utils import _export_fused_experts
-from .plugins import SpeculativeDecodingExporter, has_spec_opt
+from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
@@ -740,6 +740,13 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        # Step-3.5 QuantMoELinear reconstructs packed MoE tensors from child
+        # expert QuantLinears after export. Fill missing input amax here, before
+        # named_modules() reaches those children, so every expert emits input_scale.
+        if type(sub_module).__name__ == "QuantMoELinear" and hasattr(sub_module, "experts"):
+            set_expert_quantizer_amax(list(sub_module.experts), quantizer_attrs="input_quantizer")
+            continue
+
         # Preprocessing: restore unpacked weight so the export path can read
         # the live quantizer state. Falls through to the export branches below.
         if hasattr(sub_module, "weight_packed") or (
@@ -859,9 +866,14 @@ def _export_transformers_checkpoint(
                 elif hasattr(sub_module.experts, "gate_up_proj_weight_quantizers"):
                     # _QuantFusedExperts: amax fallback is handled in _export_fused_experts
                     break
-                elif "QuantGptOssExperts" in type(sub_module.experts).__name__:
-                    # Handle GPT-OSS experts specifically
-                    # GPT-OSS experts use gate_up_proj and down_proj
+                elif (
+                    "QuantGptOssExperts" in type(sub_module.experts).__name__
+                    or "QuantLlama4TextExperts" in type(sub_module.experts).__name__
+                ):
+                    # Handle GPT-OSS / Llama4 fused experts specifically.
+                    # Both use gate_up_proj and down_proj with singular input quantizers
+                    # (gate_up_proj_input_quantizer/down_proj_input_quantizer); the actual
+                    # amax fallback and weight export is performed in _process_quantized_modules.
                     gpt_oss_linear_names = ["gate_up_proj", "down_proj"]
                     for linear_name in gpt_oss_linear_names:
                         if hasattr(sub_module.experts, linear_name):
@@ -1380,6 +1392,8 @@ def export_hf_checkpoint(
 
         with open(original_config) as file:
             config_data = json.load(file)
+
+        sanitize_hf_config_for_deployment(config_data, model)
 
         if hf_quant_config is not None:
             config_data["quantization_config"] = hf_quant_config

@@ -41,6 +41,7 @@ class TestSlurmConfig:
         assert cfg.nodes == 1
         assert cfg.ntasks_per_node == 1
         assert cfg.gpus_per_node == 1
+        assert cfg.mem == "0"
         assert cfg.local is False
         assert cfg.container_mounts is None
         assert cfg.srun_args is None
@@ -52,6 +53,7 @@ class TestSlurmConfig:
             account="my_account",
             nodes=4,
             gpus_per_node=8,
+            mem="128G",
             container="nvcr.io/nvidia/pytorch:24.01-py3",
             container_mounts=["/data:/data"],
             srun_args=["--no-container-mount-home"],
@@ -60,6 +62,7 @@ class TestSlurmConfig:
         assert cfg.account == "my_account"
         assert cfg.nodes == 4
         assert cfg.gpus_per_node == 8
+        assert cfg.mem == "128G"
         assert cfg.container_mounts == ["/data:/data"]
 
 
@@ -78,6 +81,10 @@ class TestSlurmFactory:
     def test_default_srun_args(self):
         cfg = slurm_factory()
         assert cfg.srun_args == ["--no-container-mount-home"]
+
+    def test_default_mem(self):
+        cfg = slurm_factory()
+        assert cfg.mem == "0"
 
     def test_default_container_mounts_from_env(self, monkeypatch):
         monkeypatch.setenv("SLURM_HF_LOCAL", "/custom/hf-local")
@@ -102,3 +109,9 @@ class TestSlurmFactory:
         importlib.reload(slurm_config)
         cfg = slurm_config.slurm_factory()
         assert cfg.host == "test-host.example.com"
+
+    def test_env_var_mem(self, monkeypatch):
+        monkeypatch.setenv("SLURM_MEM", "100G")
+        importlib.reload(slurm_config)
+        cfg = slurm_config.slurm_factory()
+        assert cfg.mem == "100G"
