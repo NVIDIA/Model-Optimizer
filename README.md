@@ -9,7 +9,7 @@
 [![license](https://img.shields.io/badge/License-Apache%202.0-blue)](./LICENSE)
 
 [Documentation](https://nvidia.github.io/Model-Optimizer) |
-[Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+[Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 
 </div>
 
@@ -119,7 +119,7 @@ more fine-grained control on installed dependencies or for alternative docker im
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](./examples/benchmark.md)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
