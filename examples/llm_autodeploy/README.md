@@ -1,5 +1,12 @@
 # Deploy AutoQuant Models with AutoDeploy
 
+> [!WARNING]
+> **Deprecated (ModelOpt 0.45).** This example is deprecated and will be removed in
+> a future release (0.46). For mixed-precision deployment, use TensorRT-LLM's
+> [AutoDeploy](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy)
+> directly, combined with ModelOpt PTQ/AutoQuant from
+> [`examples/llm_ptq`](../llm_ptq/README.md).
+
 This guide demonstrates how to deploy mixed-precision models using ModelOpt's AutoQuant and TRT-LLM's AutoDeploy.
 
 [ModelOpt's AutoQuant](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) is a post-training quantization (PTQ) algorithm that optimizes model quantization by selecting the best quantization format for each layer while adhering to user-defined compression constraints. This approach allows users to balance model accuracy and performance effectively.
