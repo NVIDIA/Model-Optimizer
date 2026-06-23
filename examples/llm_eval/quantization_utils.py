@@ -52,6 +52,17 @@ CUSTOM_CONFIG = {
 }
 
 
+def _causal_lm_sum_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Sum-reduced next-token loss keeps AutoQuantize scores additive across batches."""
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    return torch.nn.functional.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        reduction="sum",
+    )
+
+
 def get_tokenizer(ckpt_path, max_seq_len=MAX_SEQ_LEN, trust_remote_code=False):
     """Returns the tokenizer from the model ckpt_path."""
     print(f"Initializing tokenizer from {ckpt_path}")
@@ -101,6 +112,10 @@ def _quantize_model_with_dataset(
             def loss_func(output, data):
                 # For transformers AutoModelForCausalLM models, the outputs are wrapped in `CausalLMOutputWithPast`
                 # which contains the loss attribute.
+                logits = getattr(output, "logits", None)
+                labels = data.get("labels") if isinstance(data, dict) else None
+                if logits is not None and labels is not None:
+                    return _causal_lm_sum_loss(logits, labels)
                 return output.loss
         elif auto_quantize_method == "kl_div":
             # For KL divergence method, return only logits

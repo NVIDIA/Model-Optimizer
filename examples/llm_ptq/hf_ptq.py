@@ -23,7 +23,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
@@ -55,6 +54,7 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
+from accelerate.hooks import remove_hook_from_module
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.torch.export import (
     export_hf_checkpoint,
@@ -288,6 +288,17 @@ def make_calib_dataloader(
     return calib_dataloader, first_text_speech_dataset
 
 
+def _causal_lm_sum_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Sum-reduced next-token loss keeps AutoQuantize scores additive across batches."""
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    return torch.nn.functional.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        reduction="sum",
+    )
+
+
 def auto_quantize(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -349,16 +360,15 @@ def auto_quantize(
 
         def loss_func(output, data):
             logits = lm_head(output.last_hidden_state)
-            labels = data["labels"]
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            return torch.nn.functional.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-            )
+            return _causal_lm_sum_loss(logits, data["labels"])
 
     else:
 
         def loss_func(output, data):
+            logits = getattr(output, "logits", None)
+            labels = data.get("labels") if isinstance(data, dict) else None
+            if logits is not None and labels is not None:
+                return _causal_lm_sum_loss(logits, labels)
             return output.loss
 
     if auto_quantize_method == "gradient":
