@@ -78,7 +78,7 @@ from .layer_utils import (
 from .model_config import (
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
-    QUANTIZATION_FP8_PB_WO,
+    QUANTIZATION_FP8_PB_W8A8,
     QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -744,12 +744,15 @@ def _export_quantized_weight(
 
     # Register the corrected weight scale as a buffer.
     if weight_scale is not None:
-        if quantization_format == QUANTIZATION_FP8_PB_WO:
-            # DeepSeek/Qwen block-FP8 convention: same value, renamed key.
-            # weight_scale (= amax/448) is already the per-block dequant multiplier
-            # that SGLang/vLLM apply as weight_fp8 * weight_scale_inv, matching
-            # ModelOpt's TE/mcore path. Do NOT invert. Drop the plain weight_scale
-            # buffer so no stale key survives into the exported state dict.
+        if quantization_format == QUANTIZATION_FP8_PB_W8A8:
+            # W8A8 block FP8 is consumed via the flat ``quant_method: fp8`` path,
+            # which expects the per-block scale under ``weight_scale_inv``.
+            # The value (= amax/448) is already the per-block dequant multiplier
+            # applied as weight_fp8 * weight_scale_inv, matching ModelOpt's
+            # TE/mcore path. Do NOT invert. Drop the plain weight_scale buffer so
+            # no stale key survives into the exported state dict.
+            # NOTE: weight-only block FP8 (FP8_PB_WO) keeps the ``weight_scale``
+            # key below, since it is consumed via compressed-tensors.
             sub_module.register_buffer(quantizer_attrs.weight_scale_inv, weight_scale)
             if quantizer_attrs.weight_scale in sub_module._buffers:
                 del sub_module._buffers[quantizer_attrs.weight_scale]

@@ -1413,6 +1413,9 @@ FP8_PER_CHANNEL_PER_TOKEN_CFG: dict[str, Any] = _load_quantize_config_dict(
 FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/fp8_2d_blockwise_weight_only"
 )
+FP8_2D_BLOCKWISE_W8A8_DYNAMIC_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/fp8_2d_blockwise_w8a8_dynamic"
+)
 INT4_BLOCKWISE_WEIGHT_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/int4_blockwise_weight_only"
 )
@@ -1495,6 +1498,7 @@ NVFP4_OMLP_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
 # modelopt_recipes/general/ptq/ as a yaml file
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
+    "FP8_2D_BLOCKWISE_W8A8_DYNAMIC_CFG",
     "FP8_AFFINE_KV_CFG",
     "FP8_DEFAULT_CFG",
     "FP8_KV_CFG",

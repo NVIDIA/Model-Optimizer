@@ -54,6 +54,7 @@ from .model_config import (
     KV_CACHE_NVFP4_AFFINE,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
+    QUANTIZATION_FP8_PB_W8A8,
     QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_INT4_AWQ,
@@ -529,18 +530,25 @@ def get_quantization_format(module) -> str | None:
         if weight_quantizer.num_bits == (4, 3):
             if weight_quantizer.block_sizes:
                 assert weight_quantizer.block_sizes[-1] > 0, "Invalid block_sizes for FP8 quantizer"
-                # Check if this is MXFP8 (dynamic block quantization with scale_bits (8, 0))
-                block_sizes = getattr(weight_quantizer, "block_sizes")
+                # MXFP8: dynamic block quant with E8M0 (scale_bits (8, 0)) scales.
+                block_sizes = weight_quantizer.block_sizes
                 if (
                     isinstance(block_sizes, dict)
                     and block_sizes.get("type", "static") == "dynamic"
                     and block_sizes.get("scale_bits") == (8, 0)
                 ):
                     return QUANTIZATION_MXFP8
-                if weight_quantizer.fake_quant:
-                    return QUANTIZATION_FP8_PB_WO
-                else:
+                # Block FP8 (DeepSeek/Qwen style). _REAL = pre-packed weights
+                # carrying quantizer._scale; _WO/_W8A8 = fake-quant simulated PTQ.
+                # All three export real packed FP8 weights. The input_quantizer
+                # selects the activation scheme for the fake-quant path:
+                #   enabled  -> W8A8 with dynamic per-token activation (flat fp8),
+                #   disabled -> weight-only W8A16 (compressed-tensors).
+                if not weight_quantizer.fake_quant:
                     return QUANTIZATION_FP8_PB_REAL
+                if input_quantizer is not None and input_quantizer.is_enabled:
+                    return QUANTIZATION_FP8_PB_W8A8
+                return QUANTIZATION_FP8_PB_WO
             if weight_quantizer.axis == 0:
                 return QUANTIZATION_FP8_PC_PT
             return QUANTIZATION_FP8
@@ -758,10 +766,18 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
-        elif v == "fp8_pb_wo":
-            # 128x128 block-wise weight-only FP8 (DeepSeek/Qwen-style block FP8).
+        elif v == "fp8_pb_w8a8":
+            # Block-wise FP8 weights + dynamic per-token FP8 activations (W8A8,
+            # DeepSeek/Qwen-style block FP8). Consumed via flat quant_method: fp8.
             layer_config = {
                 "quant_algo": "FP8_PB",
+                "group_size": block_size_value,
+            }
+        elif v == "fp8_pb_wo":
+            # Block-wise weight-only FP8 (BF16 activations at serve time).
+            # Consumed via compressed-tensors as W8A16.
+            layer_config = {
+                "quant_algo": "FP8_PB_WO",
                 "group_size": block_size_value,
             }
         else:
@@ -871,7 +887,7 @@ def to_quantized_weight(
     if quantization == QUANTIZATION_MXFP8:
         return MXFP8QTensor.quantize_with_scale(weight, weights_scaling_factor)
 
-    if quantization == QUANTIZATION_FP8_PB_WO:
+    if quantization in (QUANTIZATION_FP8_PB_WO, QUANTIZATION_FP8_PB_W8A8):
         return FP8QTensor.quantize(
             weight, weights_scaling_factor.squeeze(), block_sizes={-1: block_size, -2: block_size}
         )[0]._quantized_data

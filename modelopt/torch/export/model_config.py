@@ -41,7 +41,10 @@ QUANTIZATION_W4A8_MXFP4_FP8 = "w4a8_mxfp4_fp8"
 QUANTIZATION_W4A16_NVFP4 = "w4a16_nvfp4"
 QUANTIZATION_NVFP4_AWQ = "nvfp4_awq"
 QUANTIZATION_FP8_PB_REAL = "fp8_pb_real"
+# Block-wise FP8, weight-only (BF16 activations at serve time) -> compressed-tensors W8A16.
 QUANTIZATION_FP8_PB_WO = "fp8_pb_wo"
+# Block-wise FP8 weights + dynamic per-token FP8 activations (W8A8) -> flat quant_method: fp8.
+QUANTIZATION_FP8_PB_W8A8 = "fp8_pb_w8a8"
 QUANTIZATION_FP8_PC_PT = "fp8_pc_pt"
 
 KV_CACHE_FP8 = "FP8"
