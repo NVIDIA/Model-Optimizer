@@ -1,5 +1,6 @@
 compressed-tensors
 fire
 flash-attn>=2.6.0
+transformers>=4.56
 transformers_stream_generator
 zstandard
