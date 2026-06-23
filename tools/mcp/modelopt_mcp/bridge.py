@@ -350,7 +350,9 @@ def _materialize_checkout(repo: str, ref: str, resolved_sha: str, path: Path) ->
     """Clone Model-Optimizer and initialize submodules for a resolved ref."""
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
-    tmp = parent / f".tmp-{_sanitize_path_token(ref, fallback='ref')}-{os.getpid()}-{time.time_ns()}"
+    tmp = (
+        parent / f".tmp-{_sanitize_path_token(ref, fallback='ref')}-{os.getpid()}-{time.time_ns()}"
+    )
     if tmp.exists():
         shutil.rmtree(tmp)
 
