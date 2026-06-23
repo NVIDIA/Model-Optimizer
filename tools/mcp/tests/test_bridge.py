@@ -270,6 +270,165 @@ def test_submit_job_yaml_not_found(monkeypatch, tmp_path):
     assert result["reason"] == "yaml_not_found"
 
 
+def test_submit_job_slurm_zero_exit_without_ids_is_failure(monkeypatch, tmp_path):
+    """Slurm submit must not report success when launcher emits no ids."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(
+        bridge,
+        "verify_slurm_setup_impl",
+        lambda **_: {"ok": True},
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Configuring global options\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "launch_result_unparsed"
+
+
+def test_submit_job_slurm_parses_nemo_job_id(monkeypatch, tmp_path):
+    """Parse Slurm job id from Nemo's experiment status output."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(
+        bridge,
+        "verify_slurm_setup_impl",
+        lambda **_: {"ok": True},
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=(
+                "Experiment Status for cicd_1782173197\n"
+                "- Job id: 13049989\n"
+                'experiment = run.Experiment.from_id("cicd_1782173197")\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    assert result["ok"] is True
+    assert result["slurm_job_id"] == "13049989"
+    assert result["experiment_id"] == "cicd_1782173197"
+
+
+def test_submit_job_slurm_job_id_without_experiment_id_is_failure(monkeypatch, tmp_path):
+    """A Slurm job id alone is not enough for MCP status/log polling."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(
+        bridge,
+        "verify_slurm_setup_impl",
+        lambda **_: {"ok": True},
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Task 0\n- Job id: 13049989\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "launch_result_unparsed"
+    assert result["slurm_job_id"] == "13049989"
+
+
+def test_submit_job_slurm_zero_exit_with_launcher_error_is_failure(monkeypatch, tmp_path):
+    """Launcher fatal text must override a misleading zero exit status."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(
+        bridge,
+        "verify_slurm_setup_impl",
+        lambda **_: {"ok": True},
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Configuring global options\n",
+            stderr="Unexpected error: Failed to parse slurm_factory\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "launch_py_failed"
+    assert "Unexpected error" in result["stderr_tail"]
+
+
 # ---------------------------------------------------------------------------
 # submit_job dry-run branch
 # ---------------------------------------------------------------------------
@@ -351,6 +510,43 @@ def test_submit_job_dry_run_yaml_invalid(monkeypatch, tmp_path):
     assert result["validated"] is False  # ...but the YAML failed validation
     assert result["exit_code"] == 1
     assert "yaml.YAMLError" in result["stderr_tail"]
+
+
+def test_submit_job_dry_run_zero_exit_with_launcher_error_is_invalid(monkeypatch, tmp_path):
+    """dry-run must treat fatal launcher text as invalid even with exit 0."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "bad.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Configuring global options\n",
+            stderr="Unexpected error: Failed to parse slurm_factory\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="bad.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+    )
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["validated"] is False
+    assert result["exit_code"] == 0
+    assert "Unexpected error" in result["stderr_tail"]
 
 
 def test_submit_job_dry_run_yaml_not_found(monkeypatch, tmp_path):
@@ -464,6 +660,44 @@ def test_job_status_running(tmp_path, monkeypatch):
     assert result["has_done_marker"] is False
 
 
+def test_job_status_nested_nemo_title_dir(tmp_path, monkeypatch):
+    """nemo_run stores experiments under experiments/<title>/<experiment_id>."""
+    exp = tmp_path / "experiments" / "cicd" / "exp_1781000006"
+    exp.mkdir(parents=True)
+    (exp / "status_task_0.out").write_text("running\n")
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+
+    result = bridge.job_status_impl("exp_1781000006")
+    assert result["ok"] is True
+    assert result["experiment_dir"] == str(exp)
+    assert result["status"] == "running"
+
+
+def test_job_status_launcher_experiments_fallback(tmp_path, monkeypatch):
+    """Resolve experiments under the installed launcher's package directory."""
+    launcher_dir = tmp_path / "launcher"
+    exp = launcher_dir / "experiments" / "cicd" / "exp_1781000007"
+    exp.mkdir(parents=True)
+    (exp / "status_task_0.out").write_text("running\n")
+    monkeypatch.delenv("NEMORUN_HOME", raising=False)
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+    monkeypatch.setattr(bridge, "_find_launcher_package_dir", lambda: launcher_dir)
+
+    result = bridge.job_status_impl("exp_1781000007")
+    assert result["ok"] is True
+    assert result["experiment_dir"] == str(exp)
+    assert result["status"] == "running"
+
+
+def test_job_status_rejects_unsafe_experiment_id():
+    """Experiment ids are path tokens, not filesystem paths or globs."""
+    result = bridge.job_status_impl("../exp_1781000008")
+    assert result["ok"] is False
+    assert result["reason"] == "invalid_experiment_id"
+
+
 def test_job_status_unknown_id(tmp_path, monkeypatch):
     """No experiment dir matching the id → experiment_dir_not_found."""
     monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
@@ -509,6 +743,13 @@ def test_job_logs_missing_task(tmp_path, monkeypatch):
     result = bridge.job_logs_impl("exp_1781000005", task="task_99", tail=None)
     assert result["ok"] is False
     assert result["reason"] == "task_log_not_found"
+
+
+def test_job_logs_rejects_unsafe_experiment_id():
+    """job_logs applies the same experiment-id validation as job_status."""
+    result = bridge.job_logs_impl("exp_*", task=None, tail=None)
+    assert result["ok"] is False
+    assert result["reason"] == "invalid_experiment_id"
 
 
 # ---------------------------------------------------------------------------

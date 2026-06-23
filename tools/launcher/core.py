@@ -75,9 +75,19 @@ def set_slurm_config_type(cls):
     """Register the SlurmConfig dataclass type used by SandboxTask."""
     global _SLURM_CONFIG_TYPE
     _SLURM_CONFIG_TYPE = cls
-    # Patch SandboxTask's type annotation so nemo-run's CLI parser can resolve factories
-    SandboxTask.__dataclass_fields__["slurm_config"].type = cls
-    SandboxTask.__annotations__["slurm_config"] = cls
+    # Patch every task dataclass so nemo-run's CLI parser sees the concrete
+    # SlurmConfig type for task_0/task_1/... fields, not the base `object`.
+    for task_cls in (
+        SandboxTask,
+        SandboxTask0,
+        SandboxTask1,
+        SandboxTask2,
+        SandboxTask3,
+        SandboxTask4,
+    ):
+        task_cls.__dataclass_fields__["slurm_config"].type = cls
+        task_cls.__annotations__["slurm_config"] = cls
+        task_cls.__init__.__annotations__["slurm_config"] = cls
 
 
 def register_factory(name, fn):
@@ -386,17 +396,17 @@ def build_docker_executor(
 
 def _git_info(path):
     """Get git commit hash and branch for a directory."""
-    import subprocess  # nosec B404
+    import subprocess  # nosec B404 - required for fixed git metadata commands; no shell.
 
     try:
-        commit = subprocess.run(  # nosec B603 B607
+        commit = subprocess.run(  # nosec B603 B607 - fixed git CLI argv; no shell.
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=path,
             capture_output=True,
             text=True,
             timeout=5,
         ).stdout.strip()
-        branch = subprocess.run(  # nosec B603 B607
+        branch = subprocess.run(  # nosec B603 B607 - fixed git CLI argv; no shell.
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=path,
             capture_output=True,

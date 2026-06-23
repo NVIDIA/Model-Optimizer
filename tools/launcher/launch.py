@@ -30,8 +30,9 @@ Environment variables:
 """
 
 import getpass
+import glob
 import os
-import subprocess  # nosec B404
+import subprocess  # nosec B404 - required for explicit git clean command; no shell is used.
 import warnings
 
 import modelopt_launcher as _pkg
@@ -79,20 +80,33 @@ _modelopt_src = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer", "modelo
 EXPERIMENT_TITLE = "cicd"
 DEFAULT_SLURM_ENV, DEFAULT_LOCAL_ENV = get_default_env(EXPERIMENT_TITLE)
 
-_include_pattern = ["examples/*", "common/*"]
-_relative_path = [LAUNCHER_DIR, LAUNCHER_DIR]
+_include_pattern = []
+_relative_path = []
+
+
+def _add_package_path(path: str) -> None:
+    """Add an existing package path using LAUNCHER_DIR as the tar root."""
+    if os.path.exists(path):
+        _include_pattern.append(path)
+        _relative_path.append(LAUNCHER_DIR)
+
+
+def _add_package_glob(pattern: str) -> None:
+    """Expand a glob and add each matching path to the launcher package."""
+    for path in sorted(glob.glob(pattern)):
+        _add_package_path(path)
+
+
+_add_package_path(os.path.join(LAUNCHER_DIR, "examples"))
+_add_package_path(os.path.join(LAUNCHER_DIR, "common"))
 
 if _has_modelopt_src:
-    _include_pattern = [
-        "modules/Megatron-LM/megatron/*",
-        "modules/Megatron-LM/examples/*",
-        "modules/Megatron-LM/*.py",
-        "modules/Model-Optimizer/modelopt/*",
-        "modules/Model-Optimizer/modelopt_recipes/*",
-        "modules/Model-Optimizer/examples/*",
-        *_include_pattern,
-    ]
-    _relative_path = [LAUNCHER_DIR] * 6 + _relative_path
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Megatron-LM/megatron"))
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Megatron-LM/examples"))
+    _add_package_glob(os.path.join(LAUNCHER_DIR, "modules/Megatron-LM/*.py"))
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt"))
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt_recipes"))
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/examples"))
 
 packager = run.PatternPackager(
     include_pattern=_include_pattern,
@@ -127,7 +141,11 @@ def launch(
             raise ValueError("--clean requires a dev checkout; modelopt source not found.")
         examples_dir = os.path.join(_mo_symlink, "examples")
         print(f"Cleaning {examples_dir} with git clean -xdf ...")
-        subprocess.run(["git", "clean", "-xdf", "."], cwd=examples_dir, check=True)  # nosec B603 B607
+        subprocess.run(  # nosec B603 B607 - fixed git CLI argv; no shell.
+            ["git", "clean", "-xdf", "."],
+            cwd=examples_dir,
+            check=True,
+        )
 
     if "NEMORUN_HOME" not in os.environ:
         warnings.warn("NEMORUN_HOME is not set. Defaulting to current working directory.")

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess  # nosec B404
+import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +52,33 @@ _THIS_DIR = Path(__file__).resolve().parent
 _STATUS_FAILURE_WORDS: frozenset[str] = frozenset(
     {"failed", "error", "errored", "cancelled", "canceled"}
 )
+
+_SAFE_EXPERIMENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+_LAUNCHER_ERROR_RE = re.compile(
+    r"(?:^|\n)(?:Unexpected error:|Error processing argument )",
+    re.IGNORECASE,
+)
+
+
+def _launcher_reported_error(stdout: str, stderr: str) -> bool:
+    """Return True when launcher text contains a fatal error despite exit 0."""
+    return bool(_LAUNCHER_ERROR_RE.search(f"{stdout}\n{stderr}"))
+
+
+def _validate_experiment_id(experiment_id: str) -> dict | None:
+    """Reject experiment ids that could escape path joins or alter glob matching."""
+    if _SAFE_EXPERIMENT_ID_RE.fullmatch(experiment_id):
+        return None
+    return {
+        "ok": False,
+        "experiment_id": experiment_id,
+        "reason": "invalid_experiment_id",
+        "diagnostic": (
+            "experiment_id must be a single path-safe token containing "
+            "only letters, numbers, underscores, and hyphens."
+        ),
+    }
 
 
 def _find_launcher_examples_dir() -> Path | None:
@@ -76,6 +103,19 @@ def _find_launcher_examples_dir() -> Path | None:
         import modelopt_launcher
 
         candidate = Path(modelopt_launcher.PACKAGE_DIR) / "examples"
+        if candidate.exists():
+            return candidate
+    except ImportError:
+        pass
+    return None
+
+
+def _find_launcher_package_dir() -> Path | None:
+    """Resolve the installed launcher's package directory."""
+    try:
+        import modelopt_launcher
+
+        candidate = Path(modelopt_launcher.PACKAGE_DIR)
         if candidate.exists():
             return candidate
     except ImportError:
@@ -196,7 +236,7 @@ def verify_docker_setup_impl() -> dict:
     # invoking the docker CLI by name with a fixed argv list, no
     # shell-interpretation, no untrusted input.
     try:
-        proc = subprocess.run(  # nosec B603 B607
+        proc = subprocess.run(  # nosec B603 B607 - fixed docker CLI argv; no shell.
             ["docker", "info"],
             capture_output=True,
             text=True,
@@ -250,7 +290,7 @@ def verify_docker_setup_impl() -> dict:
     # runtime when nvidia-ctk runtime configure was last invoked.
     # B603/B607 same false-positive shape as daemon check.
     try:
-        gpu = subprocess.run(  # nosec B603 B607
+        gpu = subprocess.run(  # nosec B603 B607 - fixed docker CLI argv; no shell.
             ["docker", "info", "--format", "{{json .}}"],
             capture_output=True,
             text=True,
@@ -325,7 +365,7 @@ def verify_slurm_setup_impl(
     # B603/B607 false positive — `ssh` invoked by name with a controlled
     # argv (BatchMode, ConnectTimeout, identity path, target). No shell.
     try:
-        proc = subprocess.run(  # nosec B603 B607
+        proc = subprocess.run(  # nosec B603 B607 - fixed ssh CLI argv; no shell.
             argv,
             capture_output=True,
             text=True,
@@ -571,7 +611,7 @@ def submit_job_impl(
         # in-flight launcher.
         # B603 false positive — argv is a controlled list built above.
         try:
-            proc = subprocess.Popen(  # nosec B603
+            proc = subprocess.Popen(  # nosec B603 - fixed launcher argv list; no shell.
                 argv,
                 env=child_env,
                 stdout=subprocess.DEVNULL,
@@ -599,7 +639,7 @@ def submit_job_impl(
     # with detach=true). Capture stdout to parse experiment_id.
     # B603 false positive — argv is a controlled list built above.
     try:
-        proc = subprocess.run(  # nosec B603
+        proc = subprocess.run(  # nosec B603 - fixed launcher argv list; no shell.
             argv,
             env=child_env,
             capture_output=True,
@@ -628,7 +668,7 @@ def submit_job_impl(
     stdout_tail = str(proc.stdout or "")[-2000:]
     stderr_tail = str(proc.stderr or "")[-2000:]
 
-    if proc.returncode != 0:
+    if proc.returncode != 0 or _launcher_reported_error(stdout_tail, stderr_tail):
         return {
             "ok": False,
             "executor": "slurm",
@@ -637,9 +677,10 @@ def submit_job_impl(
             "stdout_tail": stdout_tail,
             "stderr_tail": stderr_tail,
             "diagnostic": (
-                f"launch.py exited with code {proc.returncode}. Common "
-                f"causes: SSH publickey rejection, malformed YAML, "
-                f"NEMORUN_HOME unset. Inspect stderr_tail."
+                "launch.py failed or printed a fatal launcher error. "
+                "Common causes: SSH publickey rejection, malformed YAML, "
+                "factory parsing failure, or NEMORUN_HOME unset. Inspect "
+                "stdout_tail/stderr_tail."
             ),
             "argv": argv,
         }
@@ -654,14 +695,26 @@ def submit_job_impl(
     # nemo_run prints "Entering Experiment <title>_<id> with id: <id>" —
     # match the trailing id directly so we don't have to encode the
     # title prefix or hard-code timestamp width.
-    m = re.search(
-        r"experiment[_\s-]+id[:\s]+(\S+)",
-        stdout_tail,
-        re.IGNORECASE,
-    )
+    m = re.search(r'Experiment\.from_id\("([^"]+)"\)', stdout_tail)
     if m:
         experiment_id = m.group(1)
     else:
+        m = re.search(
+            r"Experiment Status for\s+(\S+)",
+            stdout_tail,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    if not experiment_id:
+        m = re.search(
+            r"experiment[_\s-]+id[:\s]+(\S+)",
+            stdout_tail,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    if not experiment_id:
         # Fallback for older nemo_run output that lacked the explicit
         # "id:" label. Accepts any path-safe id token following the
         # word "experiment" — not just timestamp-style.
@@ -670,7 +723,7 @@ def submit_job_impl(
             stdout_tail,
             re.IGNORECASE,
         )
-        if m:
+        if m and m.group(1).lower() not in {"status"}:
             experiment_id = m.group(1)
     # Match any path containing `/experiments/<id>/` — don't anchor on
     # cluster-specific filesystem roots (NVIDIA's /lustre, partner
@@ -681,6 +734,27 @@ def submit_job_impl(
     m = re.search(r"Submitted batch job (\d+)", stdout_tail)
     if m:
         slurm_job_id = m.group(1)
+    else:
+        m = re.search(r"Job id:\s*(\d+)", stdout_tail, re.IGNORECASE)
+        if m:
+            slurm_job_id = m.group(1)
+
+    if not experiment_id:
+        return {
+            "ok": False,
+            "executor": "slurm",
+            "reason": "launch_result_unparsed",
+            "exit_code": 0,
+            "slurm_job_id": slurm_job_id,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "diagnostic": (
+                "launch.py exited 0 but did not report an experiment_id "
+                "that callers can use for job_status/job_logs polling. "
+                "Treating this as failed even if a Slurm job id was parsed."
+            ),
+            "argv": argv,
+        }
 
     return {
         "ok": True,
@@ -778,7 +852,7 @@ def _submit_job_dry_run(
     # `submit_job_impl` (Popen at line 563 + run at line 590), the
     # verify probes (line 197 + 251), and the SSH probe (line 326).
     try:
-        proc = subprocess.run(  # nosec B603
+        proc = subprocess.run(  # nosec B603 - fixed dry-run launcher argv list; no shell.
             argv,
             env=child_env,
             capture_output=True,
@@ -807,7 +881,7 @@ def _submit_job_dry_run(
     stdout_tail = str(proc.stdout or "")[-2000:]
     stderr_tail = str(proc.stderr or "")[-2000:]
 
-    if proc.returncode != 0:
+    if proc.returncode != 0 or _launcher_reported_error(stdout_tail, stderr_tail):
         return {
             "ok": True,  # The tool itself ran cleanly
             "dry_run": True,
@@ -816,12 +890,12 @@ def _submit_job_dry_run(
             "stdout_tail": stdout_tail,
             "stderr_tail": stderr_tail,
             "diagnostic": (
-                f"launch.py --dryrun rejected the YAML (exit code "
-                f"{proc.returncode}). Common reasons: invalid YAML "
-                f"syntax, missing required fields, factory function "
-                f"not registered, or a referenced file (HF model path, "
-                f"container tag) doesn't exist. See stderr_tail for the "
-                f"specific error."
+                "launch.py --dryrun rejected the YAML or printed a fatal "
+                "launcher error. Common reasons: invalid YAML syntax, "
+                "missing required fields, factory function not registered, "
+                "factory parsing failure, or a referenced file (HF model "
+                "path, container tag) doesn't exist. See stdout_tail/"
+                "stderr_tail for the specific error."
             ),
             "argv": argv,
         }
@@ -859,15 +933,22 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
        for the case where the operator didn't set NEMORUN_HOME at all
        AND the MCP server's cwd differs from where launch.py ran.
     """
-    candidates = []
+    roots = []
     nemorun_home = os.environ.get("NEMORUN_HOME")
     if nemorun_home:
-        candidates.append(Path(nemorun_home) / "experiments" / experiment_id)
-    candidates.append(Path.cwd() / "experiments" / experiment_id)
-    candidates.append(Path.cwd() / "local_experiments" / experiment_id)
-    for c in candidates:
-        if c.exists():
-            return c
+        roots.append(Path(nemorun_home) / "experiments")
+    roots.append(Path.cwd() / "experiments")
+    roots.append(Path.cwd() / "local_experiments")
+    launcher_dir = _find_launcher_package_dir()
+    if launcher_dir is not None:
+        roots.append(launcher_dir / "experiments")
+    for root in roots:
+        direct = root / experiment_id
+        if direct.exists():
+            return direct
+        for nested in root.glob(f"*/{experiment_id}"):
+            if nested.exists():
+                return nested
     return None
 
 
@@ -885,6 +966,10 @@ def job_status_impl(experiment_id: str) -> dict:
     Per-task statuses (``status_<task_name>.out``) are also surfaced so
     multi-task pipelines can be inspected.
     """
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid:
+        return invalid
+
     exp_dir = _resolve_experiment_dir(experiment_id)
     if exp_dir is None:
         return {
@@ -940,6 +1025,10 @@ def job_logs_impl(
     If ``task`` is None, returns logs for ALL tasks.
     If ``tail`` is set, returns only the last N lines per task.
     """
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid:
+        return invalid
+
     exp_dir = _resolve_experiment_dir(experiment_id)
     if exp_dir is None:
         return {
@@ -1188,7 +1277,7 @@ def read_cluster_artifact_impl(
             str(job_idx),
         ]
         try:
-            proc = subprocess.run(  # nosec B603 B607
+            proc = subprocess.run(  # nosec B603 B607 - fixed nemo CLI argv; no shell.
                 argv,
                 capture_output=True,
                 text=True,
@@ -1367,7 +1456,7 @@ def open_draft_pr_impl(
 
     # Step 1: push
     try:
-        push = subprocess.run(  # nosec B603 B607
+        push = subprocess.run(  # nosec B603 B607 - fixed git CLI argv; no shell.
             ["git", "push", "-u", "origin", "HEAD"],
             cwd=str(cwd_path),
             capture_output=True,
@@ -1393,7 +1482,7 @@ def open_draft_pr_impl(
 
     # Step 2: gh pr create
     try:
-        gh = subprocess.run(  # nosec B603 B607
+        gh = subprocess.run(  # nosec B603 B607 - fixed gh CLI argv; no shell.
             [
                 "gh",
                 "pr",
