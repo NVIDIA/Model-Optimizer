@@ -94,6 +94,7 @@ def get_args() -> argparse.Namespace:
     )
 
     # Parallelism arguments
+    # Data parallelism is implicit: Launching with more GPUs than tp * pp * cp uses DP
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")

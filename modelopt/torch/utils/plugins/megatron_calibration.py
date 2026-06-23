@@ -62,6 +62,11 @@ def get_megatron_calibration_forward_loop(
         tokenizer = copy.deepcopy(tokenizer)
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Shard calibration data across data-parallel ranks (``with_context_parallel=False`` so CP
+    # ranks within a DP group still see the same samples — each sample's sequence is split by CP).
+    # amax is max-reduced across the DP group inside ``mtq`` calibration, so the per-rank shards
+    # combine correctly.
+    dp_size = mpu.get_data_parallel_world_size()
     dataloader = get_dataset_dataloader(
         dataset_name=dataset_name,
         tokenizer=tokenizer,
@@ -71,6 +76,12 @@ def get_megatron_calibration_forward_loop(
         device=device,
         apply_chat_template=apply_chat_template,
         pack=pack,
+        distributed=dp_size > 1,
+        sampler_kwargs={
+            "num_replicas": dp_size,
+            "rank": mpu.get_data_parallel_rank(),
+            "shuffle": False,
+        },
     )
 
     def _forward_loop(model: torch.nn.Module) -> None:

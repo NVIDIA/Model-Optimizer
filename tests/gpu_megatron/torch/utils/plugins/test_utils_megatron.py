@@ -35,6 +35,10 @@ def _test_megatron_generate_and_mmlu(rank, size, parallelism):
     elif parallelism == "cp":
         initialize_for_megatron(context_parallel_size=size, seed=SEED)
         model = get_mcore_qwen3_600m(context_parallel_size=size).cuda().eval()
+    elif parallelism == "dp":
+        # Data parallel is implicit: with all model-parallel sizes 1, DP == world size.
+        initialize_for_megatron(seed=SEED)
+        model = get_mcore_qwen3_600m().cuda().eval()
     else:
         raise ValueError(f"Invalid parallelism: {parallelism}")
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
@@ -58,7 +62,7 @@ def _test_megatron_generate_and_mmlu(rank, size, parallelism):
     assert 0.36 < megatron_mmlu(model, tokenizer, fraction=0.1, batch_size=16) < 0.39
 
 
-@pytest.mark.parametrize("parallelism", ["tp", "pp", "cp"])
+@pytest.mark.parametrize("parallelism", ["tp", "pp", "cp", "dp"])
 def test_megatron_generate_and_mmlu(dist_workers, parallelism, num_gpus):
     if num_gpus == 1 and parallelism != "tp":
         pytest.skip("Skipping as redundant test on 1 GPU")
