@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
@@ -54,7 +55,6 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
-from accelerate.hooks import remove_hook_from_module
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.torch.export import (
     export_hf_checkpoint,
@@ -365,6 +365,9 @@ def auto_quantize(
     else:
 
         def loss_func(output, data):
+            loss = getattr(output, "loss", None)
+            if loss is not None:
+                return loss
             logits = getattr(output, "logits", None)
             labels = data.get("labels") if isinstance(data, dict) else None
             if logits is not None and labels is not None:
@@ -374,7 +377,10 @@ def auto_quantize(
     if auto_quantize_method == "gradient":
 
         def forward_step(model, batch):
-            inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
+            if is_base_model:
+                inputs = {k: v for k, v in batch.items() if k != "labels"}
+            else:
+                inputs = {**batch, "num_items_in_batch": 1}
             return model(**inputs)
 
     elif auto_quantize_method == "kl_div":

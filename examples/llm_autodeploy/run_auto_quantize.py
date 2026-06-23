@@ -91,17 +91,23 @@ def auto_quantize(
     def loss_func(output, data):
         # For transformers AutoModelForCausalLM models, the outputs are wrapped in `CausalLMOutputWithPast`
         # which contains the loss attribute.
+        loss = getattr(output, "loss", None)
+        if loss is not None:
+            return loss
         logits = getattr(output, "logits", None)
         labels = data.get("labels") if isinstance(data, dict) else None
         if logits is not None and labels is not None:
             return _causal_lm_sum_loss(logits, labels)
         return output.loss
 
+    def forward_step(model, batch):
+        return model(**{**batch, "num_items_in_batch": 1})
+
     model, _ = mtq.auto_quantize(
         model,
         constraints={"effective_bits": auto_quantize_bits},
         data_loader=calib_dataloader,
-        forward_step=lambda model, batch: model(**batch),
+        forward_step=forward_step,
         loss_func=loss_func,
         quantization_formats=[SUPPORT_QUANT_FORMAT[quant_format] for quant_format in qformat_list],
         num_calib_steps=len(calib_dataloader),

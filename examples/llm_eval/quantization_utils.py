@@ -107,11 +107,14 @@ def _quantize_model_with_dataset(
         if auto_quantize_method == "gradient":
             # For gradient-based method, return full output with loss
             def forward_step(model, batch):
-                return model(**batch)
+                return model(**{**batch, "num_items_in_batch": 1})
 
             def loss_func(output, data):
                 # For transformers AutoModelForCausalLM models, the outputs are wrapped in `CausalLMOutputWithPast`
                 # which contains the loss attribute.
+                loss = getattr(output, "loss", None)
+                if loss is not None:
+                    return loss
                 logits = getattr(output, "logits", None)
                 labels = data.get("labels") if isinstance(data, dict) else None
                 if logits is not None and labels is not None:

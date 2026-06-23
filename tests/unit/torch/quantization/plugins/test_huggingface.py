@@ -240,10 +240,10 @@ def _tiny_qwen3_autoquantize_candidate_stats(data_loader, num_steps):
     model = get_tiny_qwen3(dtype=torch.float32, num_hidden_layers=1, max_position_embeddings=64)
 
     def forward_step(model, batch):
-        return model(**batch)
+        return model(**{**batch, "num_items_in_batch": 1})
 
-    def loss_func(output, batch):
-        return _causal_lm_sum_loss(output.logits, batch["labels"])
+    def loss_func(output, _batch):
+        return output.loss
 
     with pytest.warns(
         UserWarning,
@@ -262,6 +262,15 @@ def _tiny_qwen3_autoquantize_candidate_stats(data_loader, num_steps):
             method="gradient",
         )
     return search_history["candidate_stats"]
+
+
+def test_autoquantize_huggingface_num_items_in_batch_uses_sum_loss():
+    model = get_tiny_qwen3(dtype=torch.float32, num_hidden_layers=1, max_position_embeddings=64)
+    batch = _qwen3_padded_calib_pair()
+
+    output = model(**{**batch, "num_items_in_batch": 1})
+
+    torch.testing.assert_close(output.loss, _causal_lm_sum_loss(output.logits, batch["labels"]))
 
 
 def test_autoquantize_huggingface_scores_are_batch_size_invariant_with_padding():
