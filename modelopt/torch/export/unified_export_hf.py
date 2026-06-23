@@ -859,9 +859,14 @@ def _export_transformers_checkpoint(
                 elif hasattr(sub_module.experts, "gate_up_proj_weight_quantizers"):
                     # _QuantFusedExperts: amax fallback is handled in _export_fused_experts
                     break
-                elif "QuantGptOssExperts" in type(sub_module.experts).__name__:
-                    # Handle GPT-OSS experts specifically
-                    # GPT-OSS experts use gate_up_proj and down_proj
+                elif (
+                    "QuantGptOssExperts" in type(sub_module.experts).__name__
+                    or "QuantLlama4TextExperts" in type(sub_module.experts).__name__
+                ):
+                    # Handle GPT-OSS / Llama4 fused experts specifically.
+                    # Both use gate_up_proj and down_proj with singular input quantizers
+                    # (gate_up_proj_input_quantizer/down_proj_input_quantizer); the actual
+                    # amax fallback and weight export is performed in _process_quantized_modules.
                     gpt_oss_linear_names = ["gate_up_proj", "down_proj"]
                     for linear_name in gpt_oss_linear_names:
                         if hasattr(sub_module.experts, linear_name):
