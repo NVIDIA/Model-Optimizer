@@ -16,6 +16,7 @@
 """Model optimization and deployment subpackage for torch."""
 
 import importlib
+import importlib.util
 import warnings as _warnings
 
 from packaging.version import Version as _Version
@@ -54,6 +55,15 @@ try:
         _warnings.warn(
             f"transformers {_transformers_version} is not tested with current version of modelopt and may cause issues."
             " Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.",
+        )
+
+    # CVE-2026-4372: transformers<5.3 + the optional `kernels` package allows remote code execution
+    # when loading untrusted models via the Hub kernel-download path. Fixed in 5.3.0. Only warn if
+    # `kernels` is actually installed, since ModelOpt's core install never pulls it in.
+    if _Version(_transformers_version) < _Version("5.3") and importlib.util.find_spec("kernels"):
+        _warnings.warn(
+            f"transformers {_transformers_version} with the `kernels` package is affected by"
+            ' CVE-2026-4372; consider `pip install -U "transformers>=5.3"` when loading untrusted models.',
         )
 except ImportError:
     pass

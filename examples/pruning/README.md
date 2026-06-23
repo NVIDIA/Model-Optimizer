@@ -12,15 +12,15 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 
 <div align="center">
 
-| **Section** | **Description** | **Link** | **Docs** |
-| :------------: | :------------: | :------------: | :------------: |
-| Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
-| Getting Started | Learn how to use the pruning API | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/3_pruning.html)\] |
-| Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] | |
-| Examples | Examples of different pruning methods | \[[Link](#examples)\] | |
-| Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] | |
-| Tutorials / Results | End-to-end tutorials for Minitron and Puzzletron pruning | \[[Link](#tutorials--results)\] | |
-| Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
+| **Section** | **Description** | **Link** |
+| :------------: | :------------: | :------------: |
+| Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] |
+| Getting Started | Learn how to use the pruning API | \[[Link](#getting-started)\] |
+| Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] |
+| Examples | Examples of different pruning methods | \[[Link](#examples)\] |
+| Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] |
+| Tutorials / Results | End-to-end tutorials for Minitron and Puzzletron pruning | \[[Link](#tutorials--results)\] |
+| Resources | Extra links to relevant resources | \[[Link](#resources)\] |
 
 </div>
 
@@ -174,10 +174,19 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 | **Algorithm** | **Model** | **Pruning Constraints** |
 | :---: | :---: | :---: |
-| Minitron | Megatron-core (M-LM, M-Bridge) based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | **Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values<br>**Auto:** one or more of `params`, `active_params`, `memory_mb` (requires `score_func` in config) |
+| Minitron | Megatron-core<sup>1</sup> (M-Bridge, M-LM) based dense / MoE / hybrid Mamba-Transformer LLMs<sup>2</sup> | **Auto:** one or more of `params`, `active_params`, `memory_mb` <br>**Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`<sup>3</sup>, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values |
+| Puzzletron | Hugging Face based dense / MoE / hybrid Mamba-Transformer LLMs & VLMs<sup>4</sup> | **Target:** one or more of `target_memory`, `num_params`, `target_latency_seconds`<br>**Heterogeneous (per-layer) search dimensions:**<sup>5</sup> FFN `intermediate_size` (different sizes per layer), attention `op`/`no_op` (selective attention-layer removal) and KV heads (GQA grouping), `hidden_size`, and MoE `num_experts` (expert removal) |
 | FastNAS | Computer Vision models | `flops`, `params` |
 
-> *<sup>1.</sup>Only models in Pipeline Parallelism (PP) are supported. Hugging Face models can be imported into M-Bridge/M-LM format as long as they are [supported](https://docs.nvidia.com/nemo/megatron-bridge/latest/index.html#supported-models) by the framework.*
+> *<sup>1.</sup>Hugging Face models can be imported into M-Bridge/M-LM format as long as they are [supported](https://docs.nvidia.com/nemo/megatron-bridge/latest/index.html#supported-models) by the framework.*
+
+> *<sup>2.</sup>Language model part of VLMs can be pruned as well.*
+
+> *<sup>3.</sup>`num_attention_heads` pruning is not supported for some attention types — GatedDeltaNet (linear attention), gated attention (`attention_output_gate`, e.g. Qwen3.5) and Multi-Latent Attention (MLA, e.g. DeepSeek); for these only `hidden_size` is pruned.*
+
+> *<sup>4.</sup>Puzzletron operates on Hugging Face checkpoints via its `AnyModel` abstraction. New architectures can be added by writing a model descriptor + converter — see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md). Available configs are in the Puzzletron [configs](../puzzletron/configs/) directory.*
+
+> *<sup>5.</sup>The MIP search produces a heterogeneous architecture (dimensions can differ per layer). Which dimensions are searched is model- and config-dependent.*
 
 ## Examples
 
@@ -300,7 +309,7 @@ End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletr
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
 - 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)

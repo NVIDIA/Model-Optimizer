@@ -88,11 +88,13 @@ python export.py --pyt_ckpt_path qwen3-8b-qad-nvfp4 --export_path qwen3-8b-qad-d
 Exported checkpoints can be deployed on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang). See [llm_ptq/README.md](../llm_ptq/README.md#deployment) for deployment instructions. For quick accuracy evaluation without exporting, see [Native Fake-Quantized Evaluation](#native-fake-quantized-evaluation).
 
 > [!NOTE]
-> To see the full QAT flow in a single script (quantize + train + save), see [simple_qat_train.py](simple_qat_train.py):
+> For a minimal end-to-end demo (quantize + train + save in one script), see [simple_qat_train.py](simple_qat_train.py). It runs on a **single GPU** only and is intended as a quick introduction to the QAT flow (without transformer trainer)—not for distributed training.
 >
 > ```sh
 > python simple_qat_train.py --model-path meta-llama/Llama-3.2-3B --recipe general/ptq/nvfp4_default-kv_fp8
 > ```
+>
+> For multi-GPU training (FSDP2, DDP, DeepSpeed), use [train.py](train.py) with `accelerate launch` as shown in the [commands](#qat) above.
 
 > [!TIP]
 > For more performant QAD, please refer to [examples/megatron_bridge/README.md](../megatron_bridge/README.md) for example scripts for PTQ / QAD with Megatron-Bridge which is generally more performant than the Hugging Face scripts.
@@ -352,7 +354,7 @@ See [llm_eval/README.md](../llm_eval/README.md) for supported tasks.
 
 ## Resources
 
-- [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - [Documentation](https://nvidia.github.io/Model-Optimizer)
 - [Benchmarks](../benchmark.md)
 - [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)

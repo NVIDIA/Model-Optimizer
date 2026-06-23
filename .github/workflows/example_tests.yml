@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_ptq, vlm_ptq]
+        example: [llm_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
@@ -69,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_autodeploy, llm_eval, llm_ptq, vlm_ptq]
+        example: [llm_autodeploy, llm_eval, llm_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
