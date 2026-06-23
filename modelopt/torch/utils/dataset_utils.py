@@ -1231,7 +1231,17 @@ def create_forward_loop(
 
 
 def model_type_is_enc_dec(model):
-    enc_dec_model_list = ["t5", "bart", "whisper"]
+    # Substring match against `model.__class__.__name__.lower()` — entries are
+    # the lowercased class-name form (no underscores). Calibration then uses
+    # `model.generate` to run the full denoising loop.
+    #
+    # Note: this list intentionally diverges from ``is_enc_dec`` in
+    # ``examples/llm_ptq/example_utils.py`` (which keys by ``model_type``
+    # string and is used for preview-decode slicing). DiffusionGemma is
+    # included here so calibration uses ``.generate()`` end-to-end, but
+    # deliberately excluded there so the preview decode treats its
+    # prompt+canvas output as AR-style.
+    enc_dec_model_list = ["t5", "bart", "whisper", "diffusiongemma"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
 
 

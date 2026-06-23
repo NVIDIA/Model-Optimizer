@@ -71,6 +71,15 @@ def load_cpp_extension(
             f" does not satisfy the specifiers {cuda_version_specifiers}."
         )
     else:
+        if os.name == "nt":
+            # Define USE_CUDA so PyTorch's compiled_autograd.h takes its Windows-safe branch;
+            # otherwise, nvcc + MSVC fail with "error C2872: 'std': ambiguous symbol".
+            # See https://github.com/pytorch/pytorch/issues/148317
+            for key in ("extra_cflags", "extra_cuda_cflags"):
+                flags = list(load_kwargs.get(key, []))
+                if not any("USE_CUDA" in flag for flag in flags):
+                    flags.append("-DUSE_CUDA=1")
+                load_kwargs[key] = flags
         try:
             ext = load(name, sources, **load_kwargs)
         except Exception as e:

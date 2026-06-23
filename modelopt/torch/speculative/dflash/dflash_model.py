@@ -15,7 +15,11 @@
 
 """DFlash model to support block-wise parallel speculative decoding."""
 
+import logging
+
 from modelopt.torch.opt.dynamic import DynamicModule
+
+logger = logging.getLogger(__name__)
 
 
 class DFlashModel(DynamicModule):
@@ -31,6 +35,15 @@ class DFlashModel(DynamicModule):
         self.dflash_block_size = config.dflash_block_size
         self.dflash_freeze_base_model = config.dflash_freeze_base_model
         self.dflash_loss_decay_factor = config.dflash_loss_decay_factor
+        self.dflash_loss_objective = config.dflash_loss_objective
+        self.dflash_dpace_alpha = config.dflash_dpace_alpha
+        # dflash_dpace_alpha range is validated on DFlashConfig at construction time.
+        if self.dflash_loss_objective == "dpace" and self.dflash_loss_decay_factor > 0:
+            logger.warning(
+                "dflash_loss_decay_factor=%s is ignored when dflash_loss_objective='dpace'; "
+                "D-PACE derives per-position weights dynamically from draft confidence.",
+                self.dflash_loss_decay_factor,
+            )
         self.dflash_self_logit_distillation = config.dflash_self_logit_distillation
         self.dflash_num_anchors = config.dflash_num_anchors
         self.dflash_report_acc = config.dflash_report_acc

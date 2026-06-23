@@ -23,7 +23,60 @@ import torch
 import torch.nn as nn
 
 
-def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
+def _alias_per_expert_subtree_from_prior(module: nn.Module, prior: nn.Module, n: int) -> None:
+    """Build per-expert subtree on ``module`` by aliasing ``prior``'s packed buffers.
+
+    For each expert ``idx`` in ``0..n-1``, creates ``module.{idx}.{gate,up,down}_proj``
+    sub-modules whose ``weight`` / ``weight_scale`` / ``weight_scale_2`` /
+    ``input_scale`` are aliased to the prior side's already-packed tensors.
+    data_ptr equality is preserved so the downstream
+    ``postprocess_state_dict`` dedup collapses the duplicates at write time.
+    Called by ``_export_fused_experts`` on the tied-experts cache-hit fast path.
+    """
+    for _idx in range(n):
+        _prior_expert = getattr(prior, str(_idx), None)
+        if _prior_expert is None:
+            continue
+        _cur_expert = nn.Module()
+        for _proj_name in ("gate_proj", "up_proj", "down_proj"):
+            _prior_proj = getattr(_prior_expert, _proj_name, None)
+            if _prior_proj is None:
+                continue
+            _cur_proj = nn.Module()
+            if hasattr(_prior_proj, "weight"):
+                _cur_proj.weight = _prior_proj.weight
+            for _attr in ("weight_scale", "weight_scale_2", "input_scale"):
+                if hasattr(_prior_proj, _attr):
+                    _cur_proj.register_buffer(_attr, getattr(_prior_proj, _attr))
+            _cur_expert.add_module(_proj_name, _cur_proj)
+        module.add_module(str(_idx), _cur_expert)
+
+
+def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
+    """Remove the 3-D fused source params and per-expert quantizer ModuleLists.
+
+    Called once the per-expert subtree exists (either via the fast-path
+    aliases or via the full unpack/pack path) so the redundant fused form
+    doesn't appear in the exported state_dict alongside the per-expert form.
+    """
+    for attr in (
+        "gate_up_proj",
+        "down_proj",
+        "gate_up_proj_weight_quantizers",
+        "gate_up_proj_input_quantizer",
+        "down_proj_weight_quantizers",
+        "down_proj_input_quantizer",
+    ):
+        if hasattr(module, attr):
+            delattr(module, attr)
+
+
+def _export_fused_experts(
+    module: nn.Module,
+    dtype: torch.dtype,
+    _moe_tied_cache: dict[tuple[int, int], nn.Module] | None = None,
+    _tied_cache: dict[int, nn.Module] | None = None,
+) -> None:
     """Split fused MoE expert weights and export per-expert quantization scales.
 
     Works with any module wrapped by ``_QuantFusedExperts`` (gated, with a fused
@@ -43,6 +96,20 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
            {E}.gate_proj.weight, {E}.gate_proj.weight_scale, ...  # gated only
            {E}.up_proj.weight, {E}.up_proj.weight_scale, ...
            {E}.down_proj.weight, {E}.down_proj.weight_scale, ...
+
+    Tied-experts dedup is opt-in via ``_moe_tied_cache``: when multiple
+    fused-expert modules share their 3-D source params via HF
+    ``_tied_weights_keys``, the unpacking creates fresh per-expert tensors
+    that break the tie. With ``_moe_tied_cache`` provided (tuple-keyed by
+    ``(gate_up_proj.data_ptr(), down_proj.data_ptr())``), the alias step
+    at the end re-points the per-expert ``weight`` / ``weight_scale`` /
+    ``weight_scale_2`` / ``input_scale`` buffers at a previously-processed
+    module sharing the same source memory. ``_tied_cache`` (int-keyed) is
+    threaded through to the per-projection ``_export_quantized_weight``
+    calls so wrapper-level dedup uses the same scope as standalone Linears.
+    Both caches are owned by the caller (typically
+    ``_export_transformers_checkpoint``) and scoped to one export
+    invocation; when ``None`` the corresponding alias step is skipped.
     """
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
     from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
@@ -53,6 +120,22 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     # Only the gated split needs the per-expert intermediate dim (gate|up boundary).
     expert_dim = _get_fused_expert_intermediate_dim(module) if is_gated else None
+
+    # Capture source tensor identities BEFORE unpacking (the source
+    # attrs are deleted at the end of this function).
+    _source_key = (module.gate_up_proj.data_ptr(), module.down_proj.data_ptr())
+
+    # Tied-experts fast path: if this exact (gate_up, down) source-tensor pair
+    # has been processed before, alias all per-expert buffers directly from the
+    # prior module — no unpacking, no per-expert packing, no transient buffers
+    # thrown away. Cache miss falls through to the full unpack/pack below and
+    # registers this module as the prior for any later tied module.
+    if _moe_tied_cache is not None:
+        _prior = _moe_tied_cache.get(_source_key)
+        if _prior is not None and _prior is not module:
+            _alias_per_expert_subtree_from_prior(module, _prior, n)
+            _delete_fused_moe_source_attrs(module)
+            return
 
     # 1. Shared input quantizers — one per projection type, shared across all experts.
     gate_up_input_q = module.gate_up_proj_input_quantizer
@@ -173,7 +256,7 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
             wrapper.weight_quantizer = w_quantizer
             wrapper.input_quantizer = i_quantizer
 
-            _export_quantized_weight(wrapper, dtype)
+            _export_quantized_weight(wrapper, dtype, _tied_cache=_tied_cache)
 
             proj = nn.Module()
             proj.weight = wrapper.weight
@@ -186,17 +269,14 @@ def _export_fused_experts(module: nn.Module, dtype: torch.dtype) -> None:
         module.add_module(str(idx), expert)
 
     # 4. Remove fused params and quantizer lists — replaced by per-expert submodules
-    for attr in (
-        "gate_up_proj",
-        first_proj_attr,  # non-gated: "up_proj" (gated: same as gate_up_proj above)
-        "down_proj",
-        "gate_up_proj_weight_quantizers",
-        "gate_up_proj_input_quantizer",
-        "down_proj_weight_quantizers",
-        "down_proj_input_quantizer",
-    ):
-        if hasattr(module, attr):
-            delattr(module, attr)
+    _delete_fused_moe_source_attrs(module)
+
+    # 5. Register this module in the dedup cache so any later tied module
+    # (same source data_ptr pair) takes the fast path at the top of this
+    # function. Reached only on cache miss; cache-hit modules early-exited
+    # above before any unpack work.
+    if _moe_tied_cache is not None:
+        _moe_tied_cache[_source_key] = module
 
 
 def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | None = None):

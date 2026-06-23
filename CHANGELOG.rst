@@ -4,11 +4,33 @@ Changelog
 0.46 (2026-08-xx)
 ^^^^^^^^^^^^^^^^^
 
+**Backward Breaking Changes**
+
+- Remove the ``examples/diffusers/eval`` image-quality evaluation example (ImageReward / CLIP-IQA / CLIP metrics) and its references in ``examples/diffusers/README.md``. The example was deprecated in 0.45 and is no longer maintained.
+
+**Deprecations**
+
+- Consolidated ``examples/vlm_ptq`` into ``examples/llm_ptq``. Vision-language model PTQ now shares the ``hf_ptq.py`` entry point and ``scripts/huggingface_example.sh``; pass ``--vlm`` to run the TensorRT-LLM multimodal quickstart smoke test. The ``examples/vlm_ptq/scripts/huggingface_example.sh`` entry point is deprecated: it now prints a warning and forwards to the ``llm_ptq`` script with ``--vlm``, and will be removed in a future release. See `examples/llm_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#vlm-quantization>`__.
+- Dropped VILA / NVILA vision-language model support in ``examples/llm_ptq``. VILA's modeling code requires ``transformers<=4.50.0``, which conflicts with ModelOpt's minimum supported ``transformers`` version. The VILA-specific bootstrap (repo clone, ``requirements-vila.txt``) and loading paths in ``example_utils.py`` have been removed.
+
 **New Features**
 
+- Add the **D-PACE** loss objective for DFlash speculative-decoding training (`arXiv:2605.18810 <https://arxiv.org/abs/2605.18810>`_) and make it the default (``dflash_loss_objective: dpace``). It replaces the static exponential position decay with dynamic, confidence-derived per-position weights that adapt to whichever block positions currently limit acceptance. Smoothing is controlled by ``dflash_dpace_alpha`` (default 0.5); set ``dflash_loss_objective: decay`` to restore the previous static schedule. Training-only and detached from the gradient (no architecture or inference change).
 - Add the ``day0-release`` agent skill (``.agents/skills/day0-release/``), a deterministic end-to-end driver that chains the PTQ → evaluation → comparison skills (the evaluation stage deploys the checkpoint itself) with an enforced gate after each stage and returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE). Ships three GPU-free, unit-tested gate scripts (``gate_ptq.py``, ``gate_run.py``, ``gate_compare.py``) that validate checkpoint coverage, evaluation-run completeness, and baseline-vs-candidate accuracy threshold. v1 reports and stops on regression; the recipe-search loop is deferred.
 - Add **streaming** speculative-decoding training (EAGLE3 / DFlash): the draft trains on base-model hidden states produced on the fly by a co-located ``vllm serve`` (no disk dump), moved trainer-side over NIXL RDMA, scaling to multi-node (dedicated serve replicas + DDP trainers). New launcher examples for NVFP4 Kimi-K2.5 / K2.6 on GB200/aarch64 under ``tools/launcher/examples/moonshotai/``.
 - Add a fused Triton fast path for ``local_hessian`` NVFP4 weight-scale search (the Hessian-weighted FP8-E4M3 scale sweep). For each NVFP4 block it minimizes ``dwᵀ H dw`` over the 126 candidate scales using the per-cin-block local Hessian on tensor cores, replacing the per-weight Python reference sweep — roughly **34x** faster on a single 8192x4096 weight and bit-exact with the reference for fp32/fp16 weights. Used automatically during ``local_hessian`` calibration for both dense and fused-MoE expert weights; falls back to the reference sweep on CPU, when Triton is unavailable, or via ``MODELOPT_NVFP4_TRITON_SWEEP=0``.
+- Add Minitron pruning support for Megatron-Core models with the following new attention and MoE variants. For these, only ``hidden_size`` is pruned (alongside the usual ``ffn_hidden_size`` / ``num_layers`` / MoE dimensions); the variant-internal dimensions noted below are not pruned:
+
+  - **GatedDeltaNet** (linear attention) and **gated attention** (``attention_output_gate``), such as Qwen3.5 (hybrid GatedDeltaNet + gated-attention) language models, including MoE variants — attention / linear-attention heads are not pruned.
+  - **Multi-Latent Attention (MLA)**, such as DeepSeek — MLA latent ranks are not pruned.
+  - **Latent MoE**, such as Nemotron-3-Super — ``hidden_size`` pruning resizes the latent projections while the MoE latent dim itself is not pruned.
+- Add dLLM (tied-weight PTQ and HF-checkpoint export) support for diffusion-based encoder-decoder LLMs (e.g. DiffusionGemma) whose encoder/decoder stacks share parameters via HF ``_tied_weights_keys``.
+
+  - **Deduplicate the modules shared at source** in the quantized export step: ``_export_quantized_weight`` and ``_export_fused_experts`` now alias bit-identical packed ``weight`` / ``weight_scale`` / ``weight_scale_2`` buffers across modules sharing a source weight ``data_ptr()`` so the downstream ``postprocess_state_dict`` dedup catches them (~42% storage reduction on ``nvfp4_experts_only`` for tied 26B MoE checkpoints).
+  - New ``sync_tied_input_amax`` helper max-merges per-side ``input_quantizer.amax`` across tied modules before export so single-backbone consumers that load one ``input_scale`` per parameter don't clip either side.
+  - The exported state_dict is also **reordered (decoder keys win instead of encoder)** so canonical-side keys per HF's ``_tied_weights_keys`` declaration win the data_ptr dedup; gated to the DiffusionGemma model class in ``_reorder_canonical_first``, no-op for every other model.
+  - New DiffusionGemma model-specific recipe under ``modelopt_recipes/huggingface/diffusion_gemma/ptq/`` (``nvfp4_experts_only.yaml`` + its ``disabled_quantizers.yaml`` unit) adds the ``*self_conditioning*`` exclude on top of the standard default, leaving the shared ``default_disabled_quantizers`` unit clean for non-diffusion models — pattern matches the existing ``phi4mm`` / ``nemotron_vl`` model-specific recipes.
+  - ``hf_ptq.py`` also unwraps ``ModelOutput`` dataclasses from ``.generate()`` so the preview decode works on diffusion models. Non-tied models see no behavioral change.
 
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^
@@ -63,6 +85,9 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ``KDTrainer`` / ``QADTrainer`` evaluation now reports KD as the primary
+  ``eval_loss`` and CE as ``eval_ce_loss``; the previous secondary
+  ``eval_kd_loss`` metric is removed.
 - Reorganize custom CUDA / Triton kernels under ``modelopt.torch.kernels`` into ``common/attention``, ``quantization/{conv,gemm}``, and ``sparsity/attention``. High-level APIs (``mtq.quantize``, ``mtsa.sparsify``, etc.) are unchanged, but **any code importing directly from the kernel subpackages must be updated**: there is no backwards-compatibility shim; the old import paths will raise ``ImportError`` / ``ModuleNotFoundError``. Migration table:
 
   - ``from modelopt.torch.kernels import IS_AVAILABLE, attention, attention_calibrate, register_triton_attention`` → ``from modelopt.torch.kernels.common.attention import ...``
@@ -79,6 +104,10 @@ Changelog
 **Deprecations**
 
 - Deprecate the public ``QuantizationArgumentsWithConfig`` name in ``modelopt.torch.quantization.plugins.transformers_trainer``; it now aliases ``QuantizationArguments`` and will be removed in a future release.
+- Deprecate ``examples/llm_autodeploy``. The AutoQuant + TensorRT-LLM AutoDeploy
+  workflow it demonstrates will be removed in a future release; use TensorRT-LLM's
+  `AutoDeploy <https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy>`_
+  directly together with ModelOpt PTQ in ``examples/llm_ptq``.
 
 **Bug Fixes**
 
