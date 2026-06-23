@@ -179,7 +179,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
     original_quantization_details = input_config.get("quantization", {})
     quant_algo_value = original_quantization_details.get("quant_algo")
 
-    # FP8_PB (block-wise FP8, W8A8): emit the flat ``quant_method: fp8`` config
+    # FP8_PB (block-wise FP8, W8A8): emit the native ``quant_method: fp8`` config
     # vLLM/SGLang expect (weight_scale_inv + dynamic activations), matching the
     # official Qwen3.5 FP8 checkpoint.
     if quant_algo_value == "FP8_PB":

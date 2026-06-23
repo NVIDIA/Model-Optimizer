@@ -530,17 +530,15 @@ def get_quantization_format(module) -> str | None:
         if weight_quantizer.num_bits == (4, 3):
             if weight_quantizer.block_sizes:
                 assert weight_quantizer.block_sizes[-1] > 0, "Invalid block_sizes for FP8 quantizer"
-                # MXFP8: dynamic block quant with E8M0 (scale_bits (8, 0)) scales.
-                block_sizes = weight_quantizer.block_sizes
+                # Check if this is MXFP8 (dynamic block quantization with scale_bits (8, 0))
+                block_sizes = getattr(weight_quantizer, "block_sizes")
                 if (
                     isinstance(block_sizes, dict)
                     and block_sizes.get("type", "static") == "dynamic"
                     and block_sizes.get("scale_bits") == (8, 0)
                 ):
                     return QUANTIZATION_MXFP8
-                # Block FP8. _REAL = pre-packed weights; else fake-quant PTQ.
-                # Input quantizer enabled -> W8A8 (dynamic activations at serve);
-                # disabled -> FP8_PB_WO (unchanged from main).
+                # Block FP8: input quantizer enabled -> W8A8, else weight-only.
                 if not weight_quantizer.fake_quant:
                     return QUANTIZATION_FP8_PB_REAL
                 if input_quantizer is not None and input_quantizer.is_enabled:
@@ -764,7 +762,7 @@ def process_layer_quant_config(layer_config_dict):
                 "group_size": block_size_value,
             }
         elif v == "fp8_pb_w8a8":
-            # Block-wise FP8 W8A8 -> flat quant_method: fp8.
+            # Block-wise FP8, W8A8 at serve time.
             layer_config = {
                 "quant_algo": "FP8_PB",
                 "group_size": block_size_value,
