@@ -46,7 +46,7 @@ jobs:
             container_image: nvcr.io/nvidia/nemo:26.06
           - example: gpu_trtllm
             timeout: 15
-            container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc17
+            container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc19
           - example: gpu_vllm
             timeout: 15
             container_image: docker.io/vllm/vllm-openai:v0.20.0
