@@ -63,13 +63,10 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
     first_proj_weight_quantizers_attr = f"{first_proj_attr}_weight_quantizers"
     first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
     for attr in (
-        "gate_up_proj",
         first_proj_attr,
-        "down_proj",
-        "gate_up_proj_weight_quantizers",
         first_proj_weight_quantizers_attr,
-        "gate_up_proj_input_quantizer",
         first_proj_input_quantizer_attr,
+        "down_proj",
         "down_proj_weight_quantizers",
         "down_proj_input_quantizer",
     ):

@@ -196,6 +196,16 @@ class _TinyNonGatedMoEModel(nn.Module):
         return self.moe(x)
 
 
+def _route_once_to_each_expert(model):
+    """Call fused experts directly with deterministic routing that covers every expert."""
+    assert NUM_EXPERTS % TOP_K == 0
+    seq_len = NUM_EXPERTS // TOP_K
+    hidden_states = torch.randn(seq_len, HIDDEN_DIM)
+    top_k_index = torch.arange(NUM_EXPERTS, dtype=torch.long).reshape(seq_len, TOP_K)
+    top_k_weights = torch.ones(seq_len, TOP_K) / TOP_K
+    model.moe.experts(hidden_states, top_k_index, top_k_weights)
+
+
 # ---------------------------------------------------------------------------
 # Tests for _is_fused_experts_module
 # ---------------------------------------------------------------------------
@@ -322,7 +332,7 @@ class TestQuantFusedExperts:
 
         for idx in range(NUM_EXPERTS):
             weight_slice = converted.gate_up_proj[idx]
-            recovered_idx = converted._get_expert_idx_from_gate_up(weight_slice)
+            recovered_idx = converted._get_expert_idx_from_first_proj(weight_slice)
             assert recovered_idx == idx, f"Expected {idx}, got {recovered_idx}"
         self._cleanup_registry(expert_type)
 
@@ -367,9 +377,7 @@ class TestExportFusedExperts:
 
         def forward_loop(m):
             torch.manual_seed(0)
-            for _ in range(2):
-                x = torch.randn(1, 4, HIDDEN_DIM)
-                m(x)
+            _route_once_to_each_expert(m)
 
         mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
         converted = model.moe.experts
@@ -823,9 +831,7 @@ class TestFusedExpertsCalibration:
 
         def forward_loop(m):
             torch.manual_seed(0)
-            for _ in range(2):
-                x = torch.randn(1, 4, HIDDEN_DIM)
-                m(x)
+            _route_once_to_each_expert(m)
 
         mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
 
@@ -1224,7 +1230,7 @@ class TestNonGatedFusedExperts:
             converted = QuantModuleRegistry.convert(experts)
             for idx in range(NUM_EXPERTS):
                 weight_slice = converted.up_proj[idx]
-                assert converted._get_expert_idx_from_gate_up(weight_slice) == idx
+                assert converted._get_expert_idx_from_first_proj(weight_slice) == idx
         finally:
             self._cleanup_registry(expert_type)
 
@@ -1259,8 +1265,7 @@ class TestNonGatedFusedExperts:
 
         def forward_loop(m):
             torch.manual_seed(0)
-            for _ in range(2):
-                m(torch.randn(1, 4, HIDDEN_DIM))
+            _route_once_to_each_expert(m)
 
         try:
             mtq.quantize(model, self._nongated_fp8_cfg(), forward_loop=forward_loop)

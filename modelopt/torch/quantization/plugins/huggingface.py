@@ -889,7 +889,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
     def _first_proj_weight_quantizers_attr(self) -> str:
         return f"{self._first_proj_attr}_weight_quantizers"
 
-    def _get_expert_idx_from_gate_up(self, weight: torch.Tensor) -> int:
+    def _get_expert_idx_from_first_proj(self, weight: torch.Tensor) -> int:
         """Recover expert index from a first-projection weight slice's storage offset.
 
         When HF indexes ``<first_proj>[idx]``, the result is a view sharing the
@@ -938,7 +938,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                 input = self.down_proj_input_quantizer(input)
                 weight = self.down_proj_weight_quantizers[idx](weight)
             else:
-                idx = self._get_expert_idx_from_gate_up(weight)
+                idx = self._get_expert_idx_from_first_proj(weight)
                 self._current_expert_idx = idx
                 input = getattr(self, self._first_proj_input_quantizer_attr)(input)
                 weight = getattr(self, self._first_proj_weight_quantizers_attr)[idx](weight)
@@ -1540,12 +1540,7 @@ def _fused_experts_wrapper_class(module):
         return _QuantFusedExperts
     up = getattr(module, "up_proj", None)
     if isinstance(up, (nn.Parameter, Tensor)) and up.dim() == 3:
-        # Strictly single up_proj/down_proj only. A split-gated container with a
-        # separate gate projection (3-D gate_proj or gate_up_proj) makes three
-        # F.linear calls per expert, which would break _QuantNonGatedFusedExperts'
-        # two-call toggle and its up_proj-storage expert-index recovery. Such a
-        # layout is unsupported here (falls through to None) rather than silently
-        # mis-quantizing the wrong projection.
+        # Only claim non-gated experts that alternate up_proj then down_proj.
         if getattr(module, "gate_proj", None) is None and gate_up is None:
             return _QuantNonGatedFusedExperts
     return None
