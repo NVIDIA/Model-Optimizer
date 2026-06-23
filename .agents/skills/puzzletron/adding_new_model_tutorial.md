@@ -207,3 +207,86 @@ Results from: /workspace/puzzle_dir_qwen3_5-0.8b/mip_sweep_results.csv
 ```
 
 Use this table to pick the compression rate that best meets your accuracy/memory budget.
+
+---
+
+### Step 7: Run MMLU eval on all checkpoints
+
+After the sweep you have 7 compressed checkpoints plus the teacher. Evaluate all of them on MMLU (5-shot) to get an external benchmark score alongside the internal sweep losses.
+
+> **User:** evaluate all checkpoints on MMLU
+
+Claude first lists the available checkpoints:
+
+```text
+/puzzletron eval list
+```
+
+Example output:
+
+```text
+#     Label           MMLU    Path
+--------------------------------------------------------------------------------------------
+0     teacher                 /workspace/hf_models/Qwen/Qwen3.5-0.8B
+1     10,000 MiB              .../target_memory_10000MiB.../solution_0
+2     10,194 MiB              .../target_memory_10194_.../solution_0
+3     12,233 MiB              .../target_memory_12233_.../solution_0
+4     14,272 MiB              .../target_memory_14272_.../solution_0
+5     16,311 MiB              .../target_memory_16310_.../solution_0
+6     18,350 MiB              .../target_memory_18349_.../solution_0
+7     20,389 MiB              .../target_memory_20388_.../solution_0
+
+Usage: /puzzletron eval mmlu <index>
+       /puzzletron eval mmlu <index> --limit 10   (smoke test)
+```
+
+Then runs all 8 checkpoints sequentially in a background task (`/puzzletron eval mmlu 0` through `7`). Results are saved next to each checkpoint at `<checkpoint>/eval_results/mmlu/`.
+
+> **User:** show eval progress
+
+```text
+/puzzletron eval progress
+```
+
+Example output mid-run:
+
+```text
+MMlu eval progress  (3/8 done)
+──────────────────────────────────────────────────────────────────
+  Status      Checkpoint       MMLU acc  Path
+──────────────────────────────────────────────────────────────────
+  [DONE]      teacher            0.5038  /workspace/hf_models/Qwen/Qwen3.5-0.8B
+  [DONE]      10,000 MiB         0.2365  .../target_memory_10000MiB.../solution_0
+  [DONE]      10,194 MiB         0.2417  .../target_memory_10194_.../solution_0
+  [RUNNING]   12,233 MiB            ...  .../target_memory_12233_.../solution_0
+  [ ]         14,272 MiB        pending
+  [ ]         16,311 MiB        pending
+  [ ]         18,350 MiB        pending
+  [ ]         20,389 MiB        pending
+──────────────────────────────────────────────────────────────────
+  Done:    3/8
+  Running: 12,233 MiB
+  Pending: 14,272 MiB, 16,311 MiB, 18,350 MiB, 20,389 MiB
+```
+
+> **User:** show both in one table
+
+Claude joins the sweep CSV with the per-checkpoint MMLU JSON results:
+
+```text
+  rate    target_mem    actual_mem     num_params   lm_loss   top_1   top_5  top_10    MMLU
+----------------------------------------------------------------------------------------------------
+  teacher                                                                               0.5038
+    0.50      10,194.4      10,143.3    888,813,280    3.2367  0.3663  0.6384  0.7251  0.2417
+    0.60      12,233.2      11,719.5    909,901,856    2.6377  0.4434  0.7198  0.7981  0.2446
+    0.70      14,272.1      14,083.8    941,534,720    1.8532  0.5855  0.8176  0.8735  0.2374
+    0.80      16,311.0      15,660.1    962,623,296    1.5385  0.6448  0.8576  0.9046  0.2636
+    0.90      18,349.9      18,024.4    994,256,160    1.2447  0.7064  0.8914  0.9278  0.3119
+    1.00      20,388.7      20,388.7  1,025,889,024    1.1067  0.7365  0.9079  0.9399  0.5038
+```
+
+**Key observations for Qwen3.5-0.8B:**
+
+- The 1.0 rate (20,389 MiB) matches teacher MMLU exactly (0.5038) — a useful sanity check.
+- Below rate 0.9, MMLU drops to ~0.24 (near random chance for 4-choice) even though token-level `top_1` still improves steadily. MMLU is a much stricter signal than token accuracy.
+- The 0.9 rate (18,350 MiB, ~90 % of teacher memory) is the only compressed model with any meaningful MMLU recovery (0.31).

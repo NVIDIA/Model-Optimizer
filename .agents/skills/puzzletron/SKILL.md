@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model. Usage: /puzzletron <command> [args]"
+description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu). Usage: /puzzletron <command> [args]"
 license: Apache-2.0
 ---
 
@@ -11,7 +11,7 @@ license: Apache-2.0
 **STEP 1 — Check args before doing anything else. This is MANDATORY.**
 
 - If args are **empty**, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
-- If the first word of args does **not exactly match** `mip`, `all`, or `add-model`, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
+- If the first word of args does **not exactly match** `mip`, `all`, `add-model`, or `eval`, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
 
 ---
 
@@ -25,6 +25,9 @@ Available commands:
 - `all <nproc_per_node>` — Run the full Puzzletron pipeline (nproc_per_node: number of GPUs per node)
 - `all progress` — Show live full pipeline progress with timing summary
 - `add-model <hf_model_path>` — Implement descriptor, converter, and configs for an unsupported model
+- `eval list [puzzle_dir]` — List all available checkpoints (teacher + sweep solutions) with their index numbers; auto-discovers puzzle_dir if omitted
+- `eval progress [puzzle_dir]` — Show per-checkpoint MMLU eval status and accuracy; auto-discovers puzzle_dir if omitted
+- `eval mmlu <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); pass index from `eval list` or a direct path; add `--limit N` for a smoke test
 
 Usage: `/puzzletron <command> [args]`
 
@@ -48,7 +51,7 @@ Parse `nproc_per_node` from args using either positional or flag syntax:
 Run the following Bash command, substituting `<nproc_per_node>` with the parsed value:
 
 ```bash
-set -o pipefail && export PYTHONPATH=$PYTHONPATH:/workspace/Model-Optimizer && \
+set -o pipefail && export PYTHONPATH=$PYTHONPATH:. && \
 torchrun --nproc_per_node <nproc_per_node> examples/puzzletron/main.py \
   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml \
   2>&1 | tee ./log.txt | grep "Puzzletron Progress"
@@ -82,7 +85,7 @@ Parse `nproc_per_node` from args using either positional or flag syntax:
 Run the following Bash command, substituting `<nproc_per_node>` with the parsed value:
 
 ```bash
-set -o pipefail && export PYTHONPATH=$PYTHONPATH:/workspace/Model-Optimizer && \
+set -o pipefail && export PYTHONPATH=$PYTHONPATH:. && \
 torchrun --nproc_per_node <nproc_per_node> examples/puzzletron/main.py \
   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml \
   --mip-only 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
@@ -113,6 +116,73 @@ Run the following Bash command. Present the output to the user wrapped in a fenc
 ```bash
 python3 .agents/skills/puzzletron/mip_sweep.py
 ```
+
+## Command: eval
+
+- If the second word is not exactly `list`, `progress`, or `mmlu`, tell the user: "Unknown eval sub-command. Available: `list`, `progress`, `mmlu`." and **STOP**.
+
+### eval list
+
+Parse `puzzle_dir` from args (third word or `--puzzle_dir <value>`). It is optional.
+
+Run the following Bash command, including `<puzzle_dir>` as an argument when provided, or omitting it to trigger auto-discovery:
+
+```bash
+python3 .agents/skills/puzzletron/eval_list.py [<puzzle_dir>]
+```
+
+Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+### eval progress
+
+Parse `puzzle_dir` from args (third word or `--puzzle_dir <value>`). It is optional.
+
+Run the following Bash command, including `<puzzle_dir>` as an argument when provided, or omitting it to trigger auto-discovery:
+
+```bash
+python3 .agents/skills/puzzletron/eval_progress.py [<puzzle_dir>]
+```
+
+Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+### eval mmlu
+
+Parse args:
+- `index_or_path` — third word. If missing, ask: "Please provide a checkpoint index (from `eval list`) or a direct HF model path." and **STOP**.
+- `--puzzle_dir <dir>` — optional; used when resolving an index.
+- If `index_or_path` matches `^[0-9]+$`, resolve it to a path by running `python3 .agents/skills/puzzletron/eval_list.py [<puzzle_dir>]` and picking the Nth entry (0-based) from the output lines. If the index is out of range, tell the user and **STOP**.
+- Otherwise treat `index_or_path` as a literal `hf_model_path`.
+- `--limit <N>` — optional integer; omit the flag entirely if not provided.
+- `--batch_size <B>` — optional integer; default `4` if not provided.
+
+Derive `output_path` as `<hf_model_path>/eval_results/mmlu` (always; not user-configurable).
+
+Run the following Bash command, substituting the parsed values:
+
+```bash
+PYTHONPATH=.:$PYTHONPATH python examples/llm_eval/lm_eval_hf.py \
+  --model hf \
+  --model_args pretrained=<hf_model_path>,dtype=bfloat16,parallelize=True \
+  --tasks mmlu \
+  --num_fewshot 5 \
+  --batch_size <batch_size> \
+  --output_path <hf_model_path>/eval_results/mmlu \
+  [--limit <N>]
+```
+
+(Replace `[--limit <N>]` with the actual `--limit <N>` flag when provided, or omit it.)
+
+**Note on output file location:** lm_eval does not write results directly into `--output_path`. It creates a subdirectory named after the full model path with `/` replaced by `__`, then writes `results_<timestamp>.json` inside it. For example, for a model at `/workspace/foo/bar`, results land at:
+
+```text
+<output_path>/__workspace__foo__bar/results_<timestamp>.json
+```
+
+`eval_progress.py` handles this automatically via a recursive glob.
+
+Stream output to the user as it arrives. When the command finishes:
+- Report the exit code.
+- Show a results summary table with: model path, total questions evaluated, loglikelihood requests, and the mmlu/category accuracy scores parsed from the output.
 
 ## Command: add-model
 
