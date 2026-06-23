@@ -28,6 +28,13 @@ pytest.importorskip("pydantic")
 
 from modelopt_mcp import bridge
 
+
+@pytest.fixture(autouse=True)
+def _disable_managed_source(monkeypatch):
+    """Keep legacy subprocess tests offline unless a test opts into source routing."""
+    monkeypatch.setenv("MODELOPT_MCP_DISABLE_MANAGED_SOURCE", "1")
+
+
 # ---------------------------------------------------------------------------
 # list_examples
 # ---------------------------------------------------------------------------
@@ -268,6 +275,121 @@ def test_submit_job_yaml_not_found(monkeypatch, tmp_path):
     )
     assert result["ok"] is False
     assert result["reason"] == "yaml_not_found"
+
+
+def test_ensure_source_checkout_defaults_to_main(monkeypatch, tmp_path):
+    """Managed source defaults to Model-Optimizer main and the default repo."""
+    monkeypatch.delenv("MODELOPT_MCP_DISABLE_MANAGED_SOURCE", raising=False)
+    monkeypatch.setenv("MODELOPT_MCP_SOURCE_CACHE", str(tmp_path / "cache"))
+    seen = {}
+
+    def fake_resolve(repo, ref):
+        seen["repo"] = repo
+        seen["ref"] = ref
+        return {"ok": True, "resolved_sha": "a" * 40}
+
+    monkeypatch.setattr(bridge, "_resolve_source_ref", fake_resolve)
+    monkeypatch.setattr(bridge, "_checkout_ready", lambda path, sha: True)
+
+    result = bridge._ensure_source_checkout()
+
+    assert result["ok"] is True
+    assert seen["repo"] == "https://github.com/NVIDIA/Model-Optimizer.git"
+    assert seen["ref"] == "main"
+    assert result["checkout"].resolved_sha == "a" * 40
+
+
+def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
+    """Managed source routes launcher execution through uv --project <checkout>."""
+    checkout_root = tmp_path / "checkout"
+    yaml_dir = checkout_root / "tools" / "launcher" / "examples" / "fam" / "model"
+    yaml_dir.mkdir(parents=True)
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    checkout = bridge.SourceCheckout(
+        repo="https://example.com/modelopt.git",
+        ref="feature/ref",
+        resolved_sha="b" * 40,
+        root=checkout_root,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ensure_source_checkout",
+        lambda **_: {"ok": True, "checkout": checkout},
+    )
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Dry-run OK\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="fam/model/config.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+        source_ref="feature/ref",
+    )
+
+    assert result["ok"] is True
+    assert result["source_ref"] == "feature/ref"
+    assert result["source_sha"] == "b" * 40
+    assert captured["argv"][:5] == [
+        "uv",
+        "run",
+        "--project",
+        str(checkout_root / "tools" / "launcher"),
+        "modelopt-launcher",
+    ]
+    assert str(yaml_path) in captured["argv"]
+    assert captured["env"]["MODELOPT_MCP_SOURCE_ROOT"] == str(checkout_root)
+    assert captured["env"]["MODELOPT_MCP_SOURCE_SHA"] == "b" * 40
+
+
+def test_submit_job_source_checkout_failure_short_circuits(monkeypatch):
+    """Source checkout failures return structured diagnostics and do not launch."""
+    monkeypatch.setattr(
+        bridge,
+        "_ensure_source_checkout",
+        lambda **_: {
+            "ok": False,
+            "reason": "source_ref_not_found",
+            "diagnostic": "missing ref",
+        },
+    )
+
+    result = bridge.submit_job_impl(
+        yaml_path="examples/test.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+        source_ref="ghost",
+    )
+
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+    assert result["reason"] == "source_ref_not_found"
 
 
 def test_submit_job_slurm_zero_exit_without_ids_is_failure(monkeypatch, tmp_path):

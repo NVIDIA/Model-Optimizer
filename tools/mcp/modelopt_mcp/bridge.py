@@ -33,8 +33,10 @@ need — keeps the surface area auditable.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import shutil
 import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
 import time
 from dataclasses import dataclass
@@ -46,6 +48,9 @@ import yaml
 # path. Works for both editable installs (../launcher/examples/) and
 # uvx-from-git installs (the launcher is a sibling site-packages install).
 _THIS_DIR = Path(__file__).resolve().parent
+
+_DEFAULT_SOURCE_REPO = "https://github.com/NVIDIA/Model-Optimizer.git"
+_DEFAULT_SOURCE_REF = "main"
 
 # Canonical task-status failure tokens — matched against the FIRST word
 # of each ``status_<task>.out`` file by ``job_status_impl``.
@@ -59,6 +64,29 @@ _LAUNCHER_ERROR_RE = re.compile(
     r"(?:^|\n)(?:Unexpected error:|Error processing argument )",
     re.IGNORECASE,
 )
+
+_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_SAFE_PATH_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+@dataclass
+class SourceCheckout:
+    """A managed Model-Optimizer checkout used for one launcher invocation."""
+
+    repo: str
+    ref: str
+    resolved_sha: str
+    root: Path
+
+    @property
+    def launcher_dir(self) -> Path:
+        """Return the launcher package directory inside this checkout."""
+        return self.root / "tools" / "launcher"
+
+    @property
+    def examples_dir(self) -> Path:
+        """Return the launcher examples directory inside this checkout."""
+        return self.launcher_dir / "examples"
 
 
 def _launcher_reported_error(stdout: str, stderr: str) -> bool:
@@ -125,6 +153,19 @@ def _find_launcher_package_dir() -> Path | None:
 
 def _launcher_not_installed(argv: list[str]) -> dict:
     """Structured failure when the ``modelopt-launcher`` binary is not on PATH."""
+    if argv and argv[0] == _uv_binary():
+        return {
+            "ok": False,
+            "reason": "uv_not_installed",
+            "diagnostic": (
+                "`uv` was not found on PATH. Managed Model-Optimizer source "
+                "checkouts use `uv run --project <checkout>/tools/launcher "
+                "modelopt-launcher ...`. Install uv or set "
+                "MODELOPT_MCP_DISABLE_MANAGED_SOURCE=1 to use the installed "
+                "`modelopt-launcher` entrypoint directly."
+            ),
+            "argv": argv,
+        }
     return {
         "ok": False,
         "reason": "launcher_not_installed",
@@ -135,6 +176,299 @@ def _launcher_not_installed(argv: list[str]) -> dict:
         ),
         "argv": argv,
     }
+
+
+# ---------------------------------------------------------------------------
+# Managed Model-Optimizer source checkouts
+# ---------------------------------------------------------------------------
+
+
+def _uv_binary() -> str:
+    """Return the uv executable used for managed-source launcher runs."""
+    return os.environ.get("MODELOPT_MCP_UV", "uv")
+
+
+def _source_cache_root() -> Path:
+    """Return the root directory for MCP-managed source checkouts."""
+    env = os.environ.get("MODELOPT_MCP_SOURCE_CACHE")
+    if env:
+        return Path(env).expanduser()
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg_cache).expanduser() if xdg_cache else Path.home() / ".cache"
+    return base / "modelopt-mcp" / "sources"
+
+
+def _source_disabled() -> bool:
+    """Return True when callers explicitly opt out of managed source checkouts."""
+    return os.environ.get("MODELOPT_MCP_DISABLE_MANAGED_SOURCE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _sanitize_path_token(value: str, *, fallback: str) -> str:
+    """Make a short, filesystem-safe display token."""
+    token = _SAFE_PATH_TOKEN_RE.sub("-", value.strip()).strip(".-")
+    return (token or fallback)[:48]
+
+
+def _tail(text: str | None, limit: int = 1200) -> str:
+    """Return a short tail suitable for structured diagnostics."""
+    return str(text or "")[-limit:]
+
+
+def _git_failure(
+    *,
+    reason: str,
+    diagnostic: str,
+    argv: list[str],
+    proc: subprocess.CompletedProcess | None = None,
+) -> dict:
+    """Return a structured managed-source git failure."""
+    result = {
+        "ok": False,
+        "reason": reason,
+        "diagnostic": diagnostic,
+        "argv": argv,
+    }
+    if proc is not None:
+        result.update(
+            {
+                "exit_code": proc.returncode,
+                "stdout_tail": _tail(proc.stdout),
+                "stderr_tail": _tail(proc.stderr),
+            }
+        )
+    return result
+
+
+def _run_git(argv: list[str], *, cwd: Path | None = None, timeout: int = 300) -> dict:
+    """Run a fixed git argv list and return either proc or a structured failure."""
+    try:
+        proc = subprocess.run(  # nosec B603 B607 - fixed git argv list; no shell.
+            argv,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _git_failure(
+            reason="git_not_installed",
+            diagnostic="`git` was not found on PATH; cannot prepare the managed source checkout.",
+            argv=argv,
+        )
+    except subprocess.TimeoutExpired as e:
+        return {
+            "ok": False,
+            "reason": "git_timeout",
+            "diagnostic": f"`{' '.join(argv)}` did not finish within {timeout}s.",
+            "argv": argv,
+            "stdout_tail": (e.stdout or b"").decode(errors="replace")[-1200:]
+            if isinstance(e.stdout, bytes)
+            else _tail(e.stdout),
+            "stderr_tail": (e.stderr or b"").decode(errors="replace")[-1200:]
+            if isinstance(e.stderr, bytes)
+            else _tail(e.stderr),
+        }
+    if proc.returncode != 0:
+        return _git_failure(
+            reason="git_failed",
+            diagnostic=f"`{' '.join(argv)}` failed while preparing the managed source checkout.",
+            argv=argv,
+            proc=proc,
+        )
+    return {"ok": True, "proc": proc}
+
+
+def _resolve_source_ref(repo: str, ref: str) -> dict:
+    """Resolve a branch/tag/ref to a commit SHA without mutating local state."""
+    if _GIT_SHA_RE.fullmatch(ref):
+        return {"ok": True, "resolved_sha": ref.lower()}
+
+    patterns = [ref]
+    if not ref.startswith("refs/"):
+        patterns.extend([f"refs/heads/{ref}", f"refs/tags/{ref}", f"refs/tags/{ref}^{{}}"])
+
+    argv = ["git", "ls-remote", repo, *patterns]
+    result = _run_git(argv, timeout=60)
+    if not result.get("ok"):
+        return {
+            **result,
+            "reason": "source_ref_resolve_failed",
+            "diagnostic": (
+                f"Could not resolve Model-Optimizer source ref {ref!r} from {repo}. "
+                "Check the branch/tag/SHA and network credentials."
+            ),
+        }
+
+    lines = [line.split() for line in result["proc"].stdout.splitlines() if line.strip()]
+    by_name = {name: sha for sha, name, *_ in lines if len(sha) == 40}
+    for name in (
+        f"refs/heads/{ref}",
+        f"refs/tags/{ref}^{{}}",
+        f"refs/tags/{ref}",
+        ref,
+    ):
+        sha = by_name.get(name)
+        if sha:
+            return {"ok": True, "resolved_sha": sha}
+    for sha, *_ in lines:
+        if len(sha) == 40:
+            return {"ok": True, "resolved_sha": sha}
+
+    return {
+        "ok": False,
+        "reason": "source_ref_not_found",
+        "diagnostic": f"Model-Optimizer source ref {ref!r} was not found in {repo}.",
+        "argv": argv,
+        "stdout_tail": result["proc"].stdout[-1200:],
+        "stderr_tail": result["proc"].stderr[-1200:],
+    }
+
+
+def _checkout_path(repo: str, ref: str, resolved_sha: str) -> Path:
+    """Return the immutable checkout path for a resolved source ref."""
+    repo_hash = hashlib.sha256(repo.encode()).hexdigest()[:12]
+    ref_token = _sanitize_path_token(ref, fallback="ref")
+    sha_token = resolved_sha[:12]
+    return _source_cache_root() / repo_hash / f"{ref_token}-{sha_token}"
+
+
+def _checkout_ready(path: Path, resolved_sha: str) -> bool:
+    """Return True when a managed checkout already exists at the requested SHA."""
+    if not (path / ".git").exists() or not (path / "tools" / "launcher" / "launch.py").exists():
+        return False
+    result = _run_git(["git", "-C", str(path), "rev-parse", "HEAD"], timeout=30)
+    return bool(result.get("ok") and result["proc"].stdout.strip().startswith(resolved_sha))
+
+
+def _materialize_checkout(repo: str, ref: str, resolved_sha: str, path: Path) -> dict:
+    """Clone Model-Optimizer and initialize submodules for a resolved ref."""
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    tmp = parent / f".tmp-{_sanitize_path_token(ref, fallback='ref')}-{os.getpid()}-{time.time_ns()}"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+
+    clone = ["git", "clone", "--no-checkout", "--filter=blob:none", repo, str(tmp)]
+    fetch_refs = [resolved_sha] if _GIT_SHA_RE.fullmatch(ref) else [ref, resolved_sha]
+    post_fetch_steps = [
+        ["git", "-C", str(tmp), "checkout", "--detach", "FETCH_HEAD"],
+        ["git", "-C", str(tmp), "submodule", "sync", "--recursive"],
+        ["git", "-C", str(tmp), "submodule", "update", "--init", "--recursive", "--depth=1"],
+    ]
+    try:
+        result = _run_git(clone)
+        if not result.get("ok"):
+            return _source_checkout_failure(result, repo, ref, resolved_sha, path)
+
+        fetch_result = None
+        for fetch_ref in fetch_refs:
+            fetch = ["git", "-C", str(tmp), "fetch", "--depth=1", "origin", fetch_ref]
+            fetch_result = _run_git(fetch)
+            if fetch_result.get("ok"):
+                break
+        if fetch_result is None or not fetch_result.get("ok"):
+            return _source_checkout_failure(fetch_result or {}, repo, ref, resolved_sha, path)
+
+        for argv in post_fetch_steps:
+            result = _run_git(argv)
+            if not result.get("ok"):
+                return _source_checkout_failure(result, repo, ref, resolved_sha, path)
+        if path.exists():
+            if _checkout_ready(path, resolved_sha):
+                shutil.rmtree(tmp)
+            else:
+                shutil.rmtree(path)
+                tmp.rename(path)
+        else:
+            tmp.rename(path)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp)
+
+    return {"ok": True}
+
+
+def _source_checkout_failure(
+    result: dict,
+    repo: str,
+    ref: str,
+    resolved_sha: str,
+    path: Path,
+) -> dict:
+    """Attach source provenance to a failed checkout step."""
+    return {
+        **result,
+        "ok": False,
+        "reason": "source_checkout_failed",
+        "diagnostic": (
+            "Failed to prepare the managed Model-Optimizer source checkout. "
+            "The launcher was not run."
+        ),
+        "source_repo": repo,
+        "source_ref": ref,
+        "source_sha": resolved_sha,
+        "source_root": str(path),
+    }
+
+
+def _ensure_source_checkout(
+    source_ref: str | None = None,
+    source_repo: str | None = None,
+) -> dict:
+    """Return a managed source checkout, or None when explicitly disabled."""
+    if _source_disabled():
+        return {"ok": True, "checkout": None}
+
+    repo = source_repo or os.environ.get("MODELOPT_MCP_SOURCE_REPO") or _DEFAULT_SOURCE_REPO
+    ref = source_ref or os.environ.get("MODELOPT_MCP_SOURCE_REF") or _DEFAULT_SOURCE_REF
+
+    resolved = _resolve_source_ref(repo, ref)
+    if not resolved.get("ok"):
+        return {**resolved, "source_repo": repo, "source_ref": ref}
+
+    resolved_sha = resolved["resolved_sha"]
+    path = _checkout_path(repo, ref, resolved_sha)
+    if not _checkout_ready(path, resolved_sha):
+        materialized = _materialize_checkout(repo, ref, resolved_sha, path)
+        if not materialized.get("ok"):
+            return materialized
+
+    checkout = SourceCheckout(repo=repo, ref=ref, resolved_sha=resolved_sha, root=path)
+    return {"ok": True, "checkout": checkout}
+
+
+def _source_result_fields(checkout: SourceCheckout | None) -> dict:
+    """Return source provenance fields for tool results."""
+    if checkout is None:
+        return {}
+    return {
+        "source_repo": checkout.repo,
+        "source_ref": checkout.ref,
+        "source_sha": checkout.resolved_sha,
+        "source_root": str(checkout.root),
+    }
+
+
+def _launcher_argv(abs_yaml: Path, checkout: SourceCheckout | None, *flags: str) -> list[str]:
+    """Build the launcher argv for installed or managed-source execution."""
+    if checkout is None:
+        return ["modelopt-launcher", "--yaml", str(abs_yaml), *flags]
+    return [
+        _uv_binary(),
+        "run",
+        "--project",
+        str(checkout.launcher_dir),
+        "modelopt-launcher",
+        "--yaml",
+        str(abs_yaml),
+        *flags,
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -423,13 +757,14 @@ def verify_slurm_setup_impl(
 # ---------------------------------------------------------------------------
 
 
-def _normalize_yaml_path(yaml_path: str) -> Path:
+def _normalize_yaml_path(yaml_path: str, *, examples_dir: Path | None = None) -> Path:
     """Resolve a launcher YAML path to an absolute Path.
 
     Lookup order:
     1. Absolute path — use as-is
-    2. Relative to ``MODELOPT_LAUNCHER_EXAMPLES_DIR`` (or its parent)
-    3. Relative to cwd
+    2. Relative to the managed checkout's examples dir, when present
+    3. Relative to ``MODELOPT_LAUNCHER_EXAMPLES_DIR`` (or its parent)
+    4. Relative to cwd
 
     The double-fallback lets the agent pass either ``examples/Qwen/.../X.yaml``
     or just the absolute path.
@@ -437,13 +772,18 @@ def _normalize_yaml_path(yaml_path: str) -> Path:
     p = Path(yaml_path)
     if p.is_absolute():
         return p
-    # Look under examples dir
-    examples_dir = _find_launcher_examples_dir()
+    # Look under a managed checkout first, then the installed examples dir.
+    examples_dirs: list[Path] = []
     if examples_dir is not None:
-        candidate = examples_dir / yaml_path
+        examples_dirs.append(examples_dir)
+    installed_examples_dir = _find_launcher_examples_dir()
+    if installed_examples_dir is not None and installed_examples_dir not in examples_dirs:
+        examples_dirs.append(installed_examples_dir)
+    for root in examples_dirs:
+        candidate = root / yaml_path
         if candidate.exists():
             return candidate
-        candidate = examples_dir.parent / yaml_path
+        candidate = root.parent / yaml_path
         if candidate.exists():
             return candidate
     # cwd fallback
@@ -462,6 +802,8 @@ def submit_job_impl(
     extra_overrides: dict[str, str] | None,
     skip_verify: bool,
     dry_run: bool = False,
+    source_ref: str | None = None,
+    source_repo: str | None = None,
 ) -> dict:
     """Submit a launcher YAML.
 
@@ -494,6 +836,8 @@ def submit_job_impl(
             job_dir=job_dir,
             job_name=job_name,
             extra_overrides=extra_overrides,
+            source_ref=source_ref,
+            source_repo=source_repo,
         )
 
     # ---- Mode resolution -------------------------------------------
@@ -541,14 +885,23 @@ def submit_job_impl(
                 "verify_result": check,
             }
 
-    # ---- Resolve the YAML path ------------------------------------
-    abs_yaml = _normalize_yaml_path(yaml_path)
+    # ---- Resolve source + YAML path -------------------------------
+    source = _ensure_source_checkout(source_ref=source_ref, source_repo=source_repo)
+    if not source.get("ok"):
+        return source
+    checkout: SourceCheckout | None = source["checkout"]
+
+    abs_yaml = _normalize_yaml_path(
+        yaml_path,
+        examples_dir=checkout.examples_dir if checkout else None,
+    )
     if not abs_yaml.exists():
         return {
             "ok": False,
             "reason": "yaml_not_found",
             "yaml_path": yaml_path,
             "resolved_path": str(abs_yaml),
+            **_source_result_fields(checkout),
             "diagnostic": (
                 f"YAML not found at {abs_yaml}. Pass a path under "
                 f"tools/launcher/examples/ (relative), an absolute path, "
@@ -567,7 +920,7 @@ def submit_job_impl(
     # list never goes through a shell, so quoting bakes literal quote chars
     # into the values that nemo-run's CLI parser sees. Verbatim values
     # carry spaces / special chars safely.
-    argv = ["modelopt-launcher", "--yaml", str(abs_yaml), "--yes"]
+    argv = _launcher_argv(abs_yaml, checkout, "--yes")
     if hf_local:
         argv.append(f"hf_local={hf_local}")
     else:
@@ -594,6 +947,10 @@ def submit_job_impl(
     # experiment_dir_not_found for jobs that actually succeeded.
     child_env = os.environ.copy()
     child_env.setdefault("NEMORUN_HOME", os.getcwd())
+    if checkout is not None:
+        child_env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
+        child_env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
+        child_env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
     if executor == "slurm":
         # Required for slurm_factory's host default. Verify_setup ran
         # against this same host above (when verify_setup=True), so the
@@ -627,6 +984,7 @@ def submit_job_impl(
             "argv": argv,
             "nemorun_home": child_env["NEMORUN_HOME"],
             "experiment_id": None,  # Phase 2: tail launcher's output
+            **_source_result_fields(checkout),
             # via a side-channel log file to capture nemo_run's id
             "spike_note": (
                 "Docker mode launched detached. Phase 1: experiment_id "
@@ -660,6 +1018,7 @@ def submit_job_impl(
                 f"{(e.stdout or b'').decode(errors='replace')[-400:]}"
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
     # `proc` here is the CompletedProcess from subprocess.run with
@@ -683,6 +1042,7 @@ def submit_job_impl(
                 "stdout_tail/stderr_tail."
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
     # Best-effort experiment_id + dir + slurm_job_id parse. nemo_run's
@@ -754,6 +1114,7 @@ def submit_job_impl(
                 "Treating this as failed even if a Slurm job id was parsed."
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
     return {
@@ -765,6 +1126,7 @@ def submit_job_impl(
         "exit_code": 0,
         "stdout_tail": stdout_tail,
         "argv": argv,
+        **_source_result_fields(checkout),
     }
 
 
@@ -778,6 +1140,8 @@ def _submit_job_dry_run(
     job_dir: str | None,
     job_name: str | None,
     extra_overrides: dict[str, str] | None,
+    source_ref: str | None,
+    source_repo: str | None,
 ) -> dict:
     """Validate a launcher YAML by running ``launch.py --dryrun``.
 
@@ -793,9 +1157,17 @@ def _submit_job_dry_run(
     failure / timeout branches (the validated-success branch omits
     it since there's nothing to diagnose).
     """
-    # Same path resolution as the live submit, so dry-run and live use
-    # exactly the same YAML.
-    abs_yaml = _normalize_yaml_path(yaml_path)
+    # Same source + path resolution as the live submit, so dry-run and live
+    # use exactly the same launcher checkout and YAML.
+    source = _ensure_source_checkout(source_ref=source_ref, source_repo=source_repo)
+    if not source.get("ok"):
+        return {**source, "dry_run": True}
+    checkout: SourceCheckout | None = source["checkout"]
+
+    abs_yaml = _normalize_yaml_path(
+        yaml_path,
+        examples_dir=checkout.examples_dir if checkout else None,
+    )
     if not abs_yaml.exists():
         return {
             "ok": False,
@@ -803,6 +1175,7 @@ def _submit_job_dry_run(
             "reason": "yaml_not_found",
             "yaml_path": yaml_path,
             "resolved_path": str(abs_yaml),
+            **_source_result_fields(checkout),
             "diagnostic": (
                 f"YAML not found at {abs_yaml}. Pass a path under "
                 f"tools/launcher/examples/ (relative), an absolute path, "
@@ -819,7 +1192,7 @@ def _submit_job_dry_run(
     # blocks on its confirmation prompt — and since we're capturing
     # stdout (no TTY), the prompt would hang until the 60-second
     # timeout fires.
-    argv = ["modelopt-launcher", "--yaml", str(abs_yaml), "--dryrun", "--yes"]
+    argv = _launcher_argv(abs_yaml, checkout, "--dryrun", "--yes")
     if hf_local:
         argv.append(f"hf_local={hf_local}")
     if cluster_user:
@@ -838,6 +1211,10 @@ def _submit_job_dry_run(
     # default when cluster_host is set).
     child_env = os.environ.copy()
     child_env.setdefault("NEMORUN_HOME", os.getcwd())
+    if checkout is not None:
+        child_env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
+        child_env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
+        child_env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
     if cluster_host:
         child_env["SLURM_HOST"] = cluster_host
 
@@ -876,6 +1253,7 @@ def _submit_job_dry_run(
                 "hung."
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
     stdout_tail = str(proc.stdout or "")[-2000:]
@@ -898,6 +1276,7 @@ def _submit_job_dry_run(
                 "stderr_tail for the specific error."
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
     # Success branch returns the same field set as the failure branch
@@ -911,6 +1290,7 @@ def _submit_job_dry_run(
         "stdout_tail": stdout_tail,
         "stderr_tail": stderr_tail,
         "argv": argv,
+        **_source_result_fields(checkout),
     }
 
 
