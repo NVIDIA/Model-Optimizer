@@ -41,7 +41,6 @@ from .model_config import (
     KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
-    QUANTIZATION_FP8_PB_W8A8,
     QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
@@ -289,7 +288,6 @@ class GPTModelExporter:
         if quantization_format in (
             QUANTIZATION_FP8_PB_REAL,
             QUANTIZATION_FP8_PB_WO,
-            QUANTIZATION_FP8_PB_W8A8,
         ):
             quantization = quantization_format
         elif quantization_format == QUANTIZATION_FP8:

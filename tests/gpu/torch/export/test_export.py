@@ -150,6 +150,21 @@ def test_get_quantization_format(config, expected):
                 "layer8.quantization": None,
             },
             {
+                "quant_algo": "FP8_PB_WO",
+                "kv_cache_quant_algo": None,
+                "group_size": 128,
+                "exclude_modules": ["layer8"],
+            },
+        ),
+        (
+            {
+                "layer1.quantization": "fp8_pb_w8a8",  # 128x128 block-wise FP8 (W8A8)
+                "layer1.awq_block_size": 128,
+                "layer2.quantization": "fp8_pb_w8a8",
+                "layer2.awq_block_size": 128,
+                "layer8.quantization": None,
+            },
+            {
                 "quant_algo": "FP8_PB",
                 "kv_cache_quant_algo": None,
                 "group_size": 128,

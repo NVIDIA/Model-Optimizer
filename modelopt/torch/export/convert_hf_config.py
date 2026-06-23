@@ -105,19 +105,10 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
         }
     elif quant_algo == "FP8_PB":
-        # Block-wise FP8 weights + dynamic per-token FP8 activations (W8A8,
-        # DeepSeek/Qwen-style block FP8). ``block_structure`` carries the 2D
-        # weight block shape (e.g. [128, 128]); activations are quantized
-        # dynamically in 1xgs groups at runtime.
+        # Block-wise FP8 (W8A8). Weights in gsxgs blocks; activations quantized
+        # dynamically per-token at runtime (no input_activations entry).
         gs = group_size or 128
         return {
-            "input_activations": {
-                "dynamic": True,
-                "num_bits": 8,
-                "type": "float",
-                "strategy": "block",
-                "block_structure": [1, gs],
-            },
             "weights": {
                 "dynamic": False,
                 "num_bits": 8,
@@ -127,8 +118,7 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             },
         }
     elif quant_algo == "FP8_PB_WO":
-        # Block-wise weight-only FP8 (W8A16): weights quantized in gsxgs blocks,
-        # activations kept in high precision (no input_activations entry).
+        # Block-wise weight-only FP8 (no activation quantization).
         gs = group_size or 128
         return {
             "weights": {
@@ -201,13 +191,9 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
     original_quantization_details = input_config.get("quantization", {})
     quant_algo_value = original_quantization_details.get("quant_algo")
 
-    # FP8_PB (128x128 block-wise FP8 weights + dynamic per-token FP8 activations,
-    # i.e. W8A8) is consumed as a native DeepSeek/Qwen-style block-FP8 checkpoint
-    # rather than via the compressed-tensors ``config_groups`` schema. Emit the
-    # flat ``quant_method: "fp8"`` config that vLLM/SGLang expect (weights stored
-    # as fp8_e4m3 with a per-block ``weight_scale_inv``; activations quantized
-    # dynamically at runtime). Weight-only block FP8 (FP8_PB_WO) instead flows
-    # through the compressed-tensors ``config_groups`` path below.
+    # FP8_PB (block-wise FP8, W8A8): emit the flat ``quant_method: fp8`` config
+    # vLLM/SGLang expect (weight_scale_inv + dynamic activations), matching the
+    # official Qwen3.5 FP8 checkpoint.
     if quant_algo_value == "FP8_PB":
         group_size = original_quantization_details.get("group_size") or 128
         exclude_modules = original_quantization_details.get("exclude_modules") or []
@@ -254,7 +240,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
         }
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "FP8_PB_WO":
-        # Weight-only block FP8 (W8A16): block weights, high-precision activations.
+        # Weight-only block FP8: weights-only group, no activation indicators.
         group_size = original_quantization_details.get("group_size") or 128
         config_group_details = _quant_algo_to_group_config("FP8_PB_WO", group_size)
         config_group_details["targets"] = ["Linear"]
