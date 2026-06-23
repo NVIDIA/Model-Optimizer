@@ -73,7 +73,7 @@ Changelog
 **Deprecations**
 
 - Deprecate the public ``QuantizationArgumentsWithConfig`` name in ``modelopt.torch.quantization.plugins.transformers_trainer``; it now aliases ``QuantizationArguments`` and will be removed in a future release.
-- Deprecate the ``examples/diffusers/eval`` image-quality evaluation example (ImageReward / CLIP-IQA / CLIP metrics); it is no longer maintained and will be removed in a future release.
+- Deprecate the ``examples/diffusers/eval`` image-quality evaluation example (ImageReward / CLIP-IQA / CLIP metrics); it is no longer maintained and will be removed in the next release.
 
 **Bug Fixes**
 
