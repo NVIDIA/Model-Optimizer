@@ -42,7 +42,15 @@ if ! pip show boto3 >/dev/null 2>&1 || \
     fi
 fi
 
-if ! python3 modules/Model-Optimizer/examples/specdec_bench/run.py \
+# TensorRT-LLM jobs need to run through the launcher wrapper so spawned MPI
+# workers inherit the Slurm/container context. Other backends leave this unset.
+TRTLLM_LAUNCH_CMD=()
+if [[ -n "${TRTLLM_LAUNCH_SCRIPT:-}" ]]; then
+    # shellcheck disable=SC2206
+    TRTLLM_LAUNCH_CMD=(${TRTLLM_LAUNCH_SCRIPT})
+fi
+
+if ! "${TRTLLM_LAUNCH_CMD[@]}" python3 modules/Model-Optimizer/examples/specdec_bench/run.py \
     --model_dir ${HF_MODEL_CKPT} \
     --tokenizer ${HF_MODEL_CKPT} \
     "${@}"; then
