@@ -786,7 +786,13 @@ def is_model_on_gpu(model) -> bool:
 
 
 def is_enc_dec(model_type) -> bool:
-    """Return if the model is a encoder-decoder model."""
+    """Return whether the model_type uses encoder-decoder-style preview decode.
+
+    Controls whether ``hf_ptq.py`` slices off the prompt prefix from
+    ``.generate()`` output. ``diffusion_gemma`` is structurally encoder-decoder
+    but returns prompt+canvas concatenated, so it stays OFF this list (AR-style
+    decode applies).
+    """
     return model_type in ["t5", "bart", "whisper"]
 
 

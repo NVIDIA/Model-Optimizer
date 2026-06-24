@@ -167,6 +167,7 @@ class TestBuildSlurmExecutor:
             gpus_per_node=8,
             array="0-3",
             time="04:00:00",
+            mem="128G",
         )
 
         packager = MagicMock()
@@ -191,7 +192,47 @@ class TestBuildSlurmExecutor:
         assert kw["array"] == "0-3"
         assert kw["packager"] is packager
         assert kw["time"] == "04:00:00"
+        assert kw["mem"] == "128G"
         assert kw["retries"] == 0
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_default_mem_remains_all_node_memory(self, mock_tunnel, mock_executor):
+        mock_tunnel.return_value = MagicMock()
+
+        for mem in ("missing", "", None):
+            slurm_config = MagicMock(
+                requeue=False,
+                host="h",
+                port=22,
+                account="a",
+                partition="b",
+                container="c",
+                modelopt_install_path="/m",
+                container_mounts=[],
+                srun_args=[],
+                nodes=1,
+                ntasks_per_node=1,
+                gpus_per_node=1,
+                array=None,
+            )
+            if mem == "missing":
+                del slurm_config.mem
+            else:
+                slurm_config.mem = mem
+
+            build_slurm_executor(
+                user="u",
+                identity=None,
+                slurm_config=slurm_config,
+                experiment_id="e",
+                job_dir="/j",
+                task_name="t",
+                packager=MagicMock(),
+            )
+
+            assert mock_executor.call_args[1]["mem"] == "0"
+            mock_executor.reset_mock()
 
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")

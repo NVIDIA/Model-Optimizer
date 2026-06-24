@@ -720,8 +720,9 @@ def _warn_local_hessian_fallback(name, weight, weight_quantizer, block_size, war
 
 def _is_quant_fused_experts(module: nn.Module) -> bool:
     """Whether ``module`` is a converted HF fused-MoE-experts wrapper with per-expert quantizers."""
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     return hasattr(module, "_current_expert_idx") and hasattr(
-        module, "gate_up_proj_weight_quantizers"
+        module, f"{first_proj_attr}_weight_quantizers"
     )
 
 
@@ -765,11 +766,12 @@ def _register_local_hessian_input_hooks(model, name_to_module, capture, block_si
             handles.append(module.register_forward_pre_hook(_dense_hook))
         elif _is_quant_fused_experts(module):
             with enable_weight_access_and_writeback(module, model, name_to_module):
+                first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
                 for weight_name, quantizers_name, input_q_name in (
                     (
-                        "gate_up_proj",
-                        "gate_up_proj_weight_quantizers",
-                        "gate_up_proj_input_quantizer",
+                        first_proj_attr,
+                        f"{first_proj_attr}_weight_quantizers",
+                        f"{first_proj_attr}_input_quantizer",
                     ),
                     ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
                 ):
