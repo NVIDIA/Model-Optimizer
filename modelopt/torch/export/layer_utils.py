@@ -987,8 +987,10 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
     # Structural detection: after _export_fused_experts, fused expert modules
     # have per-expert submodules with gate_proj/up_proj/down_proj.
     # Also handles models that originally used this naming (Qwen, DeepSeek, etc.).
-    if hasattr(module, "experts") and hasattr(module.experts, "gate_up_proj_weight_quantizers"):
-        return ["gate_up_proj", "down_proj"]
+    if hasattr(module, "experts"):
+        first_proj_attr = getattr(module.experts, "_first_proj_attr", "gate_up_proj")
+        if hasattr(module.experts, f"{first_proj_attr}_weight_quantizers"):
+            return [first_proj_attr, "down_proj"]
 
     if module_match_name_list(
         module,
@@ -1004,7 +1006,7 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
     elif module_match_name_list(module, ["MixtralSparseMoeBlock"]):
         # Old-style Mixtral (iterable experts) uses w1/w2/w3.
         # Fused Mixtral (transformers 5.0+) is already handled by the
-        # structural gate_up_proj_weight_quantizers check above.
+        # structural first-projection quantizer check above.
         return ["w1", "w2", "w3"]
     elif module_match_name_list(module, ["MixtralMoeSparseMoeBlock"]):
         # Older transformers naming for Mixtral
@@ -1198,7 +1200,8 @@ def sync_moe_gate_up_amax(model: nn.Module) -> int:
     """Take element-wise max of gate and up weight quantizer amaxes per expert.
 
     Serving engines fuse gate_proj and up_proj into a single gate_up_proj and
-    require a single weight_scale_2. Since weight_scale_2 = amax / (6 * 448),
+    require a single weight_scale_2. Since weight_scale_2 = amax / (6 * m_fp8)
+    (m_fp8=448 normally, 256 for NVFP4 4/6 mode),
     syncing amaxes before quantization ensures the per-block weight_scale values
     are computed against a consistent global scale.
 

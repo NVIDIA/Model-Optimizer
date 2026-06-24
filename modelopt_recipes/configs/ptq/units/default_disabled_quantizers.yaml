@@ -38,10 +38,6 @@
     enable: false
   - quantizer_name: '*router*'
     enable: false
-  - quantizer_name: '*visual*'
-    enable: false
-  - quantizer_name: '*vision_tower*'
-    enable: false
   - quantizer_name: 'output.*'
     enable: false
   # Multimodal vision branch: keep the vision encoder (SigLIP / ViT) and any

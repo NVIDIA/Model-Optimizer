@@ -21,7 +21,7 @@ Mode is determined by which args you pass, not by which tool you call. One tool,
 |---|---|
 | `list_examples` | Enumerate bundled launcher YAMLs under `tools/launcher/examples/` with model + description metadata extracted from each YAML. Discovery primitive — call this first when you don't know which YAML to launch. |
 | `verify_setup(executor, ...)` | Fail-fast probe for the named executor. Docker: `docker info` (daemon up) + `docker info --format` runtime-registry check (looks for `"nvidia"` runtime registered by the NVIDIA Container Toolkit — no image pull, daemon-fast). Slurm: `ssh -o BatchMode=yes -o ConnectTimeout=5` to the cluster login node. Returns structured failure on auth / network / daemon issues — no exception. |
-| `submit_job(yaml_path, hf_local? \| cluster_host?, ..., dry_run?)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Returns `experiment_id` (Slurm) or PID (Docker) immediately; the actual job runs detached. Auto-runs `verify_setup` first by default (skippable). **Pass `dry_run=True`** to validate the YAML via `launch.py --dryrun --yes` without contacting the cluster / spawning a container / running sbatch — returns `{ok, dry_run: True, validated: bool, diagnostic?, exit_code, stdout_tail, stderr_tail, argv}` instead of `experiment_id`. Used by verify-task workflow stages (deployment_support, hidden_state_dump_support, mlm_eval, ...). |
+| `submit_job(yaml_path, hf_local? \| cluster_host?, ..., dry_run?, source_ref?, source_repo?)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Before launching, materializes a managed Model-Optimizer checkout at `source_ref` (branch, tag, or SHA; default `main`) and initializes recursive submodules, then runs that checkout's launcher. Returns `experiment_id` (Slurm) or PID (Docker) immediately; the actual job runs detached. Auto-runs `verify_setup` first by default (skippable). **Pass `dry_run=True`** to validate the YAML via `launch.py --dryrun --yes` without contacting the cluster / spawning a container / running sbatch — returns `{ok, dry_run: True, validated: bool, diagnostic?, exit_code, stdout_tail, stderr_tail, argv, source_sha, source_root}` instead of `experiment_id`. Used by verify-task workflow stages (deployment_support, hidden_state_dump_support, mlm_eval, ...). |
 | `job_status(experiment_id)` | Filesystem-based status from nemo_run's experiment dir (`_DONE`, `status_*.out`). Returns `done` / `failed` / `running` plus per-task statuses. No in-memory registry; survives MCP server restarts. |
 | `job_logs(experiment_id, task?, tail?)` | Read `log_<task>.out` from the experiment dir. Per-task filtering + optional tail to truncate. |
 | `wait_for_experiment(experiment_id, timeout_sec?, poll_interval_sec?)` | Block until `job_status` returns `done` / `failed`, or until `timeout_sec` elapses. Single tool call replaces the agent's `while True: status; sleep` loop — saves tool-call turns and avoids overshooting the poll interval. Returns the final status plus `waited_seconds`. |
@@ -47,7 +47,7 @@ codex mcp add modelopt -- uvx --from \
   modelopt-mcp
 ```
 
-`uvx` clones the whole repo to its cache, installs `tools/mcp/` as the entry point, and resolves the sibling `modelopt-launcher` dep via `[tool.uv.sources]` (path → `../launcher`) inside the cloned tree.
+`uvx` clones the whole repo to its cache, installs `tools/mcp/` as the entry point, and resolves the sibling `modelopt-launcher` dep via `[tool.uv.sources]` (path → `../launcher`) inside the cloned tree. That install clone is only the server runtime; job submission uses the managed source checkout described below.
 
 ### Dev install (local checkout)
 
@@ -58,6 +58,24 @@ modelopt-mcp                         # stdio server entry on PATH
 ```
 
 Both packages share the launcher's `core.py` orchestrator. The dev path relies on `[tool.uv.sources]` to point `modelopt-launcher` at `../launcher`.
+
+## Managed source checkouts
+
+`submit_job` does not rely on the uvx install clone or on the caller being inside a Model-Optimizer checkout. For each launch it resolves:
+
+1. `source_ref` argument, if provided.
+2. `MODELOPT_MCP_SOURCE_REF`, if set.
+3. `main`.
+
+It resolves that ref against `source_repo` / `MODELOPT_MCP_SOURCE_REPO` / `https://github.com/NVIDIA/Model-Optimizer.git`, creates a cached checkout under `MODELOPT_MCP_SOURCE_CACHE` (default `$XDG_CACHE_HOME/modelopt-mcp/sources` or `~/.cache/modelopt-mcp/sources`), and runs:
+
+```bash
+uv run --project <source_root>/tools/launcher modelopt-launcher --yaml <resolved-yaml> ...
+```
+
+The checkout is keyed by resolved commit SHA, so multiple agents using different branches or SHAs get separate source roots. Recursive submodules are initialized in the managed checkout, so launcher packagers can include `tools/launcher/modules/...` content even when MCP was installed outside a repo checkout.
+
+Set `MODELOPT_MCP_DISABLE_MANAGED_SOURCE=1` only for local development when you deliberately want the already-installed `modelopt-launcher` entrypoint.
 
 ### Why no plain `pip install` today
 
@@ -96,8 +114,9 @@ result = mcp__modelopt__submit_job(
     cluster_user="alice",
     identity="/home/alice/.ssh/id_ed25519",
     skip_verify=True,  # we just probed
+    source_ref="main",  # optional; omit to use main
 )
-# {"ok": True, "experiment_id": "cicd_1781240000", "slurm_job_id": "12345", ...}
+# {"ok": True, "experiment_id": "cicd_1781240000", "slurm_job_id": "12345", "source_sha": "...", ...}
 
 # 4. Poll until done
 while True:
@@ -122,6 +141,11 @@ For local Docker execution, drop `cluster_host`/`cluster_user`/`identity` and pa
 | `NEMORUN_HOME` | submit + status + logs | Where the launcher writes experiment artifacts. Defaults to cwd if unset. `job_status` / `job_logs` search `$NEMORUN_HOME/experiments/<id>/`. |
 | `MODELOPT_MCP_LOG` | (optional) server | Log level. Defaults to `INFO`. Logs go to stderr — stdout is the MCP wire. |
 | `MODELOPT_MCP_SKIP_GPU_CHECK` | (optional) `verify_setup(executor='docker')` | Set to skip the `docker info --format` runtime-registry check. Useful for CI hosts where the daemon is up but the NVIDIA Container Toolkit isn't installed. |
+| `MODELOPT_MCP_SOURCE_REPO` | (optional) `submit_job` | Default git repository for managed source checkouts. Defaults to `https://github.com/NVIDIA/Model-Optimizer.git`. |
+| `MODELOPT_MCP_SOURCE_REF` | (optional) `submit_job` | Default branch, tag, or SHA when `source_ref` is omitted. Defaults to `main`. |
+| `MODELOPT_MCP_SOURCE_CACHE` | (optional) `submit_job` | Root for managed source checkouts. Defaults to `$XDG_CACHE_HOME/modelopt-mcp/sources` or `~/.cache/modelopt-mcp/sources`. |
+| `MODELOPT_MCP_DISABLE_MANAGED_SOURCE` | (optional) local dev | Set to `1` to skip managed checkout and invoke the installed `modelopt-launcher` entrypoint directly. |
+| `MODELOPT_MCP_UV` | (optional) `submit_job` | Override the `uv` binary used for `uv run --project <source>/tools/launcher ...`. |
 | `MODELOPT_LAUNCHER_EXAMPLES_DIR` | (optional) `list_examples` | Override the examples directory location. Defaults to `../launcher/examples/` relative to this package. |
 
 ## Design principles

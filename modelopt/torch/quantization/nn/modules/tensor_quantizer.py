@@ -61,6 +61,7 @@ from ...tensor_quant import (
     static_blockwise_fp4_fake_quant,
 )
 from ...utils import is_torch_export_mode
+from ...utils.numeric_utils import fp8_max_for_normalization
 from ..functional import normalized_hadamard_transform
 
 __all__ = [
@@ -784,12 +785,20 @@ class TensorQuantizer(nn.Module):
         elif self._block_sizes.get("scale_bits") == (4, 3):
             # NVFP4 default quantization
             # Return real quantized tensor and store scales inside TensorQuantizer
+            if self._block_sizes.get("four_over_six", False):
+                raise NotImplementedError(
+                    "NVFP4 Four-Over-Six (4/6) is not supported via mtq.compress: the per-block "
+                    "M=4/M=6 choice baked into the quantizer amax by MSE calibration is not "
+                    "preserved by real quantization. Use mtq.quantize + export for 4/6 instead."
+                )
             outputs, _weights_scaling_factor, _weights_scaling_factor_2 = NVFP4QTensor.quantize(
                 inputs,
                 self._block_sizes[-1],
-                weights_scaling_factor_2=self.amax.float() / (448.0 * 6.0)
-                if self.amax is not None
-                else None,
+                weights_scaling_factor_2=(
+                    NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(self)
+                    if self.amax is not None
+                    else None
+                ),
                 try_tensorrt=True,
             )
             buffer_to_register["_scale"] = _weights_scaling_factor
@@ -1454,6 +1463,7 @@ class NVFP4StaticQuantizer(TensorQuantizer):
                 self.amax,
                 self.global_amax,  # Can be None, will be computed internally
                 True,  # quantize_block_scales
+                fp8_max_for_normalization(self),
                 inputs.dtype,
                 self._pass_through_bwd,
             )

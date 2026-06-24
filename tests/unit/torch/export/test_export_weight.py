@@ -16,10 +16,14 @@
 
 import pytest
 import torch
+import torch.nn as nn
 from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.unified_export_hf import (
+    _export_quantized_weight,
+    _process_quantized_modules,
+)
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
 
@@ -96,3 +100,43 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+class QuantMoELinear(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = nn.ModuleList([nn.Linear(8, 8, bias=False) for _ in range(2)])
+
+    def forward(self, x):
+        return self.experts[0](x)
+
+
+class _SingleRoutedExpertModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.moe = QuantMoELinear()
+
+    def forward(self, x):
+        return self.moe(x)
+
+
+def test_process_quantized_modules_fills_step3p5_moe_input_scale_for_unrouted_experts():
+    model = _SingleRoutedExpertModel()
+    quant_cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+
+    mtq.quantize(model, quant_cfg, lambda m: m(torch.randn(2, 4, 8)))
+
+    assert model.moe.experts[0].input_quantizer.amax is not None
+    assert model.moe.experts[1].input_quantizer.amax is None
+
+    _process_quantized_modules(model, torch.float32)
+
+    assert hasattr(model.moe.experts[0], "input_scale")
+    assert hasattr(model.moe.experts[1], "input_scale")

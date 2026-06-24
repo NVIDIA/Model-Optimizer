@@ -253,6 +253,7 @@ split-on-trailing-comma = false
 
 [tool.mypy]
 files = "."
+python_version = "3.10"
 install_types = true
 non_interactive = true
 show_error_codes = true
@@ -283,6 +284,12 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = ["examples.*"]
 disable_error_code = ["attr-defined"]
+
+# Vendored verbatim from NVIDIA-NeMo/Automodel (Apache-2.0); kept faithful to upstream rather
+# than annotated to modelopt's strict mypy (e.g. worker-global ``X | None`` initialized lazily).
+[[tool.mypy.overrides]]
+module = ["examples.diffusers.fastgen.preprocess.*"]
+ignore_errors = true
 
 [tool.bandit]
 exclude_dirs = [".github/", "examples/", "noxfile.py", "tests/"]

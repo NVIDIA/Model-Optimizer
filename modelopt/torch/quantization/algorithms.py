@@ -80,6 +80,12 @@ _FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS = (
     "down_proj_input_quantizer",
     "down_proj_weight_quantizer",
 )
+_NON_GATED_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS = (
+    "up_proj_input_quantizer",
+    "up_proj_weight_quantizer",
+    "down_proj_input_quantizer",
+    "down_proj_weight_quantizer",
+)
 
 
 def _get_replay_quantizer_attr(attr_name: str) -> str:
@@ -97,7 +103,11 @@ def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
     For standard Linear-derived QuantModules, returns the canonical trio.
     """
     if _is_hf_quant_fused_experts_module(module):
-        return _FUSED_EXPERTS_QUANTIZER_ATTRS
+        try:
+            from .plugins.huggingface import _get_fused_experts_quantizer_attr_names
+        except ImportError:
+            return _FUSED_EXPERTS_QUANTIZER_ATTRS
+        return _get_fused_experts_quantizer_attr_names(module)
     return _STD_QUANTIZER_ATTRS
 
 
@@ -1544,7 +1554,11 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         for pattern in _as_list(search_state.get("disabled_layers"))
     )
     per_module_entries: list[dict] = []
-    _per_module_attrs = (*_STD_QUANTIZER_ATTRS, *_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS)
+    _per_module_attrs = (
+        *_STD_QUANTIZER_ATTRS,
+        *_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
+        *_NON_GATED_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
+    )
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}
 

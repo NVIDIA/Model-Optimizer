@@ -161,8 +161,9 @@ def _fakequant_fused_experts_weights(
     expert) that the base loop skips, leaving the fused 3-D weight unquantized
     in the export and breaking weight-fold round-trips.
     """
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for w_attr, q_attr in (
-        ("gate_up_proj", "gate_up_proj_weight_quantizers"),
+        (first_proj_attr, f"{first_proj_attr}_weight_quantizers"),
         ("down_proj", "down_proj_weight_quantizers"),
     ):
         quantizers = getattr(module, q_attr, None)
