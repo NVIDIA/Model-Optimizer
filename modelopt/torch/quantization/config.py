@@ -795,9 +795,10 @@ def _coerce_layerwise_input(value):
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
 
-    # Set True only for algorithms that update solely ``TensorQuantizer._amax``
-    # (no ``layer.weight`` mutation). Gates ``layerwise.calib_mutates_weights=False``.
-    _supports_save_quantizers_only: ClassVar[bool] = False
+    # Whether this algorithm mutates ``layer.weight`` during calibration. Amax-only
+    # algorithms (max/mse/local_hessian) set this False; it gates whether
+    # ``layerwise.calib_mutates_weights=False`` is allowed.
+    _mutates_weights: ClassVar[bool] = True
 
     method: Literal[None] = ModeloptField(
         None,
@@ -880,7 +881,7 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     @model_validator(mode="after")
     def _validate_non_mutating_layerwise_supported(self):
         """Enforce the ``calib_mutates_weights=False`` whitelist."""
-        if not self.layerwise.calib_mutates_weights and not self._supports_save_quantizers_only:
+        if not self.layerwise.calib_mutates_weights and self._mutates_weights:
             raise ValueError(
                 f"Algorithm '{self.method}' mutates layer weights in-place; "
                 "calib_mutates_weights=False would lose those updates on resume. "
@@ -946,7 +947,7 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     See `Integer Quantization <https://arxiv.org/pdf/2004.09602>`_ for the concepts.
     """
 
-    _supports_save_quantizers_only: ClassVar[bool] = True
+    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["max"] = ModeloptField("max")
 
@@ -996,7 +997,7 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.
     """
 
-    _supports_save_quantizers_only: ClassVar[bool] = True
+    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["mse"] = ModeloptField("mse")
 
@@ -1050,7 +1051,7 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
 
     """
 
-    _supports_save_quantizers_only: ClassVar[bool] = True
+    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["local_hessian"] = ModeloptField("local_hessian")
 
