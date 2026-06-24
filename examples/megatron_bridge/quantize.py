@@ -61,6 +61,7 @@ import copy
 import gc
 
 import torch
+from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
@@ -69,8 +70,16 @@ from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_C
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
-from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
+from modelopt.torch.utils.plugins.megatron_calibration import (
+    get_megatron_calibration_forward_loop,
+    get_megatron_vlm_calibration_forward_loop,
+)
 from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
+from modelopt.torch.utils.vlm_dataset_utils import get_supported_vlm_datasets
+
+# Default calibration datasets when --calib_dataset_name is not set
+DEFAULT_TEXT_CALIB_DATASET = "cnn_nemotron_v2_mix"  # cnn_dailymail + nemotron-post-training-v2
+DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"
 
 # The --quant_cfg / --kv_cache_quant CLI vocabularies are discovered from the preset
 # YAMLs (shared with the hf_ptq examples via modelopt.recipe.presets). --quant_cfg
@@ -152,10 +161,13 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib_dataset_name",
         type=str,
-        default="cnn_nemotron_v2_mix",  # cnn_dailymail + nemotron-post-training-dataset-v2
+        default=None,
         help=(
-            f"HF Dataset name or local path for calibration (supported options: {', '.join(get_supported_datasets())}. "
-            "You can also pass any other dataset and see if auto-detection for your dataset works."
+            "Calibration dataset. If unset, it is auto-selected by model type: a text dataset "
+            f"({DEFAULT_TEXT_CALIB_DATASET}) for language models, and an image-text dataset "
+            f"({DEFAULT_VLM_CALIB_DATASET}) for VLMs. Passing a text dataset for a VLM estimates importance from text "
+            f"only. Text dataset options: {get_supported_datasets()}; VLM (image) dataset options: "
+            f"{get_supported_vlm_datasets()}."
         ),
     )
     parser.add_argument(
@@ -274,7 +286,50 @@ def main(args: argparse.Namespace):
         init_model_parallel=True,
     )
 
+    # Only the language model is quantized (vision tower + projector stay full precision)
+    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
+    is_vlm = language_model is not unwrapped_model
+    if is_vlm:
+        print_rank_0(
+            "VLM detected: quantizing `model.language_model` only (vision tower left in full precision)."
+        )
+
+    # Auto-select the calibration dataset by model type when not explicitly provided.
+    if args.calib_dataset_name is None:
+        args.calib_dataset_name = (
+            DEFAULT_VLM_CALIB_DATASET if is_vlm else DEFAULT_TEXT_CALIB_DATASET
+        )
+
+    # Infer the calibration modality from the dataset: the known image-text datasets require a VLM, everything
+    # else is text. Passing a text dataset for a VLM estimates importance from text only (vision tower idle).
+    use_image_calib = args.calib_dataset_name in get_supported_vlm_datasets()
+    if use_image_calib and not is_vlm:
+        raise ValueError(
+            f"Calibration dataset '{args.calib_dataset_name}' is image-text and requires a VLM; "
+            "pass a text dataset for a language model."
+        )
+    if is_vlm and not use_image_calib:
+        warn_rank_0(
+            f"Text-only calibration on a VLM (dataset '{args.calib_dataset_name}'): the language "
+            "model's pruning importance will not see vision tokens."
+        )
+    print_rank_0(f"Using calibration dataset: {args.calib_dataset_name}")
+
     mtq_config = get_quant_config(args)
+
+    # Quantize only the language model: disable quantizers on every top-level submodule that is not
+    # the language model (vision tower + projector). Skip aliases of language-model submodules (e.g.
+    # Qwen's ``self.decoder = language_model.decoder``) so the LM's own layers stay enabled.
+    if is_vlm:
+        lm_module_ids = {id(m) for m in language_model.modules()}
+        non_lm_children = sorted(
+            name
+            for name, child in unwrapped_model.named_children()
+            if name != "language_model" and id(child) not in lm_module_ids
+        )
+        for name in non_lm_children:
+            mtq_config["quant_cfg"].append({"quantizer_name": f"*{name}*", "enable": False})
+        print_rank_0(f"Disabling quantizers on non-language-model submodules: {non_lm_children}")
 
     # KV-cache quantization is incompatible with weight compression. Validate on the *resolved*
     # config (KV-cache quantizers are named ``*[kv]_bmm_quantizer``) so this also covers
@@ -294,16 +349,34 @@ def main(args: argparse.Namespace):
 
     # Dynamic and weight-only configs need no activation statistics, so skip both the
     # (potentially expensive) calibration dataset download and the calibration forward pass.
-    if mtq.need_calibration(mtq_config):
-        forward_loop = get_megatron_calibration_forward_loop(
+    if mtq.need_calibration(mtq_config) and use_image_calib:
+        # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
+        # see vision-conditioned activations (we still quantize the LM only).
+        processor = AutoProcessor.from_pretrained(
+            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+        )
+        forward_loop = get_megatron_vlm_calibration_forward_loop(
+            unwrapped_model,  # full VLM (vision encoder + projector + language model)
+            processor,
+            dataset_name=args.calib_dataset_name,
+            num_samples=args.calib_num_samples,
+            seq_length=args.seq_length,
+            batch_size=args.calib_batch_size,
+        )
+    elif mtq.need_calibration(mtq_config):
+        text_forward_loop = get_megatron_calibration_forward_loop(
             tokenizer,
             dataset_name=args.calib_dataset_name,
             num_samples=args.calib_num_samples,
             seq_length=args.seq_length,
             batch_size=args.calib_batch_size,
-            # pack=True uses Megatron pretraining-style global-stream document packing
-            pack=True,
+            pack=True,  # Megatron pretraining-style global-stream document packing
         )
+
+        # Run text prefill on the language model: we quantize the root (a VLM root forward expects
+        # vision inputs), but text calibration must drive the inner LM. For plain LMs these are the same.
+        def forward_loop(_model=None):
+            text_forward_loop(language_model)
     else:
         warn_rank_0("Dynamic or weight-only quantization detected; skipping calibration.")
         forward_loop = None
@@ -349,13 +422,14 @@ def main(args: argparse.Namespace):
         )
     if not args.skip_generate and not args.compress:
         print_rank_0("\nTesting quantized model with custom prompts...")
-        unwrapped_model.eval()
+        # Sanity-check text generation on the quantized language model.
+        language_model.eval()
         for idx, prompt in enumerate(args.prompts.split("|")):
             tokens = tokenizer(prompt, return_tensors="pt")
             # enable_kv_cache=False avoids pre-allocating the static KV cache: this is a short sanity-check
             # generation and the KV-cache allocation can OOM tight quantization runs on large MoE models.
             generated_ids = megatron_generate(
-                unwrapped_model, tokens.input_ids.cuda(), osl=args.osl, enable_kv_cache=False
+                language_model, tokens.input_ids.cuda(), osl=args.osl, enable_kv_cache=False
             )
             generated_texts = tokenizer.batch_decode(generated_ids)
             print_rank_0(f"\nPrompt {idx + 1}: {prompt}\nGenerated: {generated_texts}")

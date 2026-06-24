@@ -96,7 +96,15 @@ torchrun --nproc_per_node 2 export.py \
 
 To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export.py --help`).
 
-For VLM (vision-language model) quantization, see the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
+### Vision-Language Models (VLMs)
+
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automatically quantizes only the **language model** and leaves the vision tower and vision-language projector in full precision, then saves the full VLM back as a Megatron checkpoint. The calibration modality is inferred from `--calib_dataset_name`:
+
+- An **image-text** dataset (the default for VLMs, `nemotron_vlm_dataset_v2`) drives the full VLM forward, so the language model is calibrated on vision-conditioned activations.
+- A **text** dataset runs text-only calibration of the language model (vision tower idle).
+
+> [!NOTE]
+> HuggingFace unified export (`export.py`) of a quantized VLM is not yet supported; the quantized VLM is saved in Megatron checkpoint format only.
 
 ## Sanity-Check Generation
 

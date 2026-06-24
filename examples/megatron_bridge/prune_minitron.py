@@ -46,7 +46,12 @@ import re
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoProcessor,
+)
 
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
@@ -54,8 +59,16 @@ import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
 from modelopt.torch.utils import get_supported_datasets, print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
-from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
+from modelopt.torch.utils.plugins.megatron_calibration import (
+    get_megatron_calibration_forward_loop,
+    get_megatron_vlm_calibration_forward_loop,
+)
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
+from modelopt.torch.utils.vlm_dataset_utils import get_supported_vlm_datasets
+
+# Default calibration datasets when --calib_dataset_name is not set
+DEFAULT_TEXT_CALIB_DATASET = "nemotron-post-training-dataset-v2"
+DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"
 
 
 def get_args() -> argparse.Namespace:
@@ -92,10 +105,13 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib_dataset_name",
         type=str,
-        default="nemotron-post-training-dataset-v2",
+        default=None,
         help=(
-            f"HF Dataset name or local path for calibration (supported options: {', '.join(get_supported_datasets())}. "
-            "You can also pass any other dataset and see if auto-detection for your dataset works."
+            "Calibration dataset. If unset, it is auto-selected by model type: a text dataset "
+            f"({DEFAULT_TEXT_CALIB_DATASET}) for language models, and an image-text dataset "
+            f"({DEFAULT_VLM_CALIB_DATASET}) for VLMs. Passing a text dataset for a VLM estimates importance from text "
+            f"only. Text dataset options: {get_supported_datasets()}; VLM (image) dataset options: "
+            f"{get_supported_vlm_datasets()}."
         ),
     )
     parser.add_argument(
@@ -306,18 +322,50 @@ def main(args: argparse.Namespace):
             )
         args.hparams_to_skip = sorted({*args.hparams_to_skip, "hidden_size"})
 
-    # Calibration runs the pruning target (the language model) directly. For VLMs this is the
-    # extracted ``language_model``; text-only calibration uses its own embedding and works under
-    # pipeline parallelism via ``megatron_prefill`` (which handles inter-stage send/recv).
-    forward_loop = get_megatron_calibration_forward_loop(
-        tokenizer,
-        dataset_name=args.calib_dataset_name,
-        num_samples=args.calib_num_samples,
-        seq_length=args.seq_length,
-        batch_size=args.calib_batch_size,
-        # pack=True uses Megatron pretraining-style global-stream document packing
-        pack=True,
-    )
+    # Auto-select the calibration dataset by model type when not explicitly provided.
+    if args.calib_dataset_name is None:
+        args.calib_dataset_name = (
+            DEFAULT_VLM_CALIB_DATASET if is_vlm else DEFAULT_TEXT_CALIB_DATASET
+        )
+
+    # Infer the calibration modality from the dataset: the known image-text datasets require a VLM, everything
+    # else is text. Passing a text dataset for a VLM estimates importance from text only (vision tower idle).
+    use_image_calib = args.calib_dataset_name in get_supported_vlm_datasets()
+    if use_image_calib and not is_vlm:
+        raise ValueError(
+            f"Calibration dataset '{args.calib_dataset_name}' is image-text and requires a VLM; "
+            "pass a text dataset for a language model."
+        )
+    if is_vlm and not use_image_calib:
+        warn_rank_0(
+            f"Text-only calibration on a VLM (dataset '{args.calib_dataset_name}'): the language "
+            "model's pruning importance will not see vision tokens."
+        )
+    print_rank_0(f"Using calibration dataset: {args.calib_dataset_name}")
+
+    # Estimate pruning importance for the language model: text-only on the LM for text datasets, or
+    # the full VLM forward over image-text pairs.
+    if use_image_calib:
+        processor = AutoProcessor.from_pretrained(
+            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+        )
+        forward_loop = get_megatron_vlm_calibration_forward_loop(
+            unwrapped_model,  # full VLM (vision encoder + projector + language model)
+            processor,
+            dataset_name=args.calib_dataset_name,
+            num_samples=args.calib_num_samples,
+            seq_length=args.seq_length,
+            batch_size=args.calib_batch_size,
+        )
+    else:
+        forward_loop = get_megatron_calibration_forward_loop(
+            tokenizer,
+            dataset_name=args.calib_dataset_name,
+            num_samples=args.calib_num_samples,
+            seq_length=args.seq_length,
+            batch_size=args.calib_batch_size,
+            pack=True,  # Megatron pretraining-style global-stream document packing
+        )
 
     pruning_config = {
         "forward_loop": forward_loop,

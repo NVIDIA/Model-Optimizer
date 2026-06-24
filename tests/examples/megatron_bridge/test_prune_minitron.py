@@ -16,13 +16,8 @@
 
 from pathlib import Path
 
-import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.transformers_models import (
-    create_tiny_gemma3vl_dir,
-    create_tiny_qwen3_5_vl_dir,
-    create_tiny_qwen3_dir,
-)
+from _test_utils.torch.transformers_models import create_tiny_gemma3vl_dir, create_tiny_qwen3_dir
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 
@@ -56,20 +51,16 @@ def test_prune_minitron(tmp_path: Path, num_gpus):
     assert pruned_params <= prune_target_params
 
 
-@pytest.mark.parametrize(
-    "create_tiny_vlm_dir",
-    [
-        create_tiny_gemma3vl_dir,  # sliding/full attention LM with a multimodal projector
-        create_tiny_qwen3_5_vl_dir,  # dense - hybrid GatedDeltaNet (linear attention) + gated full-attention LM
-    ],
-)
-def test_prune_minitron_vlm(tmp_path: Path, num_gpus, create_tiny_vlm_dir):
-    teacher_hf_path, teacher_model = create_tiny_vlm_dir(
+def test_prune_minitron_vlm(tmp_path: Path, num_gpus):
+    # gemma3vl: sliding/full attention LM with a multimodal projector (qwen3_5_vl is covered by the
+    # VLM quantize test instead, to keep each VLM exercised once across the two examples).
+    teacher_hf_path, teacher_model = create_tiny_gemma3vl_dir(
         tmp_path,
-        with_tokenizer=True,
+        with_processor=True,
         return_model=True,
         num_hidden_layers=4 * num_gpus,  # >= 4 per PP stage so depth is prunable and stays balanced
         intermediate_size=128,
+        max_position_embeddings=1024,  # >= 256 image tokens + text, no truncation
     )
     language_model_params = sum(p.numel() for p in teacher_model.model.language_model.parameters())
     prune_target_params = int(language_model_params * 0.7)
@@ -80,9 +71,9 @@ def test_prune_minitron_vlm(tmp_path: Path, num_gpus, create_tiny_vlm_dir):
         hf_model_name_or_path=teacher_hf_path,
         output_hf_path=pruned_model_path,
         pp_size=num_gpus,
-        calib_dataset_name="cnn_dailymail",
+        calib_dataset_name="scienceqa",  # image-text calibration runs the full VLM forward
         calib_num_samples=8,
-        seq_length=16,
+        seq_length=1024,
         prune_target_params=prune_target_params,
         prune_score_func="mmlu_1pct_bs32",
         ss_channel_divisor=4,

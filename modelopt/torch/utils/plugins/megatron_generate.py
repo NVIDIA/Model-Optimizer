@@ -225,6 +225,10 @@ def megatron_prefill(
     else:
         output = model(tokens, position_ids, attention_mask, runtime_gather_output=True)
 
+    # Some VLM wrappers (e.g. Gemma3VLModel) return ``(logits, loss_mask)`` rather than a bare tensor.
+    if isinstance(output, (tuple, list)):
+        output = output[0]
+
     # For PP non-last stages, forward activations to the next stage and return early.
     if is_pp and not pp_last:
         pp_dtype = model.config.pipeline_dtype or (
