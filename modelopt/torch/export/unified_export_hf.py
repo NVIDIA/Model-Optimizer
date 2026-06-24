@@ -745,15 +745,8 @@ def _export_quantized_weight(
     # Register the corrected weight scale as a buffer.
     if weight_scale is not None:
         if quantization_format == QUANTIZATION_FP8_PB_W8A8:
-            # Flat quant_method: fp8 expects the per-block scale as weight_scale_inv.
-            # Value (= amax/448) is the dequant multiplier; do NOT invert. Drop the
-            # plain weight_scale buffer so no stale key remains.
-            #
-            # The block-amax is computed with keepdim, yielding a 4-D scale
-            # [out_blocks, 1, in_blocks, 1]. Collapse the singleton block axes to
-            # the 2-D [out_blocks, in_blocks] DeepSeek/Qwen layout that both
-            # ModelOpt's own _QuantFP8Linear reload path and vLLM/SGLang's stock
-            # block-FP8 loader expect. The squeeze is lossless.
+            # Store per-block scale as 2-D weight_scale_inv (amax/448, not
+            # inverted); squeeze the keepdim block-amax [out, 1, in, 1].
             if (
                 weight_scale.dim() == 4
                 and weight_scale.shape[1] == 1

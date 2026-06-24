@@ -596,6 +596,5 @@ def test_fp8_pb_w8a8_export_uses_weight_scale_inv(tmp_path):
                 if k.endswith(".weight_scale_inv"):
                     scale_inv = f.get_tensor(k)
                     assert scale_inv.ndim == 2, (
-                        f"{k} must be 2-D [out_blocks, in_blocks], got "
-                        f"{tuple(scale_inv.shape)}"
+                        f"{k} must be 2-D [out_blocks, in_blocks], got {tuple(scale_inv.shape)}"
                     )
