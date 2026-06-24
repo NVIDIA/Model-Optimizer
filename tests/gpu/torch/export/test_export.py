@@ -585,3 +585,17 @@ def test_fp8_pb_w8a8_export_uses_weight_scale_inv(tmp_path):
     assert not any(k.endswith(".input_scale") for k in keys), (
         "dynamic activations store no input_scale"
     )
+
+    # Per-block scales must be 2-D [out_blocks, in_blocks] (DeepSeek/Qwen
+    # convention) -- not the 4-D [out_blocks, 1, in_blocks, 1] block-amax shape.
+    # This is what ModelOpt's _QuantFP8Linear reload path and vLLM/SGLang's stock
+    # block-FP8 loader expect.
+    for st in export_dir.glob("*.safetensors"):
+        with safe_open(st, framework="pt") as f:
+            for k in list(f.keys()):
+                if k.endswith(".weight_scale_inv"):
+                    scale_inv = f.get_tensor(k)
+                    assert scale_inv.ndim == 2, (
+                        f"{k} must be 2-D [out_blocks, in_blocks], got "
+                        f"{tuple(scale_inv.shape)}"
+                    )
