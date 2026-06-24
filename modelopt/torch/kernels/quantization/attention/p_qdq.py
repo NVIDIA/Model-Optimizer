@@ -35,7 +35,7 @@ along the key dimension — the contraction axis of ``P @ V``. The caller
 import triton
 import triton.language as tl
 
-from modelopt.torch.kernels.quantization.gemm.nvfp4_quant import nvfp4_scalar_qdq
+from modelopt.torch.kernels.quantization.common.nvfp4_quant import nvfp4_scalar_qdq
 
 
 @triton.jit

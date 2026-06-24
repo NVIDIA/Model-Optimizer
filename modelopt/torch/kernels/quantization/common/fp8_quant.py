@@ -15,7 +15,7 @@
 
 """Composable Triton JIT functions for FP8 (E4M3) fake quantization.
 
-Counterpart of ``gemm/nvfp4_quant.py`` for per-tensor FP8. Used by the unified
+Counterpart of ``nvfp4_quant.py`` for per-tensor FP8. Used by the unified
 flash-attention kernel's softmax-P qdq (``common/attention/triton_fa.py``).
 """
 

@@ -16,10 +16,10 @@
 """Composable Triton JIT functions for NVFP4 (E2M1) fake quantization.
 
 Single source of truth for FP4 decision-boundary rounding.  Used by:
-  - ``fp4_kernel.py``              (standalone blockwise fake quant)
-  - ``fp4_kernel_hopper.py``       (Hopper block-pointer variant)
-  - ``gptq_fused_kernel.py``       (fused GPTQ scalar path)
-  - ``../attention/p_qdq.py``      (softmax-P qdq in the flash-attention kernel)
+  - ``../gemm/fp4_kernel.py``         (standalone blockwise fake quant)
+  - ``../gemm/fp4_kernel_hopper.py``  (Hopper block-pointer variant)
+  - ``../gemm/gptq_fused_kernel.py``  (fused GPTQ scalar path)
+  - ``../attention/p_qdq.py``         (softmax-P qdq in the flash-attention kernel)
 
 FP4 (E2M1) representable magnitudes: {0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
 """
