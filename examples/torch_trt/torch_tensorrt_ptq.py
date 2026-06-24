@@ -54,9 +54,15 @@ def load_model_and_processor(model_id: str, device: torch.device, dtype: torch.d
     """Pull the HF ViT classifier and its preprocessor."""
     print(f"Loading {model_id} (dtype={dtype})...")
     processor = AutoImageProcessor.from_pretrained(model_id)
-    # tanh-approximation GELU rather than the erf-based default.
+    # `gelu_fast` selects the tanh-approximation GELU rather than the erf-based
+    # default. Eager attention runs softmax through `F.softmax` instead of the
+    # fused SDPA kernel, so the recipe's `*softmax_quantizer` is exercised during
+    # calibration and emits Q/DQ around the softmax output on export.
     model = ViTForImageClassification.from_pretrained(
-        model_id, torch_dtype=dtype, hidden_act="gelu_fast"
+        model_id,
+        torch_dtype=dtype,
+        hidden_act="gelu_fast",
+        attn_implementation="eager",
     )
     model.eval().to(device)
     return model, processor
