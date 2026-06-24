@@ -93,8 +93,8 @@ def get_args() -> argparse.Namespace:
         help="Path to save the quantized model in Megatron checkpoint format (with ModelOpt state).",
     )
 
-    # Parallelism arguments
-    # Data parallelism is implicit: Launching with more GPUs than tp * pp * cp uses DP
+    # Parallelism arguments. Data parallelism is implicit: DP = world_size / (tp * pp * cp).
+    # e.g. `torchrun --nproc_per_node 8 quantize.py --tp_size 2` runs with DP=4.
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")

@@ -75,6 +75,9 @@ torchrun --nproc_per_node 2 quantize.py \
     --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 ```
 
+> [!NOTE]
+> Data parallelism is implicit: `DP = world_size / (tp_size * pp_size * cp_size)`. Launching with more GPUs than `tp_size * pp_size * cp_size` shards calibration across the extra data-parallel ranks (e.g. `torchrun --nproc_per_node 8 quantize.py --tp_size 2` runs with DP=4).
+
 **Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
 
 ```bash
