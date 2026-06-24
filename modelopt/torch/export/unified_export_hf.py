@@ -71,6 +71,7 @@ from .layer_utils import (
     get_experts_list,
     is_layernorm,
     is_moe,
+    is_quantconv3d,
     is_quantlinear,
     set_expert_quantizer_amax,
     sync_moe_gate_up_amax,
@@ -151,6 +152,7 @@ def _postprocess_safetensors(
     export_dir: Path,
     pipe: Any | None = None,
     hf_quant_config: dict | None = None,
+    nvfp4_exclude_layers: set[str] | None = None,
     **kwargs,
 ) -> None:
     """Post-process saved safetensors files for deployment compatibility.
@@ -253,10 +255,10 @@ def _postprocess_safetensors(
             metadata = base_metadata
 
         if padding_strategy is not None:
-            sd = pad_nvfp4_weights(sd, padding_strategy)
+            sd = pad_nvfp4_weights(sd, padding_strategy, exclude_layers=nvfp4_exclude_layers)
 
         if enable_swizzle_layout:
-            sd = swizzle_nvfp4_scales(sd)
+            sd = swizzle_nvfp4_scales(sd, exclude_layers=nvfp4_exclude_layers)
 
         if hf_quant_config is not None:
             metadata["quantization_config"] = json.dumps(hf_quant_config)
@@ -774,6 +776,105 @@ def _export_quantized_weight(
     torch.cuda.empty_cache()
 
 
+def _export_quantized_conv_weight(
+    sub_module: nn.Module,
+    dtype: torch.dtype,
+    weight_name: str = "weight",
+) -> None:
+    """Export an NVFP4-quantized Conv3d module to the logical flattened-K schema.
+
+    The convolution filter ``[O, C, kt, kh, kw]`` is flattened to ``[O, K_flat]``
+    in PyTorch-contiguous order (``reshape(O, -1)``, matching the calibration-time
+    flatten in ``_QuantConv3d`` and yielding the correct grouped-conv reduction
+    dimension ``K = in_channels // groups * kt * kh * kw``). ``K_flat`` is padded up
+    to a multiple of the block size, then the same NVFP4 packing used for Linear
+    produces ``weight`` (``[O, K_pad / 2]`` uint8), ``weight_scale``
+    (``[O, K_pad / 16]`` float8_e4m3fn), and the scalar ``weight_scale_2``.
+    ``input_scale`` (``amax_input / (448 * 6)``) is registered when the activation
+    quantizer has a calibrated amax, matching NVFP4 Linear; it is omitted when the
+    activation quantizer is disabled or uncalibrated.
+
+    Per-block and global scales are derived from the flattened, padded weight
+    tensor (the dynamic-NVFP4 convention), so this does not rely on a stored
+    weight-quantizer ``_amax``. Scope is dynamic NVFP4 Conv3d: a static NVFP4
+    weight quantizer raises ``NotImplementedError`` (its calibrated per-block amax
+    is collected in the native conv shape and would not match the flattened-K
+    blocks), and a Conv3d in any non-NVFP4 format is left unpacked with a warning.
+    """
+    quantization_format = get_quantization_format(sub_module)
+    if quantization_format not in (QUANTIZATION_NVFP4, QUANTIZATION_W4A16_NVFP4):
+        warnings.warn(
+            f"Conv3d export currently supports only dynamic NVFP4; got "
+            f"'{quantization_format}' for {type(sub_module).__name__}. Leaving the weight unpacked.",
+            stacklevel=2,
+        )
+        return
+
+    block_size = get_weight_block_size(sub_module, weight_name)
+    quantizer_attrs = quantizer_attr_names(weight_name)
+    weight: nn.Parameter = getattr(sub_module, weight_name)
+    weight_quantizer = getattr(sub_module, quantizer_attrs.weight_quantizer, None)
+
+    # Dynamic NVFP4 only: a static weight quantizer's per-block amax is calibrated
+    # in the native conv shape and would not map onto the flattened-K blocks.
+    if weight_quantizer is not None and NVFP4QTensor._is_static_quantizer(weight_quantizer):
+        raise NotImplementedError(
+            "Static NVFP4 Conv3d export is not supported (dynamic NVFP4 only); "
+            f"module {type(sub_module).__name__} has a static weight quantizer."
+        )
+
+    # Flatten the conv filter to [O, K_flat] in PyTorch-contiguous order. This
+    # collapses (in_channels // groups) and every kernel dimension into the
+    # reduction dimension K, matching the calibration-time weight flatten.
+    out_channels = weight.shape[0]
+    weight_flat = weight.reshape(out_channels, -1)
+
+    # Pad K up to a multiple of the block size *before* deriving scales: the
+    # per-block scale helper requires the last dim to be block-divisible.
+    k_flat = weight_flat.shape[-1]
+    k_pad = ((k_flat + block_size - 1) // block_size) * block_size
+    if k_pad != k_flat:
+        weight_flat = torch.nn.functional.pad(weight_flat, (0, k_pad - k_flat))
+
+    # Dynamic NVFP4: derive both the global and per-block scales from the
+    # flattened, padded weight tensor itself.
+    weight_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2(weight_flat).squeeze()
+    weight_scale = NVFP4QTensor.get_weights_scaling_factor(
+        weight_flat,
+        block_size=block_size,
+        weights_scaling_factor_2=weight_scale_2,
+    )[0]
+
+    quantized_weight = to_quantized_weight(
+        weight_flat.to(dtype),
+        weight_scale,
+        quantization_format,
+        weight_scale_2,
+        block_size,
+    )
+
+    setattr(sub_module, weight_name, nn.Parameter(quantized_weight, requires_grad=False))
+    sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
+    sub_module.register_buffer(quantizer_attrs.weight_scale_2, weight_scale_2)
+
+    # Activation (input) scale: registered when the activation quantizer carries a
+    # calibrated amax (input_scale = amax_input / (448 * 6)), as for NVFP4 Linear.
+    input_quantizer = getattr(sub_module, quantizer_attrs.input_quantizer, None)
+    if (
+        input_quantizer is not None
+        and "disabled" not in repr(input_quantizer)
+        and input_quantizer.amax is not None
+    ):
+        sub_module.register_buffer(
+            quantizer_attrs.input_scale,
+            get_activation_scaling_factor(
+                sub_module, input_quantizer_name=quantizer_attrs.input_quantizer
+            ).squeeze(),
+        )
+
+    torch.cuda.empty_cache()
+
+
 def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
@@ -854,6 +955,18 @@ def _process_quantized_modules(
                 except AssertionError as e:
                     raise AssertionError(
                         f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
+                    ) from e
+            elif is_quantconv3d(sub_module):
+                # Quantized Conv3d (e.g. Wan VAE WanCausalConv3d): pack the
+                # flattened-K NVFP4 weight + scales. is_quantlinear is False for
+                # these even though they subclass nn.Conv3d, so they need their
+                # own branch.
+                try:
+                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                        _export_quantized_conv_weight(sub_module, dtype)
+                except AssertionError as e:
+                    raise AssertionError(
+                        f"Failed to export conv module '{name}' (type={type(sub_module).__name__}): {e}"
                     ) from e
             elif isinstance(sub_module, nn.Embedding) and hasattr(sub_module, "weight_quantizer"):
                 # Quantized nn.Embedding: pack the embedding table the same way as Linear
@@ -1211,6 +1324,13 @@ def _export_diffusers_checkpoint(
             # Step 4: Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
 
+            # NVFP4 Conv3d weights are stored in the logical flattened-K layout and
+            # must be kept out of the kernel-side pad/swizzle transforms below (those
+            # target Linear/GEMM); the conv kernel does its own layout preparation.
+            conv_nvfp4_prefixes = {
+                name for name, sub in component.named_modules() if is_quantconv3d(sub)
+            }
+
             # Step 5: Build quantization config
             quant_config = get_quant_config(component, is_modelopt_qlora=False)
             hf_quant_config = convert_hf_quant_config_format(quant_config) if quant_config else None
@@ -1230,6 +1350,7 @@ def _export_diffusers_checkpoint(
                 component_export_dir,
                 pipe,
                 hf_quant_config=hf_quant_config,
+                nvfp4_exclude_layers=conv_nvfp4_prefixes,
                 **kwargs,
             )
 

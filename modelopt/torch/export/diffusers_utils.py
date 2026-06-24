@@ -26,8 +26,6 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file, safe_open
 
-from .layer_utils import is_quantlinear
-
 DiffusionPipeline: type[Any] | None
 ModelMixin: type[Any] | None
 try:  # diffusers is optional for LTX-2 export paths
@@ -685,15 +683,20 @@ def hide_quantizers_from_state_dict(model: nn.Module):
     # Store references to quantizers that we'll temporarily remove
     quantizer_backup: dict[str, dict[str, nn.Module]] = {}
 
+    # Strip every quantizer submodule (any child whose name ends with
+    # "_quantizer": weight/input/output plus attention bmm/softmax quantizers) so
+    # save_pretrained never serializes quantizer buffers (e.g. _amax), regardless
+    # of layer type.
     for name, module in model.named_modules():
-        if is_quantlinear(module):
-            backup = {}
-            for attr in ["weight_quantizer", "input_quantizer", "output_quantizer"]:
-                if hasattr(module, attr):
-                    backup[attr] = getattr(module, attr)
-                    delattr(module, attr)
-            if backup:
-                quantizer_backup[name] = backup
+        backup = {
+            child_name: child
+            for child_name, child in module.named_children()
+            if child_name.endswith("_quantizer")
+        }
+        if backup:
+            for child_name in backup:
+                delattr(module, child_name)
+            quantizer_backup[name] = backup
 
     try:
         yield
@@ -855,11 +858,15 @@ def merge_diffusion_checkpoint(
     return merged_state_dict, metadata
 
 
-def _find_nvfp4_layers(state_dict: dict[str, torch.Tensor]) -> set[str]:
+def _find_nvfp4_layers(
+    state_dict: dict[str, torch.Tensor],
+    exclude_layers: set[str] | None = None,
+) -> set[str]:
     """Find all NVFP4 layer prefixes in a state dict.
 
     A layer is NVFP4 if it has ``weight`` (uint8), ``weight_scale`` (float8_e4m3fn),
-    and ``weight_scale_2`` (float32) entries.
+    and ``weight_scale_2`` (float32) entries. Any prefixes in ``exclude_layers``
+    (e.g. Conv3d layers that must stay in logical flattened-K layout) are omitted.
     """
     layers: set[str] = set()
     for key in state_dict:
@@ -874,12 +881,15 @@ def _find_nvfp4_layers(state_dict: dict[str, torch.Tensor]) -> set[str]:
                 and state_dict[s_key].dtype == torch.float8_e4m3fn
             ):
                 layers.add(layer)
+    if exclude_layers:
+        layers -= set(exclude_layers)
     return layers
 
 
 def pad_nvfp4_weights(
     state_dict: dict[str, torch.Tensor],
     padding_strategy: str = "row",
+    exclude_layers: set[str] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Pad NVFP4 weight and scale tensors so dimensions are multiples of 16.
 
@@ -887,6 +897,8 @@ def pad_nvfp4_weights(
         state_dict: The state dict to pad (modified in-place and returned).
         padding_strategy: ``"row"`` (default) pads only rows to multiples of 16;
             ``"row_col"`` pads both rows and columns.
+        exclude_layers: Layer prefixes to leave untouched (e.g. Conv3d layers,
+            whose logical flattened-K layout must not receive kernel-side padding).
     """
     if padding_strategy not in ("row", "row_col"):
         raise ValueError(f"padding_strategy must be 'row' or 'row_col', got '{padding_strategy}'")
@@ -894,7 +906,7 @@ def pad_nvfp4_weights(
     def _roundup(a: int, b: int) -> int:
         return ((a + b - 1) // b) * b
 
-    nvfp4_layers = _find_nvfp4_layers(state_dict)
+    nvfp4_layers = _find_nvfp4_layers(state_dict, exclude_layers)
 
     for layer in sorted(nvfp4_layers):
         w_key = f"{layer}.weight"
@@ -919,6 +931,7 @@ def pad_nvfp4_weights(
 
 def swizzle_nvfp4_scales(
     state_dict: dict[str, torch.Tensor],
+    exclude_layers: set[str] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Swizzle NVFP4 block scales to cuBLAS 2-D tiled layout.
 
@@ -932,6 +945,8 @@ def swizzle_nvfp4_scales(
 
     Args:
         state_dict: The state dict to transform (modified in-place and returned).
+        exclude_layers: Layer prefixes to leave untouched (e.g. Conv3d layers,
+            whose logical flattened-K layout must not be swizzled).
     """
 
     def _ceil_div(a: int, b: int) -> int:
@@ -960,7 +975,7 @@ def swizzle_nvfp4_scales(
         rearranged = blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16)
         return rearranged.reshape(padded_rows, padded_cols)
 
-    nvfp4_layers = _find_nvfp4_layers(state_dict)
+    nvfp4_layers = _find_nvfp4_layers(state_dict, exclude_layers)
 
     for layer in sorted(nvfp4_layers):
         s_key = f"{layer}.weight_scale"
