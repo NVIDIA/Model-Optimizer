@@ -7,11 +7,7 @@
 # Slurm run on cw_dfw — cells override per-cell knobs via
 # pipeline.task_N.args+=[...]:
 #
-#   uv run slurm.py \
-#     --yaml modules/Model-Optimizer/tools/launcher/examples/Nemotron-h/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/specdec_bench_mtp_vllm.yaml \
-#     --yes detach=true \
-#     pipeline.task_0.args+=["--temperature 0","--max_seq_len 65536","--save_dir /scratchspace/<sweep>/qualitative","--draft_length 3"] \
-#     pipeline.task_1.args+=["--temperature 0","--max_seq_len 65536","--save_dir /scratchspace/<sweep>/throughput_32k","--num_requests 80","--draft_length 3"]
+#   uv run slurm.py #     --yaml modules/Model-Optimizer/tools/launcher/examples/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/specdec_bench_mtp_vllm.yaml #     --yes detach=true #     pipeline.task_0.args+=["--temperature 0","--max_seq_len 65536","--save_dir /scratchspace/<sweep>/qualitative","--draft_length 3"] #     pipeline.task_1.args+=["--temperature 0","--max_seq_len 65536","--save_dir /scratchspace/<sweep>/throughput_32k","--num_requests 80","--draft_length 3"]
 
 job_name: NVIDIA-Nemotron-3-Super-120B-A12B-BF16_specdec_bench_mtp_vllm
 
