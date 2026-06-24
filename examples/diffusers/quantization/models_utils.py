@@ -366,6 +366,8 @@ def build_block_range_quant_cfg(
         {"quantizer_name": f"*{block_module}.*input_quantizer", "enable": True},
     ]
     for idx in excluded:
-        rules.append({"quantizer_name": f"*{block_module}.{idx}.*weight_quantizer", "enable": False})
+        rules.append(
+            {"quantizer_name": f"*{block_module}.{idx}.*weight_quantizer", "enable": False}
+        )
         rules.append({"quantizer_name": f"*{block_module}.{idx}.*input_quantizer", "enable": False})
     return rules

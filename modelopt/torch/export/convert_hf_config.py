@@ -182,7 +182,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
     # This structure is derived based on the example for "FP8" and "NVFP4"
     # TODO: Handle other quantization algorithms
     if quant_algo_value == "FP8":
-        config_group_details = {
+        config_group_details: dict[str, Any] = {
             "input_activations": {"dynamic": False, "num_bits": 8, "type": "float"},
             "weights": {"dynamic": False, "num_bits": 8, "type": "float"},
             "targets": ["Linear"],

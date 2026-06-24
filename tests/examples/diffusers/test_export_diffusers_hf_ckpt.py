@@ -219,14 +219,14 @@ def test_qwen_image_hf_ckpt_export(
     assert quant_config.get("quant_method") == "modelopt"
 
     keys: set[str] = set()
-    lora_tensors: dict[str, "object"] = {}
+    lora_tensors: dict[str, object] = {}
     safetensors_files = sorted(transformer_dir.rglob("*.safetensors"))
     assert safetensors_files, f"no safetensors in {transformer_dir}"
     for path in safetensors_files:
         with safe_open(str(path), framework="pt") as handle:
-            for key in handle.keys():
+            for key in handle.keys():  # noqa: SIM118 - safe_open is not iterable
                 keys.add(key)
-                if key.endswith(".svdquant_lora_a") or key.endswith(".svdquant_lora_b"):
+                if key.endswith((".svdquant_lora_a", ".svdquant_lora_b")):
                     lora_tensors[key] = handle.get_tensor(key)
 
     # No live quantizer state should leak into the exported checkpoint.
