@@ -464,6 +464,8 @@ def _launcher_argv(abs_yaml: Path, checkout: SourceCheckout | None, *flags: str)
     return [
         _uv_binary(),
         "run",
+        "--reinstall-package",
+        "modelopt-launcher",
         "--project",
         str(checkout.launcher_dir),
         "modelopt-launcher",
