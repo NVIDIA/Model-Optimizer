@@ -33,13 +33,21 @@ trap 'exit_handler' EXIT
 # Skip the install when the deps are already present (warm container or
 # previous task in the pipeline). Saves a few minutes per task and avoids
 # silently drifting versions if upstream wheels move between launches.
-if ! pip show boto3 >/dev/null 2>&1 || \
-   ! pip show datasets >/dev/null 2>&1 || \
-   ! pip show seaborn >/dev/null 2>&1; then
-    if ! pip install -r modules/Model-Optimizer/examples/specdec_bench/requirements.txt; then
-        report_result "FAIL: specdec_bench: pip install requirements.txt failed"
-        exit 1
+install_deps() {
+    if ! pip show boto3 >/dev/null 2>&1 || \
+       ! pip show datasets >/dev/null 2>&1 || \
+       ! pip show seaborn >/dev/null 2>&1; then
+        if ! pip install -r modules/Model-Optimizer/examples/specdec_bench/requirements.txt; then
+            report_result "FAIL: specdec_bench: pip install requirements.txt failed"
+            exit 1
+        fi
     fi
+}
+
+if [[ -n "${SLURM_PROCID:-}" ]]; then
+    flock /tmp/specdec_bench_deps.lock bash -c "$(declare -f install_deps); install_deps"
+else
+    install_deps
 fi
 
 # TensorRT-LLM jobs need to run through the launcher wrapper so spawned MPI
