@@ -575,15 +575,6 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--restore-from", type=str, help="Path to restore from previous checkpoint"
     )
     export_group.add_argument(
-        "--sanity-image-path",
-        type=str,
-        default=None,
-        help="If set, generate one image from the in-memory quantized pipeline (after "
-        "quantization, before the weights are packed for export) and save it here. This is "
-        "a quick functional sanity check of quantized inference; it does NOT reload the "
-        "exported checkpoint.",
-    )
-    export_group.add_argument(
         "--trt-high-precision-dtype",
         type=str,
         default="Half",
@@ -721,29 +712,6 @@ def main() -> None:
                 export_manager.save_checkpoint(backbone, backbone_name)
 
         pipeline_manager.print_quant_summary()
-
-        # Optional functional sanity check: generate one image from the in-memory
-        # quantized pipeline. This runs BEFORE export (while weights are still
-        # fake-quantized and runnable, not yet packed) and does not reload the
-        # exported checkpoint.
-        if args.sanity_image_path:
-            try:
-                logger.info(f"Generating sanity image to {args.sanity_image_path}")
-                inference_args = MODEL_DEFAULTS.get(model_type, {}).get("inference_extra_args", {})
-                result = pipe(
-                    prompt="A high-quality photo of a cat wearing sunglasses",
-                    num_inference_steps=calib_config.n_steps,
-                    **inference_args,
-                )
-                sanity_path = Path(args.sanity_image_path)
-                sanity_path.parent.mkdir(parents=True, exist_ok=True)
-                result.images[0].save(str(sanity_path))
-                logger.info("Sanity image saved successfully")
-            except Exception as sanity_error:
-                # A requested sanity image is a positive success criterion: if it
-                # cannot be produced, fail loudly rather than reporting success.
-                logger.error(f"Sanity image generation failed: {sanity_error}", exc_info=True)
-                raise
 
         for backbone_name, backbone in pipeline_manager.iter_backbones():
             export_manager.export_onnx(
