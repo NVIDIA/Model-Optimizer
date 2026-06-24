@@ -30,7 +30,7 @@ repos:
         exclude: ^examples/specdec_bench/specdec_bench/datasets/speed\.py$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.17.1
+    rev: v2.1.0
     hooks:
       - id: mypy
 

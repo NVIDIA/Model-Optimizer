@@ -930,7 +930,7 @@ class MambaNumHeadsHp(TracedHp):
         else:
             slice_order = self._slice_order
         target_nheads_per_group = self.active // self._ngroups
-        return slice_order.view(self._ngroups, -1)[:, :target_nheads_per_group].flatten()  # type: ignore[misc]
+        return slice_order.view(self._ngroups, -1)[:, :target_nheads_per_group].flatten()
 
 
 class MambaDInnerHp(TracedHp):
