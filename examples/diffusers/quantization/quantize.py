@@ -39,6 +39,7 @@ from models_utils import (
     get_model_filter_func,
     parse_extra_params,
 )
+from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from pipeline_manager import PipelineManager
 from quantize_config import (
     CalibrationConfig,
@@ -317,11 +318,6 @@ class ExportManager:
         """
         if not self.config.onnx_dir:
             return
-
-        # onnx_graphsurgeon (pulled in by onnx_utils.export) is an optional dependency
-        # only needed for the ONNX export path; import lazily so the HF-checkpoint
-        # export runs without it installed.
-        from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 
         self.logger.info(f"Starting ONNX export to {self.config.onnx_dir}")
 
