@@ -16,8 +16,19 @@
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
-# Recipe variants the example ships.
-_RECIPES = ["huggingface/vit/ptq/fp8", "huggingface/vit/ptq/nvfp4"]
+from modelopt.torch.quantization.backends.utils import fp4_compatible
+
+# Recipe variants the example ships. NVFP4's TRT kernels are only generated on
+# Blackwell (compute capability >= 10.0), so that case is skipped elsewhere.
+_RECIPES = [
+    "huggingface/vit/ptq/fp8",
+    pytest.param(
+        "huggingface/vit/ptq/nvfp4",
+        marks=pytest.mark.skipif(
+            not fp4_compatible(), reason="NVFP4 requires a Blackwell GPU (SM >= 100)"
+        ),
+    ),
+]
 
 
 @pytest.mark.parametrize("recipe", _RECIPES)
