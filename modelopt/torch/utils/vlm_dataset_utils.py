@@ -506,12 +506,14 @@ def get_vlm_dataset_dataloader(
     # iterable/streaming ones (each rank then processes ~num_samples / dp_size samples).
     sampler = None
     if dp_size > 1:
-        if hasattr(dataset, "__len__"):
+        # Discriminate on dataset kind, not __len__: the streaming wrapper is an IterableDataset
+        # that also defines __len__, and DataLoader rejects a sampler on an IterableDataset.
+        if isinstance(dataset, torch.utils.data.IterableDataset):
+            dataset = _ShardedIterable(dataset, rank=dp_rank, world=dp_size)
+        else:
             from torch.utils.data.distributed import DistributedSampler
 
             sampler = DistributedSampler(dataset, num_replicas=dp_size, rank=dp_rank, shuffle=False)
-        else:
-            dataset = _ShardedIterable(dataset, rank=dp_rank, world=dp_size)
 
     return DataLoader(
         dataset, batch_size=batch_size, sampler=sampler, shuffle=False, collate_fn=_collate_fn

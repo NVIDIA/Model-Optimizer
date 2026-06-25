@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import contextlib
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -144,8 +145,8 @@ def _create_tiny_vlm_dir(
     return (dir_path, model) if return_model else dir_path
 
 
-##### Qwen3 #####
-def get_tiny_qwen3(**config_kwargs) -> PreTrainedModel:
+##### Qwen3 (dense or MoE) #####
+def _get_tiny_qwen3(moe: bool = False, **config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
 
     kwargs = {
@@ -158,54 +159,42 @@ def get_tiny_qwen3(**config_kwargs) -> PreTrainedModel:
         "max_position_embeddings": 32,
         "vocab_size": 32,
     }
+    if moe:
+        kwargs.update(
+            {
+                "moe_intermediate_size": 32,
+                "num_experts": 4,
+                "num_experts_per_tok": 2,
+                "decoder_sparse_step": 1,
+            }
+        )
     kwargs.update(config_kwargs)
-    # NOTE: Use AutoModelForCausalLM.from_config() instead of Qwen3ForCausalLM() for correct dtype handling
-    return AutoModelForCausalLM.from_config(Qwen3Config(**kwargs))
+    # NOTE: Use AutoModelForCausalLM.from_config() instead of Qwen3[Moe]ForCausalLM() for correct dtype handling
+    return AutoModelForCausalLM.from_config((Qwen3MoeConfig if moe else Qwen3Config)(**kwargs))
 
 
-def create_tiny_qwen3_dir(
-    tmp_path: Path | str, with_tokenizer: bool = False, return_model: bool = False, **config_kwargs
+def _create_tiny_qwen3_dir(
+    tmp_path: Path | str,
+    with_tokenizer: bool = False,
+    return_model: bool = False,
+    *,
+    moe: bool = False,
+    **config_kwargs,
 ) -> Path | tuple[Path, PreTrainedModel]:
     return _create_tiny_llm_dir(
-        Path(tmp_path) / "tiny_qwen3",
-        get_tiny_qwen3,
+        Path(tmp_path) / ("tiny_qwen3_moe" if moe else "tiny_qwen3"),
+        _get_tiny_qwen3,
         with_tokenizer=with_tokenizer,
         return_model=return_model,
+        moe=moe,
         **config_kwargs,
     )
 
 
-##### Qwen3 MoE #####
-def get_tiny_qwen3_moe(**config_kwargs) -> PreTrainedModel:
-    set_seed(SEED)
-
-    kwargs = {
-        "dtype": torch.bfloat16,
-        "hidden_size": 32,
-        "intermediate_size": 32,
-        "moe_intermediate_size": 32,
-        "num_hidden_layers": 2,
-        "num_attention_heads": 16,
-        "num_key_value_heads": 2,
-        "max_position_embeddings": 32,
-        "vocab_size": 32,
-        "num_experts": 4,
-        "num_experts_per_tok": 2,
-        "decoder_sparse_step": 1,
-    }
-    kwargs.update(config_kwargs)
-    return AutoModelForCausalLM.from_config(Qwen3MoeConfig(**kwargs))
-
-
-def create_tiny_qwen3_moe_dir(
-    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
-) -> Path | tuple[Path, PreTrainedModel]:
-    return _create_tiny_llm_dir(
-        Path(tmp_path) / "tiny_qwen3_moe",
-        get_tiny_qwen3_moe,
-        with_tokenizer=with_tokenizer,
-        **config_kwargs,
-    )
+get_tiny_qwen3 = partial(_get_tiny_qwen3, moe=False)
+create_tiny_qwen3_dir = partial(_create_tiny_qwen3_dir, moe=False)
+get_tiny_qwen3_moe = partial(_get_tiny_qwen3, moe=True)
+create_tiny_qwen3_moe_dir = partial(_create_tiny_qwen3_dir, moe=True)
 
 
 ##### Qwen3-VL #####
@@ -328,14 +317,13 @@ def create_tiny_gemma3vl_dir(
     )
 
 
-##### Qwen3.5-VL (dense, hybrid GatedDeltaNet + gated attention) #####
-# Real Qwen3.5-VL reused (via get_tiny_vlm_processor) for the fixture's image processor + chat
-# template; the vision patch params below match it so the processor's pixel_values fit the tiny tower.
+##### Qwen3.5-VL (dense or MoE, hybrid GatedDeltaNet + gated attention) #####
 QWEN3_5_VL_REF = "Qwen/Qwen3.5-0.8B"
 
 
-def get_tiny_qwen3_5_vl(**config_kwargs) -> PreTrainedModel:
-    from transformers import Qwen3_5Config
+def _get_tiny_qwen3_5_vl(moe: bool = False, **config_kwargs) -> PreTrainedModel:
+    # Lazy imports — Qwen3.5-VL requires a recent transformers version.
+    from transformers import Qwen3_5Config, Qwen3_5MoeConfig
 
     set_seed(SEED)
 
@@ -362,6 +350,16 @@ def get_tiny_qwen3_5_vl(**config_kwargs) -> PreTrainedModel:
         "linear_value_head_dim": 16,
         "linear_conv_kernel_dim": 4,
     }
+    if moe:
+        # Replace the dense MLP with a tiny MoE (Qwen3.5-MoE: hybrid GatedDeltaNet + gated attention + MoE).
+        text_kwargs.update(
+            {
+                "num_experts": 4,
+                "num_experts_per_tok": 2,
+                "moe_intermediate_size": 64,
+                "shared_expert_intermediate_size": 64,
+            }
+        )
     text_kwargs.update(config_kwargs)
     vision_kwargs = {
         "hidden_size": 16,
@@ -376,7 +374,7 @@ def get_tiny_qwen3_5_vl(**config_kwargs) -> PreTrainedModel:
         "out_hidden_size": text_kwargs["hidden_size"],  # must match text hidden_size
         "deepstack_visual_indexes": [],  # no deepstack injection (unlike Qwen3-VL)
     }
-    cfg = Qwen3_5Config(
+    cfg = (Qwen3_5MoeConfig if moe else Qwen3_5Config)(
         text_config=text_kwargs,
         vision_config=vision_kwargs,
         dtype=torch.bfloat16,
@@ -389,17 +387,29 @@ def get_tiny_qwen3_5_vl(**config_kwargs) -> PreTrainedModel:
     return AutoModelForImageTextToText.from_config(cfg)
 
 
-def create_tiny_qwen3_5_vl_dir(
-    tmp_path: Path | str, with_processor: bool = False, return_model: bool = False, **config_kwargs
+def _create_tiny_qwen3_5_vl_dir(
+    tmp_path: Path | str,
+    with_processor: bool = False,
+    return_model: bool = False,
+    *,
+    moe: bool = False,
+    **config_kwargs,
 ) -> Path | tuple[Path, PreTrainedModel]:
     return _create_tiny_vlm_dir(
-        Path(tmp_path) / "tiny_qwen3_5_vl",
+        Path(tmp_path) / ("tiny_qwen3_5_moe_vl" if moe else "tiny_qwen3_5_vl"),
         QWEN3_5_VL_REF,
-        get_tiny_qwen3_5_vl,
+        _get_tiny_qwen3_5_vl,
         with_processor=with_processor,
         return_model=return_model,
+        moe=moe,
         **config_kwargs,
     )
+
+
+get_tiny_qwen3_5_vl = partial(_get_tiny_qwen3_5_vl, moe=False)
+create_tiny_qwen3_5_vl_dir = partial(_create_tiny_qwen3_5_vl_dir, moe=False)
+get_tiny_qwen3_5_moe_vl = partial(_get_tiny_qwen3_5_vl, moe=True)
+create_tiny_qwen3_5_moe_vl_dir = partial(_create_tiny_qwen3_5_vl_dir, moe=True)
 
 
 ##### NEMOTRON #####

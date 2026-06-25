@@ -311,11 +311,16 @@ class MCoreMinitronSearcher(BaseSearcher):
                 assert isinstance(self.constraints[k], (int, float)), f"{k} must be a float!"
             assert self.has_score, "score_func (e.g. MMLU) is required for metric-based pruning!"
             export_config = None
-            # Sort all parameters for metric-based pruning
-            self.hps_to_sort = SUPPORTED_HPARAMS
+            # Sort all parameters that may be pruned. Skip the ones explicitly excluded from the
+            # search: sorting permutes a dimension by importance, and for hparams that are never
+            # pruned this permutation is pure churn. It is also unsafe for ``hidden_size`` on VLMs --
+            # the language model shares its residual dimension with the (un-pruned) vision projector,
+            # so permuting it would misalign the injected image features.
+            self.hps_to_sort = SUPPORTED_HPARAMS - set(self.config["hparams_to_skip"] or [])
 
         for n, hp in named_hparams(self.model, unique=True):
             hp_name = n.split(".")[-1]
+            hp.reset_choices()  # Refresh ConcatHparam choices (recomputed after modify()) before validating
             if hp.is_configurable:
                 # Make sure configurable hparams are the ones with right names else implementation needs to be fixed!
                 assert hp_name in SUPPORTED_HPARAMS, f"[ImplError] Invalid hparam {hp_name}!"
@@ -329,7 +334,6 @@ class MCoreMinitronSearcher(BaseSearcher):
                     f"{hp.choices}. Manual export_config values must match the search-space "
                     "granularity (see the *_divisor settings)."
                 )
-            hp.reset_choices()  # Make sure ConcatHparam choices are updated after modify()
 
         assert isinstance(self.model, _DynamicMCoreLanguageModel), (
             "Input should be unwrapped MCore model!"

@@ -311,7 +311,7 @@ def main(args: argparse.Namespace):
     if is_vlm and not use_image_calib:
         warn_rank_0(
             f"Text-only calibration on a VLM (dataset '{args.calib_dataset_name}'): the language "
-            "model's pruning importance will not see vision tokens."
+            "model's calibration statistics will not see vision tokens."
         )
     print_rank_0(f"Using calibration dataset: {args.calib_dataset_name}")
 
@@ -328,7 +328,9 @@ def main(args: argparse.Namespace):
             if name != "language_model" and id(child) not in lm_module_ids
         )
         for name in non_lm_children:
-            mtq_config["quant_cfg"].append({"quantizer_name": f"*{name}*", "enable": False})
+            # Anchor to the child subtree (top-level child of the quantized root) so a short non-LM
+            # name cannot accidentally match a language-model quantizer path by substring.
+            mtq_config["quant_cfg"].append({"quantizer_name": f"{name}.*", "enable": False})
         print_rank_0(f"Disabling quantizers on non-language-model submodules: {non_lm_children}")
 
     # KV-cache quantization is incompatible with weight compression. Validate on the *resolved*

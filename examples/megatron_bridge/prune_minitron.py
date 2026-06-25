@@ -309,7 +309,7 @@ def main(args: argparse.Namespace):
     )
 
     # For VLMs (e.g. Qwen3-VL), only the language model is pruned; the vision tower is left intact.
-    # hidden_size is shared with the vision->LM projector, so it is never pruned here (follow-up).
+    # hidden_size is shared with the vision->LM projector, so it is skipped
     language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
     is_vlm = language_model is not unwrapped_model
     if is_vlm:
@@ -508,10 +508,16 @@ def main(args: argparse.Namespace):
             text_cfg.mamba_head_dim = mcore_cfg.mamba_head_dim
         if hasattr(text_cfg, "moe_intermediate_size"):
             text_cfg.moe_intermediate_size = mcore_cfg.moe_ffn_hidden_size
-        if hasattr(text_cfg, "moe_shared_expert_intermediate_size"):
-            text_cfg.moe_shared_expert_intermediate_size = (
-                mcore_cfg.moe_shared_expert_intermediate_size
-            )
+        # HF names this field with or without the ``moe_`` prefix depending on the model
+        # (e.g. Qwen3.5-MoE uses ``shared_expert_intermediate_size``).
+        for shared_expert_field in (
+            "moe_shared_expert_intermediate_size",
+            "shared_expert_intermediate_size",
+        ):
+            if hasattr(text_cfg, shared_expert_field):
+                setattr(
+                    text_cfg, shared_expert_field, mcore_cfg.moe_shared_expert_intermediate_size
+                )
         if hasattr(text_cfg, "num_experts"):
             text_cfg.num_experts = mcore_cfg.num_moe_experts
         if hasattr(text_cfg, "n_routed_experts"):
