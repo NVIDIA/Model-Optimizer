@@ -28,5 +28,6 @@ register(
             "Qwen3_5MoeSparseMoeBlock",
         ),
         expert_linear_names=("gate_proj", "down_proj", "up_proj"),
+        has_iterable_experts=True,
     )
 )

@@ -94,25 +94,14 @@ def get_experts_list(
     """
     experts_list = []
 
-    # Define linear layer names for different model types
-    if "mixtralforcausallm" in model_type:
-        linear_names = ["w1", "w2", "w3"]
-    elif any(
-        qwen_variant in model_type
-        for qwen_variant in [
-            "qwenmoeforcausallm",
-            "qwen2moeforcausallm",
-            "qwen3moeforcausallm",
-            "qwen3nextforcausallm",
-        ]
-    ):
-        linear_names = ["gate_proj", "down_proj", "up_proj"]
-    elif "nemotronhforcausallm" in model_type:
-        linear_names = ["up_proj", "down_proj"]
-    elif "gemma4" in model_type:
-        linear_names = ["gate_proj", "down_proj", "up_proj"]
-    else:
+    # Expert linear names live in modeling/families/*. The grouped export path only
+    # supports families whose experts are iterable per-expert sub-modules (Mixtral,
+    # Qwen MoE, NemotronH, Gemma4); stacked/fused layouts (DBRX, GptOss, ...) raise
+    # NotImplementedError here and are handled by other paths.
+    spec = match_moe_block(module)
+    if spec is None or not spec.has_iterable_experts or spec.expert_linear_names is None:
         raise NotImplementedError(f" {model_type} not supported")
+    linear_names = list(spec.expert_linear_names)
 
     # Common logic for all supported model types
     experts_list.extend(

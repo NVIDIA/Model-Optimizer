@@ -102,7 +102,79 @@ deltas leaking into those files get extracted. Target = generic engine (by opera
 
 ## 3. Target Architecture
 
-*TBD.*
+Two layers, split along the §2 red line:
+
+- **Generic engine** (the existing files, organized *by operation*): `layer_utils`,
+  `quant_utils`, `moe_utils`, `model_config_export`, … — keep all algorithms here.
+- **Modeling library** (`modeling/`, organized *by model*): per-model **data only**,
+  read by the engine through registry lookups.
+
+### 3.1 Layout
+
+```text
+modeling/
+  base.py        # ModelSpec dataclass — the per-model contract
+  registry.py    # register() + lookups; returns None when unmatched
+  __init__.py    # re-exports; importing it registers all families
+  families/
+    __init__.py  # imports each family module (import == registration)
+    qwen.py deepseek.py gemma.py mixtral.py dbrx.py gptoss.py nemotron.py ...
+```
+
+`modeling/` depends only on `torch.nn` + stdlib. It must **never** import from the
+parent export package (no `from ..layer_utils import ...`), so it stays at the bottom
+of the dependency graph and cannot reintroduce the `unified_export_hf ↔ plugins` cycle.
+
+### 3.2 `ModelSpec` — the contract
+
+A frozen-ish data record per model family. Two kinds of fields:
+
+- **Matching keys** (how a spec is resolved):
+  - `architectures: tuple[str, ...]` — exact HF architecture class names (model-level).
+  - `moe_block_names: tuple[str, ...]` — MoE block class-name substrings, matched
+    case-insensitively (sub-module-level), reproducing the legacy `module_match_name_list`.
+- **Per-model data** (grows one migration step at a time; **values, never callables/algorithms**):
+  - `expert_linear_names` *(P1, landed)*
+  - P2/P3 add fields here (e.g. expert-stacking names, `norm_weight_plus_one`,
+    `default_activation`, `scale_embedding_by_sqrt_hidden`, `share_embedding_table`).
+
+Rule: if a field would hold *behavior* (an attention builder, enc-dec routing), it does
+**not** belong on `ModelSpec` — that is the OUT bucket (§4).
+
+### 3.3 Lookup conventions
+
+Two resolvers in `registry.py`, both returning `ModelSpec | None`:
+
+- `match_by_architecture(arch)` — model-level data, keyed on `model.config.architectures[0]`.
+- `match_moe_block(module)` — sub-module-level data, keyed on a module's class name.
+
+Specs are matched in registration order; families must keep their match keys mutually
+exclusive (no class name may match two specs), so order is never load-bearing.
+
+### 3.4 Call-site integration pattern (fallback-first)
+
+Every migrated call site follows the same shape — look up, use if present, else fall
+through to the **unchanged** legacy code:
+
+```python
+spec = match_moe_block(module)               # or match_by_architecture(arch)
+if spec is not None and spec.<field> is not None:
+    return spec.<field>
+# ... legacy branch preserved verbatim as fallback ...
+```
+
+This is what makes migration incremental: a family not yet in `modeling/` returns
+`None` and behaves exactly as before. Once every family for a category is migrated, the
+legacy branch is dead but kept until the category is fully retired.
+
+### 3.5 Conventions for contributors
+
+- **Add a model:** create/extend `families/<family>.py`, register a `ModelSpec`, done —
+  no engine edits.
+- **Add a category (P2/P3):** add a field to `ModelSpec`, populate it in the families,
+  convert the one engine call site to the fallback-first pattern, add an equivalence test.
+- **Never** put algorithms in `modeling/`; if tempted, the logic belongs in the engine
+  and only its per-model *parameters* (if any) come from the spec.
 
 ## 4. Migration Plan & Priority
 

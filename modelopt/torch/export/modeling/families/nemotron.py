@@ -24,5 +24,6 @@ register(
         # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
         moe_block_names=("NemotronHMOE",),
         expert_linear_names=("up_proj", "down_proj"),
+        has_iterable_experts=True,
     )
 )

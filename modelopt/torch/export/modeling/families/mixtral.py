@@ -25,6 +25,7 @@ register(
         name="mixtral",
         moe_block_names=("MixtralSparseMoeBlock",),
         expert_linear_names=("w1", "w2", "w3"),
+        has_iterable_experts=True,
     )
 )
 

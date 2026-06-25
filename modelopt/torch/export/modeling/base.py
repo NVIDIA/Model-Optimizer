@@ -40,6 +40,10 @@ class ModelSpec:
         expert_linear_names: the expert linear projection names for this family's MoE
             block, e.g. ("gate_proj", "down_proj", "up_proj"). ``None`` means this spec
             carries no MoE-naming override.
+        has_iterable_experts: True when this family stores experts as per-expert
+            iterable sub-modules (Mixtral, Qwen MoE, NemotronH, Gemma4), so the grouped
+            export path (``get_experts_list``) can index them. False/unset for stacked
+            or fused layouts (DBRX, GptOss, ...), which are handled by other paths.
     """
 
     name: str
@@ -49,5 +53,8 @@ class ModelSpec:
     # --- P1: MoE expert naming ---
     expert_linear_names: tuple[str, ...] | None = None
 
-    # Reserved for later migration steps (P2/P3); added when those land.
+    # --- P2: grouped (iterable) expert export support ---
+    has_iterable_experts: bool = False
+
+    # Reserved for later migration steps (P3); added when those land.
     _extra: dict = field(default_factory=dict, repr=False)
