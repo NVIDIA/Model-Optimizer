@@ -32,6 +32,8 @@ python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or mode
 
 > **Note (Slurm interactive nodes):** On Slurm interactive nodes, `WORLD_SIZE` is set to the number of available GPUs in the shell environment. Running `python` directly causes `lm_eval` to hang waiting for peer ranks that were never spawned. Prepend `WORLD_SIZE=1` to any of the above commands to fix this.
 
+For a quick smoke test, add `--limit 10` to any of the above commands to evaluate on only 10 samples.
+
 - For data-parallel evaluation with model-sharding:
 
 With the following command, the model will be sharded across `total_num_of_available_gpus/num_copies_of_your_model` with a data-parallelism of `num_copies_of_your_model`
