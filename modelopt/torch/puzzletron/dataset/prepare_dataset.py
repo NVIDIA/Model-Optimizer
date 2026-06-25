@@ -15,10 +15,9 @@
 
 import os
 
+import datasets
 import fire
 import numpy as np
-
-import datasets
 
 from ..tools.logger import mprint
 
