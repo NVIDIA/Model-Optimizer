@@ -226,11 +226,6 @@ class TestIsFusedExpertsModule:
         assert _is_fused_experts_module(module) is False
 
     def test_module_missing_act_fn_still_detected(self):
-        # act_fn is intentionally not required: some fused-expert modules
-        # (e.g. MiniMaxM3VLExperts) apply a custom gated activation between the
-        # two F.linear calls instead of exposing an act_fn attribute.
-        # _QuantFusedExperts is activation-agnostic, so such modules must still
-        # be detected and quantized.
         module = nn.Module()
         module.gate_up_proj = nn.Parameter(torch.randn(4, 16, 8))
         module.down_proj = nn.Parameter(torch.randn(4, 8, 16))
