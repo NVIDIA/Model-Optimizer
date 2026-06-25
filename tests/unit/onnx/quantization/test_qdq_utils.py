@@ -705,6 +705,7 @@ def create_test_model_with_int4_dq_matmul():
 class TestColumnMajorTransformation:
     """Test suite for column-major storage transformation functions."""
 
+    @pytest.mark.timeout(120)
     def test_column_major_transformation_graph_structure(self):
         """Test that column-major transformation produces correct graph structure.
 
