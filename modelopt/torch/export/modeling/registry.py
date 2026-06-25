@@ -24,7 +24,13 @@ import torch.nn as nn
 
 from .base import ModelSpec
 
-__all__ = ["match_by_architecture", "match_by_decoder_type", "match_moe_block", "register"]
+__all__ = [
+    "match_by_architecture",
+    "match_by_decoder_type",
+    "match_mlp_block",
+    "match_moe_block",
+    "register",
+]
 
 _SPECS: list[ModelSpec] = []
 
@@ -64,5 +70,18 @@ def match_moe_block(module: nn.Module) -> ModelSpec | None:
     cls_name = type(module).__name__.lower()
     for spec in _SPECS:
         if any(name.lower() in cls_name for name in spec.moe_block_names):
+            return spec
+    return None
+
+
+def match_mlp_block(module: nn.Module) -> ModelSpec | None:
+    """Return the spec whose ``mlp_block_names`` exactly equals ``module``'s class name.
+
+    Exact equality (not substring), mirroring the legacy ``type(module).__name__ in [...]``
+    checks for MLP keyword adjustments.
+    """
+    cls_name = type(module).__name__
+    for spec in _SPECS:
+        if cls_name in spec.mlp_block_names:
             return spec
     return None

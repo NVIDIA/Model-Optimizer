@@ -23,12 +23,19 @@ behavior. See ``MODEL_SPECIFIC_REFACTOR.md`` for scope and migration priority.
 
 from . import families
 from .base import ModelSpec
-from .registry import match_by_architecture, match_by_decoder_type, match_moe_block, register
+from .registry import (
+    match_by_architecture,
+    match_by_decoder_type,
+    match_mlp_block,
+    match_moe_block,
+    register,
+)
 
 __all__ = [
     "ModelSpec",
     "match_by_architecture",
     "match_by_decoder_type",
+    "match_mlp_block",
     "match_moe_block",
     "register",
 ]

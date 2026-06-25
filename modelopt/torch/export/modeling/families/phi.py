@@ -25,3 +25,12 @@ register(
         forced_activation="swiglu",
     )
 )
+
+# Phi3Small and the related TLGv4 MLP treat up_proj as the fc projection (not gate).
+register(
+    ModelSpec(
+        name="phi3_small",
+        mlp_block_names=("Phi3SmallMLP", "TLGv4MLP"),
+        mlp_keyword_roles={"up_proj": "fc"},
+    )
+)

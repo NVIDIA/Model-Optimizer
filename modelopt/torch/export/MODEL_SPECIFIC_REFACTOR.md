@@ -185,12 +185,12 @@ never breaks un-migrated models.
 
 | Step | What | Why this order | Risk |
 |---|---|---|---|
-| **P0** ✅ | Registry skeleton: `modeling/` + `ModelSpec` + lookups (`match_moe_block` / `match_by_architecture`, return `None` → fallback). Do **not** touch `MODEL_NAME_TO_TYPE`. | Everything keys off it; purely additive, no behavior change. | very low |
+| **P0** ✅ | Registry skeleton: `modeling/` + `ModelSpec` + lookups (`match_moe_block` / `match_mlp_block` / `match_by_decoder_type` / `match_by_architecture`, return `None` → fallback). Do **not** touch `MODEL_NAME_TO_TYPE`. | Everything keys off it; purely additive, no behavior change. | very low |
 | **P1** (pilot) ✅ | MoE expert naming: `get_expert_linear_names` if-chain → `spec.expert_linear_names`. | Purest data + the #1 shotgun-surgery driver. Proves the mechanism end-to-end with near-zero blast radius. | very low |
 | **P2** ✅ | The duplicate expert-naming table in `get_experts_list` → `spec.expert_linear_names` + `spec.has_iterable_experts` (the grouped-export capability flag that reproduces the legacy "supported 4 families, else `NotImplementedError`"). | Removes the second copy of expert-naming data → "add a MoE model" stops touching this site. | low |
-| **P3** | Non-MoE pure-data flags: norm+1, activation override, embed √scale, share_embedding. | Mechanical bool/str moves; clears scattered `layer_utils` branches. | low |
+| **P3** (partial) | Non-MoE per-model data. Done: activation override (`forced_activation` ✅), shared-embedding (`force_share_embedding_table` ✅), MLP keyword roles (`mlp_keyword_roles` ✅ — Arctic/InternLM2 remap, MPT/Phi3Small/TLGv4/Nemotron up_proj→fc). Deferred: norm+1 (mixes the generic `LayerNorm1P` which stays in the engine; needs a case-sensitive norm-class resolver) and embed √scale (Gemma1-only + `is_tensorrt_llm_0_8_or_9()` version gate) — low value. | Mechanical bool/str/dict moves; clears scattered `layer_utils` / `model_config_export` branches. | low |
 | **P4** (optional) | Already-declarative tables: `HF_CONFIG_MAP`, `PQS_FUSE_MODULE_MAPPING`. | Already data and not causing pain; move only for consistency. | low |
-| **OUT** | Control-flow oddballs: enc-dec routing, MLA, VLM language-tower extraction, spec-decoding (already separate). | Forcing into `ModelSpec` creates leaky hooks; revisit after P1–P3 fix the interface. | — |
+| **OUT** | Control-flow oddballs: enc-dec routing, MLA, VLM language-tower extraction, spec-decoding (already separate), the ChatGLM/Phi3 fused gate/fc chunk-swap. | Forcing into `ModelSpec` creates leaky hooks; revisit after P1–P3 fix the interface. | — |
 
 **Guardrails:** fallback-first (un-migrated models keep the old path); one category per
 PR with an export-test equivalence check; hard line — never move *algorithms*, only the

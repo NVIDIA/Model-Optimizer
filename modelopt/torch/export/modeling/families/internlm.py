@@ -13,26 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nemotron family export specs."""
+"""InternLM family export specs."""
 
 from ..base import ModelSpec
 from ..registry import register
 
+# InternLM2 MLP shares Arctic's w1/w2/w3 role layout (w1=fc, w2=proj, w3=gate).
 register(
     ModelSpec(
-        name="nemotron_h",
-        # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
-        moe_block_names=("NemotronHMOE",),
-        expert_linear_names=("up_proj", "down_proj"),
-        has_iterable_experts=True,
-    )
-)
-
-# Dense Nemotron MLP treats up_proj as the fc projection (not gate).
-register(
-    ModelSpec(
-        name="nemotron",
-        mlp_block_names=("NemotronMLP",),
-        mlp_keyword_roles={"up_proj": "fc"},
+        name="internlm2",
+        mlp_block_names=("InternLM2MLP",),
+        mlp_keyword_roles={"w1": "fc", "w2": "proj", "w3": "gate"},
     )
 )

@@ -60,7 +60,7 @@ from .model_config import (
     RgLruConfig,
 )
 from .model_config_utils import pad_weights
-from .modeling import match_by_decoder_type, match_moe_block
+from .modeling import match_by_decoder_type, match_mlp_block, match_moe_block
 from .postprocess import view_as_float8_e4m3fn_if_needed, view_as_uint8_if_needed
 from .quant_utils import (
     get_activation_scaling_factor,
@@ -760,26 +760,18 @@ def build_mlp_config(
         "c_fc_1",  # exaone
     }
 
-    # Arctic (llama-based MoE, decoder_type is "llama") has MLP keyword conflicts with Qwen
-    # Arctic's residual MLP use w1 for fc, w2 for proj, w3 for gate
-    if type(module).__name__ in ["ArcticMLP", "InternLM2MLP"]:
-        fc_keywords.discard("w2")
-        gate_keywords.discard("w1")
-        fc_keywords.add("w1")
-        proj_keywords.add("w2")
-        gate_keywords.add("w3")
-
-    if decoder_type == "mpt":
-        fc_keywords.add("up_proj")
-        gate_keywords.discard("up_proj")
-
-    if type(module).__name__ in [
-        "TLGv4MLP",
-        "Phi3SmallMLP",
-        "NemotronMLP",
-    ]:  # for TLGv4ForCausalLM
-        fc_keywords.add("up_proj")
-        gate_keywords.discard("up_proj")
+    # Per-family MLP keyword role overrides live in modeling/families/* (e.g. Arctic/
+    # InternLM2 w1/w2/w3 remap; MPT/Phi3Small/TLGv4/Nemotron up_proj→fc). Resolve by the
+    # MLP module class and by decoder_type; apply on top of the shared keyword sets.
+    _role_sets = {"fc": fc_keywords, "gate": gate_keywords, "proj": proj_keywords}
+    for _spec in (match_mlp_block(module), match_by_decoder_type(decoder_type)):
+        if _spec is None or not _spec.mlp_keyword_roles:
+            continue
+        for _kw, _role in _spec.mlp_keyword_roles.items():
+            fc_keywords.discard(_kw)
+            gate_keywords.discard(_kw)
+            proj_keywords.discard(_kw)
+            _role_sets[_role].add(_kw)
 
     fc_linear: nn.Module = None
     gate_linear: nn.Module = None

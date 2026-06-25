@@ -37,6 +37,8 @@ class ModelSpec:
         moe_block_names: MoE block class-name substrings, matched case-insensitively
             the same way the legacy ``module_match_name_list`` did (e.g.
             "Qwen3MoeSparseMoeBlock"). Used to resolve a spec from a sub-module.
+        mlp_block_names: MLP module class names, matched by exact equality (e.g.
+            "ArcticMLP", "Phi3SmallMLP"). Used to resolve a spec from an MLP sub-module.
 
     Per-model data (grows as categories are migrated):
         expert_linear_names: the expert linear projection names for this family's MoE
@@ -51,12 +53,18 @@ class ModelSpec:
         force_share_embedding_table: True for families TRT-LLM forces to share the
             embedding/output table (Gemma/Gemma2/Gemma3), gated by an equality check at
             the call site.
+        mlp_keyword_roles: per-family overrides for which child-module name maps to which
+            MLP role, e.g. {"up_proj": "fc"} (MPT/Phi3Small) or
+            {"w1": "fc", "w2": "proj", "w3": "gate"} (Arctic/InternLM2). Applied on top of
+            the shared keyword sets: each keyword is removed from all sets, then added to
+            its target role's set. ``None`` = no override.
     """
 
     name: str
     architectures: tuple[str, ...] = ()
     decoder_types: tuple[str, ...] = ()
     moe_block_names: tuple[str, ...] = ()
+    mlp_block_names: tuple[str, ...] = ()
 
     # --- P1: MoE expert naming ---
     expert_linear_names: tuple[str, ...] | None = None
@@ -67,6 +75,7 @@ class ModelSpec:
     # --- P3: non-MoE per-model flags ---
     forced_activation: str | None = None
     force_share_embedding_table: bool = False
+    mlp_keyword_roles: dict[str, str] | None = None
 
     # Reserved for later migration steps; added when those land.
     _extra: dict = field(default_factory=dict, repr=False)

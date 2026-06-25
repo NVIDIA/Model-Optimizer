@@ -13,26 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nemotron family export specs."""
+"""MPT family export specs."""
 
 from ..base import ModelSpec
 from ..registry import register
 
+# MPT treats up_proj as the fc projection (not gate).
 register(
     ModelSpec(
-        name="nemotron_h",
-        # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
-        moe_block_names=("NemotronHMOE",),
-        expert_linear_names=("up_proj", "down_proj"),
-        has_iterable_experts=True,
-    )
-)
-
-# Dense Nemotron MLP treats up_proj as the fc projection (not gate).
-register(
-    ModelSpec(
-        name="nemotron",
-        mlp_block_names=("NemotronMLP",),
+        name="mpt",
+        decoder_types=("mpt",),
         mlp_keyword_roles={"up_proj": "fc"},
     )
 )
