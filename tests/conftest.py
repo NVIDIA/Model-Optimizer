@@ -54,7 +54,7 @@ _DEFAULT_TIMEOUT = {
     "gpu_trtllm": 60,
     "gpu_vllm": 60,
     "regression": 180,
-    "unit": 60,
+    "unit": 120 if platform.system() == "Windows" else 60,
 }
 
 
