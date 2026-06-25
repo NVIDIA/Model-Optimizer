@@ -296,8 +296,10 @@ class MCoreMinitronSearcher(BaseSearcher):
                 assert isinstance(self.constraints[k], (int, float)), f"{k} must be a float!"
             assert self.has_score, "score_func (e.g. MMLU) is required for metric-based pruning!"
             export_config = None
-            # Sort all parameters for metric-based pruning
-            self.hps_to_sort = SUPPORTED_HPARAMS
+            # Sort all parameters that may be pruned, but skip the ones excluded from the search:
+            # sorting permutes a dimension by importance, which is unsafe for hidden_size on VLMs
+            # (the LM shares its residual dim with the un-pruned vision projector).
+            self.hps_to_sort = SUPPORTED_HPARAMS - set(self.config["hparams_to_skip"] or [])
 
         for n, hp in named_hparams(self.model, unique=True):
             hp_name = n.split(".")[-1]
