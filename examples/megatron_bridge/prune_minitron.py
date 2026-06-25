@@ -57,7 +57,13 @@ import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
-from modelopt.torch.utils import get_supported_datasets, print_args, print_rank_0, warn_rank_0
+from modelopt.torch.utils import (
+    get_supported_datasets,
+    num2hrb,
+    print_args,
+    print_rank_0,
+    warn_rank_0,
+)
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
@@ -146,7 +152,8 @@ def get_args() -> argparse.Namespace:
         help=(
             "Target total parameter count e.g., 6e9 for 6B params. "
             "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
-            "Can be combined with --prune_target_active_params and/or --prune_target_memory_mb."
+            "Can be combined with --prune_target_active_params and/or --prune_target_memory_mb. "
+            "For VLMs this targets the language-model tower only."
         ),
     )
     parser.add_argument(
@@ -155,7 +162,8 @@ def get_args() -> argparse.Namespace:
         help=(
             "Target active parameter count e.g., 3e9 for 3B active params (useful for MoE models). "
             "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
-            "Can be combined with --prune_target_params and/or --prune_target_memory_mb."
+            "Can be combined with --prune_target_params and/or --prune_target_memory_mb. "
+            "For VLMs this targets the language-model tower only."
         ),
     )
     parser.add_argument(
@@ -165,7 +173,8 @@ def get_args() -> argparse.Namespace:
             "Target memory footprint in MB (weights + KV-cache estimated via seq_length and "
             "--inference_batch_size; assumes BF16). "
             "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
-            "Can be combined with --prune_target_params and/or --prune_target_active_params."
+            "Can be combined with --prune_target_params and/or --prune_target_active_params. "
+            "For VLMs this targets the language-model tower only."
         ),
     )
     parser.add_argument(
@@ -280,6 +289,43 @@ def get_args() -> argparse.Namespace:
     return args
 
 
+def _log_vlm_param_breakdown(unwrapped_model, language_model, stage: str) -> None:
+    """Log language-model / frozen-non-LM / total param counts for a VLM (rank 0)."""
+
+    def _local(module) -> int:
+        # De-dup weights shared within a rank (e.g. tied embedding/output on a single stage).
+        seen: set[int] = set()
+        n = 0
+        for p in module.parameters():
+            if id(p) not in seen:
+                seen.add(id(p))
+                n += p.numel()
+        return n
+
+    total = dist.allreduce(_local(unwrapped_model))  # sum across pipeline ranks
+    lm = dist.allreduce(_local(language_model))
+    # Under pipeline parallelism a tied embedding is materialized on both the first (word_embeddings)
+    # and last (output_layer) stage, so the sum double-counts it; subtract one copy. Only the first
+    # stage owns ``word_embeddings``, so the allreduce-sum below yields exactly one copy.
+    if dist.size() > 1 and getattr(language_model, "share_embeddings_and_output_weights", False):
+        emb = dist.allreduce(
+            next(
+                (
+                    p.numel()
+                    for n, p in unwrapped_model.named_parameters()
+                    if "word_embeddings" in n
+                ),
+                0,
+            )
+        )
+        total -= emb
+        lm -= emb
+    print_rank_0(
+        f"[{stage}] language_model={num2hrb(lm)} (--prune_target_* applies here) | "
+        f"frozen non-language-model={num2hrb(total - lm)} | full model={num2hrb(total)}"
+    )
+
+
 def main(args: argparse.Namespace):
     assert dist.size() == args.pp_size, "Only Pipeline parallelism is supported for pruning."
 
@@ -314,13 +360,17 @@ def main(args: argparse.Namespace):
     is_vlm = language_model is not unwrapped_model
     if is_vlm:
         print_rank_0(
-            "VLM detected: pruning model.language_model only (hidden_size pruning skipped)."
+            "VLM detected: pruning model.language_model only; all non-language-model components "
+            "(vision/audio encoders, projectors, etc.) are frozen and excluded. --prune_target_* "
+            "applies to the language-model tower, not the full model (hidden_size pruning is also "
+            "skipped -- it is shared with the projector)."
         )
         if args.prune_export_config and "hidden_size" in args.prune_export_config:
             raise ValueError(
                 "Pruning 'hidden_size' is not supported for VLMs (shared with the vision projector)."
             )
         args.hparams_to_skip = sorted({*args.hparams_to_skip, "hidden_size"})
+        _log_vlm_param_breakdown(unwrapped_model, language_model, "before pruning")
 
     # Auto-select the calibration dataset by model type when not explicitly provided.
     if args.calib_dataset_name is None:
@@ -457,6 +507,8 @@ def main(args: argparse.Namespace):
     # Remove unnecessary modelopt_state since ckpt is homogeneous
     if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=language_model):
         mto.ModeloptStateManager.remove_state(language_model)
+    if is_vlm:
+        _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
     if isinstance(provider, MambaModelProvider):
         hybrid_key = (
             "hybrid_override_pattern"
@@ -526,18 +578,36 @@ def main(args: argparse.Namespace):
             text_cfg.n_shared_experts = (
                 mcore_cfg.moe_shared_expert_intermediate_size // mcore_cfg.moe_ffn_hidden_size
             )
+        # Layers that survived depth pruning (1-indexed). sorted_layers is None when no layer scores
+        # were collected (no depth pruning) -> all layers kept.
+        sorted_layers = pruning_scores["sorted_layers"]
+        kept_layer_nums = (
+            set(sorted_layers[: mcore_cfg.num_layers])
+            if sorted_layers is not None
+            else set(range(1, mcore_cfg.num_layers + 1))
+        )
         if hasattr(text_cfg, "layer_types"):
-            # Keep layer_types for the layers that survived depth pruning (1-indexed). sorted_layers
-            # is None when no layer scores were collected (no depth pruning) -> all layers kept.
-            sorted_layers = pruning_scores["sorted_layers"]
-            kept_layer_nums = (
-                set(sorted_layers[: mcore_cfg.num_layers])
-                if sorted_layers is not None
-                else set(range(1, mcore_cfg.num_layers + 1))
-            )
             text_cfg.layer_types = [
                 lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
             ]
+        # Qwen3-VL injects deepstack vision features at specific (0-indexed) LM layers. Remap those
+        # indices to the surviving layers so the exported config stays valid (no out-of-range index);
+        # a dropped injection layer snaps to the nearest survivor below it (count is preserved so the
+        # frozen vision projector still lines up).
+        vision_cfg = getattr(hf_cfg, "vision_config", None)
+        ds_indices = getattr(vision_cfg, "deepstack_visual_indexes", None)
+        if vision_cfg is not None and ds_indices:
+            kept_sorted = sorted(kept_layer_nums)
+            vision_cfg.deepstack_visual_indexes = [
+                max(0, sum(k <= d + 1 for k in kept_sorted) - 1) for d in ds_indices
+            ]
+            if any((d + 1) not in kept_layer_nums for d in ds_indices):
+                warn_rank_0(
+                    "A deepstack vision-injection layer was dropped during depth pruning; its "
+                    "feature was snapped to the nearest surviving layer. Text-only (LM) "
+                    "distillation cannot recover this vision-path change -- consider full VLM "
+                    "training/distillation instead of LM-only to recover vision quality."
+                )
         if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
             hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
