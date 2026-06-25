@@ -754,6 +754,7 @@ def _mamba_hybrid_forward_step(model, batch):
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
+@pytest.mark.timeout(600)
 def test_gptq_mamba_hybrid(distributed_setup_size_1):
     """End-to-end GPTQ (NVFP4) on a Megatron-Core NemotronH-style hybrid model."""
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
@@ -769,9 +770,21 @@ def test_gptq_mamba_hybrid(distributed_setup_size_1):
     forward = get_forward(model, batch_size=2)
     model = mtq.quantize(model, quant_cfg, forward)
 
-    assert any(is_quantized_linear(m) and m.weight_quantizer.is_enabled for m in model.modules()), (
-        "GPTQ should have produced at least one enabled weight quantizer"
-    )
+    # All experts should have weight and input quantizers
+    for m in model.modules():
+        if isinstance(m, SequentialMLP):
+            assert all(
+                is_quantized_linear(e.linear_fc1)
+                and e.linear_fc1.weight_quantizer.is_enabled
+                and e.linear_fc1.input_quantizer.is_enabled
+                for e in m.local_experts
+            )
+            assert all(
+                is_quantized_linear(e.linear_fc2)
+                and e.linear_fc2.weight_quantizer.is_enabled
+                and e.linear_fc2.input_quantizer.is_enabled
+                for e in m.local_experts
+            )
     assert torch.isfinite(forward(model)).all()
 
     destroy_model_parallel()
