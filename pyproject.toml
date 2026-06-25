@@ -299,16 +299,6 @@ disable_error_code = ["attr-defined"]
 module = ["examples.diffusers.fastgen.preprocess.*"]
 ignore_errors = true
 
-# mypy 2.0 surfaces new errors in these modules; suppress until addressed separately.
-[[tool.mypy.overrides]]
-module = [
-    "modelopt.torch.export.distribute",
-    "modelopt.torch.nas.modules.linear",
-    "modelopt.torch.nas.modules.norm",
-    "modelopt.torch.speculative.plugins.hf_eagle",
-]
-disable_error_code = ["arg-type", "index"]
-
 [tool.bandit]
 exclude_dirs = [".github/", "examples/", "noxfile.py", "tests/"]
 # Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
