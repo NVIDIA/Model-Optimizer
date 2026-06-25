@@ -121,6 +121,11 @@ def _is_enabled_quantizer(quantizer):
     return False
 
 
+def _has_pre_quant_scale(module: nn.Module) -> bool:
+    input_quantizer = getattr(module, "input_quantizer", None)
+    return input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale")
+
+
 def _save_component_state_dict_safetensors(
     component: nn.Module,
     component_export_dir: Path,
@@ -407,6 +412,7 @@ def _fuse_shared_input_modules(
                 and group_quant_format is not None
                 and group_quant_format != QUANTIZATION_NONE
                 and "awq" in group_quant_format
+                and all(_has_pre_quant_scale(module) for module in modules)
                 and tensor in output_to_layernorm
             ):
                 with fsdp2_aware_weight_update(model, output_to_layernorm[tensor]):

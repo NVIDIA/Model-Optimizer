@@ -18,6 +18,7 @@
 from collections import OrderedDict
 
 import torch
+from _test_utils.torch.export.utils import SmallQKVModel
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
@@ -29,7 +30,10 @@ from modelopt.torch.export.model_utils import (
     _reorder_canonical_first,
 )
 from modelopt.torch.export.quant_utils import sync_tied_input_amax
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.unified_export_hf import (
+    _export_quantized_weight,
+    requantize_resmooth_fused_llm_layers,
+)
 
 
 def test_collect_canonical_tied_patterns_dict_style():
@@ -113,6 +117,22 @@ def test_sync_tied_input_amax_no_op_for_untied_modules():
 
     assert torch.allclose(enc_q.amax, torch.tensor(2.0))
     assert torch.allclose(dec_q.amax, torch.tensor(5.0))
+
+
+def test_requantize_resmooth_skips_layernorm_without_pre_quant_scale():
+    """INT4 blockwise weight-only export has no pre-quant scale to fold into layernorm."""
+    model = SmallQKVModel(dim=4, device="cpu", apply_embed=True)
+    mtq.quantize(model, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    modules = [model.q_proj, model.k_proj, model.v_proj]
+    layernorm_weight = model.input_layernorm.weight.detach().clone()
+
+    for module in modules:
+        assert not hasattr(module.input_quantizer, "_pre_quant_scale")
+
+    requantize_resmooth_fused_llm_layers(model)
+
+    assert torch.equal(model.input_layernorm.weight, layernorm_weight)
+    assert all(not getattr(module, "fused_with_prequant", False) for module in modules)
 
 
 def _calibrate_through_both_children(parent):
