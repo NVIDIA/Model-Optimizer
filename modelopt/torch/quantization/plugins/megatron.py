@@ -614,10 +614,10 @@ class _MegatronSequentialMLP(DynamicModule):
                 expert_model_parallel_group=mcore_parallel.get_expert_model_parallel_group(),
             )
 
-        # Initialize parallel state for submodules local_experts.*.linear_fc1 and local_experts.*.linear_fc2
+        # Write the backing field directly: these linears are converted after this _setup.
         for expert in self.local_experts:
-            expert.linear_fc1.parallel_state = self.parallel_state
-            expert.linear_fc2.parallel_state = self.parallel_state
+            expert.linear_fc1._parallel_state = self.parallel_state
+            expert.linear_fc2._parallel_state = self.parallel_state
 
     def layer_sync_moe_local_experts_amax(self, sync_weight_amax=False):
         """Sync quantizer amax across local experts in a SequentialMLP.
@@ -723,9 +723,9 @@ if HAS_TE:
                     tensor_parallel_group=mcore_parallel.get_expert_tensor_parallel_group(),
                     expert_model_parallel_group=mcore_parallel.get_expert_model_parallel_group(),
                 )
-            # initialize parallel state for submodules linear_fc1 and linear_fc2
-            self.linear_fc1.parallel_state = self.parallel_state
-            self.linear_fc2.parallel_state = self.parallel_state
+            # Write the backing field directly: these linears are converted after this _setup.
+            self.linear_fc1._parallel_state = self.parallel_state
+            self.linear_fc2._parallel_state = self.parallel_state
 
     @QuantModuleRegistry.register({TEDotProductAttention: "TEDotProductAttention"})
     class _QuantTEDotProductAttention(QuantModule):

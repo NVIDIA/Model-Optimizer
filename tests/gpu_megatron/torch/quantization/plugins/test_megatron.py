@@ -16,6 +16,7 @@
 import copy
 from contextlib import nullcontext
 from functools import partial
+from pathlib import Path
 
 import pytest
 import torch
@@ -54,11 +55,13 @@ from megatron.core.transformer.moe.router import TopKRouter
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.megatron import (
     _QuantTEMCoreRowParallelLinear,
     get_mcore_layerwise_calibration_layers,
 )
+from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 try:
@@ -738,6 +741,103 @@ def _test_auto_quantize_moe_ep_helper(rank, size):
 def test_auto_quantize_moe_ep(dist_workers_size_2):
     """auto_quantize must sum score/cost across EP ranks and pick a consistent recipe."""
     dist_workers_size_2.run(_test_auto_quantize_moe_ep_helper)
+
+
+def _mamba_hybrid_forward_step(model, batch):
+    input_ids, labels, position_ids, attention_mask, loss_mask = batch
+    return model.forward(
+        input_ids=input_ids,
+        position_ids=position_ids,
+        attention_mask=attention_mask,
+        labels=labels,
+    )
+
+
+@pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
+def test_gptq_mamba_hybrid(distributed_setup_size_1):
+    """End-to-end GPTQ (NVFP4) on a Megatron-Core NemotronH-style hybrid model."""
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = get_mcore_mamba_hybrid_model(
+        tensor_model_parallel_size=1,
+        num_moe_experts=8,
+        moe_grouped_gemm=False,
+        transformer_impl="modelopt",
+    ).cuda()
+
+    quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    quant_cfg["algorithm"] = {"method": "gptq"}
+    forward = get_forward(model, batch_size=2)
+    model = mtq.quantize(model, quant_cfg, forward)
+
+    assert any(is_quantized_linear(m) and m.weight_quantizer.is_enabled for m in model.modules()), (
+        "GPTQ should have produced at least one enabled weight quantizer"
+    )
+    assert torch.isfinite(forward(model)).all()
+
+    destroy_model_parallel()
+
+
+def _auto_quantize_mamba_hybrid_cost_helper(rank, size, result_path):
+    initialize_for_megatron(
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=size,
+        seed=SEED,
+    )
+    model = get_mcore_mamba_hybrid_model(
+        tensor_model_parallel_size=1,
+        num_moe_experts=8,
+        moe_grouped_gemm=False,
+        transformer_impl="modelopt",
+        expert_model_parallel_size=size,
+    ).cuda()
+
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+        data_loader=[get_batch(model, batch_size=2) for _ in range(2)],
+        forward_step=_mamba_hybrid_forward_step,
+        forward_backward_step=lambda m, b: _mamba_hybrid_forward_step(m, b).mean().backward(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        verbose=True,
+    )
+
+    no_quant = QuantRecipe(quant_cfg=None)
+    summed_cost = sum(
+        stat["costs"][stat["formats"].index(no_quant)]
+        for stat in search_state["candidate_stats"].values()
+    )
+    # The per-op no-quant costs must sum to the cost denominator AutoQuantize uses,
+    # which is the full quantizable weight size aggregated across EP ranks.
+    assert summed_cost == pytest.approx(search_state["cost_denominator"], rel=1e-6)
+    assert search_state["best"]["is_satisfied"]
+
+    if size == 1:
+        # Single GPU holds the whole model, so the summed cost must equal the locally
+        # measured quantizable weight size (no cross-rank aggregation involved).
+        local_total = _AutoQuantizeBaseSearcher._get_total_weight_size(list(model.modules()))
+        assert summed_cost == pytest.approx(local_total, rel=1e-6)
+
+    if rank == 0:
+        Path(result_path).write_text(repr(summed_cost))
+
+
+@pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
+@pytest.mark.timeout(900)  # cold-starts two worker pools (EP=1 and EP=4) + first FP8 ext build
+def test_auto_quantize_mamba_hybrid_ep_cost(dist_workers_size_1, dist_workers_size_4, tmp_path):
+    """AutoQuantize must sum per-op cost to the same model size for single-GPU and EP=4."""
+    ep1_path = tmp_path / "ep1_cost.txt"
+    ep4_path = tmp_path / "ep4_cost.txt"
+    dist_workers_size_1.run(
+        partial(_auto_quantize_mamba_hybrid_cost_helper, result_path=str(ep1_path))
+    )
+    dist_workers_size_4.run(
+        partial(_auto_quantize_mamba_hybrid_cost_helper, result_path=str(ep4_path))
+    )
+    cost_ep1 = float(ep1_path.read_text())
+    cost_ep4 = float(ep4_path.read_text())
+    assert cost_ep1 == pytest.approx(cost_ep4, rel=1e-6)
 
 
 def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(distributed_setup_size_1):
