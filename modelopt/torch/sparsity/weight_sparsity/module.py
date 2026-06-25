@@ -17,6 +17,7 @@
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
 from modelopt.torch.opt.hparam import Hparam
@@ -34,7 +35,13 @@ class SparseModule(DynamicModule):
     @staticmethod
     def _get_weight(mod: "SparseModule", weight: torch.Tensor) -> torch.Tensor:
         if mod.is_sparse and mod._weight_mask is not None:
-            masked_weight = weight * mod._weight_mask
+            mask = mod._weight_mask
+            # Under FSDP the weight is sharded into a DTensor while the mask buffer stays a
+            # plain tensor; align the mask to the weight's sharding so the elementwise multiply
+            # does not mix DTensor and torch.Tensor operands.
+            if isinstance(weight, DTensor) and not isinstance(mask, DTensor):
+                mask = distribute_tensor(mask, weight.device_mesh, weight.placements)
+            masked_weight = weight * mask
             # Quick workaround for the custom attribute for Megatron.
             # TODO: maybe we need a more general way for customized attributes
             if hasattr(weight, "main_grad"):
