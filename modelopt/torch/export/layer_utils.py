@@ -60,6 +60,7 @@ from .model_config import (
     RgLruConfig,
 )
 from .model_config_utils import pad_weights
+from .modeling import match_moe_block
 from .postprocess import view_as_float8_e4m3fn_if_needed, view_as_uint8_if_needed
 from .quant_utils import (
     get_activation_scaling_factor,
@@ -991,6 +992,12 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         first_proj_attr = getattr(module.experts, "_first_proj_attr", "gate_up_proj")
         if hasattr(module.experts, f"{first_proj_attr}_weight_quantizers"):
             return [first_proj_attr, "down_proj"]
+
+    # Per-model expert naming now lives in modeling/families/*. Fall back to the legacy
+    # mapping below for any MoE block not yet migrated there.
+    spec = match_moe_block(module)
+    if spec is not None and spec.expert_linear_names is not None:
+        return list(spec.expert_linear_names)
 
     if module_match_name_list(
         module,
