@@ -32,6 +32,10 @@ Changelog
   - New DiffusionGemma model-specific recipe under ``modelopt_recipes/huggingface/diffusion_gemma/ptq/`` (``nvfp4_experts_only.yaml`` + its ``disabled_quantizers.yaml`` unit) adds the ``*self_conditioning*`` exclude on top of the standard default, leaving the shared ``default_disabled_quantizers`` unit clean for non-diffusion models — pattern matches the existing ``phi4mm`` / ``nemotron_vl`` model-specific recipes.
   - ``hf_ptq.py`` also unwraps ``ModelOutput`` dataclasses from ``.generate()`` so the preview decode works on diffusion models. Non-tied models see no behavioral change.
 
+**Bug Fixes**
+
+- Fix ``NotImplementedError: "max_all_cuda" not implemented for 'Float8_e4m3fn'`` during quantization calibration of models with natively FP8 (``float8_e4m3fn`` / ``float8_e5m2``) weights, such as DeepSeek-V3. FP8 dtypes implement no reduction (``max``/``amax``), ``abs``, or elementwise ``maximum`` kernels, so ``reduce_amax`` now upcasts FP8 inputs to the default float dtype before reducing; the upcast is lossless and only affects the FP8 path.
+
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^
 
