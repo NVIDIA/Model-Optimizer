@@ -24,8 +24,13 @@ from diffusers.models.attention_processor import Attention, AttnProcessor
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
 from diffusers.utils import load_image
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.plugins.diffusion.diffusers import AttentionModuleMixin
+from modelopt.torch.quantization.utils.core_utils import (
+    get_quantizer_state_dict,
+    set_quantizer_state_dict,
+)
 
 USE_PEFT = True
 try:
@@ -193,3 +198,36 @@ def fp8_mha_disable(backbone, quantized_mha_output: bool = True):
 
     if hasattr(F, "scaled_dot_product_attention"):
         mtq.disable_quantizer(backbone, mha_filter_func)
+
+
+def save_quantizer_state(model: torch.nn.Module, path: str) -> None:
+    """Save ONLY ModelOpt's quantization state -- the recipe plus the quantizer
+    buffers (amax, pre_quant_scale, ...) -- and NOT the model weights.
+
+    This is the same idiom ModelOpt uses internally (see
+    ``modelopt.torch.quantization.plugins.transformers_trainer``): the
+    ``modelopt_state`` (architecture/recipe from :func:`mto.modelopt_state`) is
+    bundled with the per-quantizer state from
+    :func:`get_quantizer_state_dict` under the ``modelopt_state_weights`` key.
+    The resulting checkpoint is tiny (KBs-MBs) and is reloaded on top of the
+    original (unquantized) model via :func:`restore_quantizer_state`.
+    """
+    modelopt_state = mto.modelopt_state(model)
+    modelopt_state["modelopt_state_weights"] = get_quantizer_state_dict(model)
+    torch.save(modelopt_state, str(path))
+
+
+def restore_quantizer_state(model: torch.nn.Module, path: str) -> torch.nn.Module:
+    """Reload a checkpoint written by :func:`save_quantizer_state` onto ``model``.
+
+    ``model`` must already hold its original (unquantized) weights (e.g. freshly
+    loaded from the base HF/diffusers checkpoint); this re-applies the
+    quantization recipe and loads the calibrated amax/quantizer buffers on top.
+    Mirrors ModelOpt's ``_restore_modelopt_state_with_weights``.
+    """
+    modelopt_state = mto.load_modelopt_state(str(path))
+    quantizer_state = modelopt_state.pop("modelopt_state_weights", None)
+    mto.restore_from_modelopt_state(model, modelopt_state)
+    if quantizer_state is not None:
+        set_quantizer_state_dict(model, quantizer_state)
+    return model

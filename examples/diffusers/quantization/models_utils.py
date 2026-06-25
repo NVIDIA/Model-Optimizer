@@ -64,6 +64,10 @@ class ModelType(str, Enum):
     WAN22_T2V_14b = "wan2.2-t2v-14b"
     WAN22_T2V_5b = "wan2.2-t2v-5b"
     QWEN_IMAGE = "qwen-image"
+    # DMD2-distilled few-step Qwen-Image student (from examples/diffusers/fastgen).
+    # Same architecture as QWEN_IMAGE, but loaded from a consolidated student dir
+    # and calibrated with the few-step DMD sampler instead of the standard loop.
+    QWEN_IMAGE_DMD2 = "qwen-image-dmd2"
 
 
 _FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
@@ -74,6 +78,7 @@ _FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
     ModelType.WAN22_T2V_14b: filter_func_wan_video,
     ModelType.WAN22_T2V_5b: filter_func_wan_video,
     ModelType.QWEN_IMAGE: filter_func_qwen_image,
+    ModelType.QWEN_IMAGE_DMD2: filter_func_qwen_image,
 }
 
 _VAE_FILTER_FUNC_MAP: dict[tuple[ModelType, str], Callable[[str], bool]] = {
@@ -107,6 +112,11 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.WAN22_T2V_14b: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     ModelType.WAN22_T2V_5b: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
     ModelType.QWEN_IMAGE: "Qwen/Qwen-Image",
+    # Base pipeline (VAE / text-encoder / tokenizer / scheduler) for DMD2 students;
+    # the trained transformer is loaded separately from a consolidated dir via the
+    # ``student_path`` extra-param. Override with ``--override-model-path`` or
+    # ``--extra-param base_pipeline_path=...``.
+    ModelType.QWEN_IMAGE_DMD2: "Qwen/Qwen-Image",
 }
 
 MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
@@ -122,6 +132,7 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
     ModelType.WAN22_T2V_14b: WanPipeline,
     ModelType.WAN22_T2V_5b: WanPipeline,
     ModelType.QWEN_IMAGE: QwenImagePipeline,
+    ModelType.QWEN_IMAGE_DMD2: QwenImagePipeline,
 }
 
 # Shared dataset configurations
@@ -257,6 +268,14 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
         },
     },
 }
+
+# DMD2 students share Qwen-Image's architecture, so they reuse the same block-range
+# recipe, high-precision filter, base pipeline, and calibration dataset. They differ
+# only in (a) loading -- a consolidated student dir swapped into the base pipeline
+# (PipelineManager._create_qwen_image_dmd2_pipeline) -- and (b) calibration, which
+# drives the few-step DMD sampler instead of the standard denoising loop
+# (Calibrator._run_qwen_image_dmd2_calibration). Inherit so the recipe stays in sync.
+MODEL_DEFAULTS[ModelType.QWEN_IMAGE_DMD2] = {**MODEL_DEFAULTS[ModelType.QWEN_IMAGE]}
 
 
 def _coerce_extra_param_value(value: str) -> Any:
