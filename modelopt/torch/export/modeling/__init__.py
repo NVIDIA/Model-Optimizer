@@ -22,6 +22,8 @@ returns ``None`` so callers fall back to their default behavior.
 
 from . import families
 from .base import ModelSpec
+from .context import ExportContext
+from .hooks import NULL_HOOKS, ModelHooks
 from .registry import (
     iter_pqs_fuse_rules,
     match_by_architecture,
@@ -32,6 +34,9 @@ from .registry import (
 )
 
 __all__ = [
+    "NULL_HOOKS",
+    "ExportContext",
+    "ModelHooks",
     "ModelSpec",
     "iter_pqs_fuse_rules",
     "match_by_architecture",

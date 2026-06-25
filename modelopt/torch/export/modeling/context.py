@@ -13,22 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-model-family export specs. Importing each module registers its specs."""
+"""Context passed from the export engine into per-model hooks.
 
-from . import (
-    arctic,
-    bloom,
-    dbrx,
-    deepseek,
-    gemma,
-    glm,
-    gptoss,
-    internlm,
-    llama,
-    mixtral,
-    mllama,
-    mpt,
-    nemotron,
-    phi,
-    qwen,
-)
+The engine fills this with the builder callables a hook may need and passes it in, so
+hooks never import the engine modules directly (keeping ``modeling/`` free of cycles).
+"""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+
+__all__ = ["ExportContext"]
+
+
+@dataclass
+class ExportContext:
+    """Builders and metadata available to ``ModelHooks`` methods."""
+
+    build_layernorm_config: Callable

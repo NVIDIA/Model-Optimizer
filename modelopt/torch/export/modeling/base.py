@@ -21,6 +21,10 @@ spec holds per-model data only, not export logic.
 """
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .hooks import ModelHooks
 
 __all__ = ["ModelSpec"]
 
@@ -57,6 +61,9 @@ class ModelSpec:
             class name contains one of the substrings, the pre_quant_scale on ``fuse_from``
             is folded into ``fuse_into`` (e.g. attention o_proj → v_proj, MLP down_proj →
             up_proj).
+        hooks: optional :class:`ModelHooks` for behavioral seams that no value can express
+            (custom config-slot placement, module-tree unwrap, MoE building). ``None`` uses
+            the engine defaults.
     """
 
     name: str
@@ -80,6 +87,9 @@ class ModelSpec:
 
     # AWQ pre_quant_scale fusion.
     pqs_fuse_rules: tuple[tuple[tuple[str, ...], str, str], ...] = ()
+
+    # Behavioral overrides for structural export seams (None = use the engine default).
+    hooks: "ModelHooks | None" = None
 
     # Free-form extension slot for future per-model fields.
     _extra: dict = field(default_factory=dict, repr=False)

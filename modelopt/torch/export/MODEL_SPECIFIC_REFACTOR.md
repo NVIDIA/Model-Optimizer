@@ -127,29 +127,32 @@ of the dependency graph and cannot reintroduce the `unified_export_hf ↔ plugin
 
 ### 3.2 `ModelSpec` — the contract
 
-A frozen-ish data record per model family. Two kinds of fields:
+A per-model-family record with three kinds of members:
 
-- **Matching keys** (how a spec is resolved):
-  - `architectures: tuple[str, ...]` — exact HF architecture class names (model-level).
-  - `moe_block_names: tuple[str, ...]` — MoE block class-name substrings, matched
-    case-insensitively (sub-module-level), reproducing the legacy `module_match_name_list`.
-- **Per-model data** (grows one migration step at a time; **values, never callables/algorithms**):
-  - `expert_linear_names` *(P1, landed)*
-  - P2/P3 add fields here (e.g. expert-stacking names, `norm_weight_plus_one`,
-    `default_activation`, `scale_embedding_by_sqrt_hidden`, `share_embedding_table`).
+- **Matching keys** (how a spec is resolved): `architectures`, `decoder_types`,
+  `moe_block_names` (case-insensitive substring), `mlp_block_names` (exact).
+- **Per-model data** (preferred whenever a value suffices): `expert_linear_names`,
+  `has_iterable_experts`, `forced_activation`, `force_share_embedding_table`,
+  `mlp_keyword_roles`, `pqs_fuse_rules`.
+- **Per-model hooks** (`hooks: ModelHooks`, default no-op) — used only where behavior
+  genuinely diverges and no value can express it (see §3.6).
 
-Rule: if a field would hold *behavior* (an attention builder, enc-dec routing), it does
-**not** belong on `ModelSpec` — that is the OUT bucket (§4).
+Principle: the engine owns the common algorithm; a family overrides only **named,
+fine-grained seams** via data or hooks with a default fallback — it never forks a whole
+function. Prefer a data field; reach for a hook only when the divergence is behavioral.
 
 ### 3.3 Lookup conventions
 
-Two resolvers in `registry.py`, both returning `ModelSpec | None`:
+Resolvers in `registry.py`, each returning `ModelSpec | None` (plus `iter_pqs_fuse_rules`
+which aggregates a rule list across all specs):
 
-- `match_by_architecture(arch)` — model-level data, keyed on `model.config.architectures[0]`.
-- `match_moe_block(module)` — sub-module-level data, keyed on a module's class name.
+- `match_by_architecture(arch)` — keyed on `model.config.architectures[0]`.
+- `match_by_decoder_type(decoder_type)` — keyed on the ModelOpt `decoder_type` string.
+- `match_moe_block(module)` / `match_mlp_block(module)` — keyed on a sub-module class name.
 
-Specs are matched in registration order; families must keep their match keys mutually
-exclusive (no class name may match two specs), so order is never load-bearing.
+Specs are matched in registration order; families keep their match keys mutually
+exclusive, so order is never load-bearing. A family should ideally be a **single spec**
+carrying all of its keys, data, and hooks (consolidate split specs as hooks are added).
 
 ### 3.4 Call-site integration pattern (fallback-first)
 
@@ -171,10 +174,56 @@ legacy branch is dead but kept until the category is fully retired.
 
 - **Add a model:** create/extend `families/<family>.py`, register a `ModelSpec`, done —
   no engine edits.
-- **Add a category (P2/P3):** add a field to `ModelSpec`, populate it in the families,
+- **Add a data category:** add a field to `ModelSpec`, populate it in the families,
   convert the one engine call site to the fallback-first pattern, add an equivalence test.
-- **Never** put algorithms in `modeling/`; if tempted, the logic belongs in the engine
-  and only its per-model *parameters* (if any) come from the spec.
+- **Add a behavioral seam:** add a default no-op method to `ModelHooks`, call it at the
+  engine seam with fallback, override it in the families that need it (see §3.6).
+- Keep the common algorithm in the engine; families supply only per-model values or
+  override specific seams. Do not fork whole functions into `modeling/`.
+
+### 3.6 Per-model hooks
+
+Some divergence is behavioral (which sub-module to read, which config slot to assign,
+how to traverse a family's module tree) and cannot be a value. These are handled by
+`ModelHooks`, not by forking the engine.
+
+Two simplifying decisions keep this small:
+
+1. **Data first** — a hook is used only when no value can express the divergence.
+2. **Engine builds, the hook places** — the engine still classifies a sub-module and
+   builds its config object; the hook only routes that object into a family-specific
+   slot. So most hooks need no builders and the injected context stays tiny.
+
+Pieces:
+
+- **`ModelHooks`** (`modeling/hooks.py`) — a base class with one default **no-op** method
+  per seam. A family subclasses it and overrides only the seams it needs;
+  `ModelSpec.hooks` defaults to a shared no-op instance.
+- **`ExportContext`** (`modeling/context.py`) — a small struct carrying export metadata
+  plus the few builder callables the heavier seams need (only `build_moe` and Gemma3
+  q/k-norm extraction). Hooks call `ctx.build_*` instead of importing `layer_utils`, so
+  `modeling/` stays at the bottom of the dependency graph (no cycle).
+- **Engine seams** call the hook and fall back when it declines (no-op sentinel):
+
+  ```python
+  if is_moe(layer):
+      config.mlp = hooks.build_moe(layer, ctx) or build_moe_config(layer, decoder_type)
+  else:
+      built = build_layernorm_config(child)  # or build_attention_config(...)
+      if not hooks.place_submodule(name, built, config, ctx):
+          ...  # default placement
+  ```
+
+The seam set is **finite and known** (the library was audited end to end):
+
+| Seam | Covers |
+|---|---|
+| `unwrap_decoder_layer(module, ctx)` | module-tree shape differences (DBRX, ExaOne, Deci) |
+| `place_submodule(name, built, layer_cfg, ctx)` | family-specific config slots — Gemma2/3 norms, MLlama/enc-dec self↔cross attention, Gemma3 q/k-norm |
+| `build_moe(module, ctx)` | per-family router + experts + shared expert |
+
+Everything else stays data: `head_is_first_dim` (bool) and the TRT-LLM target-config
+extras (a per-family field dict) are values, not hooks.
 
 ## 4. Migration Plan & Priority
 
@@ -190,11 +239,12 @@ never breaks un-migrated models.
 | **P2** ✅ | The duplicate expert-naming table in `get_experts_list` → `spec.expert_linear_names` + `spec.has_iterable_experts` (the grouped-export capability flag that reproduces the legacy "supported 4 families, else `NotImplementedError`"). | Removes the second copy of expert-naming data → "add a MoE model" stops touching this site. | low |
 | **P3** (partial) | Non-MoE per-model data. Done: activation override (`forced_activation` ✅), shared-embedding (`force_share_embedding_table` ✅), MLP keyword roles (`mlp_keyword_roles` ✅ — Arctic/InternLM2 remap, MPT/Phi3Small/TLGv4/Nemotron up_proj→fc). Deferred: norm+1 (mixes the generic `LayerNorm1P` which stays in the engine; needs a case-sensitive norm-class resolver) and embed √scale (Gemma1-only + `is_tensorrt_llm_0_8_or_9()` version gate) — low value. | Mechanical bool/str/dict moves; clears scattered `layer_utils` / `model_config_export` branches. | low |
 | **P4** (partial) | `PQS_FUSE_MODULE_MAPPING` (AWQ fusion) → `spec.pqs_fuse_rules`, aggregated via `iter_pqs_fuse_rules` (✅, llama/qwen families). `HF_CONFIG_MAP` deliberately **kept**: it is a shared *alias* table applied generically to every config (`for keys, name in HF_CONFIG_MAP`), not a per-model branch — splitting it by family would be artificial and more fragile. | PQS rules are genuinely per-model (keyed by module class); the alias table is not. | low |
-| **OUT** | Control-flow oddballs: enc-dec routing, MLA, VLM language-tower extraction, spec-decoding (already separate), the ChatGLM/Phi3 fused gate/fc chunk-swap. | Forcing into `ModelSpec` creates leaky hooks; revisit after P1–P3 fix the interface. | — |
+| **P5** (hooks) | Behavioral per-model logic via `ModelHooks` + `ExportContext` (§3.6), 3 seams. **P5a** (pilot): hook machinery + `place_submodule` for decoder slots (Gemma2/3 norms, MLlama self/cross, Gemma3 q/k-norm). **P5b**: `unwrap_decoder_layer` (DBRX/ExaOne/Deci) + the `head_is_first_dim` data flag. **P5c**: `build_moe` per family (Llama/Phi3, DBRX, DeepSeek, Qwen). **P5d** (later, mostly data): TRT-LLM target-config extras as a per-family field dict; enc-dec routing and VLM extraction remain separate paths. | Moves the structural `build_decoder_config` / `build_moe_config` branches that data fields cannot express; biggest remaining per-model cluster. | medium (hooks run real building logic — equivalence-test each seam) |
+| **OUT** | Shared/generic tables that are not per-model (`HF_CONFIG_MAP`); generic algorithms (`_GATE_UP_PAIRS`, amax fallback); the ChatGLM/Phi3 fused gate/fc chunk-swap (a fused-weight reshape, not a per-model value); speculative-decoding export (already its own modular subsystem under `plugins/hf_spec_*`). | Not per-model branches, pure algorithm, or already modular — they stay where they are. | — |
 
-**Guardrails:** fallback-first (un-migrated models keep the old path); one category per
-PR with an export-test equivalence check; hard line — never move *algorithms*, only the
-per-model *values*.
+**Guardrails:** fallback-first (un-migrated models keep the old path); one seam/category
+per PR with an export-test equivalence check; the engine keeps the common algorithm —
+families supply only per-model values or override named seams, never fork whole functions.
 
 > **P2 note:** an earlier draft scoped P2 as "expert amax fallback / gate-up amax sync."
 > On inspection `set_expert_quantizer_amax` and `sync_moe_gate_up_amax` are generic
