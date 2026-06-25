@@ -183,6 +183,11 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
     # vLLM/SGLang expect (weight_scale_inv + dynamic activations), matching the
     # official Qwen3.5 FP8 checkpoint.
     if quant_algo_value == "FP8_PB":
+        kv_cache_quant_algo = original_quantization_details.get("kv_cache_quant_algo")
+        assert not kv_cache_quant_algo, (
+            "FP8_PB export does not support kv_cache quantization yet "
+            f"(got kv_cache_quant_algo={kv_cache_quant_algo!r})."
+        )
         group_size = original_quantization_details.get("group_size") or 128
         exclude_modules = original_quantization_details.get("exclude_modules") or []
         fp8_config: dict[str, Any] = {
