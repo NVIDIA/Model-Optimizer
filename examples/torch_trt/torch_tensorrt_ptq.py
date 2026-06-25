@@ -20,8 +20,8 @@ Pipeline:
 1. Load ``google/vit-large-patch16-224`` (`ViTForImageClassification`) from HF.
 2. Build a calibration loader from `zh-plus/tiny-imagenet` so the recipe runs
    end-to-end without ImageNet access.
-3. Run ``mtq.quantize`` with one of the ViT-specific recipes under
-   `modelopt_recipes/huggingface/vit/ptq/` (FP8 or NVFP4).
+3. Run ``mtq.quantize`` with the ViT-specific FP8 recipe under
+   `modelopt_recipes/huggingface/vit/ptq/`.
 4. Compile the quantized model with ``torch_tensorrt.compile(ir="dynamo",
    min_block_size=1)`` and verify the compiled-model argmax matches the
    fake-quant argmax on a sample input.
@@ -46,7 +46,7 @@ from modelopt.torch.quantization.utils import export_torch_mode
 
 # Default ViT PTQ recipe under `modelopt_recipes/huggingface/vit/ptq/`. The
 # recipe loader resolves this relative path against the built-in recipe library;
-# pass `--recipe` for a different one (e.g. `huggingface/vit/ptq/nvfp4`).
+# pass `--recipe` for a different one.
 DEFAULT_RECIPE = "huggingface/vit/ptq/fp8"
 
 
@@ -195,7 +195,7 @@ def main():
         "--recipe",
         default=DEFAULT_RECIPE,
         help="Recipe path (relative to modelopt_recipes/ or an absolute YAML). "
-        "Defaults to the ViT FP8 recipe; pass huggingface/vit/ptq/nvfp4 for NVFP4.",
+        "Defaults to the ViT FP8 recipe.",
     )
     parser.add_argument(
         "--calib_samples",

@@ -2,7 +2,7 @@
 
 [Torch-TensorRT](https://docs.pytorch.org/TensorRT/) compiles a PyTorch model into an optimized TensorRT engine with no separate export or runtime. This example quantizes a PyTorch / HuggingFace model with NVIDIA Model Optimizer and then compiles the quantized graph in-framework with Torch-TensorRT for deployment.
 
-Quantization is an effective model optimization technique that compresses your models. Model Optimizer inserts Q/DQ nodes into the eager PyTorch graph; `torch_tensorrt.compile(ir="dynamo")` then converts those Q/DQ nodes into native TensorRT precision layers — including FP8 and NVFP4 — following the [Torch-TensorRT quantization guide](https://docs.pytorch.org/TensorRT/user_guide/shapes_precision/quantization.html).
+Quantization is an effective model optimization technique that compresses your models. Model Optimizer inserts Q/DQ nodes into the eager PyTorch graph; `torch_tensorrt.compile(ir="dynamo")` then converts those Q/DQ nodes into native TensorRT FP8 precision layers, following the [Torch-TensorRT quantization guide](https://docs.pytorch.org/TensorRT/user_guide/shapes_precision/quantization.html).
 
 This section focuses on the in-framework Torch-TensorRT path: a PyTorch front end (`mtq.quantize`) feeding a Dynamo-compiled TensorRT engine, demonstrated end-to-end on a HuggingFace ViT image classifier. If you instead want a portable ONNX → TensorRT artifact, or you start from an ONNX model, see the sibling [`torch_onnx`](../torch_onnx/) and [`onnx_ptq`](../onnx_ptq/) examples (compared in the [Support Matrix](#support-matrix)).
 
@@ -13,7 +13,7 @@ This section focuses on the in-framework Torch-TensorRT path: a PyTorch front en
 | Pre-Requisites | Required packages and installation | \[[Link](#pre-requisites)\] | |
 | Getting Started | Quantize and compile a ViT in a few lines | \[[Link](#getting-started)\] | \[[docs](https://docs.pytorch.org/TensorRT/user_guide/shapes_precision/quantization.html)\] |
 | Support Matrix | How this path compares to the ONNX examples | \[[Link](#support-matrix)\] | |
-| ViT Recipes | The FP8 / NVFP4 recipes shipped with the example | \[[Link](#vit-recipes)\] | |
+| ViT Recipes | The FP8 recipe shipped with the example | \[[Link](#vit-recipes)\] | |
 | Usage | CLI flags for the quantize and accuracy scripts | \[[Link](#usage)\] | |
 | Evaluate Accuracy | Measure ImageNet top-1 / top-5 accuracy | \[[Link](#evaluate-accuracy)\] | |
 | Custom Recipes | Plug in your own recipe / model | \[[Link](#custom-recipes)\] | |
@@ -49,7 +49,6 @@ The low-precision kernels Torch-TensorRT emits need a GPU that supports the targ
 | Recipe | Minimum GPU |
 | :---: | :---: |
 | `fp8` | Ada / Hopper — compute capability 8.9+ |
-| `nvfp4` | Blackwell — compute capability 10.0+ |
 
 </div>
 
@@ -69,7 +68,7 @@ from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.utils import export_torch_mode
 
 # 1. Quantize the eager PyTorch model with a Model Optimizer PTQ recipe.
-recipe = load_recipe("huggingface/vit/ptq/fp8")  # or huggingface/vit/ptq/nvfp4
+recipe = load_recipe("huggingface/vit/ptq/fp8")
 mtq.quantize(model, recipe.quantize.model_dump(), forward_loop=calibrate)
 
 # 2. Compile the quantized (Q/DQ) graph with Torch-TensorRT.
@@ -105,9 +104,6 @@ The runnable script [`torch_tensorrt_ptq.py`](./torch_tensorrt_ptq.py) wraps thi
 # Default model is google/vit-large-patch16-224, default recipe is the ViT FP8 recipe.
 python torch_tensorrt_ptq.py --calib_samples 1024 --batch_size 128
 
-# NVFP4 instead of FP8.
-python torch_tensorrt_ptq.py --recipe huggingface/vit/ptq/nvfp4
-
 # Quantize but don't TRT-compile (handy on a non-TRT host).
 python torch_tensorrt_ptq.py --skip_trt
 ```
@@ -136,14 +132,13 @@ This example and [`torch_onnx`](../torch_onnx/) share the same PyTorch front end
 
 ## ViT Recipes
 
-These are the recipes the CLI selects by default when `--model_id` points at a HF ViT classifier. They are tuned for the HF ViT module layout and are composed from the shared `$import` building blocks under [`modelopt_recipes/configs/`](../../modelopt_recipes/configs/) (`numerics/{fp8,nvfp4}`, `ptq/units/{w8a8_fp8_fp8,attention_qkv_fp8,w4a4_nvfp4_nvfp4}`) rather than spelling out each `quant_cfg` entry.
+This is the recipe the CLI selects by default when `--model_id` points at a HF ViT classifier. It is tuned for the HF ViT module layout and is composed from the shared `$import` building blocks under [`modelopt_recipes/configs/`](../../modelopt_recipes/configs/) (`ptq/units/{w8a8_fp8_fp8,attention_qkv_fp8}`) rather than spelling out each `quant_cfg` entry.
 
 <div align="center">
 
 | `--recipe` value | Calibration | What it quantizes |
 | :---: | :---: | :--- |
 | `huggingface/vit/ptq/fp8` (default) | `max` | Per-tensor FP8 (E4M3) on every weight + input quantizer matched by the `*weight_quantizer` / `*input_quantizer` globs — encoder Linears, the patch-embed `nn.Conv2d` projection, and the `classifier` head — plus FP8 on the attention Q/K/V BMMs and softmax. All output quantizers disabled. |
-| `huggingface/vit/ptq/nvfp4` | `awq_lite` | Dynamic NVFP4 W4A4 (E2M1, block size 16, FP8 E4M3 scales) on all weight/input quantizers, with the patch-embed `nn.Conv2d` projection, the `classifier` head, and the attention Q/K/V BMMs + softmax held at per-tensor FP8. All output quantizers disabled. |
 
 </div>
 
@@ -158,7 +153,7 @@ These are the recipes the CLI selects by default when `--model_id` points at a H
 | Flag | Default | Description |
 | :---: | :---: | :--- |
 | `--model_id` | `google/vit-large-patch16-224` | HuggingFace model id of the ViT classifier to quantize. |
-| `--recipe` | `huggingface/vit/ptq/fp8` | Recipe path (relative to `modelopt_recipes/` or an absolute YAML). Pass `huggingface/vit/ptq/nvfp4` for NVFP4. |
+| `--recipe` | `huggingface/vit/ptq/fp8` | Recipe path (relative to `modelopt_recipes/` or an absolute YAML). |
 | `--calib_samples` | `1024` | Number of tiny-imagenet samples to use for calibration. |
 | `--batch_size` | `128` | Batch size for calibration / TRT compile. |
 | `--save_dir` | `./modelopt_quantized` | Directory the quantized Model Optimizer state-dict (FP16 weights + Q/DQ metadata) is always saved to, as `vit_modelopt_state.pt` — re-usable across runs without recalibration. |
@@ -174,7 +169,7 @@ python torch_tensorrt_ptq.py \
     --recipe <recipe-path-relative-to-modelopt_recipes-or-absolute-yaml> \
     --save_dir ./my_quantized
 
-# Dump the compiled engine's per-layer info to inspect FP8/NVFP4 fusion.
+# Dump the compiled engine's per-layer info to inspect FP8 fusion.
 python torch_tensorrt_ptq.py --layer_info_path ./vit_fp8_layers.txt
 ```
 
@@ -187,7 +182,7 @@ python torch_tensorrt_ptq.py --layer_info_path ./vit_fp8_layers.txt
 | Flag | Default | Description |
 | :---: | :---: | :--- |
 | `--model_id` | `google/vit-large-patch16-224` | HuggingFace model id of the ViT classifier to quantize and score. |
-| `--recipe` | `huggingface/vit/ptq/fp8` | Recipe path (relative to `modelopt_recipes/` or an absolute YAML). Pass `huggingface/vit/ptq/nvfp4` for NVFP4. |
+| `--recipe` | `huggingface/vit/ptq/fp8` | Recipe path (relative to `modelopt_recipes/` or an absolute YAML). |
 | `--calib_samples` | `1024` | Number of tiny-imagenet samples to use for calibration. |
 | `--batch_size` | `128` | Calibration / compile / eval batch size. The Torch-TRT engine is dynamic (`min=1`, `opt=max(--batch_size, 2)`, `max=1024`) and handles any batch including the trailing partial batch. |
 | `--eval_data_size` | full 50k | Number of ImageNet validation images to score. |

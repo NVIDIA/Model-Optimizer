@@ -106,7 +106,7 @@ def main():
         "--recipe",
         default=ttptq.DEFAULT_RECIPE,
         help="Recipe path (relative to modelopt_recipes/ or an absolute YAML). "
-        "Defaults to the ViT FP8 recipe; pass huggingface/vit/ptq/nvfp4 for NVFP4.",
+        "Defaults to the ViT FP8 recipe.",
     )
     parser.add_argument(
         "--calib_samples",
@@ -210,7 +210,7 @@ def main():
     )
     ttptq.quantize_with_recipe(model, args.recipe, calib_batches)
 
-    label = Path(args.recipe).stem  # e.g. "fp8" / "nvfp4"
+    label = Path(args.recipe).stem  # e.g. "fp8"
     tag = f"{label} ({runtime})"
     eval_model = to_eval_model(model, f"{label} model")
     print(f"\n=== {tag} ===")
