@@ -37,6 +37,7 @@ Changelog
 **Bug Fixes**
 
 - Fix ``ShapeInferenceError`` during ONNX INT8 + FP16 quantization (``--high_precision_dtype fp16``) of weakly-typed models (e.g. TensorFlow exports) that carry stale rank-0 ``graph.output`` shapes or ops such as ``TopK`` that ONNX's static shape inference cannot resolve. ``clear_stale_value_info`` now reconciles stale output shapes via symbolic shape inference (keeping every output's shape field populated), and AutoCast runs ONNX shape inference in strict mode and falls back to schema-based standalone type inference when it fails, so unresolved ops no longer leave tensors untyped.
+- Fix ``ImportError: cannot import name 'is_torch_fx_available'`` when loading ``trust_remote_code`` checkpoints (e.g. DeepSeek-V3 / Kimi-K2) with Transformers 5.x in ``examples/llm_ptq``. Transformers 5.0 removed the ``is_torch_fx_available`` helper that these models' bundled ``modeling_*.py`` still import at load time; ``get_model`` now reinstalls it as a backward-compatibility shim before loading the model.
 
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^

@@ -194,3 +194,27 @@ def test_get_original_hf_quant_method_none_for_unquantized():
         example_utils.get_original_hf_quant_method(SimpleNamespace(quantization_config=None))
         is None
     )
+
+
+# ---------- legacy transformers import_utils shim ---------------------------
+# Transformers 5.0 removed is_torch_fx_available, breaking trust_remote_code checkpoints
+# (DeepSeek-V3 / Kimi-K2) whose modeling_deepseek.py still imports it at module load.
+# get_model() restores it via _restore_legacy_transformers_import_utils().
+
+
+def test_restore_legacy_transformers_import_utils(monkeypatch):
+    import transformers.utils
+    import transformers.utils.import_utils as tf_import_utils
+
+    # Simulate Transformers 5.x, where the helper is gone from both namespaces.
+    monkeypatch.delattr(tf_import_utils, "is_torch_fx_available", raising=False)
+    monkeypatch.delattr(transformers.utils, "is_torch_fx_available", raising=False)
+
+    example_utils._restore_legacy_transformers_import_utils()
+
+    # The exact import the DeepSeek/Kimi remote code performs must now succeed...
+    from transformers.utils.import_utils import is_torch_fx_available
+
+    assert is_torch_fx_available() is True
+    # ...and the re-exported alias on transformers.utils is kept in sync.
+    assert hasattr(transformers.utils, "is_torch_fx_available")

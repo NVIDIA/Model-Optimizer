@@ -58,6 +58,41 @@ _QWEN36_AUTOQ_DISABLED_LAYERS = ("*shared_expert_gate*",)
 _VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
 
 
+def _restore_legacy_transformers_import_utils() -> None:
+    """Re-add ``transformers.utils.import_utils`` helpers that Transformers 5.0 removed.
+
+    Many ``trust_remote_code`` checkpoints (e.g. DeepSeek-V3 / Kimi-K2's
+    ``modeling_deepseek.py``) were written against Transformers 4.x and run
+    ``from transformers.utils.import_utils import is_torch_fx_available`` at import time.
+    Transformers 5.0 deleted that helper -- ``torch.fx`` has shipped unconditionally since
+    PyTorch 2.1 -- so loading such a checkpoint now raises ``ImportError`` before the model is
+    even built (https://github.com/huggingface/transformers/issues/44561).
+
+    Reinstall the removed names as faithful shims so the remote code imports cleanly. Each shim
+    is only installed when the symbol is missing, leaving older Transformers untouched.
+    """
+    import transformers.utils as tf_utils
+    import transformers.utils.import_utils as tf_import_utils
+
+    def is_torch_fx_available() -> bool:
+        # torch.fx is importable on every torch version ModelOpt supports (PyTorch >= 2.1).
+        try:
+            import torch.fx  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    legacy_shims = {"is_torch_fx_available": is_torch_fx_available}
+    for name, shim in legacy_shims.items():
+        if not hasattr(tf_import_utils, name):
+            setattr(tf_import_utils, name, shim)
+        # ``transformers.utils`` re-exports these helpers; keep both namespaces in sync so
+        # ``from transformers.utils import is_torch_fx_available`` also keeps working.
+        if not hasattr(tf_utils, name):
+            setattr(tf_utils, name, getattr(tf_import_utils, name))
+
+
 def _is_qwen_model(model) -> bool:
     """Return True when model/config identifiers indicate a Qwen-family model."""
     candidates = [type(model).__name__]
@@ -607,6 +642,10 @@ def get_model(
     attn_implementation=None,
 ):
     print(f"Initializing model from {ckpt_path}")
+
+    # Transformers 5.0 dropped ``is_torch_fx_available``; restore it so trust_remote_code
+    # checkpoints (e.g. DeepSeek-V3 / Kimi-K2) that still import it can be loaded.
+    _restore_legacy_transformers_import_utils()
 
     device_map = "auto"
     if device == "cpu":
