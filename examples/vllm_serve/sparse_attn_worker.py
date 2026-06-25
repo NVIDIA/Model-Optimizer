@@ -54,14 +54,16 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config impor
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     _build_sparse_kw,
     _clone_sparse_impl,
+    select_sparse_impl_cls,
 )
 
 
 def _replace_attention_impl(worker):
-    """Replace FlashAttentionImpl with ModelOptSparseAttentionImpl on all Attention layers.
+    """Replace the attention impl with the ModelOpt sparse impl on all Attention layers.
 
-    The sole configuration source is the checkpoint's ``sparse_attention_config``
-    metadata. No-op if the checkpoint has no such block.
+    Supports the FlashAttention and FlashInfer backends (the matching sparse impl
+    is selected per layer). The sole configuration source is the checkpoint's
+    ``sparse_attention_config`` metadata. No-op if the checkpoint has no such block.
     """
     hf_config = getattr(worker.model_runner.model_config, "hf_config", None)
     detected = load_from_checkpoint_metadata(hf_config)
@@ -81,6 +83,7 @@ def _replace_attention_impl(worker):
         model = model.unwrap()
 
     patched = 0
+    skipped_backends: set[str] = set()
     for name, module in model.named_modules():
         if not isinstance(module, VLLMAttention):
             continue
@@ -94,11 +97,26 @@ def _replace_attention_impl(worker):
             # Keep vLLM's original impl when the exported layer config does not
             # enable any sparse feature.
             continue
-        new_impl = _clone_sparse_impl(module.impl)
+        new_cls = select_sparse_impl_cls(module.impl)
+        if new_cls is None:
+            # Unsupported backend (not FlashAttention / FlashInfer) — leave it on
+            # vLLM's native impl rather than mis-cloning into the wrong base.
+            skipped_backends.add(type(module.impl).__name__)
+            continue
+        try:
+            new_impl = _clone_sparse_impl(module.impl, new_cls)
+        except NotImplementedError:
+            skipped_backends.add(type(module.impl).__name__)
+            continue
         new_impl.sparse_kw = sparse_kw
         module.impl = new_impl
         patched += 1
     print(f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers")
+    if skipped_backends:
+        print(
+            f"[ModelOpt] Sparse attention: left {sorted(skipped_backends)} layers unchanged "
+            "(unsupported backend — serve under FLASH_ATTN or FLASHINFER)."
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -143,7 +143,9 @@ def _load_paged_k_tile(
     # Load K values: K_cache[page_global, offset_in_page, kv_head_idx, dim]
     # K^T layout [BLOCK_D, BLOCK_N] for Q @ K^T matmul
     k_ptrs = (
-        page_global[None, :] * stride_kc_block
+        # int64: real KV pools have >2^31/stride blocks, so page_global*stride_kc_block
+        # overflows int32 at high block IDs -> negative offset -> illegal memory access.
+        page_global[None, :].to(tl.int64) * stride_kc_block
         + offset_in_page[None, :] * stride_kc_pos
         + kv_head_idx * stride_kc_head
         + dim_pos[:, None]
@@ -185,7 +187,8 @@ def _load_paged_v_tile(
 
     # V layout [BLOCK_N, BLOCK_D]
     v_ptrs = (
-        page_global[:, None] * stride_vc_block
+        # int64: see _load_paged_k_tile — avoid int32 overflow at high block IDs.
+        page_global[:, None].to(tl.int64) * stride_vc_block
         + offset_in_page[:, None] * stride_vc_pos
         + kv_head_idx * stride_vc_head
         + dim_pos[None, :]
@@ -259,7 +262,7 @@ def _attn_fwd(
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
     DENSE_SINK_TOKENS: tl.constexpr = 0,  # Leading KV tokens kept dense (attention sinks)
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,  # Recent KV tokens kept dense (BLOCK_N-independent)
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,  # Recent KV tokens kept dense (BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     P_QDQ: tl.constexpr = 0,  # Fake quant-dequant of softmax P: 0=off, 1=FP8 E4M3, 2=NVFP4
@@ -540,7 +543,7 @@ def _attn_bwd_dq(
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
     DENSE_SINK_TOKENS: tl.constexpr = 0,
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
@@ -691,7 +694,7 @@ def _attn_bwd_dkdv(
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
     DENSE_SINK_TOKENS: tl.constexpr = 0,
-    DENSE_RECENT_TOKENS: tl.constexpr = 64,
+    DENSE_RECENT_TOKENS: tl.constexpr = 128,
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
@@ -919,7 +922,11 @@ class _Attention(torch.autograd.Function):
             lse.stride(1),
         )
         fwd_kwargs = {
-            "N_CTX": max_input_len,
+            # Bucket the autotune key to a power-of-2 length REGIME, not the exact seq
+            # len: keying on exact max_input_len re-ran autotune per unique prefill length
+            # (the TTFT blowup on varying-length workloads). next_power_of_2 collapses that
+            # to one tune per length regime. (N_CTX is key-only, never used in compute.)
+            "N_CTX": triton.next_power_of_2(max(1, max_input_len)),
             "kv_group_num": kv_group_num,
             "BLOCK_D": BLOCK_D,
             "IS_CAUSAL": is_causal,

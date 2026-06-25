@@ -130,14 +130,35 @@ class DynamicThresholdCalibrator:
         # with one entry per threshold, eliminating the need for repeated forward passes.
         print(f"\nStage 1: Collecting {phase} sparsity data for all thresholds in one pass...")
 
-        all_data_points = []  # List of {"threshold", "length", "scale_factor", "sparsity"}
-
         self._set_thresholds(attention_modules, self.threshold_trials)
         self._enable_calibration_mode(attention_modules)
         with torch.no_grad():
             forward_loop(model)
         per_sample_stats = self._extract_calibration_stats(attention_modules, phase=phase)
         self._disable_calibration_mode(attention_modules)
+
+        return self.calibrate_from_stats(per_sample_stats, phase)
+
+    def calibrate_from_stats(self, per_sample_stats: list[dict], phase: str) -> dict[str, Any]:
+        """Fit the exponential model from already-collected per-sample stats.
+
+        This is the backend-agnostic Stage 2/3 of :meth:`calibrate`. The HF and
+        diffusion paths reach it through :meth:`calibrate` (which runs a
+        ``forward_loop`` to collect the stats first); the vLLM path collects the
+        stats itself — one record per scheduled request — and calls this directly
+        so both paths share the same exponential fit.
+
+        Args:
+            per_sample_stats: List of ``{"sparsity": [s_0, ..., s_n], "sample_length": L}``
+                records, one per calibration sample. ``sparsity`` holds the
+                skipped-tile fraction at each threshold in ``threshold_trials``
+                (same order, same length).
+            phase: Phase being calibrated ('prefill' or 'decode').
+
+        Returns:
+            Dict with calibration results including a, b, r_squared, and num_data_points.
+        """
+        all_data_points = []  # List of {"threshold", "length", "scale_factor", "sparsity"}
 
         for sample_stat in per_sample_stats:
             length = sample_stat["sample_length"]
@@ -152,6 +173,12 @@ class DynamicThresholdCalibrator:
                         "sparsity": sparsity,
                     }
                 )
+
+        # Per-sample measured sparsity (one row per calibration sample: its
+        # skipped-tile fraction at every threshold). Printed before the fit-
+        # validity guard so the raw per-sample data is visible even when the fit
+        # bails (e.g. degenerate near-zero sparsity).
+        self._print_per_sample_sparsity(per_sample_stats, phase)
 
         if len(all_data_points) < 10:
             warnings.warn(
@@ -286,10 +313,31 @@ class DynamicThresholdCalibrator:
             "fit_logspace": self.fit_logspace,
             "min_observed_sparsity": min_observed_sparsity,
             "max_observed_sparsity": max_observed_sparsity,
+            # Raw per-sample measured sparsity, so callers can audit the spread
+            # across samples (not just the fitted average).
+            "per_sample_sparsity": [
+                {
+                    "sample_length": s.get("sample_length", 0),
+                    "sparsity": list(s.get("sparsity", [])),
+                }
+                for s in per_sample_stats
+            ],
         }
         if self.fit_logspace:
             result["log_a"] = float(log_a)
         return result
+
+    def _print_per_sample_sparsity(self, per_sample_stats: list[dict], phase: str) -> None:
+        """Print each sample's measured skipped-tile fraction at every threshold."""
+        if not per_sample_stats:
+            return
+        print(f"\nPer-sample {phase} sparsity (skipped-tile fraction per threshold):")
+        header = " ".join(f"{t:>7.0e}" for t in self.threshold_trials)
+        print(f"  {'sample':>6} {'length':>8}  {header}")
+        for idx, stat in enumerate(per_sample_stats):
+            sparsity = stat.get("sparsity", [])
+            row = " ".join(f"{s:>7.2%}" for s in sparsity)
+            print(f"  {idx:>6} {stat.get('sample_length', 0):>8}  {row}")
 
     def _enable_calibration_mode(self, modules: list[nn.Module]):
         """Enable calibration mode on sparse attention modules."""
