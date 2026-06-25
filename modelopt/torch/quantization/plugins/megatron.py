@@ -614,7 +614,8 @@ class _MegatronSequentialMLP(DynamicModule):
                 expert_model_parallel_group=mcore_parallel.get_expert_model_parallel_group(),
             )
 
-        # Write the backing field directly: these linears are converted after this _setup.
+        # These child linears are still native MCore modules here. Seed `_parallel_state`
+        # directly so the later QuantModule conversion sees the intended parallel state.
         for expert in self.local_experts:
             expert.linear_fc1._parallel_state = self.parallel_state
             expert.linear_fc2._parallel_state = self.parallel_state
@@ -723,7 +724,8 @@ if HAS_TE:
                     tensor_parallel_group=mcore_parallel.get_expert_tensor_parallel_group(),
                     expert_model_parallel_group=mcore_parallel.get_expert_model_parallel_group(),
                 )
-            # Write the backing field directly: these linears are converted after this _setup.
+            # These child linears are still native MCore modules here. Seed `_parallel_state`
+            # directly so the later QuantModule conversion sees the intended parallel state.
             self.linear_fc1._parallel_state = self.parallel_state
             self.linear_fc2._parallel_state = self.parallel_state
 
