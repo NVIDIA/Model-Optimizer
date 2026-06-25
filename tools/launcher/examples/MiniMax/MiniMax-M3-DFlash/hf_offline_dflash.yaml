@@ -40,9 +40,10 @@ pipeline:
   task_0:
     script: common/eagle3/dump_offline_data_vllm.sh
     args:
-      # Synthetic data from the M3 synth campaign (default.jsonl, 3-way thinking-mode mix),
-      # cleaned + uploaded. Update the suffix once the cleaned set is published.
-      - --input-data /hf-local/modelopt/MiniMax-M3-synthetic-data
+      # Synthetic data from the M3 synth campaign (default.jsonl, even 3-way thinking-mode
+      # mix), consolidated + cleaned: 2,761,690 records across 16,472 shards (empties +
+      # finished-markers dropped, provenance joined from the source prompts).
+      - --input-data /hf-local/modelopt/MiniMax-M3-synthetic-data-clean
       - --output-dir /scratchspace/dflash_minimax_m3_hidden_states
       # Must match the draft model's num_hidden_layers (recipe default: 5).
       - --aux-layers dflash
