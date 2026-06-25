@@ -183,7 +183,9 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                 / f"solution_{i_solution}"
             )
 
-            model_config.dtype = resolve_torch_dtype(getattr(args, "model_dtype", "torch.bfloat16"))
+            model_config.torch_dtype = resolve_torch_dtype(
+                getattr(args, "model_dtype", "torch.bfloat16")
+            )
             Converter.copy_checkpoint_files(args.teacher_dir, checkpoint_dir)
             if realizable_as_symlinks:
                 if dist.is_master():

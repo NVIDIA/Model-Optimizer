@@ -16,6 +16,8 @@ The supported eval tasks are [here](https://github.com/EleutherAI/lm-evaluation-
 
 ### Baseline
 
+Both standard HuggingFace models and heterogeneous pruned checkpoints produced by Puzzletron are supported.
+
 - For models which fit on a single GPU:
 
 ```sh
@@ -28,6 +30,8 @@ python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or mode
 python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or model card>,parallelize=True --tasks <comma separated tasks> --batch_size 4
 ```
 
+> **Note (Slurm interactive nodes):** On Slurm interactive nodes, `WORLD_SIZE` is set to the number of available GPUs in the shell environment. Running `python` directly causes `lm_eval` to hang waiting for peer ranks that were never spawned. Prepend `WORLD_SIZE=1` to any of the above commands to fix this.
+
 - For data-parallel evaluation with model-sharding:
 
 With the following command, the model will be sharded across `total_num_of_available_gpus/num_copies_of_your_model` with a data-parallelism of `num_copies_of_your_model`
@@ -39,22 +43,6 @@ accelerate launch --multi_gpu --num_processes <num_copies_of_your_model> \
     --model_args pretrained=<HF model folder or model card>,parallelize=True \
     --batch_size 4
 ```
-
-### Heterogeneous Pruned Checkpoints (Puzzletron)
-
-Heterogeneous pruned checkpoints produced by Puzzletron are automatically detected and loaded with the appropriate model patcher. No additional flags are needed beyond specifying the checkpoint path:
-
-```sh
-python lm_eval_hf.py --model hf \
-    --model_args pretrained=path/to/anymodel/checkpoint,dtype=bfloat16,parallelize=True \
-    --tasks mmlu \
-    --num_fewshot 5 \
-    --batch_size 4
-```
-
-For a quick smoke test, add `--limit 10`.
-
-> **Note:** Requires the `puzzletron` extra to be installed (`pip install -e ".[puzzletron]"`).
 
 ### Quantized (simulated)
 

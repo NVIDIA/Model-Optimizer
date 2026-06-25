@@ -256,18 +256,7 @@ The plot shows how token accuracy changes with different compression rates. High
 
 ## Evaluation
 
-Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly.
-
-```bash
-python examples/llm_eval/lm_eval_hf.py \
-   --model hf \
-   --model_args pretrained=path/to/checkpoint,dtype=bfloat16,parallelize=True \
-   --tasks mmlu \
-   --num_fewshot 5 \
-   --batch_size 4
-```
-
-For a quick smoke test, add `--limit 10`.
+Evaluate AnyModel checkpoints using lm-eval. See the [LM-Eval-Harness section](../llm_eval/README.md#lm-eval-harness) in `examples/llm_eval/README.md` for full instructions, including multi-GPU and Slurm setup.
 
 > **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
 > see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
@@ -388,3 +377,10 @@ Due to non-linear extension of the runtime stats of single subblocks to the tota
 ## Advanced Usage
 
 Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenarios.
+
+## Using with AI agents
+
+> **Experimental:** AI agent integration is an experimental feature and may change.
+
+Puzzletron ships a skill for AI coding agents (Claude Code, Cursor, Codex).
+See [`.agents/skills/puzzletron/README.md`](../../.agents/skills/puzzletron/README.md) for setup, commands, and example output.
