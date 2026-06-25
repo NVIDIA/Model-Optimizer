@@ -13,22 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-family export descriptors (the "modeling library").
+"""Bloom family export specs."""
 
-Holds per-model export *data* extracted from the generic export code, organized by
-model family. The generic export path reads ``ModelSpec`` fields via the registry
-lookups below; an unmatched lookup returns ``None`` so callers fall back to legacy
-behavior. See ``MODEL_SPECIFIC_REFACTOR.md`` for scope and migration priority.
-"""
+from ..base import ModelSpec
+from ..registry import register
 
-from . import families
-from .base import ModelSpec
-from .registry import match_by_architecture, match_by_decoder_type, match_moe_block, register
-
-__all__ = [
-    "ModelSpec",
-    "match_by_architecture",
-    "match_by_decoder_type",
-    "match_moe_block",
-    "register",
-]
+register(
+    ModelSpec(
+        name="bloom",
+        decoder_types=("bloom",),
+        forced_activation="gelu",
+    )
+)

@@ -32,6 +32,8 @@ class ModelSpec:
 
     Matching keys (a spec applies to a model when any key matches):
         architectures: exact HF architecture class names (e.g. "Qwen3MoeForCausalLM").
+        decoder_types: ModelOpt ``decoder_type`` strings (the normalized family name from
+            ``MODEL_NAME_TO_TYPE``, e.g. "bloom", "phi3"). Exact match.
         moe_block_names: MoE block class-name substrings, matched case-insensitively
             the same way the legacy ``module_match_name_list`` did (e.g.
             "Qwen3MoeSparseMoeBlock"). Used to resolve a spec from a sub-module.
@@ -44,10 +46,13 @@ class ModelSpec:
             iterable sub-modules (Mixtral, Qwen MoE, NemotronH, Gemma4), so the grouped
             export path (``get_experts_list``) can index them. False/unset for stacked
             or fused layouts (DBRX, GptOss, ...), which are handled by other paths.
+        forced_activation: activation that overrides MLP activation detection for this
+            family (e.g. Bloom/GLM → "gelu", Phi3 → "swiglu"). ``None`` = no override.
     """
 
     name: str
     architectures: tuple[str, ...] = ()
+    decoder_types: tuple[str, ...] = ()
     moe_block_names: tuple[str, ...] = ()
 
     # --- P1: MoE expert naming ---
@@ -56,5 +61,8 @@ class ModelSpec:
     # --- P2: grouped (iterable) expert export support ---
     has_iterable_experts: bool = False
 
-    # Reserved for later migration steps (P3); added when those land.
+    # --- P3: non-MoE per-model flags ---
+    forced_activation: str | None = None
+
+    # Reserved for later migration steps; added when those land.
     _extra: dict = field(default_factory=dict, repr=False)

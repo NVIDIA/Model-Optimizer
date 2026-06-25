@@ -185,9 +185,9 @@ never breaks un-migrated models.
 
 | Step | What | Why this order | Risk |
 |---|---|---|---|
-| **P0** | Registry skeleton: `modeling/` + `ModelSpec` + `get_model_spec()` (lookup by architecture / module class name, returns `None` → fallback). Do **not** touch `MODEL_NAME_TO_TYPE`. | Everything keys off it; purely additive, no behavior change. | very low |
-| **P1** (pilot) | MoE expert naming: `get_expert_linear_names` if-chain → `spec.expert_linear_names`. | Purest data + the #1 shotgun-surgery driver. Proves the mechanism end-to-end with near-zero blast radius. | very low |
-| **P2** | Remaining MoE per-model deltas in `moe_utils`/`quant_utils` (expert amax fallback, gate/up amax sync, expert stacking names). | Completes the pain center → "add a MoE model" becomes ~1 file. | medium (sits next to quant logic — move data only) |
+| **P0** ✅ | Registry skeleton: `modeling/` + `ModelSpec` + lookups (`match_moe_block` / `match_by_architecture`, return `None` → fallback). Do **not** touch `MODEL_NAME_TO_TYPE`. | Everything keys off it; purely additive, no behavior change. | very low |
+| **P1** (pilot) ✅ | MoE expert naming: `get_expert_linear_names` if-chain → `spec.expert_linear_names`. | Purest data + the #1 shotgun-surgery driver. Proves the mechanism end-to-end with near-zero blast radius. | very low |
+| **P2** ✅ | The duplicate expert-naming table in `get_experts_list` → `spec.expert_linear_names` + `spec.has_iterable_experts` (the grouped-export capability flag that reproduces the legacy "supported 4 families, else `NotImplementedError`"). | Removes the second copy of expert-naming data → "add a MoE model" stops touching this site. | low |
 | **P3** | Non-MoE pure-data flags: norm+1, activation override, embed √scale, share_embedding. | Mechanical bool/str moves; clears scattered `layer_utils` branches. | low |
 | **P4** (optional) | Already-declarative tables: `HF_CONFIG_MAP`, `PQS_FUSE_MODULE_MAPPING`. | Already data and not causing pain; move only for consistency. | low |
 | **OUT** | Control-flow oddballs: enc-dec routing, MLA, VLM language-tower extraction, spec-decoding (already separate). | Forcing into `ModelSpec` creates leaky hooks; revisit after P1–P3 fix the interface. | — |
@@ -196,5 +196,8 @@ never breaks un-migrated models.
 PR with an export-test equivalence check; hard line — never move *algorithms*, only the
 per-model *values*.
 
-> Section 3 (Target Architecture) is intentionally left until the P1 pilot lands and the
-> `ModelSpec` interface settles, to avoid prematurely fixing its fields on paper.
+> **P2 note:** an earlier draft scoped P2 as "expert amax fallback / gate-up amax sync."
+> On inspection `set_expert_quantizer_amax` and `sync_moe_gate_up_amax` are generic
+> *algorithms* (the gate/up pairs in `_GATE_UP_PAIRS` are a flat, non-per-model list), so
+> by the red line they stay in the engine. The only per-model *data* left in this area was
+> the duplicate naming table in `get_experts_list`, which is what P2 actually migrated.

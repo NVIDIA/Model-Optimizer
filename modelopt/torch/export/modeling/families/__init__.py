@@ -15,4 +15,4 @@
 
 """Per-model-family export specs. Importing each module registers its specs."""
 
-from . import dbrx, deepseek, gemma, gptoss, mixtral, nemotron, qwen
+from . import bloom, dbrx, deepseek, gemma, glm, gptoss, mixtral, nemotron, phi, qwen

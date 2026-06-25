@@ -24,7 +24,7 @@ import torch.nn as nn
 
 from .base import ModelSpec
 
-__all__ = ["match_by_architecture", "match_moe_block", "register"]
+__all__ = ["match_by_architecture", "match_by_decoder_type", "match_moe_block", "register"]
 
 _SPECS: list[ModelSpec] = []
 
@@ -39,6 +39,18 @@ def match_by_architecture(architecture: str) -> ModelSpec | None:
     """Return the spec whose ``architectures`` contains an exact ``architecture`` match."""
     for spec in _SPECS:
         if architecture in spec.architectures:
+            return spec
+    return None
+
+
+def match_by_decoder_type(decoder_type: str) -> ModelSpec | None:
+    """Return the spec whose ``decoder_types`` contains an exact ``decoder_type`` match.
+
+    ``decoder_type`` is ModelOpt's normalized family string (from ``MODEL_NAME_TO_TYPE``),
+    so an exact match is appropriate (unlike raw, possibly quant-prefixed class names).
+    """
+    for spec in _SPECS:
+        if decoder_type in spec.decoder_types:
             return spec
     return None
 

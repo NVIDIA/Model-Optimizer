@@ -60,7 +60,7 @@ from .model_config import (
     RgLruConfig,
 )
 from .model_config_utils import pad_weights
-from .modeling import match_moe_block
+from .modeling import match_by_decoder_type, match_moe_block
 from .postprocess import view_as_float8_e4m3fn_if_needed, view_as_uint8_if_needed
 from .quant_utils import (
     get_activation_scaling_factor,
@@ -855,11 +855,11 @@ def build_mlp_config(
 
     assert config.proj is not None and config.fc is not None, "proj or fc can not be found"
 
-    # Override hidden_act based on decoder_type
-    if decoder_type in ["bloom", "glm"]:
-        hidden_act = "gelu"
-    if decoder_type == "phi3":
-        hidden_act = "swiglu"
+    # Per-family activation override lives in modeling/families/* (e.g. bloom/glm → gelu,
+    # phi3 → swiglu). Unmatched families fall through to activation detection below.
+    _spec = match_by_decoder_type(decoder_type)
+    if _spec is not None and _spec.forced_activation is not None:
+        hidden_act = _spec.forced_activation
 
     if hidden_act is None:
         if hasattr(module, "activation"):
