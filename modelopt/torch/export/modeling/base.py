@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The per-model descriptor that holds model-specific export *data* (not algorithms).
+"""Per-model-family export descriptor.
 
-A ``ModelSpec`` declares how a model family differs from the generic export path. The
-generic export code reads these fields instead of branching on ``decoder_type`` /
-class-name strings. Fields are added one migration step at a time (see
-``MODEL_SPECIFIC_REFACTOR.md``); keep this to per-model *values*, never algorithms.
+A ``ModelSpec`` declares how one model family differs from the generic export path,
+so the export code can read these values instead of branching on model names. Each
+spec holds per-model data only, not export logic.
 """
 
 from dataclasses import dataclass, field
@@ -28,63 +27,59 @@ __all__ = ["ModelSpec"]
 
 @dataclass
 class ModelSpec:
-    """Declarative, per-model-family export data.
+    """Per-model-family export data.
 
-    Matching keys (a spec applies to a model when any key matches):
-        architectures: exact HF architecture class names (e.g. "Qwen3MoeForCausalLM").
-        decoder_types: ModelOpt ``decoder_type`` strings (the normalized family name from
-            ``MODEL_NAME_TO_TYPE``, e.g. "bloom", "phi3"). Exact match.
+    A spec is resolved from a model (or one of its sub-modules) via any of its matching
+    keys:
+        architectures: exact HuggingFace architecture class names (e.g. "Qwen3MoeForCausalLM").
+        decoder_types: ModelOpt ``decoder_type`` strings (e.g. "bloom", "phi3"). Exact match.
         moe_block_names: MoE block class-name substrings, matched case-insensitively
-            the same way the legacy ``module_match_name_list`` did (e.g.
-            "Qwen3MoeSparseMoeBlock"). Used to resolve a spec from a sub-module.
-        mlp_block_names: MLP module class names, matched by exact equality (e.g.
-            "ArcticMLP", "Phi3SmallMLP"). Used to resolve a spec from an MLP sub-module.
+            (e.g. "Qwen3MoeSparseMoeBlock").
+        mlp_block_names: MLP module class names, matched by exact equality
+            (e.g. "ArcticMLP", "Phi3SmallMLP").
 
-    Per-model data (grows as categories are migrated):
-        expert_linear_names: the expert linear projection names for this family's MoE
-            block, e.g. ("gate_proj", "down_proj", "up_proj"). ``None`` means this spec
-            carries no MoE-naming override.
-        has_iterable_experts: True when this family stores experts as per-expert
-            iterable sub-modules (Mixtral, Qwen MoE, NemotronH, Gemma4), so the grouped
-            export path (``get_experts_list``) can index them. False/unset for stacked
-            or fused layouts (DBRX, GptOss, ...), which are handled by other paths.
-        forced_activation: activation that overrides MLP activation detection for this
-            family (e.g. Bloom/GLM → "gelu", Phi3 → "swiglu"). ``None`` = no override.
-        force_share_embedding_table: True for families TRT-LLM forces to share the
-            embedding/output table (Gemma/Gemma2/Gemma3), gated by an equality check at
-            the call site.
-        mlp_keyword_roles: per-family overrides for which child-module name maps to which
-            MLP role, e.g. {"up_proj": "fc"} (MPT/Phi3Small) or
-            {"w1": "fc", "w2": "proj", "w3": "gate"} (Arctic/InternLM2). Applied on top of
-            the shared keyword sets: each keyword is removed from all sets, then added to
-            its target role's set. ``None`` = no override.
-        pqs_fuse_rules: AWQ pre_quant_scale fusion rules for this family, each a
-            ``(module_class_substrings, fuse_into, fuse_from)`` triple — for a module whose
-            class name contains one of the substrings, the pre_quant_scale on the
-            ``fuse_from`` submodule is folded into ``fuse_into``. Aggregated across all
-            specs (see ``iter_pqs_fuse_rules``), e.g. Llama/Qwen3 attention → fold o_proj
-            into v_proj, MLP → fold down_proj into up_proj.
+    Per-model fields:
+        expert_linear_names: expert linear projection names for this family's MoE block,
+            e.g. ("gate_proj", "down_proj", "up_proj"). ``None`` if not applicable.
+        has_iterable_experts: True when experts are stored as per-expert iterable
+            sub-modules (Mixtral, Qwen MoE, NemotronH, Gemma4) and can be grouped by
+            ``get_experts_list``. False for stacked or fused layouts (DBRX, GptOss).
+        forced_activation: activation that overrides MLP activation detection
+            (e.g. Bloom/GLM → "gelu", Phi3 → "swiglu"). ``None`` for no override.
+        force_share_embedding_table: True for families that share the embedding/output
+            table (Gemma/Gemma2/Gemma3); still gated by a weight-equality check.
+        mlp_keyword_roles: overrides mapping a child-module name to its MLP role, e.g.
+            {"up_proj": "fc"} (MPT/Phi3Small) or {"w1": "fc", "w2": "proj", "w3": "gate"}
+            (Arctic/InternLM2). Each keyword is removed from the default role sets and
+            added to its target role. ``None`` for no override.
+        pqs_fuse_rules: AWQ pre_quant_scale fusion rules, each a
+            ``(module_class_substrings, fuse_into, fuse_from)`` triple: for a module whose
+            class name contains one of the substrings, the pre_quant_scale on ``fuse_from``
+            is folded into ``fuse_into`` (e.g. attention o_proj → v_proj, MLP down_proj →
+            up_proj).
     """
 
     name: str
+
+    # Matching keys.
     architectures: tuple[str, ...] = ()
     decoder_types: tuple[str, ...] = ()
     moe_block_names: tuple[str, ...] = ()
     mlp_block_names: tuple[str, ...] = ()
 
-    # --- P1: MoE expert naming ---
+    # MoE expert layout.
     expert_linear_names: tuple[str, ...] | None = None
-
-    # --- P2: grouped (iterable) expert export support ---
     has_iterable_experts: bool = False
 
-    # --- P3: non-MoE per-model flags ---
+    # MLP and activation.
     forced_activation: str | None = None
-    force_share_embedding_table: bool = False
     mlp_keyword_roles: dict[str, str] | None = None
 
-    # --- P4: AWQ pre_quant_scale fusion ---
+    # Embedding.
+    force_share_embedding_table: bool = False
+
+    # AWQ pre_quant_scale fusion.
     pqs_fuse_rules: tuple[tuple[tuple[str, ...], str, str], ...] = ()
 
-    # Reserved for later migration steps; added when those land.
+    # Free-form extension slot for future per-model fields.
     _extra: dict = field(default_factory=dict, repr=False)

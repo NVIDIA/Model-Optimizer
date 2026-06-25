@@ -974,8 +974,8 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         if hasattr(module.experts, f"{first_proj_attr}_weight_quantizers"):
             return [first_proj_attr, "down_proj"]
 
-    # Per-model expert naming now lives in modeling/families/*. Fall back to the legacy
-    # mapping below for any MoE block not yet migrated there.
+    # Resolve expert names from the model-family registry; fall back to the mapping
+    # below when no family spec matches the MoE block.
     spec = match_moe_block(module)
     if spec is not None and spec.expert_linear_names is not None:
         return list(spec.expert_linear_names)

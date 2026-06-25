@@ -18,8 +18,8 @@
 from ..base import ModelSpec
 from ..registry import register
 
-# Old-style Mixtral (iterable experts) uses w1/w2/w3. The fused Mixtral (transformers
-# 5.0+) is handled by the structural first-projection check before registry lookup.
+# Mixtral with iterable experts uses w1/w2/w3. Fused experts (transformers 5.0+) are
+# detected from their per-expert quantizer attributes and need no naming override here.
 register(
     ModelSpec(
         name="mixtral",

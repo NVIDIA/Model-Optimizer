@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-family export descriptors (the "modeling library").
+"""Model-family export descriptors.
 
-Holds per-model export *data* extracted from the generic export code, organized by
-model family. The generic export path reads ``ModelSpec`` fields via the registry
-lookups below; an unmatched lookup returns ``None`` so callers fall back to legacy
-behavior. See ``MODEL_SPECIFIC_REFACTOR.md`` for scope and migration priority.
+Holds per-model export data organized by model family. The export code resolves a
+``ModelSpec`` via the registry lookups and reads its fields; an unmatched lookup
+returns ``None`` so callers fall back to their default behavior.
 """
 
 from . import families

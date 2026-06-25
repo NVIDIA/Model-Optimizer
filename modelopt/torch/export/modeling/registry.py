@@ -13,11 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Registry that maps a model (or one of its sub-modules) to its ``ModelSpec``.
+"""Registry that resolves a model (or one of its sub-modules) to its ``ModelSpec``.
 
 Families register their specs at import time (see ``families/``). Lookups return
-``None`` when nothing matches, so the generic export code can fall back to its legacy
-path — this is what makes the migration incremental and safe.
+``None`` when nothing matches, so callers can fall back to their default behavior.
 """
 
 import torch.nn as nn
@@ -37,7 +36,7 @@ _SPECS: list[ModelSpec] = []
 
 
 def register(spec: ModelSpec) -> ModelSpec:
-    """Register a model-family spec. Returns the spec for convenient module-level use."""
+    """Register a model-family spec and return it."""
     _SPECS.append(spec)
     return spec
 
@@ -61,11 +60,7 @@ def iter_pqs_fuse_rules():
 
 
 def match_by_decoder_type(decoder_type: str) -> ModelSpec | None:
-    """Return the spec whose ``decoder_types`` contains an exact ``decoder_type`` match.
-
-    ``decoder_type`` is ModelOpt's normalized family string (from ``MODEL_NAME_TO_TYPE``),
-    so an exact match is appropriate (unlike raw, possibly quant-prefixed class names).
-    """
+    """Return the spec whose ``decoder_types`` contains ``decoder_type`` (exact match)."""
     for spec in _SPECS:
         if decoder_type in spec.decoder_types:
             return spec
@@ -73,10 +68,9 @@ def match_by_decoder_type(decoder_type: str) -> ModelSpec | None:
 
 
 def match_moe_block(module: nn.Module) -> ModelSpec | None:
-    """Return the spec whose ``moe_block_names`` matches ``module``'s class name.
+    """Return the spec matching ``module``'s class name against ``moe_block_names``.
 
-    Mirrors the legacy ``module_match_name_list`` semantics: case-insensitive substring
-    match against ``type(module).__name__``.
+    Case-insensitive substring match against ``type(module).__name__``.
     """
     cls_name = type(module).__name__.lower()
     for spec in _SPECS:
@@ -86,11 +80,7 @@ def match_moe_block(module: nn.Module) -> ModelSpec | None:
 
 
 def match_mlp_block(module: nn.Module) -> ModelSpec | None:
-    """Return the spec whose ``mlp_block_names`` exactly equals ``module``'s class name.
-
-    Exact equality (not substring), mirroring the legacy ``type(module).__name__ in [...]``
-    checks for MLP keyword adjustments.
-    """
+    """Return the spec whose ``mlp_block_names`` exactly equals ``module``'s class name."""
     cls_name = type(module).__name__
     for spec in _SPECS:
         if cls_name in spec.mlp_block_names:
