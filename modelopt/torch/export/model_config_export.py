@@ -60,6 +60,7 @@ from .model_config_utils import (
     pack_linear_weights,
     split_config_and_weights,
 )
+from .modeling import match_by_decoder_type
 from .postprocess import (
     check_weight_shape_valid,
     pad_embedding_lm_head,
@@ -312,8 +313,10 @@ def torch_to_tensorrt_llm_checkpoint(
                     # the model head weight is None so we just skip processing
                     config.share_embedding_table = True
                     continue
-                # TRT LLM forces the embedding table to be shared for the following models.
-                force_share_embedding_table = decoder_type in ["gemma", "gemma2", "gemma3"]
+                # TRT LLM forces the embedding table to be shared for some families
+                # (see modeling/families/*); the equality check below still gates it.
+                _spec = match_by_decoder_type(decoder_type)
+                force_share_embedding_table = bool(_spec and _spec.force_share_embedding_table)
                 if force_share_embedding_table and torch.equal(
                     module.weight, config.vocab_embedding.weight
                 ):

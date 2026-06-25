@@ -27,3 +27,12 @@ register(
         has_iterable_experts=True,
     )
 )
+
+# Dense Gemma 1/2/3: TRT-LLM forces a shared embedding/output table.
+register(
+    ModelSpec(
+        name="gemma",
+        decoder_types=("gemma", "gemma2", "gemma3"),
+        force_share_embedding_table=True,
+    )
+)

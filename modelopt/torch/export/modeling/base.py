@@ -48,6 +48,9 @@ class ModelSpec:
             or fused layouts (DBRX, GptOss, ...), which are handled by other paths.
         forced_activation: activation that overrides MLP activation detection for this
             family (e.g. Bloom/GLM → "gelu", Phi3 → "swiglu"). ``None`` = no override.
+        force_share_embedding_table: True for families TRT-LLM forces to share the
+            embedding/output table (Gemma/Gemma2/Gemma3), gated by an equality check at
+            the call site.
     """
 
     name: str
@@ -63,6 +66,7 @@ class ModelSpec:
 
     # --- P3: non-MoE per-model flags ---
     forced_activation: str | None = None
+    force_share_embedding_table: bool = False
 
     # Reserved for later migration steps; added when those land.
     _extra: dict = field(default_factory=dict, repr=False)
