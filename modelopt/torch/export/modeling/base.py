@@ -58,6 +58,12 @@ class ModelSpec:
             {"w1": "fc", "w2": "proj", "w3": "gate"} (Arctic/InternLM2). Applied on top of
             the shared keyword sets: each keyword is removed from all sets, then added to
             its target role's set. ``None`` = no override.
+        pqs_fuse_rules: AWQ pre_quant_scale fusion rules for this family, each a
+            ``(module_class_substrings, fuse_into, fuse_from)`` triple — for a module whose
+            class name contains one of the substrings, the pre_quant_scale on the
+            ``fuse_from`` submodule is folded into ``fuse_into``. Aggregated across all
+            specs (see ``iter_pqs_fuse_rules``), e.g. Llama/Qwen3 attention → fold o_proj
+            into v_proj, MLP → fold down_proj into up_proj.
     """
 
     name: str
@@ -76,6 +82,9 @@ class ModelSpec:
     forced_activation: str | None = None
     force_share_embedding_table: bool = False
     mlp_keyword_roles: dict[str, str] | None = None
+
+    # --- P4: AWQ pre_quant_scale fusion ---
+    pqs_fuse_rules: tuple[tuple[tuple[str, ...], str, str], ...] = ()
 
     # Reserved for later migration steps; added when those land.
     _extra: dict = field(default_factory=dict, repr=False)

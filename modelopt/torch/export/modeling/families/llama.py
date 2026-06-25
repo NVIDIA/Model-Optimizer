@@ -13,33 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen family export specs."""
+"""Llama family export specs."""
 
 from ..base import ModelSpec
 from ..registry import register
 
 register(
     ModelSpec(
-        name="qwen_moe",
-        moe_block_names=(
-            "Qwen2MoeSparseMoeBlock",
-            "Qwen3MoeSparseMoeBlock",
-            "Qwen3NextSparseMoeBlock",
-            "Qwen3_5MoeSparseMoeBlock",
-        ),
-        expert_linear_names=("gate_proj", "down_proj", "up_proj"),
-        has_iterable_experts=True,
-    )
-)
-
-# Qwen3 (dense + MoE) AWQ pre_quant_scale fusion: fold o_proj into v_proj,
-# down_proj into up_proj.
-register(
-    ModelSpec(
-        name="qwen3",
+        name="llama",
+        # AWQ pre_quant_scale fusion: fold o_proj into v_proj, down_proj into up_proj.
         pqs_fuse_rules=(
-            (("Qwen3Attention", "Qwen3MoeAttention"), "v_proj", "o_proj"),
-            (("Qwen3MLP", "Qwen3MoeMLP"), "up_proj", "down_proj"),
+            (("LlamaAttention",), "v_proj", "o_proj"),
+            (("LlamaMLP",), "up_proj", "down_proj"),
         ),
     )
 )

@@ -25,6 +25,7 @@ import torch.nn as nn
 from .base import ModelSpec
 
 __all__ = [
+    "iter_pqs_fuse_rules",
     "match_by_architecture",
     "match_by_decoder_type",
     "match_mlp_block",
@@ -47,6 +48,16 @@ def match_by_architecture(architecture: str) -> ModelSpec | None:
         if architecture in spec.architectures:
             return spec
     return None
+
+
+def iter_pqs_fuse_rules():
+    """Yield every ``(module_class_substrings, fuse_into, fuse_from)`` AWQ fusion rule.
+
+    Aggregated across all registered specs (the consumer matches each model module
+    against the substrings, so the order across families does not matter).
+    """
+    for spec in _SPECS:
+        yield from spec.pqs_fuse_rules
 
 
 def match_by_decoder_type(decoder_type: str) -> ModelSpec | None:

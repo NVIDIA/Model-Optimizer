@@ -24,6 +24,7 @@ behavior. See ``MODEL_SPECIFIC_REFACTOR.md`` for scope and migration priority.
 from . import families
 from .base import ModelSpec
 from .registry import (
+    iter_pqs_fuse_rules,
     match_by_architecture,
     match_by_decoder_type,
     match_mlp_block,
@@ -33,6 +34,7 @@ from .registry import (
 
 __all__ = [
     "ModelSpec",
+    "iter_pqs_fuse_rules",
     "match_by_architecture",
     "match_by_decoder_type",
     "match_mlp_block",

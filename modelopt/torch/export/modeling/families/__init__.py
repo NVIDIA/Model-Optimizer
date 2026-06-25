@@ -24,6 +24,7 @@ from . import (
     glm,
     gptoss,
     internlm,
+    llama,
     mixtral,
     mpt,
     nemotron,
