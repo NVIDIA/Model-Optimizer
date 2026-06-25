@@ -22,15 +22,17 @@ used to parameterize runtime benchmarks, as well as model checkpointing helpers
 to ensure compatibility with downstream evaluation pipelines.
 """
 
+import inspect
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
 import torch
-from transformers import AutoTokenizer, LlamaForCausalLM
+from transformers import AutoTokenizer, PretrainedConfig, PreTrainedModel
 
 from ..anymodel.converter import Converter
+from ..anymodel.model_descriptor import ModelDescriptor
 from ..anymodel.models.llama import LlamaModelDescriptor
 from ..tools.logger import mprint
 from ..utils.vllm_adapter import convert_block_configs_to_per_layer_config
@@ -56,21 +58,38 @@ class RuntimeConfig:
     # GPU during benchmarking; requesting too much fails vLLM's startup
     # free-memory check.
     gpu_memory_utilization: float = 0.5
+    benchmark_model_key: str = "llama"
+    benchmark_model_config: PretrainedConfig | None = field(
+        default=None, compare=False, hash=False
+    )
+    benchmark_model_descriptor: type[ModelDescriptor] = field(
+        default=LlamaModelDescriptor, compare=False, hash=False
+    )
 
 
-def save_model(model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path) -> None:
+def save_model(
+    model: PreTrainedModel,
+    tokenizer_path: Path,
+    output_path: Path,
+    descriptor: type[ModelDescriptor] = LlamaModelDescriptor,
+) -> None:
     """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
     model = model.to(dtype=torch.bfloat16)
-    save_model_as_anymodel(model, output_path, LlamaModelDescriptor)
+    save_model_as_anymodel(model, output_path, descriptor)
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_path, trust_remote_code=descriptor.requires_trust_remote_code()
+    )
     tokenizer.save_pretrained(output_path)
 
 
 def save_model_as_anymodel(model, output_dir: Path, descriptor):
     """Save a model checkpoint in AnyModel subblock-safetensors format."""
     # Save standard model checkpoint (as safetensors, HF format)
-    model.save_pretrained(output_dir, safe_serialization=True)
+    save_pretrained_kwargs = {"safe_serialization": True}
+    if "save_original_format" in inspect.signature(model.save_pretrained).parameters:
+        save_pretrained_kwargs["save_original_format"] = False
+    model.save_pretrained(output_dir, **save_pretrained_kwargs)
 
     # Convert/slice weights into AnyModel subblock_safetensors format
     Converter.convert_model_weights(
@@ -104,7 +123,8 @@ def convert_config_to_vllm_anymodel(input_dir: Path, output_dir: Path):
 
     config = SimpleNamespace(**config_data)
     config.architectures = ["AnyModel"]
-    config.base_architecture = "LlamaForCausalLM"
+    if not getattr(config, "base_architecture", None):
+        config.base_architecture = "LlamaForCausalLM"
 
     if convert_block_configs_to_per_layer_config(config):
         mprint("Converted block configs to per-layer config")

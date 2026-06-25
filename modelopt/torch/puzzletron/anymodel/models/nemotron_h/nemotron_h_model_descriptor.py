@@ -42,7 +42,10 @@ __all__ = [
 
 
 def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
-    import transformers_modules
+    try:
+        import transformers_modules
+    except ModuleNotFoundError:
+        return []
 
     matches = []
     for finder, modname, ispkg in pkgutil.walk_packages(
@@ -54,6 +57,14 @@ def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
                 matches.append(obj)
 
     return matches
+
+
+def get_native_nemotron_h_block() -> Type[nn.Module] | None:
+    try:
+        from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHBlock
+    except ImportError:
+        return None
+    return NemotronHBlock
 
 
 @dataclass
@@ -103,6 +114,9 @@ class NemotronHModelDescriptor(ModelDescriptor):
     @staticmethod
     def decoder_layer_cls():
         decoder_cls_list = get_dynamic_modules("NemotronHBlock")
+        native_decoder_cls = get_native_nemotron_h_block()
+        if native_decoder_cls is not None:
+            decoder_cls_list.append(native_decoder_cls)
         if not decoder_cls_list:
             raise AssertionError(
                 "NemotronH contains dynamic modules that should be cached beforehand, make sure to load your config using `load_model_config` or manually call `force_cache_dynamic_modules(config, checkpoint_dir)`"

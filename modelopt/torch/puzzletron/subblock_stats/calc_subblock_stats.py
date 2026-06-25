@@ -132,6 +132,8 @@ def calculate_subblock_stats(
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,
             batch_size=batch_size,
+            model_config=model_config,
+            descriptor=descriptor,
         )
 
     sorted_subblock_config = sorted(
