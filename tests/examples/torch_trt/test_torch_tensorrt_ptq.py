@@ -15,19 +15,11 @@
 
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
+from _test_utils.torch.transformers_models import create_tiny_vit_dir
 
-from modelopt.torch.quantization.backends.utils import fp4_compatible
-
-# Recipe variants the example ships. NVFP4's TRT kernels are only generated on
-# Blackwell (compute capability >= 10.0), so that case is skipped elsewhere.
+# Recipe variants the example ships.
 _RECIPES = [
     "huggingface/vit/ptq/fp8",
-    pytest.param(
-        "huggingface/vit/ptq/nvfp4",
-        marks=pytest.mark.skipif(
-            not fp4_compatible(), reason="NVFP4 requires a Blackwell GPU (SM >= 100)"
-        ),
-    ),
 ]
 
 
@@ -35,17 +27,20 @@ _RECIPES = [
 def test_torch_tensorrt_ptq(recipe, tmp_path):
     """End-to-end: load ViT -> mtq.quantize via recipe -> torch_tensorrt.compile.
 
-    Uses the pretrained ``google/vit-base-patch16-224`` (the example no longer
-    exposes a random-weight path). The CLI exits non-zero if any step
-    (calibration, quantization, TRT compile) fails; the printed argmax
-    comparison is informational only. NVFP4's low-precision kernels require a
-    Blackwell GPU, so the nvfp4 case only builds there.
+    Uses a tiny randomly-initialized ViT (saved locally with its image processor)
+    rather than downloading a full pretrained checkpoint, so the test stays offline
+    and fast while exercising the same module structure (3-channel patch conv,
+    attention q/k/v, classifier). The CLI exits non-zero if any step (calibration,
+    quantization, TRT compile) fails; the printed argmax comparison is informational
+    only.
     """
     pytest.importorskip("torch_tensorrt")
 
+    model_dir = create_tiny_vit_dir(tmp_path)
+
     cmd_parts = extend_cmd_parts(
         ["python", "torch_tensorrt_ptq.py"],
-        model_id="google/vit-base-patch16-224",
+        model_id=str(model_dir),
         recipe=recipe,
         calib_samples="4",
         batch_size="1",

@@ -24,6 +24,7 @@ from _test_utils.torch.misc import set_seed
 transformers = pytest.importorskip("transformers")
 from transformers import (
     AutoModelForCausalLM,
+    AutoModelForImageClassification,
     AutoModelForImageTextToText,
     AutoModelForQuestionAnswering,
     AutoProcessor,
@@ -39,6 +40,8 @@ from transformers import (
     Qwen3MoeConfig,
     T5Config,
     T5ForConditionalGeneration,
+    ViTConfig,
+    ViTImageProcessor,
 )
 
 import modelopt.torch.opt as mto
@@ -642,6 +645,37 @@ def get_tiny_bert(**config_kwargs) -> PreTrainedModel:
 
 def create_tiny_bert_dir(tmp_path: Path | str, **config_kwargs) -> Path:
     return _create_tiny_llm_dir(Path(tmp_path) / "tiny_bert", get_tiny_bert, **config_kwargs)
+
+
+##### ViT (vision) #####
+def get_tiny_vit(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+
+    # Keep num_channels=3 and a 16x16 patch so the patch-embedding stem conv matches a
+    # real ViT; image_size=32 gives a 2x2 patch grid, keeping the model tiny.
+    kwargs = {
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "image_size": 32,
+        "patch_size": 16,
+        "num_channels": 3,
+        "num_labels": 2,
+    }
+    kwargs.update(**config_kwargs)
+    return AutoModelForImageClassification.from_config(ViTConfig(**kwargs))
+
+
+def create_tiny_vit_dir(tmp_path: Path | str, **config_kwargs) -> Path:
+    vit_dir = Path(tmp_path) / "tiny_vit"
+    tiny_vit = get_tiny_vit(**config_kwargs)
+    tiny_vit.save_pretrained(vit_dir)
+    # A vision model also needs a saved image processor so the example's
+    # AutoImageProcessor.from_pretrained(dir) resolves; size it to the tiny image.
+    image_size = tiny_vit.config.image_size
+    ViTImageProcessor(size={"height": image_size, "width": image_size}).save_pretrained(vit_dir)
+    return vit_dir
 
 
 ##### TESTERS #####
