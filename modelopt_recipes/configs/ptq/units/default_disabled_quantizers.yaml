@@ -63,6 +63,9 @@
   - parent_class: 'nn.BatchNorm3d'
     quantizer_name: '*'
     enable: false
+  - parent_class: 'nn.SyncBatchNorm'
+    quantizer_name: '*'
+    enable: false
   - parent_class: 'nn.LeakyReLU'
     quantizer_name: '*'
     enable: false
