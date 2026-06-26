@@ -772,3 +772,19 @@ def test_wan2_2_t2v_a14b_diffusers_nvfp4(command):
 )
 def test_wan2_2_t2v_a14b_diffusers_fp8(command):
     command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/diffusiongemma-26B-A4B-it-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=2,
+            mini_sm=100,
+        ),
+    ],
+    ids=idfn,
+)
+def test_diffusiongemma_26b_a4b_it_nvfp4(command):
+    command.run()
