@@ -17,6 +17,7 @@
 from typing import Any
 
 from megatron.bridge import AutoBridge
+from megatron.bridge.models.conversion.param_mapping import AutoMapping, GatedMLPMapping
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
@@ -39,16 +40,15 @@ __all__ = ["load_mbridge_model_from_hf", "load_modelopt_megatron_checkpoint"]
 
 
 def _patch_qwen35_moe_sequential_expert_mappings() -> None:
-    """Add sequential (non-grouped) expert mappings to Megatron-Bridge's Qwen3.5 MoE bridge.
+    """WAR: Add sequential (non-grouped) expert mappings to Megatron-Bridge's Qwen3.5 MoE bridge.
 
     The shipped bridge only maps grouped experts (``experts.gate_up_proj``), but pruning disables
     grouped GEMM and needs the sequential ``experts.local_experts.*`` layout. This also covers
     Qwen3.5-VL MoE, whose bridge delegates to the same ``_get_moe_lm_mappings`` helper.
 
-    TODO: Remove once Megatron-Bridge maps sequential Qwen3.5 MoE experts natively (26.06.01 onwards).
+    TODO: Remove once Megatron-Bridge maps sequential Qwen3.5 MoE experts natively (patched in 26.06.01).
     """
     try:
-        from megatron.bridge.models.conversion.param_mapping import AutoMapping, GatedMLPMapping
         from megatron.bridge.models.qwen.qwen35_bridge import Qwen35MoEBridge
     except ImportError:
         return

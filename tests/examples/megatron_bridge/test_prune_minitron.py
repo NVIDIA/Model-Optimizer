@@ -20,6 +20,7 @@ from _test_utils.examples.run_command import extend_cmd_parts, run_example_comma
 from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
     create_tiny_nemotron_h_dir,
+    create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
 )
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
@@ -98,18 +99,17 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
             ),
             id="gemma3vl",
         ),
-        # TODO: Enable once CI uses the nemo:26.06 container
         # qwen3.5-VL MoE: hybrid GatedDeltaNet + gated-attention MoE LM (prunes depth + MoE dims).
-        # pytest.param(
-        #     lambda tmp_path, num_gpus: create_tiny_qwen3_5_moe_vl_dir(
-        #         tmp_path,
-        #         with_processor=True,
-        #         return_model=True,
-        #         num_hidden_layers=4 * num_gpus,
-        #         max_position_embeddings=1024,
-        #     ),
-        #     id="qwen3_5_moe_vl",
-        # ),
+        pytest.param(
+            lambda tmp_path, num_gpus: create_tiny_qwen3_5_moe_vl_dir(
+                tmp_path,
+                with_processor=True,
+                return_model=True,
+                num_hidden_layers=4 * num_gpus,
+                max_position_embeddings=1024,
+            ),
+            id="qwen3_5_moe_vl",
+        ),
     ],
 )
 def test_prune_minitron_vlm(tmp_path, num_gpus, create_teacher):
