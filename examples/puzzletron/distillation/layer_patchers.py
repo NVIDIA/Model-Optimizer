@@ -418,7 +418,7 @@ def mbridge_patcher(
 
     has_mamba_block = False
     try:
-        import megatron.core.ssm.mamba_block  # noqa: F401  ensure loaded
+        import megatron.core.ssm.mamba_block
 
         has_mamba_block = True
     except ImportError:

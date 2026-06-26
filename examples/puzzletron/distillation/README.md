@@ -117,7 +117,6 @@ model.seq_length=1024 \
 dataset.seq_length=1024
 ```
 
-
 ### Heterogeneous student + teacher (e.g. GPT-OSS → Nemotron-H)
 
 ```bash

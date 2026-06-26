@@ -92,7 +92,7 @@ from hooks import PuzzletronHooks
 
 # Add megatron_bridge to sys.path so we can import the shared main()
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "megatron_bridge"))
-from distill import main as mbridge_main  # noqa: E402
+from distill import main as mbridge_main
 
 configure_logging()
 logger = logging.getLogger(__name__)

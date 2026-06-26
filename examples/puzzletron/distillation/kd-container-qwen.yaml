@@ -93,30 +93,23 @@ dataset:
   seq_length: *seq_length_anchor
   path_to_cache: /puzzletron/workspaces/datasets_cache
   random_seed: &seed 42
-  reset_attention_mask: False
-  reset_position_ids: False
-  eod_mask_loss: False
+  reset_attention_mask: false
+  reset_position_ids: false
+  eod_mask_loss: false
   num_dataset_builder_threads: 1
-  data_sharding: True
+  data_sharding: true
   dataloader_type: "cyclic"
-  skip_getting_attention_mask_from_dataset: True
+  skip_getting_attention_mask_from_dataset: true
   num_workers: 1
-  split: null
-  blend: null
-  blend_per_split: 
-    - - - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Qwen3-8B/puzzle_kd-qwen-train_text_document
-      - [1.0]
-
-    # Validation
-    - - - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Qwen3-8B/puzzle_kd-qwen-valid_text_document
-      - [1.0]
-    # Test (same blend as validation in source tuple)
-    - - - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Qwen3-8B/puzzle_kd-qwen-valid_text_document
-      - [1.0]
-
-# ---------------------------------------------------------------------------
-# Tokenizer (override to NullTokenizer + vocab_size for mock-token runs)
-# ---------------------------------------------------------------------------
+  split:
+  blend:
+  blend_per_split:
+    -   -   - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Qwen3-8B/puzzle_kd-qwen-train_text_document
+        - [1.0]
+    -   -   - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Qwen3-8B/puzzle_kd-qwen-valid_text_document
+        - [1.0]
+    -   -   - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Qwen3-8B/puzzle_kd-qwen-valid_text_document
+        - [1.0]
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
   # Omit ``tokenizer_model`` here so distill.py can set it from ``--student-checkpoint``.

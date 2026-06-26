@@ -494,8 +494,8 @@ def main(args: argparse.Namespace, hooks: DistillHooks | None = None) -> None:
 
     # Build student provider
     student_megatron_path = getattr(args, "student_megatron_path", None)
-    student_has_modelopt_state = (
-        student_megatron_path is not None and has_modelopt_state(student_megatron_path)
+    student_has_modelopt_state = student_megatron_path is not None and has_modelopt_state(
+        student_megatron_path
     )
     student_bridge = hooks.load_bridge(args.student_hf_path, args.trust_remote_code)
     student_provider = _configure_provider(
@@ -520,7 +520,9 @@ def main(args: argparse.Namespace, hooks: DistillHooks | None = None) -> None:
         skip_lm_loss=not getattr(args, "no_skip_lm_loss", False),
         kd_loss_scale=getattr(args, "kd_loss_scale", 1.0),
     )
-    distill_provider = convert_to_distillation_provider(student_provider, teacher_provider, kd_config)
+    distill_provider = convert_to_distillation_provider(
+        student_provider, teacher_provider, kd_config
+    )
 
     if student_megatron_path:
         if student_has_modelopt_state:

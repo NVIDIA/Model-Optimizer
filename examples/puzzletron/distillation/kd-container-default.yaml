@@ -98,20 +98,20 @@ ddp:
 # ---------------------------------------------------------------------------
 dataset:
   seq_length: *seqlen
-  per_split_data_args_path: null  # e.g. /path/to/blend_spec.json
+  per_split_data_args_path:       # e.g. /path/to/blend_spec.json
   path_to_cache: ./outputs/datasets_cache
   random_seed: 1234
-  reset_attention_mask: False
-  reset_position_ids: False
-  eod_mask_loss: False
+  reset_attention_mask: false
+  reset_position_ids: false
+  eod_mask_loss: false
   num_dataset_builder_threads: 1
-  data_sharding: True
+  data_sharding: true
   dataloader_type: "cyclic"
-  skip_getting_attention_mask_from_dataset: True
+  skip_getting_attention_mask_from_dataset: true
   num_workers: 1
-  blend: null
-  split: null
-  blend_per_split: null
+  blend:
+  split:
+  blend_per_split:
 
 # ---------------------------------------------------------------------------
 # Tokenizer (override to NullTokenizer + vocab_size for mock-token runs)
@@ -141,9 +141,9 @@ logger:
   tensorboard_dir: ./outputs/tb
   log_timers_to_tensorboard: true
   # Optional Weights & Biases logging — leave null to disable, or override per run.
-  wandb_project: null
-  wandb_exp_name: null
-  wandb_entity: null
+  wandb_project:
+  wandb_exp_name:
+  wandb_entity:
   wandb_save_dir: ./outputs/wandb
 
 # ---------------------------------------------------------------------------

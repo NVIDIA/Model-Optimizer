@@ -31,24 +31,18 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
+from _common import _get_block_configs, _get_model_descriptor, _load_hf_config
+from _common import _load_bridge as _common_load_bridge
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.utils.common_utils import get_rank_safe
 from omegaconf import OmegaConf
 
-from _common import (
-    _get_block_configs,
-    _get_model_descriptor,
-    _load_bridge as _common_load_bridge,
-    _load_hf_config,
-)
-
-import sys
-from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "megatron_bridge"))
-from distill import DistillHooks  # noqa: E402
+from distill import DistillHooks
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +52,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _build_distill_config_container(distill_provider, student_checkpoint_path: str) -> ConfigContainer:
+def _build_distill_config_container(
+    distill_provider, student_checkpoint_path: str
+) -> ConfigContainer:
     """Build a ``ConfigContainer`` for distillation using Bridge ``_pretrain_common()`` defaults.
 
     Sets ``model`` to the :class:`DistillationProvider`, points the HF tokenizer at the
@@ -357,17 +353,15 @@ class PuzzletronHooks(DistillHooks):
             student_path: _get_model_descriptor(student_converter),
             teacher_path: _get_model_descriptor(teacher_converter),
         }
+        student_blocks = self._block_configs[student_path]
+        teacher_blocks = self._block_configs[teacher_path]
         logger.info(
             "  student block_configs: %s",
-            f"{len(self._block_configs[student_path])} layers"
-            if self._block_configs[student_path]
-            else "None (homogeneous)",
+            f"{len(student_blocks)} layers" if student_blocks else "None (homogeneous)",
         )
         logger.info(
             "  teacher block_configs: %s",
-            f"{len(self._block_configs[teacher_path])} layers"
-            if self._block_configs[teacher_path]
-            else "None (homogeneous)",
+            f"{len(teacher_blocks)} layers" if teacher_blocks else "None (homogeneous)",
         )
 
     # ------------------------------------------------------------------
@@ -458,14 +452,10 @@ class PuzzletronHooks(DistillHooks):
         # (they live on the student, not the teacher, in the merged dict). Snapshot
         # them so we can put them back on distill_provider.teacher afterwards.
         teacher_hop = getattr(distill_provider.teacher, "hybrid_override_pattern", None)
-        teacher_mtp_hop = getattr(
-            distill_provider.teacher, "mtp_hybrid_override_pattern", None
-        )
+        teacher_mtp_hop = getattr(distill_provider.teacher, "mtp_hybrid_override_pattern", None)
         apply_overrides(config, final_cfg_dict, excluded_fields)
         object.__setattr__(distill_provider.teacher, "hybrid_override_pattern", teacher_hop)
-        object.__setattr__(
-            distill_provider.teacher, "mtp_hybrid_override_pattern", teacher_mtp_hop
-        )
+        object.__setattr__(distill_provider.teacher, "mtp_hybrid_override_pattern", teacher_mtp_hop)
 
         _sync_teacher_config_from_student(config.model)
         return config
