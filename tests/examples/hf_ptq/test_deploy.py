@@ -788,3 +788,19 @@ def test_wan2_2_t2v_a14b_diffusers_fp8(command):
 )
 def test_diffusiongemma_26b_a4b_it_nvfp4(command):
     command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=2,
+            mini_sm=89,
+        ),
+    ],
+    ids=idfn,
+)
+def test_nemotron(command):
+    command.run()
