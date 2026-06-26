@@ -156,6 +156,7 @@ def test_load_recipe_builtin_description():
 _BUILTIN_PTQ_RECIPES = [
     "general/ptq/fp8_default-kv_fp8",
     "general/ptq/fp8_default-kv_fp8_cast",
+    "general/ptq/int4_blockwise_weight_only",
     "general/ptq/nvfp4_default-kv_fp8",
     "general/ptq/nvfp4_default-kv_fp8_cast",
     "general/ptq/nvfp4_default-kv_nvfp4_cast",
@@ -509,6 +510,7 @@ def test_load_recipe_dflash_field_validation_raises(tmp_path):
     ("yaml_path", "model_cfg_name", "kv_cfg_name"),
     [
         ("general/ptq/fp8_default-kv_fp8.yaml", "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("general/ptq/int4_blockwise_weight_only.yaml", "INT4_BLOCKWISE_WEIGHT_ONLY_CFG", None),
         ("general/ptq/nvfp4_default-kv_fp8.yaml", "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
         ("general/ptq/nvfp4_mlp_only-kv_fp8.yaml", "NVFP4_MLP_ONLY_CFG", "FP8_KV_CFG"),
         ("general/ptq/nvfp4_omlp_only-kv_fp8.yaml", "NVFP4_OMLP_ONLY_CFG", "FP8_KV_CFG"),
@@ -517,7 +519,7 @@ def test_load_recipe_dflash_field_validation_raises(tmp_path):
 def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg_name):
     """Each general/ptq YAML's quant_cfg list matches the merged Python config dicts."""
     model_cfg = getattr(qcfg, model_cfg_name)
-    kv_cfg = getattr(qcfg, kv_cfg_name)
+    kv_cfg = getattr(qcfg, kv_cfg_name) if kv_cfg_name is not None else None
     recipe = load_recipe(yaml_path)
     yaml_data = {"quantize": recipe.quantize}
 
@@ -552,7 +554,10 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
     def _sort_key(entry):
         return json.dumps(entry, sort_keys=True, default=str)
 
-    python_entries = _normalize_entries(model_cfg["quant_cfg"] + kv_cfg["quant_cfg"])
+    python_quant_cfg = model_cfg["quant_cfg"]
+    if kv_cfg is not None:
+        python_quant_cfg = python_quant_cfg + kv_cfg["quant_cfg"]
+    python_entries = _normalize_entries(python_quant_cfg)
     yaml_entries = _normalize_entries(yaml_data["quantize"]["quant_cfg"])
 
     assert sorted(python_entries, key=_sort_key) == sorted(yaml_entries, key=_sort_key)
