@@ -129,6 +129,7 @@ def main(args: argparse.Namespace) -> None:
         args.expert_model_parallel_size,
         args.expert_tensor_parallel_size,
     )
+    logger.info("  patch_router_expert_bias: %s", args.patch_router_expert_bias)
     logger.info("  CLI overrides:     %s", args.overrides)
 
     # Map puzzletron arg names to the mbridge-compatible names expected by
@@ -149,6 +150,7 @@ def main(args: argparse.Namespace) -> None:
         config_file=args.config_file,
         overrides=args.overrides,
         trust_remote_code=args.trust_remote_code,
+        patch_router_expert_bias=args.patch_router_expert_bias,
     )
     mbridge_main(args, hooks=hooks)
 
@@ -270,6 +272,17 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         dest="expert_tensor_parallel_size",
         help="Expert tensor parallel size (ETP) for MoE.",
+    )
+    parser.add_argument(
+        "--patch-router-expert-bias",
+        action="store_true",
+        dest="patch_router_expert_bias",
+        help=(
+            "Enable a monkey patch for Megatron finalize_model_grads router "
+            "expert-bias helpers (_update_router_expert_bias and "
+            "reset_model_temporary_tensors) for heterogeneous per-layer "
+            "num_local_experts and modules without token counters."
+        ),
     )
 
     # Hydra-style pass-through overrides (everything that doesn't match a known flag)

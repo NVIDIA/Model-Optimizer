@@ -83,7 +83,7 @@ ddp:
   # Required false when use_distributed_optimizer is false (Megatron).
   overlap_param_gather: false
   average_in_collective: true
-  use_distributed_optimizer: false
+  use_distributed_optimizer: true
 
 # ---------------------------------------------------------------------------
 # Dataset (mock blend — replace with real blend / per_split_data_args_path for production)

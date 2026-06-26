@@ -324,6 +324,8 @@ class PuzzletronHooks(DistillHooks):
         config_file: Optional path to a YAML override file (OmegaConf format).
         overrides: List of Hydra-style CLI overrides (e.g. ``["train.train_iters=50000"]``).
         trust_remote_code: Passed through to HF loading calls.
+        patch_router_expert_bias: When True, patch Megatron router expert-bias
+            helpers for heterogeneous MoE (see ``router_expert_bias_patch``).
     """
 
     def __init__(
@@ -335,11 +337,13 @@ class PuzzletronHooks(DistillHooks):
         config_file: str | None,
         overrides: list[str],
         trust_remote_code: bool,
+        patch_router_expert_bias: bool = False,
     ) -> None:
         self._student_path = student_path
         self._teacher_path = teacher_path
         self._config_file = config_file
         self._overrides = overrides
+        self._patch_router_expert_bias = patch_router_expert_bias
 
         logger.info("PuzzletronHooks: loading HF configs to derive block_configs and descriptors")
         student_hf_cfg = _load_hf_config(student_path, trust_remote_code)
@@ -386,6 +390,15 @@ class PuzzletronHooks(DistillHooks):
         # Patches DistillationProvider.provide() so the student build (which calls
         # _super_class.provide directly, bypassing the class-level patch) is also wrapped.
         apply_distillation_patch()
+        if self._patch_router_expert_bias:
+            from router_expert_bias_patch import apply_patch as apply_router_expert_bias_patch
+
+            apply_router_expert_bias_patch()
+            logger.info(
+                "PuzzletronHooks: enabled heterogeneous-safe router expert-bias monkey patch "
+                "(finalize_model_grads._update_router_expert_bias, "
+                "reset_model_temporary_tensors)"
+            )
 
     def load_bridge(self, path: str, trust_remote_code: bool):
         """Load an HF checkpoint via deci_x_patcher when an AnyModel descriptor is available."""

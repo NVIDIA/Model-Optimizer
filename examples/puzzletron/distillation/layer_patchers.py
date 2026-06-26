@@ -424,6 +424,22 @@ def mbridge_patcher(
     except ImportError:
         logger.debug("megatron.core.ssm.mamba_block not available; skipping mamba_block patch")
 
+    # HybridStack (Nemotron-H) builds each decoder slot (MoE 'E', attention,
+    # MLP) by calling ``build_module`` bound *in its own module namespace*
+    # (``from ...spec_utils import build_module``). Patching only spec_utils is
+    # therefore insufficient — the hybrid 'E' (MoE) slots would be built with
+    # the global ``num_moe_experts`` (e.g. 128) instead of the per-layer count
+    # (e.g. 16/96), producing a router.expert_bias shape mismatch at HF load.
+    has_hybrid_block = False
+    try:
+        import megatron.core.models.hybrid.hybrid_block  # noqa: F401  ensure loaded
+
+        has_hybrid_block = True
+    except ImportError:
+        logger.debug(
+            "megatron.core.models.hybrid.hybrid_block not available; skipping hybrid_block patch"
+        )
+
     from megatron.core.transformer.transformer_layer import (
         TransformerLayer,
         get_transformer_layer_offset,
@@ -433,6 +449,9 @@ def mbridge_patcher(
     spec_utils_mod = sys.modules["megatron.core.transformer.spec_utils"]
     transformer_block_mod = sys.modules["megatron.core.transformer.transformer_block"]
     mamba_block_mod = sys.modules.get("megatron.core.ssm.mamba_block") if has_mamba_block else None
+    hybrid_block_mod = (
+        sys.modules.get("megatron.core.models.hybrid.hybrid_block") if has_hybrid_block else None
+    )
 
     orig_build_module = spec_utils_mod.build_module
 
@@ -448,7 +467,15 @@ def mbridge_patcher(
     # -------------------------------------------------------------------------
 
     def patched_build_module(spec_or_module: Any, *args: Any, **kwargs: Any) -> Any:
-        """Intercept TransformerLayer construction and apply per-layer config overrides."""
+        """Intercept TransformerLayer construction and apply per-layer config overrides.
+
+        Only TransformerLayer subclasses are intercepted here. The MoE expert
+        count for hybrid 'E' slots is carried on the layer's ``config`` (patched
+        below) and flows into the inner ``MoELayer`` router via ``self.config``;
+        intercepting ``MoELayer`` directly would be wrong because its inner
+        ``build_module`` call receives no ``layer_number`` and would re-apply an
+        override for the wrong layer.
+        """
         # Resolve the module class from the spec argument.
         if isinstance(spec_or_module, type):
             module_cls = spec_or_module
@@ -462,12 +489,22 @@ def mbridge_patcher(
         # Only intercept TransformerLayer and its subclasses. Using issubclass (not
         # name matching) is critical: MambaStack uses MoETransformerLayer and
         # MLPLayer, both of which subclass TransformerLayer under different names.
-        if not (isinstance(module_cls, type) and issubclass(module_cls, TransformerLayer)):
+        is_transformer_layer = isinstance(module_cls, type) and issubclass(
+            module_cls, TransformerLayer
+        )
+        if not is_transformer_layer:
             return orig_build_module(spec_or_module, *args, **kwargs)
 
-        # Compute the global 1-based layer number from the local index plus
-        # the PP-stage offset.
+        # Resolve the global 1-based layer index into block_configs.
+        #
+        # TransformerBlock passes a *local* 1-based layer_number and expects the
+        # PP offset to be added here.  HybridStack (Nemotron-H) already passes a
+        # *global* 1-based layer_number with add_layer_offset=False — adding the
+        # offset again would pick the wrong block_config (e.g. layer 41 MoE with
+        # 96 experts would read block_configs[79] and fall back to global
+        # num_moe_experts=128, breaking router.expert_bias load).
         layer_number = kwargs.get("layer_number", 1)
+        add_layer_offset = kwargs.get("add_layer_offset", True)
         config = kwargs.get("config")
         vp_stage = kwargs.get("vp_stage")
         pg_collection = kwargs.get("pg_collection")
@@ -475,22 +512,25 @@ def mbridge_patcher(
         if config is None or ctx.block_configs is None:
             return orig_build_module(spec_or_module, *args, **kwargs)
 
-        if pg_collection is None:
-            # pg_collection is normally passed in kwargs by MCore ≥ 0.9.
-            # Best-effort fallback for older MCore builds.
-            try:
-                from megatron.core.process_groups_config import ProcessGroupCollection
+        if add_layer_offset:
+            if pg_collection is None:
+                # pg_collection is normally passed in kwargs by MCore ≥ 0.9.
+                # Best-effort fallback for older MCore builds.
+                try:
+                    from megatron.core.process_groups_config import ProcessGroupCollection
 
-                pg_collection = ProcessGroupCollection.use_mpu_process_groups()
-            except Exception:
-                pass
+                    pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+                except Exception:
+                    pass
 
-        pp_offset = (
-            get_transformer_layer_offset(config, vp_stage, get_pg_rank(pg_collection.pp))
-            if pg_collection is not None
-            else 0
-        )
-        global_layer_number = layer_number + pp_offset
+            pp_offset = (
+                get_transformer_layer_offset(config, vp_stage, get_pg_rank(pg_collection.pp))
+                if pg_collection is not None
+                else 0
+            )
+            global_layer_number = layer_number + pp_offset
+        else:
+            global_layer_number = layer_number
 
         overrides, patched_config = _lookup_and_apply_config(ctx, config, global_layer_number)
 
@@ -587,13 +627,16 @@ def mbridge_patcher(
         transformer_block_mod.build_module = patched_build_module
         if mamba_block_mod is not None:
             mamba_block_mod.build_module = patched_build_module
+        if hybrid_block_mod is not None:
+            hybrid_block_mod.build_module = patched_build_module
 
         logger.info(
             "mbridge_patcher: active — block_configs=%d layers, apply_no_ops=%s, "
-            "mamba_block_patched=%s, mamba_layer_patched=%s",
+            "mamba_block_patched=%s, hybrid_block_patched=%s, mamba_layer_patched=%s",
             len(block_configs),
             apply_no_ops,
             has_mamba_block,
+            has_hybrid_block,
             has_mamba_layer_patch,
         )
         yield
@@ -603,6 +646,8 @@ def mbridge_patcher(
         transformer_block_mod.build_module = orig_build_module
         if mamba_block_mod is not None:
             mamba_block_mod.build_module = orig_build_module
+        if hybrid_block_mod is not None:
+            hybrid_block_mod.build_module = orig_build_module
 
         if has_mamba_layer_patch:
             MambaLayer.__init__ = orig_mamba_init
