@@ -40,6 +40,7 @@ from modelopt.torch.opt.plugins.megatron import (
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
+from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
 from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
@@ -800,22 +801,11 @@ def _is_param_grad_enabled_for_megatron(pname: str, model: torch.nn.Module) -> b
     return "weight" in pname
 
 
-_AUTOQUANT_SUPPORT_REGISTERED = False
-
-
-def register_megatron_autoquant_support() -> None:
-    """Register megatron AutoQuant hooks. Call from `auto_quantize` entry (lazy), not at module-load."""
-    global _AUTOQUANT_SUPPORT_REGISTERED
-    if _AUTOQUANT_SUPPORT_REGISTERED:
-        return
-    from ..algorithms import AutoQuantizeGradientSearcher
-
-    AutoQuantizeGradientSearcher.register_custom_support(
-        _is_supported_megatron_model,
-        _megatron_grad_ckpt_context,
-        _is_param_grad_enabled_for_megatron,
-    )
-    _AUTOQUANT_SUPPORT_REGISTERED = True
+AutoQuantizeGradientSearcher.register_custom_support(
+    _is_supported_megatron_model,
+    _megatron_grad_ckpt_context,
+    _is_param_grad_enabled_for_megatron,
+)
 
 
 def get_mcore_layerwise_calibration_layers(
