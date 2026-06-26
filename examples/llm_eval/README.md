@@ -30,7 +30,7 @@ python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or mode
 python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or model card>,parallelize=True --tasks <comma separated tasks> --batch_size 4
 ```
 
-> **Note (Slurm interactive nodes):** On Slurm interactive nodes, `WORLD_SIZE` is set to the number of available GPUs in the shell environment. Running `python` directly causes `lm_eval` to hang waiting for peer ranks that were never spawned. Prepend `WORLD_SIZE=1` to any of the above commands to fix this.
+> **Note (Slurm interactive nodes):** On Slurm interactive nodes, `WORLD_SIZE` is set to the number of available GPUs in the shell environment. Running `python` directly causes `lm_eval` to hang waiting for peer ranks that were never spawned. Prepend `WORLD_SIZE=1` to the `python` commands above to fix this. This does not limit GPU usage — `parallelize=True` independently enables model parallelism across all available GPUs within the single process. The `accelerate launch` command manages `WORLD_SIZE` itself and does not require this workaround.
 
 For a quick smoke test, add `--limit 10` to any of the above commands to evaluate on only 10 samples.
 
