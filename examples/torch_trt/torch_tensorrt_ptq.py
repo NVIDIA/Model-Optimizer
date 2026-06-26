@@ -56,8 +56,9 @@ def load_model_and_processor(model_id: str, device: torch.device, dtype: torch.d
     processor = AutoImageProcessor.from_pretrained(model_id)
     # `gelu_fast` selects the tanh-approximation GELU rather than the erf-based
     # default. Eager attention runs softmax through `F.softmax` instead of the
-    # fused SDPA kernel, so the recipe's `*softmax_quantizer` is exercised during
-    # calibration and emits Q/DQ around the softmax output on export.
+    # fused SDPA kernel, so the recipe's attention softmax-P quantizer
+    # (`p_bmm_quantizer` on HF attention) is exercised during calibration and
+    # emits Q/DQ around the softmax output on export.
     model = ViTForImageClassification.from_pretrained(
         model_id,
         torch_dtype=dtype,

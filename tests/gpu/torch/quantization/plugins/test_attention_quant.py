@@ -134,8 +134,6 @@ def test_p_qdq_unsupported_cases_raise():
         run(s_aux=torch.zeros(num_q_heads, device="cuda"))
     with pytest.raises(NotImplementedError, match="softcapping"):
         run(softcap=50.0)
-    with pytest.raises(NotImplementedError, match="non-causal"):
-        run(is_causal=False)
     with pytest.raises(NotImplementedError, match="dropout"):
         run(dropout=0.1)
     with pytest.raises(NotImplementedError, match="KV cache"):
@@ -165,6 +163,51 @@ def test_p_qdq_unsupported_cases_raise():
     )
     output = run(attention_mask=causal_4d)[0]
     assert torch.isfinite(output).all()
+
+
+@pytest.mark.skipif(not TRITON_FA_AVAILABLE, reason="Triton attention kernel unavailable")
+def test_p_qdq_non_causal_falls_back_to_eager():
+    """Non-causal attention (e.g. ViT) is outside the causal-only Triton kernel's
+    envelope, so p_bmm_quantizer is applied through the eager softmax wrapper
+    instead of raising -- keeping the softmax-P quant in an export-traceable graph."""
+    batch_size, num_q_heads, num_kv_heads, seqlen, head_dim = 2, 4, 2, 32, 64
+
+    quant_attention = _make_quant_attention(num_q_heads=num_q_heads, num_kv_heads=num_kv_heads)
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        getattr(quant_attention, name).disable()
+
+    torch.manual_seed(29)
+    q = torch.randn(batch_size, num_q_heads, seqlen, head_dim, dtype=torch.bfloat16, device="cuda")
+    k = torch.randn(batch_size, num_kv_heads, seqlen, head_dim, dtype=torch.bfloat16, device="cuda")
+    v = torch.randn(batch_size, num_kv_heads, seqlen, head_dim, dtype=torch.bfloat16, device="cuda")
+
+    # Eager interface so the wrapper's F.softmax swap actually fires (SDPA fuses softmax).
+    module = inspect.getmodule(quant_attention.get_attn_type(quant_attention))
+    eager_fn = module.eager_attention_forward
+
+    def run():
+        return quant_attention._quantized_attention(
+            eager_fn,
+            quant_attention,
+            q,
+            k,
+            v,
+            attention_mask=None,
+            scaling=head_dim**-0.5,
+            is_causal=False,
+        )[0]
+
+    quant_attention.p_bmm_quantizer.disable()
+    expected = run()
+
+    quant_attention.p_bmm_quantizer.enable()
+    quant_attention.p_bmm_quantizer.num_bits = (4, 3)  # FP8
+    quant_attention.p_bmm_quantizer.amax = torch.tensor(1.0, device="cuda")  # softmax P in [0, 1]
+    output = run()
+
+    assert output.shape == expected.shape
+    assert not torch.equal(output, expected), "softmax qdq should perturb the output"
+    torch.testing.assert_close(output, expected, atol=0.1, rtol=0.1)
 
 
 @pytest.mark.skipif(kitchen is None, reason="kitchen is not installed.")
