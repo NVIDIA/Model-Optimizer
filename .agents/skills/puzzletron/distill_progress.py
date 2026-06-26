@@ -24,7 +24,7 @@ Shows for each matching run:
   - Elapsed time and estimated remaining time
   - Whether a distillation process is currently running
   - HF export status
-  - Last loss value
+  - Dual training/validation loss sparklines with convergence verdict
 """
 
 import contextlib
@@ -34,6 +34,8 @@ import re
 import subprocess  # nosec B404
 import sys
 from datetime import datetime
+
+SPARKLINE_BLOCKS = "▁▂▃▄▅▆▇█"
 
 
 def find_puzzle_dir_candidates():
@@ -110,27 +112,72 @@ def latest_iter(output_dir):
     return (max(iters) if iters else None), iters_sorted
 
 
-def parse_log_timing(output_dir):
-    """Parse ./log.txt for iteration timing if it belongs to this output_dir.
+def parse_log_text(log_path="./log.txt"):
+    """Read log.txt, return text or empty string on failure."""
+    if not os.path.isfile(log_path):
+        return ""
+    try:
+        return open(log_path).read()
+    except OSError:
+        return ""
+
+
+def parse_training_loss_history(text, output_dir):
+    """Return list of (iter, loss) from training log lines for this output_dir."""
+    if not text or os.path.abspath(output_dir) not in text:
+        return []
+    pattern = re.compile(r"\] iteration\s+(\d+)/\s*\d+.*?total loss:\s*([\d.Ee+\-]+)")
+    return [(int(m[0]), float(m[1])) for m in pattern.findall(text)]
+
+
+def parse_validation_loss_history(text, output_dir):
+    """Return list of (iter, loss) from validation log lines for this output_dir."""
+    if not text or os.path.abspath(output_dir) not in text:
+        return []
+    pattern = re.compile(
+        r"validation loss at iteration\s+(\d+).*?total loss value:\s*([\d.Ee+\-]+)"
+    )
+    return [(int(m[0]), float(m[1])) for m in pattern.findall(text)]
+
+
+def read_loss_history_tb(output_dir):
+    """Return (train_history, val_history) as (iter, loss) lists from tensorboard."""
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+        tb_dir = os.path.join(output_dir, "tensorboard")
+        if not os.path.isdir(tb_dir):
+            return [], []
+        ea = EventAccumulator(tb_dir)
+        ea.Reload()
+        tags = ea.Tags().get("scalars", [])
+
+        # Pick the KD / distillation loss tag for training
+        train_tag = next(
+            (t for t in tags if "loss" in t.lower() and "valid" not in t.lower()),
+            None,
+        )
+        val_tag = next(
+            (t for t in tags if "valid" in t.lower() and "loss" in t.lower()),
+            None,
+        )
+        train_hist = [(e.step, e.value) for e in ea.Scalars(train_tag)] if train_tag else []
+        val_hist = [(e.step, e.value) for e in ea.Scalars(val_tag)] if val_tag else []
+        return train_hist, val_hist
+    except Exception:
+        return [], []
+
+
+def parse_log_timing(text, output_dir):
+    """Extract timing/progress info from log text for this output_dir.
 
     Returns dict with keys: cur_iter, total_iters, avg_iter_ms, started_ts, last_loss.
     """
-    log_path = "./log.txt"
-    if not os.path.isfile(log_path):
-        return {}
-    try:
-        text = open(log_path).read()
-    except OSError:
-        return {}
-
-    # Confirm this log belongs to this output_dir
-    abs_out = os.path.abspath(output_dir)
-    if abs_out not in text:
+    if not text or os.path.abspath(output_dir) not in text:
         return {}
 
     result = {}
 
-    # Parse: [datetime] iteration N/ M | ... elapsed time per iteration (ms): XXX | ...
     iter_pattern = re.compile(
         r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] iteration\s+(\d+)/\s*(\d+)"
         r".*?elapsed time per iteration \(ms\):\s*([\d.]+)"
@@ -140,19 +187,16 @@ def parse_log_timing(output_dir):
         ts_str, cur, total, _ms = matches[-1]
         result["cur_iter"] = int(cur)
         result["total_iters"] = int(total)
-        # Average over last 5 iterations for a stable estimate
         recent = matches[-5:]
         result["avg_iter_ms"] = sum(float(m[3]) for m in recent) / len(recent)
         result["last_iter_ts"] = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
 
-    # Parse training start time
     m = re.search(
         r"\[after dataloaders are built\] datetime: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", text
     )
     if m:
         result["started_ts"] = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
 
-    # Parse last loss
     loss_pattern = re.compile(r"\[.*?\] iteration\s+\d+/\s*\d+.*?total loss:\s*([\d.Ee+\-]+)")
     loss_matches = loss_pattern.findall(text)
     if loss_matches:
@@ -161,28 +205,54 @@ def parse_log_timing(output_dir):
     return result
 
 
-def read_last_loss_tb(output_dir):
-    """Try to read the last logged loss from tensorboard events."""
-    try:
-        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+def bucket_losses(history, bucket_size):
+    """Average (iter, loss) pairs into fixed-size iteration buckets."""
+    if not history:
+        return []
+    buckets: dict = {}
+    for itr, loss in history:
+        b = (itr // bucket_size) * bucket_size + bucket_size
+        buckets.setdefault(b, []).append(loss)
+    return [(b, sum(v) / len(v)) for b, v in sorted(buckets.items())]
 
-        tb_dir = os.path.join(output_dir, "tensorboard")
-        if not os.path.isdir(tb_dir):
-            return None
-        ea = EventAccumulator(tb_dir)
-        ea.Reload()
-        tags = ea.Tags().get("scalars", [])
-        loss_tag = next((t for t in tags if "loss" in t.lower() and "kd" in t.lower()), None)
-        if loss_tag is None:
-            loss_tag = next((t for t in tags if "loss" in t.lower()), None)
-        if loss_tag:
-            events = ea.Scalars(loss_tag)
-            if events:
-                last = events[-1]
-                return last.value, last.step
-    except Exception:
-        pass
-    return None
+
+def make_sparkline(history):
+    """Build a sparkline string from a list of (iter, loss) pairs.
+
+    Higher loss maps to a taller bar so the curve visually descends as training improves.
+    """
+    if not history:
+        return "—"
+    losses = [loss for _, loss in history]
+    if len(losses) == 1:
+        return SPARKLINE_BLOCKS[4]
+    min_l, max_l = min(losses), max(losses)
+    if max_l == min_l:
+        return SPARKLINE_BLOCKS[4] * len(losses)
+    return "".join(SPARKLINE_BLOCKS[int((loss - min_l) / (max_l - min_l) * 7)] for loss in losses)
+
+
+def convergence_verdict(val_history):
+    """Return (status, detail) string pair based on validation loss trend."""
+    if len(val_history) < 2:
+        return "NOT ENOUGH DATA", f"need ≥2 val checkpoints (have {len(val_history)})"
+
+    losses = [loss for _, loss in val_history]
+    k = min(3, len(losses))
+
+    # Divergence: last point higher than k checkpoints ago
+    if losses[-1] > losses[-k]:
+        pct = (losses[-1] - losses[-k]) / losses[-k] * 100
+        return "DIVERGING", f"+{pct:.1f}% over last {k} checkpoints — consider stopping"
+
+    improvement = (losses[-k] - losses[-1]) / losses[-k] * 100
+
+    if improvement > 2.0:
+        return "CONVERGING", f"-{improvement:.1f}% over last {k} checkpoints"
+    elif improvement > 0.5:
+        return "DIMINISHING RETURNS", f"-{improvement:.1f}% over last {k} checkpoints"
+    else:
+        return "PLATEAU", f"<0.5% change over last {k} checkpoints — safe to stop"
 
 
 def show_progress(puzzle_dir, ratio_filter):
@@ -192,9 +262,19 @@ def show_progress(puzzle_dir, ratio_filter):
         print(f"No distillation directory found at {distill_base}")
         return
 
+    running_dirs = get_running_output_dirs()
+
     runs = sorted(
         d for d in os.listdir(distill_base) if os.path.isdir(os.path.join(distill_base, d))
     )
+    # Also include runs that are currently active but haven't saved a checkpoint yet
+    abs_distill_base = os.path.abspath(distill_base)
+    existing_abs = {os.path.abspath(os.path.join(distill_base, r)) for r in runs}
+    for abs_running in running_dirs:
+        if abs_running.startswith(abs_distill_base + os.sep) and abs_running not in existing_abs:
+            runs.append(os.path.relpath(abs_running, abs_distill_base))
+    runs = sorted(runs)
+
     if ratio_filter:
         runs = [r for r in runs if r == ratio_filter or r == f"{float(ratio_filter):.1f}x"]
 
@@ -204,9 +284,8 @@ def show_progress(puzzle_dir, ratio_filter):
             msg += f" for ratio {ratio_filter}"
         print(msg + f" under {distill_base}/")
         return
-
-    running_dirs = get_running_output_dirs()
     now = datetime.now().replace(microsecond=0)
+    log_text = parse_log_text("./log.txt")
 
     div = "─" * 76
     print(f"\nDistillation progress — {puzzle_dir}")
@@ -226,7 +305,7 @@ def show_progress(puzzle_dir, ratio_filter):
             else False
         )
 
-        timing = parse_log_timing(output_dir) if is_running else {}
+        timing = parse_log_timing(log_text, output_dir) if is_running else {}
 
         print(f"\n  Ratio:      {run}")
         print(f"  Output dir: {output_dir}")
@@ -281,19 +360,42 @@ def show_progress(puzzle_dir, ratio_filter):
         else:
             print("  HF export:  not yet")
 
-        # Loss — prefer log parse (fast), fall back to tensorboard
-        loss_val = timing.get("last_loss")
-        if loss_val is not None:
-            print(f"  Last loss:  {loss_val:.4f} (iter {timing.get('cur_iter', '?')})")
-        else:
-            tb = read_last_loss_tb(output_dir)
-            if tb:
-                print(f"  Last loss:  {tb[0]:.4f} (step {tb[1]})")
+        # Log file (running)
+        if is_running:
+            log_path = os.path.abspath("./log.txt")
+            if os.path.isfile(log_path):
+                print(f"  Log file:   {log_path}")
 
-        # Log file
-        log_path = os.path.abspath("./log.txt")
-        if os.path.isfile(log_path) and is_running:
-            print(f"  Log file:   {log_path}")
+        # --- Loss curves and convergence ---
+        train_hist = parse_training_loss_history(log_text, output_dir)
+        val_hist = parse_validation_loss_history(log_text, output_dir)
+
+        # Fall back to tensorboard for stopped/older runs
+        if not train_hist and not val_hist:
+            train_hist, val_hist = read_loss_history_tb(output_dir)
+
+        if train_hist or val_hist:
+            # Infer bucket size from validation checkpoint spacing
+            bucket_size = 500
+            if len(val_hist) >= 2:
+                bucket_size = val_hist[1][0] - val_hist[0][0]
+
+            bucketed_train = bucket_losses(train_hist, bucket_size) if train_hist else []
+
+            print()
+            if bucketed_train:
+                first_l, last_l = bucketed_train[0][1], bucketed_train[-1][1]
+                spark = make_sparkline(bucketed_train)
+                print(f"  Train loss: {spark}  ({first_l:.3f} → {last_l:.3f})")
+            if val_hist:
+                first_l, last_l = val_hist[0][1], val_hist[-1][1]
+                spark = make_sparkline(val_hist)
+                print(f"  Val loss:   {spark}  ({first_l:.3f} → {last_l:.3f})")
+                verdict, detail = convergence_verdict(val_hist)
+                print(f"  Convergence: {verdict}  ({detail})")
+        elif timing.get("last_loss") is not None:
+            # Fallback: single loss value from timing parse
+            print(f"  Last loss:  {timing['last_loss']:.4f} (iter {timing.get('cur_iter', '?')})")
 
     print(f"\n{div}")
 

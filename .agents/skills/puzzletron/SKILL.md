@@ -331,7 +331,7 @@ Parse args:
 - `--puzzle_dir <dir>` — optional; auto-discovered if omitted
 - `--ratio <r>` — optional float (e.g. `0.9`); required if multiple sweep ratios exist
 - `--nproc_per_node <n>` — number of GPUs per node; required. If missing, ask: "Please provide the number of GPUs per node (--nproc_per_node)." and **STOP**.
-- `--train_iters <n>` — number of training iterations; required. If missing, ask: "Please provide the number of training iterations (--train_iters)." and **STOP**.
+- `--train_iters <n>` — number of training iterations; optional. If omitted and `--data_paths` is provided, auto-compute as one epoch (see Step 1b). If omitted and `--use_mock_data` is provided, ask: "Please provide the number of training iterations (--train_iters)." and **STOP**.
 - `--use_mock_data` — flag; use mock/dummy data instead of a real dataset
 - `--data_paths <p>...` — one or more tokenized data paths (weight1 path1 weight2 path2 ...); mutually exclusive with `--use_mock_data`
 - `--mbs <n>` — micro-batch size; optional, default `1`
@@ -341,6 +341,23 @@ Parse args:
 If neither `--use_mock_data` nor `--data_paths` is provided, ask: "Please provide either --use_mock_data or --data_paths <paths>." and **STOP**.
 
 **Step 1 — Resolve paths** by running:
+
+**Step 1b — Auto-compute `train_iters` if omitted and `--data_paths` is provided:**
+
+```bash
+python3 -c "
+import os, sys
+args = sys.argv[1:]
+# args: weight1 path1 weight2 path2 ... gbs seq_len
+gbs, seq_len = int(args[-2]), int(args[-1])
+data_paths = args[:-2][1::2]  # extract paths from weight/path pairs
+total_tokens = sum(os.path.getsize(p + '.bin') // 4 for p in data_paths if os.path.isfile(p + '.bin'))
+total_seqs = total_tokens // seq_len
+print(max(1, total_seqs // gbs))
+" <data_paths_space_separated> <gbs> 4096
+```
+
+Report to the user: `"Auto-computed train_iters=<N> (1 epoch, <total_seqs> sequences, gbs=<gbs>)"`. Use this value for `<train_iters>` in Step 2.
 
 ```bash
 python3 .agents/skills/puzzletron/distill_resolve.py [<puzzle_dir>] [--ratio <ratio>]
@@ -368,13 +385,23 @@ torchrun --nproc_per_node <nproc_per_node> examples/megatron_bridge/distill.py \
   --mbs <mbs> \
   --gbs <gbs> \
   --lr_warmup_iters 50 \
-  --eval_interval 500 \
+  --eval_interval 100 \
   --log_interval 10 \
   [--use_mock_data | --data_paths <data_paths>] \
   2>&1 | tee ./log.txt
 ```
 
-Replace bracketed placeholders with resolved values. Use `--use_mock_data` or `--data_paths <data_paths>` (space-separated) depending on which was provided. Stream output to the user as it arrives. When the command finishes, report the exit code and the output and HF export paths.
+Replace bracketed placeholders with resolved values. Use `--use_mock_data` or `--data_paths <data_paths>` (space-separated) depending on which was provided.
+
+**Run in background** — distillation takes hours. Launch the torchrun command with `run_in_background=true` so the agent stays responsive. Tell the user the log file path (`./log.txt`) immediately.
+
+**Show progress immediately after launch** — once the background job is started, wait ~30 seconds for initialization, then run:
+
+```bash
+python3 .agents/skills/puzzletron/distill_progress.py [<puzzle_dir>]
+```
+
+Show the progress output to the user. If the run hasn't written its first iteration yet, tell the user it's still initializing and to check again shortly with `/puzzletron distill progress`.
 
 **Key gotchas:**
 - Always set `HF_HOME=/workspace/hf_cache` — the default `/tmp` cache fills up quickly on this machine.
@@ -406,6 +433,21 @@ python3 .agents/skills/puzzletron/distill_progress.py [<puzzle_dir>] [--ratio <r
 ```
 
 Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+The output shows for each run:
+- Status (RUNNING / STOPPED / DONE), current iteration, and ETA
+- Dual ASCII sparklines for training and validation loss (higher bar = higher loss, so a descending curve means improvement)
+- Convergence verdict: `CONVERGING` (>2% improvement over last 3 checkpoints), `DIMINISHING RETURNS` (0.5–2%), `PLATEAU` (<0.5%), or `DIVERGING`
+
+Example output:
+
+```text
+  Train loss: ▇▆▅▄▃▃▃  (0.504 → 0.431)
+  Val loss:   ▇▆▅▄▃▃   (0.497 → 0.438)
+  Convergence: CONVERGING  (-3.1% over last 3 checkpoints)
+```
+
+Loss data is read from `./log.txt` while the run is active; falls back to TensorBoard logs for stopped runs.
 
 ### distill tokenize
 
