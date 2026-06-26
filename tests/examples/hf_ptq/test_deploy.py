@@ -817,3 +817,18 @@ def test_diffusiongemma_26b_a4b_it_nvfp4(command):
 )
 def test_nemotron(command):
     command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+        ),
+    ],
+    ids=idfn,
+)
+def test_nvidia_nemotron_3_ultra_550b_a55b_bf16(command):
+    command.run()
