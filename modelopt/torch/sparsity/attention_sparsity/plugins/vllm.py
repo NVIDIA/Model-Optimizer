@@ -114,6 +114,34 @@ def _build_sparse_kw(layer_cfg: dict) -> dict:
     return sparse_kw
 
 
+def _p_qdq_from_layer(layer) -> tuple[str | None, float]:
+    """Map a layer's ``p_bmm_quantizer`` to ``(p_qdq mode, p_qdq_amax)`` for the kernels.
+
+    Mirrors ``_QuantAttention._p_qdq_mode``: per-tensor FP8 -> ``"fp8"``; dynamic NVFP4
+    at block size 16 -> ``"nvfp4"``; otherwise (missing/disabled quantizer or an
+    unsupported format) -> ``None`` (no P quant). A calibrated per-tensor ``_amax``, if
+    present, is forwarded so the kernel uses it instead of the default 1.0.
+    """
+    pq = getattr(layer, "p_bmm_quantizer", None)
+    if pq is None or not getattr(pq, "is_enabled", False):
+        return None, 1.0
+    if pq.is_fp8:
+        mode = "fp8"
+    elif pq.is_nvfp4_dynamic and (pq.block_sizes or {}).get(-1, None) == 16:
+        mode = "nvfp4"
+    else:
+        return None, 1.0
+    amax = getattr(pq, "_amax", None)
+    if amax is not None:
+        if amax.numel() != 1:
+            raise NotImplementedError(
+                "p_bmm_quantizer via the sparse Triton kernel supports only a per-tensor "
+                f"(scalar) amax, got shape {tuple(amax.shape)}."
+            )
+        return mode, float(amax)
+    return mode, 1.0
+
+
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
     """Attention implementation that uses the ModelOpt Triton kernel.
 
@@ -199,6 +227,11 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         page_size = key_cache.shape[1]
 
+        # Softmax-P quant from the layer's p_bmm_quantizer (config-driven, exported);
+        # None when no/disabled/unsupported quantizer. P quant alone (no sparsity) still
+        # engages the kernel below.
+        p_qdq, p_qdq_amax = _p_qdq_from_layer(layer)
+
         # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
         sparse_kw = dict(getattr(self, "sparse_kw", {}))
         _resolve_skip_softmax_calibration(
@@ -211,8 +244,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
                 sparse_kw.pop(name, None)
             threshold = sparse_kw.get("skip_softmax_threshold")
-            if threshold is None:
-                # No decode sparsity active for this launch; use vLLM FlashAttention.
+            if threshold is None and p_qdq is None:
+                # No decode sparsity and no P quant for this launch; use vLLM FlashAttention.
                 return self._forward_vllm_flash_attn(
                     layer,
                     query,
@@ -224,8 +257,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                     output_scale,
                     output_block_scale,
                 )
-            # Decode-only skip-softmax runs on the dedicated paged decode kernel
-            # (one query vector per request, split-K), not the prefill kernel.
+            # Decode runs on the dedicated paged decode kernel (one query vector per
+            # request, split-K): skip-softmax and/or P quant, not the prefill kernel.
             return self._forward_sparse_decode(
                 query=query,
                 key_cache=key_cache,
@@ -235,12 +268,13 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 block_table=attn_metadata.block_table,
                 num_actual_tokens=num_actual_tokens,
                 skip_softmax_threshold=threshold,
+                p_qdq=p_qdq,
+                p_qdq_amax=p_qdq_amax,
                 output=output,
             )
-        if not sparse_kw:
-            # Dynamic calibration can disable sparse work for a launch, e.g.
-            # short-prefill thresholds outside the valid lambda range. Avoid
-            # swapping in the ModelOpt dense kernel when no sparse feature is active.
+        if not sparse_kw and p_qdq is None:
+            # No sparse feature and no P quant active (e.g. dynamic calibration
+            # disabled the threshold); avoid swapping in the ModelOpt kernel.
             return self._forward_vllm_flash_attn(
                 layer,
                 query,
@@ -283,6 +317,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             v_cache=value_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
             block_table=attn_metadata.block_table,  # [batch, max_blocks]
             page_size=page_size,  # tokens per page in the KV cache
+            p_qdq=p_qdq,
+            p_qdq_amax=p_qdq_amax,
             **sparse_kw,
         )
 
@@ -299,10 +335,12 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         seq_lens: torch.Tensor,
         block_table: torch.Tensor,
         num_actual_tokens: int,
-        skip_softmax_threshold: float,
+        skip_softmax_threshold: float | None = None,
+        p_qdq: str | None = None,
+        p_qdq_amax: float = 1.0,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        """Decode-only skip-softmax via the dedicated paged decode kernel.
+        """Decode via the dedicated paged decode kernel (skip-softmax and/or P quant).
 
         Standard decode schedules exactly one query token per request, so the
         ``num_actual_tokens`` query rows are the per-request decode queries. The
@@ -322,6 +360,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             softmax_scale=self.scale,
             skip_softmax_threshold=skip_softmax_threshold,
             page_size=page_size,
+            p_qdq=p_qdq,
+            p_qdq_amax=p_qdq_amax,
         )
         output[:num_actual_tokens] = decode_out
         return output

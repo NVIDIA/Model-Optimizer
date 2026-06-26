@@ -33,7 +33,10 @@ import torch
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    ModelOptSparseAttentionImpl,
+    _p_qdq_from_layer,
+)
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention as triton_attention
@@ -44,6 +47,28 @@ _ACTIVE_PREFILL_SPARSE_KW = {
     "dense_sink_tokens": 0,
     "dense_recent_tokens": 0,
 }
+
+
+def test_p_qdq_from_layer():
+    """_p_qdq_from_layer maps a layer's p_bmm_quantizer to (p_qdq mode, amax)."""
+    # Missing / disabled quantizer -> no P quant.
+    assert _p_qdq_from_layer(None) == (None, 1.0)
+    assert _p_qdq_from_layer(SimpleNamespace()) == (None, 1.0)
+    disabled = SimpleNamespace(p_bmm_quantizer=SimpleNamespace(is_enabled=False))
+    assert _p_qdq_from_layer(disabled) == (None, 1.0)
+
+    def _layer(**kw):
+        return SimpleNamespace(p_bmm_quantizer=SimpleNamespace(is_enabled=True, **kw))
+
+    # Per-tensor FP8 -> "fp8"; a calibrated scalar _amax is forwarded, else default 1.0.
+    fp8 = {"is_fp8": True, "is_nvfp4_dynamic": False, "block_sizes": None}
+    assert _p_qdq_from_layer(_layer(**fp8, _amax=None)) == ("fp8", 1.0)
+    assert _p_qdq_from_layer(_layer(**fp8, _amax=torch.tensor(0.5))) == ("fp8", 0.5)
+
+    # Dynamic NVFP4 at block size 16 -> "nvfp4"; any other block size -> None.
+    nvfp4 = {"is_fp8": False, "is_nvfp4_dynamic": True, "_amax": None}
+    assert _p_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 16})) == ("nvfp4", 1.0)
+    assert _p_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 32})) == (None, 1.0)
 
 
 def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size):
