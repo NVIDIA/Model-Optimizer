@@ -81,6 +81,61 @@ def fmt_duration(seconds):
     return f"{m}m {sec}s"
 
 
+def read_run_config(output_dir):
+    """Return dict with dataset names, gbs, seq_len, train_iters from latest checkpoint config."""
+    ckpt_dir = os.path.join(output_dir, "checkpoints")
+    if not os.path.isdir(ckpt_dir):
+        return {}
+    # Find the latest iter_* checkpoint that has a run_config.yaml
+    configs = sorted(glob.glob(os.path.join(ckpt_dir, "iter_*/run_config.yaml")), reverse=True)
+    if not configs:
+        return {}
+    try:
+        text = open(configs[0]).read()
+    except OSError:
+        return {}
+
+    result = {}
+
+    # Extract blend paths -> simplified dataset names
+    blend_paths = re.findall(r"- /workspace/\S+", text)
+    names = []
+    for bp in blend_paths:
+        name = bp.strip().lstrip("- ")
+        basename = os.path.basename(name)
+        # Shorten: remove long prefixes/suffixes for readability
+        short = re.sub(r"nvidia--", "nvidia/", basename)
+        short = re.sub(r"Salesforce--", "Salesforce/", short)
+        short = re.sub(r"_text_document$", "", short)
+        short = re.sub(r"_messages_max\d+$", "", short)
+        names.append(short)
+    if names:
+        result["datasets"] = names
+
+    m = re.search(r"global_batch_size:\s*(\d+)", text)
+    if m:
+        result["gbs"] = int(m.group(1))
+
+    m = re.search(r"seq_length:\s*(\d+)", text)
+    if m:
+        result["seq_len"] = int(m.group(1))
+
+    m = re.search(r"train_iters:\s*(\d+)", text)
+    if m:
+        result["train_iters"] = int(m.group(1))
+
+    return result
+
+
+def fmt_tokens(n):
+    """Format token count as e.g. '122M', '1.2B', or '328K'."""
+    if n >= 1e9:
+        return f"{n / 1e9:.2f}B"
+    if n >= 1e6:
+        return f"{n / 1e6:.1f}M"
+    return f"{n / 1e3:.0f}K"
+
+
 def get_running_output_dirs():
     """Return set of output_dir paths where distill.py is currently running."""
     running = set()
@@ -124,7 +179,9 @@ def parse_log_text(log_path="./log.txt"):
 
 def parse_training_loss_history(text, output_dir):
     """Return list of (iter, loss) from training log lines for this output_dir."""
-    if not text or os.path.abspath(output_dir) not in text:
+    abs_dir = os.path.abspath(output_dir)
+    # Use trailing slash to avoid matching e.g. "0.9x" inside "0.9x-nemotron-full"
+    if not text or ((abs_dir + "/") not in text and (abs_dir + "\n") not in text):
         return []
     pattern = re.compile(r"\] iteration\s+(\d+)/\s*\d+.*?total loss:\s*([\d.Ee+\-]+)")
     return [(int(m[0]), float(m[1])) for m in pattern.findall(text)]
@@ -132,7 +189,8 @@ def parse_training_loss_history(text, output_dir):
 
 def parse_validation_loss_history(text, output_dir):
     """Return list of (iter, loss) from validation log lines for this output_dir."""
-    if not text or os.path.abspath(output_dir) not in text:
+    abs_dir = os.path.abspath(output_dir)
+    if not text or ((abs_dir + "/") not in text and (abs_dir + "\n") not in text):
         return []
     pattern = re.compile(
         r"validation loss at iteration\s+(\d+).*?total loss value:\s*([\d.Ee+\-]+)"
@@ -145,8 +203,16 @@ def read_loss_history_tb(output_dir):
     try:
         from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-        tb_dir = os.path.join(output_dir, "tensorboard")
-        if not os.path.isdir(tb_dir):
+        # Megatron saves to tb_logs/, not tensorboard/
+        tb_dir = next(
+            (
+                os.path.join(output_dir, d)
+                for d in ("tb_logs", "tensorboard")
+                if os.path.isdir(os.path.join(output_dir, d))
+            ),
+            None,
+        )
+        if tb_dir is None:
             return [], []
         ea = EventAccumulator(tb_dir)
         ea.Reload()
@@ -173,7 +239,8 @@ def parse_log_timing(text, output_dir):
 
     Returns dict with keys: cur_iter, total_iters, avg_iter_ms, started_ts, last_loss.
     """
-    if not text or os.path.abspath(output_dir) not in text:
+    abs_dir = os.path.abspath(output_dir)
+    if not text or ((abs_dir + "/") not in text and (abs_dir + "\n") not in text):
         return {}
 
     result = {}
@@ -276,7 +343,11 @@ def show_progress(puzzle_dir, ratio_filter):
     runs = sorted(runs)
 
     if ratio_filter:
-        runs = [r for r in runs if r == ratio_filter or r == f"{float(ratio_filter):.1f}x"]
+        try:
+            numeric_form = f"{float(ratio_filter):.1f}x"
+        except (ValueError, TypeError):
+            numeric_form = None
+        runs = [r for r in runs if r == ratio_filter or (numeric_form and r == numeric_form)]
 
     if not runs:
         msg = "No distillation runs found"
@@ -307,8 +378,27 @@ def show_progress(puzzle_dir, ratio_filter):
 
         timing = parse_log_timing(log_text, output_dir) if is_running else {}
 
+        run_cfg = read_run_config(output_dir)
+
         print(f"\n  Ratio:      {run}")
         print(f"  Output dir: {output_dir}")
+
+        # Dataset + token info
+        if run_cfg.get("datasets"):
+            print(f"  Dataset:    {', '.join(run_cfg['datasets'])}")
+        if run_cfg.get("gbs") and run_cfg.get("seq_len"):
+            gbs, seq_len = run_cfg["gbs"], run_cfg["seq_len"]
+            tokens_per_iter = gbs * seq_len
+            # Use live iter from timing if running, else latest checkpoint
+            effective_iter = timing.get("cur_iter") if is_running and timing else latest
+            if effective_iter is not None:
+                tokens_done = effective_iter * tokens_per_iter
+                total_iters_cfg = run_cfg.get("train_iters")
+                tokens_total = (total_iters_cfg * tokens_per_iter) if total_iters_cfg else None
+                token_str = fmt_tokens(tokens_done)
+                if tokens_total:
+                    token_str += f" / {fmt_tokens(tokens_total)}"
+                print(f"  Tokens:     {token_str}  (GBS={gbs}, seq={seq_len})")
 
         # Status line
         if is_running:
@@ -325,7 +415,7 @@ def show_progress(puzzle_dir, ratio_filter):
         else:
             print("  Status:     NOT STARTED")
 
-        # Timing block (running only)
+        # Timing block
         if is_running and timing:
             started = timing.get("started_ts")
             elapsed_s = int((now - started).total_seconds()) if started else None
@@ -338,7 +428,6 @@ def show_progress(puzzle_dir, ratio_filter):
                 if (avg_ms and remaining_iters is not None)
                 else None
             )
-
             if started:
                 print(f"  Started:    {started.strftime('%H:%M:%S')}")
             if elapsed_s is not None:
@@ -347,6 +436,17 @@ def show_progress(puzzle_dir, ratio_filter):
                 print(f"  Iter time:  {avg_ms / 1000:.1f}s/iter (avg last 5)")
             if remaining_s is not None:
                 print(f"  Remaining:  ~{fmt_duration(remaining_s)} ({remaining_iters} iters left)")
+        elif not is_running and all_iters:
+            # For completed/stopped runs, estimate elapsed from first→last checkpoint mtime
+            ckpt_dir = os.path.join(output_dir, "checkpoints")
+            try:
+                first_mtime = os.path.getmtime(os.path.join(ckpt_dir, f"iter_{all_iters[0]:07d}"))
+                last_mtime = os.path.getmtime(os.path.join(ckpt_dir, f"iter_{all_iters[-1]:07d}"))
+                elapsed_s = int(last_mtime - first_mtime)
+                if elapsed_s > 0:
+                    print(f"  Elapsed:    {fmt_duration(elapsed_s)}  (first→last checkpoint)")
+            except OSError:
+                pass
 
         # Checkpoint iters (stopped/done)
         if latest is not None and not is_running:
@@ -378,7 +478,9 @@ def show_progress(puzzle_dir, ratio_filter):
             # Infer bucket size from validation checkpoint spacing
             bucket_size = 500
             if len(val_hist) >= 2:
-                bucket_size = val_hist[1][0] - val_hist[0][0]
+                diff = val_hist[1][0] - val_hist[0][0]
+                if diff > 0:
+                    bucket_size = diff
 
             bucketed_train = bucket_losses(train_hist, bucket_size) if train_hist else []
 

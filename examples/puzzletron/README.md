@@ -345,6 +345,29 @@ See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) fo
 
 For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
 
+### Monitoring distillation progress
+
+Use `/puzzletron distill progress` (Claude Code skill) to track running and completed distillation jobs:
+
+```text
+  Ratio:      0.9x-nemotron-full_correct_dataset
+  Output dir: /workspace/puzzle_dir_llama3_2-3b/distillation/0.9x-nemotron-full_correct_dataset
+  Dataset:    nvidia/Nemotron-Post-Training-Dataset-v2_default_math, ...stem
+  Tokens:     49.8M / 124.1M  (GBS=8, seq=4096)
+  Status:     RUNNING  (iter 1520/3787)
+  Started:    11:59:35
+  Elapsed:    9m 36s
+  Iter time:  0.3s/iter (avg last 5)
+  Remaining:  ~10m 58s (2267 iters left)
+  HF export:  not yet
+
+  Train loss: █▇▆▅▅▄▄▃▃▃▂▂▂▁▁▁  (0.335 → 0.235)
+  Val loss:   ▇█▅▆▄▃▂▃▄▃▁▁▁▁▁  (0.336 → 0.241)
+  Convergence: CONVERGING  (-4.2% over last 3 checkpoints)
+```
+
+Live loss curves are read from `./log.txt`; completed runs use TensorBoard event files under `<output_dir>/tb_logs/`.
+
 ## Runtime-Based Latency Optimization
 
 You can enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints.

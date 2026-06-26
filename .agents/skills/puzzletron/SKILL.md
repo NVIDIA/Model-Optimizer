@@ -26,7 +26,7 @@ Available commands:
 - `all progress` — Show live full pipeline progress with timing summary
 - `add-model <hf_model_path>` — Implement descriptor, converter, and configs for an unsupported model
 - `eval list [puzzle_dir]` — List all available checkpoints (teacher + sweep solutions) with their index numbers; auto-discovers puzzle_dir if omitted
-- `eval progress [puzzle_dir]` — Show per-checkpoint MMLU eval status and accuracy; auto-discovers puzzle_dir if omitted
+- `eval progress [puzzle_dir]` — Show per-checkpoint MMLU eval status, accuracy, and elapsed/remaining time for running evals; auto-discovers puzzle_dir if omitted
 - `eval mmlu <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); pass index from `eval list` or a direct path; default `--limit 10` (smoke test)
 - `distill run [--puzzle_dir <dir>] [--ratio <r>] [--nproc_per_node <n>] [--train_iters <n>] [--output_dir <dir>] [--use_mock_data] [--data_paths <p>...]` — Run distillation for a MIP solution
 - `distill list [puzzle_dir]` — List all distillation runs with status
@@ -148,6 +148,15 @@ python3 .agents/skills/puzzletron/eval_progress.py [<puzzle_dir>]
 ```
 
 Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+For running evals, the script detects active `lm_eval_hf.py` processes via `ps` and shows elapsed time and estimated remaining time on a second line, e.g.:
+
+```text
+  [RUNNING]   distill:0.9x-nemotron        ...  /workspace/.../hf
+                                89% done  elapsed 4m19s  remaining ~0m32s
+```
+
+Progress % is parsed from the tqdm output written to the process's open file descriptors. If the process hasn't started inference yet (still loading weights), only elapsed time is shown.
 
 ### eval mmlu
 
@@ -435,19 +444,50 @@ python3 .agents/skills/puzzletron/distill_progress.py [<puzzle_dir>] [--ratio <r
 Present the output to the user wrapped in a fenced code block (``` ... ```).
 
 The output shows for each run:
-- Status (RUNNING / STOPPED / DONE), current iteration, and ETA
+- Dataset name(s) and token count processed so far / total (from `run_config.yaml` in the latest checkpoint)
+- Status (RUNNING / STOPPED / DONE), current iteration out of total, and ETA with elapsed/remaining time (running only)
 - Dual ASCII sparklines for training and validation loss (higher bar = higher loss, so a descending curve means improvement)
 - Convergence verdict: `CONVERGING` (>2% improvement over last 3 checkpoints), `DIMINISHING RETURNS` (0.5–2%), `PLATEAU` (<0.5%), or `DIVERGING`
 
-Example output:
+Example output for a running job:
 
 ```text
-  Train loss: ▇▆▅▄▃▃▃  (0.504 → 0.431)
-  Val loss:   ▇▆▅▄▃▃   (0.497 → 0.438)
-  Convergence: CONVERGING  (-3.1% over last 3 checkpoints)
+  Ratio:      0.9x-nemotron-full_correct_dataset
+  Output dir: /workspace/puzzle_dir_llama3_2-3b/distillation/0.9x-nemotron-full_correct_dataset
+  Dataset:    nvidia/Nemotron-Post-Training-Dataset-v2_default_math, nvidia/Nemotron-Post-Training-Dataset-v2_default_stem
+  Tokens:     49.8M / 124.1M  (GBS=8, seq=4096)
+  Status:     RUNNING  (iter 1520/3787)
+  Started:    11:59:35
+  Elapsed:    9m 36s
+  Iter time:  0.3s/iter (avg last 5)
+  Remaining:  ~10m 58s (2267 iters left)
+  HF export:  not yet
+  Log file:   /workspace/Model-Optimizer/log.txt
+
+  Train loss: █▇▆▅▅▄▄▃▃▃▂▂▂▁▁▁  (0.335 → 0.235)
+  Val loss:   ▇█▅▆▄▃▂▃▄▃▁▁▁▁▁  (0.336 → 0.241)
+  Convergence: CONVERGING  (-4.2% over last 3 checkpoints)
 ```
 
-Loss data is read from `./log.txt` while the run is active; falls back to TensorBoard logs for stopped runs.
+Example output for a completed job (Dataset and Tokens always shown when `run_config.yaml` is present):
+
+```text
+  Ratio:      0.9x-nemotron-full_correct_dataset
+  Output dir: /workspace/puzzle_dir_llama3_2-3b/distillation/0.9x-nemotron-full_correct_dataset
+  Dataset:    nvidia/Nemotron-Post-Training-Dataset-v2_default_math, nvidia/Nemotron-Post-Training-Dataset-v2_default_stem
+  Tokens:     124.1M / 124.1M  (GBS=8, seq=4096)
+  Status:     DONE (HF exported)
+  Checkpoints: iters 3400, 3500, 3600, 3700, 3787
+  HF export:  /workspace/puzzle_dir_llama3_2-3b/distillation/0.9x-nemotron-full_correct_dataset/hf
+
+  Train loss: █▇▇▆▆▆▅▅▅▅▄▄▄▄▄▃▃▃▃▃▃▃▂▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁  (0.335 → 0.157)
+  Val loss:   ▇█▆▇▆▅▅▅▅▅▄▄▄▄▄▄▃▃▂▃▃▂▂▂▁▂▂▂▁▁▁▁▁▁▁▁▁▁  (0.336 → 0.158)
+  Convergence: DIVERGING  (+0.0% over last 3 checkpoints — consider stopping)
+```
+
+**Loss data sources:**
+- **Running job**: parsed in real-time from `./log.txt` — matches `iteration <N>/<total> ... total loss: <val>` and `validation loss at iteration <N> ... total loss value: <val>` lines
+- **Stopped/done jobs**: read from `<output_dir>/tb_logs/` TensorBoard event files via `EventAccumulator`
 
 ### distill tokenize
 

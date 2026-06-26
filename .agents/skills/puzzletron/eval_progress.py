@@ -92,20 +92,76 @@ def get_checkpoints(puzzle_dir):
     return entries
 
 
-def get_running_checkpoint():
-    """Return the checkpoint path currently being evaluated by lm_eval, or None."""
+def get_running_evals():
+    """Return dict of checkpoint_path -> {pid, elapsed_s, pct_done} for running lm_eval processes."""
+    results = {}
     try:
-        result = subprocess.run(  # nosec B603 B607
+        ps_out = subprocess.run(  # nosec B603 B607
             ["ps", "-ww", "aux"], capture_output=True, text=True
-        )
-        for line in result.stdout.splitlines():
-            if "lm_eval_hf.py" in line and "pretrained=" in line:
-                m = re.search(r"pretrained=(/[^,\s]+)", line)
-                if m:
-                    return m.group(1)
+        ).stdout
+        for line in ps_out.splitlines():
+            if "lm_eval_hf.py" not in line or "pretrained=" not in line:
+                continue
+            path_m = re.search(r"pretrained=(/[^,\s]+)", line)
+            pid_m = re.match(r"\S+\s+(\d+)", line)
+            if not path_m or not pid_m:
+                continue
+            path, pid = path_m.group(1), pid_m.group(1)
+            elapsed = None
+            pct = None
+            try:
+                r = subprocess.run(  # nosec B603 B607
+                    ["ps", "-o", "etimes=", "-p", pid], capture_output=True, text=True
+                )
+                elapsed = int(r.stdout.strip())
+            except Exception:
+                pass
+            # Try to read tqdm progress from any output file the process has open
+            try:
+                for fd in os.listdir(f"/proc/{pid}/fd"):
+                    try:
+                        target = os.readlink(f"/proc/{pid}/fd/{fd}")
+                    except OSError:
+                        continue
+                    if not os.path.isfile(target):
+                        continue
+                    try:
+                        # Read last 4KB to find the most recent tqdm bar
+                        with open(target, "rb") as f:
+                            f.seek(0, 2)
+                            size = f.tell()
+                            f.seek(max(0, size - 4096))
+                            tail = f.read().decode("utf-8", errors="replace")
+                        # tqdm writes lines like "  14%|█▍        | 1966/14042 ..."
+                        for tqdm_m in re.finditer(r"(\d+)%\|[^|]*\|\s*(\d+)/(\d+)", tail):
+                            pct = int(tqdm_m.group(1))
+                        if pct is not None:
+                            break
+                    except OSError:
+                        continue
+            except OSError:
+                pass
+            results[path] = {"pid": pid, "elapsed_s": elapsed, "pct": pct}
     except Exception:
         pass
-    return None
+    return results
+
+
+def fmt_time(seconds):
+    """Format seconds as a human-readable duration string."""
+    if seconds is None:
+        return "?"
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    return f"{m}m{s:02d}s"
+
+
+def get_running_checkpoint():
+    """Return the checkpoint path currently being evaluated by lm_eval, or None."""
+    running = get_running_evals()
+    return next(iter(running), None) if running else None
 
 
 def get_mmlu_accuracy(path):
@@ -168,19 +224,19 @@ if not entries:
     print(f"No checkpoints found under {puzzle_dir}.")
     sys.exit(1)
 
-running_ckpt = get_running_checkpoint()
+running_evals = get_running_evals()
 
 done = []
 running = []
 pending = []
 for label, path in entries:
     acc = get_mmlu_accuracy(path)
-    if acc not in (None, "running"):
-        done.append((label, path))
-    elif acc == "running" or (
-        running_ckpt and os.path.abspath(path) == os.path.abspath(running_ckpt)
-    ):
+    abs_path = os.path.abspath(path)
+    is_running = acc == "running" or any(os.path.abspath(p) == abs_path for p in running_evals)
+    if is_running:
         running.append((label, path))
+    elif acc not in (None, "running"):
+        done.append((label, path))
     else:
         pending.append((label, path))
 
@@ -191,19 +247,38 @@ print(f"  {'Status':<10}  {'Checkpoint':<14}  {'MMLU acc':>9}  Path")
 print(DIV)
 for label, path in entries:
     acc = get_mmlu_accuracy(path)
-    is_running = (acc == "running") or (
-        running_ckpt and os.path.abspath(path) == os.path.abspath(running_ckpt)
-    )
-    if acc not in (None, "running"):
-        status = "[DONE]"
-        acc_str = f"{acc:.4f}"
-    elif is_running:
+    abs_path = os.path.abspath(path)
+    eval_info = next((v for p, v in running_evals.items() if os.path.abspath(p) == abs_path), None)
+    is_running = acc == "running" or eval_info is not None
+    if is_running:
         status = "[RUNNING]"
         acc_str = "..."
+        if eval_info:
+            elapsed_s = eval_info.get("elapsed_s")
+            pct = eval_info.get("pct")
+            elapsed_str = fmt_time(elapsed_s)
+            if pct and pct > 0 and elapsed_s:
+                remaining_s = elapsed_s * (100 - pct) / pct
+                timing_str = (
+                    f"  {pct}% done  elapsed {elapsed_str}  remaining ~{fmt_time(remaining_s)}"
+                )
+            elif elapsed_s:
+                timing_str = f"  elapsed {elapsed_str}"
+            else:
+                timing_str = ""
+        else:
+            timing_str = ""
+    elif acc not in (None, "running"):
+        status = "[DONE]"
+        acc_str = f"{acc:.4f}"
+        timing_str = ""
     else:
         status = "[ ]"
         acc_str = "pending"
+        timing_str = ""
     print(f"  {status:<10}  {label:<14}  {acc_str:>9}  {path}")
+    if timing_str:
+        print(f"  {'':10}  {'':14}  {timing_str}")
 print(DIV)
 print(f"  Done:    {len(done)}/{len(entries)}")
 if running:
