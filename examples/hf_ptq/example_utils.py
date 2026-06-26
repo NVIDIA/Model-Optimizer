@@ -598,6 +598,25 @@ def get_original_hf_quant_method(config) -> str | None:
     return None
 
 
+def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs):
+    """Re-derive a built-in config when a remote-code config is used with a built-in model
+    class, so it matches the model definition's version; fall back to hf_config otherwise.
+    """
+    if auto_model_module in [AutoModelForCausalLM, AutoModel]:
+        return hf_config
+    if not type(hf_config).__module__.startswith("transformers_modules"):
+        return hf_config
+    builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    try:
+        return AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
+    except Exception as e:
+        warnings.warn(
+            f"Could not re-derive a built-in config for {ckpt_path} ({e}); using the "
+            "remote-code config for device-map inference."
+        )
+        return hf_config
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -731,16 +750,9 @@ def get_model(
             auto_model_module = getattr(transformers, architecture)
             from_config = auto_model_module._from_config
 
-        # Keep the config from the same version as the model definition: re-derive a
-        # remote-code config with the built-in class to avoid attribute mismatches.
-        config_for_init = hf_config
-        if auto_model_module not in [AutoModelForCausalLM, AutoModel] and type(
-            hf_config
-        ).__module__.startswith("transformers_modules"):
-            builtin_config_kwargs = {
-                k: v for k, v in config_kwargs.items() if k != "trust_remote_code"
-            }
-            config_for_init = AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
+        config_for_init = _resolve_init_config(
+            hf_config, auto_model_module, ckpt_path, config_kwargs
+        )
 
         with init_empty_weights(include_buffers=True):
             # When computing the device_map, assuming bfloat16 precision by default,
