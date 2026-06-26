@@ -58,7 +58,6 @@ def get_megatron_calibration_dataloader(
     if getattr(tokenizer, "pad_token", None) is None:
         tokenizer = copy.deepcopy(tokenizer)
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
 
     # Shard calibration data across DP ranks; amax is max-reduced across DP inside ``mtq``.
     dp_size = mpu.get_data_parallel_world_size()
