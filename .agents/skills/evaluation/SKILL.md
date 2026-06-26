@@ -42,7 +42,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
 **Task recipes** (always read before editing the relevant task in the config):
 
-- AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom}.md`
+- AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom,omniscience}.md`
 - Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
 
 **AA rule:** If the user mentions "AA" / "Artificial Analysis", generate **only** tasks under `recipes/tasks/aa/`. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked.
@@ -239,6 +239,14 @@ On SLURM, several deploy/eval failures are invisible to `--dry-run` and only sur
 **Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.
 
 Evals that exceed 4h of wall-clock time are handled by **NEL's built-in dependency-chain resume**, not by shrinking the eval. NEL submits the first SLURM job; if it hits walltime, a dependent follow-on job resumes from the response/result caches the first job wrote, then queues another follow-on. Long evals continue across walltime windows automatically. See `references/run-validation.md#nel-timeout-and-resume-behavior` for the full mechanism.
+
+**Preemption / external kill — resume manually with `sbatch run.sub`.** On a preemptible account (common on busy internal clusters) the scheduler can **CANCEL** a run mid-eval for a higher-priority job — `sacct -j <id>` shows `CANCELLED by <uid>` (a `svc-*` service account) with `Elapsed` well under the 4h walltime. NEL does **not** auto-resume this (its dependency chain only fires on a genuine walltime timeout). But the job's generated `run.sub` is **re-submittable** and resumes from the same `output_dir` + response cache (`skip_filled`), continuing from the partial output rather than restarting:
+
+```bash
+ssh <host> "cd <output_dir>/<timestamp>-<invocation>/<task>/ && sbatch run.sub"
+```
+
+Re-submit again if it's preempted again — each resume re-deploys, then skips already-generated samples, so progress is **cumulative** across attempts until it completes. Always confirm via `sacct -j <id>` that the prior job was `CANCELLED` (not a real failure) before resuming.
 
 Implications for the agent:
 
