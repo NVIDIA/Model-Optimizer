@@ -731,16 +731,27 @@ def get_model(
             auto_model_module = getattr(transformers, architecture)
             from_config = auto_model_module._from_config
 
+        # Keep the config from the same version as the model definition: re-derive a
+        # remote-code config with the built-in class to avoid attribute mismatches.
+        config_for_init = hf_config
+        if auto_model_module not in [AutoModelForCausalLM, AutoModel] and type(
+            hf_config
+        ).__module__.startswith("transformers_modules"):
+            builtin_config_kwargs = {
+                k: v for k, v in config_kwargs.items() if k != "trust_remote_code"
+            }
+            config_for_init = AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
+
         with init_empty_weights(include_buffers=True):
             # When computing the device_map, assuming bfloat16 precision by default,
             # unless specified by the hf_config.
-            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
+            torch_dtype = getattr(config_for_init, "torch_dtype", torch.bfloat16)
             model_kwargs2 = model_kwargs.copy()
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
             model_kwargs2["dtype"] = torch_dtype
             model_kwargs2.pop("max_memory", None)
-            model = from_config(hf_config, **model_kwargs2)
+            model = from_config(config_for_init, **model_kwargs2)
 
         max_memory = get_max_memory()
         inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
