@@ -39,11 +39,11 @@ Use this inside the top-level `evaluation.tasks` list:
 
 ## Score Extraction from mlflow
 
-AA-Omniscience reports a few related numbers (see the AA methodology:
-<https://artificialanalysis.ai/methodology/intelligence-benchmarking#aa-omniscience>):
+**Primary result — Omniscience Index** (-100 to 100): `omniscience_pass_at_1_avg-of-N_judge_omni_index`. This is AA's headline metric: accuracy net of hallucinations, rewarding abstention over guessing wrong (so it can be negative). Report this one. See the AA methodology: <https://artificialanalysis.ai/methodology/intelligence-benchmarking#aa-omniscience>.
+
+Also report (same `pass_at_1_avg-of-N` aggregation):
 
 - **Accuracy** (0-100): `omniscience_pass_at_1_avg-of-N_judge_correct` — % of questions answered correctly.
-- **Omniscience Index** (-100 to 100): `omniscience_pass_at_1_avg-of-N_judge_omni_index` — accuracy net of hallucinations; AA's headline metric, which rewards abstaining over guessing wrong (so it can be negative).
 - **Non-hallucination rate** (0-100): `100 - omniscience_pass_at_1_avg-of-N_judge_omni_hallucination` — the `judge_omni_hallucination` key is the hallucination rate, so non-hallucination = `1 - hallucination`.
 
 N is the repeat count (10). If the repeat count is unknown, use the highest available `avg-of-N`.
