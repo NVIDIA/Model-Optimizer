@@ -572,6 +572,7 @@ def test_minimax(command):
     ],
     ids=idfn,
 )
+@pytest.mark.timeout(3600)
 def test_llama_nemotron(command):
     command.run()
 

@@ -377,6 +377,8 @@ class ModelDeployer:
         elif self.model_id in (
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
         ):
             llm = sgl.Engine(
                 model_path=self.model_id,
