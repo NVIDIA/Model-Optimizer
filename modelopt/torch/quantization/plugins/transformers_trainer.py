@@ -39,7 +39,9 @@ from ..utils import (
     disable_lora_quantizers_in_config,
     get_quantizer_state_dict,
     is_quantized,
+    quantizer_attr_names,
     set_quantizer_state_dict,
+    weight_attr_names,
 )
 
 # TODO: Enable documentation rendering for this class
@@ -168,6 +170,27 @@ def _patch_fsdp2_post_backward():
                 sp.grad = sp.grad.to(sp.dtype)
 
     FSDPParamGroup.post_backward = _patched_post_backward
+
+
+def _align_laq_amax_param_dtypes(model):
+    """Cast LAQ learnable amax params to their owning weight dtype for FSDP2."""
+    # TODO: Remove this once a stable PyTorch release supports FSDP2 mixed
+    # precision parameter dtypes for this case.
+    for module in model.modules():
+        for weight_name in weight_attr_names(module):
+            weight = getattr(module, weight_name, None)
+            if weight is None:
+                continue
+
+            quantizer_name = quantizer_attr_names(weight_name).weight_quantizer
+            quantizer = getattr(module, quantizer_name, None)
+            if not isinstance(quantizer, TensorQuantizer) or not getattr(quantizer, "_laq", False):
+                continue
+
+            for amax_name in ("_amax_pre", "_amax_post"):
+                amax = getattr(quantizer, amax_name, None)
+                if isinstance(amax, torch.nn.Parameter) and amax.dtype != weight.dtype:
+                    amax.data = amax.data.to(dtype=weight.dtype)
 
 
 def check_awq_smoothquant(quant_cfg):
@@ -372,6 +395,8 @@ class QATTrainer(ModelOptHFTrainer):
             model = next((obj for obj in args if isinstance(obj, torch.nn.Module)), None)
             if model is None:
                 return self._original_prepare(*args, **kwargs)
+
+            _align_laq_amax_param_dtypes(model)
 
             # Hide TQ buffers from accelerate's FSDP2 state_dict handling.
             tq_og_non_prsist_buffers = {}

@@ -1385,7 +1385,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     Supports both FP4 (E2M1) and INT block quantization formats with configurable
     block_size and optional FP8 scale quantization.
     Uses _global_amax and inherited _amax for per-block amax values.
-    Preserves both amax states in fp32.
+    Preserves static amax states in fp32.
     """
 
     _laq: bool = False
@@ -1395,11 +1395,11 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     _quantize_scales: bool = True
 
     def _preserve_amax_in_fp32(self):
-        for name in ("_amax", "_global_amax", "_amax_pre", "_amax_post", "_per_tensor_scale"):
+        for name in ("_amax", "_global_amax", "_per_tensor_scale"):
             tensor = getattr(self, name, None)
             if isinstance(tensor, nn.Parameter):
-                tensor.data = tensor.data.to(dtype=torch.float32)
-            elif tensor is not None:
+                continue
+            if tensor is not None:
                 setattr(self, name, tensor.to(dtype=torch.float32))
 
     def _amax_setter_helper(self, value):
@@ -1495,9 +1495,21 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         """Apply module transforms without rounding static scale state."""
         amax = getattr(self, "_amax", None)
         global_amax = getattr(self, "_global_amax", None)
+        laq_scale_state = {}
+        for name in ("_amax_pre", "_amax_post", "_per_tensor_scale"):
+            tensor = getattr(self, name, None)
+            if tensor is not None:
+                laq_scale_state[name] = tensor.detach().clone()
 
         module = super()._apply(fn, recurse=recurse)
         self._preserve_amax_in_fp32()
+        for name, value in laq_scale_state.items():
+            tensor = getattr(self, name, None)
+            if tensor is not None:
+                if isinstance(tensor, nn.Parameter):
+                    tensor.data.copy_(value.to(tensor.device))
+                else:
+                    setattr(self, name, value.to(device=tensor.device, dtype=torch.float32))
         if amax is not None:
             self.amax = amax
         if global_amax is not None:
@@ -1537,19 +1549,25 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         """
         if hasattr(self, "_amax"):
             delattr(self, "_amax")
-        amax = amax.float()
+        amax = amax.detach()
+        if not amax.is_floating_point():
+            amax = amax.float()
+        # TODO: Support fp32 learnable amax values once a stable PyTorch release
+        # includes FSDP2 mixed-precision parameter dtype support.
+        amax_param = amax.clone()
+        amax_buffer = amax.float().clone()
         learn = {learnable_amax} if isinstance(learnable_amax, str) else set(learnable_amax)
 
         if "post" in learn:
-            self._amax_post = nn.Parameter(amax.clone().detach(), requires_grad=True)
+            self._amax_post = nn.Parameter(amax_param.clone(), requires_grad=True)
         else:
-            self.register_buffer("_amax_post", amax.clone().detach())
+            self.register_buffer("_amax_post", amax_buffer.clone())
 
         if not tied_amax:
             if "pre" in learn:
-                self._amax_pre = nn.Parameter(amax.clone().detach(), requires_grad=True)
+                self._amax_pre = nn.Parameter(amax_param.clone(), requires_grad=True)
             else:
-                self.register_buffer("_amax_pre", amax.clone().detach())
+                self.register_buffer("_amax_pre", amax_buffer.clone())
 
         if per_tensor_scale is not None:
             self.register_buffer("_per_tensor_scale", per_tensor_scale.float().clone().detach())

@@ -24,6 +24,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     StaticBlockScaleQuantizer,
     TensorQuantizer,
 )
+from modelopt.torch.quantization.plugins.transformers_trainer import _align_laq_amax_param_dtypes
 from modelopt.torch.quantization.tensor_quant import int_cast_ste
 
 
@@ -126,6 +127,60 @@ class TestEnableLAQ:
         assert hasattr(q, "_amax")
         q.enable_laq(torch.ones(8), quantize_scales=False)
         assert not hasattr(q, "_amax")
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_learnable_amax_uses_input_dtype(self, dtype):
+        q = self._make_quantizer()
+        q.enable_laq(
+            torch.ones(8, dtype=dtype),
+            quantize_scales=False,
+            learnable_amax=["pre", "post"],
+        )
+
+        assert q._amax_pre.dtype == dtype
+        assert q._amax_post.dtype == dtype
+
+    def test_frozen_amax_uses_fp32_storage(self):
+        q = self._make_quantizer()
+        q.enable_laq(
+            torch.ones(8, dtype=torch.bfloat16),
+            quantize_scales=False,
+            learnable_amax=[],
+        )
+
+        assert q._amax_pre.dtype == torch.float32
+        assert q._amax_post.dtype == torch.float32
+
+    def test_dtype_cast_updates_learnable_amax_dtype(self):
+        q = self._make_quantizer()
+        q.enable_laq(
+            torch.ones(8),
+            quantize_scales=False,
+            learnable_amax=["pre", "post"],
+        )
+
+        q.to(dtype=torch.bfloat16)
+
+        assert q._amax_pre.dtype == torch.bfloat16
+        assert q._amax_post.dtype == torch.bfloat16
+
+    def test_align_laq_amax_param_dtypes_uses_weight_dtype(self):
+        module = nn.Module()
+        module.weight = nn.Parameter(torch.ones(8, 16, dtype=torch.bfloat16))
+        module.weight_quantizer = self._make_quantizer()
+        module.weight_quantizer.enable_laq(
+            torch.ones(8),
+            quantize_scales=False,
+            learnable_amax=["pre", "post"],
+        )
+
+        assert module.weight_quantizer._amax_pre.dtype == torch.float32
+        assert module.weight_quantizer._amax_post.dtype == torch.float32
+
+        _align_laq_amax_param_dtypes(module)
+
+        assert module.weight_quantizer._amax_pre.dtype == torch.bfloat16
+        assert module.weight_quantizer._amax_post.dtype == torch.bfloat16
 
 
 class TestIntCastSTE:
