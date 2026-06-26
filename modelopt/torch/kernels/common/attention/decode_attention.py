@@ -52,10 +52,13 @@ import triton
 import triton.language as tl
 
 from modelopt.torch.kernels.common.attention.triton_fa import (
+    _P_QDQ_MODES,
     LOG2E,
     _load_paged_k_tile,
     _load_paged_v_tile,
 )
+from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4
+from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _p_qdq_fp8
 
 # Cap on the auto-chosen split count. Decode KV reads dominate, so a handful of
 # splits is enough to fill the SMs at small batch; more just fragments skipping.
@@ -98,6 +101,8 @@ def _attn_decode_split_fwd(
     APPLY_SKIP: tl.constexpr,
     SKIP_THRESHOLD_LOG2: tl.constexpr,  # log2(lambda) in the scaled-log2 score space
     MEASURE_SPARSITY: tl.constexpr,
+    P_QDQ: tl.constexpr = 0,  # softmax-P quant-dequant: 0=off, 1=FP8 E4M3, 2=NVFP4
+    p_qdq_scale=1.0,  # per-tensor P-qdq scale (runtime scalar; amax/448 or amax/(6*448))
 ):
     """One (request, head, KV split): partial GEMV attention with skip."""
     batch_idx = tl.program_id(0)
@@ -171,8 +176,16 @@ def _attn_decode_split_fwd(
             p = tl.math.exp2(scores - m_new)  # [BLOCK_N]
             p = tl.where(kv_valid, p, 0.0)
             correction = tl.math.exp2(m_i - m_new)
-            l_i = l_i * correction + tl.sum(p, axis=0)
+            l_i = l_i * correction + tl.sum(p, axis=0)  # denominator: unquantized p
             acc = acc * correction
+            # Optional softmax-P quant-dequant for the P @ V weighting (BMM2); the
+            # denominator above stays unquantized, matching the prefill kernel.
+            if P_QDQ == 1:
+                p = _p_qdq_fp8(p, p_qdq_scale)
+            elif P_QDQ == 2:
+                p = tl.reshape(
+                    _p_qdq_nvfp4(tl.reshape(p, (1, BLOCK_N)), p_qdq_scale, 1, BLOCK_N), (BLOCK_N,)
+                )
             vt = _load_paged_v_tile(
                 V_cache,
                 Block_table,
@@ -267,6 +280,8 @@ def attention_decode(
     page_size: int = 16,
     num_kv_splits: int | None = None,
     measure_sparsity: bool = False,
+    p_qdq: str | None = None,
+    p_qdq_amax: float = 1.0,
 ) -> torch.Tensor:
     """Decode attention (one query token per request) over a paged KV cache.
 
@@ -287,6 +302,11 @@ def attention_decode(
             skipping maximally effective.
         measure_sparsity: when skipping is active, count total/skipped tiles and
             attach them as ``_sparsity_total`` / ``_sparsity_skipped`` on the output.
+        p_qdq: fake quant-dequant of the softmax probabilities P before P @ V —
+            ``"fp8"`` (E4M3) or ``"nvfp4"`` (E2M1, block-16 along keys), or ``None`` to
+            disable. The softmax denominator stays unquantized (straight-through).
+        p_qdq_amax: per-tensor amax for the P qdq (default 1.0, the upper bound of the
+            unnormalized P). Converted to amax/448 (FP8) or amax/(6*448) (NVFP4).
 
     Returns:
         ``[batch, num_q_heads, head_dim]`` attention output.
@@ -301,6 +321,19 @@ def attention_decode(
     qk_scale = sm_scale * LOG2E
     BLOCK_D = triton.next_power_of_2(head_dim)
     BLOCK_N = 128  # match attention_calibrate's KV tile granularity
+
+    if p_qdq not in _P_QDQ_MODES:
+        raise ValueError(
+            f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
+        )
+    p_qdq_mode = _P_QDQ_MODES[p_qdq]
+    # Per-tensor amax -> kernel scale (q = cast(p / scale) * scale): FP8 uses amax/448,
+    # NVFP4 the global scale amax/(6*448). amax=1 (P lies in [0, 1]) = full-range scale.
+    p_qdq_scale = 1.0
+    if p_qdq_mode:
+        if not (math.isfinite(p_qdq_amax) and p_qdq_amax > 0):
+            raise ValueError(f"p_qdq_amax must be finite and positive, got {p_qdq_amax}")
+        p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
 
     if skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
         apply_skip = True
@@ -365,6 +398,8 @@ def attention_decode(
             APPLY_SKIP=apply_skip,
             SKIP_THRESHOLD_LOG2=skip_threshold_log2,
             MEASURE_SPARSITY=do_measure,
+            P_QDQ=p_qdq_mode,
+            p_qdq_scale=p_qdq_scale,
             num_warps=4,
             num_stages=2,
         )
