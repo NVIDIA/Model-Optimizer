@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu). Usage: /puzzletron <command> [args]"
+description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu), distill (run/list/progress). Usage: /puzzletron <command> [args]"
 license: Apache-2.0
 ---
 
@@ -11,7 +11,7 @@ license: Apache-2.0
 **STEP 1 — Check args before doing anything else. This is MANDATORY.**
 
 - If args are **empty**, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
-- If the first word of args does **not exactly match** `mip`, `all`, `add-model`, or `eval`, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
+- If the first word of args does **not exactly match** `mip`, `all`, `add-model`, `eval`, or `distill`, output the block below verbatim and **STOP immediately. Do NOT proceed to any command.**
 
 ---
 
@@ -27,7 +27,11 @@ Available commands:
 - `add-model <hf_model_path>` — Implement descriptor, converter, and configs for an unsupported model
 - `eval list [puzzle_dir]` — List all available checkpoints (teacher + sweep solutions) with their index numbers; auto-discovers puzzle_dir if omitted
 - `eval progress [puzzle_dir]` — Show per-checkpoint MMLU eval status and accuracy; auto-discovers puzzle_dir if omitted
-- `eval mmlu <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); pass index from `eval list` or a direct path; add `--limit N` for a smoke test
+- `eval mmlu <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); pass index from `eval list` or a direct path; default `--limit 10` (smoke test)
+- `distill run [--puzzle_dir <dir>] [--ratio <r>] [--nproc_per_node <n>] [--train_iters <n>] [--output_dir <dir>] [--use_mock_data] [--data_paths <p>...]` — Run distillation for a MIP solution
+- `distill list [puzzle_dir]` — List all distillation runs with status
+- `distill progress [--puzzle_dir <dir>] [--ratio <r>]` — Show training progress for distillation runs
+- `distill tokenize --hf_dataset <name> --output_dir <dir> --tokenizer <path> [--hf_name <s>] [--hf_split <s>] [--hf_max_samples <n>] [--json_keys text|messages]` — Tokenize an HF dataset to Megatron binary format for distillation
 
 Usage: `/puzzletron <command> [args]`
 
@@ -152,7 +156,7 @@ Parse args:
 - `--puzzle_dir <dir>` — optional; used when resolving an index.
 - If `index_or_path` matches `^[0-9]+$`, resolve it to a path by running `python3 .agents/skills/puzzletron/eval_list.py [<puzzle_dir>]` and picking the Nth entry (0-based) from the output lines. If the index is out of range, tell the user and **STOP**.
 - Otherwise treat `index_or_path` as a literal `hf_model_path`.
-- `--limit <N>` — optional integer; omit the flag entirely if not provided.
+- `--limit <N>` — optional integer; default `10` if not provided.
 - `--batch_size <B>` — optional integer; default `4` if not provided.
 
 Derive `output_path` as `<hf_model_path>/eval_results/mmlu` (always; not user-configurable).
@@ -160,7 +164,7 @@ Derive `output_path` as `<hf_model_path>/eval_results/mmlu` (always; not user-co
 Run the following Bash command, substituting the parsed values:
 
 ```bash
-PYTHONPATH=.:$PYTHONPATH python examples/llm_eval/lm_eval_hf.py \
+WORLD_SIZE=1 PYTHONPATH=.:$PYTHONPATH python examples/llm_eval/lm_eval_hf.py \
   --model hf \
   --model_args pretrained=<hf_model_path>,dtype=bfloat16,parallelize=True \
   --tasks mmlu \
@@ -170,7 +174,9 @@ PYTHONPATH=.:$PYTHONPATH python examples/llm_eval/lm_eval_hf.py \
   [--limit <N>]
 ```
 
-(Replace `[--limit <N>]` with the actual `--limit <N>` flag when provided, or omit it.)
+(Replace `[--limit <N>]` with the actual `--limit <N>` flag; always include it since the default is 10.)
+
+**Note:** `WORLD_SIZE=1` is required to prevent lm_eval from hanging in multi-GPU environments — without it, the process initializes distributed context and waits for ranks that never appear.
 
 **Note on output file location:** lm_eval does not write results directly into `--output_path`. It creates a subdirectory named after the full model path with `/` replaced by `__`, then writes `results_<timestamp>.json` inside it. For example, for a model at `/workspace/foo/bar`, results land at:
 
@@ -314,3 +320,129 @@ List the files created, confirm registration, and suggest running the pipeline:
 ```text
 run puzzletron all for <model_name> on <N> GPUs
 ```
+
+## Command: distill
+
+- If the second word is not exactly `run`, `list`, `progress`, or `tokenize`, tell the user: "Unknown distill sub-command. Available: `run`, `list`, `progress`, `tokenize`." and **STOP**.
+
+### distill run
+
+Parse args:
+- `--puzzle_dir <dir>` — optional; auto-discovered if omitted
+- `--ratio <r>` — optional float (e.g. `0.9`); required if multiple sweep ratios exist
+- `--nproc_per_node <n>` — number of GPUs per node; required. If missing, ask: "Please provide the number of GPUs per node (--nproc_per_node)." and **STOP**.
+- `--train_iters <n>` — number of training iterations; required. If missing, ask: "Please provide the number of training iterations (--train_iters)." and **STOP**.
+- `--use_mock_data` — flag; use mock/dummy data instead of a real dataset
+- `--data_paths <p>...` — one or more tokenized data paths (weight1 path1 weight2 path2 ...); mutually exclusive with `--use_mock_data`
+- `--mbs <n>` — micro-batch size; optional, default `1`
+- `--gbs <n>` — global batch size; optional, default equals `nproc_per_node` (one sample per GPU)
+- `--output_dir <dir>` — optional override for the output directory (default: resolved from puzzle_dir + ratio). Use when running multiple datasets for the same ratio (e.g. `--output_dir /workspace/puzzle_dir_llama3_2-3b/distillation/0.9x-nemotron`).
+
+If neither `--use_mock_data` nor `--data_paths` is provided, ask: "Please provide either --use_mock_data or --data_paths <paths>." and **STOP**.
+
+**Step 1 — Resolve paths** by running:
+
+```bash
+python3 .agents/skills/puzzletron/distill_resolve.py [<puzzle_dir>] [--ratio <ratio>]
+```
+
+(Include `<puzzle_dir>` positionally if provided; include `--ratio <ratio>` if provided.)
+
+Capture stdout and `eval` it to obtain shell variables: `STUDENT_PATH`, `TEACHER_PATH`, `OUTPUT_DIR`, `HF_EXPORT_PATH`, `RATIO_LABEL`. If the script exits non-zero, show its stderr to the user and **STOP**.
+
+If `--output_dir` was provided, override `OUTPUT_DIR` and set `HF_EXPORT_PATH=<output_dir>/hf`.
+
+**Step 2 — Run distillation:**
+
+Compute `gbs` = `nproc_per_node` if not explicitly provided (ensures GBS is divisible by data-parallel size). Build the command:
+
+```bash
+set -o pipefail && export PYTHONPATH=$PYTHONPATH:. && export HF_HOME=/workspace/hf_cache && \
+torchrun --nproc_per_node <nproc_per_node> examples/megatron_bridge/distill.py \
+  --student_hf_path <STUDENT_PATH> \
+  --teacher_hf_path <TEACHER_PATH> \
+  --output_dir <OUTPUT_DIR> \
+  --hf_export_path <HF_EXPORT_PATH> \
+  --student_hf_model <TEACHER_PATH> \
+  --train_iters <train_iters> \
+  --mbs <mbs> \
+  --gbs <gbs> \
+  --lr_warmup_iters 50 \
+  --eval_interval 500 \
+  --log_interval 10 \
+  [--use_mock_data | --data_paths <data_paths>] \
+  2>&1 | tee ./log.txt
+```
+
+Replace bracketed placeholders with resolved values. Use `--use_mock_data` or `--data_paths <data_paths>` (space-separated) depending on which was provided. Stream output to the user as it arrives. When the command finishes, report the exit code and the output and HF export paths.
+
+**Key gotchas:**
+- Always set `HF_HOME=/workspace/hf_cache` — the default `/tmp` cache fills up quickly on this machine.
+- Always pass `--student_hf_model <TEACHER_PATH>` (the local teacher path), NOT a HuggingFace hub model ID — hub downloads fail due to `/tmp` space limits.
+- `gbs` must be divisible by `nproc_per_node`; defaulting to `nproc_per_node` is safe for smoke tests.
+
+### distill list
+
+Parse `puzzle_dir` from args (third word or `--puzzle_dir <value>`). It is optional.
+
+Run the following Bash command, including `<puzzle_dir>` as an argument when provided, or omitting it to trigger auto-discovery:
+
+```bash
+python3 .agents/skills/puzzletron/distill_list.py [<puzzle_dir>]
+```
+
+Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+### distill progress
+
+Parse args:
+- `puzzle_dir` — third word or `--puzzle_dir <value>`; optional
+- `--ratio <r>` — optional; filter to a specific ratio
+
+Run the following Bash command, including arguments as applicable:
+
+```bash
+python3 .agents/skills/puzzletron/distill_progress.py [<puzzle_dir>] [--ratio <ratio>]
+```
+
+Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+### distill tokenize
+
+Tokenize a HuggingFace dataset into Megatron binary format (`.bin` / `.idx`) for use with `distill run --data_paths`.
+
+Parse args:
+- `--hf_dataset <name>` — HuggingFace dataset repo ID (e.g. `nvidia/Nemotron-Post-Training-Dataset-v2`); required.
+- `--hf_name <subset>` — dataset config/subset name (e.g. `default`, `General`); optional.
+- `--hf_split <split>` — dataset split (e.g. `train`, `stem`, `math`); optional, defaults to all splits.
+- `--hf_max_samples <n>` — cap samples per split; optional.
+- `--output_dir <dir>` — output directory for `.bin`/`.idx` files; required.
+- `--tokenizer <path>` — local HF tokenizer path; required. If missing, ask the user.
+- `--json_keys <key>` — `text` for pretraining data, `messages` for chat/instruction data; default `text`.
+- `--workers <n>` — tokenization workers; optional, default `32`.
+
+Run the following Bash command, substituting parsed values. Include `--append_eod` only when `--json_keys text`:
+
+```bash
+HF_TOKEN=<token_if_needed> HF_HOME=/workspace/hf_cache \
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+  --hf_dataset <hf_dataset> \
+  [--hf_name <hf_name>] \
+  [--hf_split <hf_split>] \
+  [--hf_max_samples_per_split <hf_max_samples>] \
+  --hf_streaming \
+  --json_keys <json_keys> \
+  --tokenizer <tokenizer> \
+  --output_dir <output_dir> \
+  --workers <workers> \
+  --max_sequence_length 256_000 \
+  [--append_eod]
+```
+
+When the command finishes, report the output prefixes (printed by the script) and the `.bin` file size in MB + token count (file size ÷ 4).
+
+**Key gotchas:**
+- `HF_TOKEN` must be set explicitly in the command prefix — exporting it in the shell is not enough for background jobs.
+- `gated: manual` datasets (e.g. `Nemotron-Pretraining-SFT-v1`) require NVIDIA to manually approve access before downloading.
+- `gated: auto` datasets (e.g. `Nemotron-Post-Training-Dataset-v2`) grant access immediately after accepting terms on the Hub page.
+- Token count = `.bin` file size ÷ 4 bytes. Aim for ≥2.5B tokens for a meaningful run at GBS=768, seq_len=8192 (400 iters).

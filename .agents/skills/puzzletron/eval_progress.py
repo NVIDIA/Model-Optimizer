@@ -59,8 +59,23 @@ def find_teacher(puzzle_dir):
     return None
 
 
+def get_distill_checkpoints(puzzle_dir):
+    """Return list of (label, path) for distillation HF exports."""
+    entries = []
+    distill_base = os.path.join(puzzle_dir, "distillation")
+    if not os.path.isdir(distill_base):
+        return entries
+    for run in sorted(os.listdir(distill_base)):
+        hf_dir = os.path.join(distill_base, run, "hf")
+        if os.path.isdir(hf_dir) and any(
+            f.endswith((".safetensors", ".bin", "config.json")) for f in os.listdir(hf_dir)
+        ):
+            entries.append((f"distill:{run}", hf_dir))
+    return entries
+
+
 def get_checkpoints(puzzle_dir):
-    """Return list of (label, path) for teacher + all sweep solution checkpoints."""
+    """Return list of (label, path) for teacher + sweep solutions + distillation checkpoints."""
     teacher_path = find_teacher(puzzle_dir)
     ckpt_dirs = sorted(
         glob.glob(f"{puzzle_dir}/mip/puzzle_solutions/*/solutions--checkpoints/solution_0")
@@ -73,6 +88,7 @@ def get_checkpoints(puzzle_dir):
         mem = parse_memory_mib(dir_name)
         label = f"{mem:,.0f} MiB" if mem is not None else dir_name
         entries.append((label, ckpt))
+    entries.extend(get_distill_checkpoints(puzzle_dir))
     return entries
 
 
