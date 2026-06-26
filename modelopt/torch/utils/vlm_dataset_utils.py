@@ -298,9 +298,11 @@ def _get_vlm_dataset(
         # Keep only samples with a non-null image field (ScienceQA has both).
         with contextlib.suppress(Exception):
             ds = ds.filter(
-                lambda ex: ex.get("image", None) is not None
-                or ex.get("images", None) is not None
-                or _extract_image_ref_from_example(ex) is not None
+                lambda ex: (
+                    ex.get("image", None) is not None
+                    or ex.get("images", None) is not None
+                    or _extract_image_ref_from_example(ex) is not None
+                )
             )
 
     # Select the first `num_samples` entries (or fewer if dataset is smaller).

@@ -648,7 +648,7 @@ class TestLayerwiseNestedConfig:
         ],
     )
     def test_checkpoint_dir_requires_enable(self, kwargs):
-        with pytest.raises(ValidationError, match="requires layerwise.enable=True"):
+        with pytest.raises(ValidationError, match=r"requires layerwise.enable=True"):
             MaxCalibConfig(**kwargs)
 
     @pytest.mark.parametrize(

@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ruff: noqa: N803, N806 — Triton kernels use uppercase for constexpr and tensor args by convention
 
 """Triton flash attention kernel with variable-length sequences and GQA.
 

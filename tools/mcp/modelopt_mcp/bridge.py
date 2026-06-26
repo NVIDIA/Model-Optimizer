@@ -1087,7 +1087,7 @@ def submit_job_impl(
             stdout_tail,
             re.IGNORECASE,
         )
-        if m and m.group(1).lower() not in {"status"}:
+        if m and m.group(1).lower() != "status":
             experiment_id = m.group(1)
     # Match any path containing `/experiments/<id>/` — don't anchor on
     # cluster-specific filesystem roots (NVIDIA's /lustre, partner

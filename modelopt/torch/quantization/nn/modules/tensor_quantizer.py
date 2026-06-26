@@ -975,9 +975,7 @@ class TensorQuantizer(nn.Module):
 
         quant_axis = [i for i in range(len(quantize_axis)) if quantize_axis[i]]
 
-        slices = (
-            None if all(s is None for s in slices) else [s if s else slice(None) for s in slices]
-        )
+        slices = None if all(s is None for s in slices) else [s or slice(None) for s in slices]
 
         if all(p is None for p in paddings):
             paddings = None
@@ -986,7 +984,7 @@ class TensorQuantizer(nn.Module):
             for padding in paddings:
                 if not (new_paddings or padding):
                     continue
-                new_paddings.extend(padding if padding else (0, 0))
+                new_paddings.extend(padding or (0, 0))
             paddings = tuple(reversed(new_paddings))
 
         set_quant_params(quant_axis, reshape_size, paddings, slices)

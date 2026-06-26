@@ -1518,7 +1518,7 @@ def register_dbrx_moe_on_the_fly(model):
 
     The MoE class in DBRX is `transformers_modules.modeling_dbrx.DbrxExpertGLU`, which loads dynamically.
     """
-    if type(model).__name__ in ["DbrxForCausalLM"]:
+    if type(model).__name__ == "DbrxForCausalLM":
         moe_type = type(model.transformer.blocks[0].ffn.experts.mlp)
         # Create a QuantDbrxExpertGLU class on the fly
         if QuantModuleRegistry.get(moe_type) is None:

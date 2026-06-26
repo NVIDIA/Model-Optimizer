@@ -415,8 +415,10 @@ class _DynamicTEQKVLayerNormColumnParallelLinear(DynamicModule, TELayerNormColum
         self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
             "out_features",
-            lambda mod, val: (num_attention_heads.active + 2 * mod.config.num_query_groups)
-            * mod.config.kv_channels,
+            lambda mod, val: (
+                (num_attention_heads.active + 2 * mod.config.num_query_groups)
+                * mod.config.kv_channels
+            ),
         )
         # in_features must track input_size so TE's forward-time inp_shape[-1] == in_features
         # assertion holds when hidden_size is pruned.

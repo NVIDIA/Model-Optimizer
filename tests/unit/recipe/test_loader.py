@@ -1432,7 +1432,7 @@ def test_modelopt_schema_reports_circular_resolution(monkeypatch):
     module.__spec__ = types.SimpleNamespace(_initializing=True)
     monkeypatch.setitem(sys.modules, module_name, module)
 
-    with pytest.raises(ValueError, match="still being initialized.*circular import"):
+    with pytest.raises(ValueError, match=r"still being initialized.*circular import"):
         _schema_type(f"{module_name}.MissingSchema")
 
 

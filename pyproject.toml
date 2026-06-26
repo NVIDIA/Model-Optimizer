@@ -98,7 +98,7 @@ dev-lint = [
     "bandit[toml]==1.7.9", # security/compliance checks
     "mypy==2.1.0",
     "pre-commit==4.6.0",
-    "ruff==0.12.11",
+    "ruff==0.15.20",
 ]
 dev-docs = [
     "autodoc_pydantic>=2.1.0",
@@ -198,10 +198,10 @@ extend-ignore = [
     "PT030",
     "RUF002",
     "RUF012",
+    "RUF059",
     "SIM102",
     "SIM108",
     "SIM115",
-    "UP038",
 ]
 
 
@@ -212,10 +212,8 @@ extend-ignore = [
 "tests/*" = ["B017", "D", "E402", "PT012"]
 ".agents/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
 "*/_[a-zA-Z]*" = ["D"] # Private packages (_abc/*.py) or modules (_xyz.py)
-"*.ipynb" = [
-    "D",
-    "E501",
-] # Ignore missing docstrings or line length for Jupyter notebooks
+"*.ipynb" = ["D", "E501"] # Ignore missing docstrings or line length for Jupyter notebooks
+"modelopt/torch/kernels/*" = ["N803", "N806", "E731"] # triton style
 "modelopt/torch/puzzletron/*" = [
     "C4",
     "D",
@@ -226,24 +224,7 @@ extend-ignore = [
     "RUF",
     "SIM",
     "UP",
-] # TODO: Disabled for now, will enable later, once all puzzletron code is migrated
-"modelopt/torch/kernels/quantization/gemm/*" = [
-    "N803",
-    "N806",
-    "E731",
-] # triton style
-"modelopt/torch/kernels/sparsity/attention/*" = [
-    "N803",
-    "N806",
-] # triton kernel style
-"modelopt/torch/kernels/quantization/attention/*" = [
-    "N803",
-    "N806",
-] # triton kernel style
-"modelopt/torch/kernels/quantization/common/*" = [
-    "N803",
-    "N806",
-] # triton kernel style
+] # TODO: Disabled for now, will enable once newer puzzletron code with ruff fixes is migrated
 
 [tool.ruff.lint.pycodestyle]
 max-line-length = 120 # Line length limit for comments and docstrings
