@@ -164,6 +164,7 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/nvfp4_experts_only-kv_fp8_cast",
     "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
     "general/ptq/nvfp4_mlp_only-kv_fp8",
+    "general/ptq/nvfp4_mlp_only-novit-kv_fp8",
     "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
     "general/ptq/nvfp4_omlp_only-kv_fp8",
     "general/ptq/nvfp4_omlp_only-kv_fp8_cast",
@@ -195,6 +196,17 @@ def test_nvfp4_weight_only_recipe_disables_vllm_marlin_incompatible_projections(
         "*visual*",
         "*vision_tower*",
     } <= disabled_quantizers
+
+
+def test_nvfp4_mlp_only_novit_recipe_disables_vision_quantizers():
+    recipe = load_recipe("general/ptq/nvfp4_mlp_only-novit-kv_fp8")
+    disabled_quantizers = {
+        entry["quantizer_name"]
+        for entry in recipe.quantize.model_dump()["quant_cfg"]
+        if entry.get("enable") is False
+    }
+
+    assert {"*visual*", "*vision_tower*"} <= disabled_quantizers
 
 
 # ---------------------------------------------------------------------------
@@ -1420,7 +1432,7 @@ def test_modelopt_schema_reports_circular_resolution(monkeypatch):
     module.__spec__ = types.SimpleNamespace(_initializing=True)
     monkeypatch.setitem(sys.modules, module_name, module)
 
-    with pytest.raises(ValueError, match="still being initialized.*circular import"):
+    with pytest.raises(ValueError, match=r"still being initialized.*circular import"):
         _schema_type(f"{module_name}.MissingSchema")
 
 

@@ -1599,7 +1599,7 @@ def build_decoder_config(
         module_layers = {}
         module_layers.update(dict(getattr(module, "norm_attn_norm").named_children()))
         module_layers.update({"ffn": module.ffn})
-    elif decoder_type in ["t5"]:
+    elif decoder_type == "t5":
         # Combine two modules (T5LayerSelfAttention, T5LayerFF) / three modules
         # ((T5LayerSelfAttention, T5LayerCrossAttention, T5LayerFF)) of T5 model
         # (depending on whether it's encoder / decoder) into one decoder layer
@@ -1633,7 +1633,7 @@ def build_decoder_config(
         module_layers.update({"MLP": encdec_mlp_module})
     else:
         module_layers = dict(module.named_children())
-        if decoder_type in ["exaone"]:
+        if decoder_type == "exaone":
             module_layers.update({"attn": module_layers["attn"].attention})
 
     for name, layer in module_layers.items():
@@ -1647,7 +1647,7 @@ def build_decoder_config(
                     model_metadata_config, config, layernorm_config
                 )
             # For all decoder only models
-            elif name in ["ln_mlp"]:
+            elif name == "ln_mlp":
                 config.mlp_layernorm = layernorm_config
             elif (
                 config.decoder_type in ["gemma2", "gemma3"]

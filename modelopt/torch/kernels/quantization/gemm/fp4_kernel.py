@@ -26,7 +26,7 @@ import triton.language as tl
 
 from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
 
-from .nvfp4_quant import nvfp4_scalar_quant
+from ..common.nvfp4_quant import nvfp4_scalar_quant
 
 __all__ = ["compute_fp4_scales", "fp4_dequantize", "static_blockwise_fp4_fake_quant"]
 

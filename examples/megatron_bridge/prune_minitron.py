@@ -319,11 +319,9 @@ def main(args: argparse.Namespace):
         # NAS-based pruning: restrict search space to a smaller set of candidates.
         # Allow more choices for MoE FFN as they are generally smaller.
         # NOTE: Reduce divisors and increase config['top_k'] to potentially find a better model.
-        hidden_size_divisor = args.ss_channel_divisor if args.ss_channel_divisor else 256
-        ffn_hidden_size_divisor = (
-            args.ss_channel_divisor
-            if args.ss_channel_divisor
-            else (256 if (provider.num_moe_experts or 0) > 0 else 512)
+        hidden_size_divisor = args.ss_channel_divisor or 256
+        ffn_hidden_size_divisor = args.ss_channel_divisor or (
+            256 if (provider.num_moe_experts or 0) > 0 else 512
         )
         ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
             hidden_size_divisor=hidden_size_divisor,

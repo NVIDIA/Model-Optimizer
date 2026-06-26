@@ -30,7 +30,7 @@ class TestBuildSlurmExecutor:
 
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
-    def test_scratch_and_modelopt_mounts(self, mock_tunnel, mock_executor):
+    def test_installed_mode_skips_modelopt_source_mounts(self, mock_tunnel, mock_executor):
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
@@ -64,13 +64,60 @@ class TestBuildSlurmExecutor:
         mock_executor.assert_called_once()
         call_kwargs = mock_executor.call_args[1]
 
-        # Verify container mounts include scratch, modelopt, and experiment title
+        # Installed package mode packages only launcher examples/common. Do not
+        # mount ModelOpt source overlays that were not packaged into remote code.
         mounts = call_kwargs["container_mounts"]
         assert any("/scratchspace" in m for m in mounts)
-        assert any("/opt/modelopt" in m for m in mounts)
         assert any("/cicd" in m for m in mounts)
+        assert not any("/opt/modelopt" in m for m in mounts)
+        assert not any("modelopt_recipes" in m for m in mounts)
         # Original mount preserved
         assert any("/hf-local:/hf-local" in m for m in mounts)
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_source_mode_adds_modelopt_source_mounts(self, mock_tunnel, mock_executor):
+        mock_tunnel.return_value = MagicMock()
+
+        slurm_config = MagicMock(
+            requeue=False,
+            host="test-host",
+            port=22,
+            account="test_account",
+            partition="batch",
+            container="nvcr.io/test:latest",
+            modelopt_install_path="/opt/modelopt",
+            container_mounts=[],
+            srun_args=["--no-container-mount-home"],
+            nodes=1,
+            ntasks_per_node=4,
+            gpus_per_node=4,
+            array=None,
+        )
+
+        build_slurm_executor(
+            user="testuser",
+            identity=None,
+            slurm_config=slurm_config,
+            experiment_id="exp_001",
+            job_dir="/lustre/experiments",
+            task_name="job_0",
+            packager=MagicMock(),
+            modelopt_src_path="/checkout/modelopt",
+            experiment_title="cicd",
+        )
+
+        mounts = mock_executor.call_args[1]["container_mounts"]
+        assert any(
+            "/lustre/experiments/cicd/exp_001/job_0/code/modules/Model-Optimizer/modelopt:"
+            "/opt/modelopt" in m
+            for m in mounts
+        )
+        assert any(
+            "/lustre/experiments/cicd/exp_001/job_0/code/modules/Model-Optimizer/"
+            "modelopt_recipes:/opt/modelopt_recipes" in m
+            for m in mounts
+        )
 
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
@@ -265,9 +312,10 @@ class TestBuildSlurmExecutor:
             packager=MagicMock(),
         )
 
-        # Should not crash; mounts should still include scratch + modelopt + title
+        # Should not crash; installed mode still includes scratch + title mounts.
         mounts = mock_executor.call_args[1]["container_mounts"]
-        assert len(mounts) >= 3
+        assert "/j/cicd/e:/scratchspace" in mounts
+        assert "/j/cicd:/cicd" in mounts
 
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")

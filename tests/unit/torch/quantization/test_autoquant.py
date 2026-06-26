@@ -109,7 +109,7 @@ def test_quant_recipe(quant_cfg, other_quant_cfg, is_less_than):
     assert (qr_this < qr_other) == is_less_than
 
     qr_this_duplicate = QuantRecipe(quant_cfg)
-    assert qr_this_duplicate in {qr_this}
+    assert qr_this_duplicate == qr_this
 
 
 def test_quant_recipe_hparam():

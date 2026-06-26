@@ -137,7 +137,7 @@ default for short model-bound tasks and override the outliers:
 
 | Bottleneck | AA tasks | Cap by |
 | --- | --- | --- |
-| Model / GPU KV (short) | `gpqa_diamond_aa_v3`, `ns_ifbench` | top-level default (preemption-free KV-fit) |
+| Model / GPU KV (short) | `ns_gpqa`, `ns_ifbench` | top-level default (preemption-free KV-fit) |
 | Long-context KV (~120K) | `ns_aa_lcr` | **low** override — prefill thrash; MLA ≫ GQA |
 | Judge / user-sim rate limit | `ns_hle_aa`, `ns_aa_lcr`, `tau2_bench_telecom` | judge endpoint 429s, **not** the model |
 | Sandbox execution | `ns_scicode` | sandbox slots |
@@ -151,8 +151,8 @@ default for short model-bound tasks and override the outliers:
 
 ## Worked examples (8×B200)
 
-- **Dense 9B NVFP4** (~5–6 GB) → **TP=1/DP=8, no EP**. GPQA `n_samples=1` = 198 reqs
-  (request-bound) → `parallelism=256`, `max-num-seqs=32`. `n_samples=8` = 1584
+- **Dense 9B NVFP4** (~5–6 GB) → **TP=1/DP=8, no EP**. GPQA `num_repeats=1` = 198 reqs
+  (request-bound) → `parallelism=256`, `max-num-seqs=32`. `num_repeats=8` = 1584
   (capacity-bound) → start 512; tune up only while preemption≈0 (~82K reasoning output
   → knee may be <1024).
 - **Dense ~70B BF16, 8×H100/80GB** (~140 GB) → won't fit 1 GPU → **TP=2/DP=4, no EP**.

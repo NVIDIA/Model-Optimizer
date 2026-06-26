@@ -517,7 +517,23 @@ def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     )
 
 
-@pytest.mark.parametrize("hidden_size", [256, 320])
+@pytest.mark.parametrize(
+    "hidden_size",
+    [
+        256,
+        pytest.param(
+            320,
+            marks=pytest.mark.skip(
+                # TODO: Flaky CUDA "illegal memory access" during AWQ-lite calibration on the
+                # nemo:26.06 container (TE 2.16 / CUDA 13 / torch 2.12). It is intermittent
+                # (passes in isolation, only surfaces under full-suite accumulated GPU state) and
+                # poisons the process CUDA context, cascading into all subsequent quant tests.
+                # Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic. Re-enable once fixed.
+                reason="Flaky CUDA illegal memory access on nemo:26.06 (TE 2.16 / CUDA 13); see TODO"
+            ),
+        ),
+    ],
+)
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
     initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
 

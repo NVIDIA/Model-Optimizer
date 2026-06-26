@@ -464,6 +464,8 @@ def _launcher_argv(abs_yaml: Path, checkout: SourceCheckout | None, *flags: str)
     return [
         _uv_binary(),
         "run",
+        "--reinstall-package",
+        "modelopt-launcher",
         "--project",
         str(checkout.launcher_dir),
         "modelopt-launcher",
@@ -1085,7 +1087,7 @@ def submit_job_impl(
             stdout_tail,
             re.IGNORECASE,
         )
-        if m and m.group(1).lower() not in {"status"}:
+        if m and m.group(1).lower() != "status":
             experiment_id = m.group(1)
     # Match any path containing `/experiments/<id>/` — don't anchor on
     # cluster-specific filesystem roots (NVIDIA's /lustre, partner

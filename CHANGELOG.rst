@@ -34,6 +34,10 @@ Changelog
   - ``hf_ptq.py`` also unwraps ``ModelOutput`` dataclasses from ``.generate()`` so the preview decode works on diffusion models. Non-tied models see no behavioral change.
 - Add **context-parallel (CP)** and **data-parallel (DP)** support to the shared Megatron-Core inference/calibration utilities. Under CP, ``get_megatron_calibration_forward_loop`` and ``megatron_mmlu`` partition each sequence across CP ranks (zigzag load-balanced), ``megatron_prefill`` accepts a CP-partitioned ``position_ids`` and lets the CP-aware causal attention build the mask, and MMLU gathers per-rank logits back to the full sequence for last-token scoring. Under DP, calibration shards the dataset across data-parallel ranks (``DistributedSampler``; amax is max-reduced across the DP group inside ``mtq``) and ``megatron_mmlu`` shards whole batches across DP ranks and all-reduces the per-subject counts. DP is implicit (``world_size / (tp * pp * cp)``); ``examples/megatron_bridge/quantize.py`` gains a ``--cp_size`` flag.
 
+**Bug Fixes**
+
+- Fix ``ShapeInferenceError`` during ONNX INT8 + FP16 quantization (``--high_precision_dtype fp16``) of weakly-typed models (e.g. TensorFlow exports) that carry stale rank-0 ``graph.output`` shapes or ops such as ``TopK`` that ONNX's static shape inference cannot resolve. ``clear_stale_value_info`` now reconciles stale output shapes via symbolic shape inference (keeping every output's shape field populated), and AutoCast runs ONNX shape inference in strict mode and falls back to schema-based standalone type inference when it fails, so unresolved ops no longer leave tensors untyped.
+
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^
 
@@ -122,6 +126,7 @@ Changelog
 - Fix the GPT-OSS MXFP4 → NVFP4 PTQ path in ``examples/llm_ptq/hf_ptq.py`` (used with ``--cast_mxfp4_to_nvfp4``). ``get_model`` now loads native MXFP4 checkpoints (``openai/gpt-oss-*``) dequantized to BF16 ``GptOssExperts`` via ``Mxfp4Config(dequantize=True)`` on a sequential device map. This fixes a CUDA illegal-memory access during the multi-GPU dequant load and the ``NotImplementedError`` for experts type ``Mxfp4GptOssExperts`` during unified HF export (the packed-kernel experts wrapper, used when the optional ``kernels`` package is installed, is unsupported by export); ``kernels`` is no longer required. The ``--cast_mxfp4_to_nvfp4`` step now also resolves a HF Hub ID ``--pyt_ckpt_path`` to its local snapshot directory instead of failing with ``FileNotFoundError``.
 - Fix ``_QuantGptOssExperts`` / ``_QuantLlama4TextExperts`` static-block NVFP4 weight calibration raising ``ValueError: Input shape has changed`` during the calibration forward. These experts quantize their weights transposed (``_transposed_quantize``); ``iter_weights_for_calibration`` now yields the same transposed view so weight-only calibration and the forward agree on the block-quant shape (and the export ``_amax`` orientation).
 - Fix unified HF checkpoint export for Llama4 MoE models. The uncalibrated-experts input-quantizer ``amax`` fallback in ``_export_transformers_checkpoint`` special-cased only ``QuantGptOssExperts``; ``QuantLlama4TextExperts`` uses the same fused ``gate_up_proj`` / ``down_proj`` layout and is now handled by the same branch, fixing the export failure.
+- Fix ``NotImplementedError: "max_all_cuda" not implemented for 'Float8_e4m3fn'`` during quantization calibration of models with natively FP8 (``float8_e4m3fn`` / ``float8_e5m2``) weights, such as DeepSeek-V3. FP8 dtypes implement no reduction (``max``/``amax``), ``abs``, or elementwise ``maximum`` kernels, so ``reduce_amax`` now upcasts FP8 inputs to the default float dtype before reducing; the upcast is lossless and only affects the FP8 path.
 
 0.44 (2026-05-14)
 ^^^^^^^^^^^^^^^^^

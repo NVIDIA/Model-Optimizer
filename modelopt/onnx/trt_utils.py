@@ -154,7 +154,7 @@ def get_custom_layers(
 
         for i in range(layer.num_outputs):
             output_tensor = layer.get_output(i)
-            if output_tensor and not all_tensor_info.get(output_tensor.name, None):
+            if output_tensor and not all_tensor_info.get(output_tensor.name):
                 all_tensor_info[output_tensor.name] = {
                     "shape": ["unk" if (s == -1) else s for s in output_tensor.shape],
                     "dtype": output_tensor.dtype,

@@ -82,7 +82,7 @@ hf = [
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
-    "transformers>=4.56,<5.10",                                                       # Should match modelopt/torch/__init__.py and noxfile.py
+    "transformers>=4.56,<5.13",                                                       # Should match modelopt/torch/__init__.py and noxfile.py
     "wonderwords",
 ]
 
@@ -96,18 +96,18 @@ puzzletron = [ # Dependedencies for modelopt.torch.puzzletron subpackage
 ]
 dev-lint = [
     "bandit[toml]==1.7.9", # security/compliance checks
-    "mypy==1.17.1",
-    "pre-commit==4.3.0",
-    "ruff==0.12.11",
+    "mypy==2.1.0",
+    "pre-commit==4.6.0",
+    "ruff==0.15.20",
 ]
 dev-docs = [
     "autodoc_pydantic>=2.1.0",
-    "sphinx~=8.1.0",
+    "sphinx~=9.1.0",
     "sphinx-argparse>=0.5.2",
     "sphinx-autobuild>=2024.10.3",
     "sphinx-copybutton>=0.5.2",
     "sphinx-inline-tabs>=2023.4.21",
-    "sphinx-rtd-theme~=3.0.0",
+    "sphinx-rtd-theme~=3.1.0",
     "sphinx-togglebutton>=0.3.2",
 ]
 dev-test = [
@@ -198,10 +198,10 @@ extend-ignore = [
     "PT030",
     "RUF002",
     "RUF012",
+    "RUF059",
     "SIM102",
     "SIM108",
     "SIM115",
-    "UP038",
 ]
 
 
@@ -212,10 +212,8 @@ extend-ignore = [
 "tests/*" = ["B017", "D", "E402", "PT012"]
 ".agents/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
 "*/_[a-zA-Z]*" = ["D"] # Private packages (_abc/*.py) or modules (_xyz.py)
-"*.ipynb" = [
-    "D",
-    "E501",
-] # Ignore missing docstrings or line length for Jupyter notebooks
+"*.ipynb" = ["D", "E501"] # Ignore missing docstrings or line length for Jupyter notebooks
+"modelopt/torch/kernels/*" = ["N803", "N806", "E731"] # triton style
 "modelopt/torch/puzzletron/*" = [
     "C4",
     "D",
@@ -226,16 +224,7 @@ extend-ignore = [
     "RUF",
     "SIM",
     "UP",
-] # TODO: Disabled for now, will enable later, once all puzzletron code is migrated
-"modelopt/torch/kernels/quantization/gemm/*" = [
-    "N803",
-    "N806",
-    "E731",
-] # triton style
-"modelopt/torch/kernels/sparsity/attention/*" = [
-    "N803",
-    "N806",
-] # triton kernel style
+] # TODO: Disabled for now, will enable once newer puzzletron code with ruff fixes is migrated
 
 [tool.ruff.lint.pycodestyle]
 max-line-length = 120 # Line length limit for comments and docstrings
@@ -263,6 +252,12 @@ disable_error_code = [
     "has-type",
     "var-annotated",
     "override",
+]
+enable_error_code = [
+    "ignore-without-code",  # require `# type: ignore[code]` instead of bare `# type: ignore`
+    "deprecated",           # use of `@deprecated`-marked APIs
+    # TODO: enable in a follow-up (each surfaces many errors needing case-by-case fixes):
+    #   "possibly-undefined", "redundant-expr", "truthy-bool"
 ]
 explicit_package_bases = true
 namespace_packages = true

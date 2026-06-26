@@ -287,7 +287,7 @@ class QuantRecipeHparam(Hparam):
         cost_weight: float = 1.0,
     ) -> None:
         """Initializes Hparam with original value and choices."""
-        choices = sorted({*(choices if choices else []), QuantRecipe(quant_cfg=None)})
+        choices = sorted({*(choices or []), QuantRecipe(quant_cfg=None)})
         super().__init__(choices, original=choices[0])
 
         self.name = name

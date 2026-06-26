@@ -349,9 +349,11 @@ def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["source_ref"] == "feature/ref"
     assert result["source_sha"] == "b" * 40
-    assert captured["argv"][:5] == [
+    assert captured["argv"][:7] == [
         "uv",
         "run",
+        "--reinstall-package",
+        "modelopt-launcher",
         "--project",
         str(checkout_root / "tools" / "launcher"),
         "modelopt-launcher",

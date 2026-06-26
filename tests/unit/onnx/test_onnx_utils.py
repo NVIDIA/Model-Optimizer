@@ -33,6 +33,7 @@ from modelopt.onnx.utils import (
     clear_stale_value_info,
     get_input_names_from_bytes,
     get_output_names_from_bytes,
+    infer_types,
     randomize_weights_onnx_bytes,
     remove_node_training_mode,
     remove_weights_data,
@@ -364,3 +365,94 @@ def test_clear_stale_value_info(output_elem_type, with_value_info, expected_coun
     assert model.graph.output[0].type.tensor_type.elem_type == onnx.TensorProto.FLOAT
     assert len(model.graph.value_info) == 0
     assert count == expected_count
+
+
+def _make_matmul_model(output_shape):
+    """Build an X[3,4] @ W[4,5] -> Y model with Y declared using ``output_shape``."""
+    weights = make_tensor("W", onnx.TensorProto.FLOAT, [4, 5], np.zeros(20, dtype=np.float32))
+    nodes = [make_node("MatMul", ["X", "W"], ["Y"], name="matmul")]
+    inputs = [make_tensor_value_info("X", onnx.TensorProto.FLOAT, [3, 4])]
+    outputs = [make_tensor_value_info("Y", onnx.TensorProto.FLOAT, output_shape)]
+    graph = make_graph(nodes, "matmul_graph", inputs, outputs, initializer=[weights])
+    return make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
+
+
+def test_clear_stale_value_info_reconciles_stale_rank0_output():
+    # Y is really rank-2 [3, 5] but the model declares it as a rank-0 scalar (stale
+    # metadata typical of weakly-typed exports). This is the rank-(N)-vs-(0) class of
+    # conflict that crashes downstream shape inference (NVBug 6058907).
+    model = _make_matmul_model(output_shape=[])
+    assert len(model.graph.output[0].type.tensor_type.shape.dim) == 0  # stale rank-0
+
+    clear_stale_value_info(model)
+
+    out_type = model.graph.output[0].type.tensor_type
+    assert out_type.HasField("shape")  # shape field must remain (onnx.checker requires it)
+    assert [d.dim_value for d in out_type.shape.dim] == [3, 5]  # reconciled to the real shape
+    onnx.checker.check_model(model)
+
+
+def test_clear_stale_value_info_preserves_valid_output_shape():
+    # A correct output shape must be left untouched (no-op for healthy models).
+    model = _make_matmul_model(output_shape=[3, 5])
+
+    clear_stale_value_info(model)
+
+    out_type = model.graph.output[0].type.tensor_type
+    assert [d.dim_value for d in out_type.shape.dim] == [3, 5]
+
+
+def _make_dynamic_dim_model():
+    """Build an X[batch,4] -> Relu -> Y[my_batch,4] model (output declares a different dim_param)."""
+    nodes = [make_node("Relu", ["X"], ["Y"], name="relu")]
+    inputs = [make_tensor_value_info("X", onnx.TensorProto.FLOAT, ["batch", 4])]
+    outputs = [make_tensor_value_info("Y", onnx.TensorProto.FLOAT, ["my_batch", 4])]
+    graph = make_graph(nodes, "dyn_graph", inputs, outputs)
+    return make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
+
+
+def test_clear_stale_value_info_preserves_dynamic_dim_names():
+    # A healthy output with a named dynamic dim must not be rewritten just because
+    # symbolic shape inference re-derives a different dim_param. Y is declared with
+    # "my_batch" while the graph would infer "batch" from the input: same rank, no
+    # concrete-dim conflict, so the declaration (incl. its dim_param) must be preserved.
+    model = _make_dynamic_dim_model()
+
+    clear_stale_value_info(model)
+
+    out_dims = model.graph.output[0].type.tensor_type.shape.dim
+    assert [d.dim_param or d.dim_value for d in out_dims] == ["my_batch", 4]
+    onnx.checker.check_model(model)
+
+
+def _make_topk_overflow_model():
+    """Build a model whose TopK ``k`` (5) exceeds the static axis dim (3).
+
+    ONNX shape inference raises "Axis has less than the requested k elements" on this
+    model (the same failure class seen in NVBug 6058907), while standalone type
+    inference can still derive the output types (values float, indices int64).
+    """
+    k = make_tensor("k", onnx.TensorProto.INT64, [1], [5])
+    nodes = [
+        make_node("TopK", ["X", "k"], ["vals", "inds"], axis=1, name="topk"),
+        make_node("Cast", ["inds"], ["out"], to=onnx.TensorProto.FLOAT, name="cast_inds"),
+    ]
+    inputs = [make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 3])]
+    outputs = [make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1, 5])]
+    graph = make_graph(nodes, "topk_overflow", inputs, outputs, initializer=[k])
+    return make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
+
+
+def test_infer_types_falls_back_to_standalone_when_onnx_fails():
+    # ONNX shape inference cannot resolve this model's TopK. With strict_mode=True it raises
+    # (instead of silently leaving the TopK outputs untyped), so infer_types catches the
+    # error and falls back to standalone type inference, which still types every tensor.
+    model = _make_topk_overflow_model()
+
+    inferred = infer_types(model, strict_mode=True)
+
+    value_info_types = {vi.name: vi.type.tensor_type.elem_type for vi in inferred.graph.value_info}
+    output_types = {o.name: o.type.tensor_type.elem_type for o in inferred.graph.output}
+    assert value_info_types.get("vals") == onnx.TensorProto.FLOAT
+    assert value_info_types.get("inds") == onnx.TensorProto.INT64  # TopK indices
+    assert output_types.get("out") == onnx.TensorProto.FLOAT

@@ -239,9 +239,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         e2m1_bounds = cls.get_e2m1_bounds(device)
         ord = torch.searchsorted(e2m1_bounds, weight_abs, out_int32=True).to(torch.uint8)
 
-        # Efficiently check for rounding at odd-indexed bounds [0.75, 1.75, 2.5]
+        # Efficiently check for rounding at odd-indexed bounds [0.75, 1.75, 3.5]
         # Only need to check bounds at indices 1, 3, 5
-        odd_bounds = e2m1_bounds[[1, 3, 5]]  # [0.75, 1.75, 2.5]
+        odd_bounds = e2m1_bounds[[1, 3, 5]]  # [0.75, 1.75, 3.5]
         equals_odd_bounds = torch.any(weight_abs.unsqueeze(-1) == odd_bounds, dim=-1).to(
             torch.uint8
         )

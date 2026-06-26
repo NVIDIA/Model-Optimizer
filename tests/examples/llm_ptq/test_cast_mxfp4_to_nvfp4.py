@@ -232,7 +232,7 @@ def test_apply_to_model_raises_on_missing_blocks_pair(tmp_path):
         )
     )
     model = _FakeModel(num_blocks=4)
-    with pytest.raises(AssertionError, match="no paired '.*_blocks' tensor"):
+    with pytest.raises(AssertionError, match=r"no paired '.*_blocks' tensor"):
         cast.apply_to_model(model, ckpt_dir)
 
 

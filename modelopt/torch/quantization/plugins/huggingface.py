@@ -30,6 +30,11 @@ from torch import Tensor
 from torch.nn.functional import linear
 from transformers.models.t5.modeling_t5 import T5Attention
 
+from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
+from modelopt.torch.kernels.common.attention import (
+    triton_attention_forward,
+    validate_triton_attention_envelope,
+)
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
@@ -77,16 +82,16 @@ class _QuantAttention(QuantModule):
         self.q_bmm_quantizer = TensorQuantizer()
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
-        self.softmax_quantizer = TensorQuantizer()
+        self.p_bmm_quantizer = TensorQuantizer()
         self.kitchen_attn_fn = None
         self.use_kitchen = False
 
     def _init_kitchen_attn_fn(self):
-        if not self.softmax_quantizer.is_enabled:
+        if not self.p_bmm_quantizer.is_enabled:
             self.kitchen_attn_fn = "disabled"
             return
         self.use_kitchen = True
-        if self.softmax_quantizer.is_mxfp(8):
+        if self.p_bmm_quantizer.is_mxfp(8):
             qfa_params = triton_fa_params.QTritonFAParams(
                 backend="triton",
                 qk_dot_precisions="bf16@bf16",
@@ -99,7 +104,7 @@ class _QuantAttention(QuantModule):
                 use_natural_transcendental_func=False,  # Different from default
             )
         else:
-            raise NotImplementedError(f"softmax_quantizer not supported: {self.softmax_quantizer}")
+            raise NotImplementedError(f"p_bmm_quantizer not supported: {self.p_bmm_quantizer}")
 
         self.kitchen_attn_fn = KitchenFlashAttentionModule(
             num_attention_heads=self.config.num_attention_heads,
@@ -117,6 +122,78 @@ class _QuantAttention(QuantModule):
             qfa_params=qfa_params,
         )
 
+    def _p_qdq_mode(self) -> str | None:
+        """Map the p_bmm_quantizer config to a Triton P quant-dequant mode.
+
+        Returns "fp8" for per-tensor E4M3, "nvfp4" for dynamic E2M1 with
+        block-16 E4M3 scales, or None when the p_bmm_quantizer is disabled
+        or its format is not supported by the built-in Triton kernel
+        (e.g. MXFP8, which goes through kitchen).
+        """
+        pq = self.p_bmm_quantizer
+        if not pq.is_enabled:
+            return None
+        if pq.is_fp8:
+            return "fp8"
+        # Only dynamic NVFP4 maps to the kernel, and only at block size 16 (the kernel
+        # hardcodes it). Static (calibrated) NVFP4 is excluded because is_nvfp4_dynamic
+        # requires dynamically-computed block scales.
+        if pq.is_nvfp4_dynamic and (pq.block_sizes or {}).get(-1, None) == 16:
+            return "nvfp4"
+        return None
+
+    def _triton_qdq_attention(self, p_qdq, query_states, key_states, value_states, **kwargs):
+        """Quantized attention via the built-in Triton kernel (no kitchen required).
+
+        Fake quant-dequant of the softmax probabilities (P) is fused into the
+        flash-attention kernel; see ``p_qdq`` in
+        :func:`modelopt.torch.kernels.common.attention.triton_fa.attention`.
+
+        Inputs outside the kernel/wrapper envelope (sliding window, sinks,
+        softcapping, non-causal masks, ...) raise ``NotImplementedError``
+        instead of silently computing wrong attention; see
+        :func:`validate_triton_attention_envelope
+        <modelopt.torch.kernels.common.attention.hf_triton_attention.validate_triton_attention_envelope>`.
+        """
+        if not TRITON_FA_AVAILABLE:
+            raise RuntimeError(
+                f"p_bmm_quantizer ({p_qdq}) requires the Triton attention kernel. "
+                "Install triton with `pip install triton` and run on a CUDA device."
+            )
+        assert (
+            triton_attention_forward is not None and validate_triton_attention_envelope is not None
+        )
+        attention_mask = kwargs.pop("attention_mask", None)
+        validate_triton_attention_envelope(self, query_states, key_states, attention_mask, **kwargs)
+
+        # Forward a user-set or calibrated per-tensor amax to the kernel, which
+        # converts it to the FP8 / NVFP4 scale. Without one, the kernel default
+        # amax of 1.0 applies -- the theoretical upper bound of the unnormalized
+        # P's amax (P lies in [0, 1]).
+        p_qdq_amax = None
+        pq_amax = getattr(self.p_bmm_quantizer, "_amax", None)
+        if pq_amax is not None:
+            if pq_amax.numel() != 1:
+                raise NotImplementedError(
+                    "p_bmm_quantizer via the Triton attention kernel only supports a "
+                    f"per-tensor (scalar) amax, got shape {tuple(pq_amax.shape)}."
+                )
+            p_qdq_amax = float(pq_amax)
+
+        scaling = kwargs.get("scaling")
+        if scaling is None:
+            scaling = query_states.shape[-1] ** -0.5
+        return triton_attention_forward(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            scaling,
+            p_qdq=p_qdq,
+            p_qdq_amax=p_qdq_amax,
+        )
+
     @staticmethod
     def _quantized_attention(
         original_attention_interface,
@@ -127,12 +204,24 @@ class _QuantAttention(QuantModule):
         *args,
         **kwargs,
     ):
-        if kitchen is not None and self.kitchen_attn_fn is None:
-            self._init_kitchen_attn_fn()
-
         query_states = self.q_bmm_quantizer(query_states)
         key_states = self.k_bmm_quantizer(key_states)
         value_states = self.v_bmm_quantizer(value_states)
+
+        # FP8 / NVFP4 P quant-dequant runs on the built-in Triton kernel
+        # and takes priority over kitchen (which handles MXFP8).
+        p_qdq = self._p_qdq_mode()
+        if p_qdq is not None:
+            # The attention interface passes attention_mask as the only
+            # positional argument after q/k/v; everything else is a kwarg.
+            if args:
+                kwargs["attention_mask"] = args[0]
+            return self._triton_qdq_attention(
+                p_qdq, query_states, key_states, value_states, **kwargs
+            )
+
+        if kitchen is not None and self.kitchen_attn_fn is None:
+            self._init_kitchen_attn_fn()
         if not self.use_kitchen:
             return original_attention_interface(
                 self, query_states, key_states, value_states, *args, **kwargs
@@ -1429,7 +1518,7 @@ def register_dbrx_moe_on_the_fly(model):
 
     The MoE class in DBRX is `transformers_modules.modeling_dbrx.DbrxExpertGLU`, which loads dynamically.
     """
-    if type(model).__name__ in ["DbrxForCausalLM"]:
+    if type(model).__name__ == "DbrxForCausalLM":
         moe_type = type(model.transformer.blocks[0].ffn.experts.mlp)
         # Create a QuantDbrxExpertGLU class on the fly
         if QuantModuleRegistry.get(moe_type) is None:
