@@ -17,6 +17,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore::UserWarning"),
@@ -82,6 +83,28 @@ class TestDecodeAttention:
             q, k_cache, v_cache, block_table, seq_lens, softmax_scale=scale, page_size=page_size
         )
         torch.testing.assert_close(out, _dense_decode(q, k, v, scale), rtol=5e-3, atol=5e-3)
+
+    @pytest.mark.parametrize(("num_q_heads", "num_kv_heads"), [(32, 8), (16, 16)])
+    def test_matches_pytorch_sdpa(self, num_q_heads, num_kv_heads):
+        """The decode kernel matches PyTorch native scaled_dot_product_attention (fp16)."""
+        batch, seq_k, head_dim, page_size = 2, 1024, 128, 16
+        scale = 1.0 / (head_dim**0.5)
+        q, k, v, seq_lens = self._inputs(batch, num_q_heads, num_kv_heads, seq_k, head_dim, seed=5)
+        k_cache, v_cache, block_table = _paged_cache(k, v, seq_lens, page_size)
+
+        out = attention_decode(
+            q, k_cache, v_cache, block_table, seq_lens, softmax_scale=scale, page_size=page_size
+        )
+        # Native attention: the single decode query [B,H,1,D] attends to all KV.
+        g = num_q_heads // num_kv_heads
+        ref = F.scaled_dot_product_attention(
+            q.unsqueeze(2),
+            k.repeat_interleave(g, dim=1),
+            v.repeat_interleave(g, dim=1),
+            scale=scale,
+            is_causal=False,
+        ).squeeze(2)
+        torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
 
     def test_tiny_threshold_matches_dense(self):
         """A near-zero lambda skips almost nothing, so output stays close to dense."""
