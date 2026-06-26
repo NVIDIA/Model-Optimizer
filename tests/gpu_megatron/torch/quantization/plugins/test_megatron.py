@@ -426,6 +426,7 @@ FP8_GEMM_KV_CFG = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
 FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 
 
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize(
     "config",
     [
