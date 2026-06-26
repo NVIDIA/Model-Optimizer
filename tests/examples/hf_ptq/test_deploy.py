@@ -502,6 +502,12 @@ def test_glm(command):
             tensor_parallel_size=8,
             mini_sm=100,
         ),
+        *ModelDeployerList(
+            model_id="nvidia/MiniMax-M3-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=4,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
