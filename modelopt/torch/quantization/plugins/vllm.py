@@ -501,12 +501,20 @@ class _QuantVLLMAttention(QuantModule):
         self.q_bmm_quantizer = TensorQuantizer()
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
+        # P (softmax) quantizer: a config carrier restored from the checkpoint but NOT applied here
+        # (P only exists inside the attention kernel). The sparse Triton impl reads it to apply
+        # P_QDQ in-kernel. When ``_value_quant_in_kernel`` is set (sparse path), V is likewise
+        # quantized along the key axis in-kernel by that impl, so the V pre-step below is skipped to
+        # avoid double-quantizing V on the wrong (head_dim) axis. Default off keeps native behavior.
+        self.p_bmm_quantizer = TensorQuantizer()
+        self._value_quant_in_kernel = False
         self.parallel_state = create_parallel_state()
 
     def forward(self, query, key, value, *args, **kwargs):
         query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        if not self._value_quant_in_kernel:
+            value = self.v_bmm_quantizer(value)
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:
