@@ -377,6 +377,8 @@ def verify_slurm_setup_impl(
     cluster_host: str,
     cluster_user: str | None = None,
     identity: str | None = None,
+    control_socket: str | None = None,
+    reconnect_command: str | None = None,
 ) -> dict:
     """Probe passwordless SSH to a Slurm cluster login node.
 
@@ -394,6 +396,44 @@ def verify_slurm_setup_impl(
         "-o",
         "ConnectTimeout=5",
     ]
+    if control_socket:
+        expanded_socket = os.path.expanduser(control_socket)
+        check_target = f"{cluster_user}@{cluster_host}" if cluster_user else cluster_host
+        check = subprocess.run(  # nosec B603 B607 - fixed ssh argv, no shell.
+            [
+                "ssh",
+                "-O",
+                "check",
+                "-o",
+                f"ControlPath={expanded_socket}",
+                check_target,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if check.returncode != 0:
+            return {
+                "ok": False,
+                "executor": "slurm",
+                "cluster_host": cluster_host,
+                "cluster_user": cluster_user,
+                "reason": "mfa_reauth_required",
+                "control_socket": control_socket,
+                "reconnect_command": reconnect_command,
+                "diagnostic": (
+                    "OpenSSH ControlMaster socket is absent or expired. "
+                    f"Run `{reconnect_command or 'ssh <cluster>'}`, keep it "
+                    "connected, then retry."
+                ),
+            }
+        argv += [
+            "-o",
+            f"ControlPath={expanded_socket}",
+            "-o",
+            "ControlMaster=no",
+        ]
     if identity:
         argv += ["-i", identity]
     target = f"{cluster_user}@{cluster_host}" if cluster_user else cluster_host
@@ -450,6 +490,7 @@ def verify_slurm_setup_impl(
         "executor": "slurm",
         "cluster_host": cluster_host,
         "cluster_user": cluster_user,
+        "control_socket": control_socket,
         "whoami": lines[0] if lines else "",
         "remote_hostname": lines[1] if len(lines) > 1 else "",
     }
@@ -490,14 +531,24 @@ def _normalize_yaml_path(yaml_path: str) -> Path:
 def submit_job_impl(
     *,
     yaml_path: str,
-    hf_local: str | None,
-    cluster_host: str | None,
-    cluster_user: str | None,
-    identity: str | None,
-    job_dir: str | None,
-    job_name: str | None,
-    extra_overrides: dict[str, str] | None,
-    skip_verify: bool,
+    hf_local: str | None = None,
+    cluster_host: str | None = None,
+    cluster_user: str | None = None,
+    identity: str | None = None,
+    job_dir: str | None = None,
+    job_name: str | None = None,
+    extra_overrides: dict[str, str] | None = None,
+    skip_verify: bool = False,
+    account: str | None = None,
+    partition: str | None = None,
+    container: str | None = None,
+    gpus_per_node: int | None = None,
+    ntasks_per_node: int | None = None,
+    control_socket: str | None = None,
+    reconnect_command: str | None = None,
+    gpu_type: str | None = None,
+    mfa: bool = False,
+    ssh_alias: str | None = None,
     dry_run: bool = False,
 ) -> dict:
     """Submit a launcher YAML.
@@ -564,6 +615,8 @@ def submit_job_impl(
                 cluster_host=cluster_host or "",
                 cluster_user=cluster_user,
                 identity=identity,
+                control_socket=control_socket,
+                reconnect_command=reconnect_command,
             )
         if not check.get("ok"):
             return {
@@ -622,7 +675,21 @@ def submit_job_impl(
         argv.append(f"job_dir={job_dir}")
     if job_name:
         argv.append(f"job_name={job_name}")
-    for k, v in (extra_overrides or {}).items():
+
+    overrides = dict(extra_overrides or {})
+    if executor == "slurm":
+        slurm_prefix = "pipeline.task_0.slurm_config."
+        if account:
+            overrides.setdefault(f"{slurm_prefix}account", account)
+        if partition:
+            overrides.setdefault(f"{slurm_prefix}partition", partition)
+        if container:
+            overrides.setdefault(f"{slurm_prefix}container", container)
+        if gpus_per_node is not None:
+            overrides.setdefault(f"{slurm_prefix}gpus_per_node", str(gpus_per_node))
+        if ntasks_per_node is not None:
+            overrides.setdefault(f"{slurm_prefix}ntasks_per_node", str(ntasks_per_node))
+    for k, v in overrides.items():
         argv.append(f"{k}={v}")
 
     # Run from the launcher dir so it picks up its own ./core.py etc.
@@ -642,6 +709,14 @@ def submit_job_impl(
         # against this same host above (when verify_setup=True), so the
         # value is known good.
         child_env["SLURM_HOST"] = cluster_host or ""
+        if account:
+            child_env["SLURM_ACCOUNT"] = account
+        if partition:
+            child_env["SLURM_PARTITION"] = partition
+        if control_socket:
+            child_env["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"] = os.path.expanduser(control_socket)
+        if reconnect_command:
+            child_env["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] = reconnect_command
 
     if executor == "docker":
         # Docker mode: spawn detached. Discard stdout/stderr to /dev/null —

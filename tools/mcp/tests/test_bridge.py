@@ -194,6 +194,63 @@ def test_verify_slurm_ssh_success(monkeypatch):
     assert result["remote_hostname"] == "cluster-login-01"
 
 
+def test_verify_slurm_controlmaster_success(monkeypatch):
+    """MFA clusters can verify through an existing OpenSSH ControlMaster socket."""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ["ssh", "-O", "check"]:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        assert "ControlPath=/tmp/ptyche.sock" in argv
+        assert "ControlMaster=no" in argv
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="chenhany\nlogin-ptyche\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.verify_slurm_setup_impl(
+        cluster_host="login-ptyche.nvidia.com",
+        cluster_user="chenhany-mfa",
+        control_socket="/tmp/ptyche.sock",
+        reconnect_command="ssh ptyche",
+    )
+
+    assert result["ok"] is True
+    assert result["control_socket"] == "/tmp/ptyche.sock"
+    assert len(calls) == 2
+
+
+def test_verify_slurm_controlmaster_missing(monkeypatch):
+    """Missing ControlMaster socket returns a reauth diagnostic before probing SSH."""
+
+    def fake_run(argv, **kwargs):
+        assert argv[:3] == ["ssh", "-O", "check"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=255,
+            stdout="",
+            stderr="Control socket connect failed",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.verify_slurm_setup_impl(
+        cluster_host="login-ptyche.nvidia.com",
+        cluster_user="chenhany-mfa",
+        control_socket="/tmp/missing.sock",
+        reconnect_command="ssh ptyche",
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "mfa_reauth_required"
+    assert result["reconnect_command"] == "ssh ptyche"
+
+
 def test_verify_slurm_auth_failed(monkeypatch):
     """Ssh -o BatchMode=yes exit 255 → ssh_auth_failed with diagnostic."""
 
@@ -268,6 +325,340 @@ def test_submit_job_yaml_not_found(monkeypatch, tmp_path):
     )
     assert result["ok"] is False
     assert result["reason"] == "yaml_not_found"
+
+
+def test_ensure_source_checkout_defaults_to_main(monkeypatch, tmp_path):
+    """Managed source defaults to Model-Optimizer main and the default repo."""
+    monkeypatch.delenv("MODELOPT_MCP_DISABLE_MANAGED_SOURCE", raising=False)
+    monkeypatch.setenv("MODELOPT_MCP_SOURCE_CACHE", str(tmp_path / "cache"))
+    seen = {}
+
+    def fake_resolve(repo, ref):
+        seen["repo"] = repo
+        seen["ref"] = ref
+        return {"ok": True, "resolved_sha": "a" * 40}
+
+    monkeypatch.setattr(bridge, "_resolve_source_ref", fake_resolve)
+    monkeypatch.setattr(bridge, "_checkout_ready", lambda path, sha: True)
+
+    result = bridge._ensure_source_checkout()
+
+    assert result["ok"] is True
+    assert seen["repo"] == "https://github.com/NVIDIA/Model-Optimizer.git"
+    assert seen["ref"] == "main"
+    assert result["checkout"].resolved_sha == "a" * 40
+
+
+def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
+    """Managed source routes launcher execution through uv --project <checkout>."""
+    checkout_root = tmp_path / "checkout"
+    yaml_dir = checkout_root / "tools" / "launcher" / "examples" / "fam" / "model"
+    yaml_dir.mkdir(parents=True)
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    checkout = bridge.SourceCheckout(
+        repo="https://example.com/modelopt.git",
+        ref="feature/ref",
+        resolved_sha="b" * 40,
+        root=checkout_root,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_ensure_source_checkout",
+        lambda **_: {"ok": True, "checkout": checkout},
+    )
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Dry-run OK\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="fam/model/config.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+        source_ref="feature/ref",
+    )
+
+    assert result["ok"] is True
+    assert result["source_ref"] == "feature/ref"
+    assert result["source_sha"] == "b" * 40
+    assert captured["argv"][:7] == [
+        "uv",
+        "run",
+        "--reinstall-package",
+        "modelopt-launcher",
+        "--project",
+        str(checkout_root / "tools" / "launcher"),
+        "modelopt-launcher",
+    ]
+    assert str(yaml_path) in captured["argv"]
+    assert captured["env"]["MODELOPT_MCP_SOURCE_ROOT"] == str(checkout_root)
+    assert captured["env"]["MODELOPT_MCP_SOURCE_SHA"] == "b" * 40
+
+
+def test_submit_job_source_checkout_failure_short_circuits(monkeypatch):
+    """Source checkout failures return structured diagnostics and do not launch."""
+    monkeypatch.setattr(
+        bridge,
+        "_ensure_source_checkout",
+        lambda **_: {
+            "ok": False,
+            "reason": "source_ref_not_found",
+            "diagnostic": "missing ref",
+        },
+    )
+
+    result = bridge.submit_job_impl(
+        yaml_path="examples/test.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+        source_ref="ghost",
+    )
+
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+    assert result["reason"] == "source_ref_not_found"
+
+
+def test_submit_job_slurm_zero_exit_without_ids_is_failure(monkeypatch, tmp_path):
+    """Slurm submit must not report success when launcher emits no ids."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(
+        bridge,
+        "verify_slurm_setup_impl",
+        lambda **_: {"ok": True},
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Configuring global options\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "launch_result_unparsed"
+
+
+def test_submit_job_slurm_parses_nemo_job_id(monkeypatch, tmp_path):
+    """Parse Slurm job id from Nemo's experiment status output."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(
+        bridge,
+        "verify_slurm_setup_impl",
+        lambda **_: {"ok": True},
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=(
+                "Experiment Status for cicd_1782173197\n"
+                "- Job id: 13049989\n"
+                'experiment = run.Experiment.from_id("cicd_1782173197")\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    assert result["ok"] is True
+    assert result["slurm_job_id"] == "13049989"
+    assert result["experiment_id"] == "cicd_1782173197"
+
+
+def test_submit_job_slurm_accepts_nmm_cluster_fields(monkeypatch, tmp_path):
+    """nmm-sandbox resolved cluster config maps to launcher overrides and env."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "config.yaml").write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    verify_seen = {}
+
+    def fake_verify(**kwargs):
+        verify_seen.update(kwargs)
+        return {"ok": True}
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=(
+                "Experiment Status for cicd_1782173197\n"
+                "- Job id: 13049989\n"
+                'experiment = run.Experiment.from_id("cicd_1782173197")\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(bridge, "verify_slurm_setup_impl", fake_verify)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        cluster_host="login-ptyche.nvidia.com",
+        cluster_user="chenhany-mfa",
+        account="coreai_dlalgo_cw",
+        partition="batch",
+        container="ubuntu:24.04",
+        ntasks_per_node=1,
+        control_socket="~/.ssh/ptyche.sock",
+        reconnect_command="ssh ptyche",
+        skip_verify=False,
+    )
+
+    assert result["ok"] is True
+    assert verify_seen["control_socket"] == "~/.ssh/ptyche.sock"
+    assert verify_seen["reconnect_command"] == "ssh ptyche"
+    assert "pipeline.task_0.slurm_config.account=coreai_dlalgo_cw" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.partition=batch" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.container=ubuntu:24.04" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.ntasks_per_node=1" in captured["argv"]
+    assert captured["env"]["SLURM_ACCOUNT"] == "coreai_dlalgo_cw"
+    assert captured["env"]["SLURM_PARTITION"] == "batch"
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"].endswith(".ssh/ptyche.sock")
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] == "ssh ptyche"
+
+
+def test_submit_job_slurm_job_id_without_experiment_id_is_failure(monkeypatch, tmp_path):
+    """A Slurm job id alone is not enough for MCP status/log polling."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(
+        bridge,
+        "verify_slurm_setup_impl",
+        lambda **_: {"ok": True},
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Task 0\n- Job id: 13049989\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "launch_result_unparsed"
+    assert result["slurm_job_id"] == "13049989"
+
+
+def test_submit_job_slurm_zero_exit_with_launcher_error_is_failure(monkeypatch, tmp_path):
+    """Launcher fatal text must override a misleading zero exit status."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(
+        bridge,
+        "verify_slurm_setup_impl",
+        lambda **_: {"ok": True},
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Configuring global options\n",
+            stderr="Unexpected error: Failed to parse slurm_factory\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "launch_py_failed"
+    assert "Unexpected error" in result["stderr_tail"]
 
 
 # ---------------------------------------------------------------------------
