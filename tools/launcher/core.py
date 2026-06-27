@@ -23,7 +23,10 @@ import getpass
 import json
 import os
 import re
+import shlex
+import subprocess
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import nemo_run as run
 import yaml
@@ -249,6 +252,140 @@ class SandboxPipeline:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _ControlMasterSession:
+    """Minimal Fabric-like session backed by an OpenSSH ControlMaster socket."""
+
+    user: str
+    host: str
+    port: int
+    sock_path: str
+    pre_command: str | None = None
+    connect_kwargs: dict | None = None
+    is_connected: bool = True
+
+    def _ssh_opts(self) -> list[str]:
+        return [
+            "-o",
+            f"ControlPath={self.sock_path}",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+        ]
+
+    def run(self, command: str, hide: bool = True, warn: bool = False, **kwargs):
+        if self.pre_command:
+            command = f"{self.pre_command} && {command}"
+        proc = subprocess.run(
+            [
+                "ssh",
+                "-p",
+                str(self.port or 22),
+                *self._ssh_opts(),
+                f"{self.user}@{self.host}",
+                command,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0 and not warn:
+            raise RuntimeError(
+                f"Remote command failed (exit {proc.returncode}):\n"
+                f"  cmd: {command}\n"
+                f"  stderr: {proc.stderr.strip()}"
+            )
+        return SimpleNamespace(
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            exited=proc.returncode,
+            command=command,
+        )
+
+    def local(self, command: str, hide: bool = True, warn: bool = False, **kwargs):
+        command = self._inject_controlmaster_rsh(command)
+        proc = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0 and not warn:
+            raise RuntimeError(
+                f"Local command failed (exit {proc.returncode}):\n"
+                f"  cmd: {command}\n"
+                f"  stderr: {proc.stderr.strip()}"
+            )
+        return SimpleNamespace(
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            exited=proc.returncode,
+            command=command,
+        )
+
+    def _inject_controlmaster_rsh(self, command: str) -> str:
+        if not command.startswith("rsync ") or "--rsh='ssh " not in command:
+            return command
+        opts = " ".join(map(shlex.quote, self._ssh_opts()))
+        return command.replace("--rsh='ssh ", f"--rsh='ssh {opts} ", 1)
+
+    def close(self) -> None:
+        self.is_connected = False
+
+
+class ControlMasterSSHTunnel(run.SSHTunnel):
+    """SSHTunnel variant that reuses an existing OpenSSH ControlMaster socket."""
+
+    def _control_socket_path(self) -> str | None:
+        value = os.environ.get("MODELOPT_LAUNCHER_SSH_CONTROL_PATH")
+        return os.path.expanduser(value) if value else None
+
+    def _has_live_controlmaster(self) -> bool:
+        sock_path = self._control_socket_path()
+        if not sock_path or not os.path.exists(sock_path):
+            return False
+        proc = subprocess.run(
+            [
+                "ssh",
+                "-O",
+                "check",
+                "-o",
+                f"ControlPath={sock_path}",
+                f"{self.user}@{self.host}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return proc.returncode == 0
+
+    def _raise_reauth_required(self) -> None:
+        reconnect = os.environ.get("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND") or "ssh"
+        raise RuntimeError(
+            "mfa_reauth_required: an active OpenSSH ControlMaster socket is "
+            f"required at {self._control_socket_path()}. Run `{reconnect}`, "
+            "keep it connected, then retry this submission."
+        )
+
+    def connect(self):
+        """Attach nemo-run to an already-authenticated OpenSSH ControlMaster session."""
+        if self._has_live_controlmaster():
+            self.session = _ControlMasterSession(
+                user=self.user,
+                host=self.host,
+                port=int(getattr(self, "port", 22) or 22),
+                sock_path=self._control_socket_path() or "",
+                pre_command=self.pre_command,
+                connect_kwargs={},
+            )
+            return
+        self._raise_reauth_required()
+
+
 def build_slurm_executor(
     user,
     identity,
@@ -297,7 +434,12 @@ def build_slurm_executor(
     if slurm_config.host in ("localhost", "127.0.0.1"):
         tunnel = run.LocalTunnel(job_dir=job_dir)
     else:
-        tunnel = run.SSHTunnel(
+        tunnel_cls = (
+            ControlMasterSSHTunnel
+            if os.environ.get("MODELOPT_LAUNCHER_SSH_CONTROL_PATH")
+            else run.SSHTunnel
+        )
+        tunnel = tunnel_cls(
             host=slurm_config.host,
             user=user or getattr(slurm_config, "user", None) or getpass.getuser(),
             port=slurm_config.port,

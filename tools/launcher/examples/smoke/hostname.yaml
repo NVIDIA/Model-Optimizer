@@ -1,0 +1,22 @@
+# Minimal Slurm smoke test for launcher/MCP integration on CPU-only or
+# no-GRES clusters. It verifies:
+#   MCP submit_job -> launcher YAML parse -> Slurm submit -> container start.
+
+job_name: hostname_smoke
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Slurm container CPU smoke test"
+
+  task_0:
+    script: common/smoke/hostname.sh
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: "00:10:00"
+      mem: "16G"
+      container: ubuntu:24.04
+      container_mounts: []
+      srun_args: []
