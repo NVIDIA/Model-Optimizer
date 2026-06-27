@@ -27,6 +27,7 @@ Coverage:
 import os
 from unittest.mock import MagicMock, patch
 
+import core
 import pytest
 from core import (
     GlobalVariables,
@@ -38,6 +39,7 @@ from core import (
     get_default_env,
     run_jobs,
 )
+from slurm_config import SlurmConfig
 
 
 class TestCreateTaskFromYamlErrors:
@@ -118,6 +120,28 @@ class TestSandboxPipelineExtended:
         pipeline = SandboxPipeline(task_0=t0)
         # No interpolation happens — args kept as-is
         assert pipeline.tasks[0].args == ["<<global_vars.hf_model>>"]
+
+    def test_slurm_repair_preserves_explicit_nullable_gpus(self, monkeypatch):
+        """Inline --yaml repair keeps factory host and explicit no-GRES value."""
+
+        def factory():
+            return SlurmConfig(host="cluster.example.com", gpus_per_node=1)
+
+        monkeypatch.setitem(core._FACTORY_REGISTRY, "slurm_factory", factory)
+
+        task = SandboxTask0(
+            script="test.sh",
+            slurm_config=SlurmConfig(
+                host=None,
+                container="ubuntu:24.04",
+                gpus_per_node=None,
+            ),
+        )
+        pipeline = SandboxPipeline(task_0=task)
+
+        assert pipeline.tasks[0].slurm_config.host == "cluster.example.com"
+        assert pipeline.tasks[0].slurm_config.container == "ubuntu:24.04"
+        assert pipeline.tasks[0].slurm_config.gpus_per_node is None
 
 
 class TestGitInfo:
