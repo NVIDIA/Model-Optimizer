@@ -13,12 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU unit tests for the LAQ algorithm using INT4 quantization."""
+"""CPU unit tests for the LAQ algorithm using INT block quantization."""
 
 import pytest
 import torch
+from _test_utils.torch.quantization.models import SimpleLinear
 from torch import nn
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import LAQConfig
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     StaticBlockScaleQuantizer,
@@ -258,3 +260,119 @@ class TestFakeQuantizeLAQ:
         out = q._fake_quantize(x)
         out.sum().backward()
         assert q._amax_post.grad is not None
+
+
+class TestQuantizeLAQIntBlock:
+    """End-to-end LAQ tests for low-bit INT static block weight quantization."""
+
+    @staticmethod
+    def _make_config(num_bits, scale_method, learnable_amax=("post",), tied_amax=False):
+        return {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "enable": True,
+                    "cfg": {
+                        "num_bits": num_bits,
+                        "block_sizes": {-1: 16, "type": "static"},
+                    },
+                },
+            ],
+            "algorithm": {
+                "method": "laq",
+                "learnable_amax": list(learnable_amax),
+                "tied_amax": tied_amax,
+                "scale_algorithm": {"method": scale_method},
+            },
+        }
+
+    @staticmethod
+    def _make_dynamic_max_config(num_bits):
+        return {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "enable": True,
+                    "cfg": {
+                        "num_bits": num_bits,
+                        "block_sizes": {-1: 16, "type": "dynamic"},
+                    },
+                },
+            ],
+            "algorithm": "max",
+        }
+
+    @staticmethod
+    def _forward_loop(model):
+        model(SimpleLinear.get_input())
+
+    @staticmethod
+    def _weight_quantizers(model):
+        return [
+            module.weight_quantizer
+            for module in model.modules()
+            if hasattr(module, "weight_quantizer")
+        ]
+
+    @pytest.mark.parametrize("num_bits", [3, 2])
+    @pytest.mark.parametrize("scale_method", ["max", "mse"])
+    def test_low_bit_initializers_enable_laq(self, num_bits, scale_method):
+        model = mtq.quantize(
+            SimpleLinear(),
+            self._make_config(num_bits, scale_method, learnable_amax=["pre", "post"]),
+            self._forward_loop,
+        )
+        weight_quantizers = self._weight_quantizers(model)
+
+        assert weight_quantizers
+        for quantizer in weight_quantizers:
+            assert isinstance(quantizer, StaticBlockScaleQuantizer)
+            assert quantizer._laq is True
+            assert quantizer.num_bits == num_bits
+            assert quantizer.block_sizes[-1] == 16
+
+        output = model(SimpleLinear.get_input())
+        assert torch.isfinite(output).all()
+
+    @pytest.mark.parametrize("num_bits", [3, 2])
+    @pytest.mark.parametrize(
+        ("learnable_amax", "tied_amax", "expected_learnable_count"),
+        [
+            (["pre", "post"], True, 1),
+            (["pre", "post"], False, 2),
+            ([], False, 0),
+        ],
+    )
+    def test_low_bit_laq_variants(
+        self, num_bits, learnable_amax, tied_amax, expected_learnable_count
+    ):
+        model = mtq.quantize(
+            SimpleLinear(),
+            self._make_config(num_bits, "max", learnable_amax, tied_amax),
+            self._forward_loop,
+        )
+        weight_quantizers = self._weight_quantizers(model)
+
+        assert weight_quantizers
+        for quantizer in weight_quantizers:
+            learnable_params = [
+                value
+                for value in (quantizer.amax_pre, quantizer.amax_post)
+                if isinstance(value, nn.Parameter)
+            ]
+            assert len(set(map(id, learnable_params))) == expected_learnable_count
+            assert quantizer._tied_amax is tied_amax
+            assert set(quantizer._learnable_amax) == set(learnable_amax)
+
+    @pytest.mark.parametrize("num_bits", [3, 2])
+    def test_low_bit_dynamic_max_weight_only_forward(self, num_bits):
+        model = mtq.quantize(
+            SimpleLinear(),
+            self._make_dynamic_max_config(num_bits),
+            self._forward_loop,
+        )
+        output = model(SimpleLinear.get_input())
+
+        assert torch.isfinite(output).all()

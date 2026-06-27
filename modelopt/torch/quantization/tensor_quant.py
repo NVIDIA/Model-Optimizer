@@ -18,6 +18,7 @@
 import warnings
 
 import torch
+import torch.nn.functional as F
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
 
@@ -25,6 +26,7 @@ import modelopt.torch.kernels.quantization.gemm as triton_kernel
 
 from .config import QuantizerAttributeConfig
 from .extensions import get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx
+from .utils import reduce_amax
 
 mx_format_map = {
     (4, 3): "E4M3",
@@ -464,6 +466,7 @@ def _dynamic_block_quantize_forward(
     inputs,
     block_size,
     amax,
+    bias,
     num_bits,
     scale_bits,
     trt_high_precision_dtype=None,
@@ -471,6 +474,17 @@ def _dynamic_block_quantize_forward(
     pass_through_bwd=True,
 ):
     """Forward method."""
+    if isinstance(num_bits, int) and scale_bits is None:
+        return _dynamic_int_block_quantize_forward(
+            ctx,
+            inputs,
+            block_size,
+            bias,
+            num_bits,
+            pass_through_bwd,
+        )
+
+    _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
     if isinstance(num_bits, int):
         # special case for INT dynamic block quantization, e.g. MXINT8
         exponent_bits = 0
@@ -491,6 +505,41 @@ def _dynamic_block_quantize_forward(
         scale_exponent_bits,
     )
     return outputs
+
+
+def _dynamic_int_block_quantize_forward(
+    ctx,
+    inputs,
+    block_size,
+    bias,
+    num_bits,
+    pass_through_bwd=True,
+):
+    """Fake quantize INT blocks with a per-forward max scale."""
+    if bias is not None:
+        raise NotImplementedError("Dynamic INT block quantization does not support bias.")
+
+    original_last_dim = inputs.shape[-1]
+    if original_last_dim % block_size != 0:
+        pad_width = block_size - original_last_dim % block_size
+        inputs = F.pad(inputs, (0, pad_width), "constant", 0)
+
+    blocked_shape = (*inputs.shape[:-1], -1, block_size)
+    blocked_inputs = inputs.reshape(blocked_shape)
+    block_amax = reduce_amax(blocked_inputs, axis=-1, keepdims=True).detach()
+    if not pass_through_bwd:
+        backward_amax = block_amax.expand_as(blocked_inputs).reshape(inputs.shape)
+        ctx.save_for_backward(
+            inputs[..., :original_last_dim], backward_amax[..., :original_last_dim]
+        )
+    outputs = _tensor_quant(
+        blocked_inputs,
+        block_amax,
+        num_bits,
+        unsigned=False,
+        narrow_range=True,
+    ).reshape(inputs.shape)
+    return outputs[..., :original_last_dim]
 
 
 class DynamicBlockQuantizationFunction(Function):
@@ -548,12 +597,12 @@ class DynamicBlockQuantizationFunction(Function):
         pass_through_bwd=True,
     ):
         """Forward method."""
-        _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
         return _dynamic_block_quantize_forward(
             ctx,
             inputs,
             block_size,
             amax,
+            bias,
             num_bits,
             scale_bits,
             trt_high_precision_dtype,
