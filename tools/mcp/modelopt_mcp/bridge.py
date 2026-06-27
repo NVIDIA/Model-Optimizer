@@ -574,7 +574,7 @@ def verify_docker_setup_impl() -> dict:
     # invoking the docker CLI by name with a fixed argv list, no
     # shell-interpretation, no untrusted input.
     try:
-        proc = subprocess.run(  # nosec B603 B607 - fixed docker CLI argv; no shell.
+        proc = subprocess.run(
             ["docker", "info"],
             capture_output=True,
             text=True,
@@ -628,7 +628,7 @@ def verify_docker_setup_impl() -> dict:
     # runtime when nvidia-ctk runtime configure was last invoked.
     # B603/B607 same false-positive shape as daemon check.
     try:
-        gpu = subprocess.run(  # nosec B603 B607 - fixed docker CLI argv; no shell.
+        gpu = subprocess.run(
             ["docker", "info", "--format", "{{json .}}"],
             capture_output=True,
             text=True,
@@ -678,6 +678,8 @@ def verify_slurm_setup_impl(
     cluster_host: str,
     cluster_user: str | None = None,
     identity: str | None = None,
+    control_socket: str | None = None,
+    reconnect_command: str | None = None,
 ) -> dict:
     """Probe passwordless SSH to a Slurm cluster login node.
 
@@ -695,6 +697,63 @@ def verify_slurm_setup_impl(
         "-o",
         "ConnectTimeout=5",
     ]
+    if control_socket:
+        expanded_socket = os.path.expanduser(control_socket)
+        check_target = f"{cluster_user}@{cluster_host}" if cluster_user else cluster_host
+        try:
+            check = subprocess.run(
+                [
+                    "ssh",
+                    "-O",
+                    "check",
+                    "-o",
+                    f"ControlPath={expanded_socket}",
+                    check_target,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "executor": "slurm",
+                "cluster_host": cluster_host,
+                "reason": "ssh_timeout",
+                "diagnostic": (
+                    f"ssh ControlMaster check for {cluster_host} did not respond within 15s. "
+                    "The control socket may be wedged; reconnect and retry."
+                ),
+            }
+        except FileNotFoundError:
+            return {
+                "ok": False,
+                "executor": "slurm",
+                "reason": "ssh_not_installed",
+                "diagnostic": "`ssh` binary not on PATH.",
+            }
+        if check.returncode != 0:
+            return {
+                "ok": False,
+                "executor": "slurm",
+                "cluster_host": cluster_host,
+                "cluster_user": cluster_user,
+                "reason": "mfa_reauth_required",
+                "control_socket": control_socket,
+                "reconnect_command": reconnect_command,
+                "diagnostic": (
+                    "OpenSSH ControlMaster socket is absent or expired. "
+                    f"Run `{reconnect_command or 'ssh <cluster>'}`, keep it "
+                    "connected, then retry."
+                ),
+            }
+        argv += [
+            "-o",
+            f"ControlPath={expanded_socket}",
+            "-o",
+            "ControlMaster=no",
+        ]
     if identity:
         argv += ["-i", identity]
     target = f"{cluster_user}@{cluster_host}" if cluster_user else cluster_host
@@ -703,7 +762,7 @@ def verify_slurm_setup_impl(
     # B603/B607 false positive — `ssh` invoked by name with a controlled
     # argv (BatchMode, ConnectTimeout, identity path, target). No shell.
     try:
-        proc = subprocess.run(  # nosec B603 B607 - fixed ssh CLI argv; no shell.
+        proc = subprocess.run(
             argv,
             capture_output=True,
             text=True,
@@ -751,6 +810,7 @@ def verify_slurm_setup_impl(
         "executor": "slurm",
         "cluster_host": cluster_host,
         "cluster_user": cluster_user,
+        "control_socket": control_socket,
         "whoami": lines[0] if lines else "",
         "remote_hostname": lines[1] if len(lines) > 1 else "",
     }
@@ -794,17 +854,83 @@ def _normalize_yaml_path(yaml_path: str, *, examples_dir: Path | None = None) ->
     return (Path.cwd() / yaml_path).resolve()
 
 
+def _launcher_overrides(
+    *,
+    executor: str,
+    extra_overrides: dict[str, str] | None,
+    account: str | None,
+    partition: str | None,
+    container: str | None,
+    gpus_per_node: int | None,
+    ntasks_per_node: int | None,
+) -> dict[str, str]:
+    """Build launcher CLI overrides shared by live submit and dry-run."""
+    overrides = dict(extra_overrides or {})
+    if executor == "slurm":
+        slurm_prefix = "pipeline.task_0.slurm_config."
+        if account:
+            overrides.setdefault(f"{slurm_prefix}account", account)
+        if partition:
+            overrides.setdefault(f"{slurm_prefix}partition", partition)
+        if container:
+            overrides.setdefault(f"{slurm_prefix}container", container)
+        if gpus_per_node is not None:
+            overrides.setdefault(f"{slurm_prefix}gpus_per_node", str(gpus_per_node))
+        if ntasks_per_node is not None:
+            overrides.setdefault(f"{slurm_prefix}ntasks_per_node", str(ntasks_per_node))
+    return overrides
+
+
+def _apply_launcher_env(
+    env: dict[str, str],
+    *,
+    checkout: SourceCheckout | None,
+    executor: str,
+    cluster_host: str | None,
+    account: str | None,
+    partition: str | None,
+    control_socket: str | None,
+    reconnect_command: str | None,
+) -> None:
+    """Apply launcher env shared by live submit and dry-run."""
+    env.setdefault("NEMORUN_HOME", os.getcwd())
+    if checkout is not None:
+        env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
+        env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
+        env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
+    if executor == "slurm":
+        env["SLURM_HOST"] = cluster_host or ""
+        if account:
+            env["SLURM_ACCOUNT"] = account
+        if partition:
+            env["SLURM_PARTITION"] = partition
+        if control_socket:
+            env["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"] = os.path.expanduser(control_socket)
+        if reconnect_command:
+            env["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] = reconnect_command
+
+
 def submit_job_impl(
     *,
     yaml_path: str,
-    hf_local: str | None,
-    cluster_host: str | None,
-    cluster_user: str | None,
-    identity: str | None,
-    job_dir: str | None,
-    job_name: str | None,
-    extra_overrides: dict[str, str] | None,
-    skip_verify: bool,
+    hf_local: str | None = None,
+    cluster_host: str | None = None,
+    cluster_user: str | None = None,
+    identity: str | None = None,
+    job_dir: str | None = None,
+    job_name: str | None = None,
+    extra_overrides: dict[str, str] | None = None,
+    skip_verify: bool = False,
+    account: str | None = None,
+    partition: str | None = None,
+    container: str | None = None,
+    gpus_per_node: int | None = None,
+    ntasks_per_node: int | None = None,
+    control_socket: str | None = None,
+    reconnect_command: str | None = None,
+    gpu_type: str | None = None,
+    mfa: bool = False,
+    ssh_alias: str | None = None,
     dry_run: bool = False,
     source_ref: str | None = None,
     source_repo: str | None = None,
@@ -829,6 +955,20 @@ def submit_job_impl(
     ``core.run_jobs``. We don't re-implement nemo_run integration here —
     that lives upstream.
     """
+    reconnect_command = reconnect_command or (f"ssh {ssh_alias}" if ssh_alias else None)
+    if mfa and cluster_host and not control_socket:
+        return {
+            "ok": False,
+            "reason": "mfa_control_socket_required",
+            "executor": "slurm",
+            "cluster_host": cluster_host,
+            "ssh_alias": ssh_alias,
+            "diagnostic": (
+                "mfa=True requires control_socket so the launcher can reuse "
+                "an authenticated OpenSSH ControlMaster session."
+            ),
+        }
+
     # ---- Dry-run branch (no cluster contact) -----------------------
     if dry_run:
         return _submit_job_dry_run(
@@ -840,6 +980,13 @@ def submit_job_impl(
             job_dir=job_dir,
             job_name=job_name,
             extra_overrides=extra_overrides,
+            account=account,
+            partition=partition,
+            container=container,
+            gpus_per_node=gpus_per_node,
+            ntasks_per_node=ntasks_per_node,
+            control_socket=control_socket,
+            reconnect_command=reconnect_command,
             source_ref=source_ref,
             source_repo=source_repo,
         )
@@ -875,6 +1022,8 @@ def submit_job_impl(
                 cluster_host=cluster_host or "",
                 cluster_user=cluster_user,
                 identity=identity,
+                control_socket=control_socket,
+                reconnect_command=reconnect_command,
             )
         if not check.get("ok"):
             return {
@@ -941,7 +1090,16 @@ def submit_job_impl(
         argv.append(f"job_dir={job_dir}")
     if job_name:
         argv.append(f"job_name={job_name}")
-    for k, v in (extra_overrides or {}).items():
+
+    for k, v in _launcher_overrides(
+        executor=executor,
+        extra_overrides=extra_overrides,
+        account=account,
+        partition=partition,
+        container=container,
+        gpus_per_node=gpus_per_node,
+        ntasks_per_node=ntasks_per_node,
+    ).items():
         argv.append(f"{k}={v}")
 
     # Propagate env so submit-side and status-side agree on NEMORUN_HOME.
@@ -950,16 +1108,16 @@ def submit_job_impl(
     # MCP server's cwd — different paths, so job_status would return
     # experiment_dir_not_found for jobs that actually succeeded.
     child_env = os.environ.copy()
-    child_env.setdefault("NEMORUN_HOME", os.getcwd())
-    if checkout is not None:
-        child_env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
-        child_env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
-        child_env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
-    if executor == "slurm":
-        # Required for slurm_factory's host default. Verify_setup ran
-        # against this same host above (when verify_setup=True), so the
-        # value is known good.
-        child_env["SLURM_HOST"] = cluster_host or ""
+    _apply_launcher_env(
+        child_env,
+        checkout=checkout,
+        executor=executor,
+        cluster_host=cluster_host,
+        account=account,
+        partition=partition,
+        control_socket=control_socket,
+        reconnect_command=reconnect_command,
+    )
 
     if executor == "docker":
         # Docker mode: spawn detached. Discard stdout/stderr to /dev/null —
@@ -1144,6 +1302,13 @@ def _submit_job_dry_run(
     job_dir: str | None,
     job_name: str | None,
     extra_overrides: dict[str, str] | None,
+    account: str | None,
+    partition: str | None,
+    container: str | None,
+    gpus_per_node: int | None,
+    ntasks_per_node: int | None,
+    control_socket: str | None,
+    reconnect_command: str | None,
     source_ref: str | None,
     source_repo: str | None,
 ) -> dict:
@@ -1207,20 +1372,32 @@ def _submit_job_dry_run(
         argv.append(f"job_dir={job_dir}")
     if job_name:
         argv.append(f"job_name={job_name}")
-    for k, v in (extra_overrides or {}).items():
+    executor = "docker" if hf_local else "slurm" if cluster_host else "dryrun"
+    for k, v in _launcher_overrides(
+        executor=executor,
+        extra_overrides=extra_overrides,
+        account=account,
+        partition=partition,
+        container=container,
+        gpus_per_node=gpus_per_node,
+        ntasks_per_node=ntasks_per_node,
+    ).items():
         argv.append(f"{k}={v}")
 
     # Propagate env so the launcher's factory resolution matches what
     # the live submit would see (mainly: SLURM_HOST for slurm-factory
     # default when cluster_host is set).
     child_env = os.environ.copy()
-    child_env.setdefault("NEMORUN_HOME", os.getcwd())
-    if checkout is not None:
-        child_env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
-        child_env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
-        child_env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
-    if cluster_host:
-        child_env["SLURM_HOST"] = cluster_host
+    _apply_launcher_env(
+        child_env,
+        checkout=checkout,
+        executor=executor,
+        cluster_host=cluster_host,
+        account=account,
+        partition=partition,
+        control_socket=control_socket,
+        reconnect_command=reconnect_command,
+    )
 
     # Dry-run is fast (no network, no container) — 60s timeout is
     # generous. Same subprocess invocation shape as the live-submit
