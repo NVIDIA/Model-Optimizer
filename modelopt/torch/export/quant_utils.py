@@ -1257,9 +1257,10 @@ def fuse_prequant_layernorm(
         fused_bias = bias * avg_pre_quant_scale
         layernorm_output_scaled = (normalization(input) * fused_weight) + fused_bias
     """
-    pre_quant_scale = getattr(modules[0].input_quantizer, "_pre_quant_scale").to(
-        layernorm_module.weight.device
-    )
+    if not hasattr(modules[0].input_quantizer, "_pre_quant_scale"):
+        return
+
+    pre_quant_scale = modules[0].input_quantizer._pre_quant_scale.to(layernorm_module.weight.device)
     if _layernorm_uses_weight_plus_one(layernorm_module):
         # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
         fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
