@@ -25,6 +25,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_gpt_oss,
     get_tiny_llama,
+    get_tiny_qwen3,
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
@@ -192,6 +193,103 @@ def test_autoquantize_huggingface(model_provider, method):
             num_score_steps=2,
             verbose=True,
             method=method,
+        )
+
+
+def _causal_lm_sum_loss(logits, labels):
+    logits = logits.float()
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    return torch.nn.functional.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        reduction="sum",
+    )
+
+
+def _qwen3_sample_ids(length, offset=0):
+    return (torch.arange(length, dtype=torch.long) + offset).remainder(31) + 1
+
+
+def _qwen3_calib_sample(length, offset=0):
+    input_ids = _qwen3_sample_ids(length, offset).unsqueeze(0)
+    return {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        "labels": input_ids.clone(),
+    }
+
+
+def _qwen3_padded_calib_pair():
+    sample_short = _qwen3_sample_ids(16)
+    sample_long = _qwen3_sample_ids(32, offset=7)
+    input_ids = torch.zeros((2, 32), dtype=torch.long)
+    labels = torch.full((2, 32), -100, dtype=torch.long)
+    attention_mask = torch.zeros((2, 32), dtype=torch.long)
+
+    input_ids[0, :16] = sample_short
+    labels[0, :16] = sample_short
+    attention_mask[0, :16] = 1
+    input_ids[1] = sample_long
+    labels[1] = sample_long
+    attention_mask[1] = 1
+
+    return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+
+def _tiny_qwen3_autoquantize_candidate_stats(data_loader, num_steps):
+    model = get_tiny_qwen3(dtype=torch.float32, num_hidden_layers=1, max_position_embeddings=64)
+
+    def forward_step(model, batch):
+        return model(**{**batch, "num_items_in_batch": 1})
+
+    def loss_func(output, _batch):
+        return output.loss
+
+    with pytest.warns(
+        UserWarning,
+        match="AutoQuantize: Huggingface model detected - Enabling gradient checkpointing. ",
+    ):
+        _, search_history = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 11.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=data_loader,
+            forward_step=forward_step,
+            loss_func=loss_func,
+            num_calib_steps=num_steps,
+            num_score_steps=num_steps,
+            verbose=False,
+            method="gradient",
+        )
+    return search_history["candidate_stats"]
+
+
+def test_autoquantize_huggingface_num_items_in_batch_uses_sum_loss():
+    model = get_tiny_qwen3(dtype=torch.float32, num_hidden_layers=1, max_position_embeddings=64)
+    batch = _qwen3_padded_calib_pair()
+
+    output = model(**{**batch, "num_items_in_batch": 1})
+
+    torch.testing.assert_close(output.loss, _causal_lm_sum_loss(output.logits, batch["labels"]))
+
+
+def test_autoquantize_huggingface_scores_are_batch_size_invariant_with_padding():
+    stats_bs1 = _tiny_qwen3_autoquantize_candidate_stats(
+        [_qwen3_calib_sample(16), _qwen3_calib_sample(32, offset=7)], num_steps=2
+    )
+    stats_bs2 = _tiny_qwen3_autoquantize_candidate_stats([_qwen3_padded_calib_pair()], num_steps=1)
+
+    assert stats_bs1.keys() == stats_bs2.keys()
+    for name in stats_bs1:
+        assert stats_bs1[name]["formats"] == stats_bs2[name]["formats"]
+        torch.testing.assert_close(
+            torch.tensor(stats_bs1[name]["scores"]),
+            torch.tensor(stats_bs2[name]["scores"]),
+            rtol=1e-4,
+            atol=1e-5,
+            msg=f"Candidate scores differ for {name}",
         )
 
 
