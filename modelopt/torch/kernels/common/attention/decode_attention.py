@@ -57,8 +57,8 @@ from modelopt.torch.kernels.common.attention.triton_fa import (
     _load_paged_k_tile,
     _load_paged_v_tile,
 )
-from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4
-from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _p_qdq_fp8
+from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4, _v_qdq_nvfp4
+from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _qdq_fp8
 
 # Cap on the auto-chosen split count. Decode KV reads dominate, so a handful of
 # splits is enough to fill the SMs at small batch; more just fragments skipping.
@@ -103,6 +103,8 @@ def _attn_decode_split_fwd(
     MEASURE_SPARSITY: tl.constexpr,
     P_QDQ: tl.constexpr = 0,  # softmax-P quant-dequant: 0=off, 1=FP8 E4M3, 2=NVFP4
     p_qdq_scale=1.0,  # per-tensor P-qdq scale (runtime scalar; amax/448 or amax/(6*448))
+    V_QDQ: tl.constexpr = 0,  # value quant-dequant: 0=off, 1=FP8 E4M3, 2=NVFP4 (block-16 along keys)
+    v_qdq_scale=1.0,  # per-tensor V-qdq scale (runtime scalar; amax/448 or amax/(6*448))
 ):
     """One (request, head, KV split): partial GEMV attention with skip."""
     batch_idx = tl.program_id(0)
@@ -178,10 +180,10 @@ def _attn_decode_split_fwd(
             correction = tl.math.exp2(m_i - m_new)
             l_i = l_i * correction + tl.sum(p, axis=0)  # denominator: unquantized p
             acc = acc * correction
-            # Optional softmax-P quant-dequant for the P @ V weighting (BMM2); the
-            # denominator above stays unquantized, matching the prefill kernel.
+            # Optional in-kernel quant-dequant of the BMM2 operands (P and V); the
+            # softmax denominator above stays unquantized, matching the prefill kernel.
             if P_QDQ == 1:
-                p = _p_qdq_fp8(p, p_qdq_scale)
+                p = _qdq_fp8(p, p_qdq_scale)
             elif P_QDQ == 2:
                 p = tl.reshape(
                     _p_qdq_nvfp4(tl.reshape(p, (1, BLOCK_N)), p_qdq_scale, 1, BLOCK_N), (BLOCK_N,)
@@ -204,7 +206,15 @@ def _attn_decode_split_fwd(
                 HEAD_DIM,
                 max_blocks_per_seq,
             )
-            acc += tl.sum(p[:, None] * vt.to(tl.float32), axis=0)  # [BLOCK_D], fp32 accum
+            vt = vt.to(tl.float32)
+            # V is the B-side of BMM2; its NVFP4 blocks of 16 run along the key axis
+            # (axis 0 of [BLOCK_N, BLOCK_D]). _load_paged_v_tile masks out-of-range keys
+            # to 0, so a partial trailing tile cannot poison a block amax.
+            if V_QDQ == 1:
+                vt = _qdq_fp8(vt, v_qdq_scale)
+            elif V_QDQ == 2:
+                vt = _v_qdq_nvfp4(vt, v_qdq_scale, BLOCK_N, BLOCK_D)
+            acc += tl.sum(p[:, None] * vt, axis=0)  # [BLOCK_D], fp32 accum
             m_i = m_new
 
     # Store this split's partial softmax state (undivided acc + max + denom).
@@ -282,6 +292,8 @@ def attention_decode(
     measure_sparsity: bool = False,
     p_qdq: str | None = None,
     p_qdq_amax: float = 1.0,
+    v_qdq: str | None = None,
+    v_qdq_amax: float | None = None,
 ) -> torch.Tensor:
     """Decode attention (one query token per request) over a paged KV cache.
 
@@ -307,6 +319,13 @@ def attention_decode(
             disable. The softmax denominator stays unquantized (straight-through).
         p_qdq_amax: per-tensor amax for the P qdq (default 1.0, the upper bound of the
             unnormalized P). Converted to amax/448 (FP8) or amax/(6*448) (NVFP4).
+        v_qdq: fake quant-dequant of the value operand V before P @ V — ``"fp8"`` or
+            ``"nvfp4"`` (E2M1, block-16 along keys, the BMM2 contraction axis), or
+            ``None``. V is quantized on read here because its keys-axis blocks cannot
+            be formed by a per-token cache write.
+        v_qdq_amax: per-tensor amax for the V qdq. ``None`` uses the constant 1.0
+            global scale (V's dynamic per-16 block amax carries the range and does not
+            saturate E4M3); a calibrated amax is converted as for ``p_qdq_amax``.
 
     Returns:
         ``[batch, num_q_heads, head_dim]`` attention output.
@@ -334,6 +353,19 @@ def attention_decode(
         if not (math.isfinite(p_qdq_amax) and p_qdq_amax > 0):
             raise ValueError(f"p_qdq_amax must be finite and positive, got {p_qdq_amax}")
         p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
+
+    if v_qdq not in _P_QDQ_MODES:
+        raise ValueError(
+            f"v_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {v_qdq!r}"
+        )
+    v_qdq_mode = _P_QDQ_MODES[v_qdq]
+    # V has no natural amax bound; v_qdq_amax=None -> constant 1.0 global scale (the
+    # per-16 block amax carries the range, and V does not saturate E4M3).
+    v_qdq_scale = 1.0
+    if v_qdq_mode and v_qdq_amax is not None:
+        if not (math.isfinite(v_qdq_amax) and v_qdq_amax > 0):
+            raise ValueError(f"v_qdq_amax must be finite and positive, got {v_qdq_amax}")
+        v_qdq_scale = v_qdq_amax / 448.0 if v_qdq == "fp8" else v_qdq_amax / (6.0 * 448.0)
 
     if skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
         apply_skip = True
@@ -400,6 +432,8 @@ def attention_decode(
             MEASURE_SPARSITY=do_measure,
             P_QDQ=p_qdq_mode,
             p_qdq_scale=p_qdq_scale,
+            V_QDQ=v_qdq_mode,
+            v_qdq_scale=v_qdq_scale,
             num_warps=4,
             num_stages=2,
         )

@@ -43,6 +43,7 @@ _is_dense_region: Any = None
 _skip_softmax_decision: Any = None
 _p_qdq_fp8: Any = None
 _p_qdq_nvfp4: Any = None
+_v_qdq_nvfp4: Any = None
 
 
 def _load_sparsity_helpers() -> None:
@@ -64,13 +65,15 @@ def _load_sparsity_helpers() -> None:
 
 
 def _load_p_qdq_helpers() -> None:
-    global _p_qdq_fp8, _p_qdq_nvfp4
+    global _p_qdq_fp8, _p_qdq_nvfp4, _v_qdq_nvfp4
     if _p_qdq_fp8 is None:
         from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4 as _nvfp4
+        from modelopt.torch.kernels.quantization.attention.p_qdq import _v_qdq_nvfp4 as _vnvfp4
         from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _fp8
 
         _p_qdq_fp8 = _fp8
         _p_qdq_nvfp4 = _nvfp4
+        _v_qdq_nvfp4 = _vnvfp4
 
 
 # Maps the public p_qdq option to the kernel's P_QDQ constexpr.
@@ -263,6 +266,8 @@ def _attn_fwd(
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     P_QDQ: tl.constexpr = 0,  # Fake quant-dequant of softmax P: 0=off, 1=FP8 E4M3, 2=NVFP4
     p_qdq_scale=1.0,  # Per-tensor scale for softmax qdq (runtime scalar; amax/448 or amax/(6*448))
+    V_QDQ: tl.constexpr = 0,  # Fake quant-dequant of value V: 0=off, 1=FP8 E4M3, 2=NVFP4 (block-16 keys)
+    v_qdq_scale=1.0,  # Per-tensor scale for V qdq (runtime scalar; amax/448 or amax/(6*448))
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
     Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
     MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
@@ -435,6 +440,13 @@ def _attn_fwd(
                     mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                     other=0.0,
                 )
+            # Optional V quant-dequant (BMM2 B-side). NVFP4 blocks of 16 run along the
+            # key axis (axis 0 of [BLOCK_N, BLOCK_D]); the masked-to-0 loads keep a partial
+            # tile from poisoning a block amax. FQ in fp32, then back to v.dtype for the dot.
+            if V_QDQ == 1:
+                v = _p_qdq_fp8(v.to(tl.float32), v_qdq_scale).to(v.dtype)
+            elif V_QDQ == 2:
+                v = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_D).to(v.dtype)
             acc = tl.dot(p.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
@@ -833,6 +845,8 @@ class _Attention(torch.autograd.Function):
         measure_sparsity,
         p_qdq_mode,
         p_qdq_scale,
+        v_qdq_mode,
+        v_qdq_scale,
         k_cache,
         v_cache,
         block_table,
@@ -932,6 +946,8 @@ class _Attention(torch.autograd.Function):
             "SKIP_THRESHOLD_LOG2": skip_threshold_log2,
             "P_QDQ": p_qdq_mode,
             "p_qdq_scale": p_qdq_scale,
+            "V_QDQ": v_qdq_mode,
+            "v_qdq_scale": v_qdq_scale,
             "Sparsity_total": sparsity_total,
             "Sparsity_skipped": sparsity_skipped,
             "MEASURE_SPARSITY": do_measure,
@@ -1137,6 +1153,8 @@ class _Attention(torch.autograd.Function):
             None,  # measure_sparsity
             None,  # p_qdq_mode
             None,  # p_qdq_scale
+            None,  # v_qdq_mode
+            None,  # v_qdq_scale
             None,  # k_cache
             None,  # v_cache
             None,  # block_table
@@ -1165,6 +1183,8 @@ def attention(
     measure_sparsity: bool = False,
     p_qdq: str | None = None,
     p_qdq_amax: float = 1.0,
+    v_qdq: str | None = None,
+    v_qdq_amax: float | None = None,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1221,6 +1241,16 @@ def attention(
             and the global scale ``amax / (6 * 448)`` for NVFP4. A runtime
             scalar — user-set or calibrated values do not recompile the
             kernel. Values above amax saturate.
+        v_qdq: Fake quant-dequant of the value operand ``V`` before ``P @ V``,
+            the other BMM2 operand. ``"fp8"`` or ``"nvfp4"`` (E2M1, one E4M3
+            scale per 16 elements along the *key* axis — the contraction axis,
+            which is axis 0 of the loaded V tile). V is quantized in-kernel on
+            read because its keys-axis blocks cannot be formed by a per-token
+            cache write. ``None`` disables.
+        v_qdq_amax: Per-tensor amax for the V quant-dequant. ``None`` (default)
+            uses the constant 1.0 global scale — V's dynamic per-16 block amax
+            carries the range and V does not saturate E4M3 — while a calibrated
+            amax converts as for ``p_qdq_amax``.
         k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
             When provided, K/V are read from paged cache via block_table
             instead of from contiguous k/v tensors.
@@ -1259,6 +1289,19 @@ def attention(
         if not (math.isfinite(p_qdq_amax) and p_qdq_amax > 0):
             raise ValueError(f"p_qdq_amax must be a finite positive value, got {p_qdq_amax}")
         p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
+    if v_qdq not in _P_QDQ_MODES:
+        raise ValueError(
+            f"v_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {v_qdq!r}"
+        )
+    v_qdq_mode = _P_QDQ_MODES[v_qdq]
+    # V has no natural amax bound; ``v_qdq_amax=None`` uses the constant 1.0 global
+    # scale (the dynamic per-16 block amax carries the range, and V does not saturate
+    # E4M3). A calibrated amax converts as for ``p_qdq_amax``.
+    v_qdq_scale = 1.0
+    if v_qdq_mode and v_qdq_amax is not None:
+        if not (math.isfinite(v_qdq_amax) and v_qdq_amax > 0):
+            raise ValueError(f"v_qdq_amax must be a finite positive value, got {v_qdq_amax}")
+        v_qdq_scale = v_qdq_amax / 448.0 if v_qdq == "fp8" else v_qdq_amax / (6.0 * 448.0)
     sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
     return _Attention.apply(
         q,
@@ -1280,6 +1323,8 @@ def attention(
         measure_sparsity,
         p_qdq_mode,
         p_qdq_scale,
+        v_qdq_mode,
+        v_qdq_scale,
         k_cache,
         v_cache,
         block_table,

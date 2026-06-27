@@ -114,32 +114,46 @@ def _build_sparse_kw(layer_cfg: dict) -> dict:
     return sparse_kw
 
 
-def _p_qdq_from_layer(layer) -> tuple[str | None, float]:
-    """Map a layer's ``p_bmm_quantizer`` to ``(p_qdq mode, p_qdq_amax)`` for the kernels.
+def _bmm_qdq_from_layer(layer, attr: str, default_amax: float | None):
+    """Map a layer's ``attr`` BMM2 quantizer to ``(qdq mode, amax)`` for the kernels.
 
     Mirrors ``_QuantAttention._p_qdq_mode``: per-tensor FP8 -> ``"fp8"``; dynamic NVFP4
     at block size 16 -> ``"nvfp4"``; otherwise (missing/disabled quantizer or an
-    unsupported format) -> ``None`` (no P quant). A calibrated per-tensor ``_amax``, if
-    present, is forwarded so the kernel uses it instead of the default 1.0.
+    unsupported format) -> ``(None, default_amax)``. A calibrated per-tensor ``_amax``,
+    if present, is forwarded so the kernel uses it instead of ``default_amax``.
     """
-    pq = getattr(layer, "p_bmm_quantizer", None)
-    if pq is None or not getattr(pq, "is_enabled", False):
-        return None, 1.0
-    if pq.is_fp8:
+    q = getattr(layer, attr, None)
+    if q is None or not getattr(q, "is_enabled", False):
+        return None, default_amax
+    if q.is_fp8:
         mode = "fp8"
-    elif pq.is_nvfp4_dynamic and (pq.block_sizes or {}).get(-1, None) == 16:
+    elif q.is_nvfp4_dynamic and (q.block_sizes or {}).get(-1, None) == 16:
         mode = "nvfp4"
     else:
-        return None, 1.0
-    amax = getattr(pq, "_amax", None)
+        return None, default_amax
+    amax = getattr(q, "_amax", None)
     if amax is not None:
         if amax.numel() != 1:
             raise NotImplementedError(
-                "p_bmm_quantizer via the sparse Triton kernel supports only a per-tensor "
+                f"{attr} via the sparse Triton kernel supports only a per-tensor "
                 f"(scalar) amax, got shape {tuple(amax.shape)}."
             )
         return mode, float(amax)
-    return mode, 1.0
+    return mode, default_amax
+
+
+def _p_qdq_from_layer(layer) -> tuple[str | None, float]:
+    """P (softmax) BMM2 operand from ``p_bmm_quantizer``; default amax 1.0 (P in [0, 1])."""
+    return _bmm_qdq_from_layer(layer, "p_bmm_quantizer", 1.0)
+
+
+def _v_qdq_from_layer(layer) -> tuple[str | None, float | None]:
+    """V (value) BMM2 operand from ``v_bmm_quantizer``.
+
+    Default amax ``None`` -> the constant 1.0 global scale (V's dynamic per-16
+    block amax carries the range).
+    """
+    return _bmm_qdq_from_layer(layer, "v_bmm_quantizer", None)
 
 
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
@@ -227,10 +241,13 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         page_size = key_cache.shape[1]
 
-        # Softmax-P quant from the layer's p_bmm_quantizer (config-driven, exported);
-        # None when no/disabled/unsupported quantizer. P quant alone (no sparsity) still
-        # engages the kernel below.
+        # BMM2-operand quant from the layer's p/v_bmm_quantizer (config-driven, exported);
+        # None when no/disabled/unsupported quantizer. P or V quant alone (no sparsity)
+        # still engages the kernel below. K/Q quant is applied upstream by the
+        # _QuantVLLMAttention pre-step (head_dim axis); only the keys-axis BMM2 operands
+        # (P, V) are quantized in-kernel here.
         p_qdq, p_qdq_amax = _p_qdq_from_layer(layer)
+        v_qdq, v_qdq_amax = _v_qdq_from_layer(layer)
 
         # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
         sparse_kw = dict(getattr(self, "sparse_kw", {}))
@@ -244,8 +261,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
                 sparse_kw.pop(name, None)
             threshold = sparse_kw.get("skip_softmax_threshold")
-            if threshold is None and p_qdq is None:
-                # No decode sparsity and no P quant for this launch; use vLLM FlashAttention.
+            if threshold is None and p_qdq is None and v_qdq is None:
+                # No decode sparsity and no BMM2 quant for this launch; use vLLM FlashAttention.
                 return self._forward_vllm_flash_attn(
                     layer,
                     query,
@@ -270,10 +287,12 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 skip_softmax_threshold=threshold,
                 p_qdq=p_qdq,
                 p_qdq_amax=p_qdq_amax,
+                v_qdq=v_qdq,
+                v_qdq_amax=v_qdq_amax,
                 output=output,
             )
-        if not sparse_kw and p_qdq is None:
-            # No sparse feature and no P quant active (e.g. dynamic calibration
+        if not sparse_kw and p_qdq is None and v_qdq is None:
+            # No sparse feature and no BMM2 quant active (e.g. dynamic calibration
             # disabled the threshold); avoid swapping in the ModelOpt kernel.
             return self._forward_vllm_flash_attn(
                 layer,
@@ -319,6 +338,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             page_size=page_size,  # tokens per page in the KV cache
             p_qdq=p_qdq,
             p_qdq_amax=p_qdq_amax,
+            v_qdq=v_qdq,
+            v_qdq_amax=v_qdq_amax,
             **sparse_kw,
         )
 
@@ -338,9 +359,11 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         skip_softmax_threshold: float | None = None,
         p_qdq: str | None = None,
         p_qdq_amax: float = 1.0,
+        v_qdq: str | None = None,
+        v_qdq_amax: float | None = None,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        """Decode via the dedicated paged decode kernel (skip-softmax and/or P quant).
+        """Decode via the dedicated paged decode kernel (skip-softmax and/or P/V quant).
 
         Standard decode schedules exactly one query token per request, so the
         ``num_actual_tokens`` query rows are the per-request decode queries. The
@@ -362,6 +385,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             page_size=page_size,
             p_qdq=p_qdq,
             p_qdq_amax=p_qdq_amax,
+            v_qdq=v_qdq,
+            v_qdq_amax=v_qdq_amax,
         )
         output[:num_actual_tokens] = decode_out
         return output

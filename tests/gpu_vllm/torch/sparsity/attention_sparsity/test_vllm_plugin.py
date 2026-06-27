@@ -36,6 +36,7 @@ from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNE
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     ModelOptSparseAttentionImpl,
     _p_qdq_from_layer,
+    _v_qdq_from_layer,
 )
 
 if TRITON_KERNEL_AVAILABLE:
@@ -69,6 +70,32 @@ def test_p_qdq_from_layer():
     nvfp4 = {"is_fp8": False, "is_nvfp4_dynamic": True, "_amax": None}
     assert _p_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 16})) == ("nvfp4", 1.0)
     assert _p_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 32})) == (None, 1.0)
+
+
+def test_v_qdq_from_layer():
+    """_v_qdq_from_layer maps a layer's v_bmm_quantizer to (v_qdq mode, amax).
+
+    Same FP8/NVFP4 mapping as P, but V has no natural amax bound, so the default
+    (no calibrated _amax) is ``None`` -> the kernel's constant 1.0 global scale.
+    """
+    # Missing / disabled quantizer -> no V quant, default amax None.
+    assert _v_qdq_from_layer(None) == (None, None)
+    assert _v_qdq_from_layer(SimpleNamespace()) == (None, None)
+    disabled = SimpleNamespace(v_bmm_quantizer=SimpleNamespace(is_enabled=False))
+    assert _v_qdq_from_layer(disabled) == (None, None)
+
+    def _layer(**kw):
+        return SimpleNamespace(v_bmm_quantizer=SimpleNamespace(is_enabled=True, **kw))
+
+    # Per-tensor FP8 -> "fp8"; calibrated scalar _amax forwarded, else default None.
+    fp8 = {"is_fp8": True, "is_nvfp4_dynamic": False, "block_sizes": None}
+    assert _v_qdq_from_layer(_layer(**fp8, _amax=None)) == ("fp8", None)
+    assert _v_qdq_from_layer(_layer(**fp8, _amax=torch.tensor(0.5))) == ("fp8", 0.5)
+
+    # Dynamic NVFP4 at block size 16 -> "nvfp4"; any other block size -> None.
+    nvfp4 = {"is_fp8": False, "is_nvfp4_dynamic": True, "_amax": None}
+    assert _v_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 16})) == ("nvfp4", None)
+    assert _v_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 32})) == (None, None)
 
 
 def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size):

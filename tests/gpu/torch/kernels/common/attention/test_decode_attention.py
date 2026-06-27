@@ -214,6 +214,40 @@ class TestDecodeAttention:
             ref = _dense_decode(q[b : b + 1], k[b : b + 1, :, :sl], v[b : b + 1, :, :sl], scale)
             torch.testing.assert_close(out[b : b + 1], ref, rtol=5e-3, atol=5e-3)
 
+    @pytest.mark.skipif(
+        not (torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)),
+        reason="FP8/NVFP4 qdq uses tl.float8e4nv (sm_89+)",
+    )
+    @pytest.mark.parametrize(
+        ("p_qdq", "v_qdq"), [(None, "nvfp4"), ("nvfp4", "nvfp4"), (None, "fp8")]
+    )
+    def test_bmm2_qdq_close_to_dense(self, p_qdq, v_qdq):
+        """In-kernel P/V quant-dequant of BMM2 stays close to dense decode.
+
+        V is fake-quantized on read with NVFP4 blocks of 16 along the key axis
+        (BMM2 contraction) — the keys-axis blocking a per-token cache write cannot
+        produce. Small block-16 quant error => high cosine vs the dense fp32 result.
+        """
+        batch, seq_k, head_dim, page_size = 2, 1024, 128, 16
+        scale = 1.0 / (head_dim**0.5)
+        q, k, v, seq_lens = self._inputs(batch, 16, 16, seq_k, head_dim, seed=7)
+        k_cache, v_cache, block_table = _paged_cache(k, v, seq_lens, page_size)
+
+        out = attention_decode(
+            q,
+            k_cache,
+            v_cache,
+            block_table,
+            seq_lens,
+            softmax_scale=scale,
+            page_size=page_size,
+            p_qdq=p_qdq,
+            v_qdq=v_qdq,
+        )
+        ref = _dense_decode(q, k, v, scale)
+        cos = F.cosine_similarity(out.flatten().float(), ref.flatten().float(), dim=0)
+        assert cos > 0.99, (p_qdq, v_qdq, float(cos))
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
