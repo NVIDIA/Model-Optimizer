@@ -1,6 +1,6 @@
 # Puzzletron Distillation Results
 
-The following MMLU results demonstrate knowledge distillation on student models that were first compressed using [Puzzletron](../../puzzletron/README.md). The original (uncompressed) model serves as the teacher, and distillation recovers accuracy lost during compression.
+The following MMLU results demonstrate knowledge distillation on student models that were first compressed using [Puzzletron](./README.md). The original (uncompressed) model serves as the teacher, and distillation recovers accuracy lost during compression.
 
 ## Qwen3-8B compressed to 80% of original
 
