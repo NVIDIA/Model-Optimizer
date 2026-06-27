@@ -79,12 +79,18 @@ decode V **must** be on-write:
 - Needs the graph-safe `(batch, n_kv, 1)` decode-grid repair so the bake kernel
   composes with the captured decode step.
 
-Because written tokens are immutable, on-write is **bit-identical** to on-read for
-every complete block (same 16 elements → same amax → same result) and the trailing
-tile is handled identically — so this is a **pure speedup, no accuracy change**.
-K escapes the problem entirely: the pre-step quantizes each K once. (This is
-"Option 3" of the trailing-block methods: quantize the tail from pristine bf16
-each step — no accumulation, uniform-precision kernel.)
+Because written tokens are immutable, on-write reproduces the on-read fake-quant
+**bit-for-bit** at the V‑value level. Validated on B200 (NVFP4, fp16/bf16 cache):
+(A) FQ-all on the baked cache equals FQ-all on the raw cache — `maxabs = 0`; (B)
+incremental per-tile baking (the decode pattern) yields a bit-identical cache to a
+single-shot bake — **no cross-step accumulation**. The dequantized V is stored at
+the buffer (cache) dtype, which the NVFP4 dequant already hits exactly. The
+attention *output* of read-as-is vs FQ-on-read can differ by ≤~1e-5 — fp32-reduction
+scheduling between the two compiled kernel variants on **identical** V values, not a
+quantization difference. So this is a **pure speedup, no accuracy change**. K escapes
+the problem entirely: the pre-step quantizes each K once. (This is "Option 3" of the
+trailing-block methods: quantize the tail from pristine bf16 each step — no
+accumulation, uniform-precision kernel.)
 
 ## Fidelity to true NVFP4
 
@@ -114,16 +120,15 @@ sparsity/attention_sparsity/plugins/vllm.py
 Implemented: paged decode kernel + skip-softmax; in-kernel `P_QDQ` and `V_QDQ`
 helpers in both prefill and decode; plugin wiring that drives P/V quant from the
 exported `p/v_bmm_quantizer` and engages the kernel for quant-only launches.
+**Decode V on-write** (`fake_quant_v_onwrite` + `V_CACHE_QUANTIZED` gating + graph-safe
+`(batch, n_kv, 1)` grid): prefill bakes the prompt's complete tiles after its on-read
+attention; decode bakes each newly-complete tile and reads complete tiles as-is,
+re-FQ'ing only the trailing tile → `O(S)`. **Validated on B200** as exactly Option 3
+(bake == on-read FQ bit-for-bit; incremental == single-shot cache; output diff ≤~1e-5
+is fp32-reduction scheduling, not a value change).
 
 Remaining:
 
-- **Decode V → on-write** (the `O(S²)` fix above). Port the `fake_quant_kv_onwrite`
-  V-path + `V_CACHE_QUANTIZED` boundary gating + graph-safe decode grid from
-  `kaix/sparse_attn_integration` onto this config-driven chassis (V-only; K/Q stay
-  pre-step, P stays straight). The current in-kernel `V_QDQ` stays as the
-  **prefill** path and as the **trailing-tile** FQ; the decode kernel flips from
-  "FQ every tile" to "read baked blocks + FQ the trailing tile." Numerically
-  identical, so no accuracy rework.
 - Un-skip `p_bmm_quantizer` / `v_bmm_quantizer` in the vLLM reload + add their
   slots to `_QuantVLLMAttention`, so the exported config reaches the served layer.
 - Unified serve worker: quant restore (gives `_QuantVLLMAttention` with Q/K

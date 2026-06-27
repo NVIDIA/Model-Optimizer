@@ -105,6 +105,7 @@ def _attn_decode_split_fwd(
     p_qdq_scale=1.0,  # per-tensor P-qdq scale (runtime scalar; amax/448 or amax/(6*448))
     V_QDQ: tl.constexpr = 0,  # value quant-dequant: 0=off, 1=FP8 E4M3, 2=NVFP4 (block-16 along keys)
     v_qdq_scale=1.0,  # per-tensor V-qdq scale (runtime scalar; amax/448 or amax/(6*448))
+    V_CACHE_QUANTIZED: tl.constexpr = False,  # V baked on write -> read complete tiles as-is, FQ only the tail
 ):
     """One (request, head, KV split): partial GEMV attention with skip."""
     batch_idx = tl.program_id(0)
@@ -113,6 +114,9 @@ def _attn_decode_split_fwd(
     kv_head_idx = head_idx // kv_group_num
 
     seq_len_kv = tl.load(B_seq_len_k + batch_idx)
+    # Last complete BLOCK_N tile boundary: with V baked on write, tiles below this are on the NVFP4
+    # grid (read as-is); the trailing partial tile is still raw and re-fake-quantized on read.
+    v_dense_boundary = (seq_len_kv // BLOCK_N) * BLOCK_N
 
     # Partition whole BLOCK_N tiles (calibration-aligned) evenly across splits.
     num_tiles = (seq_len_kv + BLOCK_N - 1) // BLOCK_N
@@ -209,11 +213,18 @@ def _attn_decode_split_fwd(
             vt = vt.to(tl.float32)
             # V is the B-side of BMM2; its NVFP4 blocks of 16 run along the key axis
             # (axis 0 of [BLOCK_N, BLOCK_D]). _load_paged_v_tile masks out-of-range keys
-            # to 0, so a partial trailing tile cannot poison a block amax.
-            if V_QDQ == 1:
-                vt = _qdq_fp8(vt, v_qdq_scale)
-            elif V_QDQ == 2:
-                vt = _v_qdq_nvfp4(vt, v_qdq_scale, BLOCK_N, BLOCK_D)
+            # to 0, so a partial trailing tile cannot poison a block amax. When V is baked
+            # on write (V_CACHE_QUANTIZED), complete tiles are already on the grid -> skip
+            # the redundant re-quant and FQ only the trailing partial tile.
+            if V_QDQ != 0 and ((not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_dense_boundary)):
+                if V_QDQ == 1:
+                    vt = _qdq_fp8(vt, v_qdq_scale)
+                else:  # V_QDQ == 2 (NVFP4)
+                    vt = _v_qdq_nvfp4(vt, v_qdq_scale, BLOCK_N, BLOCK_D)
+                # Round the dequantized V to the cache (bf16) dtype so an on-read tile matches a
+                # baked-on-write tile bit-for-bit: on-write stores bf16(FQ) in the cache, so the
+                # on-read path must dequant at the same bf16 precision. Makes on-read == on-write.
+                vt = vt.to(V_cache.dtype.element_ty).to(tl.float32)
             acc += tl.sum(p[:, None] * vt, axis=0)  # [BLOCK_D], fp32 accum
             m_i = m_new
 
@@ -278,6 +289,118 @@ def _auto_num_kv_splits(device: torch.device, num_programs: int) -> int:
     return max(1, min(MAX_KV_SPLITS, -(-num_sms // max(num_programs, 1))))
 
 
+# BLOCK_N tile size for the V cache bake — matches the decode/prefill kernels' tile so a baked
+# tile and the kernels' read tile coincide (each tile is fake-quantized exactly once).
+_ONWRITE_BLOCK_N = 128
+
+
+@triton.jit
+def _onwrite_fq_v_kernel(
+    V_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+    Block_table,  # [batch, max_blocks_per_seq]
+    V_lo,  # [batch] per-request bake range [lo, hi) in key positions (BLOCK_N-aligned, device)
+    V_hi,
+    stride_vc_block,
+    stride_vc_pos,
+    stride_vc_head,
+    v_qdq_scale,  # per-tensor NVFP4 global scale (constant runtime scalar)
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    max_blocks_per_seq,
+):
+    """In-place NVFP4 fake-quant of complete BLOCK_N V tiles in the paged cache (quantize-on-write).
+
+    Each program bakes one complete ``BLOCK_N`` tile of one ``(request, kv_head)``: load the tile,
+    fake-quant it with the SAME ``_v_qdq_nvfp4`` the decode/prefill kernels apply on read, and store
+    it back. The per-request range ``[V_lo, V_hi)`` is read from device tensors and the tile index from
+    ``program_id(2)``, so the launch grid never needs a host ``.item()`` — CUDA-graph-capturable. A
+    pure-decode step appends one key that completes at most one tile, so a fixed ``(batch, n_kv, 1)``
+    grid covers it (empty ranges mask to a no-op).
+    """
+    batch_idx = tl.program_id(0)
+    kv_head_idx = tl.program_id(1)
+    vlo = tl.load(V_lo + batch_idx)
+    vhi = tl.load(V_hi + batch_idx)
+    tile = (vlo // BLOCK_N) + tl.program_id(2)
+    kv_start = tile * BLOCK_N
+    kv_pos = tl.arange(0, BLOCK_N)
+    dim_pos = tl.arange(0, BLOCK_D)
+    d_mask = dim_pos < HEAD_DIM
+    kv_abs = kv_start + kv_pos
+    v_in = (kv_abs >= vlo) & (kv_abs < vhi)
+
+    page_local = kv_abs // PAGE_SIZE
+    offset_in_page = kv_abs % PAGE_SIZE
+    page_global = tl.load(
+        Block_table + batch_idx * max_blocks_per_seq + page_local, mask=v_in, other=0
+    )
+    # V layout [BLOCK_N keys, BLOCK_D]; int64 offsets so a large paged cache cannot overflow int32.
+    v_ptrs = (
+        page_global[:, None].to(tl.int64) * stride_vc_block
+        + offset_in_page[:, None] * stride_vc_pos
+        + kv_head_idx * stride_vc_head
+        + dim_pos[None, :]
+    )
+    vt = tl.load(V_cache + v_ptrs, mask=v_in[:, None] & d_mask[None, :], other=0.0).to(tl.float32)
+    vq = _v_qdq_nvfp4(vt, v_qdq_scale, BLOCK_N, BLOCK_D)
+    tl.store(
+        V_cache + v_ptrs, vq.to(V_cache.dtype.element_ty), mask=v_in[:, None] & d_mask[None, :]
+    )
+
+
+def fake_quant_v_onwrite(
+    v_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    v_lo: torch.Tensor,  # [batch] int32 device tensor, BLOCK_N-aligned bake range [lo, hi)
+    v_hi: torch.Tensor,
+    *,
+    page_size: int = 16,
+    v_qdq_scale: float = 1.0,
+    decode: bool = False,
+) -> None:
+    """NVFP4 quantize-on-write for V: fake-quant complete ``BLOCK_N`` tiles in ``[v_lo, v_hi)`` in place.
+
+    Bakes V tiles once at write so the decode kernel reads complete tiles as-is (``O(S)`` decode)
+    instead of re-fake-quantizing the whole cache every step (``O(S²)`` on-read). Because written
+    tokens are immutable and the same ``_v_qdq_nvfp4`` is used, the baked tile is bit-identical to the
+    on-read result — a pure speedup.
+
+    ``decode=True`` fixes the grid to one tile/request (graph-capturable, no host sync); otherwise the
+    grid spans the largest per-request range (eager prefill).
+    """
+    batch, max_blocks = block_table.shape
+    num_kv, head_dim = v_cache.shape[2], v_cache.shape[3]
+    BLOCK_N = _ONWRITE_BLOCK_N
+    BLOCK_D = triton.next_power_of_2(head_dim)
+    if decode:
+        n_tiles = 1  # one appended key completes at most one tile; fixed grid => graph-safe
+    else:
+        base = v_lo // BLOCK_N
+        span = int((v_hi - base * BLOCK_N).max().item())
+        if span <= 0:
+            return
+        n_tiles = (span + BLOCK_N - 1) // BLOCK_N
+    with torch.cuda.device(v_cache.device):
+        _onwrite_fq_v_kernel[(batch, num_kv, n_tiles)](
+            v_cache,
+            block_table,
+            v_lo,
+            v_hi,
+            v_cache.stride(0),
+            v_cache.stride(1),
+            v_cache.stride(2),
+            v_qdq_scale,
+            BLOCK_N=BLOCK_N,
+            BLOCK_D=BLOCK_D,
+            HEAD_DIM=head_dim,
+            PAGE_SIZE=page_size,
+            max_blocks_per_seq=max_blocks,
+            num_warps=4,
+        )
+
+
 def attention_decode(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -294,6 +417,7 @@ def attention_decode(
     p_qdq_amax: float = 1.0,
     v_qdq: str | None = None,
     v_qdq_amax: float | None = None,
+    v_cache_quantized: bool = False,
 ) -> torch.Tensor:
     """Decode attention (one query token per request) over a paged KV cache.
 
@@ -326,6 +450,10 @@ def attention_decode(
         v_qdq_amax: per-tensor amax for the V qdq. ``None`` uses the constant 1.0
             global scale (V's dynamic per-16 block amax carries the range and does not
             saturate E4M3); a calibrated amax is converted as for ``p_qdq_amax``.
+        v_cache_quantized: when True, V was already NVFP4-baked on write
+            (``fake_quant_v_onwrite``), so complete BLOCK_N tiles are on the grid — the
+            kernel reads them as-is and re-fake-quantizes only the trailing partial tile,
+            avoiding the O(S²) on-read re-quant during decode.
 
     Returns:
         ``[batch, num_q_heads, head_dim]`` attention output.
@@ -434,6 +562,7 @@ def attention_decode(
             p_qdq_scale=p_qdq_scale,
             V_QDQ=v_qdq_mode,
             v_qdq_scale=v_qdq_scale,
+            V_CACHE_QUANTIZED=v_cache_quantized,
             num_warps=4,
             num_stages=2,
         )
@@ -461,4 +590,4 @@ def attention_decode(
     return out
 
 
-__all__ = ["attention_decode"]
+__all__ = ["attention_decode", "fake_quant_v_onwrite"]

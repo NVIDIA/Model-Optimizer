@@ -37,7 +37,11 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
 )
 
-from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
+from modelopt.torch.kernels.common.attention.decode_attention import (
+    _ONWRITE_BLOCK_N,
+    attention_decode,
+    fake_quant_v_onwrite,
+)
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
 
 
@@ -154,6 +158,31 @@ def _v_qdq_from_layer(layer) -> tuple[str | None, float | None]:
     block amax carries the range).
     """
     return _bmm_qdq_from_layer(layer, "v_bmm_quantizer", None)
+
+
+def _bake_v_onwrite(value_cache, block_table, seq_lens, query_lens, page_size, v_qdq_amax, decode):
+    """Quantize-on-write the newly-complete BLOCK_N V tiles so decode reads them as-is.
+
+    Bakes the tiles that completed since the previous step (``[prev, seq)`` clipped to whole
+    ``_ONWRITE_BLOCK_N`` tiles) into the paged cache, NVFP4, with the same scale the kernel applies
+    on read — turning decode V quant from ``O(S²)`` on-read into ``O(S)`` quantize-once. NVFP4-only;
+    the caller skips it for FP8 V.
+    """
+    bn = _ONWRITE_BLOCK_N
+    prev = (seq_lens - query_lens).to(torch.int32)
+    seqk = seq_lens.to(torch.int32)
+    v_lo = (prev // bn) * bn
+    v_hi = (seqk // bn) * bn
+    v_scale = 1.0 if v_qdq_amax is None else v_qdq_amax / (6.0 * 448.0)
+    fake_quant_v_onwrite(
+        value_cache,
+        block_table,
+        v_lo,
+        v_hi,
+        page_size=page_size,
+        v_qdq_scale=v_scale,
+        decode=decode,
+    )
 
 
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
@@ -274,6 +303,20 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                     output_scale,
                     output_block_scale,
                 )
+            # NVFP4 V: bake the newly-complete tiles on write so the decode kernel reads them
+            # as-is (O(S)) instead of re-fake-quantizing the whole cache every step (O(S²)).
+            # FP8 V stays on-read. Bake BEFORE the attention so it reads the baked cache.
+            v_cache_quantized = v_qdq == "nvfp4"
+            if v_cache_quantized:
+                _bake_v_onwrite(
+                    value_cache,
+                    attn_metadata.block_table,
+                    seq_lens,
+                    b_seq_len,
+                    page_size,
+                    v_qdq_amax,
+                    decode=True,
+                )
             # Decode runs on the dedicated paged decode kernel (one query vector per
             # request, split-K): skip-softmax and/or P quant, not the prefill kernel.
             return self._forward_sparse_decode(
@@ -289,6 +332,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 p_qdq_amax=p_qdq_amax,
                 v_qdq=v_qdq,
                 v_qdq_amax=v_qdq_amax,
+                v_cache_quantized=v_cache_quantized,
                 output=output,
             )
         if not sparse_kw and p_qdq is None and v_qdq is None:
@@ -344,6 +388,20 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         )
 
         output[:num_actual_tokens] = triton_out
+        # NVFP4 V: prefill attention read raw V on-read above (O(S), single pass); now bake the
+        # prompt's complete tiles on write so the following decode steps inherit a pre-quantized
+        # cache and stay O(S). (Chunked prefill re-reads earlier baked tiles on-read with a small
+        # idempotency drift; a prefill-side V_CACHE_QUANTIZED gate would remove it — follow-up.)
+        if v_qdq == "nvfp4":
+            _bake_v_onwrite(
+                value_cache,
+                attn_metadata.block_table,
+                seq_lens,
+                b_seq_len,
+                page_size,
+                v_qdq_amax,
+                decode=False,
+            )
         return output
 
     def _forward_sparse_decode(
@@ -361,6 +419,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         p_qdq_amax: float = 1.0,
         v_qdq: str | None = None,
         v_qdq_amax: float | None = None,
+        v_cache_quantized: bool = False,
         output: torch.Tensor,
     ) -> torch.Tensor:
         """Decode via the dedicated paged decode kernel (skip-softmax and/or P/V quant).
@@ -387,6 +446,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             p_qdq_amax=p_qdq_amax,
             v_qdq=v_qdq,
             v_qdq_amax=v_qdq_amax,
+            v_cache_quantized=v_cache_quantized,
         )
         output[:num_actual_tokens] = decode_out
         return output

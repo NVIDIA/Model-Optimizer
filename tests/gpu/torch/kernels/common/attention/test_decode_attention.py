@@ -28,7 +28,10 @@ pytestmark = [
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
-    from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
+    from modelopt.torch.kernels.common.attention.decode_attention import (
+        attention_decode,
+        fake_quant_v_onwrite,
+    )
 
 
 def _paged_cache(k, v, seq_lens, page_size):
@@ -247,6 +250,43 @@ class TestDecodeAttention:
         ref = _dense_decode(q, k, v, scale)
         cos = F.cosine_similarity(out.flatten().float(), ref.flatten().float(), dim=0)
         assert cos > 0.99, (p_qdq, v_qdq, float(cos))
+
+    @pytest.mark.skipif(
+        not (torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)),
+        reason="NVFP4 qdq uses tl.float8e4nv (sm_89+)",
+    )
+    def test_onwrite_v_matches_onread(self):
+        """On-write V baking is exactly Option 3 (validated on B200).
+
+        (A) The bake reproduces the on-read fake-quant of every complete tile **bit-for-bit**:
+            FQ-all on the baked cache equals FQ-all on the raw cache (quantize-once == re-quant-
+            every-read; re-fake-quantizing already-baked tiles is idempotent).
+        (B) The read-as-is path (``v_cache_quantized=True``) matches on-read within an fp32-reduction
+            tolerance: the V values are identical per (A), but reading baked tiles as-is vs fake-
+            quantizing on read compiles to a slightly different fp32 reduction order (~1e-5).
+        """
+        batch, seq_k, head_dim, page_size = 2, 1000, 128, 16  # 7 complete 128-tiles + 104 trailing
+        scale = 1.0 / (head_dim**0.5)
+        q, k, v, seq_lens = self._inputs(batch, 16, 16, seq_k, head_dim, seed=11)
+        k_cache, v_cache, block_table = _paged_cache(k, v, seq_lens, page_size)
+        kw = {"softmax_scale": scale, "page_size": page_size, "num_kv_splits": 1, "v_qdq": "nvfp4"}
+
+        out_onread = attention_decode(q, k_cache, v_cache, block_table, seq_lens, **kw)
+
+        v_baked = v_cache.clone()
+        v_lo = torch.zeros(batch, device=q.device, dtype=torch.int32)
+        v_hi = ((seq_lens // 128) * 128).to(torch.int32)
+        fake_quant_v_onwrite(v_baked, block_table, v_lo, v_hi, page_size=page_size)
+
+        # (A) bit-identical V values: FQ-all on the baked cache == FQ-all on the raw cache.
+        out_onread_baked = attention_decode(q, k_cache, v_baked, block_table, seq_lens, **kw)
+        torch.testing.assert_close(out_onread_baked, out_onread, rtol=0, atol=0)
+
+        # (B) read-as-is matches within the fp32-reduction ordering of the two compiled paths.
+        out_onwrite = attention_decode(
+            q, k_cache, v_baked, block_table, seq_lens, v_cache_quantized=True, **kw
+        )
+        torch.testing.assert_close(out_onwrite, out_onread, rtol=2e-3, atol=2e-3)
 
 
 if __name__ == "__main__":
