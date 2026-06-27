@@ -209,6 +209,35 @@ class SandboxPipeline:
                 task = getattr(self, f"task_{i}", None)
                 if task is not None:
                     self.tasks += [task]
+
+        # When slurm.py/launch.py processes a --yaml launcher-format YAML,
+        # nemo_run constructs SlurmConfig directly from the YAML dict, silently
+        # dropping the _factory_ key (it's not a SlurmConfig field) and leaving
+        # host=None. This crashes paramiko with TypeError when connecting.
+        # Detect by checking host is falsy and re-apply the registered
+        # "slurm_factory" as base defaults, overlaying any fields explicitly set
+        # in the YAML (identified by value != SlurmConfig dataclass default).
+        _lookup = self._factory_lookup or _FACTORY_REGISTRY
+        _default_factory = _lookup.get("slurm_factory")
+        if _default_factory is not None:
+            for _task in self.tasks:
+                _sc = _task.slurm_config
+                if _sc is None or not hasattr(_sc, "host"):
+                    continue
+                if _sc.host:  # already set — factory was called correctly
+                    continue
+                if not dataclasses.is_dataclass(_sc):
+                    continue
+                _base = _default_factory()
+                for _f in dataclasses.fields(_sc):
+                    _val = getattr(_sc, _f.name)
+                    # Overlay only fields that differ from the SlurmConfig
+                    # dataclass default — these were explicitly set in the YAML.
+                    _dflt = _f.default if _f.default is not dataclasses.MISSING else None
+                    if _val is not None and _val != _dflt:
+                        setattr(_base, _f.name, _val)
+                _task.slurm_config = _base
+
         if self.task_configs is not None:
             lookup = self._factory_lookup or _FACTORY_REGISTRY
             if lookup:
