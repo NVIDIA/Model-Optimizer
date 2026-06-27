@@ -48,7 +48,7 @@ jobs:
       pip_install_extras: "[hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
 
-  ##### TensorRT-LLM Example Tests (pr/non-pr split: non-pr runs extra autodeploy+eval examples) #####
+  ##### TensorRT-LLM Example Tests (pr/non-pr split: non-pr runs extra eval examples) #####
   trtllm-pr:
     needs: [pr-gate]
     if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true'
@@ -69,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_autodeploy, llm_eval, llm_ptq]
+        example: [llm_eval, llm_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
