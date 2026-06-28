@@ -169,8 +169,8 @@ class HFDFlashModel(DFlashModel):
     def _base_model_norm(self):
         """Base model's final pre-lm_head RMSNorm, or None if none was located.
 
-        vLLM captures the UN-normed final hidden state, so the offline/streaming
-        distillation path must apply this before lm_head to reconstruct true base logits.
+        Applied before lm_head in the offline/streaming distillation path only when the
+        producer captured a pre-norm hidden (base_hidden_prenorm), to reconstruct true logits.
         """
         path = getattr(self, "base_model_norm_path", None)
         return self.get_submodule(path) if path else None
@@ -204,7 +204,7 @@ class HFDFlashModel(DFlashModel):
             else:
                 raise ValueError(f"Part {name} not found in model")
         # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
-        # un-normed final hidden before lm_head in the offline/streaming distillation path.
+        # un-normed final hidden collect by vllm.
         self.base_model_norm_path = None
         for path in _FINAL_NORM_PATHS:
             try:
@@ -596,11 +596,13 @@ class HFDFlashModel(DFlashModel):
                 # Compute logits from last-layer hidden states for KD loss.
                 # base_model_hidden_states is required on this path — fail fast
                 # with KeyError rather than lm_head(None).
-                out_hiddens = kwargs["base_model_outputs"]["base_model_hidden_states"]
-                # vLLM captures the UN-normed final hidden state, so re-apply the base
-                # model's final RMSNorm before lm_head to reconstruct its true logits
-                # (the distillation target). No-op if no final norm was located.
-                if self._base_model_norm is not None:
+                bmo = kwargs["base_model_outputs"]
+                out_hiddens = bmo["base_model_hidden_states"]
+                # Re-apply the base model's final norm before lm_head ONLY when the producer
+                # captured a pre-(final-)norm hidden (vLLM does; HF/TRT-LLM capture post-norm
+                # and declare base_hidden_prenorm False). Honoring the producer's declaration
+                # keeps this consumer backend-agnostic. No-op if no final norm was located.
+                if bmo.get("base_hidden_prenorm", False) and self._base_model_norm is not None:
                     out_hiddens = self._base_model_norm(out_hiddens)
                 base_outputs.logits = self._base_model_lm_head(out_hiddens)
             target_hidden = base_outputs.target_hidden

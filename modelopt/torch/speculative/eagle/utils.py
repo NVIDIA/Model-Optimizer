@@ -156,6 +156,9 @@ class OfflineSupervisedDataset(Dataset):
             "attention_mask": torch.ones_like(offline_data["input_ids"]),
             "loss_mask": loss_mask,
             "labels": labels,
+            # Whether the dumped hidden is pre-(final-)norm (the consumer re-applies the base
+            # norm if so). Read from the dump; default False = post-norm, the prior behavior.
+            "base_hidden_prenorm": bool(offline_data.get("hidden_states_prenorm", False)),
         }
         return ret
 
@@ -195,6 +198,10 @@ class EagleOfflineDataCollator:
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
             for k in ["base_model_hidden_states", "aux_hidden_states"]
         }
+        # Propagate the producer's pre-norm declaration (constant across the batch). DFlash
+        # honors it to decide whether to re-apply the base final norm; other heads ignore it.
+        if "base_hidden_prenorm" in features[0]:
+            base_model_outputs["base_hidden_prenorm"] = features[0]["base_hidden_prenorm"]
 
         batch = {
             **base_batch,

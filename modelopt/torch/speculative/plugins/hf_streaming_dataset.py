@@ -551,4 +551,7 @@ class EagleVllmStreamingDataset(StreamingDataset):
             "attention_mask": torch.ones_like(input_ids),
             "loss_mask": loss_mask,
             "labels": labels,
+            # vLLM captures the residual stream BEFORE the final norm; tell the trainer to
+            # re-apply it before lm_head (see HFDFlashModel.forward).
+            "base_hidden_prenorm": True,
         }
