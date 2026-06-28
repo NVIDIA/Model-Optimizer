@@ -36,6 +36,7 @@ class TestLAQConfig:
         assert cfg.method == "laq"
         assert cfg.learnable_amax == ["post"]
         assert cfg.tied_amax is False
+        assert cfg.quantize_pre_scale is True
         assert cfg.scale_algorithm is None
 
     @pytest.mark.parametrize(
@@ -127,6 +128,15 @@ class TestEnableLAQ:
         assert hasattr(q, "_amax")
         q.enable_laq(torch.ones(8), quantize_scales=False)
         assert not hasattr(q, "_amax")
+
+    def test_can_skip_pre_scale_quantization(self):
+        q = self._make_quantizer()
+        q.enable_laq(
+            torch.ones(8),
+            quantize_scales=False,
+            quantize_pre_scale=False,
+        )
+        assert q._quantize_pre_scale is False
 
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_learnable_amax_uses_input_dtype(self, dtype):
@@ -258,3 +268,44 @@ class TestFakeQuantizeLAQ:
         out = q._fake_quantize(x)
         out.sum().backward()
         assert q._amax_post.grad is not None
+
+    def test_skip_pre_scale_quantization_still_quantizes_post(self, monkeypatch):
+        q = self._make_laq_quantizer()
+        q._quantize_scales = True
+        q._quantize_pre_scale = False
+        q.register_buffer("_per_tensor_scale", torch.tensor(1.0))
+        calls = []
+
+        def spy_maybe_quantize_scale(scale_raw):
+            calls.append(scale_raw)
+            return scale_raw
+
+        monkeypatch.setattr(q, "_maybe_quantize_scale", spy_maybe_quantize_scale)
+
+        out = q._fake_quantize(torch.randn(4, 16))
+
+        assert out.shape == (4, 16)
+        assert len(calls) == 1
+
+    def test_skip_pre_scale_quantization_uses_raw_scale_floor(self, monkeypatch):
+        q = self._make_laq_quantizer()
+        q._quantize_scales = True
+        q._quantize_pre_scale = False
+        q.register_buffer("_per_tensor_scale", torch.tensor(1.0))
+        min_values = []
+
+        def fake_amax_to_scale(amax, maxbound, min_value=None):
+            min_values.append(min_value)
+            return torch.ones_like(amax)
+
+        monkeypatch.setattr(
+            "modelopt.torch.quantization.nn.modules.tensor_quantizer._amax_to_scale",
+            fake_amax_to_scale,
+        )
+        monkeypatch.setattr(q, "_maybe_quantize_scale", lambda scale_raw: scale_raw)
+
+        out = q._fake_quantize(torch.randn(4, 16))
+
+        assert out.shape == (4, 16)
+        assert torch.equal(min_values[0], torch.tensor([0.002]))
+        assert min_values[1] == 1e-8

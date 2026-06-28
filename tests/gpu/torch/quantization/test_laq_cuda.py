@@ -79,6 +79,26 @@ NVFP4_LAQ_TIED_MSE_CFG = {
     },
 }
 
+NVFP4_LAQ_SKIP_PRE_SCALE_MSE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+    },
+    "algorithm": {
+        "method": "laq",
+        "learnable_amax": ["post"],
+        "quantize_pre_scale": False,
+        "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
+    },
+}
+
 
 class SimpleModel(nn.Module):
     """Minimal model for LAQ testing."""
@@ -102,8 +122,13 @@ def _make_forward_loop(model, device):
 
 @pytest.mark.parametrize(
     "config",
-    [NVFP4_LAQ_POST_MSE_CFG, NVFP4_LAQ_PRE_POST_MSE_CFG, NVFP4_LAQ_TIED_MSE_CFG],
-    ids=["post_only", "pre_and_post", "tied"],
+    [
+        NVFP4_LAQ_POST_MSE_CFG,
+        NVFP4_LAQ_PRE_POST_MSE_CFG,
+        NVFP4_LAQ_TIED_MSE_CFG,
+        NVFP4_LAQ_SKIP_PRE_SCALE_MSE_CFG,
+    ],
+    ids=["post_only", "pre_and_post", "tied", "skip_pre_scale"],
 )
 def test_laq_quantize_e2e(config):
     """End-to-end: quantize a small model with LAQ + NVFP4 on GPU."""
@@ -112,6 +137,9 @@ def test_laq_quantize_e2e(config):
     forward_loop = _make_forward_loop(model, device)
 
     model = mtq.quantize(model, config, forward_loop=forward_loop)
+    assert model.linear.weight_quantizer._quantize_pre_scale is config["algorithm"].get(
+        "quantize_pre_scale", True
+    )
 
     # Verify the model still produces output of the correct shape
     x = torch.randn(2, 64, device=device)

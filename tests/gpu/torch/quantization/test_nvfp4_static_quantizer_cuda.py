@@ -149,6 +149,85 @@ class TestNVFP4StaticQuantizer:
         torch.testing.assert_close(target.amax, source.amax)
         torch.testing.assert_close(target.global_amax, source.global_amax)
 
+    def test_laq_dtype_cast_handles_learnable_params_and_frozen_buffers(self, device):
+        """Casting should update learnable amax params but keep frozen scale buffers fp32."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        expected = torch.tensor(
+            [1.0001, 1.0002, 1.0003, 1.0004], device=device, dtype=torch.float32
+        )
+        quantizer.enable_laq(
+            expected,
+            per_tensor_scale=torch.tensor(1.0, device=device),
+            quantize_scales=True,
+            learnable_amax=["pre", "post"],
+        )
+
+        quantizer = quantizer.half()
+
+        assert quantizer._amax_pre.dtype == torch.float16
+        assert quantizer._amax_post.dtype == torch.float16
+        torch.testing.assert_close(quantizer._amax_pre, expected.to(torch.float16))
+        torch.testing.assert_close(quantizer._amax_post, expected.to(torch.float16))
+
+        quantizer = quantizer.to(dtype=torch.bfloat16)
+
+        assert quantizer._amax_pre.dtype == torch.bfloat16
+        assert quantizer._amax_post.dtype == torch.bfloat16
+        torch.testing.assert_close(quantizer._amax_pre, expected.to(torch.bfloat16))
+        torch.testing.assert_close(quantizer._amax_post, expected.to(torch.bfloat16))
+
+        frozen_quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        frozen_quantizer.enable_laq(
+            expected.to(torch.bfloat16),
+            per_tensor_scale=torch.tensor(1.0, device=device, dtype=torch.bfloat16),
+            quantize_scales=True,
+            learnable_amax=[],
+        )
+        frozen_quantizer = frozen_quantizer.half()
+
+        assert frozen_quantizer._amax_pre.dtype == torch.float32
+        assert frozen_quantizer._amax_post.dtype == torch.float32
+        assert frozen_quantizer._per_tensor_scale.dtype == torch.float32
+        expected_frozen = expected.to(torch.bfloat16).float()
+        torch.testing.assert_close(frozen_quantizer._amax_pre, expected_frozen)
+        torch.testing.assert_close(frozen_quantizer._amax_post, expected_frozen)
+
+    def test_laq_load_state_dict_preserves_fp32_scale_state(self, device):
+        """Loading lower-precision state should keep LAQ scale state fp32."""
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        expected = torch.arange(1, 5, device=device, dtype=torch.float32)
+        source = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        source.enable_laq(
+            expected,
+            per_tensor_scale=torch.tensor(1.0, device=device),
+            quantize_scales=True,
+            learnable_amax=["pre", "post"],
+        )
+        state_dict = source.state_dict()
+        state_dict["_amax_pre"] = state_dict["_amax_pre"].to(dtype=torch.float16)
+        state_dict["_amax_post"] = state_dict["_amax_post"].to(dtype=torch.float16)
+
+        target = NVFP4StaticQuantizer(quant_attribute_cfg=cfg).to(device)
+        target.enable_laq(
+            torch.zeros(4, device=device),
+            per_tensor_scale=torch.tensor(0.0, device=device),
+            quantize_scales=True,
+            learnable_amax=["pre", "post"],
+        )
+        target.load_state_dict(state_dict)
+
+        assert target._amax_pre.dtype == torch.float32
+        assert target._amax_post.dtype == torch.float32
+        torch.testing.assert_close(target._amax_pre, source._amax_pre)
+        torch.testing.assert_close(target._amax_post, source._amax_post)
+
     def test_modelopt_state_restore_uses_fp32_scale_metadata(self, device):
         """ModelOpt metadata restore should use the saved fp32 static scale metadata."""
         cfg = QuantizerAttributeConfig(

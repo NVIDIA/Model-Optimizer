@@ -309,6 +309,77 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
     return get_scaling_factor(weight_quantizer)
 
 
+def _to_export_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if hasattr(tensor, "to_local"):
+        tensor = tensor.to_local()
+    return tensor.detach().float()
+
+
+def _laq_amax_to_scale(
+    amax: torch.Tensor, max_bound: float, min_value: float | torch.Tensor
+) -> torch.Tensor:
+    scale = _to_export_tensor(amax) / max_bound
+    return torch.where(scale <= min_value, min_value, scale)
+
+
+def _laq_scale_factors(
+    scale: torch.Tensor,
+    quantizer: TensorQuantizer,
+    quantize_scale: bool,
+    expected_shape: torch.Size,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    scale = scale.view(expected_shape)
+    if not quantize_scale:
+        return scale, torch.tensor(1.0, device=scale.device)
+
+    scale_amax = _to_export_tensor(quantizer._per_tensor_scale)
+    scale_2 = scale_amax / 448.0
+    scaled = (scale * 448.0 / scale_amax.view(-1)).clamp(min=2**-9, max=448.0)
+    return scaled.to(torch.float8_e4m3fn), scale_2
+
+
+def get_laq_weight_scaling_factors(
+    weight_quantizer: TensorQuantizer, weight: torch.Tensor, block_size: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return LAQ pre/post scale factors for NVFP4 export.
+
+    The pre factors are used only to pack the FP4 weight codes. The post factors
+    are serialized as the exported dequantization scales.
+    """
+    assert getattr(weight_quantizer, "_laq", False), "Expected an LAQ quantizer."
+    assert weight.shape[-1] % block_size == 0, (
+        "Weight shape is not divisible for block size for block quantization."
+    )
+
+    expected_shape = torch.Size((*weight.shape[:-1], weight.shape[-1] // block_size))
+    quantize_scales = getattr(weight_quantizer, "_quantize_scales", False)
+    per_tensor_scale = (
+        _to_export_tensor(weight_quantizer._per_tensor_scale) if quantize_scales else None
+    )
+    max_bound = float(weight_quantizer._quant_max_bound)
+
+    post_min = 0.002 * per_tensor_scale.view(-1) if per_tensor_scale is not None else 1e-8
+    pre_min = (
+        0.002 * per_tensor_scale.view(-1)
+        if per_tensor_scale is not None and getattr(weight_quantizer, "_quantize_pre_scale", True)
+        else 1e-8
+    )
+
+    post_scale = _laq_amax_to_scale(weight_quantizer.amax_post, max_bound, post_min)
+    pre_scale = _laq_amax_to_scale(weight_quantizer.amax_pre, max_bound, pre_min)
+
+    pre_scale, pre_scale_2 = _laq_scale_factors(
+        pre_scale,
+        weight_quantizer,
+        quantize_scales and getattr(weight_quantizer, "_quantize_pre_scale", True),
+        expected_shape,
+    )
+    post_scale, post_scale_2 = _laq_scale_factors(
+        post_scale, weight_quantizer, quantize_scales, expected_shape
+    )
+    return pre_scale, pre_scale_2, post_scale, post_scale_2
+
+
 def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") -> torch.Tensor:
     """Returns the secondary weight scaling factor."""
     weight_quantizer = getattr(module, quantizer_attr_names(weight_name).weight_quantizer, None)
