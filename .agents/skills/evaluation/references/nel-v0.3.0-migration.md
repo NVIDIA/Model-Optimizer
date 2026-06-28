@@ -352,10 +352,10 @@ sampling (`temperature`, `top_p`, `max_tokens`) lives under `services.model.gene
 config: [`recipes/examples/r030_example_eval.yaml`](../recipes/examples/r030_example_eval.yaml)
 (simple / no-tools). For a tool-calling benchmark see the `gym://` example below.
 
-Because the native path uses `cluster: {type: slurm}` (`auto_resume: true` by default), NEL **auto-resumes**
-these runs on a wall-clock kill — it chains a successor job, no manual step. (This differs from `gym://`,
-which runs under `cluster: {type: local}` and must be resumed by hand with `nel eval run --resume` — see the
-gym `§7` caveats.)
+The native path runs under `cluster: {type: slurm}` with `auto_resume: true` (the default), so NEL
+**auto-resumes** a wall-clock kill itself — it chains a successor SLURM job, no manual step. (A `gym://` run
+is different: it runs under `cluster: {type: local}`, which has no `auto_resume`, so you resume it by hand —
+see the gym section's "Resume the jobs".)
 
 ### gym:// (server + reward)
 
@@ -484,7 +484,8 @@ benchmarks:
     max_concurrent: 64
     solver: {type: simple, service: model}
 cluster:
-  type: local                      # evaluator runs in-process on the CPU node
+  # gym's single grader lives on 127.0.0.1, so a gym run can't shard across nodes — keep it single-node.
+  type: local                      # evaluator runs in-process on the CPU node (no shards)
 output:
   dir: <rundir>
 ```
@@ -556,24 +557,39 @@ until [ -f <shared>/serve_host.txt ]; do sleep 5; done
 POLICY_HOST=$(cat <shared>/serve_host.txt)
 until curl -s --max-time 8 "http://$POLICY_HOST:8000/v1/models" | grep -q '"id"'; do sleep 10; done
 sed -i "s#<gpu-host>#$POLICY_HOST#; s#<port>#$PORT#" config.yaml
-# 3. run the conductor (§4)
-nel eval run config.yaml
+# 3. run the conductor (§4); ${RESUME} is empty on a fresh run, "--resume" when resuming (§7)
+nel eval run config.yaml ${RESUME:-}
 ```
 
 Submit `serve.sbatch` first (a plain `sbatch --dependency=after` only waits for the serve job to *start*,
 not for vLLM to finish loading — that's why `gym_eval.sbatch` polls `…/v1/models` above before running).
 
-#### 7. Caveats
+#### 7. Resume the jobs
+
+Resuming a wall-clock kill is **manual** here. `cluster: {type: local}` has no `auto_resume` (that only
+chains `slurm`-cluster jobs — see the native section), so neither job restarts itself, and the GPU serve
+job dies too. A resume is therefore **two steps** — relaunch the serve, then resume the eval:
+
+```bash
+# 1. relaunch the GPU serve — it rewrites serve_host.txt with the new node's hostname
+sbatch serve.sbatch
+
+# 2. resume the eval — it waits for the fresh serve_host.txt + /v1/models, then continues
+sbatch --export=ALL,RESUME=--resume gym_eval.sbatch          # RESUME -> nel eval run … --resume (§6 step 3)
+```
+
+Completed rollouts are checkpointed per `(problem, repeat)`, so the resume **skips everything already
+scored** and re-runs only what was in flight — even though the new serve node changes the model URL. (NEL
+keys the skip on its *verified* log, which survives the config-hash change; only the un-scored inference
+cache is dropped and regenerated.)
+
+#### 8. Caveats
 
 - **Reasoning models need a big enough `generation.max_tokens`** — too small truncates mid-reasoning, the
   grader sees empty output, and the score collapses.
 - **Reasoning models: enable thinking via `proxy.extra_body`** — pass `chat_template_kwargs: {enable_thinking:
   true}` under `services.model.proxy.extra_body` (it's merged into every request) so the chat template emits
   the reasoning block. This is a *model* setting (applies to native runs too), not gym-specific.
-- **Resuming a killed run is manual.** `cluster: {type: local}` does not auto-restart after a SLURM
-  wall-clock kill (NEL's `auto_resume` only chains `slurm`-cluster jobs). Finished rollouts are
-  checkpointed, though — just re-submit the job with `nel eval run --resume` and it skips the done ones
-  and continues.
 - **`example.jsonl` is a small subset** — use `prepare.py` (§3) for the full benchmark.
 - **Sharding:** a gym run has one shared grader, so it doesn't shard across nodes cleanly (loopback breaks)
   — keep it single-node.
