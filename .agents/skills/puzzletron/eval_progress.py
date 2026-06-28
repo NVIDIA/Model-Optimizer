@@ -46,6 +46,7 @@ class EvalProgress:
     pct: int | None = None
     phase_elapsed_s: int | None = None
     phase_remaining_s: int | None = None
+    overall_remaining_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ _ANY_TQDM_RE = re.compile(
     r"(?P<pct>\d+)%\|[^|]*\|\s*(?P<current>\d+)/(?P<total>\d+)"
     r"(?:\s*\[(?P<elapsed>[\d:]+)<(?P<remaining>[\d:]+),)?"
 )
+_RESULT_SAVING_ALLOWANCE_S = 5
 
 
 def parse_tqdm_time(value):
@@ -82,13 +84,19 @@ def parse_tqdm_time(value):
 
 def progress_from_match(match):
     """Convert a named tqdm match to structured progress."""
+    phase = match.group("label")
+    phase_remaining_s = parse_tqdm_time(match.group("remaining"))
+    overall_remaining_s = None
+    if phase == "Running loglikelihood requests" and phase_remaining_s is not None:
+        overall_remaining_s = phase_remaining_s + _RESULT_SAVING_ALLOWANCE_S
     return EvalProgress(
-        phase=match.group("label"),
+        phase=phase,
         current=int(match.group("current")),
         total=int(match.group("total")),
         pct=int(match.group("pct")),
         phase_elapsed_s=parse_tqdm_time(match.group("elapsed")),
-        phase_remaining_s=parse_tqdm_time(match.group("remaining")),
+        phase_remaining_s=phase_remaining_s,
+        overall_remaining_s=overall_remaining_s,
     )
 
 
@@ -388,6 +396,8 @@ def fmt_running_timing(eval_info):
         timing += f"  phase elapsed {fmt_time(progress.phase_elapsed_s)}"
     if progress.phase_remaining_s is not None:
         timing += f"  phase remaining ~{fmt_time(progress.phase_remaining_s)}"
+    if progress.overall_remaining_s is not None:
+        timing += f"  overall remaining ~{fmt_time(progress.overall_remaining_s)}"
     return timing
 
 
@@ -404,7 +414,8 @@ if len(sys.argv) == 3 and sys.argv[1] == "--log-file":
         f"phase={log_progress.phase} pct={log_progress.pct} "
         f"current={log_progress.current} total={log_progress.total} "
         f"phase_elapsed={fmt_time(log_progress.phase_elapsed_s)} "
-        f"phase_remaining={fmt_time(log_progress.phase_remaining_s)}"
+        f"phase_remaining={fmt_time(log_progress.phase_remaining_s)} "
+        f"overall_remaining={fmt_time(log_progress.overall_remaining_s)}"
     )
     sys.exit(0)
 

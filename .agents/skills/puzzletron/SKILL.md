@@ -276,10 +276,10 @@ For running evals, detect active `lm_eval_hf.py` processes via `ps` and show the
                           phase: Loading weights 62% (157/254)  total elapsed 0m38s  phase remaining ~0m15s
 
   [RUNNING]   distill:0.9x          ...  /workspace/.../hf
-                          phase: Running loglikelihood requests 89% (49989/56168)  total elapsed 4m19s  phase remaining ~0m19s
+                          phase: Running loglikelihood requests 89% (49989/56168)  total elapsed 4m19s  phase remaining ~0m19s  overall remaining ~0m24s
 ```
 
-Treat `phase remaining` as the ETA for the named phase, not the entire evaluation. Do not derive it from total process time. The script reads tqdm's own ETA for loading, tokenization, and loglikelihood. It aggregates the repeatedly-reset per-subtask bars into one `Building contexts` phase and estimates that phase from completed task intervals.
+Treat `phase remaining` as the ETA for the named phase, not the entire evaluation. Do not derive it from total process time. The script reads tqdm's own ETA for loading, tokenization, and loglikelihood. It aggregates the repeatedly-reset per-subtask bars into one `Building contexts` phase and estimates that phase from completed task intervals. During the final loglikelihood phase, also show `overall remaining` as the phase ETA plus a five-second result-saving allowance. Do not show an overall ETA during earlier phases without calibrated timings for their future phases.
 
 When saved JSONs include both limited and full evaluations, prefer the newest full evaluation. If only a limited result exists, append `(limit=N)` to its accuracy so it cannot be mistaken for a full score.
 

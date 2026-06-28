@@ -169,7 +169,7 @@ When running multiple checkpoints sequentially, monitor progress with:
 /puzzletron eval progress
 ```
 
-Running rows show the current lm-eval phase and that phase's ETA. Context-building progress is aggregated across MMLU subtasks instead of resetting for every task. Saved full evaluations take precedence over smoke tests; when only a limited result exists, its accuracy is labeled `(limit=N)`.
+Running rows show the current lm-eval phase and that phase's ETA. During the final loglikelihood phase, they also show the overall ETA, including result-saving time. Context-building progress is aggregated across MMLU subtasks instead of resetting for every task. Saved full evaluations take precedence over smoke tests; when only a limited result exists, its accuracy is labeled `(limit=N)`.
 
 Example output mid-run:
 
