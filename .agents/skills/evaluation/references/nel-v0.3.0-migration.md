@@ -352,6 +352,11 @@ sampling (`temperature`, `top_p`, `max_tokens`) lives under `services.model.gene
 config: [`recipes/examples/r030_example_eval.yaml`](../recipes/examples/r030_example_eval.yaml)
 (simple / no-tools). For a tool-calling benchmark see the `gym://` example below.
 
+Because the native path uses `cluster: {type: slurm}` (`auto_resume: true` by default), NEL **auto-resumes**
+these runs on a wall-clock kill — it chains a successor job, no manual step. (This differs from `gym://`,
+which runs under `cluster: {type: local}` and must be resumed by hand with `nel eval run --resume` — see the
+gym `§7` caveats.)
+
 ### gym:// (server + reward)
 
 `gym://` runs a NeMo-Gym **resource server** that scores each response — the faithful path for the `†`
