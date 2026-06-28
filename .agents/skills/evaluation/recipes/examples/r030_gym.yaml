@@ -29,6 +29,13 @@ services:
     generation:
       temperature: 0.0
       max_tokens: 512
+    # Reasoning models: uncomment to emit the thinking block (see the migration doc's gym caveats).
+    # extra_body is merged into every request; pair it with a big enough generation.max_tokens or the
+    # reasoning gets truncated -> empty answer -> score collapses.
+    # proxy:
+    #   extra_body:
+    #     chat_template_kwargs:
+    #       enable_thinking: true
 
 benchmarks:
   # The benchmark lives in the running server + the data file, NOT after the prefix.
@@ -52,5 +59,16 @@ cluster:
 
 output:
   dir: /abs/path/to/rundir                 # MUST be absolute
-  # export is run manually after the job (see r030_example_eval.yaml / migration doc "Export to MLFlow"):
-  #   nel export <rundir>/<bundle> --dest mlflow -o tracking_uri=<uri> -o experiment_name=<exp>
+  export:
+    - mlflow                               # cluster:local auto-exports at run end (or `nel export <bundle>` manually)
+  export_config:
+    mlflow:
+      tracking_uri: <your-mlflow-uri>
+      experiment_name: <experiment>
+      tags:                                # ride into the bundle -> MLflow; what dashboards attribute runs by
+        model: <model-name>               # set this — without it the run lands as an orphan "no checkpoint" row
+        checkpoint_path: <abs path>       # per-checkpoint row label downstream
+        benchmark: <bench>                # a gym:// name is a URI, so set the clean benchmark id explicitly here
+        source: gym
+        precision: <bf16|fp8|nvfp4>
+        variant: <run label>             # e.g. 96k-thinking

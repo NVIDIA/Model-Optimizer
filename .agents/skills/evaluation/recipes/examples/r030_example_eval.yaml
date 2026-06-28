@@ -17,6 +17,13 @@ services:
     model: /path/to/checkpoint
     served_model_name: my-model      # required; referenced by benchmarks
     protocol: chat_completions
+    # Reasoning models: uncomment to emit the thinking block (see the migration doc's gym caveats).
+    # extra_body is merged into every request; pair it with a big enough generation max_tokens or the
+    # reasoning gets truncated -> empty answer -> score collapses. (Applies to native type:vllm too.)
+    # proxy:
+    #   extra_body:
+    #     chat_template_kwargs:
+    #       enable_thinking: true
     port: 8000
     node_pool: gpu
     # Single-instance serving. Pick TP/PP from model size & GPU count (references/parallelism.md).
@@ -106,6 +113,9 @@ output:
       tracking_uri: <your-mlflow-uri>
       experiment_name: <experiment>
       tags:
-        model: my-model
+        model: my-model                    # set this — dashboards attribute/group runs by it
+        checkpoint_path: <abs path>        # per-checkpoint row label downstream
         precision: <bf16|fp8|nvfp4>
         pipeline: r0.3.0
+        # (no static `benchmark` tag — this config runs several benchmarks; the engine
+        #  carries each one's identity in its own export bundle)
