@@ -542,7 +542,8 @@ sbatch gym_eval.sbatch    # CPU: the script below
 export RAY_TMPDIR=/tmp                                         # Lustre socket-path fix
 # 1. start the grader (§2) on this node, then wait for it to register + read its DYNAMIC port
 cd <gym>
-gym env start --config <grader-only config> &                 # keep only resources_servers:, drop the agent (§2)
+# Launch gym grader in background by using "&". Keep only resources_servers and drop the agent (§2) as needed
+gym env start --config resources_servers/<name>/configs/<name>.yaml &
 PORT=""
 for i in $(seq 1 60); do                                      # server takes a few s to register
   PORT=$(curl -s http://127.0.0.1:11000/server_instances \
