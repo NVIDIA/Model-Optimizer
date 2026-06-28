@@ -641,3 +641,30 @@ subdirectories and writes the merged `<bench>/` bundles next to them, which expo
 from `output.export_config.mlflow.tags` (e.g. `model`, `checkpoint_path`, `num_nodes`, `precision`,
 `variant`) ride along and feed your MLflow dashboards / downstream viewers. The `/` in a
 `skills://` name becomes `___` in the on-disk bundle dir (`skills___aime25`).
+
+> **Always set a stable `model` (and ideally `checkpoint_path`) tag.** Dashboards key/group runs by
+> these tags to attribute a score to a model or checkpoint. A run exported **without** them can't be
+> attributed — it shows up as an orphan/"no checkpoint" row instead of landing on the right model — and
+> a `model` value that drifts between runs (or differs from a baseline's) splits what should be one row.
+> The engine logs only a generic headline metric (`pass_at_1` / `mean_reward`); the benchmark identity
+> rides in the `benchmark` tag and the model identity in `model`, so both tags are what make the export
+> usable downstream.
+
+Example `output` block with the tags set (lives in the run config; `nel export` also accepts the same
+tracking URI / experiment via `-o`):
+
+```yaml
+output:
+  dir: <run dir>
+  export: [mlflow]
+  export_config:
+    mlflow:
+      tracking_uri: <your-mlflow-uri>
+      experiment_name: <exp>
+      tags:
+        model: <model-name>          # set this — dashboards group/attribute runs by it
+        checkpoint_path: <abs path>  # the per-checkpoint row label downstream
+        benchmark: <bench>           # benchmark identity (the engine logs only a generic metric key)
+        precision: bf16
+        variant: <run label>         # e.g. base / with-tools / 96k-thinking
+```
