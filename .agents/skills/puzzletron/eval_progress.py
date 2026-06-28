@@ -30,8 +30,125 @@ import os
 import re
 import subprocess  # nosec B404
 import sys
+from dataclasses import dataclass
+from itertools import pairwise
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+@dataclass(frozen=True)
+class EvalProgress:
+    """Progress within the current lm-eval phase."""
+
+    phase: str
+    current: int | None = None
+    total: int | None = None
+    pct: int | None = None
+    phase_elapsed_s: int | None = None
+    phase_remaining_s: int | None = None
+
+
+@dataclass(frozen=True)
+class MmluResult:
+    """A saved MMLU result and its sample limit, if any."""
+
+    accuracy: float
+    limit: int | None
+    mtime: float
+
+
+_MAJOR_TQDM_RE = re.compile(
+    r"(?P<label>Loading weights|Tokenizing inputs|Running loglikelihood requests):\s*"
+    r"(?P<pct>\d+)%\|[^|]*\|\s*(?P<current>\d+)/(?P<total>\d+)"
+    r"(?:\s*\[(?P<elapsed>[\d:]+)<(?P<remaining>[\d:]+),)?"
+)
+_ANY_TQDM_RE = re.compile(
+    r"(?P<pct>\d+)%\|[^|]*\|\s*(?P<current>\d+)/(?P<total>\d+)"
+    r"(?:\s*\[(?P<elapsed>[\d:]+)<(?P<remaining>[\d:]+),)?"
+)
+
+
+def parse_tqdm_time(value):
+    """Parse tqdm's MM:SS or H:MM:SS duration format."""
+    if not value:
+        return None
+    parts = [int(part) for part in value.split(":")]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return None
+
+
+def progress_from_match(match):
+    """Convert a named tqdm match to structured progress."""
+    return EvalProgress(
+        phase=match.group("label"),
+        current=int(match.group("current")),
+        total=int(match.group("total")),
+        pct=int(match.group("pct")),
+        phase_elapsed_s=parse_tqdm_time(match.group("elapsed")),
+        phase_remaining_s=parse_tqdm_time(match.group("remaining")),
+    )
+
+
+def parse_eval_progress(text):
+    """Parse the current phase without confusing nested/reset tqdm bars."""
+    major_matches = list(_MAJOR_TQDM_RE.finditer(text))
+    major_match = major_matches[-1] if major_matches else None
+
+    if "Saving results aggregated" in text:
+        return EvalProgress(phase="Saving results")
+
+    context_matches = list(re.finditer(r"Building contexts for (mmlu_\S+) on rank", text))
+    last_context_pos = context_matches[-1].start() if context_matches else -1
+    major_pos = major_match.start() if major_match else -1
+
+    # Context construction has one reset tqdm bar per MMLU subtask. Combine
+    # them into one task-level phase instead of exposing the latest reset bar.
+    if context_matches and last_context_pos > major_pos:
+        selected_tasks = set(re.findall(r"Task: (mmlu_[^\s(]+) \(", text))
+        started_tasks = {match.group(1) for match in context_matches}
+        total = max(len(selected_tasks), len(started_tasks))
+        segment = text[last_context_pos:]
+        task_matches = list(_ANY_TQDM_RE.finditer(segment))
+        task_match = task_matches[-1] if task_matches else None
+        task_fraction = int(task_match.group("pct")) / 100 if task_match else 0.0
+        completed_equivalent = max(0, len(started_tasks) - 1) + task_fraction
+        pct = round(100 * completed_equivalent / total) if total else None
+
+        remaining_s = None
+        timestamps = [
+            int(hour) * 3600 + int(minute) * 60 + int(second)
+            for hour, minute, second in re.findall(
+                r"(\d{2}):(\d{2}):(\d{2}).*?Building contexts for mmlu_\S+ on rank", text
+            )
+        ]
+        if len(timestamps) >= 2:
+            intervals = [(later - earlier) % (24 * 3600) for earlier, later in pairwise(timestamps)]
+            average_task_s = sum(intervals) / len(intervals)
+            current_task_remaining_s = (
+                parse_tqdm_time(task_match.group("remaining")) if task_match else 0
+            )
+            remaining_s = round(
+                average_task_s * max(0, total - len(started_tasks))
+                + (current_task_remaining_s or 0)
+            )
+
+        return EvalProgress(
+            phase="Building contexts",
+            current=len(started_tasks),
+            total=total,
+            pct=pct,
+            phase_remaining_s=remaining_s,
+        )
+
+    if major_match:
+        progress = progress_from_match(major_match)
+        if progress.phase == "Loading weights" and progress.pct == 100:
+            return EvalProgress(phase="Preparing tasks")
+        return progress
+    return EvalProgress(phase="Initializing")
 
 
 def parse_memory_mib(dir_name):
@@ -93,7 +210,7 @@ def get_checkpoints(puzzle_dir):
 
 
 def get_running_evals():
-    """Return dict of checkpoint_path -> {pid, elapsed_s, pct_done} for running lm_eval processes."""
+    """Return process and current phase details for running lm-eval jobs."""
     results = {}
     try:
         ps_out = subprocess.run(  # nosec B603 B607
@@ -112,7 +229,7 @@ def get_running_evals():
             path = os.path.abspath(path_m.group(1))
             pid = pid_m.group(1)
             elapsed = None
-            pct = None
+            progress = EvalProgress(phase="Initializing")
             try:
                 r = subprocess.run(  # nosec B603 B607
                     ["ps", "-o", "etimes=", "-p", pid], capture_output=True, text=True
@@ -126,6 +243,12 @@ def get_running_evals():
             # For distillation checkpoints: <run_dir>/eval_mmlu.log
             parent = os.path.dirname(path)
             log_candidates.append(os.path.join(parent, "eval_mmlu.log"))
+            # Sandboxed progress commands may not be allowed to inspect another
+            # process's file descriptors. Search recent Puzzletron eval logs and
+            # validate them against the model path before parsing.
+            log_candidates.extend(
+                glob.glob("/workspace/puzzle_dir_*/**/*mmlu*.log", recursive=True)
+            )
             # Check files open by the python process itself
             try:
                 for fd in os.listdir(f"/proc/{pid}/fd"):
@@ -164,20 +287,19 @@ def get_running_evals():
                             pass
             except Exception:
                 pass
-            for log_path in log_candidates:
+            existing_logs = {candidate for candidate in log_candidates if os.path.isfile(candidate)}
+            for log_path in sorted(existing_logs, key=os.path.getmtime, reverse=True):
                 try:
                     with open(log_path, "rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - 4096))
-                        tail = f.read().decode("utf-8", errors="replace")
-                    for tqdm_m in re.finditer(r"(\d+)%\|[^|]*\|\s*(\d+)/(\d+)", tail):
-                        pct = int(tqdm_m.group(1))
-                    if pct is not None:
+                        text = f.read().decode("utf-8", errors="replace")
+                    if path not in text:
+                        continue
+                    progress = parse_eval_progress(text)
+                    if progress.phase != "Initializing":
                         break
                 except OSError:
                     continue
-            results[path] = {"pid": pid, "elapsed_s": elapsed, "pct": pct}
+            results[path] = {"pid": pid, "elapsed_s": elapsed, "progress": progress}
     except Exception:
         pass
     return results
@@ -194,14 +316,8 @@ def fmt_time(seconds):
     return f"{m}m{s:02d}s"
 
 
-# Rough baseline for full MMLU eval duration in seconds (measured: Qwen3-8B/8GPU/bs4).
-# Used to estimate remaining time during the model-loading phase before tqdm starts.
-# Update with measured values as more runs complete.
-_MMLU_EVAL_BASELINE_S = 2700  # ~45 min, measured Qwen3-8B/8GPU/batch_size=4
-
-
 def get_mmlu_accuracy(path):
-    """Return overall MMLU accuracy from saved JSON results, or None if not done."""
+    """Return the preferred saved MMLU result, favoring full evaluations."""
     results_dir = os.path.join(path, "eval_results", "mmlu")
     if not os.path.isdir(results_dir):
         return None
@@ -209,6 +325,7 @@ def get_mmlu_accuracy(path):
     # (slashes replaced by __), then results_<timestamp>.json inside it.
     # Use os.walk instead of glob — glob skips dirs starting with '.' (e.g.
     # when the model path was relative, lm_eval names the subdir '..__..').
+    candidates = []
     for dirpath, _dirs, files in os.walk(results_dir):
         for fname in files:
             if not fname.startswith("results_") or not fname.endswith(".json"):
@@ -216,10 +333,27 @@ def get_mmlu_accuracy(path):
             data = None
             with contextlib.suppress(OSError, json.JSONDecodeError, KeyError):
                 data = json.load(open(os.path.join(dirpath, fname)))
-            if data is not None:
-                results = data.get("results", {})
-                if "mmlu" in results:
-                    return results["mmlu"].get("acc,none") or results["mmlu"].get("acc")
+            if data is None:
+                continue
+            results = data.get("results", {})
+            if "mmlu" not in results:
+                continue
+            accuracy = results["mmlu"].get("acc,none")
+            if accuracy is None:
+                accuracy = results["mmlu"].get("acc")
+            if accuracy is None:
+                continue
+            limit = data.get("config", {}).get("limit")
+            result_path = os.path.join(dirpath, fname)
+            candidates.append(
+                MmluResult(
+                    accuracy=float(accuracy),
+                    limit=int(limit) if limit is not None else None,
+                    mtime=os.path.getmtime(result_path),
+                )
+            )
+    if candidates:
+        return max(candidates, key=lambda result: (result.limit is None, result.mtime))
     # results dir exists but no readable JSON yet — still running
     return "running"
 
@@ -230,10 +364,49 @@ def fmt_acc(acc):
         return ""
     if acc == "running":
         return "running"
+    if isinstance(acc, MmluResult):
+        suffix = f" (limit={acc.limit})" if acc.limit is not None else ""
+        return f"{acc.accuracy:.4f}{suffix}"
     return f"{acc:.4f}"
 
 
+def fmt_running_timing(eval_info):
+    """Format phase-aware timing without presenting a phase ETA as overall ETA."""
+    elapsed_s = eval_info.get("elapsed_s")
+    progress = eval_info.get("progress")
+    if not isinstance(progress, EvalProgress):
+        progress = EvalProgress(phase="Initializing")
+
+    phase_detail = progress.phase
+    if progress.pct is not None:
+        phase_detail += f" {progress.pct}%"
+    if progress.current is not None and progress.total is not None:
+        phase_detail += f" ({progress.current}/{progress.total})"
+
+    timing = f"phase: {phase_detail}  total elapsed {fmt_time(elapsed_s)}"
+    if progress.phase_elapsed_s is not None:
+        timing += f"  phase elapsed {fmt_time(progress.phase_elapsed_s)}"
+    if progress.phase_remaining_s is not None:
+        timing += f"  phase remaining ~{fmt_time(progress.phase_remaining_s)}"
+    return timing
+
+
 # --- main ---
+
+if len(sys.argv) == 3 and sys.argv[1] == "--log-file":
+    if sys.argv[2] == "-":
+        log_text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+    else:
+        with open(sys.argv[2], "rb") as log_file:
+            log_text = log_file.read().decode("utf-8", errors="replace")
+    log_progress = parse_eval_progress(log_text)
+    print(
+        f"phase={log_progress.phase} pct={log_progress.pct} "
+        f"current={log_progress.current} total={log_progress.total} "
+        f"phase_elapsed={fmt_time(log_progress.phase_elapsed_s)} "
+        f"phase_remaining={fmt_time(log_progress.phase_remaining_s)}"
+    )
+    sys.exit(0)
 
 puzzle_dir = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else None
 
@@ -269,7 +442,6 @@ running_evals = get_running_evals()
 
 done = []
 running = []
-queued = []
 pending = []
 for label, path in entries:
     acc = get_mmlu_accuracy(path)
@@ -279,16 +451,13 @@ for label, path in entries:
         running.append((label, path))
     elif acc not in (None, "running"):
         done.append((label, path))
-    elif acc == "running":
-        # eval_results dir exists but no active process — queued/waiting
-        queued.append((label, path))
     else:
         pending.append((label, path))
 
-DIV = "─" * 66
+DIV = "─" * 80
 print(f"\nMMlu eval progress  ({len(done)}/{len(entries)} done)")
 print(DIV)
-print(f"  {'Status':<10}  {'Checkpoint':<14}  {'MMLU acc':>9}  Path")
+print(f"  {'Status':<10}  {'Checkpoint':<14}  {'MMLU acc':>20}  Path")
 print(DIV)
 for label, path in entries:
     acc = get_mmlu_accuracy(path)
@@ -297,40 +466,25 @@ for label, path in entries:
     if eval_info is not None:
         status = "[RUNNING]"
         acc_str = "..."
-        elapsed_s = eval_info.get("elapsed_s")
-        pct = eval_info.get("pct")
-        elapsed_str = fmt_time(elapsed_s)
-        if pct and pct > 0 and elapsed_s:
-            remaining_s = elapsed_s * (100 - pct) / pct
-            timing_str = f"  {pct}% done  elapsed {elapsed_str}  remaining ~{fmt_time(remaining_s)}"
-        elif elapsed_s:
-            # Loading phase: use baseline estimate for remaining
-            remaining_s = max(0, _MMLU_EVAL_BASELINE_S - elapsed_s)
-            timing_str = (
-                f"  loading...  elapsed {elapsed_str}  remaining ~{fmt_time(remaining_s)} est."
-            )
-        else:
-            timing_str = "  loading..."
+        timing_str = f"  {fmt_running_timing(eval_info)}"
     elif acc not in (None, "running"):
         status = "[DONE]"
-        acc_str = f"{acc:.4f}"
+        acc_str = fmt_acc(acc)
         timing_str = ""
     elif acc == "running":
-        status = "[QUEUED]"
-        acc_str = "..."
-        timing_str = "  waiting for previous eval to finish"
+        status = "[ ]"
+        acc_str = "pending"
+        timing_str = ""
     else:
         status = "[ ]"
         acc_str = "pending"
         timing_str = ""
-    print(f"  {status:<10}  {label:<14}  {acc_str:>9}  {path}")
+    print(f"  {status:<10}  {label:<14}  {acc_str:>20}  {path}")
     if timing_str:
         print(f"  {'':10}  {'':14}  {timing_str}")
 print(DIV)
 print(f"  Done:    {len(done)}/{len(entries)}")
 if running:
     print(f"  Running: {', '.join(lbl for lbl, _ in running)}")
-if queued:
-    print(f"  Queued:  {', '.join(lbl for lbl, _ in queued)}")
 if pending:
     print(f"  Pending: {', '.join(lbl for lbl, _ in pending)}")

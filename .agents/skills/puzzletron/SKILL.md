@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu), distill (run/list/progress). Usage: /puzzletron <command> [args]"
+description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu), distill (run/list/progress). Usage: /puzzletron COMMAND [ARGS]"
 license: Apache-2.0
 ---
 
@@ -27,7 +27,7 @@ Available commands:
 - `all progress` — Show live full pipeline progress with timing summary
 - `add-model <hf_model_path>` — Implement descriptor, converter, and configs for an unsupported model
 - `eval list [puzzle_dir]` — List all available checkpoints (teacher + sweep solutions) with their index numbers; auto-discovers puzzle_dir if omitted
-- `eval progress [puzzle_dir]` — Show per-checkpoint MMLU eval status, accuracy, and elapsed/remaining time for running evals; auto-discovers puzzle_dir if omitted
+- `eval progress [puzzle_dir]` — Show per-checkpoint MMLU status, full-vs-limited accuracy, and phase-aware timing; auto-discovers puzzle_dir if omitted
 - `eval mmlu <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); pass index from `eval list` or a direct path; default `--limit 10` (smoke test)
 - `distill run [--puzzle_dir <dir>] [--ratio <r>] [--nproc_per_node <n>] [--train_iters <n>] [--output_dir <dir>] [--use_mock_data] [--data_paths <p>...]` — Run distillation for a MIP solution
 - `distill list [puzzle_dir]` — List all distillation runs with status
@@ -269,27 +269,30 @@ python3 .agents/skills/puzzletron/eval_progress.py [<puzzle_dir>]
 
 Present the output to the user wrapped in a fenced code block (``` ... ```).
 
-For running evals, the script detects active `lm_eval_hf.py` processes via `ps` and **always shows both elapsed and remaining time** on a second line. Remaining time is always shown — never suppressed:
+For running evals, detect active `lm_eval_hf.py` processes via `ps` and show the current named phase on a second line:
 
 ```text
   [RUNNING]   teacher               ...  /workspace/.../Qwen3-8B
-                          loading...  elapsed 0m38s  remaining ~44m22s est.
+                          phase: Loading weights 62% (157/254)  total elapsed 0m38s  phase remaining ~0m15s
 
   [RUNNING]   distill:0.9x          ...  /workspace/.../hf
-                          89% done  elapsed 4m19s  remaining ~0m32s
+                          phase: Running loglikelihood requests 89% (49989/56168)  total elapsed 4m19s  phase remaining ~0m19s
 ```
 
+Treat `phase remaining` as the ETA for the named phase, not the entire evaluation. Do not derive it from total process time. The script reads tqdm's own ETA for loading, tokenization, and loglikelihood. It aggregates the repeatedly-reset per-subtask bars into one `Building contexts` phase and estimates that phase from completed task intervals.
+
+When saved JSONs include both limited and full evaluations, prefer the newest full evaluation. If only a limited result exists, append `(limit=N)` to its accuracy so it cannot be mistaken for a full score.
+
 Status values:
-- `[RUNNING]` — active `lm_eval_hf.py` process found; always shows elapsed + remaining
-- `[QUEUED]`  — eval_results dir exists but process not yet started (waiting in sequence)
+- `[RUNNING]` — active `lm_eval_hf.py` process found; shows total elapsed and phase timing when available
 - `[DONE]`    — results JSON written with MMLU accuracy
-- `[ ]`       — not started yet
+- `[ ]`       — no active process and no saved result; an empty result directory is also pending
 
-**Remaining time estimation:**
-- During loading phase (no tqdm progress yet): `remaining = max(0, _MMLU_EVAL_BASELINE_S − elapsed)` — uses a baseline of ~45 min (measured Qwen3-8B/8GPU/batch_size=4); marked as `est.`
-- During inference (tqdm progress available): `remaining = elapsed × (100 − pct) / pct` — rate-based from actual throughput
+To inspect the parser against a saved log while developing it, run:
 
-Update `_MMLU_EVAL_BASELINE_S` in `eval_progress.py` with measured values as more runs complete.
+```bash
+python3 .agents/skills/puzzletron/eval_progress.py --log-file <eval_log>
+```
 
 ### eval mmlu
 
