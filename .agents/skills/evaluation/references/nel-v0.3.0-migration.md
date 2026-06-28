@@ -387,14 +387,36 @@ First install NeMo-Gym (the `gym`/`ng` CLI) — clone [NVIDIA-NeMo/Gym](https://
 and `uv venv --python 3.12 && uv sync`; see the repo README.
 
 The grader is **not** started by NEL — you launch it on the **CPU node** (same node as the evaluator, so
-it's reachable at `127.0.0.1`). Use **`--resources-server <name>`** to bring up *only* the grader: a
-benchmark's bundled config also defines an **agent** that needs its own model server, which you don't want
-here (NEL is the conductor and serves its own model). It registers with a head process on `:11000` and
-gets a **dynamic** port:
+it's reachable at `127.0.0.1`). A benchmark's bundled config (`resources_servers/<name>/configs/<name>.yaml`)
+usually packs **more than one server instance** into one file — you only start one of them. For
+[ifbench](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/ifbench/configs/ifbench.yaml):
+
+```text
+top-level key in <name>.yaml    kind                  role                             NEL native: start it?
+------------------------------  --------------------  -------------------------------  ----------------------
+ifbench                         resources_servers     the GRADER — scores via /verify  KEEP  (all NEL needs)
+ifbench_simple_agent            responses_api_agents  a sample gym-driven agent loop   DROP
+  └ model_server: policy_model  responses_api_models  the model that agent would run   (placeholder name only;
+                                (referenced, NOT          — gym-driven path, not NEL    not defined in the file)
+                                 defined in the file)
+```
+
+**Keep / drop — which and when:**
+- **NEL `gym://…?protocol=native` (this guide)** — NEL *is* the conductor: it calls the model itself, then
+  posts each answer to the grader's `/verify`. Start **only the `resources_servers` grader** (`ifbench`);
+  drop the agent.
+- **gym-driven (Responses API)** — gym runs the `*_simple_agent` itself and needs a real
+  `responses_api_models` wired in (the bundle ships `policy_model` as an unresolved placeholder). Different
+  path; not what NEL native uses.
+
+`gym env start --resources-server <name>` (and `--config <name>.yaml`) load the **whole** bundled file, so
+they also try to start `*_simple_agent` and **fail** on the undefined `policy_model`. To bring up only the
+grader, point `--config` at a config that keeps **just** the `resources_servers:` block (drop
+`responses_api_agents:`). It registers with a head process on `:11000` and gets a **dynamic** port:
 
 ```bash
 export RAY_TMPDIR=/tmp                                          # Lustre socket-path fix
-gym env start --resources-server <name> &                      # e.g. --resources-server ifbench
+gym env start --config resources_servers/<name>/configs/<name>.yaml &    # Launch gym grader in background by using "&"
 curl -s http://127.0.0.1:11000/server_instances | python3 -m json.tool   # -> [{"name": .., "url": ".../<PORT>"}]
 ```
 
@@ -519,8 +541,8 @@ sbatch gym_eval.sbatch    # CPU: the script below
 #SBATCH --time=02:00:00
 export RAY_TMPDIR=/tmp                                         # Lustre socket-path fix
 # 1. start the grader (§2) on this node, then wait for it to register + read its DYNAMIC port
-cd <gym>                                                      # so --resources-server <name> resolves
-gym env start --resources-server <name> &
+cd <gym>
+gym env start --config <grader-only config> &                 # keep only resources_servers:, drop the agent (§2)
 PORT=""
 for i in $(seq 1 60); do                                      # server takes a few s to register
   PORT=$(curl -s http://127.0.0.1:11000/server_instances \
