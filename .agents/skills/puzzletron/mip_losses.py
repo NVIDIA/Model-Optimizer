@@ -28,22 +28,16 @@ import sys
 
 KEYS = ["lm_loss", "token_accuracy_top_1", "token_accuracy_top_5", "token_accuracy_top_10"]
 
-LOG = "./log.txt"
+puzzle_dir = sys.argv[1] if len(sys.argv) > 1 else None
+if not puzzle_dir:
+    print("Usage: mip_losses.py <puzzle_dir>")
+    sys.exit(1)
+LOG = f"{puzzle_dir}/log.txt"
 try:
     text = open(LOG).read()
 except FileNotFoundError:
-    print("No log.txt found. Run /puzzletron all first.")
+    print(f"No log.txt found at {LOG}. Run /puzzletron all first.")
     sys.exit(1)
-
-# Extract puzzle_dir from any path containing /mip/puzzle_solutions/ in the log
-match = re.search(r"(\S+)/mip/puzzle_solutions/", text)
-if not match:
-    match = re.search(r"(\S+)/ckpts/teacher", text)
-if not match:
-    print("Could not find puzzle_dir in log.txt. Has the pipeline run?")
-    sys.exit(1)
-
-puzzle_dir = match.group(1)
 
 # Extract the configured target_memory from the log (logged in the args dict)
 target_mem_match = re.search(r"'target_memory':\s*([\d.]+)", text)

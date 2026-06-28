@@ -19,8 +19,9 @@ license: Apache-2.0
 
 Available commands:
 - `mip <nproc_per_node>` — Run the MIP step (nproc_per_node: number of GPUs per node)
-- `mip progress` — Show live MIP progress with timing summary
+- `mip progress` / `mip sweep progress` — Show live MIP progress with timing summary (works for both single and sweep runs)
 - `mip losses` — Show teacher vs. compressed model accuracy for the single constrained MIP solution
+- `mip sweep run <nproc_per_node> [--config <path>]` — Enable sweep in config YAML and run MIP across all compression rates
 - `mip sweep losses` — Show accuracy across all compression rates from a completed sweep
 - `all <nproc_per_node>` — Run the full Puzzletron pipeline (nproc_per_node: number of GPUs per node)
 - `all progress` — Show live full pipeline progress with timing summary
@@ -52,24 +53,63 @@ Parse `nproc_per_node` from args using either positional or flag syntax:
 
 ### all \<nproc_per_node\>
 
-Run the following Bash command, substituting `<nproc_per_node>` with the parsed value:
+First extract `puzzle_dir` from the config YAML:
 
 ```bash
-set -o pipefail && export PYTHONPATH=$PYTHONPATH:. && \
+PUZZLE_DIR=$(python3 -c "import yaml; print(yaml.safe_load(open('examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml'))['puzzle_dir'])")
+```
+
+Then run the pipeline, writing the log into the puzzle dir:
+
+```bash
+mkdir -p $PUZZLE_DIR && set -o pipefail && export PYTHONPATH=$PYTHONPATH:. && \
 torchrun --nproc_per_node <nproc_per_node> examples/puzzletron/main.py \
   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml \
-  2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+  2>&1 | tee $PUZZLE_DIR/log.txt | grep "Puzzletron Progress"
 ```
 
 Stream output to the user as it arrives. When the command finishes, report the exit code.
 
 ### all progress
 
+First extract `puzzle_dir` from the config YAML:
+
+```bash
+PUZZLE_DIR=$(python3 -c "import yaml; print(yaml.safe_load(open('examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml'))['puzzle_dir'])")
+```
+
 Run the following Bash command. Present the output to the user wrapped in a fenced code block (``` ... ```).
 
 ```bash
-python3 .agents/skills/puzzletron/all_progress.py
+python3 .agents/skills/puzzletron/all_progress.py $PUZZLE_DIR
 ```
+
+**How remaining time is estimated (`all_progress.py`):**
+
+The script uses per-step baseline durations and a live scale factor derived from completed steps:
+
+| Step | Description | Baseline | Source |
+|------|-------------|----------|--------|
+| 1 | starting pipeline | 1s | measured Qwen3-8B/8GPU |
+| 2 | model conversion (single-gpu) | 29s | measured Qwen3-8B/8GPU |
+| 3 | activation scoring (multi-gpu) | 2m8s | measured Qwen3-8B/8GPU |
+| 4 | pruning & saving (single-gpu) | 58s | measured Qwen3-8B/8GPU |
+| 5 | replacement library (single-gpu) | 15s | measured Qwen3-8B/8GPU |
+| 6 | one block scores (multi-gpu) | 53m7s | measured Qwen3-8B/8GPU |
+| 7 | MIP solve | 5m15s | measured Qwen3-8B/8GPU |
+| 8 | completion | ~0s | measured Qwen3-8B/8GPU |
+
+When adding support for a new model or GPU count, update `_BASELINE_S` in `all_progress.py` with actual measured step durations from a completed run.
+
+`scale_factor` = mean(actual / baseline) across all **completed** steps except step 1 (excluded because it is always trivially fast and would skew the factor). Starts at 1.0 until at least one non-trivial step finishes.
+
+`remaining = max(0, step_est(current) − elapsed_in_current) + Σ step_est(future)`
+
+where `step_est(s) = baseline[s] × scale_factor`.
+
+**At the very start of step 1** (nothing completed yet): `scale_factor = 1.0`, so the estimate equals the sum of all baselines for steps 1–8 ≈ **6 minutes**. This is a rough prior based on measured/estimated values; it converges as steps complete.
+
+For the current running step, if sub-step progress is available (batch count or solution count), remaining time within that step is computed from the observed throughput rate instead.
 
 ## Command: mip
 
@@ -79,6 +119,8 @@ Parse `nproc_per_node` from args using either positional or flag syntax:
 
 - If the second word is exactly `progress`, execute the **mip progress** sub-command below.
 - If the second word is exactly `losses`, execute the **mip losses** sub-command below.
+- If the second word is exactly `sweep` and the third word is exactly `progress`, execute the **mip progress** sub-command below (sweep and single use the same progress view).
+- If the second word is exactly `sweep` and the third word is exactly `run`, execute the **mip sweep run** sub-command below.
 - If the second and third words are exactly `sweep losses`, execute the **mip sweep losses** sub-command below.
 - If no `nproc_per_node` value can be found, ask the user: "Please provide the number of GPUs per node (nproc_per_node)." and **STOP**.
 - If the value does not match `^[0-9]+$`, ask the user: "nproc_per_node must be a positive integer." and **STOP**.
@@ -86,39 +128,117 @@ Parse `nproc_per_node` from args using either positional or flag syntax:
 
 ### mip \<nproc_per_node\>
 
-Run the following Bash command, substituting `<nproc_per_node>` with the parsed value:
+First extract `puzzle_dir` from the config YAML:
 
 ```bash
-set -o pipefail && export PYTHONPATH=$PYTHONPATH:. && \
+PUZZLE_DIR=$(python3 -c "import yaml; print(yaml.safe_load(open('examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml'))['puzzle_dir'])")
+```
+
+Then run the MIP step, writing the log into the puzzle dir:
+
+```bash
+mkdir -p $PUZZLE_DIR && set -o pipefail && export PYTHONPATH=$PYTHONPATH:. && \
 torchrun --nproc_per_node <nproc_per_node> examples/puzzletron/main.py \
   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml \
-  --mip-only 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+  --mip-only 2>&1 | tee $PUZZLE_DIR/log.txt | grep "Puzzletron Progress"
 ```
 
 Stream output to the user as it arrives. When the command finishes, report the exit code.
 
 ### mip progress
 
+First extract `puzzle_dir` from the config YAML:
+
+```bash
+PUZZLE_DIR=$(python3 -c "import yaml; print(yaml.safe_load(open('examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml'))['puzzle_dir'])")
+```
+
 Run the following Bash command. Present the output to the user wrapped in a fenced code block (``` ... ```).
 
 ```bash
-python3 .agents/skills/puzzletron/mip_progress.py
+python3 .agents/skills/puzzletron/mip_progress.py $PUZZLE_DIR
 ```
 
 ### mip losses
 
+First extract `puzzle_dir` from the config YAML:
+
+```bash
+PUZZLE_DIR=$(python3 -c "import yaml; print(yaml.safe_load(open('examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml'))['puzzle_dir'])")
+```
+
 Run the following Bash command. Present the output to the user wrapped in a fenced code block (``` ... ```).
 
 ```bash
-python3 .agents/skills/puzzletron/mip_losses.py
+python3 .agents/skills/puzzletron/mip_losses.py $PUZZLE_DIR
 ```
+
+### mip sweep run
+
+Parse args:
+- `nproc_per_node` — fourth word or `--nproc_per_node <value>`. If missing, ask: "Please provide the number of GPUs per node (nproc_per_node)." and **STOP**.
+- `--config <path>` — optional path to the main YAML config file. If omitted, ask the user which model config to use (show available configs under `examples/puzzletron/configs/`) and **STOP** if they don't provide one.
+
+**Step 1 — Resolve config and puzzle_dir:**
+
+```bash
+CONFIG=<config_path>
+PUZZLE_DIR=$(python3 -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['puzzle_dir'])")
+```
+
+**Step 2 — Check if sweep is already enabled; enable it if not:**
+
+```bash
+python3 -c "
+import yaml
+cfg = yaml.safe_load(open('$CONFIG'))
+sweep = (cfg.get('mip') or {}).get('sweep') or {}
+print('enabled' if sweep.get('enabled') else 'disabled')
+"
+```
+
+If the output is `disabled`, edit the YAML to add the sweep block under `mip:`:
+
+```yaml
+  sweep:
+    enabled: true
+    memory_compression_rates: [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    output_csv: ${puzzle_dir}/mip_sweep_results.csv
+```
+
+Tell the user what was changed. If already `enabled`, tell the user sweep is already configured and proceed.
+
+**Step 3 — Run the MIP sweep in background:**
+
+```bash
+mkdir -p $PUZZLE_DIR && set -o pipefail && export PYTHONPATH=$PYTHONPATH:. && \
+torchrun --nproc_per_node <nproc_per_node> examples/puzzletron/main.py \
+  --config <config_path> \
+  --mip-only 2>&1 | tee $PUZZLE_DIR/log.txt | grep "Puzzletron Progress"
+```
+
+Run in background (`run_in_background=true`). Tell the user the log path (`$PUZZLE_DIR/log.txt`) immediately.
+
+**Step 4 — Show initial progress** after ~15 seconds:
+
+```bash
+python3 .agents/skills/puzzletron/mip_progress.py $PUZZLE_DIR
+```
+
+Present output in a fenced code block. The sweep runs 6 compression rates sequentially; each takes ~5 minutes, so the full sweep takes ~30 minutes.
 
 ### mip sweep losses
 
+First extract `puzzle_dir` from the config YAML:
+
+```bash
+PUZZLE_DIR=$(python3 -c "import yaml; print(yaml.safe_load(open('examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml'))['puzzle_dir'])")
+```
+
 Run the following Bash command. Present the output to the user wrapped in a fenced code block (``` ... ```).
 
 ```bash
-python3 .agents/skills/puzzletron/mip_sweep.py
+python3 .agents/skills/puzzletron/mip_sweep.py $PUZZLE_DIR
 ```
 
 ## Command: eval
@@ -149,14 +269,27 @@ python3 .agents/skills/puzzletron/eval_progress.py [<puzzle_dir>]
 
 Present the output to the user wrapped in a fenced code block (``` ... ```).
 
-For running evals, the script detects active `lm_eval_hf.py` processes via `ps` and shows elapsed time and estimated remaining time on a second line, e.g.:
+For running evals, the script detects active `lm_eval_hf.py` processes via `ps` and **always shows both elapsed and remaining time** on a second line. Remaining time is always shown — never suppressed:
 
 ```text
-  [RUNNING]   distill:0.9x-nemotron        ...  /workspace/.../hf
-                                89% done  elapsed 4m19s  remaining ~0m32s
+  [RUNNING]   teacher               ...  /workspace/.../Qwen3-8B
+                          loading...  elapsed 0m38s  remaining ~44m22s est.
+
+  [RUNNING]   distill:0.9x          ...  /workspace/.../hf
+                          89% done  elapsed 4m19s  remaining ~0m32s
 ```
 
-Progress % is parsed from the tqdm output written to the process's open file descriptors. If the process hasn't started inference yet (still loading weights), only elapsed time is shown.
+Status values:
+- `[RUNNING]` — active `lm_eval_hf.py` process found; always shows elapsed + remaining
+- `[QUEUED]`  — eval_results dir exists but process not yet started (waiting in sequence)
+- `[DONE]`    — results JSON written with MMLU accuracy
+- `[ ]`       — not started yet
+
+**Remaining time estimation:**
+- During loading phase (no tqdm progress yet): `remaining = max(0, _MMLU_EVAL_BASELINE_S − elapsed)` — uses a baseline of ~45 min (measured Qwen3-8B/8GPU/batch_size=4); marked as `est.`
+- During inference (tqdm progress available): `remaining = elapsed × (100 − pct) / pct` — rate-based from actual throughput
+
+Update `_MMLU_EVAL_BASELINE_S` in `eval_progress.py` with measured values as more runs complete.
 
 ### eval mmlu
 
@@ -397,12 +530,12 @@ torchrun --nproc_per_node <nproc_per_node> examples/megatron_bridge/distill.py \
   --eval_interval 100 \
   --log_interval 10 \
   [--use_mock_data | --data_paths <data_paths>] \
-  2>&1 | tee ./log.txt
+  2>&1 | tee <OUTPUT_DIR>/log.txt
 ```
 
 Replace bracketed placeholders with resolved values. Use `--use_mock_data` or `--data_paths <data_paths>` (space-separated) depending on which was provided.
 
-**Run in background** — distillation takes hours. Launch the torchrun command with `run_in_background=true` so the agent stays responsive. Tell the user the log file path (`./log.txt`) immediately.
+**Run in background** — distillation takes hours. Launch the torchrun command with `run_in_background=true` so the agent stays responsive. Tell the user the log file path (`<OUTPUT_DIR>/log.txt`) immediately.
 
 **Show progress immediately after launch** — once the background job is started, wait ~30 seconds for initialization, then run:
 
@@ -446,7 +579,7 @@ Present the output to the user wrapped in a fenced code block (``` ... ```).
 The output shows for each run:
 - Dataset name(s) and token count processed so far / total (from `run_config.yaml` in the latest checkpoint)
 - Status (RUNNING / STOPPED / DONE), current iteration out of total, and ETA with elapsed/remaining time (running only)
-- Dual ASCII sparklines for training and validation loss (higher bar = higher loss, so a descending curve means improvement)
+- ASCII sparklines for training/validation objective loss and validation student CE (higher bar = higher loss, so a descending curve means improvement)
 - Convergence verdict: `CONVERGING` (>2% improvement over last 3 checkpoints), `DIMINISHING RETURNS` (0.5–2%), `PLATEAU` (<0.5%), or `DIVERGING`
 
 Example output for a running job:
@@ -462,11 +595,12 @@ Example output for a running job:
   Iter time:  0.3s/iter (avg last 5)
   Remaining:  ~10m 58s (2267 iters left)
   HF export:  not yet
-  Log file:   /workspace/Model-Optimizer/log.txt
+  Log file:   /workspace/puzzle_dir_llama3_2-3b/distillation/0.9x-nemotron-full_correct_dataset/log.txt
 
   Train loss: █▇▆▅▅▄▄▃▃▃▂▂▂▁▁▁  (0.335 → 0.235)
   Val loss:   ▇█▅▆▄▃▂▃▄▃▁▁▁▁▁  (0.336 → 0.241)
   Convergence: CONVERGING  (-4.2% over last 3 checkpoints)
+  Student CE: █▇▆▅▅▄▄▃▃▃▂▂▂▁▁  (2.840 → 2.410)
 ```
 
 Example output for a completed job (Dataset and Tokens always shown when `run_config.yaml` is present):
@@ -483,10 +617,11 @@ Example output for a completed job (Dataset and Tokens always shown when `run_co
   Train loss: █▇▇▆▆▆▅▅▅▅▄▄▄▄▄▃▃▃▃▃▃▃▂▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁  (0.335 → 0.157)
   Val loss:   ▇█▆▇▆▅▅▅▅▅▄▄▄▄▄▄▃▃▂▃▃▂▂▂▁▂▂▂▁▁▁▁▁▁▁▁▁▁  (0.336 → 0.158)
   Convergence: DIVERGING  (+0.0% over last 3 checkpoints — consider stopping)
+  Student CE: █▇▆▅▅▄▄▃▃▃▂▂▂▁▁  (2.840 → 2.410)
 ```
 
 **Loss data sources:**
-- **Running job**: parsed in real-time from `./log.txt` — matches `iteration <N>/<total> ... total loss: <val>` and `validation loss at iteration <N> ... total loss value: <val>` lines
+- **Running job**: parsed in real-time from `<output_dir>/log.txt` — objective loss matches `iteration <N>/<total> ... total loss: <val>` and `validation loss at iteration <N> ... total loss value: <val>`; student CE matches `lm loss value: <val>` on validation lines
 - **Stopped/done jobs**: read from `<output_dir>/tb_logs/` TensorBoard event files via `EventAccumulator`
 
 ### distill tokenize

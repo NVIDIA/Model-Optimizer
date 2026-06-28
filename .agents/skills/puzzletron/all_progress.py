@@ -21,12 +21,16 @@ import re
 import sys
 from datetime import datetime
 
-LOG = "./log.txt"
+puzzle_dir = sys.argv[1] if len(sys.argv) > 1 else None
+if not puzzle_dir:
+    print("Usage: all_progress.py <puzzle_dir>")
+    sys.exit(1)
+LOG = f"{puzzle_dir}/log.txt"
 try:
     lines = open(LOG).readlines()
     text = "".join(lines)
 except FileNotFoundError:
-    print("No log.txt found. Run /puzzletron all first.")
+    print(f"No log.txt found at {LOG}. Run /puzzletron all first.")
     sys.exit(0)
 
 
@@ -139,25 +143,46 @@ for snum in range(last_step_num + 1, total_steps + 1):
 
 print(DIV)
 done_steps = len([s for s in seen_steps if s != last_step_num or pipeline_complete_ts])
-step_durations = []
+
+# Per-step baseline durations (seconds) measured on Qwen3-8B with 8 GPUs.
+# Step 1 is excluded from scaling because it's always trivially fast (~1s).
+# Update these values as real runs complete to keep estimates accurate.
+_BASELINE_S = {
+    1: 1,  # starting pipeline
+    2: 29,  # model conversion (single-gpu)   — measured: Qwen3-8B/8GPU
+    3: 128,  # activation scoring (multi-gpu)  — measured: Qwen3-8B/8GPU
+    4: 58,  # pruning & saving (single-gpu)   — measured: Qwen3-8B/8GPU
+    5: 15,  # replacement library (single-gpu) — measured: Qwen3-8B/8GPU
+    6: 3187,  # one block scores (multi-gpu)    — measured: Qwen3-8B/8GPU (53m7s)
+    7: 315,  # MIP solve                       — measured: Qwen3-8B/8GPU (5m15s)
+    8: 1,  # completion / realisation        — measured: Qwen3-8B/8GPU (~0s)
+}
+
+# Scale factor: ratio of actual vs. baseline for completed non-trivial steps.
+# Starts at 1.0 (trust baselines); updates as steps finish.
+_scale_samples = []
 for i, (snum, (sdesc, sts)) in enumerate(step_ts_list):
     next_ts = (
         step_ts_list[i + 1][1][1] if i + 1 < len(step_ts_list) else (pipeline_complete_ts or None)
     )
-    if next_ts and sts:
-        step_durations.append(int((next_ts - sts).total_seconds()))
-avg_step_s = sum(step_durations) / len(step_durations) if step_durations else None
+    if next_ts and sts and snum > 1 and snum in _BASELINE_S:
+        actual = int((next_ts - sts).total_seconds())
+        baseline = _BASELINE_S[snum]
+        if baseline > 0:
+            _scale_samples.append(actual / baseline)
+_scale = sum(_scale_samples) / len(_scale_samples) if _scale_samples else 1.0
 
 
 def step_est(snum):
-    """Estimate duration in seconds for a pending pipeline step."""
-    if snum == 7:
-        # Step 7 in the full pipeline is a single MIP solve (~5m), not a sweep
-        return 296
-    elif snum == 8:
-        return 60
-    return avg_step_s or 0
+    """Estimate duration (seconds) for a pipeline step using scaled baselines."""
+    return int(_BASELINE_S.get(snum, 600) * _scale)
 
+
+# If no sub-step progress is available for the current step, estimate remaining
+# time from the baseline minus elapsed.
+if not pipeline_complete_ts and cur_step_start_ts and step_remaining is None:
+    cur_step_elapsed = int((now - cur_step_start_ts).total_seconds())
+    step_remaining = max(0, step_est(last_step_num) - cur_step_elapsed)
 
 if pipeline_complete_ts:
     est_rem = "done"
@@ -165,9 +190,8 @@ elif step_remaining is not None:
     future_s = sum(step_est(s) for s in range(last_step_num + 1, total_steps + 1))
     est_rem = fmt(step_remaining + future_s)
 else:
-    cur_s = step_est(last_step_num)
-    future_s = cur_s + sum(step_est(s) for s in range(last_step_num + 1, total_steps + 1))
-    est_rem = fmt(future_s) if (cur_s or future_s) else "calculating..."
+    future_s = sum(step_est(s) for s in range(last_step_num, total_steps + 1))
+    est_rem = fmt(future_s) if future_s else "calculating..."
 
 finished_str = (
     pipeline_complete_ts.strftime("%H:%M:%S")

@@ -20,12 +20,16 @@ import re
 import sys
 from datetime import datetime
 
-LOG = "./log.txt"
+puzzle_dir = sys.argv[1] if len(sys.argv) > 1 else None
+if not puzzle_dir:
+    print("Usage: mip_progress.py <puzzle_dir>")
+    sys.exit(1)
+LOG = f"{puzzle_dir}/log.txt"
 try:
     lines = open(LOG).readlines()
     text = "".join(lines)
 except FileNotFoundError:
-    print("No log.txt found. Run /puzzletron mip first.")
+    print(f"No log.txt found at {LOG}. Run /puzzletron mip first.")
     sys.exit(0)
 
 
@@ -50,6 +54,13 @@ now = datetime.now().replace(microsecond=0)
 rates_match = re.search(r"Compression rates: \[(.*?)\]", text)
 all_rates = [norm(r.strip()) for r in rates_match.group(1).split(",")] if rates_match else []
 
+# Use step 7 marker text as primary signal for sweep vs single mode — more
+# reliable than Compression rates alone because both lines are written together;
+# if the log is from a previous single run and the new sweep hasn't written yet
+# we fall back to rates_match.
+step7_line = next((line for line in lines if "Puzzletron Progress 7/8" in line), None)
+sweep_mode = bool(all_rates) or (step7_line is not None and "sweep" in step7_line.lower())
+
 # Detect completion via step 8 marker or sweep.py:292
 complete_ts = None
 for line in lines:
@@ -60,8 +71,18 @@ for line in lines:
 
 cbc_matches = re.findall(r"After (\d+) nodes.*?\(([\d.]+) seconds\)", text)
 
+# ── No step 7 in log yet ──────────────────────────────────────────────────────
+if not step7_line and not all_rates:
+    import os
+
+    age_s = int(now.timestamp() - os.path.getmtime(LOG))
+    age_str = f"{age_s // 60}m {age_s % 60}s ago" if age_s >= 60 else f"{age_s}s ago"
+    print(f"\nMIP step 7 not yet reached (log last modified {age_str}).")
+    print("The log may be from a previous run; wait for the new run to start writing.")
+    sys.exit(0)
+
 # ── Sweep disabled: single MIP solve ─────────────────────────────────────────
-if not all_rates:
+if not sweep_mode:
     step7_ts = None
     for line in lines:
         ts = get_ts(line)

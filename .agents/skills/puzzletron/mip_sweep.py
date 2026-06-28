@@ -19,24 +19,18 @@
 import contextlib
 import csv
 import os
-import re
 import sys
 
-LOG = "./log.txt"
+puzzle_dir = sys.argv[1] if len(sys.argv) > 1 else None
+if not puzzle_dir:
+    print("Usage: mip_sweep.py <puzzle_dir>")
+    sys.exit(1)
+LOG = f"{puzzle_dir}/log.txt"
 try:
     text = open(LOG).read()
 except FileNotFoundError:
-    print("No log.txt found. Run /puzzletron all first.")
+    print(f"No log.txt found at {LOG}. Run /puzzletron all first.")
     sys.exit(1)
-
-match = re.search(r"(\S+)/mip/puzzle_solutions/", text)
-if not match:
-    match = re.search(r"(\S+)/ckpts/teacher", text)
-if not match:
-    print("Could not find puzzle_dir in log.txt.")
-    sys.exit(1)
-
-puzzle_dir = match.group(1)
 sweep_csv = os.path.join(puzzle_dir, "mip_sweep_results.csv")
 
 if not os.path.exists(sweep_csv):

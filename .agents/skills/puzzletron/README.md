@@ -288,9 +288,12 @@ Distillation progress — /workspace/puzzle_dir_llama3_2-3b
   Train loss: █▅▅▄▄▄▄▃▃▃▃▃▂▂▂▂▂▂▁▁▁▁▁▁▁  (0.278 → 0.131)
   Val loss:   █▇▆▆▅▇▄▄▄▄▄▄▃▃▂▂▂▂▂▁▁▁▁▁  (0.237 → 0.134)
   Convergence: CONVERGING  (-4.0% over last 3 checkpoints)
+  Student CE: █▇▆▅▅▄▄▃▃▂▂▁  (2.840 → 2.410)
 ```
 
-The sparklines show loss history across 100-iteration buckets — bars descend as training improves. Convergence verdict:
+The sparklines show objective-loss and validation student-CE history — bars descend as
+training improves. `Student CE` is parsed from the validation `lm loss value`; it is separate
+from the objective loss optimized by distillation. Convergence verdict:
 - `CONVERGING` — >2% improvement over last 3 validation checkpoints
 - `DIMINISHING RETURNS` — 0.5–2% improvement
 - `PLATEAU` — <0.5% change (safe to stop)

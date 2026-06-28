@@ -24,7 +24,8 @@ Shows for each matching run:
   - Elapsed time and estimated remaining time
   - Whether a distillation process is currently running
   - HF export status
-  - Dual training/validation loss sparklines with convergence verdict
+  - Training/validation objective loss and validation student-CE sparklines
+  - Convergence verdict based on validation objective loss
 """
 
 import contextlib
@@ -167,8 +168,8 @@ def latest_iter(output_dir):
     return (max(iters) if iters else None), iters_sorted
 
 
-def parse_log_text(log_path="./log.txt"):
-    """Read log.txt, return text or empty string on failure."""
+def parse_log_text(log_path):
+    """Read log file, return text or empty string on failure."""
     if not os.path.isfile(log_path):
         return ""
     try:
@@ -179,9 +180,7 @@ def parse_log_text(log_path="./log.txt"):
 
 def parse_training_loss_history(text, output_dir):
     """Return list of (iter, loss) from training log lines for this output_dir."""
-    abs_dir = os.path.abspath(output_dir)
-    # Use trailing slash to avoid matching e.g. "0.9x" inside "0.9x-nemotron-full"
-    if not text or ((abs_dir + "/") not in text and (abs_dir + "\n") not in text):
+    if not text:
         return []
     pattern = re.compile(r"\] iteration\s+(\d+)/\s*\d+.*?total loss:\s*([\d.Ee+\-]+)")
     return [(int(m[0]), float(m[1])) for m in pattern.findall(text)]
@@ -189,13 +188,20 @@ def parse_training_loss_history(text, output_dir):
 
 def parse_validation_loss_history(text, output_dir):
     """Return list of (iter, loss) from validation log lines for this output_dir."""
-    abs_dir = os.path.abspath(output_dir)
-    if not text or ((abs_dir + "/") not in text and (abs_dir + "\n") not in text):
+    if not text:
         return []
     pattern = re.compile(
         r"validation loss at iteration\s+(\d+).*?total loss value:\s*([\d.Ee+\-]+)"
     )
-    return [(int(m[0]), float(m[1])) for m in pattern.findall(text)]
+    return list({int(iteration): float(loss) for iteration, loss in pattern.findall(text)}.items())
+
+
+def parse_validation_ce_history(text, output_dir):
+    """Return validation student cross-entropy as (iter, loss) pairs from log lines."""
+    if not text:
+        return []
+    pattern = re.compile(r"validation loss at iteration\s+(\d+).*?lm loss value:\s*([\d.Ee+\-]+)")
+    return list({int(iteration): float(loss) for iteration, loss in pattern.findall(text)}.items())
 
 
 def read_loss_history_tb(output_dir):
@@ -239,8 +245,7 @@ def parse_log_timing(text, output_dir):
 
     Returns dict with keys: cur_iter, total_iters, avg_iter_ms, started_ts, last_loss.
     """
-    abs_dir = os.path.abspath(output_dir)
-    if not text or ((abs_dir + "/") not in text and (abs_dir + "\n") not in text):
+    if not text:
         return {}
 
     result = {}
@@ -356,7 +361,6 @@ def show_progress(puzzle_dir, ratio_filter):
         print(msg + f" under {distill_base}/")
         return
     now = datetime.now().replace(microsecond=0)
-    log_text = parse_log_text("./log.txt")
 
     div = "─" * 76
     print(f"\nDistillation progress — {puzzle_dir}")
@@ -366,6 +370,8 @@ def show_progress(puzzle_dir, ratio_filter):
         output_dir = os.path.join(distill_base, run)
         abs_out = os.path.abspath(output_dir)
         is_running = abs_out in running_dirs
+        run_log_path = os.path.join(output_dir, "log.txt")
+        log_text = parse_log_text(run_log_path)
 
         latest, all_iters = latest_iter(output_dir)
         hf_dir = os.path.join(output_dir, "hf")
@@ -462,25 +468,32 @@ def show_progress(puzzle_dir, ratio_filter):
 
         # Log file (running)
         if is_running:
-            log_path = os.path.abspath("./log.txt")
+            log_path = os.path.abspath(run_log_path)
             if os.path.isfile(log_path):
                 print(f"  Log file:   {log_path}")
 
         # --- Loss curves and convergence ---
         train_hist = parse_training_loss_history(log_text, output_dir)
         val_hist = parse_validation_loss_history(log_text, output_dir)
+        val_ce_hist = parse_validation_ce_history(log_text, output_dir)
 
         # Fall back to tensorboard for stopped/older runs
         if not train_hist and not val_hist:
             train_hist, val_hist = read_loss_history_tb(output_dir)
 
-        if train_hist or val_hist:
-            # Infer bucket size from validation checkpoint spacing
-            bucket_size = 500
+        if train_hist or val_hist or val_ce_hist:
+            # Infer bucket size: aim for ~10-20 bars in the sparkline.
+            # Prefer val checkpoint spacing; fall back to train data range.
+            bucket_size = None
             if len(val_hist) >= 2:
                 diff = val_hist[1][0] - val_hist[0][0]
                 if diff > 0:
                     bucket_size = diff
+            if bucket_size is None and train_hist:
+                max_iter = max(i for i, _ in train_hist)
+                bucket_size = max(1, max_iter // 15)
+            if bucket_size is None:
+                bucket_size = 500
 
             bucketed_train = bucket_losses(train_hist, bucket_size) if train_hist else []
 
@@ -495,6 +508,10 @@ def show_progress(puzzle_dir, ratio_filter):
                 print(f"  Val loss:   {spark}  ({first_l:.3f} → {last_l:.3f})")
                 verdict, detail = convergence_verdict(val_hist)
                 print(f"  Convergence: {verdict}  ({detail})")
+            if val_ce_hist:
+                first_l, last_l = val_ce_hist[0][1], val_ce_hist[-1][1]
+                spark = make_sparkline(val_ce_hist)
+                print(f"  Student CE: {spark}  ({first_l:.3f} → {last_l:.3f})")
         elif timing.get("last_loss") is not None:
             # Fallback: single loss value from timing parse
             print(f"  Last loss:  {timing['last_loss']:.4f} (iter {timing.get('cur_iter', '?')})")
