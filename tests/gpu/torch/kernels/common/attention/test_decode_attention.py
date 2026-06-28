@@ -288,6 +288,62 @@ class TestDecodeAttention:
         )
         torch.testing.assert_close(out_onwrite, out_onread, rtol=2e-3, atol=2e-3)
 
+    @pytest.mark.skipif(
+        not (torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)),
+        reason="NVFP4 qdq uses tl.float8e4nv (sm_89+)",
+    )
+    def test_quant_plus_skip_softmax_compose(self):
+        """Attention quant (P/V NVFP4) and skip-softmax compose in a single launch.
+
+        Two checks that the two features stack without interfering:
+        (1) near-off skip (tiny lambda) + quant == quant-only — skip never fires, so the
+            output is unchanged from quant alone (the features are independent).
+        (2) aggressive skip on a dominant sink + quant still drops most tiles AND tracks the
+            (sink-dominated) dense result — skip selects tiles on the quantized scores while
+            P/V are fake-quantized on the surviving tiles.
+        """
+        qkw = {"p_qdq": "nvfp4", "v_qdq": "nvfp4", "num_kv_splits": 1, "page_size": 16}
+
+        # (1) quant-only vs quant + near-off skip (tiny lambda skips ~nothing).
+        b, s, d = 2, 1024, 128
+        scale = 1.0 / (d**0.5)
+        q, k, v, seq_lens = self._inputs(b, 16, 16, s, d, seed=9)
+        kc, vc, bt = _paged_cache(k, v, seq_lens, 16)
+        out_q = attention_decode(q, kc, vc, bt, seq_lens, softmax_scale=scale, **qkw)
+        out_qs = attention_decode(
+            q, kc, vc, bt, seq_lens, softmax_scale=scale, skip_softmax_threshold=2**-20, **qkw
+        )
+        torch.testing.assert_close(out_qs, out_q, rtol=1e-2, atol=1e-2)
+
+        # (2) quant + aggressive skip on a dominant sink: most tiles drop, output tracks dense.
+        bs, ss, ds = 1, 2048, 128
+        scale_s = 1.0 / (ds**0.5)
+        qs = torch.ones(bs, 16, ds, device="cuda", dtype=torch.float16)
+        ks = torch.zeros(bs, 16, ss, ds, device="cuda", dtype=torch.float16)
+        ks[:, :, 0] = 20.0  # sink dominates every query
+        vs = torch.randn(bs, 16, ss, ds, device="cuda", dtype=torch.float16)
+        sl = torch.full((bs,), ss, device="cuda", dtype=torch.int32)
+        kcs, vcs, bts = _paged_cache(ks, vs, sl, 16)
+        out = attention_decode(
+            qs,
+            kcs,
+            vcs,
+            bts,
+            sl,
+            softmax_scale=scale_s,
+            skip_softmax_threshold=0.1,
+            measure_sparsity=True,
+            **qkw,
+        )
+        assert out._sparsity_skipped / out._sparsity_total > 0.8, (
+            out._sparsity_skipped,
+            out._sparsity_total,
+        )
+        cos = F.cosine_similarity(
+            out.flatten().float(), _dense_decode(qs, ks, vs, scale_s).flatten().float(), dim=0
+        )
+        assert cos > 0.95, float(cos)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
