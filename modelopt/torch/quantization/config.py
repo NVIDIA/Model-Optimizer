@@ -1012,6 +1012,9 @@ class LAQConfig(QuantizeAlgorithmConfig):
     ``tied_amax`` makes pre and post share a single tensor (requires both to
     have the same learnable state, i.e. ``learnable_amax`` must be
     ``["pre", "post"]`` or ``[]``).
+
+    ``quantize_pre_scale=False`` leaves the pre-quantization scale unquantized
+    while preserving the existing post-scale quantization behavior.
     """
 
     method: Literal["laq"] = ModeloptField("laq")
@@ -1032,6 +1035,15 @@ class LAQConfig(QuantizeAlgorithmConfig):
         description=(
             "If True, pre and post share one underlying tensor. "
             "Requires both to have the same learnable state."
+        ),
+    )
+
+    quantize_pre_scale: bool = ModeloptField(
+        default=True,
+        title="FP8-quantize the LAQ pre-quantization scale.",
+        description=(
+            "If False, LAQ uses the raw pre-quantization scale while keeping post-scale "
+            "quantization controlled by the quantizer's block-scale settings."
         ),
     )
 

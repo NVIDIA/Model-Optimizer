@@ -1393,6 +1393,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     _tied_amax: bool = False
     _quant_max_bound: float = 6.0
     _quantize_scales: bool = True
+    _quantize_pre_scale: bool = True
 
     def _preserve_amax_in_fp32(self):
         for name in ("_amax", "_global_amax", "_per_tensor_scale"):
@@ -1536,6 +1537,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         quantize_scales: bool = True,
         learnable_amax: list | str = ("post",),
         tied_amax: bool = False,
+        quantize_pre_scale: bool = True,
     ):
         """LAQ mode with configurable learnable/frozen amax tensors.
 
@@ -1546,6 +1548,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             learnable_amax: Which amax params are learnable: 'pre', 'post',
                 ['pre', 'post'], or [].
             tied_amax: If True, pre and post share a single tensor.
+            quantize_pre_scale: Whether to FP8-quantize the LAQ pre scale.
         """
         if hasattr(self, "_amax"):
             delattr(self, "_amax")
@@ -1572,6 +1575,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         if per_tensor_scale is not None:
             self.register_buffer("_per_tensor_scale", per_tensor_scale.float().clone().detach())
         self._quantize_scales = quantize_scales
+        self._quantize_pre_scale = quantize_pre_scale
         self._laq = True
         self._learnable_amax = sorted(learn)
         self._tied_amax = tied_amax
@@ -1592,22 +1596,29 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self._laq:
             # 0.002 ≈ smallest positive FP8 E4M3 value; clamps per-block scale floor
-            _scale_min = 0.002 * self._per_tensor_scale.view(-1) if self._quantize_scales else 1e-8
+            scale_min_post = (
+                0.002 * self._per_tensor_scale.view(-1) if self._quantize_scales else 1e-8
+            )
+            scale_min_pre = (
+                0.002 * self._per_tensor_scale.view(-1)
+                if self._quantize_scales and self._quantize_pre_scale
+                else 1e-8
+            )
 
             scale_post = self._maybe_quantize_scale(
                 _amax_to_scale(
                     _to_local(self.amax_post),
                     self._quant_max_bound,
-                    min_value=_scale_min,
+                    min_value=scale_min_post,
                 )
             )
-            scale_pre = self._maybe_quantize_scale(
-                _amax_to_scale(
-                    _to_local(self.amax_pre),
-                    self._quant_max_bound,
-                    min_value=_scale_min,
-                )
+            scale_pre = _amax_to_scale(
+                _to_local(self.amax_pre),
+                self._quant_max_bound,
+                min_value=scale_min_pre,
             )
+            if self._quantize_pre_scale:
+                scale_pre = self._maybe_quantize_scale(scale_pre)
             quant_input = inputs.float() / scale_pre.float().view(-1, 1)
             w_cast = self._cast_ste(quant_input)
             return (w_cast * scale_post.view(-1, 1).to(w_cast.dtype)).to(inputs.dtype)

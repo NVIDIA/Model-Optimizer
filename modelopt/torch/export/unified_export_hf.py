@@ -95,6 +95,7 @@ from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
+    get_laq_weight_scaling_factors,
     get_quant_config,
     get_quantization_format,
     get_weight_block_size,
@@ -537,6 +538,12 @@ def _export_quantized_weight(
     output_quantizer: TensorQuantizer | SequentialQuantizer | None = getattr(
         sub_module, quantizer_attrs.output_quantizer, None
     )
+    is_laq_nvfp4 = getattr(weight_quantizer, "_laq", False) and quantization_format in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A16_NVFP4,
+    ]
 
     if quantization_format == QUANTIZATION_FP8:
         # Convert amax to float32
@@ -587,6 +594,8 @@ def _export_quantized_weight(
             sub_module.register_buffer(quantizer_attrs.weight_scale, e8m0_scale)
             if hasattr(weight_quantizer, "_scale") and weight_quantizer._scale is not None:
                 del weight_quantizer._scale
+        elif is_laq_nvfp4:
+            pass
         else:
             sub_module.register_buffer(
                 quantizer_attrs.weight_scale, get_weight_scaling_factor(sub_module, weight_name)
@@ -604,14 +613,18 @@ def _export_quantized_weight(
                 ).squeeze(),
             )
 
-    if quantization_format in [
-        QUANTIZATION_NVFP4_AWQ,
-        QUANTIZATION_NVFP4_SVDQUANT,
-        QUANTIZATION_NVFP4,
-        QUANTIZATION_W4A16_NVFP4,
-        QUANTIZATION_W4A8_AWQ,
-        QUANTIZATION_W4A8_NVFP4_FP8,
-    ]:
+    if (
+        quantization_format
+        in [
+            QUANTIZATION_NVFP4_AWQ,
+            QUANTIZATION_NVFP4_SVDQUANT,
+            QUANTIZATION_NVFP4,
+            QUANTIZATION_W4A16_NVFP4,
+            QUANTIZATION_W4A8_AWQ,
+            QUANTIZATION_W4A8_NVFP4_FP8,
+        ]
+        and not is_laq_nvfp4
+    ):
         # Register weight_scale_2
         sub_module.register_buffer(
             quantizer_attrs.weight_scale_2,
@@ -646,7 +659,11 @@ def _export_quantized_weight(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
 
-        if NVFP4QTensor._is_static_quantizer(weight_quantizer):
+        if is_laq_nvfp4:
+            weight_scale, weight_scale_2, export_weight_scale, export_weight_scale_2 = (
+                get_laq_weight_scaling_factors(weight_quantizer, weight, block_size)
+            )
+        elif NVFP4QTensor._is_static_quantizer(weight_quantizer):
             weight_scale = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
                 weight_quantizer,
                 weight,
@@ -666,10 +683,18 @@ def _export_quantized_weight(
             weight_scale_2,
             block_size,
         )
+        if is_laq_nvfp4:
+            weight_scale = export_weight_scale
+            weight_scale_2 = export_weight_scale_2
 
         quantized_weight, weight_scale = maybe_transpose_expert_weight_dimensions(
             quantized_weight, weight_scale, is_bmm_expert_weight=is_bmm_expert_weight
         )
+        if is_laq_nvfp4:
+            assert weight_scale is not None
+            assert weight_scale_2 is not None
+            sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
+            sub_module.register_buffer(quantizer_attrs.weight_scale_2, weight_scale_2.squeeze())
     elif quantization_format == QUANTIZATION_FP8_PC_PT and is_bmm_expert_weight:
         # For FP8_PC_PT with BMM-style experts, transpose only the weight (not weight_scale)
         weight, _ = maybe_transpose_expert_weight_dimensions(
