@@ -291,7 +291,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 sparse_kw.pop(name, None)
             threshold = sparse_kw.get("skip_softmax_threshold")
             if threshold is None and p_qdq is None and v_qdq is None:
-                # No decode sparsity and no BMM2 quant for this launch; use vLLM FlashAttention.
+                # No decode sparsity and no BMM quant for this launch; use vLLM FlashAttention.
                 return self._forward_vllm_flash_attn(
                     layer,
                     query,

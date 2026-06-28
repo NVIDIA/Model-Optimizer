@@ -41,7 +41,7 @@ import triton.language as tl
 _apply_sparse_nm_to_qk_tile: Any = None
 _is_dense_region: Any = None
 _skip_softmax_decision: Any = None
-_p_qdq_fp8: Any = None
+_qdq_fp8: Any = None
 _p_qdq_nvfp4: Any = None
 _v_qdq_nvfp4: Any = None
 
@@ -64,20 +64,20 @@ def _load_sparsity_helpers() -> None:
         _skip_softmax_decision = _skip
 
 
-def _load_p_qdq_helpers() -> None:
-    global _p_qdq_fp8, _p_qdq_nvfp4, _v_qdq_nvfp4
-    if _p_qdq_fp8 is None:
-        from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4 as _nvfp4
-        from modelopt.torch.kernels.quantization.attention.p_qdq import _v_qdq_nvfp4 as _vnvfp4
+def _load_qdq_helpers() -> None:
+    global _qdq_fp8, _p_qdq_nvfp4, _v_qdq_nvfp4
+    if _qdq_fp8 is None:
+        from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4 as _pnvfp4
+        from modelopt.torch.kernels.quantization.attention.v_qdq import _v_qdq_nvfp4 as _vnvfp4
         from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _fp8
 
-        _p_qdq_fp8 = _fp8
-        _p_qdq_nvfp4 = _nvfp4
+        _qdq_fp8 = _fp8
+        _p_qdq_nvfp4 = _pnvfp4
         _v_qdq_nvfp4 = _vnvfp4
 
 
-# Maps the public p_qdq option to the kernel's P_QDQ constexpr.
-_P_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
+# Maps a public p_qdq / v_qdq option ("fp8"/"nvfp4"/None) to the kernel's P_QDQ / V_QDQ constexpr.
+_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
 
 
 LOG2E: float = 1.44269504088896
@@ -409,7 +409,7 @@ def _attn_fwd(
             # row_sum keeps the unquantized p: the softmax denominator stays in
             # fp32 and only the quantized P is fed to BMM2.
             if P_QDQ == 1:
-                p = _p_qdq_fp8(p, p_qdq_scale)
+                p = _qdq_fp8(p, p_qdq_scale)
             elif P_QDQ == 2:
                 p = _p_qdq_nvfp4(p, p_qdq_scale, BLOCK_M, BLOCK_N)
 
@@ -444,7 +444,7 @@ def _attn_fwd(
             # key axis (axis 0 of [BLOCK_N, BLOCK_D]); the masked-to-0 loads keep a partial
             # tile from poisoning a block amax. FQ in fp32, then back to v.dtype for the dot.
             if V_QDQ == 1:
-                v = _p_qdq_fp8(v.to(tl.float32), v_qdq_scale).to(v.dtype)
+                v = _qdq_fp8(v.to(tl.float32), v_qdq_scale).to(v.dtype)
             elif V_QDQ == 2:
                 v = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_D).to(v.dtype)
             acc = tl.dot(p.to(v.dtype), v, acc)
@@ -1274,12 +1274,12 @@ def attention(
     # permanently excluded from the cache key and later edits to them would
     # silently reuse stale compiled kernels from the on-disk cache.
     _load_sparsity_helpers()
-    _load_p_qdq_helpers()
-    if p_qdq not in _P_QDQ_MODES:
+    _load_qdq_helpers()
+    if p_qdq not in _QDQ_MODES:
         raise ValueError(
-            f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
+            f"p_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {p_qdq!r}"
         )
-    p_qdq_mode = _P_QDQ_MODES[p_qdq]
+    p_qdq_mode = _QDQ_MODES[p_qdq]
     # Convert the per-tensor amax to the kernel's scale convention
     # (``q = cast(p / scale) * scale``): FP8 uses ``amax / 448``; NVFP4 uses the
     # global scale ``amax / (6 * 448)``. amax=1 (the default, the theoretical
@@ -1289,11 +1289,11 @@ def attention(
         if not (math.isfinite(p_qdq_amax) and p_qdq_amax > 0):
             raise ValueError(f"p_qdq_amax must be a finite positive value, got {p_qdq_amax}")
         p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
-    if v_qdq not in _P_QDQ_MODES:
+    if v_qdq not in _QDQ_MODES:
         raise ValueError(
-            f"v_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {v_qdq!r}"
+            f"v_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {v_qdq!r}"
         )
-    v_qdq_mode = _P_QDQ_MODES[v_qdq]
+    v_qdq_mode = _QDQ_MODES[v_qdq]
     # V has no natural amax bound; ``v_qdq_amax=None`` uses the constant 1.0 global
     # scale (the dynamic per-16 block amax carries the range, and V does not saturate
     # E4M3). A calibrated amax converts as for ``p_qdq_amax``.

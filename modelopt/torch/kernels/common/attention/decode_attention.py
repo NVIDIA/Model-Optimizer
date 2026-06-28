@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ruff: noqa: N803, N806 — Triton kernels use uppercase for constexpr and tensor args by convention
 
 """Triton decode attention with optional fused skip-softmax over a paged KV cache.
 
@@ -52,12 +51,13 @@ import triton
 import triton.language as tl
 
 from modelopt.torch.kernels.common.attention.triton_fa import (
-    _P_QDQ_MODES,
+    _QDQ_MODES,
     LOG2E,
     _load_paged_k_tile,
     _load_paged_v_tile,
 )
-from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4, _v_qdq_nvfp4
+from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4
+from modelopt.torch.kernels.quantization.attention.v_qdq import _v_qdq_nvfp4
 from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _qdq_fp8
 
 # Cap on the auto-chosen split count. Decode KV reads dominate, so a handful of
@@ -469,11 +469,11 @@ def attention_decode(
     BLOCK_D = triton.next_power_of_2(head_dim)
     BLOCK_N = 128  # match attention_calibrate's KV tile granularity
 
-    if p_qdq not in _P_QDQ_MODES:
+    if p_qdq not in _QDQ_MODES:
         raise ValueError(
-            f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
+            f"p_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {p_qdq!r}"
         )
-    p_qdq_mode = _P_QDQ_MODES[p_qdq]
+    p_qdq_mode = _QDQ_MODES[p_qdq]
     # Per-tensor amax -> kernel scale (q = cast(p / scale) * scale): FP8 uses amax/448,
     # NVFP4 the global scale amax/(6*448). amax=1 (P lies in [0, 1]) = full-range scale.
     p_qdq_scale = 1.0
@@ -482,11 +482,11 @@ def attention_decode(
             raise ValueError(f"p_qdq_amax must be finite and positive, got {p_qdq_amax}")
         p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
 
-    if v_qdq not in _P_QDQ_MODES:
+    if v_qdq not in _QDQ_MODES:
         raise ValueError(
-            f"v_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {v_qdq!r}"
+            f"v_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {v_qdq!r}"
         )
-    v_qdq_mode = _P_QDQ_MODES[v_qdq]
+    v_qdq_mode = _QDQ_MODES[v_qdq]
     # V has no natural amax bound; v_qdq_amax=None -> constant 1.0 global scale (the
     # per-16 block amax carries the range, and V does not saturate E4M3).
     v_qdq_scale = 1.0
