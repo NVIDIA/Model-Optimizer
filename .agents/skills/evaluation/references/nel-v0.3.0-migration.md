@@ -163,9 +163,9 @@ LONG-CONTEXT
   longcodebench              —         yes         yes
   aalcr                      —         yes†(judge)  yes      gym recommended (skills may mis-score)
 AGENTIC / TOOL / RL  (mostly gym-only; the few built-ins are noted)
-  terminal-bench-v1          yes       —           —        built-in; agentic terminal tasks
-  terminal-bench-hard        yes       —           —        built-in (+ -aa-split variant)
-  nmp_harbor                 yes       —           —        built-in (harbor packaging)
+  terminal-bench-v1          yes       —           —        built-in name; Harbor-run (harbor pkg + sandbox)
+  terminal-bench-hard        yes       —           —        Harbor-run (harbor pkg + sandbox); +-aa-split variant
+  nmp_harbor                 yes       —           —        harbor-packaging umbrella; HarborSolver + sandbox
   tau2                       —         —           yes
   gdpval                     —         —           yes
   browsecomp                 —         —           yes
@@ -180,7 +180,7 @@ AGENTIC / TOOL / RL  (mostly gym-only; the few built-ins are noted)
   xlam_fc                    —         —           yes
   ns_tools                   —         —           yes
   swe_pivot                  —         —           yes
-  pinchbench                 yes       —           —        built-in only (NOT gym)
+  pinchbench                 yes       —           —        built-in name (NOT gym); OpenClaw solver + sandbox
 ARENA / JUDGE
   arena_hard                 —         yes†(judge)  yes      the "LM Arena" family
   arena_hard_v2              —         yes†(judge)  yes
