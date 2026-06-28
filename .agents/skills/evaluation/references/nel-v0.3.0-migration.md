@@ -539,6 +539,13 @@ not for vLLM to finish loading — that's why `gym_eval.sbatch` polls `…/v1/mo
 
 - **Reasoning models need a big enough `generation.max_tokens`** — too small truncates mid-reasoning, the
   grader sees empty output, and the score collapses.
+- **Reasoning models: enable thinking via `proxy.extra_body`** — pass `chat_template_kwargs: {enable_thinking:
+  true}` under `services.model.proxy.extra_body` (it's merged into every request) so the chat template emits
+  the reasoning block. This is a *model* setting (applies to native runs too), not gym-specific.
+- **Resuming a killed run is manual.** `cluster: {type: local}` does not auto-restart after a SLURM
+  wall-clock kill (NEL's `auto_resume` only chains `slurm`-cluster jobs). Finished rollouts are
+  checkpointed, though — just re-submit the job with `nel eval run --resume` and it skips the done ones
+  and continues.
 - **`example.jsonl` is a small subset** — use `prepare.py` (§3) for the full benchmark.
 - **Sharding:** a gym run has one shared grader, so it doesn't shard across nodes cleanly (loopback breaks)
   — keep it single-node.
