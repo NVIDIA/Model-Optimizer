@@ -164,13 +164,7 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ex = self._kv_transfer_config.get_from_extra_config
         self._sidecar_port = int(ex("sidecar_port", "18999"))
         self._pool_slots = int(ex("pool_slots", "64"))
-        # Pool slot capacity in tokens. Default to the serve's max_model_len so any prompt the
-        # server can accept fits a slot (a too-small value makes the producer silently skip
-        # capture -> trainer /desc timeout -> hang). Override only to shrink the pinned pool.
-        _default_max_tokens = getattr(
-            getattr(vllm_config, "model_config", None), "max_model_len", None
-        )
-        self._max_tokens = int(ex("max_tokens", str(_default_max_tokens or 512)))
+        self._max_tokens = int(ex("max_tokens", "512"))
         self.cache_layers: list[str] = []
         # TP: hidden states are replicated across ranks, so only rank 0 owns the
         # pool + sidecar (set for real in register_kv_caches). Default True so the
