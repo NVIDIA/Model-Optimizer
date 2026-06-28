@@ -1,0 +1,56 @@
+# NEL 0.3.x (engine) — gym:// (NeMo-Gym resource server + reward).
+# The FAITHFUL path for agentic / judge / batch benchmarks that skills:// only exact-match-scores
+# (the † rows in the matrix). The engine connects to a RUNNING gym resource server, drives the
+# rollout against your model, and reads the reward back from the server's /verify.
+# Validated with the self-contained `mcqa` + `ifbench` servers (native protocol). Fill every <...>.
+# Full setup (install gym, start the server, find its port, dataset rcp format): github.com/NVIDIA-NeMo/Gym
+#
+# PREREQUISITE — start ONE resource server first (separate process), then find its dynamic port:
+#   export RAY_TMPDIR=/tmp     # Lustre AF_UNIX socket paths exceed 107 bytes → Ray fails without this
+#   gym env start --resources-server <name> &   # background it; loads ONLY the grader (not the agent)
+#   # the head server is at :11000; each resource server registers there on a DYNAMIC port. Read it back:
+#   curl -s http://127.0.0.1:11000/server_instances | python3 -m json.tool   # → [{"name": .., "url": ".../<PORT>"}]
+#   # running >1 server (e.g. ifbench + ifeval) lists them all — match the row by "name" to get each port.
+#
+#   nel eval run r030_gym.yaml --dry-run
+#   nel eval run r030_gym.yaml
+
+services:
+  model:                                   # the POLICY the engine rolls out against the gym server
+    # Hosted OpenAI-compatible endpoint = no GPU needed (ideal for a smoke). To self-serve a checkpoint,
+    # serve it on a GPU as a SEPARATE `vllm serve` job and point url: at it (migration doc §4/§5) — keep
+    # type: api here. (type: vllm + cluster: local does NOT work: NEL would run `python -m vllm` from the
+    #  nel venv, which has no vLLM; serving must be its own GPU job reached via type: api.)
+    type: api
+    url: <https://your-openai-compatible-endpoint/v1/chat/completions>
+    protocol: chat_completions
+    model: <model-id>
+    api_key: ${YOUR_API_KEY}               # resolved from env at run time (set -a; source <.env>; set +a)
+    generation:
+      temperature: 0.0
+      max_tokens: 512
+
+benchmarks:
+  # The benchmark lives in the running server + the data file, NOT after the prefix.
+  #   gym://<host:port>?protocol=native&data=<tasks.jsonl>
+  # native  = evaluator holds the dataset, seeds locally, posts the answer to the server's /verify.
+  # <PORT>  = the dynamic resource-server port from /server_instances above (NOT the 11000 head port).
+  - name: "gym://127.0.0.1:<PORT>?protocol=native&data=/abs/path/to/tasks.jsonl"
+    repeats: 1
+    max_concurrent: 5
+    # simple solver = single-shot policy answer scored by the server (mcqa/ifbench-style). For agentic
+    # gym envs that need tool use, switch to `type: tool_calling` + a `sandbox:`.
+    solver: {type: simple, service: model}
+
+cluster:
+  # `local` = NEL runs the evaluator in-process on the node you launch it from — use a CPU compute node
+  # (sbatch --partition=cpu), NOT the login node. The gym scorer is CPU; only the policy needs a GPU
+  # (and here the policy is a hosted API, so no GPU at all). This single-node path is the validated one.
+  # NOTE: sharding gym is NOT a free swap — the one shared resource server would have to be at a routable
+  # host (not 127.0.0.1) reachable from every shard node; loopback + shards silently fails to score.
+  type: local
+
+output:
+  dir: /abs/path/to/rundir                 # MUST be absolute
+  # export is run manually after the job (see r030_example_eval.yaml / migration doc "Export to MLFlow"):
+  #   nel export <rundir>/<bundle> --dest mlflow -o tracking_uri=<uri> -o experiment_name=<exp>
