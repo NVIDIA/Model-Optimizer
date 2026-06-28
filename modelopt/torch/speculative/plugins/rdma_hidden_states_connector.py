@@ -37,6 +37,7 @@ trusted cluster fabric -- any reachable peer can read descriptors / free slots.
 
 import base64
 import json
+import os
 import socket
 import threading
 import time
@@ -163,7 +164,13 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ex = self._kv_transfer_config.get_from_extra_config
         self._sidecar_port = int(ex("sidecar_port", "18999"))
         self._pool_slots = int(ex("pool_slots", "64"))
-        self._max_tokens = int(ex("max_tokens", "512"))
+        # Pool slot capacity in tokens. Default to the serve's max_model_len so any prompt the
+        # server can accept fits a slot (a too-small value makes the producer silently skip
+        # capture -> trainer /desc timeout -> hang). Override only to shrink the pinned pool.
+        _default_max_tokens = getattr(
+            getattr(vllm_config, "model_config", None), "max_model_len", None
+        )
+        self._max_tokens = int(ex("max_tokens", str(_default_max_tokens or 512)))
         self.cache_layers: list[str] = []
         # TP: hidden states are replicated across ranks, so only rank 0 owns the
         # pool + sidecar (set for real in register_kv_caches). Default True so the
@@ -249,7 +256,13 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 max_num_seqs,
             )
 
-        self._nixl = nixl_agent(f"hs-producer-{uuid.uuid4()}", nixl_agent_config(backends=["UCX"]))
+        # Backend(s) overridable via NIXL_BACKENDS (comma-sep). Default UCX (InfiniBand);
+        # set NIXL_BACKENDS=LIBFABRIC on AWS EFA (UCX needs the absent EFA verbs driver). Must
+        # match the trainer-side agent (hf_streaming_dataset.py).
+        _backends = os.environ.get("NIXL_BACKENDS", "UCX").split(",")
+        self._nixl = nixl_agent(
+            f"hs-producer-{uuid.uuid4()}", nixl_agent_config(backends=_backends)
+        )
         # ONE-TIME pool registration (the only ibv_reg_mr).
         t0 = time.time()
         self._pool = torch.empty(
@@ -389,8 +402,16 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         return meta
 
     def request_finished(self, request, block_ids):
-        """Return the request id + sidecar port for the trainer to fetch over RDMA."""
-        return True, {"hs_req_id": request.request_id, "hs_sidecar_port": self._sidecar_port}
+        """Return the request id + sidecar port for the trainer to fetch over RDMA.
+
+        ``hs_max_tokens`` lets the trainer fail loud if its ``max_seq_len`` exceeds our pool
+        slot capacity (which would otherwise silently drop long prompts and hang the fetch).
+        """
+        return True, {
+            "hs_req_id": request.request_id,
+            "hs_sidecar_port": self._sidecar_port,
+            "hs_max_tokens": self._max_tokens,
+        }
 
     def request_finished_all_groups(self, request, block_ids):
         """Multi-group variant of :meth:`request_finished` (first group's blocks)."""

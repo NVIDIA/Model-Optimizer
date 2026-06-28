@@ -88,7 +88,12 @@ from .modeling_dflash import (  # noqa: F401
     DFlashModule,
     build_target_layer_ids,
 )
-from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
+from .modeling_fakebase import (
+    _BASE_MODEL_PATHS,
+    _EMBED_TOKENS_PATHS,
+    _FINAL_NORM_PATHS,
+    _LM_HEAD_PATHS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +166,16 @@ class HFDFlashModel(DFlashModel):
         return self.get_submodule(self.base_model_lm_head_path)
 
     @property
+    def _base_model_norm(self):
+        """Base model's final pre-lm_head RMSNorm, or None if none was located.
+
+        vLLM captures the UN-normed final hidden state, so the offline/streaming
+        distillation path must apply this before lm_head to reconstruct true base logits.
+        """
+        path = getattr(self, "base_model_norm_path", None)
+        return self.get_submodule(path) if path else None
+
+    @property
     def _base_llm_config(self):
         return (
             getattr(self.config, "text_config", None)
@@ -188,6 +203,16 @@ class HFDFlashModel(DFlashModel):
                     continue
             else:
                 raise ValueError(f"Part {name} not found in model")
+        # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
+        # un-normed final hidden before lm_head in the offline/streaming distillation path.
+        self.base_model_norm_path = None
+        for path in _FINAL_NORM_PATHS:
+            try:
+                assert isinstance(self.get_submodule(path), torch.nn.Module)
+                self.base_model_norm_path = path
+                break
+            except Exception:
+                continue
 
     def modify(self, config):
         """Initialize DFlash draft module."""
@@ -572,6 +597,11 @@ class HFDFlashModel(DFlashModel):
                 # base_model_hidden_states is required on this path — fail fast
                 # with KeyError rather than lm_head(None).
                 out_hiddens = kwargs["base_model_outputs"]["base_model_hidden_states"]
+                # vLLM captures the UN-normed final hidden state, so re-apply the base
+                # model's final RMSNorm before lm_head to reconstruct its true logits
+                # (the distillation target). No-op if no final norm was located.
+                if self._base_model_norm is not None:
+                    out_hiddens = self._base_model_norm(out_hiddens)
                 base_outputs.logits = self._base_model_lm_head(out_hiddens)
             target_hidden = base_outputs.target_hidden
         else:
