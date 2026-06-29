@@ -171,6 +171,28 @@ def test_quant_recipe_hparam_zero_cost_weight():
     assert hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG)) == pytest.approx(0.0)
 
 
+def test_quant_recipe_hparam_cost_weight_and_effective_bits_compose():
+    """cost_weight (active_moe) and effective_bits (recipe override) stack multiplicatively."""
+    model_test = mtq.quantize(torch.nn.Linear(4, 16), mtq.NVFP4_DEFAULT_CFG)
+    numel = model_test.weight.numel()
+
+    # NVFP4 routed expert in active-MoE mode: cost_weight = expert ratio, effective_bits = 4.5.
+    override = QuantRecipe({**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 4.5}, name="NVFP4_4P5")
+    hparam = QuantRecipeHparam(
+        [override],
+        quant_modules=[model_test],
+        quant_module_names=["layers.0.mlp.experts.0.down_proj"],
+        cost_weight=0.03125,
+    )
+
+    # Both factors apply: numel * cost_weight * (effective_bits / 16).
+    assert hparam.get_cost(override) == pytest.approx(numel * 0.03125 * (4.5 / 16))
+    # Without the override the same recipe would use the num_bits heuristic (4.0 / 16 = 0.25).
+    assert hparam.get_cost(QuantRecipe(mtq.NVFP4_DEFAULT_CFG)) == pytest.approx(
+        numel * 0.03125 * 0.25
+    )
+
+
 def test_auto_quantize_cost_model_excludes_module_name_patterns():
     visual = torch.nn.Linear(4, 16)
     mtp = torch.nn.Linear(4, 16)
