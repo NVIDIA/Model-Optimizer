@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
+from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
@@ -33,6 +34,10 @@ from modelopt.torch.speculative.plugins.hf_training_args import (
 
 __all__ = [
     "RECIPE_TYPE_TO_CLASS",
+    "AutoQuantizeConfig",
+    "AutoQuantizeConstraints",
+    "AutoQuantizeCost",
+    "ModelOptAutoQuantizeRecipe",
     "ModelOptDFlashRecipe",
     "ModelOptEagleRecipe",
     "ModelOptMedusaRecipe",
@@ -48,6 +53,7 @@ class RecipeType(str, Enum):
     """List of recipe types. See ``RECIPE_TYPE_TO_CLASS`` at the bottom for the schema mapping."""
 
     PTQ = "ptq"
+    AUTO_QUANTIZE = "auto_quantize"
     SPECULATIVE_EAGLE = "speculative_eagle"
     SPECULATIVE_DFLASH = "speculative_dflash"
     SPECULATIVE_MEDUSA = "speculative_medusa"
@@ -113,6 +119,99 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
         description="PTQ config containing quant_cfg and algorithm. Required: a PTQ "
         "recipe without a ``quantize`` section is rejected so that a missing section "
         "can't silently fall back to the default INT8 config.",
+    )
+
+
+class AutoQuantizeCost(ModeloptBaseConfig):
+    """Cost-model parameters (the ``cost`` sub-dict of ``mtq.auto_quantize`` constraints)."""
+
+    active_moe_expert_ratio: float | None = ModeloptField(
+        default=None,
+        title="Active MoE expert ratio",
+        description="Routed experts active per token, in (0, 1]. Used by the 'active_moe' cost model.",
+    )
+
+
+class AutoQuantizeConstraints(ModeloptBaseConfig):
+    """LP search constraints + cost model; matches the ``mtq.auto_quantize`` constraints dict."""
+
+    effective_bits: float = ModeloptField(
+        default=4.8,
+        title="Effective bits per weight",
+        description="Average weight-storage bits target for the LP, in (0, 16].",
+    )
+    cost_model: Literal["weight", "active_moe"] = ModeloptField(
+        default="weight",
+        title="Cost model",
+        description="'weight' counts all weights equally; 'active_moe' scales routed-expert weights.",
+    )
+    cost: AutoQuantizeCost | None = ModeloptField(
+        default=None,
+        title="Cost-model parameters",
+        description="Extra cost-model parameters; omit for the 'weight' cost model.",
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float) -> float:
+        if not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
+
+
+class AutoQuantizeConfig(ModeloptBaseConfig):
+    """Schema for the ``auto_quantize`` block of an AutoQuantize recipe."""
+
+    constraints: AutoQuantizeConstraints = Field(
+        title="Search constraints + cost model",
+        description="LP budget and cost model.",
+    )
+    candidate_formats: list[QuantizeConfig] = ModeloptField(
+        default=[],
+        title="Candidate quantization formats",
+        description="Per-layer search space; each entry is a full QuantizeConfig. At least 2 required.",
+    )
+    auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
+        default="gradient",
+        title="Sensitivity scoring method",
+        description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
+    )
+    num_score_steps: int = ModeloptField(
+        default=128,
+        title="Scoring sample count",
+        description="Number of batches used for sensitivity scoring.",
+    )
+    disabled_layers: list[str] = ModeloptField(
+        default=[],
+        title="Excluded layer patterns",
+        description="Glob patterns; matching layers are excluded from the search.",
+    )
+    kv_cache: QuantizeConfig | None = ModeloptField(
+        default=None,
+        title="KV cache config (optional)",
+        description="QuantizeConfig applied as a uniform post-step; falls back to "
+        "the --kv_cache_qformat CLI flag when omitted.",
+    )
+
+    @field_validator("candidate_formats")
+    @classmethod
+    def _at_least_two_candidates(cls, v: list[QuantizeConfig]) -> list[QuantizeConfig]:
+        if len(v) < 2:
+            raise ValueError(
+                "auto_quantize requires at least 2 candidate_formats. "
+                "For uniform quantization, use a PTQ recipe instead."
+            )
+        return v
+
+
+class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
+    """Our config class for AutoQuantize recipes."""
+
+    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.AUTO_QUANTIZE)
+
+    auto_quantize: AutoQuantizeConfig = Field(
+        title="AutoQuantize config",
+        description="AutoQuantize search configuration. Required.",
     )
 
 
@@ -215,6 +314,7 @@ class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
 # uses this for typed-list ``$import`` resolution; add a new entry when introducing a recipe.
 RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
     RecipeType.PTQ: ModelOptPTQRecipe,
+    RecipeType.AUTO_QUANTIZE: ModelOptAutoQuantizeRecipe,
     RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
     RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,

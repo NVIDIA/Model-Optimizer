@@ -27,6 +27,7 @@ import pytest
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
+    ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
     ModelOptPTQRecipe,
@@ -1689,3 +1690,120 @@ def test_import_imports_not_a_dict_raises(tmp_path):
     config_file.write_text("imports:\n  - some/path\nkey: value\n")
     with pytest.raises(ValueError, match="must be a dict"):
         load_config(config_file)
+
+
+# ---------------------------------------------------------------------------
+# load_recipe — AutoQuantize recipes
+# ---------------------------------------------------------------------------
+
+_AQ_MINIMAL_BODY = (
+    "metadata:\n"
+    "  recipe_type: auto_quantize\n"
+    "auto_quantize:\n"
+    "  constraints:\n"
+    "    effective_bits: 4.8\n"
+    "  candidate_formats:\n"
+    "    - algorithm: max\n"
+    "      quant_cfg: []\n"
+    "    - algorithm: max\n"
+    "      quant_cfg: []\n"
+)
+
+
+def test_load_recipe_autoquantize_minimal(tmp_path):
+    """Minimal AutoQuantize recipe loads with the right type and field defaults."""
+    recipe_file = tmp_path / "aq.yml"
+    recipe_file.write_text(_AQ_MINIMAL_BODY)
+    recipe = load_recipe(recipe_file)
+
+    assert recipe.recipe_type == RecipeType.AUTO_QUANTIZE
+    assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
+    aq = recipe.auto_quantize
+    assert aq.auto_quantize_method == "gradient"
+    assert aq.num_score_steps == 128
+    assert aq.kv_cache is None
+    assert aq.constraints.effective_bits == 4.8
+    assert aq.constraints.cost_model == "weight"
+    assert aq.constraints.cost is None
+    assert len(aq.candidate_formats) == 2
+
+
+def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
+    """cost_model + cost.active_moe_expert_ratio parse and dump to the mtq constraints dict shape."""
+    recipe_file = tmp_path / "aq.yml"
+    recipe_file.write_text(
+        "metadata:\n"
+        "  recipe_type: auto_quantize\n"
+        "auto_quantize:\n"
+        "  constraints:\n"
+        "    effective_bits: 6.0\n"
+        "    cost_model: active_moe\n"
+        "    cost:\n"
+        "      active_moe_expert_ratio: 0.03125\n"
+        "  candidate_formats:\n"
+        "    - algorithm: max\n"
+        "      quant_cfg: []\n"
+        "    - algorithm: max\n"
+        "      quant_cfg: []\n"
+    )
+    constraints = load_recipe(recipe_file).auto_quantize.constraints
+    assert constraints.cost_model == "active_moe"
+    assert constraints.cost.active_moe_expert_ratio == 0.03125
+    assert constraints.model_dump(exclude_none=True) == {
+        "effective_bits": 6.0,
+        "cost_model": "active_moe",
+        "cost": {"active_moe_expert_ratio": 0.03125},
+    }
+
+
+def test_load_recipe_autoquantize_missing_section_raises(tmp_path):
+    """Missing auto_quantize section gives the clean loader-level error."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text("metadata:\n  recipe_type: auto_quantize\n")
+    with pytest.raises(
+        ValueError, match=r"AUTO_QUANTIZE recipe file .* must contain 'auto_quantize'"
+    ):
+        load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_too_few_candidates_raises(tmp_path):
+    """candidate_formats with fewer than 2 entries is rejected."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(
+        "metadata:\n  recipe_type: auto_quantize\n"
+        "auto_quantize:\n  constraints:\n    effective_bits: 4.8\n"
+        "  candidate_formats:\n    - algorithm: max\n      quant_cfg: []\n"
+    )
+    with pytest.raises(ValueError, match="at least 2"):
+        load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_effective_bits_out_of_range_raises(tmp_path):
+    """effective_bits outside (0, 16] is rejected."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(_AQ_MINIMAL_BODY.replace("effective_bits: 4.8", "effective_bits: 20"))
+    with pytest.raises(ValueError, match="effective_bits"):
+        load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_builtin_active_moe():
+    """The shipped active-MoE AutoQuantize recipe resolves to the expected values."""
+    recipe = load_recipe("general/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe")
+    assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
+    aq = recipe.auto_quantize
+    assert aq.constraints.effective_bits == 6.0
+    assert aq.constraints.cost_model == "active_moe"
+    assert aq.constraints.cost.active_moe_expert_ratio == 0.03125
+    assert aq.auto_quantize_method == "gradient"
+    assert aq.kv_cache is None
+    # Inline effective_bits overrides: fp8 = 8, w4a16_nvfp4 = 4.5.
+    assert {c.effective_bits for c in aq.candidate_formats} == {8.0, 4.5}
+
+
+def test_load_recipe_autoquantize_builtin_active_moe_heuristic():
+    """The heuristic equivalence-test recipe loads with no effective_bits overrides."""
+    aq = load_recipe(
+        "general/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe-heuristic"
+    ).auto_quantize
+    assert aq.constraints.cost_model == "active_moe"
+    assert all(c.effective_bits is None for c in aq.candidate_formats)
