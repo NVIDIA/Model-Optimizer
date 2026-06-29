@@ -785,7 +785,6 @@ def _mamba_hybrid_forward_step(model, batch):
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
-@pytest.mark.timeout(300)
 def test_gptq_mamba_hybrid(dist_workers):
     """End-to-end GPTQ (NVFP4) on a tiny Megatron-Core NemotronH-style hybrid model."""
     dist_workers.run(_test_gptq_mamba_hybrid)
@@ -893,7 +892,7 @@ def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_si
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(120)
 def test_auto_quantize_mamba_hybrid_ep_cost(dist_workers, tmp_path):
     """AutoQuantize cost must match for EP=1 and EP=2 when two GPUs are available."""
     ep1_path = tmp_path / "ep1_cost.txt"
