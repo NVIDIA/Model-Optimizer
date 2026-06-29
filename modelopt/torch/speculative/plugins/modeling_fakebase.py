@@ -161,13 +161,31 @@ class FakeBaseModel(PreTrainedModel):
             ),
             orig_config,
         )
+
+        # Resolve the base model's dtype so lm_head / embed_tokens load in the checkpoint's
+        # dtype (e.g. bf16), matching the dumped hidden states in offline training. For VLMs
+        # base_cfg is the nested text config, which often does NOT set torch_dtype — only the
+        # top-level config does (e.g. MiniMax-M3: top-level torch_dtype=bfloat16, text_config
+        # has none). Reading base_cfg.dtype there falls back to PyTorch-default fp32, so the
+        # head loads fp32 while the dump is bf16 -> 'mat1 and mat2 must have the same dtype' in
+        # the draft forward. Prefer the nested torch_dtype, then the top-level, then bf16; map
+        # a string (e.g. "bfloat16") to the torch.dtype.
+        def _resolve_dtype(*cfgs):
+            for cfg in cfgs:
+                dt = getattr(cfg, "torch_dtype", None)
+                if isinstance(dt, str):
+                    dt = getattr(torch, dt, None)
+                if isinstance(dt, torch.dtype):
+                    return dt
+            return torch.bfloat16
+
         # Extract necessary info for spec training from base config
         config = FakeBaseConfig(
             num_hidden_layers=getattr(base_cfg, "num_hidden_layers", None),
             hidden_size=getattr(base_cfg, "hidden_size", None),
             vocab_size=getattr(base_cfg, "vocab_size", None),
             max_position_embeddings=getattr(base_cfg, "max_position_embeddings", None),
-            dtype=getattr(base_cfg, "dtype", torch.bfloat16),
+            dtype=_resolve_dtype(base_cfg, orig_config),
             tie_word_embeddings=getattr(base_cfg, "tie_word_embeddings", False),
             num_attention_heads=getattr(base_cfg, "num_attention_heads", None),
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),

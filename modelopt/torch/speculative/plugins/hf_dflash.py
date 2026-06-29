@@ -466,19 +466,12 @@ class HFDFlashModel(DFlashModel):
         if self.dflash_offline:
             assert "base_model_outputs" in kwargs
             base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
-            # Offline hidden states are dumped in bf16; cast to the model dtype (fp32 when
-            # bf16=false) so matmuls against fp32 weights — the lm_head below and the draft's
-            # input projections downstream — don't raise 'mat1 and mat2 must have the same
-            # dtype'. bf16 -> fp32 is lossless.
-            model_dtype = self._base_model_lm_head.weight.dtype
-            if base_outputs.target_hidden is not None:
-                base_outputs.target_hidden = base_outputs.target_hidden.to(model_dtype)
             if base_outputs.logits is None and self.dflash_self_logit_distillation:
                 # Compute logits from last-layer hidden states for KD loss.
                 # base_model_hidden_states is required on this path — fail fast
                 # with KeyError rather than lm_head(None).
                 out_hiddens = kwargs["base_model_outputs"]["base_model_hidden_states"]
-                base_outputs.logits = self._base_model_lm_head(out_hiddens.to(model_dtype))
+                base_outputs.logits = self._base_model_lm_head(out_hiddens)
             target_hidden = base_outputs.target_hidden
         else:
             # TODO: For co-training the base model, remove no_grad and eval() switch.
