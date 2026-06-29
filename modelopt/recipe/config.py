@@ -130,6 +130,13 @@ class AutoQuantizeCost(ModeloptBaseConfig):
         title="Active MoE expert ratio",
         description="Routed experts active per token, in (0, 1]. Used by the 'active_moe' cost model.",
     )
+    excluded_module_name_patterns: list[str] | None = ModeloptField(
+        default=None,
+        title="Cost-excluded module patterns",
+        description="Module-name glob patterns excluded from the cost denominator (cost_weight 0) so "
+        "they don't count toward the bit budget — e.g. vision-tower layers in a VL model. These are "
+        "typically also in disabled_layers (excluded from search); the two roles are independent.",
+    )
 
 
 class AutoQuantizeConstraints(ModeloptBaseConfig):

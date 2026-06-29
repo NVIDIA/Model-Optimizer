@@ -24,7 +24,8 @@ from _test_utils.examples.run_command import run_hf_ptq_command
 
 @dataclass
 class PTQCommand:
-    quant: str
+    quant: str | None = None
+    recipe: str | None = None
     tasks: str = "quant"
     calib: int = 16
     sparsity: str | None = None
@@ -32,7 +33,6 @@ class PTQCommand:
     trust_remote_code: bool = False
     calib_dataset: str = "cnn_dailymail"
     calib_batch_size: int | None = None
-    auto_quantize_bits: float | None = None
     tp: int | None = None
     pp: int | None = None
     min_sm: int | None = None
