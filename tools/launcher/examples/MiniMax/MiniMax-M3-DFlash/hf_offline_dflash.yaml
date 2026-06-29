@@ -12,11 +12,15 @@
 #     is not in stable vLLM yet -> image vllm/vllm-openai:minimax-m3.
 #   * --block-size 128 is MANDATORY for M3's MSA sparse attention.
 #   * --language-model-only skips the vision encoder (text-only synth/dump).
-#   * --enforce-eager + VLLM_RPC_TIMEOUT=1800000 are REQUIRED: M3's MSA Triton kernel
-#     (_gqa_sparse_fwd_kernel) JIT-recompiles per input shape; under cudagraph capture a
-#     recompile blows the executor RPC timeout (sample_tokens timeout -> EngineDead hang).
-#     Eager mode + a long RPC timeout avoids the hang. KV cache stays bf16 (M3's MSA fused
-#     kernel rejects fp8 KV).
+#   * M3's MSA Triton kernel (_gqa_sparse_fwd_kernel) JIT-recompiles per prefill shape; a
+#     recompile (~110s) can exceed VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS (default 300) and kill
+#     the engine (sample_tokens RPC timeout -> EngineDeadError). Three mitigations, all
+#     required: (1) --enforce-eager (cudagraph capture itself hung); (2) --length-buckets +
+#     --warmup right-pad prompts to a few fixed lengths so only a handful of shapes compile,
+#     pre-compiled up front; (3) env VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 to survive those
+#     compiles + a persistent TRITON_CACHE_DIR so all parallel tasks reuse the warmed kernels.
+#     KV cache stays bf16 (M3's MSA fused kernel rejects fp8 KV). NB: VLLM_RPC_TIMEOUT is NOT
+#     a recognized env var in this vLLM build (silently ignored) — use the EXECUTE_MODEL one.
 #   * Training FakeBaseModel reads lm_head + embed_tokens from the bf16 M3 (real weights;
 #     these tensors are not what MXFP8 quantizes, so dump@MXFP8 / train@bf16 logits stay
 #     consistent). Per Ye Yu: adhere to published bf16/MXFP8 ckpts, do not self-quantize.
@@ -55,11 +59,16 @@ pipeline:
       - --block-size 128
       - --language-model-only
       - --enforce-eager
+      # Bound distinct prefill shapes -> few MSA kernel recompiles, pre-compiled up front.
+      - --length-buckets 1024,2048,4096,8192
+      - --warmup
     environment:
       - HF_MODEL_CKPT: <<global_vars.dump_model>>
       - TRUST_REMOTE_CODE: "1"
-      # Survive MSA Triton-kernel JIT recompiles without an executor RPC timeout.
-      - VLLM_RPC_TIMEOUT: "1800000"
+      # Survive the (few, bucketed) ~110s MSA kernel recompiles; default is 300s.
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+      # Persist compiled MSA Triton kernels so all parallel dump tasks reuse them.
+      - TRITON_CACHE_DIR: /hf-local/modelopt/MiniMax-M3-DFlash-assets/triton_cache
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1

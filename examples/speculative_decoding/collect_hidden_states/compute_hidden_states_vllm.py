@@ -130,6 +130,26 @@ def parse_args() -> argparse.Namespace:
         "timeout under cudagraph capture, hanging the engine.",
     )
     parser.add_argument(
+        "--length-buckets",
+        type=str,
+        default="",
+        help="Comma-separated token-length buckets (e.g. '1024,2048,4096,8192'). When set, each "
+        "prompt is right-padded to the smallest bucket >= its length, so the model sees only a "
+        "handful of distinct prefill shapes. This bounds per-shape kernel JIT recompiles for "
+        "attention that compiles per sequence length (e.g. MiniMax-M3's MSA sparse attention), "
+        "which otherwise recompiles for hundreds of lengths — each recompile can exceed "
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS and kill the engine. Pad positions are dropped on "
+        "save; causal attention leaves the real prefix's hidden states unchanged. Empty "
+        "(default) disables bucketing.",
+    )
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Before the real dump, run one throwaway prefill per length bucket to JIT-compile "
+        "the per-shape kernels up front (populating a persistent TRITON_CACHE_DIR shared across "
+        "tasks), so the timed dump runs on cached kernels. Only meaningful with --length-buckets.",
+    )
+    parser.add_argument(
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
     )
     add_aux_layers_args(parser)
@@ -214,10 +234,18 @@ def main(args: argparse.Namespace) -> None:
     if args.answer_only_loss:
         verify_generation_tags(tokenizer.chat_template)
 
+    # Length buckets (optional): bound the number of distinct prefill shapes the model sees.
+    buckets = sorted({int(b) for b in args.length_buckets.split(",") if b.strip()})
+    buckets = [b for b in buckets if b <= args.max_seq_len]
+    pad_token_id = tokenizer.pad_token_id
+    if buckets:
+        print(f"Length bucketing enabled: buckets={buckets}, pad_token_id={pad_token_id}")
+
     # Prepare prompts for vLLM
     prompts = []
     conversation_ids = []
     loss_masks = []
+    real_lens = []
     num_skipped_too_long = 0
     num_invalid = 0
 
@@ -243,9 +271,19 @@ def main(args: argparse.Namespace) -> None:
             num_skipped_too_long += 1
             continue
 
-        prompts.append(TokensPrompt(prompt_token_ids=input_ids.tolist()))
+        token_ids_list = input_ids.tolist()
+        # Right-pad to the smallest bucket >= length. Causal attention means the real prefix's
+        # hidden states are identical to the unpadded forward; pad positions are sliced off on
+        # save (using real_len). Bounds distinct prefill shapes -> bounded kernel recompiles.
+        if buckets:
+            bucket = next((b for b in buckets if b >= num_tokens), buckets[-1])
+            if bucket > num_tokens:
+                token_ids_list = token_ids_list + [pad_token_id] * (bucket - num_tokens)
+
+        prompts.append(TokensPrompt(prompt_token_ids=token_ids_list))
         conversation_ids.append(conversation_id)
         loss_masks.append(loss_mask)
+        real_lens.append(num_tokens)
 
     print(
         f"Prepared {len(prompts)} prompts ({num_skipped_too_long} skipped too long, {num_invalid} invalid)"
@@ -310,13 +348,22 @@ def main(args: argparse.Namespace) -> None:
         ),
     )
 
+    # Warm up the per-shape kernel JIT (e.g. MiniMax-M3 MSA) once per bucket so the timed dump
+    # runs on cached kernels and no single step exceeds VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS. With a
+    # persistent TRITON_CACHE_DIR this also primes the cache for every other parallel task.
+    if args.warmup and buckets:
+        print(f"Warming up {len(buckets)} bucket shapes: {buckets}")
+        warmup_prompts = [TokensPrompt(prompt_token_ids=[pad_token_id] * b) for b in buckets]
+        llm.generate(warmup_prompts, SamplingParams(max_tokens=1))
+        print("Warm-up complete.")
+
     # max_tokens=1: we only need a single forward pass over the prompt tokens.
     outputs = llm.generate(prompts, SamplingParams(max_tokens=1))
 
     # Save in the same format as compute_hidden_states_hf.py, including loss_mask.
     num_success = 0
-    for conv_id, loss_mask, output in tqdm(
-        zip(conversation_ids, loss_masks, outputs), total=len(outputs), desc="Saving"
+    for conv_id, loss_mask, real_len, output in tqdm(
+        zip(conversation_ids, loss_masks, real_lens, outputs), total=len(outputs), desc="Saving"
     ):
         hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
         if hidden_states_path is None:
@@ -328,6 +375,12 @@ def main(args: argparse.Namespace) -> None:
         # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
         # extract_layer_ids. Last layer = final output; the rest = aux layers.
         hidden_states = obj["hidden_states"]
+
+        # Drop any right-padding from length-bucketing: keep only the real prefix. Causal
+        # attention means these positions' states match the unpadded forward. No-op when
+        # bucketing is disabled (real_len == sequence length).
+        token_ids = token_ids[:real_len]
+        hidden_states = hidden_states[:real_len]
 
         output_hidden_states = hidden_states[:, -1, :].cpu()
         if hidden_states.shape[1] > 1:
