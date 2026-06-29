@@ -89,27 +89,31 @@ dependencies = [
 include = ["modelopt*", "modelopt_recipes*"]
 EOF
 fi
-pip install --no-cache-dir -e modules/Model-Optimizer/
-pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
-pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
-
-# Some trust_remote_code models pin an older transformers (e.g. MiniMax-M2.7
-# needs 4.57.x whose modeling code is incompatible with the 5.x that the
-# requirements pull in). Must run AFTER the requirements install to win.
-# In multi-node streaming mode, only trainer nodes need the override; serve
-# nodes must keep the container's transformers for vLLM compatibility (vLLM
-# v0.24+ hard-rejects transformers v4).
-if [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
-    _NNODES="${SLURM_NNODES:-1}"
-    _NODEID="${SLURM_NODEID:-0}"
-    _SNODES="${SERVE_NODES:-1}"
-    if [ "$_NNODES" -le 1 ] || [ "$_NODEID" -ge "$_SNODES" ]; then
-        pip install --no-cache-dir "transformers==${OVERRIDE_TRANSFORMERS}"
-    else
-        echo "Serve node ${_NODEID}: skipping OVERRIDE_TRANSFORMERS=${OVERRIDE_TRANSFORMERS} (vLLM needs transformers v5+)."
-    fi
-    unset _NNODES _NODEID _SNODES
+# Detect role early: serve nodes (NODEID < SERVE_NODES) only need modelopt for
+# the RDMA connector; trainer nodes need the full training stack.  Installing
+# requirements.txt on serve nodes would downgrade transformers and break vLLM.
+_NNODES="${SLURM_NNODES:-1}"
+_NODEID="${SLURM_NODEID:-0}"
+_SNODES="${SERVE_NODES:-1}"
+_IS_TRAINER=true
+if [ "$_NNODES" -gt 1 ] && [ "$_NODEID" -lt "$_SNODES" ]; then
+    _IS_TRAINER=false
 fi
+
+pip install --no-cache-dir -e modules/Model-Optimizer/
+if $_IS_TRAINER; then
+    pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
+    pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
+    # Some trust_remote_code models pin an older transformers (e.g. MiniMax-M2.7
+    # needs 4.57.x whose modeling code is incompatible with the 5.x that the
+    # requirements pull in). Must run AFTER the requirements install to win.
+    if [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
+        pip install --no-cache-dir "transformers==${OVERRIDE_TRANSFORMERS}"
+    fi
+else
+    echo "Serve node ${_NODEID}: skipping training deps to preserve vLLM's transformers."
+fi
+unset _NNODES _NODEID _SNODES _IS_TRAINER
 
 export PATH=$PATH:/workspace/.local/bin
 
