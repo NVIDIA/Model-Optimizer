@@ -64,6 +64,8 @@ pipeline:
       # Pin @triton.autotune to one config: M3's MoE _topk kernel autotune (~150s) races
       # across TP ranks and deadlocks the engine<->worker collective (see header).
       - --disable-triton-autotune
+      # batch=1 so a bucketed warm-up covers every real-loop shape -> no JIT compile in the timed loop.
+      - --max-num-seqs 1
       # Bound distinct prefill shapes -> few MSA kernel recompiles, pre-compiled up front.
       - --length-buckets 1024,2048,4096,8192
       - --warmup

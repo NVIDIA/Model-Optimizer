@@ -189,6 +189,16 @@ def parse_args() -> argparse.Namespace:
         "(default) disables bucketing.",
     )
     parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=None,
+        help="vLLM max concurrent sequences. Set 1 for MiniMax-M3: with bucketing the only "
+        "varying kernel-shape dimension is then sequence length (a handful of buckets), so a "
+        "batch=1 warm-up covers every shape the real loop hits and NO kernel compiles during "
+        "the timed dump. Per-shape compilation otherwise desyncs the TP ranks and deadlocks "
+        "the engine<->worker collective. Default (None) uses vLLM's default.",
+    )
+    parser.add_argument(
         "--disable-triton-autotune",
         action="store_true",
         help="Pin every @triton.autotune to a single config (no per-shape benchmark). Required "
@@ -373,6 +383,8 @@ def main(args: argparse.Namespace) -> None:
         extra_llm_kwargs["language_model_only"] = True
     if args.enforce_eager:
         extra_llm_kwargs["enforce_eager"] = True
+    if args.max_num_seqs is not None:
+        extra_llm_kwargs["max_num_seqs"] = args.max_num_seqs
 
     llm = LLM(
         model=args.model,
