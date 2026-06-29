@@ -78,28 +78,25 @@ def test_ptq_whisper(command):
         PTQCommand(quant="w4a8_awq", kv_cache_quant="none"),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="nvfp4_awq"),
-        # autoquant
+        # autoquant (recipe-driven)
         PTQCommand(
-            quant="int4_awq,nvfp4,fp8,w4a8_awq",
+            recipe="general/auto_quantize/nvfp4_fp8_at_4p8bits",
             calib_batch_size=4,
-            auto_quantize_bits=6.4,
             kv_cache_quant="none",
         ),
         # kv_cache
         PTQCommand(quant="nvfp4_awq", kv_cache_quant="nvfp4"),
         PTQCommand(quant="fp8", kv_cache_quant="fp8_cast", min_sm=89),
-        # autoquant_kv_cache
+        # autoquant_kv_cache (recipe-driven; KV via --kv_cache_quant fallback)
         PTQCommand(
-            quant="nvfp4,fp8",
+            recipe="general/auto_quantize/nvfp4_fp8_at_4p8bits",
             kv_cache_quant="fp8",
             calib_batch_size=4,
-            auto_quantize_bits=6.4,
         ),
         PTQCommand(
-            quant="nvfp4,fp8",
+            recipe="general/auto_quantize/nvfp4_fp8_at_4p8bits",
             kv_cache_quant="nvfp4",
             calib_batch_size=4,
-            auto_quantize_bits=6.4,
         ),
         # sm89
         PTQCommand(quant="fp8", min_sm=89),

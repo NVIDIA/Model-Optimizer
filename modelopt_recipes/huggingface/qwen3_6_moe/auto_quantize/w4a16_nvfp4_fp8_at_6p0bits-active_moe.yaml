@@ -35,6 +35,13 @@ auto_quantize:
     cost_model: active_moe
     cost:
       active_moe_expert_ratio: 0.03125
+      # VL model: exclude vision-tower / MTP weights from the cost denominator (cost_weight 0)
+      # so they don't count toward the bit budget. (Also in disabled_layers below — excluded from
+      # search — but cost-exclusion is a separate role.)
+      excluded_module_name_patterns:
+        - "*visual*"
+        - "*mtp*"
+        - "*vision_tower*"
 
   candidate_formats:
     - $import: fp8

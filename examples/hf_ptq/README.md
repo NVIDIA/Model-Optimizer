@@ -250,7 +250,7 @@ python hf_ptq.py \
 
 The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_j`, both derived from the source MXFP4 E8M0 scales. For blocks whose `k_j` lands in E4M3's representable window (`k_max - k_j ≤ 17`), NVFP4 dequant matches MXFP4 dequant bit-for-bit; out-of-range blocks fall back to a data-derived per-block amax.
 
-> *`--cast_mxfp4_to_nvfp4` requires an NVFP4-family `--qformat` (e.g. `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4`) and is incompatible with `--auto_quantize_bits`.*
+> *`--cast_mxfp4_to_nvfp4` requires an NVFP4-family `--qformat` (e.g. `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4`) and is incompatible with AutoQuantize recipes (multi-format search).*
 
 #### Deepseek R1
 
@@ -305,10 +305,10 @@ Megatron-LM framework PTQ and TensorRT-LLM deployment examples are maintained in
 
 [AutoQuantize (`mtq.auto_quantize`)](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) is a PTQ algorithm which quantizes a model by searching for the best quantization format per-layer while meeting performance constraints specified by the user. `AutoQuantize` streamlines the trade-off of model accuracy and performance.
 
-Currently `AutoQuantize` supports only `auto_quantize_bits` as the performance constraint (for both weight-only
-quantization and weight & activation quantization). `auto_quantize_bits` constraint specifies the effective number of bits for the quantized model.
+`AutoQuantize` uses an effective-bits target (`effective_bits`) as the performance constraint (for both
+weight-only and weight & activation quantization) — the effective number of bits for the quantized model.
 
-You may specify an `auto_quantize_bits` constraint such as 4.8 for mixed precision quantization using `NVFP4_DEFAULT_CFG` & `FP8_DEFAULT_CFG`.
+You may specify an `effective_bits` target such as 4.8 for mixed precision quantization using `NVFP4_DEFAULT_CFG` & `FP8_DEFAULT_CFG`.
 `AutoQuantize` will automatically quantize highly sensitive layers in `FP8_DEFAULT_CFG` while keeping less sensitive layers in `NVFP4_DEFAULT_CFG` (and even skip quantization for any extremely sensitive layers) so that
 the the final mixed precision quantized model has an effective quantized bits of 4.8. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
 
@@ -337,7 +337,7 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
     # Perform AutoQuantize
     model, search_state_dict = mtq.auto_quantize(
         model,
-        constraints = {"auto_quantize_bits": 4.8},
+        constraints = {"effective_bits": 4.8},
         # supported quantization formats are listed in `modelopt.torch.quantization.config.choices`
         quantization_formats = ["NVFP4_DEFAULT_CFG", "FP8_DEFAULT_CFG"]
         data_loader = calib_dataloader,
@@ -351,31 +351,34 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
 
 `AutoQuantize` can be performed for Huggingface LLM models like [Qwen](https://huggingface.co/Qwen/Qwen3-8B) / [Nemotron](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) as shown below:
 
+`AutoQuantize` is driven by an **AutoQuantize recipe** passed with `--recipe`. The recipe defines the
+candidate formats, the `effective_bits` target, cost model, scoring method, and disabled layers — see
+[`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
+[`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
+recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
+`modelopt_recipes/huggingface/<model>/auto_quantize/`.
+
 [Script](./scripts/huggingface_example.sh)
 
 ```bash
-export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or simply the model card>
-# --auto_quantize_bits specifies the constraint for `AutoQuantize`
-# --quant specifies the formats to be searched for `AutoQuantize`
-# NOTE: auto_quantize_bits cannot be lower than the number of bits for the smallest quantization format in --quant
-scripts/huggingface_example.sh --model $HF_PATH --quant nvfp4_mse,fp8 --auto_quantize_bits 4.75 --calib_batch_size 4
+export HF_PATH=<the downloaded checkpoint from the Hugging Face hub, or simply the model card>
+# --recipe selects an AutoQuantize recipe; the recipe defines the candidate formats and the
+# effective-bits target (here NVFP4 + FP8 at 4.8 effective bits).
+scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_4p8bits --calib_batch_size 4
 ```
 
-The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `nvfp4_mse` (specified by `--quant nvfp4_mse`) and the more sensitive layers
-are kept un-quantized such that the effective bits is 4.75 (specified by `--auto_quantize_bits 4.75`).
+The recipe quantizes the less accuracy-sensitive layers with the more aggressive format (e.g. NVFP4) and
+keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
+`effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
+`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `num_score_steps`, and
+`disabled_layers`.
 
-#### AutoQuantize Advanced Options
-
-| Flag | Default | Description |
-| :--- | :---: | :--- |
-| `--auto_quantize_method` | `gradient` | Sensitivity analysis method. `gradient` uses gradient-based scoring (requires labels). `kl_div` uses KL divergence between original and quantized outputs (no labels required). |
-| `--auto_quantize_score_size` | `128` | Number of samples for sensitivity scoring. Reducing this speeds up the search while only minimally affecting accuracy (compared to reducing `--calib_size`). |
-| `--auto_quantize_checkpoint` | auto-generated | Path to save/restore search state (sensitivity scores, costs). Useful for resuming interrupted searches. |
+The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
+interrupted search (skips re-scoring):
 
 ```bash
-# Use KL divergence method with smaller scoring set for faster search
-scripts/huggingface_example.sh --model $HF_PATH --quant nvfp4_mse,fp8 \
-  --auto_quantize_bits 4.75 --auto_quantize_method kl_div --auto_quantize_score_size 64
+scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_4p8bits \
+  --auto_quantize_checkpoint /path/to/auto_quantize.pth --calib_batch_size 4
 ```
 
 The example scripts above also have an additional flag `--tasks`, where the actual tasks run in the script can be customized. The allowed tasks are `quant,mmlu,lm_eval,livecodebench,simple_eval` specified in the script [parser](./scripts/parser.sh). The tasks combo can be specified with a comma-separated task list. Some tasks like mmlu can take a long time to run. To run lm_eval tasks, please also specify the `--lm_eval_tasks` flag with comma separated lm_eval tasks [here](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks).
