@@ -591,6 +591,7 @@ def load_vlm_or_llm(
     dtype: str | torch.dtype | None = None,
     device_map: str | None = None,
     trust_remote_code: bool = False,
+    config_overrides: dict | None = None,
 ):
     """Load a VLM or LLM. Returns the model.
 
@@ -605,6 +606,9 @@ def load_vlm_or_llm(
         dtype: dtype to use when loading the model.
         device_map: Device map passed to ``from_pretrained``.
         trust_remote_code: Whether to trust remote code.
+        config_overrides: Optional config field overrides applied to the model config and
+            its ``text_config`` before instantiation (e.g. to correct dims that don't
+            propagate from a checkpoint's nested text config).
     """
     if use_offline_training and use_fake_base:
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
@@ -615,6 +619,16 @@ def load_vlm_or_llm(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
     )
+
+    # Apply caller-supplied config corrections to both the parent config and its
+    # nested text_config (some checkpoints don't propagate text_config dims).
+    if config_overrides:
+        for cfg_obj in (model_config, getattr(model_config, "text_config", None)):
+            if cfg_obj is None:
+                continue
+            for key, value in config_overrides.items():
+                if hasattr(cfg_obj, key):
+                    setattr(cfg_obj, key, value)
 
     # Detect VLMs: either "vl" in model_type (e.g. "llava") or has a nested text config
     # (e.g. Mistral3Config with model_type="mistral3" and text_config attribute).
@@ -646,8 +660,31 @@ def load_vlm_or_llm(
         if hasattr(model_config, "layer_types"):
             extra["layer_types"] = []
 
+    # Cosmos3 omni checkpoints: the transformers-cosmos3 plugin registers only the config
+    # (cosmos3_omni) with AutoConfig, not a model under the Auto* maps, so use its
+    # Cosmos3ForConditionalGeneration (a Qwen3-VL subclass) directly. The unused vision
+    # tower has mismatched dims vs the text-only use, so ignore those on load.
+    if getattr(model_config, "model_type", None) == "cosmos3_omni":
+        from transformers_cosmos3 import Cosmos3ForConditionalGeneration
+
+        return Cosmos3ForConditionalGeneration.from_pretrained(
+            model_name_or_path,
+            config=model_config,
+            trust_remote_code=trust_remote_code,
+            torch_dtype=dtype,
+            device_map=device_map,
+            ignore_mismatched_sizes=True,
+            **extra,
+        )
+
+    if _is_vlm:
+        model_cls = transformers.AutoModelForVision2Seq
+    else:
+        model_cls = transformers.AutoModelForCausalLM
+
     model = model_cls.from_pretrained(
         model_name_or_path,
+        config=model_config if config_overrides else None,
         trust_remote_code=trust_remote_code,
         torch_dtype=dtype,
         device_map=device_map,
