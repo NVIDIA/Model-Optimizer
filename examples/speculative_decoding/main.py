@@ -217,7 +217,10 @@ def train():
         assert checkpoint is not None  # guaranteed by checkpoint_is_hf
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
-                checkpoint, dtype="auto", trust_remote_code=recipe.model.trust_remote_code
+                checkpoint,
+                dtype="auto",
+                trust_remote_code=recipe.model.trust_remote_code,
+                config_overrides=recipe.model.config_overrides,
             )
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             checkpoint, trust_remote_code=recipe.model.trust_remote_code
@@ -242,6 +245,7 @@ def train():
             dtype="auto",
             device_map="cpu",
             trust_remote_code=recipe.model.trust_remote_code,
+            config_overrides=recipe.model.config_overrides,
         )
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_name_or_path,
