@@ -1957,7 +1957,7 @@ def _compute_block_scales(quantizer):
 
     Returns (per_block_scale, per_tensor_scale, quantize_scales).
     """
-    from .nn.modules.tensor_quantizer import _amax_to_scale
+    from .nn.modules.tensor_quantizer import _FP8_E4M3_MIN_POSITIVE, _amax_to_scale
     from .tensor_quant import scaled_e4m3
 
     amax = quantizer._amax.float()
@@ -1973,8 +1973,7 @@ def _compute_block_scales(quantizer):
                 _amax_to_scale(
                     amax,
                     max_representable,
-                    min_value=0.002
-                    * per_tensor_scale.view(-1),  # 0.002 ≈ smallest positive FP8 E4M3 value
+                    min_value=_FP8_E4M3_MIN_POSITIVE * per_tensor_scale.view(-1),
                 ),
                 per_tensor_scale,
                 None,
@@ -2016,6 +2015,7 @@ def laq(
     scale_algorithm: dict | None = None,
     learnable_amax: list | str = ("post",),
     tied_amax: bool = False,
+    quantize_pre_scale: bool = True,
     **kwargs,
 ):
     """Run scale calibration then convert to LAQ mode.
@@ -2032,6 +2032,7 @@ def laq(
         learnable_amax: Which amax params are learnable: 'pre', 'post',
             ['pre', 'post'], or [].
         tied_amax: If True, pre and post share a single tensor.
+        quantize_pre_scale: If False, skip FP8 quantization for the LAQ pre scale.
     """
     _run_scale_calibration(model, forward_loop, scale_algorithm, "laq")
 
@@ -2047,4 +2048,5 @@ def laq(
             quantize_scales,
             learnable_amax=learnable_amax,
             tied_amax=tied_amax,
+            quantize_pre_scale=quantize_pre_scale,
         )
