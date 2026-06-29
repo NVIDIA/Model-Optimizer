@@ -131,9 +131,11 @@ pipeline:
     environment:
       - NUM_NODES: "8"
       # Offline training uses a lightweight FakeBaseModel, so plain DDP suffices (no
-      # ACCELERATE_CONFIG / FSDP2 patches). OVERRIDE_TRANSFORMERS pins 4.52.4 for the
-      # MiniMax-M3 config load.
-      - OVERRIDE_TRANSFORMERS: "4.52.4"
+      # ACCELERATE_CONFIG / FSDP2 patches). transformers 4.57.1 (not M3's 4.52.4): 4.52.4's
+      # Trainer does `from apex import amp`, which this training container's apex lacks ->
+      # import crash; 4.57.1 guards it and still loads M3's config/tokenizer fine. (The dump
+      # step is unaffected — it runs in the vllm:minimax-m3 image with its own transformers.)
+      - OVERRIDE_TRANSFORMERS: "4.57.1"
       - MIXED_PRECISION: "no"
     slurm_config:
       _factory_: "slurm_factory"
