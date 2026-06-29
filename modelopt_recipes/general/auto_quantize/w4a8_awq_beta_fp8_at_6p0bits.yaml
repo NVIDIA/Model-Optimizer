@@ -13,35 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# AutoQuantize recipe: per-layer search over {FP8 (W8A8), NVFP4 weight-only (W4A16)}
-# at 6.0 effective bits, active-MoE cost model. Recipe form of the CLI command:
-#   --qformat fp8,w4a16_nvfp4 --auto_quantize_bits 6.0 --auto_quantize_method gradient
-#   --auto_quantize_cost_model active_moe --auto_quantize_active_moe_expert_ratio 0.03125
+# AutoQuantize: per-layer search over {W4A8 AWQ-beta, FP8 (W8A8)} at 6.0 effective bits.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
+  w4a8_awq_beta: configs/ptq/presets/model/w4a8_awq_beta
   fp8: configs/ptq/presets/model/fp8
-  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
 
 metadata:
   recipe_type: auto_quantize
-  description: >-
-    Mixed FP8 + NVFP4-weight-only per-layer search at 6.0 effective bits with the
-    active-MoE cost model (expert ratio 0.03125).
+  description: Mixed W4A8 AWQ-beta + FP8 per-layer search at 6.0 effective bits.
 
 auto_quantize:
   constraints:
     effective_bits: 6.0
-    cost_model: active_moe
-    cost:
-      active_moe_expert_ratio: 0.03125
 
   candidate_formats:
-    # LP cost comes from the presets' numerics (NVFP4 weight = 4.5 via configs/numerics/nvfp4,
-    # FP8 = 8); no per-candidate effective_bits override needed.
+    - $import: w4a8_awq_beta
     - $import: fp8
-    - $import: w4a16_nvfp4
 
   auto_quantize_method: gradient
   num_score_steps: 128
-  # kv_cache omitted -> falls back to --kv_cache_qformat (none in the reference command).
