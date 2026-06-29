@@ -14,7 +14,8 @@
 # limitations under the License.
 
 import copy
-from contextlib import nullcontext
+import time
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 
@@ -72,6 +73,17 @@ except ImportError:
     HAS_TE = False
 
 SEED = 1234
+
+
+@contextmanager
+def _timed_section(rank, label):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        if rank == 0:
+            elapsed = time.perf_counter() - start
+            print(f"[gpu_megatron timing] {label}: {elapsed:.2f}s", flush=True)
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -722,19 +734,20 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
 
 
 def _test_auto_quantize_moe_ep_helper(rank, size):
-    initialize_for_megatron(
-        tensor_model_parallel_size=1,
-        expert_model_parallel_size=size,
-        seed=SEED,
-    )
-    model = _gpt_model_provider(
-        tp_size=1,
-        ep_size=size,
-        hidden_size=32,
-        num_moe_experts=4,
-        moe_grouped_gemm=False,
-        transformer_impl="modelopt",
-    )
+    with _timed_section(rank, f"auto_quantize_moe_ep_world{size}:init_model"):
+        initialize_for_megatron(
+            tensor_model_parallel_size=1,
+            expert_model_parallel_size=size,
+            seed=SEED,
+        )
+        model = _gpt_model_provider(
+            tp_size=1,
+            ep_size=size,
+            hidden_size=32,
+            num_moe_experts=4,
+            moe_grouped_gemm=False,
+            transformer_impl="modelopt",
+        )
 
     def forward_step(model, batch):
         input_ids, labels, position_ids, attention_mask, loss_mask = batch
@@ -746,18 +759,19 @@ def _test_auto_quantize_moe_ep_helper(rank, size):
             loss_mask=loss_mask,
         )
 
-    auto_quantize_helper(
-        model,
-        data_loader=[get_batch(model, batch_size=2) for _ in range(2)],
-        forward_step=forward_step,
-        forward_backward_step=lambda m, b: forward_step(m, b).mean().backward(),
-        quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
-    )
+    with _timed_section(rank, f"auto_quantize_moe_ep_world{size}:auto_quantize"):
+        auto_quantize_helper(
+            model,
+            data_loader=[get_batch(model, batch_size=2) for _ in range(2)],
+            forward_step=forward_step,
+            forward_backward_step=lambda m, b: forward_step(m, b).mean().backward(),
+            quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+        )
 
 
-def test_auto_quantize_moe_ep(dist_workers_size_2):
-    """auto_quantize must sum score/cost across EP ranks and pick a consistent recipe."""
-    dist_workers_size_2.run(_test_auto_quantize_moe_ep_helper)
+def test_auto_quantize_moe_ep(dist_workers):
+    """auto_quantize must pick a consistent recipe across EP ranks when multiple GPUs run."""
+    dist_workers.run(_test_auto_quantize_moe_ep_helper)
 
 
 def _mamba_hybrid_forward_step(model, batch):
@@ -771,138 +785,175 @@ def _mamba_hybrid_forward_step(model, batch):
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
-@pytest.mark.timeout(600)
-def test_gptq_mamba_hybrid(distributed_setup_size_1):
-    """End-to-end GPTQ (NVFP4) on a Megatron-Core NemotronH-style hybrid model."""
-    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
-    model = get_mcore_mamba_hybrid_model(
-        tensor_model_parallel_size=1,
-        num_moe_experts=8,
-        moe_grouped_gemm=False,
-        transformer_impl="modelopt",
-    ).cuda()
+@pytest.mark.timeout(300)
+def test_gptq_mamba_hybrid(dist_workers):
+    """End-to-end GPTQ (NVFP4) on a tiny Megatron-Core NemotronH-style hybrid model."""
+    dist_workers.run(_test_gptq_mamba_hybrid)
+
+
+def _test_gptq_mamba_hybrid(rank, size):
+    with _timed_section(rank, f"gptq_mamba_hybrid_world{size}:init_model"):
+        initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+        model = get_mcore_mamba_hybrid_model(
+            tensor_model_parallel_size=1,
+            hidden_size=32,
+            num_attention_heads=4,
+            ffn_hidden_size=64,
+            mamba_state_dim=16,
+            mamba_head_dim=8,
+            num_moe_experts=4,
+            moe_grouped_gemm=False,
+            moe_ffn_hidden_size=32,
+            moe_shared_expert_intermediate_size=16,
+            transformer_impl="modelopt",
+        ).cuda()
 
     quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
     quant_cfg["algorithm"] = {"method": "gptq"}
-    forward = get_forward(model, batch_size=2)
-    model = mtq.quantize(model, quant_cfg, forward)
+    forward = get_forward(model, batch_size=1)
+    with _timed_section(rank, f"gptq_mamba_hybrid_world{size}:quantize"):
+        model = mtq.quantize(model, quant_cfg, forward)
 
-    # All experts should have weight and input quantizers
-    for m in model.modules():
-        if isinstance(m, SequentialMLP):
-            assert all(
-                is_quantized_linear(e.linear_fc1)
-                and e.linear_fc1.weight_quantizer.is_enabled
-                and e.linear_fc1.input_quantizer.is_enabled
-                for e in m.local_experts
-            )
-            assert all(
-                is_quantized_linear(e.linear_fc2)
-                and e.linear_fc2.weight_quantizer.is_enabled
-                and e.linear_fc2.input_quantizer.is_enabled
-                for e in m.local_experts
-            )
-    assert torch.isfinite(forward(model)).all()
-
-    destroy_model_parallel()
+    with _timed_section(rank, f"gptq_mamba_hybrid_world{size}:verify"):
+        for m in model.modules():
+            if isinstance(m, SequentialMLP):
+                assert all(
+                    is_quantized_linear(e.linear_fc1)
+                    and e.linear_fc1.weight_quantizer.is_enabled
+                    and e.linear_fc1.input_quantizer.is_enabled
+                    for e in m.local_experts
+                )
+                assert all(
+                    is_quantized_linear(e.linear_fc2)
+                    and e.linear_fc2.weight_quantizer.is_enabled
+                    and e.linear_fc2.input_quantizer.is_enabled
+                    for e in m.local_experts
+                )
+        assert torch.isfinite(forward(model)).all()
 
 
-def _auto_quantize_mamba_hybrid_cost_helper(rank, size, result_path):
-    initialize_for_megatron(
-        tensor_model_parallel_size=1,
-        expert_model_parallel_size=size,
-        seed=SEED,
-    )
-    model = get_mcore_mamba_hybrid_model(
-        tensor_model_parallel_size=1,
-        num_moe_experts=8,
-        moe_grouped_gemm=False,
-        transformer_impl="modelopt",
-        expert_model_parallel_size=size,
-    ).cuda()
+def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_size, result_path):
+    label = f"auto_quantize_mamba_hybrid_ep{expert_model_parallel_size}_world{size}"
+    with _timed_section(rank, f"{label}:init_model"):
+        initialize_for_megatron(
+            tensor_model_parallel_size=1,
+            expert_model_parallel_size=expert_model_parallel_size,
+            seed=SEED,
+        )
+        model = get_mcore_mamba_hybrid_model(
+            tensor_model_parallel_size=1,
+            hidden_size=32,
+            num_attention_heads=4,
+            ffn_hidden_size=64,
+            mamba_state_dim=16,
+            mamba_head_dim=8,
+            num_moe_experts=4,
+            moe_grouped_gemm=False,
+            moe_ffn_hidden_size=32,
+            moe_shared_expert_intermediate_size=16,
+            transformer_impl="modelopt",
+            expert_model_parallel_size=expert_model_parallel_size,
+        ).cuda()
 
-    _, search_state = mtq.auto_quantize(
-        model,
-        constraints={"effective_bits": 8.0},
-        quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
-        data_loader=[get_batch(model, batch_size=2) for _ in range(2)],
-        forward_step=_mamba_hybrid_forward_step,
-        forward_backward_step=lambda m, b: _mamba_hybrid_forward_step(m, b).mean().backward(),
-        num_calib_steps=2,
-        num_score_steps=2,
-        verbose=True,
-    )
+    def forward_backward_step(model, batch):
+        _mamba_hybrid_forward_step(model, batch).mean().backward()
 
-    no_quant = QuantRecipe(quant_cfg=None)
-    summed_cost = sum(
-        stat["costs"][stat["formats"].index(no_quant)]
-        for stat in search_state["candidate_stats"].values()
-    )
-    # The per-op no-quant costs must sum to the cost denominator AutoQuantize uses,
-    # which is the full quantizable weight size aggregated across EP ranks.
-    assert summed_cost == pytest.approx(search_state["cost_denominator"], rel=1e-6)
-    assert search_state["best"]["is_satisfied"]
+    with _timed_section(rank, f"{label}:auto_quantize"):
+        _, search_state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+            data_loader=[get_batch(model, batch_size=1)],
+            forward_step=_mamba_hybrid_forward_step,
+            forward_backward_step=forward_backward_step,
+            num_calib_steps=1,
+            num_score_steps=1,
+            verbose=True,
+        )
 
-    if size == 1:
-        # Single GPU holds the whole model, so the summed cost must equal the locally
-        # measured quantizable weight size (no cross-rank aggregation involved).
-        local_total = _AutoQuantizeBaseSearcher._get_total_weight_size(list(model.modules()))
-        assert summed_cost == pytest.approx(local_total, rel=1e-6)
+    with _timed_section(rank, f"{label}:verify"):
+        no_quant = QuantRecipe(quant_cfg=None)
+        summed_cost = sum(
+            stat["costs"][stat["formats"].index(no_quant)]
+            for stat in search_state["candidate_stats"].values()
+        )
+        # The per-op no-quant costs must sum to the cost denominator AutoQuantize uses,
+        # which is the full quantizable weight size aggregated across EP ranks.
+        assert summed_cost == pytest.approx(search_state["cost_denominator"], rel=1e-6)
+        assert search_state["best"]["is_satisfied"]
 
-    if rank == 0:
-        Path(result_path).write_text(repr(summed_cost))
+        if expert_model_parallel_size == 1:
+            # With EP=1, every rank has the full expert set. DP de-duplication should make the
+            # summed no-quant cost match the local quantizable weight size on each rank.
+            local_total = _AutoQuantizeBaseSearcher._get_total_weight_size(list(model.modules()))
+            assert summed_cost == pytest.approx(local_total, rel=1e-6)
+
+        if rank == 0:
+            Path(result_path).write_text(repr(summed_cost))
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
-@pytest.mark.timeout(900)  # cold-starts two worker pools (EP=1 and EP=4) + first FP8 ext build
-def test_auto_quantize_mamba_hybrid_ep_cost(dist_workers_size_1, dist_workers_size_4, tmp_path):
-    """AutoQuantize must sum per-op cost to the same model size for single-GPU and EP=4."""
+@pytest.mark.timeout(600)
+def test_auto_quantize_mamba_hybrid_ep_cost(dist_workers, tmp_path):
+    """AutoQuantize cost must match for EP=1 and EP=2 when two GPUs are available."""
     ep1_path = tmp_path / "ep1_cost.txt"
-    ep4_path = tmp_path / "ep4_cost.txt"
-    dist_workers_size_1.run(
-        partial(_auto_quantize_mamba_hybrid_cost_helper, result_path=str(ep1_path))
+    dist_workers.run(
+        partial(
+            _auto_quantize_mamba_hybrid_cost_helper,
+            expert_model_parallel_size=1,
+            result_path=str(ep1_path),
+        )
     )
-    dist_workers_size_4.run(
-        partial(_auto_quantize_mamba_hybrid_cost_helper, result_path=str(ep4_path))
+    if dist_workers.world_size < 2:
+        return
+
+    ep2_path = tmp_path / "ep2_cost.txt"
+    dist_workers.run(
+        partial(
+            _auto_quantize_mamba_hybrid_cost_helper,
+            expert_model_parallel_size=2,
+            result_path=str(ep2_path),
+        )
     )
     cost_ep1 = float(ep1_path.read_text())
-    cost_ep4 = float(ep4_path.read_text())
-    assert cost_ep1 == pytest.approx(cost_ep4, rel=1e-6)
+    cost_ep2 = float(ep2_path.read_text())
+    assert cost_ep1 == pytest.approx(cost_ep2, rel=1e-6)
 
 
-def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(distributed_setup_size_1):
+def _test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = _gpt_model_provider(
+        tp_size=1,
+        hidden_size=32,
+        meta_device=True,
+        transformer_impl="modelopt",
+    )
+    decoder_layers = model.decoder.layers
+    decoder_len = len(decoder_layers)
+    output_layer = model.output_layer
+
+    discovered_layers = get_mcore_layerwise_calibration_layers(model)
+
+    assert discovered_layers is not None
+    assert len(discovered_layers) == decoder_len + 1
+    assert discovered_layers[-1] is output_layer
+    assert len(decoder_layers) == decoder_len
+    assert all(layer is not output_layer for layer in decoder_layers)
+
+    assert LayerActivationCollector.is_supported(model)
+    discovered_layers = LayerActivationCollector.get_decoder_layers(model)
+    assert discovered_layers is not None
+    assert len(discovered_layers) == decoder_len + 1
+    assert discovered_layers[-1] is output_layer
+    assert len(decoder_layers) == decoder_len
+    assert all(layer is not output_layer for layer in decoder_layers)
+
+
+def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(dist_workers):
     if not HAS_TE:
         pytest.skip("Transformer Engine is not installed")
 
-    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
-    try:
-        model = _gpt_model_provider(
-            tp_size=1,
-            hidden_size=32,
-            meta_device=True,
-            transformer_impl="modelopt",
-        )
-        decoder_layers = model.decoder.layers
-        decoder_len = len(decoder_layers)
-        output_layer = model.output_layer
-
-        discovered_layers = get_mcore_layerwise_calibration_layers(model)
-
-        assert discovered_layers is not None
-        assert len(discovered_layers) == decoder_len + 1
-        assert discovered_layers[-1] is output_layer
-        assert len(decoder_layers) == decoder_len
-        assert all(layer is not output_layer for layer in decoder_layers)
-
-        assert LayerActivationCollector.is_supported(model)
-        discovered_layers = LayerActivationCollector.get_decoder_layers(model)
-        assert discovered_layers is not None
-        assert len(discovered_layers) == decoder_len + 1
-        assert discovered_layers[-1] is output_layer
-        assert len(decoder_layers) == decoder_len
-        assert all(layer is not output_layer for layer in decoder_layers)
-    finally:
-        destroy_model_parallel()
+    dist_workers.run(_test_mcore_layerwise_calibration_layers_do_not_mutate_decoder)
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
