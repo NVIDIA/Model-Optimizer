@@ -41,6 +41,19 @@ Usage: `/puzzletron <command> [args]`
 
 **STEP 2 — Only if the first word of args exactly matches a command name, execute it. Never reach this step if args were empty.**
 
+## Permission handling
+
+- Run read-only monitoring commands normally, without requesting escalation. This includes
+  `ps`, `grep`, `rg`, `find`, `tail`, `sed`, `stat`, log inspection, result inspection, and
+  Puzzletron progress scripts under `.agents/skills/puzzletron/`.
+- Do not proactively mark a read-only monitoring command as requiring elevated permissions.
+  Request escalation only after the command actually fails because of sandbox restrictions and
+  the result is necessary to continue.
+- Treat GPU access and job launch separately from monitoring. A CUDA command may require
+  escalation even when its logs, result files, and process status can be inspected without it.
+- Reuse an existing approved command rule when it exactly covers the required operation; do not
+  escalate adjacent read-only checks merely because the launched job required escalation.
+
 ## Command: all
 
 Parse `nproc_per_node` from args using either positional or flag syntax:
