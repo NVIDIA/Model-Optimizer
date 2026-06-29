@@ -76,6 +76,18 @@ from modelopt.torch.utils.vlm_dataset_utils import get_supported_vlm_datasets
 DEFAULT_TEXT_CALIB_DATASET = "nemotron-post-training-dataset-v2"
 DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"
 
+# HF config field names that enable MTP
+_MTP_HF_CONFIG_FIELDS = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "mtp_num_layers")
+
+
+def _hf_config_has_mtp(hf_cfg) -> bool:
+    """Whether an HF config declares MTP heads (checked top-level and under ``text_config``)."""
+    return any(
+        cfg is not None and getattr(cfg, field, 0)
+        for cfg in (getattr(hf_cfg, "text_config", None), hf_cfg)
+        for field in _MTP_HF_CONFIG_FIELDS
+    )
+
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -348,10 +360,22 @@ def main(args: argparse.Namespace):
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
+            "mtp_num_layers": 0,  # MTP is not supported during calibration
         },
         init_model_parallel=True,
         moe_grouped_gemm=False,
     )
+
+    # TODO: Support pruning with MTP heads enabled (e.g. Qwen3.5 mtp_num_hidden_layers=1).
+    # Requires ModelOpt fixes for gated-attention QKV under DynamicModule during MTP calibration,
+    # _DynamicMCoreLanguageModel conversion/export of MTP submodules, importance hooks on MTP
+    # layers, mcore_param_count including MTP in --prune_target_params, and a CI test with MTP.
+    if _hf_config_has_mtp(bridge.hf_pretrained.config):
+        warn_rank_0(
+            "Dropping Multi-Token Prediction (MTP): calibration does not yet support MTP. Exported "
+            "checkpoints will not contain MTP weights. Standard autoregressive inference is unaffected. To use "
+            "MTP speculative decoding later, run a separate SFT phase with mtp_num_layers=1 on the pruned model."
+        )
 
     # For VLMs (e.g. Qwen3-VL), only the language model is pruned; the vision tower is left intact.
     # hidden_size is shared with the vision->LM projector, so it is skipped
@@ -608,6 +632,10 @@ def main(args: argparse.Namespace):
         if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
             hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
+        # Mark MTP as disabled on the HF text config written after pruning
+        for field in _MTP_HF_CONFIG_FIELDS:
+            if hasattr(text_cfg, field):
+                setattr(text_cfg, field, 0)
 
         # Save dummy pruned HF model to get the correct bridge for saving pruned weights
         dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM

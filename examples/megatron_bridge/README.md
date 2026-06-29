@@ -316,6 +316,9 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 > NAS-based pruning requires ~2x the GPU memory of Manual pruning because it needs to simultaneously hold original model while evaluating each pruned candidate.
 
 > [!NOTE]
+> Multi-token-prediction (MTP) heads (e.g. Qwen3.5) are not pruned yet — they are dropped for the prune run and the saved checkpoint has no MTP. Autoregressive inference is unaffected; for speculative decoding, run a short MTP SFT on the pruned model.
+
+> [!NOTE]
 > If pruning a Nemotron model and you want to save the pruned model back in HF format, please downgrade to `transformers<5` via `python -m pip install "transformers<5"` before pruning.
 
 ### Vision-Language Models (VLMs)
