@@ -323,6 +323,22 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         #. String specifying the quantization format. This is current used only for custom backends.""",
     )
 
+    effective_bits: float | None = ModeloptField(
+        default=None,
+        title="Effective bits per element (autoquant cost).",
+        description=(
+            "Per-format effective bits for the autoquant cost model; overrides the "
+            "``num_bits`` heuristic for this entry (e.g. NVFP4 = 4.5). Must be in (0, 16]."
+        ),
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
+
     @model_validator(mode="before")
     @classmethod
     def validate_config(cls, values):
@@ -1316,6 +1332,22 @@ class QuantizeConfig(ModeloptBaseConfig):
         "for more details.",
         validate_default=True,
     )
+
+    effective_bits: float | None = ModeloptField(
+        default=None,
+        title="Effective bits per element (autoquant cost override)",
+        description=(
+            "Recipe-level override for the autoquant cost model; replaces the per-entry "
+            "``num_bits`` heuristic for the whole config. Must be in (0, 16]."
+        ),
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
 
     @field_validator("quant_cfg", mode="before")
     @classmethod

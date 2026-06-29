@@ -556,6 +556,81 @@ def test_estimate_quant_compression():
     assert estimate_quant_compression(fp8_affine_kv_cfg) == 0.5
 
 
+def test_estimate_quant_compression_effective_bits_override():
+    """Recipe-level ``QuantizeConfig.effective_bits`` overrides the num_bits heuristic; unset falls back to it."""
+    # NVFP4 — heuristic returns 4.0 bits / 16 = 0.25, but true effective bits is 4.5.
+    nvfp4_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG)
+    assert nvfp4_cfg.effective_bits is None
+    assert estimate_quant_compression(nvfp4_cfg) == 0.25  # heuristic baseline
+
+    nvfp4_cfg_overridden = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=4.5)
+    assert estimate_quant_compression(nvfp4_cfg_overridden) == 4.5 / 16.0
+
+    # Override can also represent a higher cost (e.g., conservative for a sensitive recipe).
+    nvfp4_cfg_high = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=16.0)
+    assert estimate_quant_compression(nvfp4_cfg_high) == 1.0
+
+    # Out-of-range values are rejected by the Pydantic validator.
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=0.0)
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=17.0)
+
+
+def test_estimate_quant_compression_per_entry_effective_bits():
+    """Per-entry ``effective_bits`` overrides the heuristic; recipe-level wins over it; min across entries."""
+    # num_bits=(2,1) -> heuristic 0.25, but per-entry library default is 4.5.
+    cfg = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+        ],
+        algorithm="max",
+    )
+    assert cfg.effective_bits is None
+    assert estimate_quant_compression(cfg) == 4.5 / 16.0
+
+    # Recipe-level override (layer 1) wins over the per-entry value (layer 2).
+    cfg_recipe_override = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+        ],
+        algorithm="max",
+        effective_bits=8.0,
+    )
+    assert estimate_quant_compression(cfg_recipe_override) == 8.0 / 16.0
+
+    # min across entries: weight 4.5/16 = 0.28125 vs heuristic fp8 input 0.5 -> 0.28125.
+    cfg_mixed = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3)}},
+        ],
+        algorithm="max",
+    )
+    assert estimate_quant_compression(cfg_mixed) == 4.5 / 16.0
+
+    # Per-entry out-of-range is rejected by the QuantizerAttributeConfig validator.
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(
+            quant_cfg=[
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": (2, 1), "effective_bits": 20.0},
+                },
+            ],
+            algorithm="max",
+        )
+
+
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     """Test that checkpoint can be used to resume an interrupted search."""
