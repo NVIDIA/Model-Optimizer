@@ -169,7 +169,7 @@ When running multiple checkpoints sequentially, monitor progress with:
 /puzzletron eval progress
 ```
 
-Running rows show the current lm-eval phase and that phase's ETA. During the final loglikelihood phase, they also show the overall ETA, including result-saving time. Context-building progress is aggregated across MMLU subtasks instead of resetting for every task. Saved full evaluations take precedence over smoke tests; when only a limited result exists, its accuracy is labeled `(limit=N)`.
+Running rows label `phase progress` explicitly; it is not an overall evaluation percentage. `Total elapsed` covers the whole process, while `phase remaining` covers only the named phase. During the final loglikelihood phase, `overall remaining` includes result-saving time. Context-building progress is aggregated across MMLU subtasks instead of resetting for every task. Saved full evaluations take precedence over smoke tests; when only a limited result exists, its accuracy is labeled `(limit=N)`.
 
 Example output mid-run:
 
@@ -263,6 +263,27 @@ Distillation runs — /workspace/puzzle_dir_llama3_2-3b
   0.9x          10 iters   HF exported   0.9x/hf
   0.9x-nemotron 10 iters   HF exported   0.9x-nemotron/hf
   0.9x-real     10 iters   HF exported   0.9x-real/hf
+```
+
+### Comparing distillation runs
+
+```text
+/puzzletron distill summary
+```
+
+This reads each run's logged arguments and artifacts, then compares datasets, recipes,
+saved checkpoints, full-versus-limited MMLU, and allocated disk space. It also identifies
+matched-recipe groups that are suitable for controlled dataset comparisons. Model weights
+and optimizer states are not loaded.
+
+```text
+Outcomes and artifacts
+Run                           Dataset                  Steps  Saved      MMLU    Disk
+0.7x-nemotron-wiki-recipe     Nemotron v2: math+stem   100    60-100/10  0.5870  548 GiB
+0.7x-wikitext-llama-schedule  WikiText-103             100    60-100/10  0.6108  552 GiB
+
+Matched-recipe groups (safe for dataset comparisons):
+  1. 0.7x-nemotron-wiki-recipe, 0.7x-wikitext-llama-schedule
 ```
 
 ### Checking distillation progress

@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu), distill (run/list/progress). Usage: /puzzletron COMMAND [ARGS]"
+description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu), distill (run/list/summary/progress). Usage: /puzzletron COMMAND [ARGS]"
 license: Apache-2.0
 ---
 
@@ -31,6 +31,7 @@ Available commands:
 - `eval mmlu <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); pass index from `eval list` or a direct path; default `--limit 10` (smoke test)
 - `distill run [--puzzle_dir <dir>] [--ratio <r>] [--nproc_per_node <n>] [--train_iters <n>] [--output_dir <dir>] [--use_mock_data] [--data_paths <p>...]` — Run distillation for a MIP solution
 - `distill list [puzzle_dir]` — List all distillation runs with status
+- `distill summary [puzzle_dir]` — Compare datasets, recipes, checkpoints, MMLU, and disk usage across runs
 - `distill progress [--puzzle_dir <dir>] [--ratio <r>]` — Show training progress for distillation runs
 - `distill tokenize --hf_dataset <name> --output_dir <dir> --tokenizer <path> [--hf_name <s>] [--hf_split <s>] [--hf_max_samples <n>] [--json_keys text|messages]` — Tokenize an HF dataset to Megatron binary format for distillation
 
@@ -273,13 +274,20 @@ For running evals, detect active `lm_eval_hf.py` processes via `ps` and show the
 
 ```text
   [RUNNING]   teacher               ...  /workspace/.../Qwen3-8B
-                          phase: Loading weights 62% (157/254)  total elapsed 0m38s  phase remaining ~0m15s
+                          phase: Loading weights  phase progress 62% (157/254)  total elapsed 0m38s  phase remaining ~0m15s
 
   [RUNNING]   distill:0.9x          ...  /workspace/.../hf
-                          phase: Running loglikelihood requests 89% (49989/56168)  total elapsed 4m19s  phase remaining ~0m19s  overall remaining ~0m24s
+                          phase: Running loglikelihood requests  phase progress 89% (49989/56168)  total elapsed 4m19s  phase remaining ~0m19s  overall remaining ~0m24s
 ```
 
-Treat `phase remaining` as the ETA for the named phase, not the entire evaluation. Do not derive it from total process time. The script reads tqdm's own ETA for loading, tokenization, and loglikelihood. It aggregates the repeatedly-reset per-subtask bars into one `Building contexts` phase and estimates that phase from completed task intervals. During the final loglikelihood phase, also show `overall remaining` as the phase ETA plus a five-second result-saving allowance. Do not show an overall ETA during earlier phases without calibrated timings for their future phases.
+Interpret the timing fields as follows:
+
+- `phase progress` is progress only within the named phase. It is not an overall evaluation percentage.
+- `total elapsed` covers the entire evaluation process, including all completed phases.
+- `phase remaining` is the ETA for only the named phase.
+- `overall remaining` is the ETA until the evaluation finishes. Show it only when it can be estimated reliably.
+
+Do not derive phase remaining from total process time. Read tqdm's own ETA for loading, tokenization, and loglikelihood. Aggregate the repeatedly-reset per-subtask bars into one `Building contexts` phase and estimate that phase from completed task intervals. During the final loglikelihood phase, show `overall remaining` as the phase ETA plus a five-second result-saving allowance. Do not show an overall ETA during earlier phases without calibrated timings for their future phases.
 
 When saved JSONs include both limited and full evaluations, prefer the newest full evaluation. If only a limited result exists, append `(limit=N)` to its accuracy so it cannot be mistaken for a full score.
 
@@ -468,7 +476,7 @@ run puzzletron all for <model_name> on <N> GPUs
 
 ## Command: distill
 
-- If the second word is not exactly `run`, `list`, `progress`, or `tokenize`, tell the user: "Unknown distill sub-command. Available: `run`, `list`, `progress`, `tokenize`." and **STOP**.
+- If the second word is not exactly `run`, `list`, `summary`, `progress`, or `tokenize`, tell the user: "Unknown distill sub-command. Available: `run`, `list`, `summary`, `progress`, `tokenize`." and **STOP**.
 
 ### distill run
 
@@ -564,6 +572,24 @@ python3 .agents/skills/puzzletron/distill_list.py [<puzzle_dir>]
 ```
 
 Present the output to the user wrapped in a fenced code block (``` ... ```).
+
+### distill summary
+
+Parse `puzzle_dir` from args (third word or `--puzzle_dir <value>`). It is optional.
+
+Run the following Bash command, including `<puzzle_dir>` as an argument when provided, or
+omitting it to trigger auto-discovery:
+
+```bash
+python3 .agents/skills/puzzletron/distill_summary.py [<puzzle_dir>]
+```
+
+Present the output to the user wrapped in a fenced code block (``` ... ```). The command
+uses the argument dump in each `log.txt`, saved checkpoint directories, HF MMLU result
+JSONs, and allocated file sizes. It does not infer recipes from directory names. Full MMLU
+results take precedence over limited smoke tests. Use the reported matched-recipe groups
+when making dataset comparisons; runs outside the same group differ in at least one model,
+optimizer, schedule, validation, logging, or parallelism field.
 
 ### distill progress
 

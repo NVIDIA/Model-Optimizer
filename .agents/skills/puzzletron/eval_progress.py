@@ -234,7 +234,8 @@ def get_running_evals():
             pid_m = re.match(r"\S+\s+(\d+)", line)
             if not path_m or not pid_m:
                 continue
-            path = os.path.abspath(path_m.group(1))
+            path_arg = path_m.group(1)
+            path = os.path.abspath(path_arg)
             pid = pid_m.group(1)
             elapsed = None
             progress = EvalProgress(phase="Initializing")
@@ -300,7 +301,7 @@ def get_running_evals():
                 try:
                     with open(log_path, "rb") as f:
                         text = f.read().decode("utf-8", errors="replace")
-                    if path not in text:
+                    if path not in text and path_arg not in text:
                         continue
                     progress = parse_eval_progress(text)
                     if progress.phase != "Initializing":
@@ -387,7 +388,7 @@ def fmt_running_timing(eval_info):
 
     phase_detail = progress.phase
     if progress.pct is not None:
-        phase_detail += f" {progress.pct}%"
+        phase_detail += f"  phase progress {progress.pct}%"
     if progress.current is not None and progress.total is not None:
         phase_detail += f" ({progress.current}/{progress.total})"
 
