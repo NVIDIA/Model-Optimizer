@@ -96,8 +96,19 @@ pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
 # Some trust_remote_code models pin an older transformers (e.g. MiniMax-M2.7
 # needs 4.57.x whose modeling code is incompatible with the 5.x that the
 # requirements pull in). Must run AFTER the requirements install to win.
+# In multi-node streaming mode, only trainer nodes need the override; serve
+# nodes must keep the container's transformers for vLLM compatibility (vLLM
+# v0.24+ hard-rejects transformers v4).
 if [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
-    pip install --no-cache-dir "transformers==${OVERRIDE_TRANSFORMERS}"
+    _NNODES="${SLURM_NNODES:-1}"
+    _NODEID="${SLURM_NODEID:-0}"
+    _SNODES="${SERVE_NODES:-1}"
+    if [ "$_NNODES" -le 1 ] || [ "$_NODEID" -ge "$_SNODES" ]; then
+        pip install --no-cache-dir "transformers==${OVERRIDE_TRANSFORMERS}"
+    else
+        echo "Serve node ${_NODEID}: skipping OVERRIDE_TRANSFORMERS=${OVERRIDE_TRANSFORMERS} (vLLM needs transformers v5+)."
+    fi
+    unset _NNODES _NODEID _SNODES
 fi
 
 export PATH=$PATH:/workspace/.local/bin
