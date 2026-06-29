@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Adapted from https://github.com/deepseek-ai/DeepSpec/blob/main/deepspec/modeling/dspark/markov_head.py
-# Copyright (c) 2025 DeepSeek-AI
+# Copyright (c) 2026 The DeepSpec Authors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
