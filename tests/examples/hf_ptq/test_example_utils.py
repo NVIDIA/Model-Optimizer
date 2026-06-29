@@ -19,9 +19,9 @@ separate-file-standalone, separate-file-indexed) plus a negative case.
 """
 
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 
-import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import save_file
@@ -197,93 +197,48 @@ def test_get_original_hf_quant_method_none_for_unquantized():
     )
 
 
-def test_empty_model_init_kwargs_keeps_dtype_for_general_from_config():
-    kwargs = {
-        "dtype": "auto",
-        "torch_dtype": torch.float16,
-        "max_memory": {0: 1024},
-        "trust_remote_code": True,
-        "attn_implementation": "flash_attention_2",
-    }
-
-    init_kwargs = example_utils._empty_model_init_kwargs(kwargs, torch.bfloat16)
-
-    assert init_kwargs == {
-        "dtype": torch.bfloat16,
-        "torch_dtype": torch.float16,
-        "trust_remote_code": True,
-        "attn_implementation": "flash_attention_2",
-    }
-
-
-def test_empty_model_init_dtype_prefers_config_dtype():
-    assert (
-        example_utils._empty_model_init_dtype(
-            SimpleNamespace(dtype=torch.float16, torch_dtype=torch.bfloat16)
-        )
-        is torch.float16
+def test_get_model_empty_init_uses_torch_dtype_not_dtype(monkeypatch):
+    calls = {}
+    hf_config = SimpleNamespace(
+        architectures=["DeciLMForCausalLM"],
+        dtype=torch.float16,
+        model_type="llama",
+        torch_dtype=torch.bfloat16,
     )
 
+    class FakeModel:
+        def eval(self):
+            calls["eval"] = True
 
-def test_empty_model_init_dtype_defaults_to_bfloat16():
-    assert example_utils._empty_model_init_dtype(SimpleNamespace()) is torch.bfloat16
+    class FakeAutoModelForCausalLM:
+        @staticmethod
+        def from_config(config, **kwargs):
+            calls["from_config"] = kwargs
+            assert config is hf_config
+            assert "dtype" not in kwargs
+            assert kwargs["torch_dtype"] is torch.float16
+            assert "max_memory" not in kwargs
+            return FakeModel()
 
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["from_pretrained"] = kwargs
+            return FakeModel()
 
-def test_from_config_for_empty_weights_calls_with_dtype_first():
-    calls = []
-
-    def from_config(config, **kwargs):
-        calls.append((config, kwargs, torch.get_default_dtype()))
-        return "model"
-
-    hf_config = SimpleNamespace()
-    model_kwargs = {"dtype": torch.bfloat16, "trust_remote_code": True}
-
-    assert (
-        example_utils._from_config_for_empty_weights(
-            from_config, hf_config, model_kwargs, torch.bfloat16
-        )
-        == "model"
+    monkeypatch.setattr(
+        example_utils.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: hf_config,
     )
+    monkeypatch.setattr(example_utils, "AutoModelForCausalLM", FakeAutoModelForCausalLM)
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
-    assert calls == [(hf_config, model_kwargs, torch.get_default_dtype())]
+    model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
 
-
-def test_from_config_for_empty_weights_retries_without_dtype_with_default_dtype():
-    calls = []
-    original_dtype = torch.get_default_dtype()
-
-    def from_config(config, **kwargs):
-        calls.append((kwargs, torch.get_default_dtype()))
-        if "dtype" in kwargs:
-            raise TypeError("__init__() got an unexpected keyword argument 'dtype'")
-        return config
-
-    try:
-        hf_config = SimpleNamespace()
-        model_kwargs = {"dtype": torch.bfloat16, "trust_remote_code": True}
-
-        assert (
-            example_utils._from_config_for_empty_weights(
-                from_config, hf_config, model_kwargs, torch.bfloat16
-            )
-            is hf_config
-        )
-
-        assert calls == [
-            (model_kwargs, original_dtype),
-            ({"trust_remote_code": True}, torch.bfloat16),
-        ]
-        assert torch.get_default_dtype() is original_dtype
-    finally:
-        torch.set_default_dtype(original_dtype)
-
-
-def test_from_config_for_empty_weights_reraises_other_type_error():
-    def from_config(config, **kwargs):
-        raise TypeError("missing required positional argument: 'hidden_size'")
-
-    with pytest.raises(TypeError, match="hidden_size"):
-        example_utils._from_config_for_empty_weights(
-            from_config, SimpleNamespace(), {"dtype": torch.bfloat16}, torch.bfloat16
-        )
+    assert isinstance(model, FakeModel)
+    assert calls["eval"]
+    assert calls["from_config"]["trust_remote_code"] is True
