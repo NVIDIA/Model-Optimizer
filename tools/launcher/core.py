@@ -25,6 +25,7 @@ import os
 import re
 import shlex
 import subprocess  # nosec B404
+import sys
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -159,6 +160,39 @@ def create_task_from_yaml(yaml_file, factory_lookup):
     return SandboxTask(script=script, slurm_config=slurm_config, args=args, environment=environment)
 
 
+def _yaml_path_from_argv(argv: list[str] | None = None) -> str | None:
+    """Return the launcher ``--yaml`` path from argv, if present."""
+    argv = list(sys.argv if argv is None else argv)
+    for i, arg in enumerate(argv):
+        if arg == "--yaml" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--yaml="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _explicit_slurm_fields_from_yaml(yaml_path: str | None, task_name: str) -> set[str] | None:
+    """Return raw slurm_config keys explicitly present in a launcher YAML task."""
+    if not yaml_path:
+        return None
+    try:
+        with open(yaml_path) as file:
+            config = yaml.safe_load(file) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+
+    pipeline = config.get("pipeline", config)
+    if not isinstance(pipeline, dict):
+        return None
+    task = pipeline.get(task_name)
+    if not isinstance(task, dict):
+        return None
+    slurm_config = task.get("slurm_config")
+    if not isinstance(slurm_config, dict):
+        return None
+    return set(slurm_config) - {"_factory_"}
+
+
 @dataclass
 class GlobalVariables:
     """Shared variables for <<global_vars.X>> interpolation in pipeline YAMLs."""
@@ -223,7 +257,8 @@ class SandboxPipeline:
         _lookup = self._factory_lookup or _FACTORY_REGISTRY
         _default_factory = _lookup.get("slurm_factory")
         if _default_factory is not None:
-            for _task in self.tasks:
+            _yaml_path = _yaml_path_from_argv()
+            for _task_index, _task in enumerate(self.tasks):
                 _sc = _task.slurm_config
                 if _sc is None or not hasattr(_sc, "host"):
                     continue
@@ -232,17 +267,21 @@ class SandboxPipeline:
                 if not dataclasses.is_dataclass(_sc):
                     continue
                 _base = _default_factory()
+                _explicit_fields = _explicit_slurm_fields_from_yaml(
+                    _yaml_path,
+                    f"task_{_task_index}",
+                )
                 for _f in dataclasses.fields(_sc):
                     _val = getattr(_sc, _f.name)
-                    # Overlay fields that differ from the SlurmConfig dataclass
-                    # default. Keep the factory-provided host when nemo_run
-                    # materialized the dropped `_factory_` as host=None/"".
-                    # Other None values can be explicit and meaningful, e.g.
-                    # `gpus_per_node: null` means "do not request GPU GRES".
+                    # Prefer raw YAML keys so explicit default-equal values
+                    # override env-backed factory defaults. Fall back to the
+                    # value heuristic for programmatically constructed tests.
                     _dflt = _f.default if _f.default is not dataclasses.MISSING else None
                     if _f.name == "host" and not _val:
                         continue
-                    if _val != _dflt:
+                    if (_explicit_fields is not None and _f.name in _explicit_fields) or (
+                        _explicit_fields is None and _val != _dflt
+                    ):
                         setattr(_base, _f.name, _val)
                 _task.slurm_config = _base
 
@@ -381,22 +420,25 @@ class ControlMasterSSHTunnel(run.SSHTunnel):
         sock_path = self._control_socket_path()
         if not sock_path or not os.path.exists(sock_path):
             return False
-        proc = subprocess.run(  # nosec B603 B607 - fixed ssh argv, no shell.
-            [
-                "ssh",
-                "-p",
-                str(int(getattr(self, "port", 22) or 22)),
-                "-O",
-                "check",
-                "-o",
-                f"ControlPath={sock_path}",
-                f"{self.user}@{self.host}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
+        try:
+            proc = subprocess.run(  # nosec B603 B607 - fixed ssh argv, no shell.
+                [
+                    "ssh",
+                    "-p",
+                    str(int(getattr(self, "port", 22) or 22)),
+                    "-O",
+                    "check",
+                    "-o",
+                    f"ControlPath={sock_path}",
+                    f"{self.user}@{self.host}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False
         return proc.returncode == 0
 
     def _raise_reauth_required(self) -> None:

@@ -20,6 +20,7 @@ Note: actual SSH tunnel and sbatch submission are not tested (require live infra
 We mock run.SSHTunnel and run.SlurmExecutor to verify the arguments passed.
 """
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -98,6 +99,29 @@ class TestControlMasterSSHTunnel:
     def test_connect_requires_reauth_when_controlmaster_missing(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", str(tmp_path / "missing.sock"))
         monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND", "ssh ptyche")
+
+        tunnel = ControlMasterSSHTunnel(
+            host="login-ptyche.nvidia.com",
+            user="chenhany-mfa",
+            job_dir="/tmp/job",
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            tunnel.connect()
+        assert "mfa_reauth_required" in str(exc_info.value)
+
+    def test_connect_requires_reauth_when_controlmaster_check_times_out(
+        self, monkeypatch, tmp_path
+    ):
+        sock = tmp_path / "cm.sock"
+        sock.touch()
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", str(sock))
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND", "ssh ptyche")
+
+        def fake_run(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, timeout=15)
+
+        monkeypatch.setattr("core.subprocess.run", fake_run)
 
         tunnel = ControlMasterSSHTunnel(
             host="login-ptyche.nvidia.com",
