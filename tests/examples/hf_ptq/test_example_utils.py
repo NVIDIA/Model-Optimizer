@@ -21,6 +21,7 @@ separate-file-standalone, separate-file-indexed) plus a negative case.
 import json
 from types import SimpleNamespace
 
+import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import save_file
@@ -194,3 +195,95 @@ def test_get_original_hf_quant_method_none_for_unquantized():
         example_utils.get_original_hf_quant_method(SimpleNamespace(quantization_config=None))
         is None
     )
+
+
+def test_empty_model_init_kwargs_keeps_dtype_for_general_from_config():
+    kwargs = {
+        "dtype": "auto",
+        "torch_dtype": torch.float16,
+        "max_memory": {0: 1024},
+        "trust_remote_code": True,
+        "attn_implementation": "flash_attention_2",
+    }
+
+    init_kwargs = example_utils._empty_model_init_kwargs(kwargs, torch.bfloat16)
+
+    assert init_kwargs == {
+        "dtype": torch.bfloat16,
+        "torch_dtype": torch.float16,
+        "trust_remote_code": True,
+        "attn_implementation": "flash_attention_2",
+    }
+
+
+def test_empty_model_init_dtype_prefers_config_dtype():
+    assert (
+        example_utils._empty_model_init_dtype(
+            SimpleNamespace(dtype=torch.float16, torch_dtype=torch.bfloat16)
+        )
+        is torch.float16
+    )
+
+
+def test_empty_model_init_dtype_defaults_to_bfloat16():
+    assert example_utils._empty_model_init_dtype(SimpleNamespace()) is torch.bfloat16
+
+
+def test_from_config_for_empty_weights_calls_with_dtype_first():
+    calls = []
+
+    def from_config(config, **kwargs):
+        calls.append((config, kwargs, torch.get_default_dtype()))
+        return "model"
+
+    hf_config = SimpleNamespace()
+    model_kwargs = {"dtype": torch.bfloat16, "trust_remote_code": True}
+
+    assert (
+        example_utils._from_config_for_empty_weights(
+            from_config, hf_config, model_kwargs, torch.bfloat16
+        )
+        == "model"
+    )
+
+    assert calls == [(hf_config, model_kwargs, torch.get_default_dtype())]
+
+
+def test_from_config_for_empty_weights_retries_without_dtype_with_default_dtype():
+    calls = []
+    original_dtype = torch.get_default_dtype()
+
+    def from_config(config, **kwargs):
+        calls.append((kwargs, torch.get_default_dtype()))
+        if "dtype" in kwargs:
+            raise TypeError("__init__() got an unexpected keyword argument 'dtype'")
+        return config
+
+    try:
+        hf_config = SimpleNamespace()
+        model_kwargs = {"dtype": torch.bfloat16, "trust_remote_code": True}
+
+        assert (
+            example_utils._from_config_for_empty_weights(
+                from_config, hf_config, model_kwargs, torch.bfloat16
+            )
+            is hf_config
+        )
+
+        assert calls == [
+            (model_kwargs, original_dtype),
+            ({"trust_remote_code": True}, torch.bfloat16),
+        ]
+        assert torch.get_default_dtype() is original_dtype
+    finally:
+        torch.set_default_dtype(original_dtype)
+
+
+def test_from_config_for_empty_weights_reraises_other_type_error():
+    def from_config(config, **kwargs):
+        raise TypeError("missing required positional argument: 'hidden_size'")
+
+    with pytest.raises(TypeError, match="hidden_size"):
+        example_utils._from_config_for_empty_weights(
+            from_config, SimpleNamespace(), {"dtype": torch.bfloat16}, torch.bfloat16
+        )
