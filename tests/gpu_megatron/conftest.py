@@ -26,24 +26,6 @@ with contextlib.suppress(ImportError):
     from apex.transformer.parallel_state import destroy_model_parallel as apex_destroy
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _prebuild_quant_cuda_extensions():
-    """Build ModelOpt's quant CUDA extensions once, before any test runs.
-
-    The first fake-quant op JIT-compiles these via torch.utils.cpp_extension.load()
-    (~100s of ninja build). Without this, that compile lands inside the first test's
-    timed `call` and trips the per-test timeout. pyproject sets ``timeout_func_only``,
-    so doing it here in (untimed) session setup keeps it off the clock; worker
-    subprocesses then load the cached .so from the shared TORCH_EXTENSIONS_DIR.
-    """
-    if torch.cuda.is_available():
-        with contextlib.suppress(Exception):  # best-effort; tests fall back to on-demand JIT
-            from modelopt.torch.quantization import extensions as quant_ext
-
-            quant_ext.get_cuda_ext(raise_if_failed=False)
-            quant_ext.get_cuda_ext_fp8(raise_if_failed=False)
-
-
 def megatron_worker_teardown(rank, world_size):
     """Clean up model-parallel state between tests in persistent workers."""
     if dist.is_initialized():
