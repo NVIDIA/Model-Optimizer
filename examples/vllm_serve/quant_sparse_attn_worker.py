@@ -57,6 +57,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config impor
     match_sparse_config,
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    _assert_bmm_quant_supported,
     _build_sparse_kw,
     _clone_sparse_impl,
     _p_qdq_from_layer,
@@ -99,19 +100,11 @@ def _install_quant_sparse_attn(worker) -> None:
         # Active attention quant on this (restored) layer.
         p_qdq, _ = _p_qdq_from_layer(module)
         v_qdq, _ = _v_qdq_from_layer(module)
-        # Fail loud on an enabled BMM2 quantizer whose format the kernel cannot map
-        # (only per-tensor FP8 or block-16 dynamic NVFP4). Otherwise it is dropped
-        # silently: the kernel skips it (qdq=None) and, for V, _value_quant_in_kernel
-        # below would also skip the v_bmm_quantizer pre-step -> V never quantized at all.
-        # This must run before the `continue` so an unmapped-only layer cannot slip past.
-        for attr, qdq in (("p_bmm_quantizer", p_qdq), ("v_bmm_quantizer", v_qdq)):
-            q = getattr(module, attr, None)
-            if qdq is None and q is not None and getattr(q, "is_enabled", False):
-                raise NotImplementedError(
-                    f"{name}.{attr} is enabled but its quant format is unsupported by the "
-                    f"sparse attention kernel (supported: per-tensor FP8, block-16 dynamic "
-                    f"NVFP4). Re-export with a supported format or disable this quantizer."
-                )
+        # Fail loud on an enabled BMM2 quantizer the kernel cannot map (else it is
+        # dropped silently -- the kernel skips it and, for V, _value_quant_in_kernel
+        # below would skip the pre-step too). Before the `continue` so an unmapped-only
+        # layer cannot slip past.
+        _assert_bmm_quant_supported(module, name)
         quant_active = p_qdq is not None or v_qdq is not None
 
         if not sparse_kw and not quant_active:
@@ -136,6 +129,16 @@ def _install_quant_sparse_attn(worker) -> None:
         f"[ModelOpt] Quant+sparse attention: installed sparse impl on {patched} layers "
         f"({quant_layers} quant-active, {sparse_only} sparse-only)"
     )
+
+    if quant_layers:
+        # vLLM cascade attention routes shared-prefix batches through native attention,
+        # silently dropping the NVFP4 P/V quant. Disable it so every request goes through
+        # the quantized ModelOpt kernel. No-op where cascade is already off (e.g. vLLM
+        # 0.22 FlashInfer hardcodes it off); pairs with the fail-loud guard in the impl.
+        runner = worker.model_runner
+        if getattr(runner, "cascade_attn_enabled", False):
+            runner.cascade_attn_enabled = False
+            print("[ModelOpt] Disabled vLLM cascade attention (incompatible with attention quant)")
 
 
 class QuantSparseAttnWorker(FakeQuantWorker):

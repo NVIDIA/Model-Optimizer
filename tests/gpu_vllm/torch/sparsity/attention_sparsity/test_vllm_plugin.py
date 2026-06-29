@@ -35,6 +35,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     ModelOptSparseAttentionImpl,
+    _assert_bmm_quant_supported,
     _p_qdq_from_layer,
     _v_qdq_from_layer,
 )
@@ -96,6 +97,49 @@ def test_v_qdq_from_layer():
     nvfp4 = {"is_fp8": False, "is_nvfp4_dynamic": True, "_amax": None}
     assert _v_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 16})) == ("nvfp4", None)
     assert _v_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 32})) == (None, None)
+
+
+def test_assert_bmm_quant_supported():
+    """An enabled BMM2 quantizer in an unmapped format must raise -- never serve unquantized.
+
+    Regression for the silent V-quant skip: when P maps but ``v_bmm_quantizer`` is enabled
+    in a format the kernel cannot map (e.g. block size != 16), the layer would otherwise be
+    served with V unquantized (kernel skips it and ``_value_quant_in_kernel`` skips the
+    pre-step). Install must fail loud instead.
+    """
+    # Disabled / missing / sparse-only -> no raise.
+    _assert_bmm_quant_supported(SimpleNamespace())
+    _assert_bmm_quant_supported(SimpleNamespace(v_bmm_quantizer=SimpleNamespace(is_enabled=False)))
+
+    def _layer(attr, **kw):
+        return SimpleNamespace(**{attr: SimpleNamespace(is_enabled=True, **kw)})
+
+    mapped_fp8 = {"is_fp8": True, "is_nvfp4_dynamic": False, "block_sizes": None, "_amax": None}
+    mapped_nvfp4 = {
+        "is_fp8": False,
+        "is_nvfp4_dynamic": True,
+        "block_sizes": {-1: 16},
+        "_amax": None,
+    }
+    unmapped = {"is_fp8": False, "is_nvfp4_dynamic": True, "block_sizes": {-1: 32}, "_amax": None}
+
+    # Mapped formats (per-tensor FP8, block-16 NVFP4) on either operand -> no raise.
+    _assert_bmm_quant_supported(_layer("p_bmm_quantizer", **mapped_fp8))
+    _assert_bmm_quant_supported(_layer("v_bmm_quantizer", **mapped_nvfp4))
+
+    # Enabled but unmapped (block 32) -> raise, for P and for V.
+    with pytest.raises(NotImplementedError, match="unsupported"):
+        _assert_bmm_quant_supported(_layer("p_bmm_quantizer", **unmapped))
+    with pytest.raises(NotImplementedError, match="unsupported"):
+        _assert_bmm_quant_supported(_layer("v_bmm_quantizer", **unmapped))
+
+    # The motivating case: P maps, V enabled-but-unmapped -> must raise (not silently skip V).
+    p_ok_v_bad = SimpleNamespace(
+        p_bmm_quantizer=SimpleNamespace(is_enabled=True, **mapped_fp8),
+        v_bmm_quantizer=SimpleNamespace(is_enabled=True, **unmapped),
+    )
+    with pytest.raises(NotImplementedError, match="v_bmm_quantizer"):
+        _assert_bmm_quant_supported(p_ok_v_bad)
 
 
 def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size):

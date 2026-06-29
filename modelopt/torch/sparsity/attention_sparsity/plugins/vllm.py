@@ -160,6 +160,29 @@ def _v_qdq_from_layer(layer) -> tuple[str | None, float | None]:
     return _bmm_qdq_from_layer(layer, "v_bmm_quantizer", None)
 
 
+def _assert_bmm_quant_supported(layer, name: str = "") -> None:
+    """Raise if a BMM2 quantizer is enabled but in a format the kernel cannot map.
+
+    ``_bmm_qdq_from_layer`` returns ``None`` for both a disabled quantizer and an
+    enabled one in an unsupported format (only per-tensor FP8 or block-16 dynamic
+    NVFP4 map). The latter must not be served silently: the kernel would skip it and,
+    for V, ``_value_quant_in_kernel`` would also skip the pre-step quantizer, leaving
+    the operand unquantized. Detect that case (enabled, yet unmapped) and fail loud.
+    """
+    for attr, (qdq, _) in (
+        ("p_bmm_quantizer", _p_qdq_from_layer(layer)),
+        ("v_bmm_quantizer", _v_qdq_from_layer(layer)),
+    ):
+        q = getattr(layer, attr, None)
+        if qdq is None and q is not None and getattr(q, "is_enabled", False):
+            where = f"{name}." if name else ""
+            raise NotImplementedError(
+                f"{where}{attr} is enabled but its quant format is unsupported by the "
+                f"sparse attention kernel (supported: per-tensor FP8, block-16 dynamic "
+                f"NVFP4). Re-export with a supported format or disable this quantizer."
+            )
+
+
 def _bake_v_onwrite(value_cache, block_table, seq_lens, query_lens, page_size, v_qdq_amax, decode):
     """Quantize-on-write the newly-complete BLOCK_N V tiles so decode reads them as-is.
 
@@ -239,9 +262,20 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             return output.fill_(0)
 
         if getattr(attn_metadata, "use_cascade", False):
-            # vLLM cascade metadata splits the request into shared-prefix and
-            # suffix pieces. The ModelOpt paged kernel consumes plain per-request
-            # KV lengths, so delegate cascade launches back to vLLM's impl.
+            # Cascade metadata splits a shared-prefix batch into prefix + suffix; the
+            # ModelOpt paged kernel consumes plain per-request KV lengths and cannot.
+            # For a sparse-only layer the native fallback is harmless (dense output, no
+            # skip-softmax). But when attention QUANT is active, native attention serves
+            # the model UN-quantized (wrong numerics, silently), so fail loud instead.
+            # The quant worker also disables cascade up front, so this should not be hit.
+            p_qdq, _ = _p_qdq_from_layer(layer)
+            v_qdq, _ = _v_qdq_from_layer(layer)
+            if p_qdq is not None or v_qdq is not None:
+                raise NotImplementedError(
+                    "vLLM cascade attention is incompatible with ModelOpt attention "
+                    "quant (the native fallback would serve P/V un-quantized). Disable "
+                    "cascade (model_config.disable_cascade_attn=True) or the quantizers."
+                )
             return self._forward_vllm_flash_attn(
                 layer,
                 query,
