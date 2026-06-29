@@ -330,7 +330,8 @@ Derive `output_path` as `<hf_model_path>/eval_results/mmlu` (always; not user-co
 Run the following Bash command, substituting the parsed values:
 
 ```bash
-WORLD_SIZE=1 PYTHONPATH=.:$PYTHONPATH python examples/llm_eval/lm_eval_hf.py \
+env -u RANK -u LOCAL_RANK -u WORLD_SIZE -u MASTER_ADDR -u MASTER_PORT \
+  PYTHONPATH=.:$PYTHONPATH python examples/llm_eval/lm_eval_hf.py \
   --model hf \
   --model_args pretrained=<hf_model_path>,dtype=bfloat16,parallelize=True \
   --tasks mmlu \
@@ -342,7 +343,10 @@ WORLD_SIZE=1 PYTHONPATH=.:$PYTHONPATH python examples/llm_eval/lm_eval_hf.py \
 
 (Replace `[--limit <N>]` with the actual `--limit <N>` flag; always include it since the default is 10.)
 
-**Note:** `WORLD_SIZE=1` is required to prevent lm_eval from hanging in multi-GPU environments — without it, the process initializes distributed context and waits for ranks that never appear.
+**Note:** Unset the complete distributed environment for a single-process evaluation. Setting only
+`WORLD_SIZE=1` is insufficient when the interactive node exports `RANK`, `LOCAL_RANK`,
+`MASTER_ADDR`, and `MASTER_PORT`; Accelerate may then initialize a TCP rendezvous and collide with
+another evaluation using the inherited port.
 
 **Note on output file location:** lm_eval does not write results directly into `--output_path`. It creates a subdirectory named after the full model path with `/` replaced by `__`, then writes `results_<timestamp>.json` inside it. For example, for a model at `/workspace/foo/bar`, results land at:
 
