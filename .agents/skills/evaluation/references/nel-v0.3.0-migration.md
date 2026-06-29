@@ -78,6 +78,8 @@ skills://   skills://<dataset>               `nel list -s skills` (after prep) /
 lm-eval://  lm-eval://<task>                 `lm_eval --tasks list`
 gym://      gym://<host:port>?protocol=      Gym repo benchmarks/ + resources_servers/
               native&data=<tasks.jsonl>      (needs a running server → github.com/NVIDIA-NeMo/Gym)
+harbor://   `- playbook: <name>` or          src/nemo_evaluator/playbooks/ (terminal_bench_2,
+            harbor://<dataset@ver>           swebench_verified, …); HarborSolver + sandbox (harbor pkg)
 ```
 
 Example — a `benchmarks:` block, one entry per benchmark. The `name:` prefix selects the backend (it is **not** uniformly `{backend}://{benchmark}`): built-in has **no prefix** (just `{benchmark}`); `skills://` and `lm-eval://` are `{backend}://{benchmark}`; `gym://` points at a running server, `gym://{host:port}?...&data=<tasks.jsonl>` (the benchmark lives in the data file, not after the prefix):
@@ -145,7 +147,7 @@ CODE / SWE
   scicode                    —         yes†(code)   yes      gym recommended (skills may mis-score)
   ioi                        —         yes†(code)   yes
   cvdp                       —         yes†(code)   yes
-  swe-bench                  —         yes         —        gym has only SWE-RL servers (swe_pivot/swerl_*)
+  swe-bench                  —         yes         —        Verified/Pro/Multiling via Harbor playbooks (below); gym=SWE-RL (swe_pivot/swerl_*)
   bird_sql                   —         —           yes      gym only
   spider2_lite               —         —           yes      gym only
   code_gen                   —         —           yes      gym only
@@ -201,8 +203,30 @@ MULTILINGUAL / MULTIMODAL / AUDIO
   covost2                    —         yes         —        skills only (audio)
   fleurs                     —         yes         —        skills only (audio)
   labbench2_vlm              —         —           yes      gym only (multimodal)
-  vlm_eval_kit               —         —           yes      gym only (multimodal)
+  vlm_eval_kit               —         —           —        vlmevalkit:// backend (multimodal); not gym
 ```
+
+
+### Harbor playbooks (terminal-bench 2.x, SWE-bench) — a separate mechanism
+
+These are **not** built-in / `skills://` / `gym://`, so they don't appear in the matrix above. They run
+through the **Harbor** package via a `- playbook: <name>` entry (HarborSolver + sandbox), pointing at a
+`harbor://` dataset:
+
+```text
+playbook (`- playbook:`)   harbor:// target                           what it is
+-------------------------  -----------------------------------------  ----------------------------------
+terminal_bench_2           harbor://terminal-bench@2.0                Terminal-Bench 2.0
+terminal_bench_2_1         harbor://terminal-bench/terminal-bench-2-1 Terminal-Bench 2.1 (needs a harbor
+                                                                      registry override — not yet in
+                                                                      upstream registry.json)
+swebench_verified          harbor://swebench-verified@1.0             SWE-bench Verified
+swebench_pro               harbor://swebenchpro@1.0                   SWE-bench Pro
+swebench_multilingual      harbor://swebench_multilingual@1.0         SWE-bench Multilingual
+```
+
+All require the harbor package (`pip install nemo-evaluator[harbor]`) + a sandbox, like `terminal-bench-v1`.
+(terminal-bench **v1** and `-hard` are `@register` built-ins; **2.0 / 2.1** are playbook-only.)
 
 
 ## Launch NEL v0.3.0
@@ -217,6 +241,7 @@ built-in and skills:// (native)    KNOWLEDGE/QA · MATH · LONG-CONTEXT · MULTI
                                    (every row `yes` under built-in or skills with NO †)
 gym:// (server + reward)           AGENTIC/TOOL/RL (gym-only) + every † row (CODE/SWE,
                                    INSTRUCTION/FORMAT, ARENA/JUDGE, LONG-CONTEXT aalcr)
+harbor:// (playbook + sandbox)     terminal-bench v1/2/2.1, SWE-bench Verified/Pro/Multilingual, pinchbench
 legacy container://                v0.2.x `*_aa_v3` eval-factory container tasks
 ```
 
