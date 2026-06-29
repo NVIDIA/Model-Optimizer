@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | Benchmark source | each task runs in its **own published eval-factory container** (`nvcr.io/nvidia/eval-factory/*`); you never build an eval image | **one** `cluster.eval_image`; benchmarks resolve from Python `@register()` modules |
 | Where harnesses live | baked into per-task containers upstream | **you pip-install** external harnesses (`nemo-skills`, `lm-eval`) **into the one eval image** |
-| Benchmark families | eval-factory `container/` adapters, `ns_*` nemo-skills | **built-in** (17, `nel list -s builtin`), **`skills://`** (nemo-skills), **`lm-eval://`**, + legacy **`container://`** (BC) |
+| Benchmark families | eval-factory `container/` adapters, `ns_*` nemo-skills | **built-in** (17, `nel list -s builtin`), **`skills://`** (nemo-skills), **`lm-eval://`**, **`harbor://`** (agentic, Harbor pkg), + legacy **`container://`** (BC) |
 | CLI | `nel run` / `ls` / `status` / `info` | `nel eval run` / `list` / `export` |
 | Config schema | Hydra `deployment:` / `evaluation:` / `execution:` | `services:` / `benchmarks:` / `cluster:` / `output:` (one file) |
 | Serving | a `deployment:` block | integrated under `services.model` |
@@ -90,17 +90,21 @@ benchmarks: # the benchmarks block
   - name: skills://aime25                                        # NeMo-Skills
   - name: lm-eval://hellaswag                                    # lm-eval
   - name: gym://127.0.0.1:8000?protocol=native&data=tasks.jsonl  # NeMo-Gym (running server)
+  - name: harbor://terminal-bench@2.0                            # Harbor (agentic; sandbox + harbor pkg) — or `- playbook: terminal_bench_2`
 ```
 
 ### Supported Benchmarks
 
-The list of supported benchmarks are from three NVIDIA-NeMo repositories:
+The list of supported benchmarks are from three NVIDIA-NeMo repositories, plus the **external Harbor
+framework** the engine integrates:
 - `NVIDIA-NeMo/Evaluator`: built-in engine [`@register`](https://github.com/NVIDIA-NeMo/Evaluator/tree/main/src/nemo_evaluator/benchmarks)
 - `NVIDIA-NeMo/Skills`: **`skills://`** from [`nemo_skills/dataset/`](https://github.com/NVIDIA-NeMo/Skills/tree/main/nemo_skills/dataset),
 - `NVIDIA-NeMo/Gym`: **`gym://`** from Gym [`benchmarks/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks)+[`resources_servers/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers).
+- **Harbor** ([`laude-institute/harbor`](https://github.com/laude-institute/harbor), *not* a NeMo repo): **`harbor://`** agentic tasks from Harbor's own registry (60+: terminal-bench, swebench, usaco, bird-bench, …), integrated via `pip install nemo-evaluator[harbor]` and run in a sandbox (see "Harbor playbooks" below).
 
-The matrix below covers only these three backends. **`lm-eval://`** (e.g. `lm-eval://hellaswag`) is also
-supported but not enumerated here — discover its tasks with `lm_eval --tasks list`. Only the **built-in**
+The matrix below covers only these three backends. **`lm-eval://`** (e.g. `lm-eval://hellaswag`) and
+**`harbor://`** (60+ agentic tasks — discover via Harbor's registry; see "Harbor playbooks" below) are
+also supported but not enumerated here — discover lm-eval tasks with `lm_eval --tasks list`. Only the **built-in**
 column is verified against this engine (`nel list -s builtin`); the **`skills://`** and **`gym://`**
 columns are compiled from the upstream repos and have **not** all been run — treat them as a routing
 guide, not a guarantee (see the per-row notes).
@@ -225,8 +229,14 @@ swebench_pro               harbor://swebenchpro@1.0                   SWE-bench 
 swebench_multilingual      harbor://swebench_multilingual@1.0         SWE-bench Multilingual
 ```
 
-All require the harbor package (`pip install nemo-evaluator[harbor]`) + a sandbox, like `terminal-bench-v1`.
-(terminal-bench **v1** and `-hard` are `@register` built-ins; **2.0 / 2.1** are playbook-only.)
+All require the harbor package (`pip install nemo-evaluator[harbor]`) + a sandbox.
+
+**Note:** *every* terminal-bench variant executes through Harbor (`HarborEnvironment` + sandbox) — only the
+invocation differs. **v1 / -hard / -hard-aa-split** are `@register` built-in *names* (subclasses of
+`HarborEnvironment` that auto-download + map to Harbor format), so you run `- name: terminal-bench-v1`.
+**2.0 / 2.1** aren't registered as names, so you run them as `- playbook: terminal_bench_2` pointing at the
+`harbor://` dataset. None of them is "non-Harbor"; the built-in-vs-playbook split is just how you reference
+them, not a different engine path.
 
 
 ## Launch NEL v0.3.0
