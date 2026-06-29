@@ -615,6 +615,13 @@ def load_vlm_or_llm(
 
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
 
+    # Import the transformers-cosmos3 plugin if available: it registers the `cosmos3_omni`
+    # architecture with AutoConfig on import, so the from_pretrained below recognizes it.
+    try:
+        import transformers_cosmos3  # noqa: F401
+    except ImportError:
+        pass
+
     model_config = transformers.AutoConfig.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
