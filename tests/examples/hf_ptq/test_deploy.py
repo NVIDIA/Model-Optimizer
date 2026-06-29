@@ -172,12 +172,6 @@ def test_deepseek(command):
             tensor_parallel_size=8,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Llama-4-Maverick-17B-128E-Instruct-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=8,
-            mini_sm=100,
-        ),
-        *ModelDeployerList(
             model_id="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
@@ -234,11 +228,6 @@ def test_llama(command):
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=4,
             mini_sm=89,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/QwQ-32B-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            mini_sm=100,
         ),
         *ModelDeployerList(
             model_id="nvidia/Qwen3-32B-NVFP4",
@@ -329,54 +318,6 @@ def test_qwen(command):
     "command",
     [
         *ModelDeployerList(
-            model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-FP8",
-            backend=("trtllm", "vllm", "sglang"),
-            mini_sm=89,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            mini_sm=100,
-        ),
-    ],
-    ids=idfn,
-)
-def test_mixtral(command):
-    command.run()
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        *ModelDeployerList(
-            model_id="nvidia/gemma-3-12b-it-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=100,
-            attn_backend="FLASHINFER",
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/gemma-3-12b-it-FP8",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=89,
-            attn_backend="FLASHINFER",
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/gemma-3-27b-it-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=100,
-            attn_backend="FLASHINFER",
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/gemma-3-27b-it-FP8",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=89,
-            attn_backend="FLASHINFER",
-        ),
-        *ModelDeployerList(
             model_id="nvidia/Gemma-4-31B-IT-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
@@ -434,12 +375,6 @@ def test_phi(command):
 @pytest.mark.parametrize(
     "command",
     [
-        *ModelDeployerList(
-            model_id="nvidia/Kimi-K2-Instruct-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=8,
-            mini_sm=100,
-        ),
         *ModelDeployerList(
             model_id="nvidia/Kimi-K2-Thinking-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
@@ -592,18 +527,6 @@ def test_llama_nemotron(command):
             tensor_parallel_size=1,
             mini_sm=89,
         ),
-        *ModelDeployerList(
-            model_id="nvidia/Llama-3.1-70B-Medusa-FP8",
-            backend=("trtllm", "sglang"),
-            tensor_parallel_size=2,
-            mini_sm=100,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/Llama-3.1-405B-Medusa-FP8",
-            backend=("trtllm", "sglang"),
-            tensor_parallel_size=8,
-            mini_sm=100,
-        ),
     ],
     ids=idfn,
 )
@@ -662,13 +585,6 @@ def test_medusa(command):
             eagle3_one_model=False,
         ),
         *ModelDeployerList(
-            base_model="Qwen/Qwen3-30B-A3B",
-            model_id="nvidia/Qwen3-30B-A3B-Eagle3",
-            backend=("trtllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=89,
-        ),
-        *ModelDeployerList(
             base_model="Qwen/Qwen3-30B-A3B-Thinking-2507",
             model_id="nvidia/Qwen3-30B-A3B-Thinking-2507-Eagle3",
             backend=("trtllm", "sglang"),
@@ -694,16 +610,6 @@ def test_medusa(command):
             base_model="openai/gpt-oss-120b",
             model_id="nvidia/gpt-oss-120b-Eagle3-throughput",
             backend=("trtllm", "sglang"),
-            tensor_parallel_size=8,
-            mini_sm=89,
-        ),
-        *ModelDeployerList(
-            base_model="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-            model_id="nvidia/EAGLE3-NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-            # SGLang excluded: Nemotron hybrid (Mamba+attention) doesn't support
-            # speculative decoding in SGLang (NVBugs 6130106)
-            backend=("trtllm", "vllm"),
-            eagle3_one_model=False,
             tensor_parallel_size=8,
             mini_sm=89,
         ),

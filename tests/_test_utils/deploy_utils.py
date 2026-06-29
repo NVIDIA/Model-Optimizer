@@ -325,6 +325,8 @@ class ModelDeployer:
                 **base_kw,
             )
 
+        from transformers import AutoTokenizer
+
         tokenizer_model = self.base_model if "eagle" in self.model_id.lower() else self.model_id
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, trust_remote_code=True)
         prompts = COMMON_PROMPTS
