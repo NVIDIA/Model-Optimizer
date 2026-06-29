@@ -99,6 +99,19 @@ def _install_quant_sparse_attn(worker) -> None:
         # Active attention quant on this (restored) layer.
         p_qdq, _ = _p_qdq_from_layer(module)
         v_qdq, _ = _v_qdq_from_layer(module)
+        # Fail loud on an enabled BMM2 quantizer whose format the kernel cannot map
+        # (only per-tensor FP8 or block-16 dynamic NVFP4). Otherwise it is dropped
+        # silently: the kernel skips it (qdq=None) and, for V, _value_quant_in_kernel
+        # below would also skip the v_bmm_quantizer pre-step -> V never quantized at all.
+        # This must run before the `continue` so an unmapped-only layer cannot slip past.
+        for attr, qdq in (("p_bmm_quantizer", p_qdq), ("v_bmm_quantizer", v_qdq)):
+            q = getattr(module, attr, None)
+            if qdq is None and q is not None and getattr(q, "is_enabled", False):
+                raise NotImplementedError(
+                    f"{name}.{attr} is enabled but its quant format is unsupported by the "
+                    f"sparse attention kernel (supported: per-tensor FP8, block-16 dynamic "
+                    f"NVFP4). Re-export with a supported format or disable this quantizer."
+                )
         quant_active = p_qdq is not None or v_qdq is not None
 
         if not sparse_kw and not quant_active:
@@ -107,10 +120,15 @@ def _install_quant_sparse_attn(worker) -> None:
         new_impl = _clone_sparse_impl(module.impl)
         new_impl.sparse_kw = sparse_kw
         module.impl = new_impl
-        if quant_active and hasattr(module, "_value_quant_in_kernel"):
+        # Only let the kernel own V quant when V maps to a supported in-kernel format.
+        # _value_quant_in_kernel tells _QuantVLLMAttention.forward to skip its own
+        # v_bmm_quantizer pre-step (V's keys-axis NVFP4 blocks can't be formed per token);
+        # gating on quant_active instead would skip that pre-step even when V is unquantized.
+        if v_qdq is not None and hasattr(module, "_value_quant_in_kernel"):
             module._value_quant_in_kernel = True
+        if quant_active:
             quant_layers += 1
-        elif not quant_active:
+        else:
             sparse_only += 1
         patched += 1
 
