@@ -12,15 +12,17 @@
 #     is not in stable vLLM yet -> image vllm/vllm-openai:minimax-m3.
 #   * --block-size 128 is MANDATORY for M3's MSA sparse attention.
 #   * --language-model-only skips the vision encoder (text-only synth/dump).
-#   * M3's MSA Triton kernel (_gqa_sparse_fwd_kernel) JIT-recompiles per prefill shape; a
-#     recompile (~110s) can exceed VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS (default 300) and kill
-#     the engine (sample_tokens RPC timeout -> EngineDeadError). Three mitigations, all
-#     required: (1) --enforce-eager (cudagraph capture itself hung); (2) --length-buckets +
-#     --warmup right-pad prompts to a few fixed lengths so only a handful of shapes compile,
-#     pre-compiled up front; (3) env VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 to survive those
-#     compiles + a persistent TRITON_CACHE_DIR so all parallel tasks reuse the warmed kernels.
-#     KV cache stays bf16 (M3's MSA fused kernel rejects fp8 KV). NB: VLLM_RPC_TIMEOUT is NOT
-#     a recognized env var in this vLLM build (silently ignored) — use the EXECUTE_MODEL one.
+#   * M3's MSA/MoE Triton kernels JIT-compile + autotune per prefill shape, which kills the
+#     dump two ways. Four mitigations, all required: (1) --enforce-eager (cudagraph capture
+#     itself hung); (2) --length-buckets + --warmup right-pad prompts to a few fixed lengths so
+#     only a handful of attention shapes compile, pre-compiled up front; (3) env
+#     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 to survive those compiles + a persistent
+#     TRITON_CACHE_DIR so all parallel tasks reuse the warmed kernels; (4) --disable-triton-
+#     autotune — the MoE _topk_index_kernel autotune (~150s) runs UNSYNCHRONIZED across the 8
+#     TP ranks and deadlocks the engine<->worker shared-memory collective (idle-GPU reaper then
+#     kills it); pinning autotune to one config removes the race. KV cache stays bf16 (M3's MSA
+#     fused kernel rejects fp8 KV). NB: VLLM_RPC_TIMEOUT is NOT recognized in this vLLM build
+#     (silently ignored) — use VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS.
 #   * Training FakeBaseModel reads lm_head + embed_tokens from the bf16 M3 (real weights;
 #     these tensors are not what MXFP8 quantizes, so dump@MXFP8 / train@bf16 logits stay
 #     consistent). Per Ye Yu: adhere to published bf16/MXFP8 ckpts, do not self-quantize.
@@ -59,6 +61,9 @@ pipeline:
       - --block-size 128
       - --language-model-only
       - --enforce-eager
+      # Pin @triton.autotune to one config: M3's MoE _topk kernel autotune (~150s) races
+      # across TP ranks and deadlocks the engine<->worker collective (see header).
+      - --disable-triton-autotune
       # Bound distinct prefill shapes -> few MSA kernel recompiles, pre-compiled up front.
       - --length-buckets 1024,2048,4096,8192
       - --warmup

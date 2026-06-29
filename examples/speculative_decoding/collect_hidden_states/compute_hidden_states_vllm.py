@@ -28,6 +28,8 @@ import argparse
 import atexit
 import os
 import shutil
+import tempfile
+import textwrap
 from pathlib import Path
 
 import torch
@@ -45,6 +47,50 @@ from transformers import AutoConfig, AutoTokenizer
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
 )
+
+# Source for both the in-process patch and the worker sitecustomize: pin every
+# @triton.autotune to a single (last/most-conservative) config so the kernel never runs the
+# per-shape benchmark. On MiniMax-M3 that benchmark (~150s for the MoE _topk kernel) runs
+# unsynchronized across TP ranks and deadlocks the engine<->worker shared-memory collective.
+_NO_AUTOTUNE_SRC = textwrap.dedent(
+    """
+    try:
+        import triton
+        _orig_autotune = triton.autotune
+        def _single_config_autotune(*a, **k):
+            if k.get("configs"):
+                k["configs"] = [k["configs"][-1]]
+            elif a and isinstance(a[0], (list, tuple)) and a[0]:
+                a = ([a[0][-1]], *a[1:])
+            return _orig_autotune(*a, **k)
+        triton.autotune = _single_config_autotune
+        try:
+            import triton.runtime.autotuner as _ta
+            _ta.autotune = _single_config_autotune
+        except Exception:
+            pass
+    except Exception as _e:
+        import sys
+        print(f"[no-autotune] patch failed: {_e}", file=sys.stderr)
+    """
+)
+
+
+def _disable_triton_autotune() -> None:
+    """Pin @triton.autotune to a single config in this process AND in vLLM's workers.
+
+    Must run before any vLLM/Triton model module is imported (kernels are decorated at import
+    time). In-process exec covers forked workers (they inherit patched triton from memory); a
+    sitecustomize on PYTHONPATH covers spawned workers (imported at interpreter startup, before
+    vLLM). Keeping the last config (smallest BLOCK_SIZE) is always functionally correct —
+    autotune configs differ only in performance.
+    """
+    exec(_NO_AUTOTUNE_SRC, {})
+    d = Path(tempfile.mkdtemp(prefix="no_autotune_"))
+    (d / "sitecustomize.py").write_text(_NO_AUTOTUNE_SRC)
+    os.environ["PYTHONPATH"] = f"{d}{os.pathsep}{os.environ.get('PYTHONPATH', '')}"
+    atexit.register(shutil.rmtree, d, ignore_errors=True)
+    print(f"[no-autotune] triton.autotune pinned to a single config (sitecustomize at {d})")
 
 
 def _resolve_aux_layers_standalone(
@@ -143,6 +189,14 @@ def parse_args() -> argparse.Namespace:
         "(default) disables bucketing.",
     )
     parser.add_argument(
+        "--disable-triton-autotune",
+        action="store_true",
+        help="Pin every @triton.autotune to a single config (no per-shape benchmark). Required "
+        "for MiniMax-M3: the MoE _topk_index_kernel autotune (~150s) runs unsynchronized across "
+        "TP ranks and deadlocks the engine<->worker collective. Applied in-process + via a "
+        "sitecustomize on PYTHONPATH so vLLM's worker subprocesses inherit it.",
+    )
+    parser.add_argument(
         "--warmup",
         action="store_true",
         help="Before the real dump, run one throwaway prefill per length bucket to JIT-compile "
@@ -166,6 +220,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
+    # Must happen before importing vLLM (kernels are @triton.autotune-decorated at import).
+    if args.disable_triton_autotune:
+        _disable_triton_autotune()
+
     # Import lazily so --help and arg parsing work without vLLM installed.
     from vllm import LLM, SamplingParams
     from vllm.config.kv_transfer import KVTransferConfig
