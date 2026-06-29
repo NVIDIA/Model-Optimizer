@@ -16,6 +16,7 @@
 """Shared calibration forward-loop builder for Megatron-Core models."""
 
 import copy
+import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -106,7 +107,6 @@ def get_megatron_vlm_calibration_forward_loop(
     dataset_name: str = "scienceqa",
     batch_size: int = 1,
     num_samples: int = 512,
-    seq_length: int = 512,
     device: torch.device | str | None = "cuda",
     subsets: list[str] | None = None,
     max_shards: int | None = None,
@@ -124,7 +124,6 @@ def get_megatron_vlm_calibration_forward_loop(
         dataset_name: VLM calibration dataset name (see ``vlm_dataset_utils``).
         batch_size: Calibration batch size.
         num_samples: Number of calibration samples.
-        seq_length: Max text length for the processor (maps to ``max_length``).
         device: Device to move the encoded tensors to.
         subsets: Subsets to use (only for ``nemotron_vlm_dataset_v2``; ignored otherwise).
         max_shards: Max media tar shards to download per subset (only for ``nemotron_vlm_dataset_v2``;
@@ -143,11 +142,12 @@ def get_megatron_vlm_calibration_forward_loop(
         batch_size=batch_size,
         num_samples=num_samples,
         device=device,
-        max_length=seq_length,
         require_image=True,
         dp_size=dp_size,
         dp_rank=mpu.get_data_parallel_rank(),
     )
+    # tqdm total: the streaming/sharded dataloader has no __len__.
+    total_batches = math.ceil(math.ceil(num_samples / dp_size) / batch_size)
 
     def _forward_loop(_model: torch.nn.Module | None = None) -> None:
         # CP would have to split each sequence across ranks, but the multimodal forward merges vision
@@ -160,7 +160,7 @@ def get_megatron_vlm_calibration_forward_loop(
                 f"get_megatron_vlm_calibration_forward_loop requires CP=1, got "
                 f"context_parallel_world_size={cp_size}. Run calibration without CP."
             )
-        for batch in tqdm(dataloader, disable=not dist.is_master()):
+        for batch in tqdm(dataloader, total=total_batches, disable=not dist.is_master()):
             megatron_prefill(
                 model,
                 batch["input_ids"],

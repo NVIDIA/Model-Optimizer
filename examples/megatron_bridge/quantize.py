@@ -174,7 +174,12 @@ def get_args() -> argparse.Namespace:
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
     )
     parser.add_argument("--calib_batch_size", type=int, default=1, help="Calibration batch size")
-    parser.add_argument("--seq_length", type=int, default=4096, help="Calibration sequence length")
+    parser.add_argument(
+        "--seq_length",
+        type=int,
+        default=4096,
+        help="Calibration sequence length (text only; ignored for image-text VLM calibration).",
+    )
 
     # Post-quantization generation (sanity check) arguments
     parser.add_argument(
@@ -378,7 +383,6 @@ def main(args: argparse.Namespace):
             processor,
             dataset_name=args.calib_dataset_name,
             num_samples=args.calib_num_samples,
-            seq_length=args.seq_length,
             batch_size=args.calib_batch_size,
         )
 

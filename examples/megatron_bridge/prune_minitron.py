@@ -137,7 +137,12 @@ def get_args() -> argparse.Namespace:
     )
     # TODO: Add support for pre-training dataset (pre-tokenized)
     parser.add_argument("--calib_batch_size", type=int, default=1, help="Calibration batch size")
-    parser.add_argument("--seq_length", type=int, default=4096)
+    parser.add_argument(
+        "--seq_length",
+        type=int,
+        default=4096,
+        help="Calibration sequence length (text only; ignored for image-text VLM calibration).",
+    )
     # Pruning parameters
     parser.add_argument(
         "--prune_intermediate_ckpt",
@@ -427,7 +432,6 @@ def main(args: argparse.Namespace):
             processor,
             dataset_name=args.calib_dataset_name,
             num_samples=args.calib_num_samples,
-            seq_length=args.seq_length,
             batch_size=args.calib_batch_size,
         )
     else:

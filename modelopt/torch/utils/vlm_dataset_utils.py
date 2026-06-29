@@ -357,7 +357,6 @@ def get_vlm_dataset_dataloader(
     batch_size: int = 1,
     num_samples: int = 512,
     device: str | torch.device | None = None,
-    max_length: int | None = None,
     require_image: bool = True,
     subsets: list[str] | None = None,
     shuffle_buffer_size: int = 10_000,
@@ -376,7 +375,6 @@ def get_vlm_dataset_dataloader(
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset.
         device: Device to move returned tensors to. If None, keep on CPU.
-        max_length: Optional max length for text tokenization (if supported by the processor).
         require_image: If True, keep only samples that have an image field.
         dp_size: Data-parallel world size; if > 1, the dataset is sharded across DP ranks.
         dp_rank: This process's rank within the data-parallel group.
@@ -485,9 +483,7 @@ def get_vlm_dataset_dataloader(
             "return_tensors": "pt",
             "padding": True,
         }
-        if max_length is not None and "images" not in kwargs:
-            kwargs.update({"truncation": True, "max_length": max_length})
-
+        # No truncation: it clips image tokens and breaks the VLM forward
         enc = processor(**kwargs)
 
         # Some processors return BatchEncoding; normalize to plain dict of tensors.
