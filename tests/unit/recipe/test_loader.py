@@ -1796,14 +1796,22 @@ def test_load_recipe_autoquantize_builtin_active_moe():
     assert aq.constraints.cost.active_moe_expert_ratio == 0.03125
     assert aq.auto_quantize_method == "gradient"
     assert aq.kv_cache is None
-    # Inline effective_bits overrides: fp8 = 8, w4a16_nvfp4 = 4.5.
-    assert {c.effective_bits for c in aq.candidate_formats} == {8.0, 4.5}
-
-
-def test_load_recipe_autoquantize_builtin_active_moe_heuristic():
-    """The heuristic equivalence-test recipe loads with no effective_bits overrides."""
-    aq = load_recipe(
-        "general/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe-heuristic"
-    ).auto_quantize
-    assert aq.constraints.cost_model == "active_moe"
+    # No per-candidate override; NVFP4 cost (4.5) comes from configs/numerics/nvfp4.
     assert all(c.effective_bits is None for c in aq.candidate_formats)
+
+
+@pytest.mark.parametrize(
+    "recipe_path",
+    [
+        "general/auto_quantize/nvfp4_fp8_at_4p8bits",
+        "general/auto_quantize/nvfp4_mse_fp8_at_6p0bits",
+        "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits",
+        "general/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe",
+    ],
+)
+def test_load_recipe_autoquantize_builtin_general(recipe_path):
+    """Every shipped general AutoQuantize recipe loads and has >= 2 candidate formats."""
+    recipe = load_recipe(recipe_path)
+    assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
+    assert len(recipe.auto_quantize.candidate_formats) >= 2
+    assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")

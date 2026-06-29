@@ -13,33 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Equivalence-test variant: identical to w4a16_nvfp4_fp8_at_6p0bits-active_moe.yaml but
-# WITHOUT per-candidate effective_bits, so the LP uses the num_bits heuristic (NVFP4 = 4.0,
-# FP8 = 8) — matching the bare CLI command, which has no effective_bits. Use this to verify
-# the recipe path is byte-identical to the CLI; use the non-heuristic recipe for corrected cost.
+# AutoQuantize: per-layer search over {NVFP4 W4A4 (weight-MSE + FP8 sweep), FP8} at 6.0 bits.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
+  nvfp4_mse: configs/ptq/presets/model/nvfp4_w4a4_weight_mse_fp8_sweep
   fp8: configs/ptq/presets/model/fp8
-  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
 
 metadata:
   recipe_type: auto_quantize
-  description: >-
-    Equivalence baseline: mixed FP8 + NVFP4-weight-only at 6.0 effective bits, active-MoE
-    cost model (expert ratio 0.03125), num_bits heuristic (no effective_bits override).
+  description: Mixed NVFP4 (weight-MSE + FP8 sweep) + FP8 per-layer search at 6.0 effective bits.
 
 auto_quantize:
   constraints:
     effective_bits: 6.0
-    cost_model: active_moe
-    cost:
-      active_moe_expert_ratio: 0.03125
 
   candidate_formats:
+    - $import: nvfp4_mse
     - $import: fp8
-    - $import: w4a16_nvfp4
 
   auto_quantize_method: gradient
   num_score_steps: 128
-  # kv_cache omitted -> falls back to --kv_cache_qformat (none in the reference command).
