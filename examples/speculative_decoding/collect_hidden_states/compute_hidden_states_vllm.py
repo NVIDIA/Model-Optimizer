@@ -319,7 +319,10 @@ def main(args: argparse.Namespace) -> None:
     llm = LLM(
         model=args.model,
         tensor_parallel_size=tp,
-        max_model_len=args.max_seq_len,
+        # +1 for the dummy max_tokens=1 generation: the dump only needs the prefill, but vLLM
+        # validates prompt_len + output_tokens <= max_model_len, and a prompt (or a length
+        # bucket) can be exactly max_seq_len. Without the +1, max-length prompts are rejected.
+        max_model_len=args.max_seq_len + 1,
         trust_remote_code=args.trust_remote_code,
         enable_chunked_prefill=False,  # required by extract_hidden_states
         **extra_llm_kwargs,
