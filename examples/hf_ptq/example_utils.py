@@ -598,6 +598,51 @@ def get_original_hf_quant_method(config) -> str | None:
     return None
 
 
+def _empty_model_init_kwargs(model_kwargs, torch_dtype):
+    init_kwargs = model_kwargs.copy()
+    init_kwargs.pop("max_memory", None)
+    init_kwargs["dtype"] = torch_dtype
+    return init_kwargs
+
+
+def _empty_model_init_dtype(hf_config):
+    torch_dtype = (
+        getattr(hf_config, "dtype", None)
+        or getattr(hf_config, "torch_dtype", None)
+        or torch.bfloat16
+    )
+    if isinstance(torch_dtype, str):
+        torch_dtype = getattr(torch, torch_dtype)
+    return torch_dtype
+
+
+def _is_unexpected_dtype_kwarg_error(error):
+    message = str(error)
+    return "unexpected keyword argument" in message and (
+        "'dtype'" in message or '"dtype"' in message
+    )
+
+
+def _from_config_for_empty_weights(from_config, hf_config, model_kwargs, torch_dtype):
+    try:
+        return from_config(hf_config, **model_kwargs)
+    except TypeError as error:
+        if "dtype" not in model_kwargs or not _is_unexpected_dtype_kwarg_error(error):
+            raise
+
+        model_kwargs_without_dtype = model_kwargs.copy()
+        model_kwargs_without_dtype.pop("dtype", None)
+        orig_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch_dtype)
+        try:
+            # Some remote-code constructors, such as DeciLMForCausalLM, reject the
+            # Transformers dtype kwarg even though bf16-sized empty weights are
+            # still needed for device-map inference.
+            return from_config(hf_config, **model_kwargs_without_dtype)
+        finally:
+            torch.set_default_dtype(orig_dtype)
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -734,13 +779,13 @@ def get_model(
         with init_empty_weights(include_buffers=True):
             # When computing the device_map, assuming bfloat16 precision by default,
             # unless specified by the hf_config.
-            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
-            model_kwargs2 = model_kwargs.copy()
+            torch_dtype = _empty_model_init_dtype(hf_config)
+            model_kwargs2 = _empty_model_init_kwargs(model_kwargs, torch_dtype)
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
-            model_kwargs2["dtype"] = torch_dtype
-            model_kwargs2.pop("max_memory", None)
-            model = from_config(hf_config, **model_kwargs2)
+            model = _from_config_for_empty_weights(
+                from_config, hf_config, model_kwargs2, torch_dtype
+            )
 
         max_memory = get_max_memory()
         inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
