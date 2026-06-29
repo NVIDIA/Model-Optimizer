@@ -290,7 +290,7 @@ def main(args: argparse.Namespace):
     language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
     is_vlm = language_model is not unwrapped_model
     if is_vlm:
-        print_rank_0(
+        warn_rank_0(
             "VLM detected: quantizing `model.language_model` only (vision tower left in full precision)."
         )
 
@@ -345,8 +345,7 @@ def main(args: argparse.Namespace):
     print_rank_0(f"Quantizing the model with: {args.recipe or args.quant_cfg}")
     if "awq" in str(mtq_config.get("algorithm")):
         print_rank_0(
-            "AWQ calibration can take longer than other methods; "
-            "reduce --calib_num_samples to speed it up."
+            "AWQ calibration can take longer than other methods; reduce --calib_num_samples to speed it up."
         )
 
     # Dynamic and weight-only configs need no activation statistics, so skip both the

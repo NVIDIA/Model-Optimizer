@@ -382,7 +382,7 @@ def main(args: argparse.Namespace):
     language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
     is_vlm = language_model is not unwrapped_model
     if is_vlm:
-        print_rank_0(
+        warn_rank_0(
             "VLM detected: pruning model.language_model only; all non-language-model components "
             "(vision/audio encoders, projectors, etc.) are frozen and excluded. --prune_target_* "
             "applies to the language-model tower, not the full model (hidden_size pruning is also "

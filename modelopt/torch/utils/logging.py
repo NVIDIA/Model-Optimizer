@@ -130,6 +130,9 @@ def warn_rank_0(message, *args, **kwargs):
     """
     if dist.is_master():
         kwargs["stacklevel"] = kwargs.get("stacklevel", 1) + 1
+        # Render the message in yellow on a terminal (skip escape codes for redirected output / logs).
+        if isinstance(message, str) and sys.stderr.isatty():
+            message = f"\033[33m{message}\033[0m"
         warnings.warn(message, *args, **kwargs)
 
 
