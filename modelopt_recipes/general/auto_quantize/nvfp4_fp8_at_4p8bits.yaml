@@ -34,3 +34,22 @@ auto_quantize:
 
   auto_quantize_method: gradient
   num_score_steps: 128
+
+  # Base (model-agnostic) non-quantizable layers. Arch-specific models use a recipe under
+  # huggingface/<model>/auto_quantize/ that extends this set. (TODO: share via $import once
+  # the loader supports schema-less list snippets — mirrors PTQ's disabled-layer units.)
+  disabled_layers:
+    - "*block_sparse_moe.gate*"
+    - "*linear_attn.conv1d*"
+    - "*linear_attn.in_proj_a*"
+    - "*linear_attn.in_proj_b*"
+    - "*mixer.conv1d*"
+    - "*mlp.gate.*"
+    - "*mlp.shared_expert_gate.*"
+    - "*output_layer*"
+    - "*proj_out.*"
+    - "*router*"
+    - "output.*"
+    - "*embed_vision*"
+    - "*vision_tower*"
+    - "*visual*"
