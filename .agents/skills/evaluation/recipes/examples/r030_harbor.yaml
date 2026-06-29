@@ -1,0 +1,96 @@
+# NEL 0.3.x (engine) — AGENTIC harbor benchmark (terminal-bench) via the harbor solver + a remote AWS
+# ECS-Fargate sandbox. READ the "harbor://" section of references/nel-v0.3.0-migration.md FIRST: the
+# readiness chain, AWS creds, building the SSH sidecar, adding openssh-client to the eval image, and the
+# dataset/CodeBuild gotcha. Preflight (creds -> SSM -> ECR sidecar -> eval-image ssh) before firing:
+#   set -a; source <your .env>; set +a
+#   nel eval run recipes/examples/r030_harbor.yaml --dry-run
+#   nel eval run recipes/examples/r030_harbor.yaml
+
+services:
+  model:
+    type: vllm
+    model: /path/to/checkpoint
+    served_model_name: my-model
+    protocol: chat_completions
+    port: 8000
+    node_pool: gpu
+    tensor_parallel_size: 4
+    pipeline_parallel_size: 1
+    data_parallel_size: 1
+    num_nodes: 1
+    image: <vllm-image.sqsh-or-handle>
+    startup_timeout: 3600.0
+    extra_args:
+      - "--gpu-memory-utilization=0.9"
+      - "--max-model-len=262144"
+      - "--trust-remote-code"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser=<your-tool-parser>"
+      - "--reasoning-parser=<your-reasoning-parser>"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs=512"
+    extra_env:
+      HF_TOKEN: ${HF_TOKEN}
+      HF_HOME: /cache/huggingface
+    container_mounts: ["/path/to/hf-cache:/cache/huggingface"]
+    proxy: {verbose: true, request_timeout: 1800.0}
+    generation:
+      temperature: 1.0
+      top_p: 1.0
+      max_tokens: 196608             # per model-call; episode bounded by per-task `timeout` + agent turns
+
+benchmarks:
+  - name: terminal-bench-hard        # curated task set; scored by each task's unit tests (no judge)
+    repeats: 1
+    max_concurrent: 5
+    timeout: 1800.0                  # per-task wall (bounds the agentic episode)
+    # num_examples: 3                # smoke on the first N (already-cached) task images
+    solver: {type: harbor, service: model, agent: terminus-2}
+    sandbox:
+      type: ecs_fargate
+      region: <region>              # your harbor/ECS deployment region
+      cpu: "4096"
+      memory: "16384"
+      ephemeral_storage_gib: 50
+      concurrency: 10               # parallel Fargate tasks — the throughput knob here (NOT cluster.shards)
+      stateful: true
+      ssh_sidecar:
+        image: <ecr-account>.dkr.ecr.<region>.amazonaws.com/<repo>:terminalbench-ssh-sidecar__<hash>
+        ssh_ready_timeout_sec: 900.0
+        sshd_port: 52222
+        private_key_secret_arn: <from-SSM>   # both ARNs come from /<project>/ecs-sandbox/config
+        public_key_secret_arn: <from-SSM>
+
+cluster:
+  type: slurm
+  account: <your-slurm-account>
+  walltime: "04:00:00"
+  auto_resume: true                # verified-task log persists -> finished tasks skip on resume
+  eval_image: <eval-image.sqsh>    # MUST include the harbor solver AND openssh-client
+  mount_home: false
+  container_mounts:
+    - /path/to/hf-cache:/cache/huggingface
+    - /path/to/harbor_datasets:/cache/harbor_datasets   # pre-mapped, edited dataset dir
+  container_env:
+    HF_HOME: /cache/huggingface
+    HF_TOKEN: ${HF_TOKEN}
+    HARBOR_DATASETS_DIR: /cache/harbor_datasets          # pin so harbor reuses it, not re-clone
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    AWS_DEFAULT_REGION: <region>
+  node_pools:
+    gpu: {partition: <gpu-partition>, nodes: 1, ntasks_per_node: 1, gres: "gpu:4"}
+  sbatch_extra_flags: {exclusive: true}
+
+output:
+  dir: /abs/path/to/rundir
+  export: [mlflow]                 # run `nel export` manually from the login node after the job
+  export_config:
+    mlflow:
+      tracking_uri: <your-mlflow-uri>
+      experiment_name: <experiment>
+      tags:
+        model: my-model            # set this + checkpoint_path so the run attributes correctly
+        checkpoint_path: <abs path>
+        pipeline: r0.3.0
+        variant: agentic-terminal-bench

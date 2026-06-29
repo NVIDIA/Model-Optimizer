@@ -1,5 +1,41 @@
 # NEL v0.3.0 Migration
 
+## Contents
+
+- [NEL 0.2.x (launcher) vs 0.3.x (engine)](#nel-02x-launcher-vs-03x-engine)
+  - [Comparing the Config File Structure](#comparing-the-config-file-structure)
+  - [Backward supporting v0.2.x](#backward-supporting-v02x)
+- [NEL v0.3.0 Backend Support Matrix](#nel-v030-backend-support-matrix)
+  - [Supported Backends](#supported-backends)
+  - [Supported Benchmarks](#supported-benchmarks)
+  - [Harbor playbooks — a separate agentic backend](#harbor-playbooks--a-separate-agentic-backend)
+- [Launch NEL v0.3.0](#launch-nel-v030)
+  - [Basic Usage](#basic-usage)
+  - [Single-node vs sharded](#single-node-vs-sharded)
+  - [The `solver:` block — `simple` vs `tool_calling`](#the-solver-block--simple-vs-tool_calling)
+  - [built-in and skills:// (native)](#built-in-and-skills-native)
+  - [gym:// (server + reward)](#gym-server--reward)
+    - [1. The pieces (two jobs)](#1-the-pieces-two-jobs)
+    - [2. Start the gym grader + get its port](#2-start-the-gym-grader--get-its-port)
+    - [3. Get the data](#3-get-the-data)
+    - [4. The conductor config (what `nel eval run` reads)](#4-the-conductor-config-what-nel-eval-run-reads)
+    - [5. Serve the model on a GPU node](#5-serve-the-model-on-a-gpu-node)
+    - [6. Run it — the two-job pattern](#6-run-it--the-two-job-pattern)
+    - [7. Resume the jobs](#7-resume-the-jobs)
+    - [8. Caveats](#8-caveats)
+  - [harbor:// (agentic, remote sandbox)](#harbor-agentic-remote-sandbox)
+    - [1. The readiness chain](#1-the-readiness-chain)
+    - [2. The creds you need (link 1)](#2-the-creds-you-need-link-1)
+    - [3. Verify SSM (link 2)](#3-verify-ssm-link-2)
+    - [4. Dataset directory (related to link 3)](#4-dataset-directory-related-to-link-3)
+    - [5. Build the SSH sidecar (links 4–5)](#5-build-the-ssh-sidecar-links-45)
+    - [6. The eval image (link 6)](#6-the-eval-image-link-6)
+    - [7. The config](#7-the-config)
+    - [8. Preflight + run](#8-preflight--run)
+    - [9. Failure catalog (symptom → link → fix)](#9-failure-catalog-symptom--link--fix)
+  - [legacy container://](#legacy-container)
+- [Export results to MLFlow](#export-results-to-mlflow)
+
 ## NEL 0.2.x (launcher) vs 0.3.x (engine)
 
 | | **0.2.x launcher** (`nemo_evaluator_launcher`) | **0.3.x engine** (`nemo_evaluator`) |
@@ -82,7 +118,7 @@ harbor://   `- playbook: <name>` or          src/nemo_evaluator/playbooks/ (term
             harbor://<dataset@ver>           swebench_verified, …); HarborSolver + sandbox (harbor pkg)
 ```
 
-Example — a `benchmarks:` block, one entry per benchmark. The `name:` prefix selects the backend (it is **not** uniformly `{backend}://{benchmark}`): built-in has **no prefix** (just `{benchmark}`); `skills://` and `lm-eval://` are `{backend}://{benchmark}`; `gym://` points at a running server, `gym://{host:port}?...&data=<tasks.jsonl>` (the benchmark lives in the data file, not after the prefix):
+Example — a `benchmarks:` block, one entry per benchmark. The `name:` prefix selects the backend (it is **not** uniformly `{backend}://{benchmark}`): built-in has **no prefix** (just `{benchmark}`); `skills://` and `lm-eval://` are `{backend}://{benchmark}`; `gym://` points at a running server, `gym://{host:port}?...&data=<tasks.jsonl>` (the benchmark lives in the data file, not after the prefix); `harbor://` agentic tasks are usually entered as a `- playbook: <name>` (the preset bundles the `harbor://` name + `solver: {type: harbor}` + a `sandbox:`):
 
 ```yaml
 benchmarks: # the benchmarks block
@@ -90,7 +126,7 @@ benchmarks: # the benchmarks block
   - name: skills://aime25                                        # NeMo-Skills
   - name: lm-eval://hellaswag                                    # lm-eval
   - name: gym://127.0.0.1:8000?protocol=native&data=tasks.jsonl  # NeMo-Gym (running server)
-  - name: harbor://terminal-bench@2.0                            # Harbor (agentic; sandbox + harbor pkg) — or `- playbook: terminal_bench_2`
+  - playbook: terminal_bench_2                                   # Harbor (agentic): bundles `name: harbor://terminal-bench@2.0` + solver:harbor + sandbox
 ```
 
 ### Supported Benchmarks
@@ -102,7 +138,8 @@ framework** the engine integrates:
 - `NVIDIA-NeMo/Gym`: **`gym://`** from Gym [`benchmarks/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks)+[`resources_servers/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers).
 - **Harbor** ([`laude-institute/harbor`](https://github.com/laude-institute/harbor), *not* a NeMo repo): **`harbor://`** agentic tasks from Harbor's own registry (60+: terminal-bench, swebench, usaco, bird-bench, …), integrated via `pip install nemo-evaluator[harbor]` and run in a sandbox (see "Harbor playbooks" below).
 
-The matrix below covers only these three backends. **`lm-eval://`** (e.g. `lm-eval://hellaswag`) and
+The matrix below covers only its three columns — the **built-in**, **`skills://`**, and **`gym://`**
+backends. **`lm-eval://`** (e.g. `lm-eval://hellaswag`) and
 **`harbor://`** (60+ agentic tasks — discover via Harbor's registry; see "Harbor playbooks" below) are
 also supported but not enumerated here — discover lm-eval tasks with `lm_eval --tasks list`. Only the **built-in**
 column is verified against this engine (`nel list -s builtin`); the **`skills://`** and **`gym://`**
@@ -211,7 +248,7 @@ MULTILINGUAL / MULTIMODAL / AUDIO
 ```
 
 
-### Harbor playbooks (terminal-bench 2.x, SWE-bench) — a separate mechanism
+### Harbor playbooks — a separate agentic backend
 
 These are **not** built-in / `skills://` / `gym://`, so they don't appear in the matrix above. They run
 through the **Harbor** package via a `- playbook: <name>` entry (HarborSolver + sandbox), pointing at a
@@ -355,6 +392,26 @@ image — `pip install nemo-skills` from [NVIDIA-NeMo/Skills](https://github.com
 repo README. It's baked into `cluster.eval_image` (and the dataset is prepped there). Likewise `lm-eval://`
 needs `lm-eval` in the image.
 
+```text
+   login node:  `nel eval run <config>`  (cluster: type: slurm)  --submits sbatch-->  the job below
+                       |
+                       v
+   one SLURM job  (cluster: type: slurm; scale with shards)     << everything in-process: no server, no sandbox
+  +---------------------------------------------------------------+
+  |   NEL engine  <--(1) prompt / answer-->  vLLM serve           |
+  |        |                                 (services.model)     |
+  |        +--(2) scores each answer in-process:                  |
+  |             built-in scorer / skills:// bridge (math,         |
+  |             multichoice)  -->  per-sample reward              |
+  +---------------------------------------------------------------+
+                       |
+                       +--(3)--> (sharded? `nel eval merge`) --> `nel export` --> MLflow
+
+  1  the engine serves the model itself and calls it per sample (avg-of-N via `repeats`)
+  2  it scores each answer in-process — built-in scorer or the skills:// bridge — no server, no sandbox
+  3  scale throughput with cluster.shards (N single-node workers, merged after); then `nel export`
+```
+
 ```yaml
 benchmarks:
   - name: gpqa                       # built-in (multichoice)
@@ -397,7 +454,29 @@ see the gym section's "Resume the jobs".)
 `gym://` runs a NeMo-Gym **resource server** that scores each response — the faithful path for the `†`
 benchmarks `skills://` mis-scores and for agentic envs. We run it as a **two-job split**: the model on a
 GPU node (its own serve job), and the grader + evaluator on a CPU node. Why split: serving needs the vLLM
-container, while `nel` and the Gym server live in their own venvs (see the last caveat in §7).
+container, while `nel` and the Gym server live in their own venvs (see the last caveat in §8).
+
+```text
+  login node:  `sbatch serve.sbatch`              `sbatch gym_eval.sbatch`   (submit both jobs)
+                     |                                  |
+                     v                                  v
+   GPU node  (serve.sbatch)                    CPU node  (gym_eval.sbatch, cluster: type: local)
+  +-----------------------------+            +-------------------------------------------------+
+  |  vLLM serve  :8000          | <--(2)---- |  NEL conductor (nel eval run, in-process)       |
+  |  (services.model, type:api) |  question  |     sends Q to the model, gets answer A         |
+  |                             | --(2)----> |        |  (3) POST A -> /verify  (loopback)      |
+  |                             |   answer   |        v                                        |
+  |  serve_host.txt --(1)-------|----------> |  gym grader (gym env start)  127.0.0.1:<port>   |
+  |  (hostname hand-off)        |            |     scores A -> reward, back to the conductor   |
+  +-----------------------------+            +-------------------------------------------------+
+                                                       |
+                                                       +--(4)--> nel export --> MLflow
+
+  1  GPU serve job writes its hostname to serve_host.txt; the CPU job reads it + waits for /v1/models
+  2  conductor calls the model cross-node (GPU :8000) for each rollout
+  3  conductor POSTs each answer to the co-located gym grader's /verify (loopback :<dynamic port>)
+  4  grader returns a reward; conductor tallies -> nel export -> MLflow
+```
 
 #### 1. The pieces (two jobs)
 
@@ -431,7 +510,7 @@ top-level key in <name>.yaml    kind                  role                      
 ------------------------------  --------------------  -------------------------------  ----------------------
 ifbench                         resources_servers     the GRADER — scores via /verify  KEEP  (all NEL needs)
 ifbench_simple_agent            responses_api_agents  a sample gym-driven agent loop   DROP
-  └ model_server: policy_model  responses_api_models  the model that agent would run   (placeholder name only;
+    model_server: policy_model  responses_api_models  the model that agent would run   (placeholder name only;
                                 (referenced, NOT          — gym-driven path, not NEL    not defined in the file)
                                  defined in the file)
 ```
@@ -631,6 +710,269 @@ cache is dropped and regenerated.)
 - **Why not "one GPU node, NEL serves the model" (`type: vllm` + `cluster: {type: local}`)?** NEL's local
   path runs `python -m vllm` from the `nel` venv (it ignores the container `image:`), and that venv has no
   vLLM — so it errors at model startup. Serving needs the vLLM container, which is why §5 is a separate job.
+
+
+### harbor:// (agentic, remote sandbox)
+
+Harbor benchmarks (terminal-bench, swebench, …) run a multi-turn terminal agent
+([`terminus-2`](https://www.harborframework.com/docs/agents/terminus-2) — Harbor's model-agnostic
+reference agent; an interactive tmux session driven against your served model, not a model itself) inside
+per-task containers that execute **remotely on [AWS ECS Fargate](https://aws.amazon.com/fargate/)**, scored by each task's own unit tests
+(**no LLM judge**). The SLURM side only serves the model + runs the eval driver; the task containers fan
+out on Fargate (`sandbox.concurrency` is the throughput knob, **not** `cluster.shards`). This is the
+heaviest backend to stand up. Config snippet + full runnable example in §6
+([`recipes/examples/r030_harbor.yaml`](../recipes/examples/r030_harbor.yaml)).
+
+```text
+  login node:  `nel eval run <config>`  (cluster: type: slurm)  --submits sbatch-->  the GPU job below
+                          |
+                          v
+        SLURM  (1 GPU node)                          AWS ECS Fargate  (region + secret ARNs from SSM)
+  +-------------------------------+            +---------------------------------------------+
+  |  vLLM serve  :8000            | <--(2)---- |  task container: terminus-2 --tmux--> shell |
+  |  (services.model)             |   model    |             ^      (runs cmds, edits files) |
+  |                               | completions|             | (1) ssh                       |
+  |  NEL eval driver              | --(1) ssh->|  SSH sidecar  (sshd :52222)                 |
+  |  (harbor solver)              |            |             |                               |
+  |    trigger image build        | --(0)----->|  Fargate pulls the sidecar + task images    |
+  |                               |            |  (3) task's own test.sh --> pass/fail        |
+  |                               | <--(4)-----|  reward                                      |
+  +-------------------------------+            +---------------------------------------------+
+              |
+              +--(5)--> nel export --> MLflow
+
+  0  driver triggers CodeBuild (AWS) -> builds each task image -> ECR; Fargate pulls from ECR
+     (up front; ONE build failure aborts the whole benchmark)
+  1  the driver SSHes in via the sidecar to install + run terminus-2 inside the task container,
+     and to stream files / run test.sh  (needs openssh-client in the eval image)
+  2  terminus-2 (in the task container) calls your served model on the GPU node each step
+  3  when the agent stops, the task's own unit tests (test.sh) score it — no LLM judge
+  4  reward returns to the driver over the ssh tunnel
+  5  the driver aggregates, then `nel export` -> MLflow
+```
+
+The GPU node only **serves the model + runs the driver**; the agent's work happens in the remote Fargate
+containers (so `sandbox.concurrency`, not `cluster.shards`, is the throughput knob).
+
+#### 1. The readiness chain
+
+Each link must be green before the next; most failures pin to one specific link:
+
+```text
+creds → SSM → ECR/CodeBuild → sidecar pull → sshd ready → ssh client → agent (terminus-2) → score
+  1       2         3              4              5             6              7                8
+```
+1. **creds** — boto finds the AWS keys in env (*fails:* `NoCredentialsError`).
+2. **SSM** ([AWS Systems Manager](https://aws.amazon.com/systems-manager/) Parameter Store) — the engine's
+   [`resolve_ecs_config_from_ssm`](https://github.com/NVIDIA-NeMo/Evaluator/blob/main/src/nemo_evaluator/sandbox/ecs_fargate.py)
+   reads the parameter `/<project>/ecs-sandbox/config` for cluster/subnets/roles/ECR repo + the **SSH key
+   secret ARNs** (written by the reference Terraform — see §3). Don't hardcode the account/repo/ARNs — let
+   SSM resolve them (*fails:* `SSM parameter not found`).
+3. **ECR/CodeBuild** — [CodeBuild](https://aws.amazon.com/codebuild/) **builds** each task's Dockerfile and
+   pushes the image to [ECR](https://aws.amazon.com/ecr/) (the registry; content-hash tags, cached) **up
+   front**; Fargate later pulls it from ECR (link 4). One CodeBuild failure is **FATAL to the whole
+   benchmark** (0 rows); `skip_failed` does **not** cover it (§4).
+4. **sidecar pull** — Fargate pulls your baked SSH sidecar (*fails:* `CannotPullContainerError …ssh-sidecar…: not found` → ECR GC'd it → rebuild, §5).
+5. **sshd ready** — the sidecar's `sshd` must answer within `ssh_ready_timeout_sec` (*fails:* `SSH not ready … after 300s` → the default sidecar installs openssh at task start, too slow → use the **baked** one).
+6. **ssh client** — the driver shells out to `ssh` to tunnel in, so the **eval image** must ship `openssh-client` (*fails:* `[Errno 2] No such file or directory: 'ssh'`).
+7. **agent** — multi-turn loop vs your served model (*fails:* turn / `run_timeout` exhaustion → reward 0).
+8. **score** — runs the task's `test.sh`; reward from the verifier, no judge (*fails:* `verify_timeout`).
+
+#### 2. The creds you need (link 1)
+
+**AWS creds** for the harbor ECS/ECR/CodeBuild/SSM account, no judge key is needed here (unlike `gym://` judge benchmarks).
+
+```text
+AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY        IAM for harbor ECS/ECR/CodeBuild + SSM
+AWS_DEFAULT_REGION                               your harbor deployment's region (cluster.container_env)
+HF_TOKEN                                         model/dataset fetch
+(NOT needed) INFERENCE_API_KEY / JUDGE_API_KEY   scored by unit tests, no judge
+```
+Source without echoing — keys live in your `.env`; never open it with Read/Write/Edit (the harness mirrors
+opened files into the transcript → leaks the keys), shell `source` only:
+```bash
+set -a; source <your .env>; set +a
+echo "AWS=${AWS_ACCESS_KEY_ID:+set} HF=${HF_TOKEN:+set}"   # prints "set", never the value
+```
+
+#### 3. Verify SSM (link 2)
+
+Verify the SSM (AWS Systems Manager) parameter resolves — this checks the engine can read it via
+`resolve_ecs_config_from_ssm` before you fire a GPU node.
+
+The `/<project>/ecs-sandbox/config` parameter is written **once** by the repo's reference Terraform
+([`terraform/modules/ecs-sandbox-region`](https://github.com/NVIDIA-NeMo/Evaluator/tree/main/terraform/modules/ecs-sandbox-region) → `ssm.tf`),
+applied by your **cloud/infra team** — not by `nel` or the eval user, who only read it.
+
+```python
+# user-launched preflight check (NOT automated by nel): does the SSM config resolve + have the run's keys?
+from nemo_evaluator.sandbox.ecs_fargate import resolve_ecs_config_from_ssm
+cfg = resolve_ecs_config_from_ssm("<region>", "harbor")   # raises if the parameter is missing
+assert all(cfg.get(k) for k in ("cluster", "ecr_repository", "s3_bucket", "codebuild_service_role")), cfg
+print("OK:", cfg["cluster"], cfg["ecr_repository"])
+```
+*Fails:* `SSM parameter '/harbor/ecs-sandbox/config' not found` → wrong region/project, the harbor stack
+isn't deployed, or your IAM can't read the parameter.
+
+#### 4. Dataset directory (related to link 3)
+
+**Recommended for every harbor benchmark**, not just terminal-bench. The `harbor://` factory maps each
+benchmark's dataset under `HARBOR_DATASETS_DIR` (default `./harbor_datasets`, relative to CWD — fragile).
+Point it at an absolute dir **you** control and mount it, so the engine **reuses** the mapped dataset across
+runs instead of re-mapping each time — and so you can **patch a task** if its build breaks (below). Set it in
+`cluster.container_env` + `cluster.container_mounts`:
+```bash
+export HARBOR_DATASETS_DIR=<abs dataset dir>   # also: container_env.HARBOR_DATASETS_DIR + container_mounts [<dir>:<dir>]
+nel eval run <your-config>.yaml                # maps the benchmark's dataset under $HARBOR_DATASETS_DIR (cached; e.g. `.tbv1_mapped`)
+```
+**If a task's image build fails** — a *run-time* failure (link 3): CodeBuild only fires once you launch the
+run, so you won't see it until §2–§3 and the sidecar/eval-image setup (§5–§6) are green and you've fired it.
+A task that builds a dataset at image-build time can break on dependency drift (classic: `load_dataset(...)`
+hits a `datasets`/`huggingface_hub` mismatch → CodeBuild fails → the **whole benchmark aborts**, 0 rows;
+`skip_failed` doesn't cover the build phase). `nel` won't fix it — patch the task in your mapped tree and
+re-run (harbor reuses the edited copy, no re-map). Path is benchmark-specific; terminal-bench shown:
+```bash
+vi "$HARBOR_DATASETS_DIR/terminal-bench@1.0/<task>/environment/Dockerfile"   # e.g. + RUN pip install 'huggingface_hub==0.24.6'
+nel eval run <your-config>.yaml                       # re-run; confirm reuse in the log:
+grep -hE "cached tasks|Cloning Terminal-Bench" <rundir>/logs/*.log
+#   good: "N cached tasks"   |   bad: "Cloning Terminal-Bench v1 …"  (pin bypassed → your edit ignored)
+```
+`num_examples` caps the task list (first N images built) — smoke on already-cached tasks before committing
+CodeBuild time to the full set.
+
+#### 5. Build the SSH sidecar (links 4–5)
+
+The default sidecar `apk add`s openssh at task start → step-5 timeouts under load. Build one that
+**pre-installs** `openssh-server`+`netcat` and push it to your harbor ECR — **no local Docker** (CodeBuild
+does the build). User-launched, **not** automated by `nel` (source your `.env` first — §2):
+```python
+# build + push the SSH sidecar to harbor's ECR via CodeBuild (AWS creds + AWS_DEFAULT_REGION already in env)
+import os, pathlib
+from nemo_evaluator.sandbox.ecs_fargate import EcsFargateConfig, ImageBuilder, resolve_ecs_config_from_ssm
+region = os.environ["AWS_DEFAULT_REGION"]
+d = pathlib.Path("tb_ssh_sidecar"); d.mkdir(exist_ok=True)
+(d / "Dockerfile").write_text("FROM alpine:3.20\nRUN apk add --no-cache openssh-server netcat-openbsd\n")
+ssm = resolve_ecs_config_from_ssm(region, "harbor")          # ECR repo / S3 / CodeBuild role (from SSM, §3)
+cfg = EcsFargateConfig(region=region, environment_dir=str(d), ssm_project="harbor",
+                       ecr_repository=ssm["ecr_repository"], s3_bucket=ssm["s3_bucket"],
+                       s3_prefix=ssm.get("s3_prefix", "ecs-sandbox"),
+                       codebuild_service_role=ssm["codebuild_service_role"],
+                       codebuild_project=ssm.get("codebuild_project"))
+url = ImageBuilder.ensure_image_built(cfg=cfg, environment_name="terminalbench-ssh-sidecar", force_build=True)
+print("pushed:", url)     # paste this image ref into sandbox.ssh_sidecar.image (§7)
+```
+The tag is **content-addressed** (sha of the Dockerfile bytes) — an unchanged Dockerfile reproduces the
+exact tag your config references (no config edit after a rebuild). Rebuild whenever link 4 reports
+`not found` (ECR GC).
+
+#### 6. The eval image (link 6)
+
+The 0.3.x driver runs **inside** `cluster.eval_image` and shells out to `ssh` to reach the sidecar, so the
+image must carry the **harbor framework + `openssh-client`**. The engine ships the Dockerfiles
+(`docker/Dockerfile.{base,harbor,skills,lm-eval,gym,full}`) and a builder, `nel cache-sqsh`. The **`harbor`**
+target bundles the harbor framework **and `openssh-client`** for you:
+```bash
+# builds docker/Dockerfile.harbor, pushes to the registry, then enroot-imports it to a .sqsh on the cluster
+nel cache-sqsh harbor <slurm-login-host> <abs out-dir>      # -> <out-dir>/nel-harbor.sqsh
+```
+**`cache-sqsh` needs Docker** on the machine you launch it from (it `docker build`s + `docker push`es, then
+`enroot import`s on the login node). **No Docker (enroot-only login node)?** If a prebuilt image is published
+to a registry your node can reach, `enroot import docker://<registry>/nemo-evaluator:<tag>-harbor` directly;
+otherwise **build by hand** — pure enroot, on a login node with apt+pip egress:
+```bash
+# 0. base layer: import stock Ubuntu 24.04 to squashfs (one time)
+enroot import -o ubuntu-noble.sqsh docker://ubuntu:24.04
+# 1. open a writable container from the base
+enroot create --name nel-build ubuntu-noble.sqsh
+# 2. install nemo-evaluator[harbor] + openssh-client INSIDE it. ENROOT_MOUNT_HOME=n keeps the host $HOME
+#    out, else a stale ~/.local/bin/nel shadows the fresh install.
+ENROOT_MOUNT_HOME=n enroot start --root --rw nel-build bash <<'INNER'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1
+# enroot bind-mounts the host /etc/localtime (busy) -> tzdata postinst mv fails + cascades to python3.
+# detach it + pre-seed UTC so tzdata configures cleanly:
+umount -l /etc/localtime 2>/dev/null || true
+rm -f /etc/localtime; ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime; echo Etc/UTC > /etc/timezone
+apt-get update -o Acquire::Retries=5
+apt-get install -y --no-install-recommends python3 python3-pip git curl wget openssh-client
+# --ignore-installed: the ubuntu base ships system copies of some deps (click, fsspec, httpx,
+# huggingface-hub, ...) that make a plain pip install SKIP them -> ModuleNotFoundError at runtime.
+pip install --no-cache-dir --ignore-installed "nemo-evaluator[harbor]"
+nel eval run --help >/dev/null && command -v ssh && python3 -c "import harbor; print('harbor ok')"  # verify
+INNER
+# 3. freeze the container back to a .sqsh -> point cluster.eval_image at this
+enroot export -o nel-harbor.sqsh nel-build && enroot remove -f nel-build
+```
+Three non-obvious gotchas, all baked into the snippet: **(1)** `ENROOT_MOUNT_HOME=n` (a stale host
+`~/.local/bin/nel` otherwise shadows the install); **(2)** detach `/etc/localtime` (enroot bind-mounts the
+busy host copy → `tzdata` postinst fails → cascades to `python3`); **(3)** `pip --ignore-installed` (the base
+ships system copies that a plain install skips → `ModuleNotFoundError`). Installing from a **source checkout**
+(`pip install ".[harbor]"`) instead of PyPI carries local engine patches into the image.
+
+Only if your eval image is a **non-harbor** variant (e.g. `base`/`skills`) that lacks `ssh`: add `openssh-client`
+to the existing sqsh without a rebuild (Docker-free; keeps everything already baked in):
+```bash
+enroot create --name ev <eval-image>.sqsh
+enroot start --root --rw ev bash -c 'apt-get update && apt-get install -y --no-install-recommends openssh-client'
+enroot export -o <eval-image>.new ev && mv <eval-image>.new <eval-image>.sqsh
+```
+
+#### 7. The config
+
+`solver: {type: harbor}` + a `sandbox: {type: ecs_fargate}`; the `- playbook:` presets bundle the same
+thing. The harbor-specific part is the benchmark entry:
+
+```yaml
+benchmarks:
+  - name: terminal-bench-hard          # scored by each task's unit tests (no judge)
+    repeats: 1
+    timeout: 1800.0                     # per-task wall (bounds the agentic episode)
+    # num_examples: 3                   # smoke on the first N (already-cached) task images
+    solver: {type: harbor, service: model, agent: terminus-2}
+    sandbox:
+      type: ecs_fargate
+      region: <region>
+      concurrency: 10                   # parallel Fargate tasks — the throughput knob (NOT cluster.shards)
+      ssh_sidecar:
+        image: <ecr-account>.dkr.ecr.<region>.amazonaws.com/<repo>:terminalbench-ssh-sidecar__<hash>
+        # private/public key secret ARNs resolve from SSM (link 2)
+```
+plus the usual `services.model` (your vLLM serve), a `cluster` whose `eval_image` includes the harbor
+solver **and** `openssh-client` (§6) with the AWS creds + `HARBOR_DATASETS_DIR` in `container_env` (§4),
+and `output`. Full runnable config:
+[`recipes/examples/r030_harbor.yaml`](../recipes/examples/r030_harbor.yaml).
+
+#### 8. Preflight + run
+
+Preflight links 1→4 + the eval-image ssh **before** you burn a GPU node — confirm the two AWS keys are set;
+SSM resolves (`resolve_ecs_config_from_ssm` returns `ecr_repository`/`s3_bucket`/`codebuild_service_role`);
+the sidecar tag exists in ECR (`ImageBuilder.image_exists_in_ecr(repo, tag, region)`); and `ssh` is on PATH
+inside the eval image (`enroot start <eval-image> sh -c 'command -v ssh'`). Then:
+```bash
+set -a; source <your .env>; set +a
+nel eval run recipes/examples/r030_harbor.yaml --dry-run
+nel eval run recipes/examples/r030_harbor.yaml
+# monitor (secret-filtered) — watch the chain advance:
+grep -hiE "CannotPull|SSH ready|No such file.*ssh|RUNNING|reward|exhausted|ERROR" <rundir>/logs/*.log \
+  | grep -ivE "SECRET|ACCESS_KEY"
+```
+
+#### 9. Failure catalog (symptom → link → fix)
+
+```text
+symptom in eval log                                   link  fix
+----------------------------------------------------  ----  -----------------------------------------
+no "Found credentials in environment variables"        1    source your .env
+"SSM parameter … not found"                            2    check region / project / IAM for harbor
+"CodeBuild failed for <task>" → 0 rows                 3    patch task Dockerfile + pin HARBOR_DATASETS_DIR (§4)
+"Cloning Terminal-Bench…" when reuse expected          3    pin HARBOR_DATASETS_DIR to the mapped dir (§4)
+"CannotPullContainerError …ssh-sidecar…: not found"    4    rebuild the sidecar (§5) — ECR GC evicted it
+"SSH not ready … after 300s"                           5    use the baked sidecar (§5)
+"[Errno 2] No such file or directory: 'ssh'"           6    add openssh-client to the eval image (§6)
+"max_turns_exhausted" / agent timeout                  7    raise turn / run_timeout budget
+verifier timeout                                       8    raise verify_timeout
+```
+
 
 
 ### legacy container://
