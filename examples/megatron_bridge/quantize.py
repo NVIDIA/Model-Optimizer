@@ -351,21 +351,10 @@ def main(args: argparse.Namespace):
 
     # Dynamic and weight-only configs need no activation statistics, so skip both the
     # (potentially expensive) calibration dataset download and the calibration forward pass.
-    if mtq.need_calibration(mtq_config) and use_image_calib:
-        # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
-        # see vision-conditioned activations (we still quantize the LM only).
-        processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
-        )
-        forward_loop = get_megatron_vlm_calibration_forward_loop(
-            unwrapped_model,  # full VLM (vision encoder + projector + language model)
-            processor,
-            dataset_name=args.calib_dataset_name,
-            num_samples=args.calib_num_samples,
-            seq_length=args.seq_length,
-            batch_size=args.calib_batch_size,
-        )
-    elif mtq.need_calibration(mtq_config):
+    if not mtq.need_calibration(mtq_config):
+        warn_rank_0("Dynamic or weight-only quantization detected; skipping calibration.")
+        forward_loop = None
+    elif not use_image_calib:
         text_forward_loop = get_megatron_calibration_forward_loop(
             tokenizer,
             dataset_name=args.calib_dataset_name,
@@ -380,8 +369,19 @@ def main(args: argparse.Namespace):
         def forward_loop(_model=None):
             text_forward_loop(language_model)
     else:
-        warn_rank_0("Dynamic or weight-only quantization detected; skipping calibration.")
-        forward_loop = None
+        # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
+        # see vision-conditioned activations (we still quantize the LM only).
+        processor = AutoProcessor.from_pretrained(
+            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+        )
+        forward_loop = get_megatron_vlm_calibration_forward_loop(
+            unwrapped_model,  # full VLM (vision encoder + projector + language model)
+            processor,
+            dataset_name=args.calib_dataset_name,
+            num_samples=args.calib_num_samples,
+            seq_length=args.seq_length,
+            batch_size=args.calib_batch_size,
+        )
 
     if hasattr(unwrapped_model, "calibration_mode"):
         # Some model wrappers (e.g. distillation/speculative) gate calibration behind a flag.

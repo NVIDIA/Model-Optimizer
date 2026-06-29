@@ -311,11 +311,9 @@ class MCoreMinitronSearcher(BaseSearcher):
                 assert isinstance(self.constraints[k], (int, float)), f"{k} must be a float!"
             assert self.has_score, "score_func (e.g. MMLU) is required for metric-based pruning!"
             export_config = None
-            # Sort all parameters that may be pruned. Skip the ones explicitly excluded from the
-            # search: sorting permutes a dimension by importance, and for hparams that are never
-            # pruned this permutation is pure churn. It is also unsafe for ``hidden_size`` on VLMs --
-            # the language model shares its residual dimension with the (un-pruned) vision projector,
-            # so permuting it would misalign the injected image features.
+            # Sort only hparams that may be pruned: sorting never-pruned hparams is churn, and is
+            # unsafe for ``hidden_size`` on VLMs (shared with the frozen vision projector, so
+            # permuting it would misalign injected image features).
             self.hps_to_sort = SUPPORTED_HPARAMS - set(self.config["hparams_to_skip"] or [])
 
         for n, hp in named_hparams(self.model, unique=True):
@@ -324,10 +322,8 @@ class MCoreMinitronSearcher(BaseSearcher):
             if hp.is_configurable:
                 # Make sure configurable hparams are the ones with right names else implementation needs to be fixed!
                 assert hp_name in SUPPORTED_HPARAMS, f"[ImplError] Invalid hparam {hp_name}!"
-            # Validate requested export_config values are achievable for *every* matching hparam,
-            # including non-configurable ones. A value outside `choices` (e.g. not aligned to the
-            # search-space divisor) would otherwise be silently ignored while model.config is still
-            # overwritten, producing a checkpoint whose weights don't match its config.
+            # Validate every matching hparam (even non-configurable): an out-of-range value is else
+            # silently ignored while model.config is overwritten -> weights mismatch the saved config.
             if export_config is not None and hp_name in export_config:
                 assert export_config[hp_name] in hp.choices, (
                     f"Invalid choice {export_config[hp_name]} for {n}! Available choices: "

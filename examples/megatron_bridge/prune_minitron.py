@@ -304,9 +304,8 @@ def _log_vlm_param_breakdown(unwrapped_model, language_model, stage: str) -> Non
 
     total = dist.allreduce(_local(unwrapped_model))  # sum across pipeline ranks
     lm = dist.allreduce(_local(language_model))
-    # Under pipeline parallelism a tied embedding is materialized on both the first (word_embeddings)
-    # and last (output_layer) stage, so the sum double-counts it; subtract one copy. Only the first
-    # stage owns ``word_embeddings``, so the allreduce-sum below yields exactly one copy.
+    # Under PP a tied embedding lives on both the first and last stage, so the sum double-counts it;
+    # subtract one copy (the allreduce over the first-stage-only ``word_embeddings`` gives exactly one).
     if dist.size() > 1 and getattr(language_model, "share_embeddings_and_output_weights", False):
         emb = dist.allreduce(
             next(
@@ -590,10 +589,8 @@ def main(args: argparse.Namespace):
             text_cfg.layer_types = [
                 lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
             ]
-        # Qwen3-VL injects deepstack vision features at specific (0-indexed) LM layers. Remap those
-        # indices to the surviving layers so the exported config stays valid (no out-of-range index);
-        # a dropped injection layer snaps to the nearest survivor below it (count is preserved so the
-        # frozen vision projector still lines up).
+        # Qwen3-VL injects deepstack vision features at specific LM layers; remap those indices to the
+        # surviving layers (a dropped one snaps to the nearest survivor below; count is preserved).
         vision_cfg = getattr(hf_cfg, "vision_config", None)
         ds_indices = getattr(vision_cfg, "deepstack_visual_indexes", None)
         if vision_cfg is not None and ds_indices:

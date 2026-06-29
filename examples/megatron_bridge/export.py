@@ -144,14 +144,9 @@ def main(args: argparse.Namespace):
     print_rank_0(
         f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."
     )
-    # TODO: Support exporting quantized VLMs. export_mcore_gpt_to_hf uses modelopt's own per-arch
-    # mcore<->HF mappings (mcore_qwen.py, ...), which don't cover Qwen3.5-VL / Gemma3-VL. Rather than
-    # authoring new per-model mappings, route the megatron->HF quant export through Megatron-Bridge's
-    # AutoBridge.export_hf_weights_quant(quantization_checker, quant_fn, quant_block_size): it reuses
-    # the bridge's per-model mapping (covering these VLMs plus the vision tower/projector, which the
-    # checker leaves in full precision), so modelopt only supplies the checker + pack/scale fn and the
-    # hf_quant_config (KV-cache scales need a separate path). quantize.py already saves the
-    # quantized-LM VLM Megatron checkpoint.
+    # TODO (OMNIML-5366): quantized-VLM HF export. export_mcore_gpt_to_hf's per-arch mappings don't
+    # cover Qwen3.5-VL / Gemma3-VL; See if Megatron-Bridge's AutoBridge.export_hf_weights_quant can be
+    # used instead.
     export_mcore_gpt_to_hf(
         unwrapped_model,
         args.hf_model_name_or_path,
