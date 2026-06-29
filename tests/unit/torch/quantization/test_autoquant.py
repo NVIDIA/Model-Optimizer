@@ -172,25 +172,24 @@ def test_quant_recipe_hparam_zero_cost_weight():
 
 
 def test_quant_recipe_hparam_cost_weight_and_effective_bits_compose():
-    """cost_weight (active_moe) and effective_bits (recipe override) stack multiplicatively."""
+    """cost_weight (active_moe) and effective_bits stack multiplicatively in get_cost."""
     model_test = mtq.quantize(torch.nn.Linear(4, 16), mtq.NVFP4_DEFAULT_CFG)
     numel = model_test.weight.numel()
-
-    # NVFP4 routed expert in active-MoE mode: cost_weight = expert ratio, effective_bits = 4.5.
-    override = QuantRecipe({**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 4.5}, name="NVFP4_4P5")
     hparam = QuantRecipeHparam(
-        [override],
+        [QuantRecipe(mtq.NVFP4_DEFAULT_CFG)],
         quant_modules=[model_test],
         quant_module_names=["layers.0.mlp.experts.0.down_proj"],
         cost_weight=0.03125,
     )
 
-    # Both factors apply: numel * cost_weight * (effective_bits / 16).
-    assert hparam.get_cost(override) == pytest.approx(numel * 0.03125 * (4.5 / 16))
-    # Without the override the same recipe would use the num_bits heuristic (4.0 / 16 = 0.25).
+    # NVFP4's library-default effective_bits (4.5, from configs/numerics/nvfp4) stacks with cost_weight:
+    # numel * cost_weight * (effective_bits / 16).
     assert hparam.get_cost(QuantRecipe(mtq.NVFP4_DEFAULT_CFG)) == pytest.approx(
-        numel * 0.03125 * 0.25
+        numel * 0.03125 * (4.5 / 16)
     )
+    # A recipe-level effective_bits override (8.0) wins over the library default and still stacks.
+    override = QuantRecipe({**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 8.0}, name="NVFP4_8B")
+    assert hparam.get_cost(override) == pytest.approx(numel * 0.03125 * 0.5)
 
 
 def test_auto_quantize_cost_model_excludes_module_name_patterns():
@@ -509,29 +508,30 @@ def test_data_parallel_auto_quantize(skip_on_windows):
 
 
 def test_estimate_quant_compression():
+    # NVFP4 weight/input carry effective_bits=4.5 from configs/numerics/nvfp4 -> 4.5/16 = 0.28125.
     nvfp4_affine_kv_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AFFINE_KV_CFG)
-    assert estimate_quant_compression(nvfp4_affine_kv_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_affine_kv_cfg) == 0.28125
 
     nvfp4_awq_clip_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_CLIP_CFG)
-    assert estimate_quant_compression(nvfp4_awq_clip_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_clip_cfg) == 0.28125
 
     nvfp4_awq_full_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_FULL_CFG)
-    assert estimate_quant_compression(nvfp4_awq_full_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_full_cfg) == 0.28125
 
     nvfp4_awq_lite_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_LITE_CFG)
-    assert estimate_quant_compression(nvfp4_awq_lite_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_lite_cfg) == 0.28125
 
     nvfp4_default_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG)
-    assert estimate_quant_compression(nvfp4_default_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_default_cfg) == 0.28125
 
     nvfp4_kv_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_KV_CFG)
-    assert estimate_quant_compression(nvfp4_kv_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_kv_cfg) == 0.28125
 
     nvfp4_kv_rotate_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_KV_ROTATE_CFG)
-    assert estimate_quant_compression(nvfp4_kv_rotate_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_kv_rotate_cfg) == 0.28125
 
     nvfp4_svdquant_default_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_SVDQUANT_DEFAULT_CFG)
-    assert estimate_quant_compression(nvfp4_svdquant_default_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_svdquant_default_cfg) == 0.28125
 
     int8_default_cfg = mtq.config.QuantizeConfig(**mtq.INT8_DEFAULT_CFG)
     assert estimate_quant_compression(int8_default_cfg) == 0.5
@@ -579,14 +579,15 @@ def test_estimate_quant_compression():
 
 
 def test_estimate_quant_compression_effective_bits_override():
-    """Recipe-level ``QuantizeConfig.effective_bits`` overrides the num_bits heuristic; unset falls back to it."""
-    # NVFP4 — heuristic returns 4.0 bits / 16 = 0.25, but true effective bits is 4.5.
+    """Recipe-level ``QuantizeConfig.effective_bits`` overrides the per-entry library default."""
+    # NVFP4 weight carries effective_bits=4.5 from configs/numerics/nvfp4 (per-entry default).
     nvfp4_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG)
-    assert nvfp4_cfg.effective_bits is None
-    assert estimate_quant_compression(nvfp4_cfg) == 0.25  # heuristic baseline
+    assert nvfp4_cfg.effective_bits is None  # no recipe-level override
+    assert estimate_quant_compression(nvfp4_cfg) == 4.5 / 16.0  # per-entry library default
 
-    nvfp4_cfg_overridden = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=4.5)
-    assert estimate_quant_compression(nvfp4_cfg_overridden) == 4.5 / 16.0
+    # A recipe-level QuantizeConfig.effective_bits override wins over the per-entry default.
+    nvfp4_cfg_overridden = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=8.0)
+    assert estimate_quant_compression(nvfp4_cfg_overridden) == 8.0 / 16.0
 
     # Override can also represent a higher cost (e.g., conservative for a sensitive recipe).
     nvfp4_cfg_high = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=16.0)
