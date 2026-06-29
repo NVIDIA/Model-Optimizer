@@ -288,3 +288,51 @@ def test_autoquant_cli_flags_have_recipe_mapping(monkeypatch):
         f"Unmapped autoquant CLI flags (add to recipe schema + mapping): {unmapped}"
     )
     assert all(covered.values()), f"A mapped recipe field is missing from the schema: {covered}"
+
+
+def test_qwen36_recipe_disabled_layers_match_cli_introspection(monkeypatch):
+    """The Qwen3.6 model recipe's disabled_layers equal the CLI's introspected set.
+
+    F-equivalence guard: the recipe carries arch-disabled patterns explicitly, and they must
+    match example_utils._get_auto_quantize_disabled_layers for a Qwen model. If the introspection
+    changes without updating the recipe, this fails (drift detector). Compared as sets since
+    disabled_layers is order-independent (fnmatch membership).
+    """
+    from modelopt.recipe import load_recipe
+
+    example_utils = _import_example_utils(monkeypatch)
+    monkeypatch.setattr(example_utils, "is_multimodal_model", lambda model: False)
+    qwen_model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3_moe"))
+
+    recipe = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe"
+    )
+    assert set(recipe.auto_quantize.disabled_layers) == set(
+        example_utils._get_auto_quantize_disabled_layers(qwen_model)
+    )
+
+
+def test_recipe_with_explicit_disabled_layers_matches_cli(monkeypatch):
+    """A recipe that sets disabled_layers explicitly feeds mtq the same inputs as the CLI."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "dummy",
+        "--qformat",
+        "fp8,w4a16_nvfp4",
+        "--auto_quantize_bits",
+        "6.0",
+    )
+    introspected = ["*shared_expert_gate*", "*mlp.gate.*", "*router*"]
+    monkeypatch.setattr(hf_ptq, "_get_auto_quantize_disabled_layers", lambda m: list(introspected))
+    monkeypatch.setattr(hf_ptq, "_get_auto_quantize_cost_excluded_patterns", lambda m: [])
+    model = SimpleNamespace()
+
+    # Recipe carries the SAME disabled set explicitly (replace semantics).
+    recipe_cfg = _recipe_config_from_cli_args(args).model_copy(
+        update={"disabled_layers": list(introspected)}
+    )
+    recipe_inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(recipe_cfg, args, model)
+    cli_inputs = _cli_expected_mtq_inputs(hf_ptq, args, model)
+    assert recipe_inputs["disabled_layers"] == cli_inputs["disabled_layers"]
+    assert recipe_inputs == cli_inputs
