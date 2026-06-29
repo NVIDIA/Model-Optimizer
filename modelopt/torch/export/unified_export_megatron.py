@@ -376,6 +376,9 @@ class GPTModelExporter:
                 },
                 "quantization": quantization_config,
             }
+            if "NVFP4" in quantization:
+                # for vllm, the group size is required
+                hf_quant_config["quantization"]["group_size"] = 16
             with open(save_directory + "/hf_quant_config.json", "w") as f:
                 json.dump(self._hf_quant_config, f, indent=4)
 
