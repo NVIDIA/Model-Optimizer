@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Equivalence-test variant: identical to w4a16_nvfp4_fp8_at_6p0bits-active_moe.yaml but
+# WITHOUT per-candidate effective_bits, so the LP uses the num_bits heuristic (NVFP4 = 4.0,
+# FP8 = 8) — matching the bare CLI command, which has no effective_bits. Use this to verify
+# the recipe path is byte-identical to the CLI; use the non-heuristic recipe for corrected cost.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  fp8: configs/ptq/presets/model/fp8
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+
+metadata:
+  recipe_type: auto_quantize
+  description: >-
+    Equivalence baseline: mixed FP8 + NVFP4-weight-only at 6.0 effective bits, active-MoE
+    cost model (expert ratio 0.03125), num_bits heuristic (no effective_bits override).
+
+auto_quantize:
+  constraints:
+    effective_bits: 6.0
+    cost_model: active_moe
+    cost:
+      active_moe_expert_ratio: 0.03125
+
+  candidate_formats:
+    - $import: fp8
+    - $import: w4a16_nvfp4
+
+  auto_quantize_method: gradient
+  num_score_steps: 128
+  # kv_cache omitted -> falls back to --kv_cache_qformat (none in the reference command).

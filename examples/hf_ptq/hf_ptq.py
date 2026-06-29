@@ -58,7 +58,7 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
-from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import (
     KV_CACHE_NONE,
     KV_QUANT_CFG_CHOICES,
@@ -230,6 +230,7 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
+    autoquant_gradient_recipe: bool = False,
 ) -> tuple[DataLoader | _DeviceDataLoader, str | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
@@ -295,7 +296,7 @@ def make_calib_dataloader(
         # Labels are only needed for gradient-based auto_quantize
         include_labels = (
             args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
-        )
+        ) or autoquant_gradient_recipe
 
         calib_dataloader = get_dataset_dataloader(
             dataset_name=args.dataset,
@@ -435,6 +436,155 @@ def auto_quantize(
             with mtq.set_quantizer_by_cfg_context(
                 language_model,
                 [{"quantizer_name": "*", "enable": False}, *kv_cache_quant_cfg],
+            ):
+                mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
+    return language_model
+
+
+def _canonical_candidate_dict(fmt) -> dict:
+    """Return a candidate as a known preset dict when it matches one, else its full dump.
+
+    Mirrors the CLI (which passes ``QUANT_CFG_CHOICES[name]`` directly): matching the preset
+    makes the search name the candidate after the preset (e.g. FP8_DEFAULT_CFG) instead of
+    CUSTOM_N, keeping format identity consistent with CLI-produced auto_quantize checkpoints.
+    """
+    stripped = fmt.model_dump(exclude_unset=True)
+    for preset in QUANT_CFG_CHOICES.values():
+        if preset == stripped:
+            return preset
+    return fmt.model_dump()
+
+
+def _mtq_inputs_from_auto_quantize_config(
+    aq_config, args: argparse.Namespace, search_model: torch.nn.Module
+) -> dict:
+    """Map a resolved AutoQuantizeConfig to mtq.auto_quantize inputs.
+
+    Single, testable place where a recipe maps to mtq inputs; mirrors the CLI defaults
+    (model-derived disabled layers, cost exclusions, KV fallback, preset candidate identity)
+    so the recipe path stays equivalent to the CLI path.
+    """
+    constraints = aq_config.constraints.model_dump(exclude_none=True)
+    excluded = _get_auto_quantize_cost_excluded_patterns(search_model)
+    if excluded:
+        constraints.setdefault("cost", {})[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = excluded
+    if aq_config.kv_cache is not None:
+        kv_cache_quant_cfg = aq_config.kv_cache.model_dump()
+    elif args.kv_cache_qformat == KV_CACHE_NONE:
+        kv_cache_quant_cfg = None
+    else:
+        kv_cache_quant_cfg = copy.deepcopy(KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])
+    return {
+        "constraints": constraints,
+        "quantization_formats": [
+            _canonical_candidate_dict(fmt) for fmt in aq_config.candidate_formats
+        ],
+        "disabled_layers": aq_config.disabled_layers
+        or _get_auto_quantize_disabled_layers(search_model),
+        "kv_cache_quant_cfg": kv_cache_quant_cfg,
+        "method": aq_config.auto_quantize_method,
+        "num_score_steps": aq_config.num_score_steps,
+    }
+
+
+def auto_quantize_recipe(
+    args: argparse.Namespace,
+    language_model: torch.nn.Module,
+    calib_dataloader: DataLoader,
+    aq_config,
+    full_model: torch.nn.Module | None = None,
+):
+    """Recipe-driven auto_quantize, organized around an AutoQuantizeConfig.
+
+    Forward-looking (recipe-only) entry point. The CLI ``auto_quantize`` helper is left
+    untouched as the equivalence baseline and will be retired once the recipe path is verified.
+    """
+    if args.calib_with_images:
+        raise NotImplementedError(
+            "AutoQuantize with image-text calibration is not supported yet. "
+            "Please run plain PTQ (e.g., --qformat nvfp4) with --calib_with_images."
+        )
+    assert args.inference_pipeline_parallel <= 1, (
+        "Auto Quantization is not supported for pipeline parallel size > 1"
+    )
+
+    inputs = _mtq_inputs_from_auto_quantize_config(aq_config, args, full_model or language_model)
+
+    # base-model lm_head handling (mirrors the CLI helper)
+    is_base_model = (
+        full_model is not None
+        and language_model is not full_model
+        and not hasattr(language_model, "lm_head")
+        and hasattr(full_model, "lm_head")
+    )
+    if is_base_model:
+        assert full_model is not None
+        lm_head = full_model.lm_head
+
+        def loss_func(output, data):
+            logits = lm_head(output.last_hidden_state)
+            labels = data["labels"]
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            return torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
+    else:
+
+        def loss_func(output, data):
+            return output.loss
+
+    if inputs["method"] == "gradient":
+
+        def forward_step(model, batch):
+            inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
+            return model(**inputs_)
+
+    elif inputs["method"] == "kl_div":
+
+        def forward_step(model, batch):
+            inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
+            output = model(**inputs_)
+            if is_base_model:
+                assert full_model is not None
+                return full_model.lm_head(output.last_hidden_state)
+            return output.logits
+
+    else:
+        raise ValueError(
+            f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
+        )
+
+    language_model, _ = mtq.auto_quantize(
+        language_model,
+        constraints=inputs["constraints"],
+        data_loader=calib_dataloader,
+        forward_step=forward_step,
+        loss_func=loss_func,
+        quantization_formats=inputs["quantization_formats"],
+        num_calib_steps=len(calib_dataloader),
+        num_score_steps=min(
+            len(calib_dataloader), max(inputs["num_score_steps"] // args.batch_size, 1)
+        ),
+        verbose=True,
+        disabled_layers=inputs["disabled_layers"],
+        method=inputs["method"],
+        checkpoint=args.auto_quantize_checkpoint,
+    )
+
+    # KV cache quantization is uniform; applied after the LP search.
+    kv_cache_quant_cfg = inputs["kv_cache_quant_cfg"]
+    calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
+    print(f"{'Enable' if kv_cache_quant_cfg is not None else 'Disable'} KV cache quantization")
+    if kv_cache_quant_cfg is not None:
+        kv_entries = [
+            e for e in copy.deepcopy(kv_cache_quant_cfg["quant_cfg"]) if e["quantizer_name"] != "*"
+        ]
+        mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_entries)
+        if not _kv_cfg_uses_constant_amax(kv_entries):
+            with mtq.set_quantizer_by_cfg_context(
+                language_model,
+                [{"quantizer_name": "*", "enable": False}, *kv_entries],
             ):
                 mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
     return language_model
@@ -1005,9 +1155,10 @@ def quantize_main(
     if args.recipe is not None and not args.auto_quantize_bits:
         print(f"Use recipe {args.recipe} for quantization")
         recipe = load_recipe(args.recipe)
-        if not isinstance(recipe, ModelOptPTQRecipe):
+        if not isinstance(recipe, (ModelOptPTQRecipe, ModelOptAutoQuantizeRecipe)):
             raise TypeError(
-                f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
+                f"Expected PTQ or AutoQuantize recipe, but got {type(recipe).__name__} "
+                f"from {args.recipe}"
             )
 
     def _is_layerwise(obj):
@@ -1059,7 +1210,9 @@ def quantize_main(
             else:
                 sample_input_single_batch = None
 
-            run_auto_quant = args.auto_quantize_bits is not None
+            run_auto_quant = args.auto_quantize_bits is not None or isinstance(
+                recipe, ModelOptAutoQuantizeRecipe
+            )
 
             args.batch_size = get_max_batch_size(
                 language_model,
@@ -1073,7 +1226,16 @@ def quantize_main(
     print(f"Use calib batch_size {args.batch_size}")
 
     calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
-        args, language_model, processor, tokenizer, device, model_type
+        args,
+        language_model,
+        processor,
+        tokenizer,
+        device,
+        model_type,
+        autoquant_gradient_recipe=(
+            isinstance(recipe, ModelOptAutoQuantizeRecipe)
+            and recipe.auto_quantize.auto_quantize_method == "gradient"
+        ),
     )
 
     # Detect if this is a Nemotron VL model using architecture-based detection
@@ -1102,6 +1264,17 @@ def quantize_main(
             auto_quantize_method=args.auto_quantize_method,
             auto_quantize_score_size=args.auto_quantize_score_size,
             auto_quantize_checkpoint=args.auto_quantize_checkpoint,
+            full_model=full_model,
+        )
+
+    elif isinstance(recipe, ModelOptAutoQuantizeRecipe):
+        # Recipe-driven auto_quantize (forward-looking path; the CLI branch above stays the
+        # untouched equivalence baseline).
+        auto_quantize_recipe(
+            args,
+            full_model,
+            calib_dataloader,
+            recipe.auto_quantize,
             full_model=full_model,
         )
 
