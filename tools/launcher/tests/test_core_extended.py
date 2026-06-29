@@ -143,6 +143,41 @@ class TestSandboxPipelineExtended:
         assert pipeline.tasks[0].slurm_config.container == "ubuntu:24.04"
         assert pipeline.tasks[0].slurm_config.gpus_per_node is None
 
+    def test_slurm_repair_uses_raw_yaml_keys_for_default_equal_values(self, monkeypatch, tmp_yaml):
+        """Inline --yaml repair preserves explicit values equal to dataclass defaults."""
+
+        def factory():
+            return SlurmConfig(
+                host="cluster.example.com",
+                partition="factory_partition",
+                gpus_per_node=1,
+            )
+
+        yaml_path = tmp_yaml(
+            """
+job_name: smoke
+pipeline:
+  task_0:
+    script: hostname.sh
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      gpus_per_node:
+"""
+        )
+        monkeypatch.setattr(core.sys, "argv", ["launch.py", "--yaml", yaml_path])
+        monkeypatch.setitem(core._FACTORY_REGISTRY, "slurm_factory", factory)
+
+        task = SandboxTask0(
+            script="hostname.sh",
+            slurm_config=SlurmConfig(host=None, partition="batch", gpus_per_node=None),
+        )
+        pipeline = SandboxPipeline(task_0=task)
+
+        assert pipeline.tasks[0].slurm_config.host == "cluster.example.com"
+        assert pipeline.tasks[0].slurm_config.partition == "batch"
+        assert pipeline.tasks[0].slurm_config.gpus_per_node is None
+
 
 class TestGitInfo:
     """Direct tests for _git_info helper."""
