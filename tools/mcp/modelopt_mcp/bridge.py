@@ -574,7 +574,7 @@ def verify_docker_setup_impl() -> dict:
     # invoking the docker CLI by name with a fixed argv list, no
     # shell-interpretation, no untrusted input.
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B603 B607 - fixed docker CLI argv; no shell.
             ["docker", "info"],
             capture_output=True,
             text=True,
@@ -628,7 +628,7 @@ def verify_docker_setup_impl() -> dict:
     # runtime when nvidia-ctk runtime configure was last invoked.
     # B603/B607 same false-positive shape as daemon check.
     try:
-        gpu = subprocess.run(
+        gpu = subprocess.run(  # nosec B603 B607 - fixed docker CLI argv; no shell.
             ["docker", "info", "--format", "{{json .}}"],
             capture_output=True,
             text=True,
@@ -701,7 +701,7 @@ def verify_slurm_setup_impl(
         expanded_socket = os.path.expanduser(control_socket)
         check_target = f"{cluster_user}@{cluster_host}" if cluster_user else cluster_host
         try:
-            check = subprocess.run(
+            check = subprocess.run(  # nosec B603 B607 - fixed ssh argv; no shell.
                 [
                     "ssh",
                     "-O",
@@ -762,7 +762,7 @@ def verify_slurm_setup_impl(
     # B603/B607 false positive — `ssh` invoked by name with a controlled
     # argv (BatchMode, ConnectTimeout, identity path, target). No shell.
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B603 - fixed ssh CLI argv; no shell.
             argv,
             capture_output=True,
             text=True,
