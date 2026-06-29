@@ -24,7 +24,7 @@ import json
 import os
 import re
 import shlex
-import subprocess
+import subprocess  # nosec B404
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -313,7 +313,7 @@ class _ControlMasterSession:
     def run(self, command: str, hide: bool = True, warn: bool = False, **kwargs):
         if self.pre_command:
             command = f"{self.pre_command} && {command}"
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B603 B607 - fixed ssh argv, no shell.
             [
                 "ssh",
                 "-p",
@@ -341,7 +341,7 @@ class _ControlMasterSession:
 
     def local(self, command: str, hide: bool = True, warn: bool = False, **kwargs):
         command = self._inject_controlmaster_rsh(command)
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B603 - shlex-split NeMo Run command, no shell.
             shlex.split(command),
             capture_output=True,
             text=True,
@@ -381,7 +381,7 @@ class ControlMasterSSHTunnel(run.SSHTunnel):
         sock_path = self._control_socket_path()
         if not sock_path or not os.path.exists(sock_path):
             return False
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B603 B607 - fixed ssh argv, no shell.
             [
                 "ssh",
                 "-p",
