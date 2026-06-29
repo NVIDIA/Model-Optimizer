@@ -8,14 +8,14 @@
 #
 # MiniMax-M2.7 specifics:
 #   - 229B MoE, trust_remote_code, needs TP=4 per serve replica (each replica = 1 node).
-#   - Custom chat_template_train.jinja for the Ministral chat format.
+#   - Custom chat_template_train.jinja for the MiniMax chat format.
 #   - The DFlash draft is Qwen3-architecture (5 layers); target/draft architectures
 #     are independent by design.
 #   - Mask token id 200054 (reserved row in MiniMax-M2.7 embedding).
 #   - YaRN rope_scaling at export for long context (factor = 196608/4096 = 48).
 #
-# Capture ids: build_target_layer_ids(num_orig=64, num_draft=5)=[1,16,31,46,61]
-# -> +1 for embedding = [2,17,32,47,62], append final layer 64.
+# Capture ids: build_target_layer_ids(num_orig=62, num_draft=5)=[1,16,30,44,59]
+# -> +1 for embedding = [2,17,31,45,60], append final layer 62.
 # 6 captured = 5 aux layers + final output for self-logit distillation.
 #
 # 3-step pipeline:
@@ -97,7 +97,7 @@ pipeline:
       - dflash.dflash_export_rope_scaling.mscale_all_dim=1.0
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
-      - EAGLE_CAPTURE_IDS: "[2,17,32,47,62,64]"
+      - EAGLE_CAPTURE_IDS: "[2,17,31,45,60,62]"
       - SERVE_NODES: "2"
       - SERVE_TP: "4"
       - STREAMING_NUM_WORKERS: "1"
