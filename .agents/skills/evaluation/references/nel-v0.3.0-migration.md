@@ -270,10 +270,15 @@ All require the harbor package (`pip install nemo-evaluator[harbor]`) + a sandbo
 
 **Note:** *every* terminal-bench variant executes through Harbor (`HarborEnvironment` + sandbox) — only the
 invocation differs. **v1 / -hard / -hard-aa-split** are `@register` built-in *names* (subclasses of
-`HarborEnvironment` that auto-download + map to Harbor format), so you run `- name: terminal-bench-v1`.
-**2.0 / 2.1** aren't registered as names, so you run them as `- playbook: terminal_bench_2` pointing at the
-`harbor://` dataset. None of them is "non-Harbor"; the built-in-vs-playbook split is just how you reference
-them, not a different engine path.
+`HarborEnvironment` that auto-download + map to Harbor format), so you reference them as
+`- name: terminal-bench-v1` — but you still add `solver: {type: harbor}` + a `sandbox:` yourself, since no
+playbook bundles them. **2.0 / 2.1** aren't registered as names, so you run them as `- playbook: terminal_bench_2`,
+which bundles the `harbor://` dataset + solver + sandbox for you. None of them is "non-Harbor"; the
+built-in-vs-playbook split is just how you reference them, not a different engine path.
+
+Both forms are in [`r030_harbor.yaml`](../recipes/examples/r030_harbor.yaml) side by side: the active
+`- name: terminal-bench-hard` (registered name + explicit `solver`/`sandbox`) and a commented
+`- playbook: terminal_bench_2` alternative (bundled, with just a small deployment-specific `sandbox` override).
 
 
 ## Launch NEL v0.3.0

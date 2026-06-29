@@ -61,6 +61,23 @@ benchmarks:
         private_key_secret_arn: <from-SSM>   # both ARNs come from /<project>/ecs-sandbox/config
         public_key_secret_arn: <from-SSM>
 
+  # --- ALTERNATIVE: Terminal-Bench 2.0 (89 tasks) via its playbook --------------------------------
+  # Same Harbor backend, different invocation. The `terminal_bench_2` playbook bundles
+  #   name: harbor://terminal-bench@2.0 + solver:{type: harbor, agent: terminus-2}
+  #   + an ecs_fargate sandbox (cpu/memory/concurrency/stateful) — so you only overlay the
+  # deployment-specific bits below; they deep-merge onto the playbook (your values win).
+  # To use it instead, comment out the `- name: terminal-bench-hard` entry above and uncomment this:
+  # - playbook: terminal_bench_2
+  #   sandbox:
+  #     region: <region>                 # your harbor/ECS deployment region
+  #     # ecr_repository: <acct>.dkr.ecr.<region>.amazonaws.com/<repo>   # optional; else resolved from SSM
+  #     ssh_sidecar:
+  #       image: <ecr-account>.dkr.ecr.<region>.amazonaws.com/<repo>:terminalbench-ssh-sidecar__<hash>
+  #       ssh_ready_timeout_sec: 900.0
+  #       sshd_port: 52222
+  #       private_key_secret_arn: <from-SSM>
+  #       public_key_secret_arn: <from-SSM>
+
 cluster:
   type: slurm
   account: <your-slurm-account>
