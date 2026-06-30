@@ -26,16 +26,21 @@ It provides comprehensive TensorRT utilities including:
 - TensorRTPyBenchmark: Uses TensorRT Python API for direct engine profiling
 """
 
+import contextlib
 import ctypes
 import importlib.util
 import os
 import re
+import shlex
 import shutil
+import subprocess  # nosec B404
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import torch
@@ -144,6 +149,199 @@ class Benchmark(ABC):
             self.logger.warning(f"Failed to save logs to {file}: {e}")
 
 
+_SAFE_PATTERN = (
+    r"\[\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\]\s+\[I\]\s+"
+    r"Average over \d+ runs - GPU latency:\s*([\d.]+)\s*ms"
+)
+_STD_PATTERN = r"\[I\]\s+GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"
+
+_URL_PASSWORD_RE = re.compile(r"(://[^:/?#@]+):[^@/?#]+@")
+
+
+def _redact_url_password(s: str) -> str:
+    """Replace any ``scheme://user:password@host`` substring with ``user:******@host``.
+
+    Used so SSH passwords supplied via ``--remoteAutoTuningConfig`` don't leak
+    into log messages or exception strings.
+    """
+    return _URL_PASSWORD_RE.sub(r"\1:******@", s)
+
+
+def _build_base_trtexec_cmd(
+    *,
+    timing_runs: int,
+    warmup_runs: int,
+    engine_path: str,
+    timing_cache_file: str,
+    plugin_libraries: list[str] | None = None,
+    log: Any = None,
+) -> list[str]:
+    """Build the static portion of the trtexec command line (no ``--onnx=`` yet).
+
+    Plugin libraries that don't exist on disk are skipped with a warning if a
+    logger is supplied. The leading ``trtexec`` binary path is not included —
+    the caller is responsible for prepending it.
+
+    Args:
+        timing_runs: Value for ``--avgRuns`` and ``--iterations``.
+        warmup_runs: Value for ``--warmUp``.
+        engine_path: Path used for ``--saveEngine=``.
+        timing_cache_file: Path used for ``--timingCacheFile=``.
+        plugin_libraries: Paths to ``.so`` libraries for ``--staticPlugins``.
+        log: Optional logger used to warn about missing plugins and trace adds.
+    """
+    cmd = [
+        f"--avgRuns={timing_runs}",
+        f"--iterations={timing_runs}",
+        f"--warmUp={warmup_runs}",
+        "--stronglyTyped",
+        f"--saveEngine={engine_path}",
+        f"--timingCacheFile={timing_cache_file}",
+    ]
+    for plugin_lib in plugin_libraries or []:
+        plugin_path = Path(plugin_lib).resolve()
+        if not plugin_path.exists():
+            if log is not None:
+                log.warning(f"Plugin library not found: {plugin_path}")
+            continue
+        cmd.append(f"--staticPlugins={plugin_path}")
+        if log is not None:
+            log.debug(f"Added plugin library: {plugin_path}")
+    return cmd
+
+
+def _extract_remote_config_value(trtexec_args: list[str], *, log: Any = None) -> str | None:
+    """Find the value of ``--remoteAutoTuningConfig`` in ``trtexec_args``.
+
+    Supports both inline (``--remoteAutoTuningConfig=value``) and split
+    (``--remoteAutoTuningConfig value``) forms.
+
+    Returns:
+        The value as a string, or ``None`` if the flag is absent. Returning
+        an empty string is possible (e.g. ``--remoteAutoTuningConfig=``); the
+        caller decides whether to treat that as an error.
+
+    Raises:
+        ValueError: If the flag appears more than once, has no value at the
+            end of the list, or is malformed (e.g. missing the ``=``
+            separator). SSH passwords in malformed args are redacted before
+            being included in the error or debug log.
+    """
+    matches = [a for a in trtexec_args if "--remoteAutoTuningConfig" in a]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Exactly one --remoteAutoTuningConfig argument is required")
+
+    for i, arg in enumerate(trtexec_args):
+        if not arg.startswith("--remoteAutoTuningConfig"):
+            continue
+        if arg == "--remoteAutoTuningConfig":
+            if i + 1 >= len(trtexec_args):
+                raise ValueError("Missing value for --remoteAutoTuningConfig")
+            return trtexec_args[i + 1]
+        if arg.startswith("--remoteAutoTuningConfig="):
+            return arg.split("=", 1)[1]
+        # Malformed: starts with the flag name but neither uses ``=`` nor is
+        # the bare flag. Redact any embedded SSH password before surfacing.
+        redacted_arg = _redact_url_password(arg)
+        if log is not None:
+            log.debug(f"Parsing remoteAutoTuningConfig arg: {redacted_arg}")
+        raise ValueError(f"Malformed --remoteAutoTuningConfig argument: {redacted_arg}")
+    return None  # pragma: no cover — unreachable; ``matches`` proved presence
+
+
+@dataclass(frozen=True)
+class _RemoteAutotuningConfig:
+    """Resolved remote-autotuning destination parsed from a ``ssh://`` URL."""
+
+    user: str
+    password: str  # may be empty when no password was supplied
+    ip: str
+    port: int
+    options: dict[str, str]
+    bin_path: str  # dirname of ``remote_exec_path``
+    lib_path: str  # value of ``remote_lib_path``
+
+
+def _parse_remote_autotuning_url(url: str) -> _RemoteAutotuningConfig:
+    """Parse a ``--remoteAutoTuningConfig`` URL into structured fields.
+
+    Required URL form::
+
+        ssh://user[:password]@host[:port]?remote_exec_path=PATH&remote_lib_path=PATH
+
+    Raises:
+        ValueError: If the scheme is not ``ssh://``; if user or host are
+            missing or start with ``-`` (argv-smuggling guard, see
+            CVE-2017-1000117); or if required query parameters are missing
+            or duplicated. Duplicate keys are rejected explicitly because
+            silently collapsing them would produce empty remote paths
+            downstream.
+    """
+    if not url.startswith("ssh://"):
+        raise ValueError("Only 'ssh://' remote autotuning config URLs are supported")
+    parsed = urlparse(url)
+    if parsed.username is None:
+        raise ValueError("Unable to parse remote user from --remoteAutoTuningConfig")
+    if parsed.hostname is None:
+        raise ValueError("Unable to parse remote IP from --remoteAutoTuningConfig")
+    # Reject argv-smuggling attempts: a username or host that starts with ``-``
+    # would be reinterpreted as a flag by ssh/scp when we build
+    # ``f"{user}@{host}:..."`` (CVE-2017-1000117 class). ``urlparse`` itself
+    # does not filter these — e.g. ``ssh://-oProxyCommand=evil@host`` parses
+    # cleanly into ``username='-oProxyCommand=evil'``.
+    if parsed.username.startswith("-"):
+        raise ValueError(
+            "Remote user in --remoteAutoTuningConfig must not start with '-' (argv-smuggling guard)"
+        )
+    if parsed.hostname.startswith("-"):
+        raise ValueError(
+            "Remote host in --remoteAutoTuningConfig must not start with '-' (argv-smuggling guard)"
+        )
+
+    parsed_query = parse_qs(parsed.query)
+    duplicates = sorted(k for k, v in parsed_query.items() if len(v) > 1)
+    if duplicates:
+        raise ValueError(f"Duplicate query parameters in --remoteAutoTuningConfig: {duplicates}")
+    options = {k: v[0] for k, v in parsed_query.items()}
+
+    required_params = ["remote_exec_path", "remote_lib_path"]
+    missing = [p for p in required_params if p not in options]
+    if missing:
+        raise ValueError(
+            f"Missing required query parameters in --remoteAutoTuningConfig: {missing}"
+        )
+
+    return _RemoteAutotuningConfig(
+        user=parsed.username,
+        password=parsed.password or "",
+        ip=parsed.hostname,
+        port=parsed.port if parsed.port is not None else 22,
+        options=options,
+        bin_path=os.path.dirname(options["remote_exec_path"]),
+        lib_path=options["remote_lib_path"],
+    )
+
+
+def _ensure_remote_autotuning_flags(trtexec_args: list[str], *, log: Any = None) -> list[str]:
+    """Return ``trtexec_args`` with ``--safe`` and ``--skipInference`` appended if missing.
+
+    Remote autotuning requires both flags. A warning is emitted for each flag
+    that has to be injected so the user sees that their argv was modified.
+    """
+    result = list(trtexec_args)
+    for flag in ("--safe", "--skipInference"):
+        if flag in result:
+            continue
+        if log is not None:
+            log.warning(
+                f"Remote autotuning requires '{flag}' to be set. Adding it to trtexec arguments."
+            )
+        result.append(flag)
+    return result
+
+
 class TrtExecBenchmark(Benchmark):
     """TensorRT benchmark using trtexec command-line tool.
 
@@ -159,6 +357,7 @@ class TrtExecBenchmark(Benchmark):
         timing_runs: int = 10,
         plugin_libraries: list[str] | None = None,
         trtexec_args: list[str] | None = None,
+        network_timeout_seconds: float = 60 * 5,  # 5 minutes
     ):
         """Initialize the trtexec benchmark.
 
@@ -170,59 +369,62 @@ class TrtExecBenchmark(Benchmark):
             trtexec_args: Additional command-line arguments to pass to trtexec.
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
+        network_timeout_seconds: Timeout for network operations in seconds.
+            Default is 5 minutes.  This is the timeout for uploading an engine to the remote device
+            and running trtexec_safe.  If the timeout is exceeded, the benchmark will fail.
         """
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
-        self.trtexec_args = trtexec_args if trtexec_args is not None else []
+        self.trtexec_args = list(trtexec_args) if trtexec_args is not None else []
         self.temp_dir = tempfile.mkdtemp(prefix="trtexec_benchmark_")
         self.engine_path = os.path.join(self.temp_dir, "engine.trt")
         self.temp_model_path = os.path.join(self.temp_dir, "temp_model.onnx")
+        self.network_timeout_seconds = network_timeout_seconds
         self.logger.debug(f"Created temporary engine directory: {self.temp_dir}")
         self.logger.debug(f"Temporary model path: {self.temp_model_path}")
-        self.latency_pattern = r"\[I\]\s+Latency:.*?median\s*=\s*([\d.]+)\s*ms"
 
-        self._base_cmd = [
-            f"--avgRuns={self.timing_runs}",
-            f"--iterations={self.timing_runs}",
-            f"--warmUp={self.warmup_runs}",
-            "--stronglyTyped",
-            f"--saveEngine={self.engine_path}",
-            f"--timingCacheFile={self.timing_cache_file}",
-        ]
+        self._base_cmd = _build_base_trtexec_cmd(
+            timing_runs=self.timing_runs,
+            warmup_runs=self.warmup_runs,
+            engine_path=self.engine_path,
+            timing_cache_file=self.timing_cache_file,
+            plugin_libraries=self.plugin_libraries,
+            log=self.logger,
+        )
 
-        for plugin_lib in self.plugin_libraries:
-            plugin_path = Path(plugin_lib).resolve()
-            if not plugin_path.exists():
-                self.logger.warning(f"Plugin library not found: {plugin_path}")
-                continue
-            self._base_cmd.append(f"--staticPlugins={plugin_path}")
-            self.logger.debug(f"Added plugin library: {plugin_path}")
+        # Defaults for remote-autotuning fields; overwritten when configured.
+        self.has_remote_config: bool = False
+        self.remote_ip: str | None = None
+        self.remote_port: int = 22
+        self.remote_user: str = "root"
+        self.remote_password: str = ""
+        self.remote_engine_path: str = "trtexec_benchmark_model.trt"
+        self.remote_bin_path: str = "trtexec"
+        self.remote_lib_path: str = ""
 
-        trtexec_args = self.trtexec_args or []
-        has_remote_config = any("--remoteAutoTuningConfig" in arg for arg in trtexec_args)
-
-        if has_remote_config:
+        remote_value = _extract_remote_config_value(self.trtexec_args, log=self.logger)
+        if remote_value is not None:
+            self.has_remote_config = True
+            if not remote_value:
+                raise ValueError("Could not parse --remoteAutoTuningConfig argument")
+            config = _parse_remote_autotuning_url(remote_value)
+            self.remote_user = config.user
+            self.remote_password = config.password
+            self.remote_ip = config.ip
+            self.remote_port = config.port
+            self.remote_bin_path = config.bin_path
+            self.remote_lib_path = config.lib_path
             try:
                 _check_for_trtexec(min_version="10.15")
                 self.logger.debug("TensorRT Python API version >= 10.15 detected")
-                if "--safe" not in trtexec_args:
-                    self.logger.warning(
-                        "Remote autotuning requires '--safe' to be set. Adding it to trtexec arguments."
-                    )
-                    self.trtexec_args.append("--safe")
-                if "--skipInference" not in trtexec_args:
-                    self.logger.warning(
-                        "Remote autotuning requires '--skipInference' to be set. Adding it to trtexec arguments."
-                    )
-                    self.trtexec_args.append("--skipInference")
             except ImportError:
                 self.logger.warning(
-                    "Remote autotuning is not supported with TensorRT version < 10.15. "
-                    "Removing --remoteAutoTuningConfig from trtexec arguments"
+                    "Remote autotuning is not supported with TensorRT version < 10.15."
                 )
-                trtexec_args = [
-                    arg for arg in trtexec_args if "--remoteAutoTuningConfig" not in arg
-                ]
-        self._base_cmd.extend(trtexec_args)
+                raise
+            self.trtexec_args = _ensure_remote_autotuning_flags(self.trtexec_args, log=self.logger)
+
+        self.is_safe = "--safe" in self.trtexec_args
+        self._base_cmd.extend(self.trtexec_args)
 
         self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
 
@@ -264,7 +466,9 @@ class TrtExecBenchmark(Benchmark):
             cmd = [*self._base_cmd, f"--onnx={model_path}"]
             full_cmd = ["trtexec", *cmd]
             self.logger.debug(f"Running: {' '.join(full_cmd)}")
-            result = _run_trtexec(cmd)
+            # We do not specify a timeout for engine build since this could take a very long time
+            # trtexec has its own timeout wrt the remote timing server
+            result = _run_trtexec(cmd, timeout=None)
             self._write_log_file(
                 log_file,
                 "\n".join(
@@ -287,18 +491,119 @@ class TrtExecBenchmark(Benchmark):
                 self.logger.error(f"trtexec failed with return code {result.returncode}")
                 self.logger.error(f"stderr: {result.stderr}")
                 return float("inf")
+            latency_pattern = _STD_PATTERN
+            if self.has_remote_config and self.is_safe:
+                ssh_pass = []
+                if self.remote_password:
+                    ssh_pass.append("sshpass")
+                    ssh_pass.append("-p")
+                    ssh_pass.append(self.remote_password)
+                # need to push the model to the device and use trtexec_safe to run
+                scp_cmd = [
+                    "scp",
+                    "-P",
+                    str(self.remote_port),
+                    "-oStrictHostKeyChecking=accept-new",
+                    self.engine_path,
+                    f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
+                ]
+                scp_cmd = ssh_pass + scp_cmd
+                result = subprocess.run(
+                    scp_cmd, capture_output=True, text=True, timeout=self.network_timeout_seconds
+                )  # nosec B603
 
-            if not (match := re.search(self.latency_pattern, result.stdout, re.IGNORECASE)):
-                self.logger.warning("Could not parse median latency from trtexec output")
-                self.logger.debug(f"trtexec stdout:\n{result.stdout}")
+                if result.returncode != 0:
+                    self.logger.error(f"Failed to push engine to remote device: {result.stderr}")
+                    return float("inf")
+
+                @contextlib.contextmanager
+                def cleanup_remote_engine():
+                    try:
+                        yield
+                    finally:
+                        # Cleanup remote engine file after benchmarking to avoid disk filling up
+                        cleanup_cmd = [
+                            "ssh",
+                            "-p",
+                            str(self.remote_port),
+                            f"{self.remote_user}@{self.remote_ip}",
+                            f"rm -f {shlex.quote(self.remote_engine_path)}",
+                        ]
+                        cleanup_cmd = ssh_pass + cleanup_cmd
+                        try:
+                            subprocess.run(
+                                cleanup_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=self.network_timeout_seconds,
+                            )  # nosec B603
+                        except Exception as e:
+                            self.logger.warning(f"Error during remote engine cleanup: {e}")
+
+                with cleanup_remote_engine():
+                    ld_path = (
+                        f"LD_LIBRARY_PATH={shlex.quote(self.remote_lib_path)}:$LD_LIBRARY_PATH"
+                    )
+                    trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec_safe')}"
+                    trtexec_safe_cmd = [
+                        "ssh",
+                        "-p",
+                        f"{self.remote_port}",
+                        f"{self.remote_user}@{self.remote_ip}",
+                        f"{ld_path} {shlex.quote(trt_path)} --useCudaGraph "
+                        f"--loadEngine={shlex.quote(self.remote_engine_path)}",
+                    ]
+
+                    trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
+                    result = subprocess.run(
+                        trtexec_safe_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.network_timeout_seconds,
+                    )  # nosec B603
+                    latency_pattern = _SAFE_PATTERN
+                    if result.returncode != 0:
+                        # fallback and try trtexec with "--safe" in case this is a safety proxy target
+                        trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec')}"
+                        trtexec_safe_cmd = [
+                            "ssh",
+                            "-p",
+                            f"{self.remote_port}",
+                            f"{self.remote_user}@{self.remote_ip}",
+                            f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraph "
+                            f"--loadEngine={shlex.quote(self.remote_engine_path)}",
+                        ]
+                        trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
+
+                        result = subprocess.run(
+                            trtexec_safe_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=self.network_timeout_seconds,
+                        )  # nosec B603
+                        latency_pattern = _STD_PATTERN
+            if result.returncode != 0:
+                self.logger.error(
+                    f"Failed to run trtexec_safe or trtexec with '--safe'\n{result.stdout}\n{result.stderr}"
+                )
+                return float("inf")
+            if not (match := re.search(latency_pattern, result.stdout, re.IGNORECASE)):
+                # this could be due to creating a degenerate onnx file that can't be engine built.
+                # thus not a hard failure
+                self.logger.warning(f"trtexec stdout:\n{result.stdout}")
+                self.logger.error("Could not parse median latency from trtexec output")
                 return float("inf")
             latency = float(match.group(1))
             self.logger.info(f"TrtExec benchmark (median): {latency:.2f} ms")
             return latency
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             self.logger.error(
-                "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
+                f"{e.filename} not found, please ensure system dependencies are installed and in the PATH: \n"
+                "ssh, scp, sshpass, trtexec"
             )
+            return float("inf")
+        except subprocess.TimeoutExpired as e:
+            self.logger.error(f"Benchmark timed out: {e}")
             return float("inf")
         except Exception as e:
             self.logger.error(f"Benchmark failed: {e}")
