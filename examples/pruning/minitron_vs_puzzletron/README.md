@@ -158,7 +158,7 @@ Once inside the container, uninstall the pre-existing `nvidia-modelopt`, `lm_eva
 /usr/bin/python3 -m pip uninstall -y nvidia-modelopt
 python -m pip uninstall -y lm_eval nvidia_lm_eval
 cd /opt/Model-Optimizer && python -m pip install -e ".[hf,puzzletron]"
-python -m pip install -r /opt/Model-Optimizer/examples/puzzletron/requirements.txt
+python -m pip install -r /opt/Model-Optimizer/examples/pruning/puzzletron/requirements.txt
 ```
 
 ### Base model
@@ -621,7 +621,7 @@ As shown in [Section 5.4](#54-benchmark-specific-behavior), the relative ranking
 - **More Minitron Results:** Sreenivas et al., [*LLM Pruning and Distillation in Practice: The Minitron Approach*](https://arxiv.org/pdf/2408.11796), 2024.
 - **Puzzletron:** Bercovich et al., [*Puzzle: Distillation-Based NAS for Inference-Optimized LLMs*](https://arxiv.org/abs/2411.19146), 2024.
 - **NVIDIA ModelOpt:** [GitHub Repository](https://github.com/NVIDIA/Model-Optimizer)
-- **Llama Puzzletron Tutorial:** [Puzzletron Example on ModelOpt](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/puzzletron/README.md)
+- **Llama Puzzletron Tutorial:** [Puzzletron Example on ModelOpt](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/puzzletron/README.md)
 - **Model Compression and distillation with Megatron-Bridge:** [Megatron-Bridge Examples](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/README.md)
 - **Qwen3-8B:** [HuggingFace Model Card](https://huggingface.co/Qwen/Qwen3-8B)
 
@@ -631,7 +631,7 @@ As shown in [Section 5.4](#54-benchmark-specific-behavior), the relative ranking
 
 ## Appendix: Serving a Puzzletron Model with vLLM
 
-Puzzletron's heterogeneous models require a few extra steps to serve with vLLM. Below is the procedure for the Scenario 1 Puzzletron model (`distilled_Qwen3-8B-Puzzle-7B`); the same steps apply to any Puzzletron checkpoint. The walkthrough below is kept self-contained to reproduce the exact throughput-vs-latency curves in [Section 7](#7-inference-performance) end-to-end. For the canonical, kept-up-to-date deployment instructions, see also [Deploy compressed model in vLLM](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron#deploy-compressed-model-in-vllm) in the Puzzletron example.
+Puzzletron's heterogeneous models require a few extra steps to serve with vLLM. Below is the procedure for the Scenario 1 Puzzletron model (`distilled_Qwen3-8B-Puzzle-7B`); the same steps apply to any Puzzletron checkpoint. The walkthrough below is kept self-contained to reproduce the exact throughput-vs-latency curves in [Section 7](#7-inference-performance) end-to-end. For the canonical, kept-up-to-date deployment instructions, see also [Deploy compressed model in vLLM](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning/puzzletron#deploy-compressed-model-in-vllm) in the Puzzletron example.
 
 <details>
 <summary><b>Reproduction steps</b> — install vLLM, patch config, serve, benchmark with AIPerf (click to expand)</summary>

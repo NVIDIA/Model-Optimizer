@@ -8,7 +8,7 @@ Evaluate AnyModel checkpoints by deploying a local OpenAI-compatible completions
 This flow requires Ray for serving the model and NeMo Export-Deploy (included in NeMo containers):
 
 ```bash
-pip install -r examples/puzzletron/requirements.txt
+pip install -r examples/pruning/puzzletron/requirements.txt
 ```
 
 **1. Deploy the model (2 GPUs example):**
@@ -30,7 +30,7 @@ docker run \
   --rm -it \
   -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
   -v ${MODELOPT_DIR}/modelopt:/opt/venv/lib/python3.12/site-packages/modelopt \
-  -v ${MODELOPT_DIR}/examples/puzzletron/evaluation/hf_deployable_anymodel.py:/opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py \
+  -v ${MODELOPT_DIR}/examples/pruning/puzzletron/evaluation/hf_deployable_anymodel.py:/opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py \
   -w /opt/Model-Optimizer/examples/megatron_bridge \
   ${DOCKER_IMAGE} bash
 ```
@@ -41,7 +41,7 @@ Alternatively you can manually update the file
 # Install the AnyModel-patched deployable (first time only: backs up the original)
 # /opt/Export-Deploy is the default path in NeMo containers — adjust if needed
 cp /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py.bak
-cp examples/puzzletron/evaluation/hf_deployable_anymodel.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py
+cp examples/pruning/puzzletron/evaluation/hf_deployable_anymodel.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py
 ```
 
 Now start ray server and deploy the model
@@ -64,7 +64,7 @@ eval-factory run_eval \
     --model_id anymodel-hf \
     --model_type completions \
     --model_url http://0.0.0.0:8083/v1/completions/ \
-    --output_dir examples/puzzletron/evals/mmlu_anymodel
+    --output_dir examples/pruning/puzzletron/evals/mmlu_anymodel
 ```
 
 For a quick debug run, add `--overrides "config.params.limit_samples=5"`.

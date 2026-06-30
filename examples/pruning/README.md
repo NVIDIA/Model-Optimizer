@@ -7,7 +7,7 @@ Pruning can involve removal (prune) of Linear and Conv layers; and Transformer a
 This section focuses on applying Model Optimizer's state-of-the-art complementary pruning modes to enable you to search for the best subnet architecture from your provided base model:
 
 1. [Minitron](https://arxiv.org/pdf/2408.11796): A pruning method developed by NVIDIA Research for pruning GPT (and later extended to Mamba, MoE, and Hybrid Transformer Mamba) models in NVIDIA Megatron-LM (M-LM) or Megatron-Bridge (M-Bridge) framework. It uses the activation magnitudes to prune the embedding hidden size; mlp ffn hidden size; transformer attention heads; mamba heads and head dimension; MoE number of experts, ffn hidden size, and shared expert intermediate size; and number of layers of the model.
-1. [Puzzletron](../puzzletron/README.md): An advanced pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.
+1. [Puzzletron](puzzletron/README.md): An advanced pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.
 1. FastNAS: A pruning method recommended for Computer Vision models. Given a pretrained model, FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
 
 <div align="center">
@@ -184,7 +184,7 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 > *<sup>3.</sup>`num_attention_heads` pruning is not supported for some attention types — GatedDeltaNet (linear attention), gated attention (`attention_output_gate`, e.g. Qwen3.5) and Multi-Latent Attention (MLA, e.g. DeepSeek); for these only `hidden_size` is pruned.*
 
-> *<sup>4.</sup>Puzzletron operates on Hugging Face checkpoints via its `AnyModel` abstraction. New architectures can be added by writing a model descriptor + converter — see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md). Available configs are in the Puzzletron [configs](../puzzletron/configs/) directory.*
+> *<sup>4.</sup>Puzzletron operates on Hugging Face checkpoints via its `AnyModel` abstraction. New architectures can be added by writing a model descriptor + converter — see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md). Available configs are in the Puzzletron [configs](puzzletron/configs/) directory.*
 
 > *<sup>5.</sup>The MIP search produces a heterogeneous architecture (dimensions can differ per layer). Which dimensions are searched is model- and config-dependent.*
 
@@ -204,13 +204,13 @@ See [minitron/](minitron/README.md) for end-to-end tutorials and results.
 
 ### Puzzletron Pruning for LLMs (e.g. Llama, Qwen, Nemotron)
 
-Checkout the [Puzzletron README](../puzzletron/README.md) which showcases MIP-based NAS pruning that produces heterogeneous model architectures — varying FFN intermediate sizes per layer and selectively removing attention layers — to meet a target parameter count or memory budget.
+Checkout the [Puzzletron README](puzzletron/README.md) which showcases MIP-based NAS pruning that produces heterogeneous model architectures — varying FFN intermediate sizes per layer and selectively removing attention layers — to meet a target parameter count or memory budget.
 
-Supported models include Llama-3.1-8B-Instruct, Qwen3-8B, Qwen2.5-7B-Instruct, Nemotron-Nano-12B-v2, Mistral-Small-24B-Instruct-2501, and others via the [configs](../puzzletron/configs/) directory. See the [Puzzletron README](../puzzletron/README.md) for more details.
+Supported models include Llama-3.1-8B-Instruct, Qwen3-8B, Qwen2.5-7B-Instruct, Nemotron-Nano-12B-v2, Mistral-Small-24B-Instruct-2501, and others via the [configs](puzzletron/configs/) directory. See the [Puzzletron README](puzzletron/README.md) for more details.
 
 After compression, use [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) to recover accuracy.
 
-See [puzzletron/](puzzletron/README.md) for distillation results on Puzzletron-compressed models.
+See [puzzletron/DISTILLATION_RESULTS.md](puzzletron/DISTILLATION_RESULTS.md) for distillation results on Puzzletron-compressed models.
 
 ### FastNAS Pruning for PyTorch Computer Vision Models
 
