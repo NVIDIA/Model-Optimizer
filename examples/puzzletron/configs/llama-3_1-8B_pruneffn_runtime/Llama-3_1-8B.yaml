@@ -1,7 +1,7 @@
 defaults:
-  - ../llama-3_1-8B_pruneffn_memory/pruning/ffn_pruning@pruning
-  - ../llama-3_1-8B_pruneffn_memory/validate_solutions_defaults@scoring
-  - ../llama-3_1-8B_pruneffn_memory/validate_solutions_defaults@realize_model
+  - pruning: ffn_pruning
+  - scoring: ../validate_solutions_defaults
+  - realize_model: ../validate_solutions_defaults
   - bypass:
   - override hydra/hydra_logging: disabled
   - _self_
@@ -39,7 +39,7 @@ scoring:
   teacher_dir: ${to_path:${teacher_dir}}
   output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
 
-  eval_samples: 128
+  eval_samples: 16
   micro_batch_size: 1
   seed: 42
   shuffle_seed: 444
