@@ -1,0 +1,14 @@
+# Algorithm override as plain string
+_test:
+  description: "Algorithm string override replaces preset algorithm"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_algorithm: awq_lite
+
+version: "1.0"
+quantization:
+  preset: fp8
+  algorithm: awq_lite

@@ -1,0 +1,15 @@
+# FP8 PTQ — simplest preset recipe
+_test:
+  description: "FP8 preset resolves to quant_cfg with max algorithm"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: quantize_config
+    check_no_key: auto_quantize_kwargs
+    check_algorithm: max
+
+version: "1.0"
+quantization:
+  preset: fp8

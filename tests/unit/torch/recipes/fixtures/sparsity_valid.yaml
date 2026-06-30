@@ -1,0 +1,11 @@
+# Valid sparsity config
+_test:
+  description: "Valid sparsity section (0.5)"
+
+  validate:
+    expect_success: true
+
+version: "1.0"
+sparsity:
+  method: sparse_gpt
+  sparsity: 0.5

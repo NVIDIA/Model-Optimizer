@@ -1,0 +1,12 @@
+# Schema validation error: preset + weights mutually exclusive
+_test:
+  description: "Schema error: preset and custom weights are mutually exclusive"
+
+  validate:
+    expect_error: "Cannot specify both"
+
+version: "1.0"
+quantization:
+  preset: fp8
+  weights:
+    format: int8

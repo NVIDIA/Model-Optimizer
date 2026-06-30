@@ -1,0 +1,22 @@
+# Calibration section resolved and included
+_test:
+  description: "Calibration section resolves to result dict"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: calibration
+    check_config:
+      calibration:
+        dataset: wikitext
+        num_samples: 128
+        max_sequence_length: 2048
+
+version: "1.0"
+quantization:
+  preset: fp8
+  calibration:
+    dataset: wikitext
+    num_samples: 128
+    max_sequence_length: 2048
