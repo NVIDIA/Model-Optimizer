@@ -26,6 +26,30 @@ from ...utils.dummy_modules import DummyBlock
 __all__ = ["ModelDescriptor"]
 
 
+def _set_hybrid_override_pattern(lm_config: Any, pattern: str) -> None:
+    """Set ``hybrid_override_pattern`` on a config, handling read-only variants.
+
+    Older ``NemotronHConfig`` stored ``hybrid_override_pattern`` as a writable
+    attribute. Newer Transformers expose it as a read-only property derived from
+    ``layers_block_type``; for those we convert the pattern and assign the
+    backing field instead, using the config class's own ``_pattern_to_list`` so
+    the model-specific layer-type alphabet is respected.
+    """
+    try:
+        lm_config.hybrid_override_pattern = pattern
+        return
+    except AttributeError:
+        pass
+
+    pattern_to_list = getattr(type(lm_config), "_pattern_to_list", None)
+    if pattern_to_list is None:
+        raise AttributeError(
+            f"{type(lm_config).__name__}.hybrid_override_pattern is read-only and the config "
+            "provides no '_pattern_to_list' converter to set 'layers_block_type' instead."
+        )
+    lm_config.layers_block_type = pattern_to_list(pattern)
+
+
 class ModelDescriptor(ABC):
     @staticmethod
     @abstractmethod
@@ -213,9 +237,10 @@ class ModelDescriptor(ABC):
                 f"(original: {lm_config.hybrid_override_pattern!r})"
             )
         if parent_layer_index is not None and 0 <= parent_layer_index < len(pattern):
-            lm_config.hybrid_override_pattern = pattern[parent_layer_index]
-            return
-        lm_config.hybrid_override_pattern = pattern[0]
+            truncated = pattern[parent_layer_index]
+        else:
+            truncated = pattern[0]
+        _set_hybrid_override_pattern(lm_config, truncated)
 
     @classmethod
     def create_dummy_block(cls, original_layer: nn.Module, block_index: int) -> nn.Module:

@@ -33,7 +33,17 @@ from types import SimpleNamespace
 
 from ..tools.logger import mprint
 from ..utils.vllm_adapter import convert_block_configs_to_per_layer_config
-from .runtime_utils import RuntimeConfig
+from .runtime_utils import DEFAULT_MAMBA_BLOCK_SIZE, RuntimeConfig
+
+
+def _uses_mamba_vllm_benchmark(runtime_config: RuntimeConfig, config: SimpleNamespace) -> bool:
+    if runtime_config.benchmark_model_descriptor.__name__ in {
+        "NemotronHModelDescriptor",
+        "NemotronHV2ModelDescriptor",
+    }:
+        return True
+    pattern = getattr(config, "hybrid_override_pattern", None) or ""
+    return "M" in pattern
 
 
 def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) -> float:
@@ -50,12 +60,18 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         config = json.load(f)
 
     config = SimpleNamespace(**config)
-    if convert_block_configs_to_per_layer_config(config):
-        mprint("Converted block configs to per-layer config")
-        with open(model_path / "config.json", "w") as f:
-            json.dump(vars(config), f, indent=2)
+    architectures = getattr(config, "architectures", None) or []
+    if isinstance(architectures, str):
+        architectures = [architectures]
+    if "AnyModel" in architectures:
+        if convert_block_configs_to_per_layer_config(config):
+            mprint("Converted block configs to per-layer config")
+            with open(model_path / "config.json", "w") as f:
+                json.dump(vars(config), f, indent=2)
+        else:
+            mprint("No block configs to convert")
     else:
-        mprint("No block configs to convert")
+        mprint("Using native HF config for vLLM benchmark")
 
     cmd = [
         "vllm",
@@ -93,6 +109,14 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         "--optimization-level",
         "0",
     ]
+    if runtime_config.benchmark_model_descriptor.requires_trust_remote_code():
+        cmd.append("--trust-remote-code")
+    mamba_block_size = runtime_config.mamba_block_size
+    if mamba_block_size is None and _uses_mamba_vllm_benchmark(runtime_config, config):
+        mamba_block_size = DEFAULT_MAMBA_BLOCK_SIZE
+    if mamba_block_size is not None:
+        cmd.extend(["--mamba-block-size", str(mamba_block_size)])
+        cmd.extend(["--enable-prefix-caching"])
 
     # cmd is a fixed list of strings (no shell, no untrusted input).
     try:
@@ -106,10 +130,10 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("vLLM latency benchmark timed out") from exc
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(exc.stderr or exc.stdout or "vLLM latency benchmark failed") from exc
+        raise RuntimeError(f"vLLM latency benchmark failed: {exc.stderr}") from exc
 
     if output_json_path.exists():
-        with open(output_json_path) as f:
+        with open(output_json_path, encoding="utf-8") as f:
             vllm_results = json.load(f)
         if "avg_latency" in vllm_results:
             return vllm_results["avg_latency"] * 1000  # seconds -> milliseconds
