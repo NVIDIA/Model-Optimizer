@@ -773,13 +773,28 @@ class TensorQuantizer(nn.Module):
         elif self._block_sizes.get("scale_bits") == (4, 3):
             # NVFP4 default quantization
             # Return real quantized tensor and store scales inside TensorQuantizer
+            #
+            # try_tensorrt=False (was True): the trtllm fp4_quantize CUDA op
+            # returns _scale in cutlass-interleaved layout with out_features
+            # padded up to a multiple of 64 (a [10368*168] flat buffer for a
+            # [10304, 2688] mamba in_proj weight in Nemotron-Nano). That
+            # layout is *deploy-time* optimal for nvfp4_gemm but breaks the
+            # Megatron sharded-ckpt save/load round-trip: the saved buffer's
+            # shape ([1741824]) no longer matches the canonical
+            # [out, in/block_size] shape ([10304, 168]) that the load-side
+            # model expects, so dist_checkpointing raises
+            # `Global shape mismatch ... for key ...weight_quantizer._scale`.
+            # Forcing the non-trtllm path produces canonical-layout per-block
+            # scales that survive save/load; HF export / cutlass kernels can
+            # re-interleave at deploy time via
+            # `cutlass_fp4_scale_to_modelopt_fp4_scale` and its inverse.
             outputs, _weights_scaling_factor, _weights_scaling_factor_2 = NVFP4QTensor.quantize(
                 inputs,
                 self._block_sizes[-1],
                 weights_scaling_factor_2=self.amax.float() / (448.0 * 6.0)
                 if self.amax is not None
                 else None,
-                try_tensorrt=True,
+                try_tensorrt=False,
             )
             buffer_to_register["_scale"] = _weights_scaling_factor
             buffer_to_register["_double_scale"] = _weights_scaling_factor_2

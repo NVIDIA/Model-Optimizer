@@ -40,7 +40,7 @@ from modelopt.torch.opt.plugins.megatron import (
 )
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
@@ -638,21 +638,156 @@ if HAS_TE:
 
     # Quantized subclasses to support TEGroupedMLP quantization
     class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
+        def _ep_group(self):
+            # Return the expert_model_parallel_group iff it's initialized AND has >1 rank.
+            # _MegatronTEGroupedMLP._setup populates parallel_state with the EP group;
+            # outside that wrapping it may be unset (e.g. ad-hoc unit tests).
+            ps = getattr(self, "parallel_state", None)
+            if ps is None:
+                return None
+            ep = ps.expert_model_parallel_group
+            if not ep.is_initialized() or ep.world_size() <= 1:
+                return None
+            return ep
+
+        def _gather_global_per_expert_amax_n_modules(self):
+            # Per-expert N-modules path (OMNIML-5072 AC4): each rank's N local
+            # submodules (weight_quantizer_0..weight_quantizer_{N-1}) carry an
+            # _amax tensor whose shape depends on the QUANT_CFG numerics:
+            #
+            #   * per-tensor (axis=None — e.g. NVFP4_DEFAULT_CFG, FP8_DEFAULT_CFG):
+            #     scalar, shape ()
+            #   * per-channel (axis=0 — e.g. INT8_DEFAULT_CFG): vector along the
+            #     output dim, shape [out_per_expert, 1]
+            #   * per-block (block_sizes type=static — e.g. INT4 default presets):
+            #     higher-rank tensor, shape [out, blocks] or similar
+            #
+            # Stack each sibling along a new leading dim → [N_local, *amax_shape]
+            # and all-gather across the EP group → [N_global, *amax_shape]. The
+            # leading dim is the per-expert index; trailing dims are the raw
+            # _amax shape, preserved verbatim. Shape-agnostic across configs.
+            #
+            # Returns None when not in per-expert mode or any quantizer lacks
+            # _amax (caller falls back to the legacy per-quantizer path).
+            if not getattr(self, "_per_expert_weight_quantizer", False):
+                return None
+            local = []
+            for i in range(self.num_gemms):
+                q = self._get_weight_quantizer(i)
+                q_inner = q[0] if isinstance(q, SequentialQuantizer) else q
+                amax = getattr(q_inner, "_amax", None)
+                if amax is None:
+                    return None
+                local.append(amax.to(torch.float32))
+            v_local = torch.stack(local, dim=0)  # [N_local, *amax_shape]
+            ep = self._ep_group()
+            if ep is None:
+                return v_local  # EP=1: local IS global.
+            gathered = [torch.empty_like(v_local) for _ in range(ep.world_size())]
+            torch.distributed.all_gather(gathered, v_local, group=ep.group)
+            return torch.cat(gathered, dim=0)  # [N_global, *amax_shape]
+
+        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+            # Gather the global per-expert amax ONCE before Megatron's save traversal.
+            # Stash on a temporary attribute that _process_quantizer_amax reads; the
+            # live per-expert weight_quantizer_i._amax scalars stay untouched so
+            # forward keeps working.
+            #
+            # Done at the top of sharded_state_dict (not inside _process_quantizer_amax)
+            # so the EP collective completes BEFORE Megatron's dist-checkpoint save
+            # kicks off its own default-PG ALLGATHER metadata exchanges. Interleaving
+            # EP gathers with default-PG collectives deadlocks NCCL.
+            self._cached_global_per_expert_amax_n_modules = (
+                self._gather_global_per_expert_amax_n_modules()
+            )
+            try:
+                return super().sharded_state_dict(prefix, sharded_offsets, metadata)
+            finally:
+                self._cached_global_per_expert_amax_n_modules = None
+
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             # _sharded_state_dict_grouped adds _extra_state{gemm_idx} for gemm_idx:[1, num_gemms] in
             # sharded_state_dict which is same as _extra_state. The _extra_state{gemm_idx} is used for
             # TE Fp8 checkpoint, we need to remove the _extra_state{gemm_idx} for gemm_idx:[1, num_gemms]
-            # for modelopt checkpoint restore
+            # for modelopt checkpoint restore. Drop them from a local view passed to super so the
+            # parent's strict-load check doesn't flag them as unexpected; do NOT drop them from
+            # state_dict in place — that would also hide them from siblings (none of which want them
+            # anyway, but the conservative thing is to leave state_dict alone unless we have to mutate).
             filtered_state_dict = {
                 k: v
                 for k, v in state_dict.items()
                 if not any(k.endswith(f"_extra_state{num}") for num in range(1, self.num_gemms))
             }
+            # Per-expert N-modules path: each weight_quantizer_i._amax key in the
+            # saved state-dict carries the gathered [N_global, *amax_shape] tensor
+            # (replicated across all EP ranks). Narrow it to this rank's local
+            # submodule by slicing along dim 0 at (ep_rank * N_local + i). The
+            # trailing dims are kept untouched, so any _amax shape (scalar,
+            # per-channel vector, per-block tensor) round-trips correctly.
+            #
+            # IMPORTANT: mutate `state_dict` IN PLACE (not just our local
+            # `filtered_state_dict` view). PyTorch's `Module.load_state_dict`
+            # recursion builds each child's state_dict by re-filtering the
+            # PARENT's `local_state_dict` after the parent's
+            # `_load_from_state_dict` returns. Our per-sibling `_amax` lives on
+            # the children (`weight_quantizer_<i>`), not on this grouped-linear
+            # itself; without an in-place mutation each child reads the
+            # un-narrowed [N_global, *amax_shape] tensor and the buffer-shape
+            # check fails (e.g. ckpt [128, 1856, 1] vs model [1856, 1]).
+            if getattr(self, "_per_expert_weight_quantizer", False):
+                import re
+                ep = self._ep_group()
+                ep_rank = ep.rank() if ep is not None else 0
+                ep_size = ep.world_size() if ep is not None else 1
+                global_size = self.num_gemms * ep_size
+                offset = ep_rank * self.num_gemms
+                pattern = re.compile(r"weight_quantizer_(\d+)\._amax$")
+                for k in list(state_dict.keys()):
+                    m = pattern.search(k)
+                    if m is None:
+                        continue
+                    local_i = int(m.group(1))
+                    v = state_dict[k]
+                    if v.dim() >= 1 and v.shape[0] == global_size:
+                        # Shape-agnostic format: leading dim is the global
+                        # per-expert index; trailing dims are the native _amax
+                        # shape. Slice along dim 0 and keep the rest.
+                        narrowed = v[offset + local_i].contiguous()
+                    elif v.numel() == global_size:
+                        # Legacy flat format (scalar-only era): [N_global] vector
+                        # was written, narrow to scalar for this submodule.
+                        narrowed = (
+                            v.view(global_size)[offset + local_i].view(())
+                        )
+                    else:
+                        continue  # legacy or EP=1 save format — leave as-is.
+                    state_dict[k] = narrowed
+                    if k in filtered_state_dict:
+                        filtered_state_dict[k] = narrowed
             return super()._load_from_state_dict(filtered_state_dict, prefix, *args, **kwargs)
 
         def _process_quantizer_amax(self, k, v, quantizer_state_dict):
-            assert v.numel() == 1, "TEGroupedLinear only supports per-tensor quantization"
-            quantizer_state_dict[k] = v.view(-1)
+            # Per-expert N-modules path: emit the gathered global per-expert
+            # amax tensor under every weight_quantizer_i._amax key (replicated
+            # across EP ranks). On load, _load_from_state_dict narrows back to
+            # the local per-submodule shape by slicing along dim 0.
+            #
+            # The cached tensor preserves its native shape:
+            #   [N_global]                 for scalar amax (NVFP4 / FP8)
+            #   [N_global, out, 1]         for per-channel axis=0 (INT8)
+            #   [N_global, out, blocks]    for per-block static (INT4)
+            #
+            # Suboptimal disk usage (N copies of the same per-layer tensor) but
+            # mirrors B's gather-once-cache pattern and avoids surgery into the
+            # base-class state-dict iteration.
+            cached = getattr(self, "_cached_global_per_expert_amax_n_modules", None)
+            if cached is not None and "weight_quantizer_" in k and k.endswith("_amax"):
+                quantizer_state_dict[k] = cached
+                return
+            # Non-per-expert fallback: keep the buffer in its native shape; flatten
+            # only when it is a singleton scalar so the legacy 1D-vector save
+            # format is preserved.
+            quantizer_state_dict[k] = v.view(-1) if v.numel() == 1 else v
 
     @QuantModuleRegistry.register(
         {TEColumnParallelGroupedLinear: "megatron_TEColumnParallelGroupedLinear"}

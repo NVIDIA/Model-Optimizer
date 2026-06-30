@@ -288,23 +288,39 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
 
 
 _FUSED_EXPERTS_QUANTIZER_LIST_RE = re.compile(
-    r"(weight_quantizers?|input_quantizers?)\.\d+(?=$|\.)"
+    r"(weight_quantizers?|input_quantizers?)[._]\d+(?=$|\.)"
 )
 
 
 def _normalize_fused_experts_quantizer_name(name: str) -> str:
-    """Strip the per-expert index from per-expert quantizer ModuleList names.
+    """Pattern-broadening: make ``QUANT_CFG`` wildcards match ``weight_quantizer_<digits>``.
 
-    Fused-experts modules register per-expert weight/input quantizers in a
-    ``nn.ModuleList``; its children surface as dotted names like
-    ``...gate_up_proj_weight_quantizers.0`` (plural) or — if a variant uses
-    singular naming — ``...gate_up_proj_weight_quantizer.0``. Neither matches
-    the singular-suffix wildcards (``*weight_quantizer``) used in the stock
-    configs, so the experts stay at their defaults.
+    Stock QUANT_CFG entries target the canonical names ``weight_quantizer`` and
+    ``input_quantizer`` (e.g. ``{"quantizer_name": "*weight_quantizer", "cfg":
+    {...}}``). Two plugin variants register *per-expert* quantizers under names
+    that don't end with that canonical suffix, so without normalization they
+    are silently skipped by the config applier and stay at their defaults
+    (typically ``_disabled=True``) — never enabled, never calibrated, never
+    participating in fake-quant forward.
 
-    Return a normalized name where either ``weight_quantizer[s]?.N`` or
-    ``input_quantizer[s]?.N`` collapses to the singular form without the index
-    so the standard wildcards match.
+    Variants we collapse:
+
+    1. Fused-experts plugins register per-expert weight/input quantizers in a
+       ``nn.ModuleList``; its children surface as dotted names like
+       ``...gate_up_proj_weight_quantizers.0`` (plural) or — if a variant uses
+       singular naming — ``...gate_up_proj_weight_quantizer.0``.
+
+    2. TEGroupedLinear's per-expert opt-in (``_QuantTEGroupedLinear._setup``,
+       gated by ``MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER=1``) adds siblings
+       via ``add_module(f"weight_quantizer_{i}", ...)``, which produces
+       underscore-separated names like
+       ``...experts.linear_fc1.weight_quantizer_0``.
+
+    Return a normalized name where ``weight_quantizer[s]?[._]N`` or
+    ``input_quantizer[s]?[._]N`` collapses to the singular canonical form
+    without the index, so the standard ``*weight_quantizer`` /
+    ``*input_quantizer`` wildcards match every per-expert sibling alongside
+    the original master.
     """
 
     def _repl(m: re.Match) -> str:
