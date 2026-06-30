@@ -2006,6 +2006,20 @@ def get_concat_eliminated_tensors(
     return result
 
 
+def merge_qdq_tensor_groups(
+    group_qdq_tensors: dict[str, set[str]],
+    new_groups: dict[str, set[str]],
+) -> None:
+    """Merge tensor groups that should share the same QDQ scale."""
+    for tensor_group in new_groups.values():
+        merged_group = set(tensor_group)
+        for tensor_name, existing_group in list(group_qdq_tensors.items()):
+            if tensor_name in merged_group or merged_group.intersection(existing_group):
+                merged_group.update(existing_group)
+        for tensor_name in merged_group:
+            group_qdq_tensors[tensor_name] = merged_group
+
+
 def remove_redundant_cast_nodes(graph: onnx.GraphProto) -> None:
     """Remove redundant Cast nodes from the ONNX graph to optimize model performance.
 
@@ -2089,3 +2103,158 @@ def remove_redundant_cast_nodes(graph: onnx.GraphProto) -> None:
     logger.info(f"Removing {len(cast_indices)} redundant Cast nodes")
     for node_idx in sorted(cast_indices, reverse=True):
         del graph.node[node_idx]
+
+
+def get_parallel_conv_fusion_tensors(
+    onnx_model: onnx.ModelProto,
+    nodes_to_quantize: list[str],
+) -> dict[str, set[str]]:
+    """Find output tensors of parallel Conv/ConvTranspose that should share the same QDQ scale.
+
+    This supports TensorRT's parallel convolution fusion optimization. For example:
+
+        input -> conv1 -> q1 -> dq1 -> ...
+          |-  -> conv2 -> q2 -> dq2 -> ...
+
+    If multiple Conv/ConvTranspose nodes have the same input tensor, same convolution
+    attributes, and the same fusible post-conv tail, TensorRT can fuse those parallel
+    convolutions. When the conv outputs are quantized, the Q nodes after those conv
+    branches must use the same scale; otherwise TensorRT cannot safely combine the
+    branches into one fused convolution. This function collects those post-tail tensor
+    names so calibration assigns the same Q/DQ scale to the matching parallel branches.
+
+    Supported fusible tails include Conv/ConvTranspose directly and common TensorRT
+    fusion patterns such as Conv->Relu, Conv->BatchNormalization, and
+    Conv->BatchNormalization->Relu.
+
+    Returns:
+        {tensor_name: set of tensors that should share the same scaling factor}
+    """
+    logger.info("Finding parallel conv fusion tensors")
+    input_name_to_nodes = get_tensor_consumer_nodes(onnx_model.graph)
+    graph = gs.import_onnx(onnx_model)
+
+    CONV_ATTR_KEYS = (  # noqa: N806
+        "kernel_shape",
+        "strides",
+        "pads",
+        "dilations",
+        "group",
+        "auto_pad",
+    )
+
+    # Define fusible tail patterns (forward direction, starting from Conv)
+    # Order: longest first so we match the most specific pattern
+    fusible_tail_path_types: list[tuple[list[str], tuple[str, ...]]] = []
+    for conv_type in ("Conv", "ConvTranspose"):
+        fusible_tail_path_types += [
+            # (path_type for has_path_type,          tail signature for grouping)
+            ([conv_type, "BatchNormalization", "Relu"], ("BatchNormalization", "Relu")),
+            (
+                [conv_type, "BatchNormalization", "Sigmoid", "Mul"],
+                ("BatchNormalization", "Sigmoid", "Mul"),
+            ),
+            ([conv_type, "Relu"], ("Relu",)),
+            ([conv_type, "Sigmoid", "Mul"], ("Sigmoid", "Mul")),
+            ([conv_type, "BatchNormalization"], ("BatchNormalization",)),
+            ([conv_type], ()),
+        ]
+
+    def _extract_conv_signature(node: gs.Node) -> tuple:
+        attrs = []
+        for key in CONV_ATTR_KEYS:
+            val = node.attrs.get(key, None)
+            if isinstance(val, list):
+                val = tuple(val)
+            attrs.append((key, val))
+        return (node.op, tuple(attrs))
+
+    def _match_tail(conv_node: gs.Node) -> tuple[tuple[str, ...], str] | None:
+        """Match the tail pattern after a Conv and return (tail_signature, final_tensor_name).
+
+        The final_tensor_name is the output of the last op in the tail chain,
+        which should feed into a quantize node.
+        """
+        for path_type, tail_sig in fusible_tail_path_types:
+            if conv_node.op != path_type[0]:
+                continue
+            path_nodes = []
+            if not has_path_type(
+                conv_node,
+                graph,
+                path_type,
+                is_forward=True,
+                wild_card_types=[],
+                path_nodes=path_nodes,
+            ):
+                continue
+
+            final_tensor_name = path_nodes[-1].outputs[0].name
+
+            # Verify the final tensor feeds into a quantize node
+            consumers = input_name_to_nodes.get(final_tensor_name, [])
+            if any(c.name in nodes_to_quantize for c in consumers):
+                return (tail_sig, final_tensor_name)
+
+        return None
+
+    # -------------------------------------------------------------------------
+    # Group conv nodes by (input_activation, conv_signature, tail_pattern)
+    # -------------------------------------------------------------------------
+    parallel_groups: dict[tuple, list[str]] = {}
+
+    for node in graph.nodes:
+        if node.op not in ("Conv", "ConvTranspose"):
+            continue
+
+        match_result = _match_tail(node)
+        if match_result is None:
+            continue
+
+        tail_sig, final_tensor_name = match_result
+        input_act_name = node.inputs[0].name
+        conv_sig = _extract_conv_signature(node)
+        group_key = (input_act_name, conv_sig, tail_sig)
+        parallel_groups.setdefault(group_key, []).append(final_tensor_name)
+
+    # Keep only groups with 2+ nodes
+    parallel_groups = {k: v for k, v in parallel_groups.items() if len(v) >= 2}
+
+    if not parallel_groups:
+        logger.info("No parallel conv groups found")
+        return {}
+
+    logger.info("Found %d parallel conv groups", len(parallel_groups))
+
+    # -------------------------------------------------------------------------
+    # Union-Find
+    # -------------------------------------------------------------------------
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        if x not in parent:
+            parent[x] = x
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x: str, y: str) -> None:
+        parent[find(x)] = find(y)
+
+    for tensor_names in parallel_groups.values():
+        for tensor_name in tensor_names[1:]:
+            union(tensor_name, tensor_names[0])
+
+    if not parent:
+        return {}
+
+    groups: dict[str, set[str]] = {}
+    for tensor in parent:
+        root = find(tensor)
+        groups.setdefault(root, set()).add(tensor)
+
+    result = {}
+    for tensor in parent:
+        result[tensor] = groups[find(tensor)]
+
+    return result
