@@ -36,11 +36,10 @@ pipeline:
   task_1:
     script: common/eagle3/train_eagle.sh
     args:
-      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - --config modules/Model-Optimizer/modelopt_recipes/models/Qwen3-8B/eagle3.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
       - data.data_path=/scratchspace/data/train.jsonl
       - training.output_dir=/scratchspace/eagle3
-      - training.training_seq_len=4096
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
