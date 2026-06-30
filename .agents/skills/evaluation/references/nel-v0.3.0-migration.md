@@ -1027,13 +1027,17 @@ from `output.export_config.mlflow.tags` (e.g. `model`, `checkpoint_path`, `num_n
 `variant`) ride along and feed your MLflow dashboards / downstream viewers. The `/` in a
 `skills://` name becomes `___` in the on-disk bundle dir (`skills___aime25`).
 
-> **Always set a stable `model` (and ideally `checkpoint_path`) tag.** Dashboards key/group runs by
-> these tags to attribute a score to a model or checkpoint. A run exported **without** them can't be
-> attributed — it shows up as an orphan/"no checkpoint" row instead of landing on the right model — and
-> a `model` value that drifts between runs (or differs from a baseline's) splits what should be one row.
-> The engine logs only a generic headline metric (`pass_at_1` / `mean_reward`); the benchmark identity
-> rides in the `benchmark` tag and the model identity in `model`, so both tags are what make the export
-> usable downstream.
+> **Required before every NEL 0.3 MLflow export: set both `model` and `checkpoint_path`.** Use the
+> resolved checkpoint path actually served by `services.<name>.model`; do not substitute the model name,
+> Hugging Face ID, served-model name, or output directory. When NEL 0.2 and NEL 0.3 runs evaluate the same
+> checkpoint in the same experiment, copy the exact NEL 0.2 `config.deployment.checkpoint_path` value into
+> the NEL 0.3 `checkpoint_path` tag. Every shard, merged bundle, retry, and benchmark for that checkpoint
+> must use the same value. Downstream viewers group same-experiment results by checkpoint path; a missing or
+> different value creates a second row even when the `model` tag displays the same canonical model.
+>
+> Treat a missing `checkpoint_path` as an export-preflight failure. The engine logs only generic headline
+> metrics such as `pass_at_1` / `mean_reward`; `benchmark`, `model`, and `checkpoint_path` are the identity
+> metadata that make the export usable downstream.
 
 Example `output` block with the tags set (lives in the run config; `nel export` also accepts the same
 tracking URI / experiment via `-o`):
@@ -1048,8 +1052,19 @@ output:
       experiment_name: <exp>
       tags:
         model: <model-name>          # set this — dashboards group/attribute runs by it
-        checkpoint_path: <abs path>  # the per-checkpoint row label downstream
+        checkpoint_path: <abs path>  # REQUIRED: exact path served by services.<name>.model
         benchmark: <bench>           # benchmark identity (the engine logs only a generic metric key)
         precision: bf16
         variant: <run label>         # e.g. base / with-tools / 96k-thinking
+```
+
+After export, verify the tag on every created run before refreshing a dashboard. The value must be present
+and identical across all bundles for the checkpoint:
+
+```python
+from mlflow import MlflowClient
+
+client = MlflowClient(tracking_uri="<your-mlflow-uri>")
+run = client.get_run("<run-id>")
+assert run.data.tags["checkpoint_path"] == "<abs path served by services.<name>.model>"
 ```
