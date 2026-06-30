@@ -51,8 +51,7 @@ def _grouped_axis0_fakequant_fwd_kernel(
     output_ptrs_buf,    # int64 [N]  — N output base pointers
     amax_vec_ptr,       # [N, 1, 1] (or anything with N as the leading dim)
     elements_per_expert,
-    num_bits,
-    narrow_range: tl.constexpr,
+    qmax,
     DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -68,10 +67,10 @@ def _grouped_axis0_fakequant_fwd_kernel(
     # Per-expert amax → quant scale.
     # amax is stored as fp32; convert to working precision.
     amax = tl.load(amax_vec_ptr + expert_idx).to(tl.float32)
-    # qmax = 2^(num_bits-1) - 1 when narrow_range else 2^(num_bits-1)
-    # For num_bits=8 narrow_range=True (modelopt default): qmax=127
-    qmax = ((1 << (num_bits - 1)) - 1) if narrow_range else (1 << (num_bits - 1))
-    qmin = -qmax if narrow_range else -qmax  # signed symmetric
+    # qmax is computed by the Python wrapper. Keeping bit arithmetic and the
+    # narrow-range branch outside the JIT avoids a Triton 3.4 frontend failure
+    # when parsing the equivalent constexpr conditional expression.
+    qmin = -qmax  # signed symmetric
     scale = amax / qmax
 
     # Block of elements within this expert.
@@ -192,6 +191,7 @@ def grouped_axis0_fakequant(
     BLOCK_SIZE = 2048
     num_blocks_per_expert = triton.cdiv(elements_per_expert, BLOCK_SIZE)
     grid = (N, num_blocks_per_expert)
+    qmax = (1 << (num_bits - 1)) - (1 if narrow_range else 0)
 
     with torch.cuda.device(device0):
         _grouped_axis0_fakequant_fwd_kernel[grid](
@@ -199,8 +199,7 @@ def grouped_axis0_fakequant(
             output_ptrs,
             amax_vec,
             elements_per_expert,
-            num_bits,
-            narrow_range=narrow_range,
+            qmax,
             DTYPE=_torch_dtype_to_tl(dtype0),
             BLOCK_SIZE=BLOCK_SIZE,
         )
