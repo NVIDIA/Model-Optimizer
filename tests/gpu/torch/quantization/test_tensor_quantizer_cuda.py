@@ -81,6 +81,21 @@ class TestTensorQuantizerfp4:
 
         assert fp4_quantizer._get_amax(x) == x.abs().amax()
 
+    def test_runtime_default_amax(self):
+        quantizer = tensor_quantizer.TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            )
+        ).cuda()
+        inputs = torch.randn(2, 4, 16, device="cuda")
+        runtime_amax = torch.tensor(2688.0, device="cuda")
+
+        quantizer._set_runtime_default_amax(runtime_amax)
+        actual = quantizer(inputs)
+        expected = tensor_quant.dynamic_block_quant(inputs, 16, runtime_amax, None, (2, 1), (4, 3))
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     @pytest.mark.parametrize("pass_through_bwd", [True, False])
     def test_fp4_backward(self, pass_through_bwd):
         fp4_quantizer = tensor_quantizer.TensorQuantizer(

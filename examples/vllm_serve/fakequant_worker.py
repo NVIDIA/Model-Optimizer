@@ -34,6 +34,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.plugins.vllm_fakequant_hf import is_weight_quantizer_state_key
 from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
+    post_restore_vllm_attentions,
     post_restore_vllm_parallel_linears,
 )
 from modelopt.torch.utils import safe_load
@@ -138,6 +139,8 @@ def _fakequant_run_prolog_worker(self) -> None:
             # Only barrier if distributed is actually initialized (avoids deadlocks).
             if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
                 torch.distributed.barrier()
+
+    post_restore_vllm_attentions(model)
 
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)

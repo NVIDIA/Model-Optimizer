@@ -359,6 +359,27 @@ class TensorQuantizer(nn.Module):
                 raise RuntimeError("Changing shape when setting amax is not allowed.")
             self._amax.data.copy_(value.clone().detach().to(self._amax.device))
 
+    def _set_runtime_default_amax(self, value: torch.Tensor | None) -> None:
+        """Set a nonpersistent fallback amax used only when _amax is absent."""
+        if value is None:
+            if hasattr(self, "_runtime_default_amax"):
+                delattr(self, "_runtime_default_amax")
+            return
+        if value.numel() != 1:
+            raise ValueError(
+                f"Runtime default amax must be scalar, got shape {tuple(value.shape)}."
+            )
+        value = value.detach()
+        if hasattr(self, "_runtime_default_amax"):
+            self._runtime_default_amax.data.copy_(
+                value.to(
+                    device=self._runtime_default_amax.device,
+                    dtype=self._runtime_default_amax.dtype,
+                )
+            )
+        else:
+            self.register_buffer("_runtime_default_amax", value.clone(), persistent=False)
+
     def reset_amax(self):
         """Reset amax to None."""
         if hasattr(self, "_amax"):
@@ -685,10 +706,12 @@ class TensorQuantizer(nn.Module):
             self._bias_value.data.copy_(calib_bias.clone().detach())
 
     def _get_amax(self, inputs):
-        """Get amax from buffer or compute it dynamically."""
-        if self._use_constant_amax:
+        """Get amax from configured state, runtime fallback, or inputs."""
+        if hasattr(self, "_runtime_default_amax"):
+            amax = self._amax if hasattr(self, "_amax") else self._runtime_default_amax
+        elif self._use_constant_amax:
             return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
-        if hasattr(self, "_amax"):
+        elif hasattr(self, "_amax"):
             amax = self._amax
         else:
             reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(inputs, self._axis)
