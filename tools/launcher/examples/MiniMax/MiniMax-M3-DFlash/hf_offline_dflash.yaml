@@ -97,8 +97,12 @@ pipeline:
       - data.chat_template=examples/MiniMax/MiniMax-M3-DFlash/chat_template_train.jinja
       - training.output_dir=/scratchspace/dflash_minimax_m3_offline
       - training.num_train_epochs=10
-      # bs=1 @ 8192 keeps the activation footprint of M2.7's bs=2 @ 4096 (bs*seqlen equal).
-      - training.per_device_train_batch_size=1
+      # Offline training is light (FakeBaseModel = lm_head + embed only; small 5-layer draft;
+      # dflash_num_anchors=512 caps the vocab-logit memory to 512 positions, not all 8192), so
+      # we use a higher per-device batch and far fewer nodes than M2.7's 8x bs=1. 2 nodes x 8
+      # GPU x bs=4 = effective batch 64 (same as the old 8x8x1), at 1/4 the GPUs. bs is tunable
+      # upward (anchor-bounded logits leave headroom); drop if a larger draft/seq OOMs.
+      - training.per_device_train_batch_size=4
       - training.learning_rate=1.2e-3
       - training.warmup_steps=100
       - training.training_seq_len=8192
@@ -129,7 +133,7 @@ pipeline:
       - dflash.dflash_export_rope_scaling.mscale=1.0
       - dflash.dflash_export_rope_scaling.mscale_all_dim=1.0
     environment:
-      - NUM_NODES: "8"
+      - NUM_NODES: "2"
       # Offline training uses a lightweight FakeBaseModel, so plain DDP suffices (no
       # ACCELERATE_CONFIG / FSDP2 patches). transformers 4.57.1 (not M3's 4.52.4): 4.52.4's
       # Trainer does `from apex import amp`, which this training container's apex lacks ->
@@ -139,6 +143,6 @@ pipeline:
       - MIXED_PRECISION: "no"
     slurm_config:
       _factory_: "slurm_factory"
-      nodes: 8
+      nodes: 2
       ntasks_per_node: 1
       gpus_per_node: 8
