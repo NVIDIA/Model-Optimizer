@@ -59,3 +59,27 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     # Candidates resolve to the exact preset dicts mtq expects (preset identity preserved).
     assert inputs["quantization_formats"][0] == QUANT_CFG_CHOICES["nvfp4"]
     assert inputs["quantization_formats"][1] == QUANT_CFG_CHOICES["fp8"]
+
+
+def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
+    """Top-level cost_excluded_layers maps to the mtq constraints.cost.excluded_module_name_patterns
+    key (distinct from disabled_layers), so a cost-exclusion recipe matches the nested mtq dict."""
+    from modelopt.recipe import load_recipe
+
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    aq = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe"
+    ).auto_quantize
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    # cost-exclusion is hoisted to a sibling of disabled_layers but still reaches the mtq cost dict.
+    assert aq.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+    assert inputs["constraints"]["cost"] == {
+        "active_moe_expert_ratio": 0.03125,
+        "excluded_module_name_patterns": ["*visual*", "*mtp*", "*vision_tower*"],
+    }
+    # The two exclusions are independent: cost-excluded patterns are also disabled here, but the
+    # roles (cost-accounting vs search) are tracked separately.
+    assert "*visual*" in inputs["disabled_layers"]

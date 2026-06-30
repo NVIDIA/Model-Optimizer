@@ -122,6 +122,12 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
     )
 
 
+# Named alias so a shared layer-pattern unit (e.g. configs/auto_quantize/units/base_disabled_layers)
+# can declare ``modelopt-schema: modelopt.recipe.config.LayerPatternList`` and be spliced into a
+# ``list[str]`` field — mirrors how base_disable_all is imported into a PTQ quant_cfg list.
+LayerPatternList = list[str]
+
+
 class AutoQuantizeCost(ModeloptBaseConfig):
     """Cost-model parameters (the ``cost`` sub-dict of ``mtq.auto_quantize`` constraints)."""
 
@@ -129,13 +135,6 @@ class AutoQuantizeCost(ModeloptBaseConfig):
         default=None,
         title="Active MoE expert ratio",
         description="Routed experts active per token, in (0, 1]. Used by the 'active_moe' cost model.",
-    )
-    excluded_module_name_patterns: list[str] | None = ModeloptField(
-        default=None,
-        title="Cost-excluded module patterns",
-        description="Module-name glob patterns excluded from the cost denominator (cost_weight 0) so "
-        "they don't count toward the bit budget — e.g. vision-tower layers in a VL model. These are "
-        "typically also in disabled_layers (excluded from search); the two roles are independent.",
     )
 
 
@@ -188,10 +187,17 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         title="Scoring sample count",
         description="Number of batches used for sensitivity scoring.",
     )
-    disabled_layers: list[str] = ModeloptField(
+    disabled_layers: LayerPatternList = ModeloptField(
         default=[],
-        title="Excluded layer patterns",
-        description="Glob patterns; matching layers are excluded from the search.",
+        title="Search-excluded layer patterns",
+        description="Glob patterns; matching layers are excluded from the search (kept full precision).",
+    )
+    cost_excluded_layers: LayerPatternList = ModeloptField(
+        default=[],
+        title="Cost-excluded layer patterns",
+        description="Glob patterns excluded from the bit-budget accounting (cost_weight 0) — e.g. VL "
+        "vision towers. Distinct from disabled_layers: those are removed from the search; these still "
+        "get searched but don't count toward effective_bits. The two roles overlap but are independent.",
     )
     kv_cache: QuantizeConfig | None = ModeloptField(
         default=None,

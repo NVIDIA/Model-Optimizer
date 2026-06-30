@@ -277,9 +277,13 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
     ``--kv_cache_qformat`` when the recipe omits it.
     """
     constraints = aq_config.constraints.model_dump(exclude_none=True)
-    # NOTE: model-derived cost exclusions (formerly VLM patterns such as *visual*, *vision_tower*
-    # via model introspection) are not applied here. A future VLM AutoQuantize recipe should carry
-    # them explicitly (e.g. a cost.excluded_module_name_patterns field).
+    # cost_excluded_layers (sibling of disabled_layers) maps to the mtq cost key: these layers are
+    # kept out of the bit-budget denominator (cost_weight 0) — e.g. VL vision towers — distinct from
+    # disabled_layers, which removes them from the search.
+    if aq_config.cost_excluded_layers:
+        constraints.setdefault("cost", {})["excluded_module_name_patterns"] = (
+            aq_config.cost_excluded_layers
+        )
     if aq_config.kv_cache is not None:
         kv_cache_quant_cfg = aq_config.kv_cache.model_dump()
     elif args.kv_cache_qformat == KV_CACHE_NONE:
