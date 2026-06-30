@@ -48,6 +48,8 @@ quant_config: dict[str, Any] = {
     "modelopt_state_path": os.environ.get("MODELOPT_STATE_PATH", None),
     "calib_batch_size": int(os.environ.get("CALIB_BATCH_SIZE", 1)),
     "recipe_path": os.environ.get("RECIPE_PATH", None),
+    "kv_skip_first_m": int(os.environ.get("KV_SKIP_FIRST_M", 0)),
+    "kv_skip_last_n": int(os.environ.get("KV_SKIP_LAST_N", 0)),
 }
 
 
@@ -142,6 +144,12 @@ def _fakequant_run_prolog_worker(self) -> None:
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
 
+    skip_first_m = quant_config["kv_skip_first_m"]
+    skip_last_n = quant_config["kv_skip_last_n"]
+    print(f"skip_first_m={skip_first_m}, skip_last_n={skip_last_n}")
+    if skip_first_m or skip_last_n:
+        mtq.plugins.vllm.set_kv_quant_skip_tokens(model, skip_first_m=skip_first_m, skip_last_n=skip_last_n)
+        print(f"KV quant skip: first_m={skip_first_m}, last_n={skip_last_n}")
     mtq.fold_weight(model)
     for name, module in model.named_modules():
         if is_weight_quantizer_state_key(name) and module.is_enabled:

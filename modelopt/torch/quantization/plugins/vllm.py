@@ -503,14 +503,43 @@ class _QuantVLLMAttention(QuantModule):
         self.v_bmm_quantizer = TensorQuantizer()
         self.parallel_state = create_parallel_state()
 
+        self.kv_quant_skip_first_m: int = 0
+        self.kv_quant_skip_last_n: int = 0
+
     def forward(self, query, key, value, *args, **kwargs):
         query = self.q_bmm_quantizer(query)
-        key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        if self.kv_quant_skip_first_m == 0 and self.kv_quant_skip_last_n == 0:
+            key = self.k_bmm_quantizer(key)
+            value = self.v_bmm_quantizer(value)
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:
         _vllm_attention_modelopt_post_restore(self)
+
+
+def set_kv_quant_skip_tokens(model, skip_first_m: int = 0, skip_last_n: int = 0):
+    """Configure first-M / last-N KV cache quantization skipping for all attention layers.
+
+    After mtq.quantize(), call this to skip fake-quantization of the first
+    ``skip_first_m`` and last ``skip_last_n`` KV tokens at attention time.
+    Setting both to 0 disables skipping (all tokens are quantized as normal).
+
+    Note: Standard vLLM Attention uses ``unified_attention_with_output`` skip logic.
+    MLA Attention stores these fields but the vLLM MLA custom op does not apply them yet.
+    """
+
+    def _apply(mod) -> None:
+        print(f"set_kv_quant_skip_tokens for {module.layer_name}: skip_first_m={skip_first_m}, skip_last_n={skip_last_n}")
+        mod.kv_quant_skip_first_m = skip_first_m
+        mod.kv_quant_skip_last_n = skip_last_n
+
+    for name, module in model.named_modules():
+        if isinstance(module, _QuantVLLMAttention):
+            module.layer_name = name
+            _apply(module)
+        elif VllmMLAAttention is not None and isinstance(module, _QuantVLLMMLAAttention):
+            module.layer_name = name
+            _apply(module)
 
 
 if CrossAttention is not None:
@@ -536,11 +565,14 @@ if VllmMLAAttention is not None:
             self.kv_c_bmm_quantizer = TensorQuantizer()
             self.k_pe_bmm_quantizer = TensorQuantizer()
             self.parallel_state = create_parallel_state()
+            self.kv_quant_skip_first_m: int = 0
+            self.kv_quant_skip_last_n: int = 0
 
         def forward(self, query, kv_c, k_pe, *args, **kwargs):
             query = self.q_bmm_quantizer(query)
-            kv_c = self.kv_c_bmm_quantizer(kv_c)
-            k_pe = self.k_pe_bmm_quantizer(k_pe)
+            if self.kv_quant_skip_first_m == 0 and self.kv_quant_skip_last_n == 0:
+                kv_c = self.kv_c_bmm_quantizer(kv_c)
+                k_pe = self.k_pe_bmm_quantizer(k_pe)
             return super().forward(query, kv_c, k_pe, *args, **kwargs)
 
         def modelopt_post_restore(self, prefix: str = "") -> None:
