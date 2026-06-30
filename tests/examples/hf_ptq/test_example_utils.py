@@ -278,7 +278,7 @@ def test_get_model_uses_expected_dtype_kwarg(
         def from_pretrained(*args, **kwargs):
             calls["from_pretrained"] = kwargs
             assert "dtype" not in kwargs
-            assert "torch_dtype" not in kwargs
+            assert kwargs["torch_dtype"] is torch.float16
             return FakeModel()
 
     class FakeLlamaForCausalLM(FakeAutoModelForCausalLM):
