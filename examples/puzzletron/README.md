@@ -377,10 +377,3 @@ Due to non-linear extension of the runtime stats of single subblocks to the tota
 ## Advanced Usage
 
 Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenarios.
-
-## Using with AI agents
-
-> **Experimental:** AI agent integration is an experimental feature and may change.
-
-Puzzletron ships a skill for AI coding agents (Claude Code, Cursor, Codex).
-See [`.agents/skills/puzzletron/README.md`](../../.agents/skills/puzzletron/README.md) for setup, commands, and example output.
