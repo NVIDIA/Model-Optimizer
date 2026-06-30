@@ -480,6 +480,14 @@ def _infer_subblocks_to_extract(
             keys_to_learn = bypass_config.get("model_factory", {}).get(
                 "keys_to_learn", "entire_block"
             )
+            if bypass_config_path.exists():
+                alt = json.loads(bypass_config_path.read_text())
+                alt_keys = alt.get("keys_to_learn", "entire_block")
+                if keys_to_learn != alt_keys:
+                    raise ValueError(
+                        f"Inconsistent keys_to_learn in {checkpoint_dir}: "
+                        f"args.json={keys_to_learn!r}, bypass_config.json={alt_keys!r}"
+                    )
         else:
             bypass_config = json.loads(bypass_config_path.read_text())
             keys_to_learn = bypass_config.get("keys_to_learn", "entire_block")
