@@ -369,6 +369,7 @@ class ModelDeployer:
                 },
                 tensor_parallel_size=self.tensor_parallel_size,
                 trust_remote_code=True,
+                max_model_len=4096,
             )
         else:
             quantization_method = "modelopt"
@@ -379,6 +380,7 @@ class ModelDeployer:
                 quantization=quantization_method,
                 tensor_parallel_size=self.tensor_parallel_size,
                 trust_remote_code=True,
+                max_model_len=4096,
             )
         sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
         conversations = [[{"role": "user", "content": p}] for p in COMMON_PROMPTS]
