@@ -37,6 +37,7 @@ trusted cluster fabric -- any reachable peer can read descriptors / free slots.
 
 import base64
 import json
+import os
 import socket
 import threading
 import time
@@ -249,7 +250,14 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 max_num_seqs,
             )
 
-        self._nixl = nixl_agent(f"hs-producer-{uuid.uuid4()}", nixl_agent_config(backends=["UCX"]))
+        # Backend(s) overridable via NIXL_BACKENDS (comma-separated). Default UCX
+        # (InfiniBand). On AWS EFA set NIXL_BACKENDS=LIBFABRIC: UCX needs the EFA verbs
+        # driver (libefa-rdmav34.so), which many containers lack, so UCX RDMA fails with
+        # nixlRemoteDisconnectError on the first transfer.
+        _backends = os.environ.get("NIXL_BACKENDS", "UCX").split(",")
+        self._nixl = nixl_agent(
+            f"hs-producer-{uuid.uuid4()}", nixl_agent_config(backends=_backends)
+        )
         # ONE-TIME pool registration (the only ibv_reg_mr).
         t0 = time.time()
         self._pool = torch.empty(

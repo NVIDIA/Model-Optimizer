@@ -370,7 +370,12 @@ class EagleVllmStreamingDataset(StreamingDataset):
         if getattr(self, "_nixl_pid", None) != pid:
             from nixl._api import nixl_agent, nixl_agent_config
 
-            self._nixl = nixl_agent(f"hs-trainer-{pid}", nixl_agent_config(backends=["UCX"]))
+            # Backend(s) overridable via NIXL_BACKENDS (comma-separated). Default UCX
+            # (InfiniBand). On AWS EFA set NIXL_BACKENDS=LIBFABRIC: UCX needs the EFA verbs
+            # driver (libefa-rdmav34.so), which many containers lack, so UCX RDMA fails with
+            # nixlRemoteDisconnectError on the first transfer.
+            _backends = os.environ.get("NIXL_BACKENDS", "UCX").split(",")
+            self._nixl = nixl_agent(f"hs-trainer-{pid}", nixl_agent_config(backends=_backends))
             self._nixl_pid = pid
             self._remote_by_host: dict = {}
             self._recv = None
