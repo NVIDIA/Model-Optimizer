@@ -147,7 +147,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         self._per_expert_weight_quantizer = _per_expert_weight_quantizer_enabled()
         if self._per_expert_weight_quantizer:
             for i in range(self.num_gemms):
-                self.add_module(f"weight_quantizer_{i}", copy.deepcopy(self.weight_quantizer))
+                self.add_module(f"weight_quantizer_{i}", TensorQuantizer())
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
