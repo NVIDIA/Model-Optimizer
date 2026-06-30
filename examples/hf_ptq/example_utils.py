@@ -626,11 +626,13 @@ def _get_config_dtype(config):
     return config_dtype
 
 
-def _apply_dtype_to_config(model_kwargs, config_dtype, is_decilm):
+def _apply_dtype_to_config(model_kwargs, config_dtype, is_decilm, apply_config_dtype=False):
     model_kwargs = model_kwargs.copy()
     if is_decilm:
         model_kwargs["torch_dtype"] = config_dtype
         model_kwargs.pop("dtype", None)
+    elif apply_config_dtype:
+        model_kwargs["dtype"] = config_dtype
     return model_kwargs
 
 
@@ -776,11 +778,11 @@ def get_model(
             # When computing the device_map, assuming bfloat16 precision by default,
             # unless specified by the hf_config.
             config_dtype = _get_config_dtype(config_for_init)
-            model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, is_decilm)
+            model_kwargs2 = _apply_dtype_to_config(
+                model_kwargs, config_dtype, is_decilm, apply_config_dtype=True
+            )
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
-            if not is_decilm:
-                model_kwargs2["dtype"] = config_dtype
             model_kwargs2.pop("max_memory", None)
             model = from_config(config_for_init, **model_kwargs2)
 
