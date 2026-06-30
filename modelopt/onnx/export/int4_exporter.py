@@ -107,6 +107,19 @@ class INT4QuantExporter(ONNXQuantExporter):
             else:
                 matmul_node = next_node
 
+            # Handle optional Cast between Transpose and MatMul
+            # (inserted when trt_high_precision_dtype is set to "Half")
+            if matmul_node.op_type == "Cast":
+                cast_after_transpose = matmul_node
+                nodes_to_remove.append(cast_after_transpose.name)
+                cast_child_nodes = [
+                    n for n in graph.node if cast_after_transpose.output[0] in n.input
+                ]
+                assert len(cast_child_nodes) == 1, (
+                    f"Expected exactly one child after Cast for {node.name}"
+                )
+                matmul_node = cast_child_nodes[0]
+
             assert matmul_node.op_type in ["MatMul", "Gemm"], (
                 f"Expected MatMul or Gemm node for {node.name}"
             )
@@ -249,16 +262,15 @@ class INT4QuantExporter(ONNXQuantExporter):
                     node.output.extend(cast_node.output)
                     nodes_to_remove.append(cast_node.name)
 
-        # Remove unnecessay Cast after Pre-quant scale
+        # Remove unnecessary Cast after Pre-quant scale (if present)
         for node in graph.node:
             if is_pre_quant_scale_node(node):
                 pqs_child_nodes = [n for n in graph.node if node.output[0] in n.input]
-                assert len(pqs_child_nodes) == 1, f"Expected exactly one child node for {node.name}"
-                cast_node = pqs_child_nodes[0]
-                assert cast_node.op_type == "Cast", f"Expected Cast node for {node.name}"
-                node.output.clear()
-                node.output.extend(cast_node.output)
-                nodes_to_remove.append(cast_node.name)
+                if len(pqs_child_nodes) == 1 and pqs_child_nodes[0].op_type == "Cast":
+                    cast_node = pqs_child_nodes[0]
+                    node.output.clear()
+                    node.output.extend(cast_node.output)
+                    nodes_to_remove.append(cast_node.name)
 
         # Remove unnecessary casts
         new_nodes = [node for node in graph.node if node.name not in nodes_to_remove]
