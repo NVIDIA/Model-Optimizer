@@ -78,6 +78,8 @@ additional_env_vars = {
     "CALIB_BATCH_SIZE",
     "RECIPE_PATH",
     "TRUST_REMOTE_CODE",
+    "KV_SKIP_LAST_N",
+    "KV_SKIP_FIRST_M",
 }
 
 try:
