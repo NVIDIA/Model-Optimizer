@@ -197,7 +197,7 @@ def test_get_original_hf_quant_method_none_for_unquantized():
     )
 
 
-def test_get_model_empty_init_uses_torch_dtype_not_dtype(monkeypatch):
+def test_get_model_drops_dtype_from_final_load(monkeypatch):
     calls = {}
     hf_config = SimpleNamespace(
         architectures=["DeciLMForCausalLM"],
@@ -224,7 +224,7 @@ def test_get_model_empty_init_uses_torch_dtype_not_dtype(monkeypatch):
         def from_pretrained(*args, **kwargs):
             calls["from_pretrained"] = kwargs
             assert "dtype" not in kwargs
-            assert kwargs["torch_dtype"] == "auto"
+            assert "torch_dtype" not in kwargs
             return FakeModel()
 
     monkeypatch.setattr(
