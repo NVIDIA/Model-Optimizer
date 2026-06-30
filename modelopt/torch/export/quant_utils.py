@@ -1360,7 +1360,7 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
     Without this, the BF16 router weight is written to the checkpoint but omitted from
     ``exclude_modules``, and deployment frameworks (vLLM / SGLang) then try to load it as a
     quantized weight -- e.g. ``AssertionError: Tried to load weights of size [E, H] to a
-    parameter of size [E, H/2]`` for Qwen3-MoE (NVBug 5718750).
+    parameter of size [E, H/2]`` for Qwen3-MoE.
 
     Routers are detected structurally: an MoE block exposes an ``experts`` container plus a
     ``gate`` / ``router`` (or ``shared_expert_gate``) submodule that owns a weight tensor.
@@ -1379,7 +1379,7 @@ def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
                 continue
             if get_quantization_format(router) != QUANTIZATION_NONE:
                 continue
-            router_names.append(f"{name}.{attr}")
+            router_names.append(f"{name + '.' if name else ''}{attr}")
     return router_names
 
 
@@ -1494,8 +1494,8 @@ def get_quant_config(
     # MoE routers/gates are intentionally kept in original precision. On transformers>=5.0 they
     # are not nn.Linear modules (e.g. TopKRouter), never receive a quantizer, and would otherwise
     # be missing from exclude_modules even though their BF16 weight is exported -- causing
-    # deployment frameworks to load them as quantized weights (NVBug 5718750). Record them
-    # explicitly as unquantized so they land in exclude_modules.
+    # deployment frameworks to load them as quantized weights. Record them explicitly as
+    # unquantized so they land in exclude_modules.
     for router_name in _get_unquantized_moe_router_names(model):
         layer_config_dict.setdefault(router_name + ".quantization", QUANTIZATION_NONE)
 

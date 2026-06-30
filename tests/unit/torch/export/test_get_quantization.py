@@ -158,3 +158,12 @@ def test_moe_router_excluded_when_not_quantized():
     assert not any(fnmatch.fnmatch("block.experts.0", pattern) for pattern in exclude_modules), (
         f"Quantized expert wrongly excluded: {exclude_modules}"
     )
+
+
+def test_moe_router_names_handle_root_module():
+    """When the MoE block itself is the root module, router names have no leading dot."""
+    from modelopt.torch.export.quant_utils import _get_unquantized_moe_router_names
+
+    block = _FakeMoEBlock(hidden=16)
+    # name == "" for the root module; the router must be "gate", not ".gate".
+    assert _get_unquantized_moe_router_names(block) == ["gate"]
