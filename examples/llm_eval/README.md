@@ -26,7 +26,7 @@ python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or mode
 
 For a quick smoke test, add `--limit 10` to any of the above commands to evaluate on only 10 samples.
 
-- To fit one model across multiple GPUs (model sharding; this does not speed up evaluation):
+- To fit one model across multiple GPUs (model sharding) and enable larger batches that may speed up evaluation:
 
 ```sh
 python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or model card>,parallelize=True --tasks <comma separated tasks> --batch_size 4
