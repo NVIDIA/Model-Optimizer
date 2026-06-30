@@ -405,6 +405,11 @@ def auto_quantize(
     return language_model
 
 
+def _recipe_is_auto_quantize(recipe: str | None) -> bool:
+    """True if ``recipe`` resolves to an AutoQuantize recipe (peeked before model load)."""
+    return recipe is not None and isinstance(load_recipe(recipe), ModelOptAutoQuantizeRecipe)
+
+
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
@@ -454,8 +459,14 @@ def load_model(args: argparse.Namespace):
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    # Default to image-text calibration for VLM models
-    if is_nemotron_vl_model and not args.calib_with_images:
+    # Default to image-text calibration for VLM models. Skip for AutoQuantize recipes, whose
+    # text-only path does not support image-text calibration yet (auto_quantize() would raise);
+    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally.
+    if (
+        is_nemotron_vl_model
+        and not args.calib_with_images
+        and not _recipe_is_auto_quantize(args.recipe)
+    ):
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
 
