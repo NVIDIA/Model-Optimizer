@@ -17,6 +17,7 @@
 
 import re
 from collections import defaultdict
+from collections.abc import Sequence
 from functools import reduce
 from typing import Any, cast
 
@@ -1038,6 +1039,7 @@ def get_extended_model_outputs(
     intermediate_generated_files: list[str],
     calibration_data_reader: CalibrationDataReader,
     calibration_eps: list[str],
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
 ) -> dict[str, np.ndarray]:
     """Run one inference step on an onnx model which has some intermediate tensor marked as model outputs.
 
@@ -1069,9 +1071,9 @@ def get_extended_model_outputs(
         extended_onnx_path = onnx_path.replace(".onnx", "_extended.onnx")
         save_onnx(extended_model, extended_onnx_path, save_as_external_data=True)
         intermediate_generated_files.append(extended_onnx_path)
-        session = create_inference_session(extended_onnx_path, calibration_eps)
+        session = create_inference_session(extended_onnx_path, calibration_eps, input_shapes_profile)
     else:
-        session = create_inference_session(extended_model.SerializeToString(), calibration_eps)
+        session = create_inference_session(extended_model.SerializeToString(), calibration_eps, input_shapes_profile)
 
     # Run extended model's inference.
     extended_model_output_names = [output.name for output in session.get_outputs()]
@@ -1088,6 +1090,7 @@ def find_nodes_from_matmul_to_exclude(
     calibration_data_reader: CalibrationDataReader = None,
     calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
     calibration_shapes: str | dict | None = None,
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
 ) -> list[str]:
     """Find MatMul nodes that meet gemv or small-gemm conditions and should be excluded.
 
@@ -1139,6 +1142,7 @@ def find_nodes_from_matmul_to_exclude(
             intermediate_generated_files or [],
             calibration_data_reader,
             calibration_eps,
+            input_shapes_profile,
         )
 
     logger.debug(f"Matmul nodes to exclude: {nodes_to_exclude}")
@@ -1356,6 +1360,7 @@ def _exclude_matmuls_by_inference(
     intermediate_generated_files: list[str],
     calibration_data_reader: CalibrationDataReader,
     calibration_eps: list[str],
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
 ) -> list[str]:
     """Use actual inference to find MatMuls with dimension 1 or small K/N."""
     # Add matmul outputs and second-input outputs to model outputs
@@ -1379,6 +1384,7 @@ def _exclude_matmuls_by_inference(
         intermediate_generated_files,
         calibration_data_reader,
         calibration_eps,
+        input_shapes_profile,
     )
 
     nodes_to_exclude = []
@@ -1421,6 +1427,7 @@ def find_nodes_from_mha_to_exclude(
     intermediate_generated_files: list[str] | None = None,
     calibration_data_reader: CalibrationDataReader = None,
     calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
 ) -> list[str]:
     """Find MatMul nodes in MHA pattern to exclude.
 
@@ -1481,6 +1488,7 @@ def find_nodes_from_mha_to_exclude(
             intermediate_generated_files,  # type: ignore[arg-type]
             calibration_data_reader,
             calibration_eps,
+            input_shapes_profile,
         )
 
         # For each MHA block,
