@@ -22,6 +22,7 @@ import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import save_file
@@ -197,10 +198,28 @@ def test_get_original_hf_quant_method_none_for_unquantized():
     )
 
 
-def test_get_model_uses_torch_dtype_only_for_decilm(monkeypatch):
+@pytest.mark.parametrize(
+    (
+        "architecture",
+        "model_class_name",
+        "expected_config_dtype_kwarg",
+        "unexpected_config_dtype_kwarg",
+    ),
+    [
+        ("DeciLMForCausalLM", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("LlamaForCausalLM", "LlamaForCausalLM", "dtype", "torch_dtype"),
+    ],
+)
+def test_get_model_uses_expected_dtype_kwarg(
+    monkeypatch,
+    architecture,
+    model_class_name,
+    expected_config_dtype_kwarg,
+    unexpected_config_dtype_kwarg,
+):
     calls = {}
     hf_config = SimpleNamespace(
-        architectures=["DeciLMForCausalLM"],
+        architectures=[architecture],
         dtype=torch.float16,
         model_type="llama",
         torch_dtype=torch.bfloat16,
@@ -215,8 +234,8 @@ def test_get_model_uses_torch_dtype_only_for_decilm(monkeypatch):
         def from_config(config, **kwargs):
             calls["from_config"] = kwargs
             assert config is hf_config
-            assert "dtype" not in kwargs
-            assert kwargs["torch_dtype"] is torch.float16
+            assert kwargs[expected_config_dtype_kwarg] is torch.float16
+            assert unexpected_config_dtype_kwarg not in kwargs
             assert "max_memory" not in kwargs
             return FakeModel()
 
@@ -227,46 +246,13 @@ def test_get_model_uses_torch_dtype_only_for_decilm(monkeypatch):
             assert "torch_dtype" not in kwargs
             return FakeModel()
 
-    monkeypatch.setattr(
-        example_utils.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: hf_config,
-    )
-    monkeypatch.setattr(example_utils, "AutoModelForCausalLM", FakeAutoModelForCausalLM)
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
-    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
-    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
-    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
-
-    model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
-
-    assert isinstance(model, FakeModel)
-    assert calls["eval"]
-    assert calls["from_config"]["trust_remote_code"] is True
-    assert calls["from_pretrained"]["trust_remote_code"] is True
-
-
-def test_get_model_uses_dtype_for_non_decilm(monkeypatch):
-    calls = {}
-    hf_config = SimpleNamespace(
-        architectures=["LlamaForCausalLM"],
-        dtype=torch.float16,
-        model_type="llama",
-        torch_dtype=torch.bfloat16,
-    )
-
-    class FakeModel:
-        def eval(self):
-            calls["eval"] = True
-
     class FakeLlamaForCausalLM:
         @staticmethod
         def _from_config(config, **kwargs):
             calls["from_config"] = kwargs
             assert config is hf_config
-            assert kwargs["dtype"] is torch.float16
-            assert "torch_dtype" not in kwargs
+            assert kwargs[expected_config_dtype_kwarg] is torch.float16
+            assert unexpected_config_dtype_kwarg not in kwargs
             assert "max_memory" not in kwargs
             return FakeModel()
 
@@ -282,7 +268,10 @@ def test_get_model_uses_dtype_for_non_decilm(monkeypatch):
         "from_pretrained",
         lambda *args, **kwargs: hf_config,
     )
-    monkeypatch.setattr(example_utils.transformers, "LlamaForCausalLM", FakeLlamaForCausalLM)
+    if model_class_name == "AutoModelForCausalLM":
+        monkeypatch.setattr(example_utils, "AutoModelForCausalLM", FakeAutoModelForCausalLM)
+    else:
+        monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
     monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
     monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
@@ -293,5 +282,8 @@ def test_get_model_uses_dtype_for_non_decilm(monkeypatch):
 
     assert isinstance(model, FakeModel)
     assert calls["eval"]
-    assert "trust_remote_code" not in calls["from_config"]
+    if expected_config_dtype_kwarg == "torch_dtype":
+        assert calls["from_config"]["trust_remote_code"] is True
+    else:
+        assert "trust_remote_code" not in calls["from_config"]
     assert calls["from_pretrained"]["trust_remote_code"] is True
