@@ -36,19 +36,33 @@ curl -s http://localhost:8000/v1/chat/completions \
        "content":"What is the capital of France? Then compute 17*23."}],
        "max_tokens":128}' \
   | python3 -c "import json,sys; t=json.load(sys.stdin)['choices'][0]['message']['content']; \
-print('COHERENCE:',repr(t[:200])); sys.exit(0 if 'Paris' in t else 1)" \
+ok = 'Paris' in t and '391' in t; print('COHERENCE:',repr(t[:200])); sys.exit(0 if ok else 1)" \
   || { echo 'INCOHERENT OUTPUT — wrong KV dtype / missing serving patch?'; exit 1; }
 ```
 
+Assert **both** parts (the factual answer *and* `17*23 == 391`) — a model that
+gets the capital right but the arithmetic wrong is still degraded, and a
+single-token match is too easy to pass on garbage.
+
 ## 3. Run a sweep
 
+There is no separate "sweep file" — drive the sweep inline by looping the
+concurrency values and invoking `aiperf profile` once per point. **Give each
+point its own `--artifact-dir`**, or every run overwrites the previous
+`profile_export_aiperf.json` and the comparison is lost:
+
 ```bash
-$AIPERF profile -m <model> --endpoint-type chat --streaming -u localhost:8000 \
-    --synthetic-input-tokens-mean $ISL --output-tokens-mean $OSL \
-    --concurrency $C --request-count $RC \
-    --tokenizer <model> --tokenizer-trust-remote-code \
-    --extra-inputs ignore_eos:true \
-    --random-seed 42 --artifact-dir $ARTIFACT_DIR
+ISL=8000; OSL=1000; OUT=./aiperf_results   # one shape; repeat for others (see below)
+for C in 1 4 16 64 128 256 512; do
+  RC=$(( C * 5 ))                           # a few requests per concurrency for steady state
+  $AIPERF profile -m <model> --endpoint-type chat --streaming -u localhost:8000 \
+      --synthetic-input-tokens-mean $ISL --output-tokens-mean $OSL \
+      --concurrency $C --request-count $RC \
+      --tokenizer <model> --tokenizer-trust-remote-code \
+      --extra-inputs ignore_eos:true \
+      --random-seed 42 \
+      --artifact-dir "$OUT/isl${ISL}_osl${OSL}/c${C}"   # unique per sweep point
+done
 ```
 
 Critical flags:
@@ -62,14 +76,14 @@ Critical flags:
   the same repo so synthetic token counts match the model's tokenizer.
 - **`--random-seed 42`** — reproducible synthetic prompts across runs.
 
-Sweep `--concurrency` over a range (e.g. `1 4 16 64 128 256 512`) to trace the
-latency-vs-throughput curve; set `--request-count` to a few × concurrency so each
-point reaches steady state.
+The concurrency range traces the latency-vs-throughput curve; `--request-count`
+of a few × concurrency lets each point reach steady state.
 
 ### Suggested token shapes
 
 Run more than one shape so the deployment is characterized under different
-prefill/decode and prefix-cache conditions:
+prefill/decode and prefix-cache conditions (rerun the loop above with each
+`ISL`/`OSL` pair, keeping the per-shape, per-concurrency `--artifact-dir`):
 
 | Shape       | Input (ISL) | Output (OSL) | Notes                                  |
 |-------------|-------------|--------------|----------------------------------------|
@@ -83,7 +97,8 @@ so a known fraction hits the KV cache — useful when the server has
 
 ## 4. Compare the results
 
-Each run writes `profile_export_aiperf.json` to `--artifact-dir`. Key fields:
+Each run writes `profile_export_aiperf.json` to its own `--artifact-dir` (one per
+shape × concurrency point, per §3). Key fields:
 
 - `time_to_first_token`
 - `inter_token_latency`
