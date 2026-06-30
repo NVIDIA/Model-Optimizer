@@ -137,6 +137,13 @@ class AutoQuantizeCost(ModeloptBaseConfig):
         description="Routed experts active per token, in (0, 1]. Used by the 'active_moe' cost model.",
     )
 
+    @field_validator("active_moe_expert_ratio")
+    @classmethod
+    def _validate_active_moe_expert_ratio(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 1):
+            raise ValueError(f"active_moe_expert_ratio must be in (0, 1], got {v}")
+        return v
+
 
 class AutoQuantizeConstraints(ModeloptBaseConfig):
     """LP search constraints + cost model; matches the ``mtq.auto_quantize`` constraints dict."""
@@ -176,6 +183,7 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         default=[],
         title="Candidate quantization formats",
         description="Per-layer search space; each entry is a full QuantizeConfig. At least 2 required.",
+        validate_default=True,
     )
     auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
         default="gradient",

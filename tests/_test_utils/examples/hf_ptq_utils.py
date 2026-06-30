@@ -40,6 +40,10 @@ class PTQCommand:
     min_gpu: int | None = None
     batch: int | None = None
 
+    def __post_init__(self):
+        if (self.quant is None) == (self.recipe is None):
+            raise ValueError("Exactly one of `quant` or `recipe` must be set.")
+
     def run(self, model_path: str):
         if self.min_sm and torch.cuda.get_device_capability() < (
             self.min_sm // 10,

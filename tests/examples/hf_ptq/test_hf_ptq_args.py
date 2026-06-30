@@ -17,6 +17,9 @@ import importlib
 import sys
 from pathlib import Path
 
+from modelopt.recipe import load_recipe
+from modelopt.recipe.presets import QUANT_CFG_CHOICES
+
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
 
@@ -40,9 +43,6 @@ def _parse_hf_ptq_args(monkeypatch, *args):
 
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
-    from modelopt.recipe import load_recipe
-    from modelopt.recipe.presets import QUANT_CFG_CHOICES
-
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
@@ -64,8 +64,6 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
     """Top-level cost_excluded_layers maps to the mtq constraints.cost.excluded_module_name_patterns
     key (distinct from disabled_layers), so a cost-exclusion recipe matches the nested mtq dict."""
-    from modelopt.recipe import load_recipe
-
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
