@@ -1,0 +1,104 @@
+# nel-next (nemo-evaluator 0.3.x) agentic AA eval template — NOT the 0.2.6 schema.
+# Read references/nel-next.md + recipes/tasks/aa_next/<benchmark>.md first.
+# Benchmark shown = Terminal-Bench 2.1; swap the `benchmarks:` block per the recipe.
+#
+# Run via the isolated 0.3.x venv:
+#   .agents/scripts/nel-next.sh --setup-only
+#   set -a && source .env && set +a    # HF_TOKEN, AWS_*, NEL_NEXT_EVAL_IMAGE, HARBOR_*_ECR_REPOSITORY (from modelopttools:eval-config)
+#   .agents/scripts/nel-next.sh eval run recipes/examples/example_eval_next.yaml --dry-run
+#   ... --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
+#   ... --submit                                                                                             # full
+# Internal harbor infra (eval_image + ECR) comes from .env via ${VAR}; all blocks
+# validate against 0.3.0 (extra="forbid"). `???` = fill.
+
+services:
+  model:                             # any name; referenced by benchmarks[].solver.service
+    type: vllm                       # NEL deploys + serves (auto-wrapped as an api service for the agent)
+    model: ???                       # checkpoint path (bind-mounted to /model:ro) OR HF handle
+    served_model_name: ???
+    protocol: chat_completions
+    port: 5000
+    tensor_parallel_size: 8          # STRUCTURED fields — don't repeat parallelism in extra_args
+    data_parallel_size: 1
+    num_nodes: 1
+    image: vllm/vllm-openai:v0.19.1  # vLLM SERVING image (≠ eval_image); bump to recipes.vllm.ai min (MiniMax-M2.7 NVFP4 ≥ 0.20.0)
+    startup_timeout: 3600.0
+    extra_args:                      # raw vllm flags (cross-check model card + recipes.vllm.ai)
+      - "--trust-remote-code"
+      - "--enable-auto-tool-choice"  # agentic = tool-calling; pick the parser per the chat template
+      # - "--tool-call-parser=<parser>"
+      # - "--reasoning-parser=<parser>"
+      - "--enable-expert-parallel"   # MoE only
+      - "--enable-prefix-caching"
+      - "--gpu-memory-utilization=0.9"
+      - "--max-num-seqs=64"
+      - '--model-loader-extra-config={"enable_multithread_load":true,"num_threads":48}'
+    extra_env:                       # carry the model's normal backend env (e.g. NVFP4 MoE: VLLM_USE_FLASHINFER_MOE_FP4=1, VLLM_FLASHINFER_MOE_BACKEND=throughput)
+      VLLM_CACHE_ROOT: /cache/vllm
+      HF_HOME: /cache/huggingface
+      HF_TOKEN: ${HF_TOKEN}
+      SAFETENSORS_FAST_GPU: "1"
+    container_mounts:                # source dirs MUST pre-exist (pyxis won't create them): ssh <login> 'mkdir -p <lustre>/<user>/.cache/{vllm,huggingface}'
+      - ???:/cache/vllm
+      - ???:/cache/huggingface
+    generation: {temperature: 1.0, top_p: 0.95}   # from model card (reasoning mode); adjust per card — mandatory lookup (references/model-card-research.md), same as 0.2.6
+    proxy:
+      request_timeout: 1800
+      extra_body: {skip_special_tokens: false}   # add model-card sampling extras here if the card specifies them; mirror them in the export tags below
+      interceptors:
+        - name: drop_params                        # agents send max_tokens; many servers reject it
+          config: {params: [max_tokens, max_completion_tokens]}
+        # SWE-bench (OpenHands, multi-turn) adds turn_counter + consolidate_system + a system_message — see swebench_verified.md
+    node_pool: gpu
+
+benchmarks:
+  - playbook: terminal_bench_2_1     # SWE-bench: swebench_verified (see recipe)
+    repeats: 8                       # AA count — keep for a scored run (canary: -O benchmarks.0.repeats=1)
+    max_concurrent: 50               # canonical TB2.1 bench.yaml; keep == sandbox.concurrency
+    solver:
+      service: model
+      timeout_strategy: max          # canonical TB2.1; "task" = leaderboard-comparable
+      agent_kwargs: {llm_kwargs: {timeout: 3600}}
+    sandbox:
+      region: us-east-1              # MUST match the region in ${HARBOR_ECR_REPOSITORY} (SWE-bench: us-east-2 + ${HARBOR_SWEBENCH_ECR_REPOSITORY})
+      ecr_repository: ${HARBOR_ECR_REPOSITORY}      # from modelopttools:eval-config
+      concurrency: 50
+      log_stream_prefix: terminalbench21-???
+
+cluster:
+  type: slurm
+  hostname: ???                      # login FQDN
+  username: ${oc.env:USER}
+  account: ???
+  walltime: "04:00:00"               # auto_resume chains across windows
+  shards: 1                          # N = N nodes (each redeploys vLLM)
+  eval_image: ${NEL_NEXT_EVAL_IMAGE}  # from eval-config (TB2.1 needs ≥0.3.1.1-harbor, multi-arch; enroot creds per SKILL Step 7.5)
+  sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"nel-next agentic eval"}}'
+  sbatch_extra_flags: {switches: 1, exclusive: true}
+  container_env:                     # AWS creds reach the eval container ONLY via here
+    HF_TOKEN: ${HF_TOKEN}
+    HF_HOME: /cache/huggingface
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    AWS_DEFAULT_REGION: us-east-1     # match sandbox.region / the region in ${HARBOR_ECR_REPOSITORY}
+    LLM_API_KEY: "no-key-needed"
+  mount_home: false
+  auto_resume: true
+  max_retries: 3
+  node_pools:
+    gpu: {partition: "???", nodes: 1, ntasks_per_node: 1, gpus_per_node: 8}   # match TP*DP
+
+output:
+  dir: ???                           # <lustre>/eval-output/<model>-<benchmark>
+  # MLflow auto-export — ALWAYS include. Runs cluster-side at finalize (a local
+  # `nel export` is SSO-blocked). Hardcode experiment_name (${USER}=root in-container).
+  export: [mlflow]
+  export_config:
+    mlflow:
+      tracking_uri: https://mlflow-nemo-evaluator.nvidia.com/
+      experiment_name: ???           # <user>/<model>-<benchmark>
+      log_config_params: true
+      copy_logs: true
+      exclude_patterns: ["shard*"]
+      description: ???               # '<model> | T=1.0 top_p=0.95 | <benchmark> (timeout_strategy=…) | r8'
+      tags: {framework: vllm, model: "???", temperature: '1.0', top_p: '0.95'}   # aligned with example_eval.yaml (add any extra sampling the card sets)

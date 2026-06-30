@@ -32,6 +32,22 @@ If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md
 
 ---
 
+### nel-next path (Terminal-Bench 2.x, SWE-bench, …) — branch here FIRST
+
+A few **agentic** AA benchmarks do **not** run on the default
+`nemo-evaluator-launcher` 0.2.6 (Steps 1–9 don't apply). They run on **nel-next**
+(`nemo-evaluator[harbor]` 0.3.x) — a separate package, CLI (`nel eval run`), `-O`
+overrides, and `services`/`benchmarks`/`cluster`/`output` schema. If the user asks
+for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
+
+1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
+2. Isolated 0.3.x venv: `.agents/scripts/nel-next.sh --setup-only` (keeps 0.2.6 `nel` untouched).
+3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export: [mlflow]` block.
+
+Steps 1–9 below are the 0.2.6 path — use them for everything else.
+
+---
+
 ### Step 1 — Prerequisites
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
@@ -44,6 +60,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
 - AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom,omniscience}.md`
 - Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
+- **nel-next only** (different evaluator — see the nel-next section below, NOT the 0.2.6 steps): shared reference `references/nel-next.md` + per-benchmark recipes `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md` (agentic). The `aa_next/` dir holds tasks that require nemo-evaluator-next (0.3.x); `aa/` is the 0.2.6 suite.
 
 **AA rule:** If the user mentions "AA" / "Artificial Analysis", generate **only** tasks under `recipes/tasks/aa/`. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked.
 
