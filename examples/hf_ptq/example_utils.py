@@ -598,6 +598,25 @@ def get_original_hf_quant_method(config) -> str | None:
     return None
 
 
+def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs):
+    """Re-derive a built-in config when a remote-code config is used with a built-in model
+    class, so it matches the model definition's version; fall back to hf_config otherwise.
+    """
+    if auto_model_module in [AutoModelForCausalLM, AutoModel]:
+        return hf_config
+    if not type(hf_config).__module__.startswith("transformers_modules"):
+        return hf_config
+    builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    try:
+        return AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
+    except Exception as e:
+        warnings.warn(
+            f"Could not re-derive a built-in config for {ckpt_path} ({e}); using the "
+            "remote-code config for device-map inference."
+        )
+        return hf_config
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -732,12 +751,16 @@ def get_model(
             from_config = auto_model_module._from_config
 
         is_decilm = "DeciLM" in architecture
+        config_for_init = _resolve_init_config(
+            hf_config, auto_model_module, ckpt_path, config_kwargs
+        )
+
         with init_empty_weights(include_buffers=True):
             # When computing the device_map, assuming bfloat16 precision by default,
             # unless specified by the hf_config.
             config_dtype = (
-                getattr(hf_config, "dtype", None)
-                or getattr(hf_config, "torch_dtype", None)
+                getattr(config_for_init, "dtype", None)
+                or getattr(config_for_init, "torch_dtype", None)
                 or torch.bfloat16
             )
             if isinstance(config_dtype, str):
@@ -751,7 +774,7 @@ def get_model(
             else:
                 model_kwargs2["dtype"] = config_dtype
             model_kwargs2.pop("max_memory", None)
-            model = from_config(hf_config, **model_kwargs2)
+            model = from_config(config_for_init, **model_kwargs2)
 
         max_memory = get_max_memory()
         inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)

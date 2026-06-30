@@ -21,6 +21,7 @@ separate-file-standalone, separate-file-indexed) plus a negative case.
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -196,6 +197,40 @@ def test_get_original_hf_quant_method_none_for_unquantized():
         example_utils.get_original_hf_quant_method(SimpleNamespace(quantization_config=None))
         is None
     )
+
+
+# ---------- _resolve_init_config ---------------------------------------------
+
+
+def _remote_config():
+    # Config whose class module lives under "transformers_modules" (remote code).
+    cls = type("_RemoteConfig", (), {"__module__": "transformers_modules.ckpt.config"})
+    return cls()
+
+
+def test_resolve_init_config_rederives_for_remote_config():
+    builtin_cfg = SimpleNamespace()
+    with patch.object(
+        example_utils.AutoConfig, "from_pretrained", return_value=builtin_cfg
+    ) as mock:
+        out = example_utils._resolve_init_config(
+            _remote_config(), object, "/ckpt", {"trust_remote_code": True}
+        )
+    assert out is builtin_cfg
+    mock.assert_called_once_with("/ckpt")  # trust_remote_code stripped
+
+
+def test_resolve_init_config_keeps_non_remote_config():
+    cfg = SimpleNamespace()  # module is "types", not remote
+    with patch.object(example_utils.AutoConfig, "from_pretrained") as mock:
+        assert example_utils._resolve_init_config(cfg, object, "/ckpt", {}) is cfg
+    mock.assert_not_called()
+
+
+def test_resolve_init_config_falls_back_when_rederive_raises():
+    cfg = _remote_config()
+    with patch.object(example_utils.AutoConfig, "from_pretrained", side_effect=ValueError()):
+        assert example_utils._resolve_init_config(cfg, object, "/ckpt", {}) is cfg
 
 
 @pytest.mark.parametrize(
