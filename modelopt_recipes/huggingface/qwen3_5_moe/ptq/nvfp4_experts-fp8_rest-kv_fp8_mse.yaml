@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# MSE variant of qwen3p5_mixed_nvfp4_fp8.yaml.
 # NVFP4 on the LM routed experts (MSE/FP8-scale-sweep -> STATIC weight scales, dynamic inputs)
 # + ModelOpt-default FP8 (W8A8 per-tensor static, max-calibrated) on everything else the FP8
 # checkpoint quantizes; FP8 KV cache; MTP block BF16.
