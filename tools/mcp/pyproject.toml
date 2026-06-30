@@ -5,20 +5,7 @@ description = "MCP server exposing ModelOpt launcher operations (submit, status,
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0",
-    # NOTE on modelopt-launcher: `tools/launcher/pyproject.toml` declares
-    # the package name as `modelopt-launcher` but configures
-    # `py-modules = []` — there is NO importable `modelopt_launcher`
-    # Python package on disk. bridge.py invokes the launcher via
-    # `uv run launch.py` (subprocess) from `<repo>/tools/launcher/` as
-    # a sibling directory; it does NOT `import modelopt_launcher`.
-    # Declaring the bare name here would add an unsatisfiable PyPI
-    # dependency for end users installing via
-    # `uvx --from "git+...#subdirectory=tools/mcp" modelopt-mcp`. So we
-    # do NOT declare it. The install relationship is documented in
-    # README.md as a sibling-checkout layout requirement instead. The
-    # uvx-from-git path satisfies this naturally because uvx clones
-    # the whole repo, putting tools/launcher and tools/mcp next to
-    # each other on disk.
+    "modelopt-launcher",
     "pyyaml",
     "pydantic>=2.0",
 ]
@@ -36,13 +23,8 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["modelopt_mcp*"]
 
-# No [tool.uv.sources] for the launcher — bridge.py uses it via
-# `subprocess.run(["uv", "run", "launch.py", ...], cwd=<repo>/tools/launcher/)`,
-# so the launcher is a file-layout dependency, not a Python import
-# dependency. The uvx-from-git path clones the whole repo so the
-# sibling tools/launcher/ ends up on disk automatically. For dev:
-#   uv pip install -e .
-#   # then run from a clone where ../launcher exists.
+[tool.uv.sources]
+modelopt-launcher = { path = "../launcher", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

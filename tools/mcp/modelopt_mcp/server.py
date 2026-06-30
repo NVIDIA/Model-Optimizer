@@ -130,10 +130,12 @@ def _build_server() -> FastMCP:
             "determined by mutually-exclusive args:\n"
             "  - hf_local=<path>      → Docker (local GPU)\n"
             "  - cluster_host=<host>  → Slurm (remote SSH)\n\n"
-            "Returns the experiment_id (Slurm) or PID (Docker, "
-            "experiment_id captured in Phase 2) immediately; the actual "
-            "job runs detached. Poll status via job_status, fetch "
-            "output via job_logs.\n\n"
+            "Returns PID for Docker, plus experiment_id when the id is "
+            "printed during the short launch-output tail; if the tail times "
+            "out, Docker returns experiment_id=None and stdout_log for "
+            "diagnostics. Slurm returns experiment_id. The actual job runs "
+            "detached. Poll status via job_status, fetch output via "
+            "job_logs.\n\n"
             "Auto-verifies the executor first by default (skip_verify="
             "False is recommended unless you just called verify_setup)."
         ),
@@ -197,6 +199,26 @@ def _build_server() -> FastMCP:
                 )
             ),
         ] = None,
+        source_ref: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Model-Optimizer branch, tag, or commit SHA to materialize "
+                    "before launching. None resolves the repository default "
+                    "configured by MODELOPT_MCP_SOURCE_REF, falling back to main."
+                )
+            ),
+        ] = None,
+        source_repo: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Git repository URL for the managed Model-Optimizer checkout. "
+                    "None uses MODELOPT_MCP_SOURCE_REPO or the public NVIDIA/"
+                    "Model-Optimizer repository."
+                )
+            ),
+        ] = None,
         skip_verify: Annotated[
             bool,
             Field(
@@ -241,6 +263,8 @@ def _build_server() -> FastMCP:
             extra_overrides=extra_overrides,
             skip_verify=skip_verify,
             dry_run=dry_run,
+            source_ref=source_ref,
+            source_repo=source_repo,
         )
 
     @mcp.tool(

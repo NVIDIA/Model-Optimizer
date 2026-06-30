@@ -6,7 +6,7 @@ The following instructions show how to evaluate the Model Optimizer quantized LL
 
 ## NeMo Evaluator
 
-[NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [llm_ptq](../llm_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
+[NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [hf_ptq](../hf_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
 
 ## LM-Eval-Harness
 
@@ -233,7 +233,7 @@ This is useful for evaluating quantized models deployed with vLLM or any model s
     --tensor-parallel-size <tp_size> # Adjust as needed
    ```
 
-   To generate the quantized model such as `nvidia/Llama-3.1-8B-Instruct-FP8`, please refer to instructions [here](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#deploy-fp8-quantized-model-using-vllm-and-sglang). Note currently modelopt quantized model support in vLLM is limited, we are working on expanding the model and quant formats support.
+   To generate the quantized model such as `nvidia/Llama-3.1-8B-Instruct-FP8`, please refer to instructions [here](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq#deploy-fp8-quantized-model-using-vllm-and-sglang). Note currently modelopt quantized model support in vLLM is limited, we are working on expanding the model and quant formats support.
 
 1. **Make the script executable (if not already):**
 

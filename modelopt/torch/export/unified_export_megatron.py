@@ -57,7 +57,7 @@ from .plugins.mcore_custom import (
     get_safetensor,
     save_safetensors_by_layer_index,
 )
-from .plugins.megatron_importer import GPTModelImporter
+from .plugins.megatron_importer import GPTModelImporter, _get_mamba_conv1d
 from .quant_utils import (
     get_activation_scaling_factor,
     get_kv_cache_dtype,
@@ -664,7 +664,7 @@ class GPTModelExporter:
         self.rules["D"](layer.mixer.D, layer_id)
         self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
 
-        self.rules["conv1d"](layer.mixer.conv1d, layer_id)
+        self.rules["conv1d"](_get_mamba_conv1d(layer.mixer), layer_id)
         self.rules["in_proj"](layer.mixer.in_proj, layer_id)
         self.rules["out_proj"](layer.mixer.out_proj, layer_id)
 

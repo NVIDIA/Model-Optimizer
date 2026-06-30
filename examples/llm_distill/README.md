@@ -25,7 +25,6 @@ This section focuses on demonstrating how to apply Model Optimizer to perform kn
 ### Docker
 
 For Hugging Face models, please use the PyTorch docker image (e.g., `nvcr.io/nvidia/pytorch:26.01-py3`).
-For Megatron-Bridge or Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`) which has all the dependencies installed.
 Visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
@@ -174,7 +173,7 @@ accelerate launch --config-file ./accelerate_config/fsdp2.yaml \
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)

@@ -61,6 +61,7 @@ from ...tensor_quant import (
     static_blockwise_fp4_fake_quant,
 )
 from ...utils import is_torch_export_mode
+from ...utils.numeric_utils import fp8_max_for_normalization
 from ..functional import normalized_hadamard_transform
 
 __all__ = [
@@ -530,6 +531,26 @@ class TensorQuantizer(nn.Module):
         )
 
     @property
+    def is_fp8(self):
+        """Check if is per-tensor FP8 E4M3 (no block scales, no per-channel axis)."""
+        return self._num_bits == (4, 3) and self._block_sizes is None and self._axis is None
+
+    @property
+    def is_nvfp4_dynamic(self):
+        """Check if is dynamic NVFP4: E2M1 with E4M3 per-block scales computed dynamically.
+
+        Mirror of ``is_nvfp4_static`` for the dynamic-scale layout; like it, this does
+        not constrain the block size. Consumers that require a specific block size
+        (e.g. the block-16 Triton kernels) check ``block_sizes[-1]`` downstream.
+        """
+        return (
+            self._block_sizes is not None
+            and self._block_sizes.get("type", None) == "dynamic"
+            and self._num_bits == (2, 1)
+            and self._block_sizes.get("scale_bits", None) == (4, 3)
+        )
+
+    @property
     def is_nvfp4_static(self):
         """True for E2M1 weights + E4M3 per-block scales in static layout (format-only check)."""
         return (
@@ -784,12 +805,20 @@ class TensorQuantizer(nn.Module):
         elif self._block_sizes.get("scale_bits") == (4, 3):
             # NVFP4 default quantization
             # Return real quantized tensor and store scales inside TensorQuantizer
+            if self._block_sizes.get("four_over_six", False):
+                raise NotImplementedError(
+                    "NVFP4 Four-Over-Six (4/6) is not supported via mtq.compress: the per-block "
+                    "M=4/M=6 choice baked into the quantizer amax by MSE calibration is not "
+                    "preserved by real quantization. Use mtq.quantize + export for 4/6 instead."
+                )
             outputs, _weights_scaling_factor, _weights_scaling_factor_2 = NVFP4QTensor.quantize(
                 inputs,
                 self._block_sizes[-1],
-                weights_scaling_factor_2=self.amax.float() / (448.0 * 6.0)
-                if self.amax is not None
-                else None,
+                weights_scaling_factor_2=(
+                    NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(self)
+                    if self.amax is not None
+                    else None
+                ),
                 try_tensorrt=True,
             )
             buffer_to_register["_scale"] = _weights_scaling_factor
@@ -946,9 +975,7 @@ class TensorQuantizer(nn.Module):
 
         quant_axis = [i for i in range(len(quantize_axis)) if quantize_axis[i]]
 
-        slices = (
-            None if all(s is None for s in slices) else [s if s else slice(None) for s in slices]
-        )
+        slices = None if all(s is None for s in slices) else [s or slice(None) for s in slices]
 
         if all(p is None for p in paddings):
             paddings = None
@@ -957,7 +984,7 @@ class TensorQuantizer(nn.Module):
             for padding in paddings:
                 if not (new_paddings or padding):
                     continue
-                new_paddings.extend(padding if padding else (0, 0))
+                new_paddings.extend(padding or (0, 0))
             paddings = tuple(reversed(new_paddings))
 
         set_quant_params(quant_axis, reshape_size, paddings, slices)
@@ -1454,6 +1481,7 @@ class NVFP4StaticQuantizer(TensorQuantizer):
                 self.amax,
                 self.global_amax,  # Can be None, will be computed internally
                 True,  # quantize_block_scales
+                fp8_max_for_normalization(self),
                 inputs.dtype,
                 self._pass_through_bwd,
             )

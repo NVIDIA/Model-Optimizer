@@ -62,4 +62,4 @@ This matrix covers officially validated combinations. For unlisted models:
 
 - **NVFP4 inference requires Blackwell GPUs** (B100, B200, GB200). Hopper can run FP4 calibration but not inference.
 - INT4_AWQ and W4A8_AWQ are only supported by TRT-LLM (not vLLM or SGLang).
-- Source: `examples/llm_ptq/README.md` and `docs/source/deployment/3_unified_hf.rst`
+- Source: `examples/hf_ptq/README.md` and `docs/source/deployment/3_unified_hf.rst`

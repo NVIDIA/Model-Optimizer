@@ -73,7 +73,7 @@ from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calib
 from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
 
 # The --quant_cfg / --kv_cache_quant CLI vocabularies are discovered from the preset
-# YAMLs (shared with the llm_ptq examples via modelopt.recipe.presets). --quant_cfg
+# YAMLs (shared with the hf_ptq examples via modelopt.recipe.presets). --quant_cfg
 # additionally accepts any full config name from ``mtq.config.choices`` (e.g.
 # ``FP8_DEFAULT_CFG``); see get_quant_config below.
 
@@ -93,10 +93,12 @@ def get_args() -> argparse.Namespace:
         help="Path to save the quantized model in Megatron checkpoint format (with ModelOpt state).",
     )
 
-    # Parallelism arguments
+    # Parallelism arguments. Data parallelism is implicit: DP = world_size / (tp * pp * cp).
+    # e.g. `torchrun --nproc_per_node 8 quantize.py --tp_size 2` runs with DP=4.
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
+    parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
 
     # Quantization arguments
     parser.add_argument(
@@ -263,6 +265,7 @@ def main(args: argparse.Namespace):
             "tensor_model_parallel_size": args.tp_size,
             "pipeline_model_parallel_size": args.pp_size,
             "expert_model_parallel_size": args.ep_size,
+            "context_parallel_size": args.cp_size,
             "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,

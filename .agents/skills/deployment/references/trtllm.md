@@ -42,46 +42,24 @@ llm = LLM(model="<checkpoint_path>", tensor_parallel_size=4)
 
 ## AutoDeploy (for AutoQuant / mixed-precision)
 
-AutoDeploy automates graph transformations for optimized inference. Required for AutoQuant checkpoints.
+AutoDeploy automates graph transformations for optimized inference and is useful for
+AutoQuant / mixed-precision checkpoints. The standalone `examples/llm_autodeploy` example
+was removed in 0.46; use TensorRT-LLM's
+[AutoDeploy](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy)
+directly together with a ModelOpt-quantized checkpoint.
 
-### End-to-end script
+### Workflow
 
-```bash
-# Quantize and deploy in one step
-./examples/llm_autodeploy/scripts/run_auto_quant_and_deploy.sh \
-    --hf_ckpt <model_path> \
-    --save_quantized_ckpt <output_path> \
-    --quant fp8,nvfp4 \
-    --effective_bits 4.5
-```
-
-Parameters:
-
-- `--hf_ckpt`: Path to unquantized HuggingFace checkpoint
-- `--save_quantized_ckpt`: Output path for quantized checkpoint
-- `--quant`: Quantization formats (e.g., `fp8,nvfp4`)
-- `--effective_bits`: Target precision (higher = more accuracy for sensitive layers)
-- `--world_size`: Number of GPUs for tensor parallelism
-- `--calib_batch_size`: Calibration batch size (reduce if OOM, default 8)
-
-### AutoDeploy API server
-
-```python
-# examples/llm_autodeploy/api_server.py provides a FastAPI server
-# with OpenAI-compatible endpoints using AutoDeploy
-```
-
-### Test AutoDeploy
-
-```bash
-python examples/llm_autodeploy/api_client.py --prompt "What is AI?" "What is golf?"
-```
+1. Quantize the checkpoint with ModelOpt PTQ (including AutoQuant / mixed precision) via
+   `examples/llm_ptq` (`hf_ptq.py` / `scripts/huggingface_example.sh`), which produces a
+   unified HuggingFace checkpoint with `hf_quant_config.json`.
+2. Deploy that checkpoint with TensorRT-LLM's AutoDeploy backend (see the upstream
+   `examples/auto_deploy` docs for the current API and `trtllm-serve` flags).
 
 ### Notes
 
-- NVFP4 in AutoDeploy requires Blackwell GPUs
-- For Hopper: remove `nvfp4` from `--quant` and set `--effective_bits` above 8.0
-- AutoDeploy supports CUDA graphs, torch compile backends, and KV cache optimization
+- NVFP4 in AutoDeploy requires Blackwell GPUs; on Hopper use FP8 instead.
+- AutoDeploy supports CUDA graphs, torch compile backends, and KV cache optimization.
 
 ## Legacy TRT-LLM Checkpoint (deprecated)
 

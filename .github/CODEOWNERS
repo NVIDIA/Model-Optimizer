@@ -46,10 +46,9 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 /examples/deepseek @NVIDIA/modelopt-deploy-codeowners
 /examples/diffusers @NVIDIA/modelopt-examples-diffusers-codeowners
 /examples/gpt-oss @NVIDIA/modelopt-examples-gpt-oss-codeowners
-/examples/llm_autodeploy @NVIDIA/modelopt-deploy-codeowners
 /examples/llm_distill @NVIDIA/modelopt-torch-distill-codeowners
 /examples/llm_eval @NVIDIA/modelopt-examples-llm_ptq-codeowners
-/examples/llm_ptq @NVIDIA/modelopt-examples-llm_ptq-codeowners
+/examples/hf_ptq @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/llm_qat @NVIDIA/modelopt-examples-llm_qat-codeowners
 /examples/llm_sparsity @NVIDIA/modelopt-torch-sparsity-codeowners
 /examples/megatron_bridge @NVIDIA/modelopt-examples-megatron-codeowners
@@ -60,7 +59,6 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 /examples/specdec_bench @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/speculative_decoding @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/torch_onnx @NVIDIA/modelopt-onnx-codeowners
-/examples/vlm_ptq @NVIDIA/modelopt-examples-vlm-codeowners
 /examples/vllm_serve @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/windows @NVIDIA/modelopt-windows-codeowners
 

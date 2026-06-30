@@ -223,7 +223,7 @@ def test_max_seq_len_is_required():
     rather than crashing later in _fetch."""
     with pytest.raises(ValueError, match="max_seq_len"):
         EagleVllmStreamingConfig(server_urls="http://a:8000", model="m")
-    with pytest.raises(ValueError, match="max_seq_len|greater than 0"):
+    with pytest.raises(ValueError, match=r"max_seq_len|greater than 0"):
         EagleVllmStreamingConfig(server_urls="http://a:8000", model="m", max_seq_len=0)
 
 

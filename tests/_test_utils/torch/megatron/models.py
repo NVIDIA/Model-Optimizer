@@ -23,12 +23,17 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
+    get_gpt_mtp_block_spec,
 )
 from megatron.core.models.mamba import MambaModel
-from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
+from megatron.core.parallel_state import (
+    get_pipeline_model_parallel_rank,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
+)
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.transformer_config import MLATransformerConfig, TransformerConfig
 
 from modelopt.torch.export.unified_export_megatron import import_mcore_gpt_from_hf
 from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
@@ -145,13 +150,53 @@ def get_mcore_gpt_model(
     moe_grouped_gemm: bool = False,
     moe_ffn_hidden_size: int | None = None,
     moe_shared_expert_intermediate_size: int | None = None,
+    moe_latent_size: int | None = None,
     num_moe_experts: int | None = None,
+    # Experimental attention variant (e.g. "gated_delta_net" for Qwen3.5-style hybrid GatedDeltaNet
+    # + gated full-attention layers). When set, the experimental block spec is used.
+    experimental_attention_variant: str | None = None,
+    # Multi-Latent Attention (DeepSeek et al.). When True, an MLATransformerConfig + MLA spec is used.
+    multi_latent_attention: bool = False,
+    # Overrides
     **config_kwargs: dict,
 ) -> GPTModel:
     assert activation_func in ["swiglu", "squared_relu"]
     assert normalization in ["LayerNorm", "RMSNorm"]
     assert transformer_impl in ["local", "transformer_engine", "modelopt"]
+    assert not (multi_latent_attention and experimental_attention_variant is not None), (
+        "multi_latent_attention and experimental_attention_variant are mutually exclusive."
+    )
     print(f"Using `{transformer_impl=}` model spec for building GPT Model.")
+
+    config_cls = TransformerConfig
+    if multi_latent_attention:
+        assert transformer_impl == "transformer_engine", "MLA tiny model uses the standard TE spec"
+        config_cls = MLATransformerConfig
+        # MLA latent/head-dim defaults for tiny models (override via config_kwargs).
+        config_kwargs = {
+            "q_lora_rank": 32,
+            "kv_lora_rank": 16,
+            "qk_head_dim": 16,
+            "qk_pos_emb_head_dim": 16,
+            "v_head_dim": 16,
+            **config_kwargs,
+        }
+
+    if experimental_attention_variant:
+        # GatedDeltaNet/gated-attention shape defaults for tiny models (override via config_kwargs).
+        config_kwargs = {
+            "experimental_attention_variant": experimental_attention_variant,
+            "linear_attention_freq": 2,  # every 2nd layer is full attention, rest GatedDeltaNet
+            "attention_output_gate": True,
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "linear_key_head_dim": 16,
+            "linear_value_head_dim": 16,
+            "linear_conv_kernel_dim": 4,
+            "qk_layernorm": True,
+            "layernorm_zero_centered_gamma": True,
+            **config_kwargs,
+        }
 
     if initialize_megatron:
         initialize_for_megatron(
@@ -164,7 +209,7 @@ def get_mcore_gpt_model(
     def squared_relu(x):
         return torch.pow(F.relu(x), 2)
 
-    config = TransformerConfig(
+    config = config_cls(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         expert_model_parallel_size=expert_model_parallel_size,
@@ -189,6 +234,7 @@ def get_mcore_gpt_model(
         moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
+        moe_latent_size=moe_latent_size,
         moe_router_enable_expert_bias=True,
         moe_router_score_function="sigmoid",
         num_moe_experts=num_moe_experts,
@@ -205,7 +251,16 @@ def get_mcore_gpt_model(
         config.yarn_mscale_all_dim = 0.0
         config.yarn_correction_range_round_to_int = False
 
-    if transformer_impl == "local":
+    if experimental_attention_variant:
+        # Lazy import — experimental attention variant spec may be absent in older mcore builds.
+        from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+            get_transformer_block_with_experimental_attention_variant_spec,
+        )
+
+        transformer_layer_spec = get_transformer_block_with_experimental_attention_variant_spec(
+            config, pp_rank=get_pipeline_model_parallel_rank()
+        )
+    elif transformer_impl == "local":
         assert HAS_APEX, "Apex not installed"
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=num_moe_experts,
@@ -215,19 +270,25 @@ def get_mcore_gpt_model(
     else:
         assert HAS_TE, "Transformer Engine not installed"
         if transformer_impl == "modelopt":
-            transformer_layer_spec = get_gpt_modelopt_spec(
-                config,
-                remap_te_layernorm=True,
-            )
+            transformer_layer_spec = get_gpt_modelopt_spec(config, remap_te_layernorm=True)
         else:
             transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
                 num_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                multi_latent_attention=multi_latent_attention,
             )
+
+    mtp_block_spec = None
+    if config.mtp_num_layers:
+        use_te = transformer_impl != "local"
+        mtp_block_spec = get_gpt_mtp_block_spec(
+            config=config, spec=transformer_layer_spec, use_transformer_engine=use_te
+        )
 
     model = GPTModel(
         config=config,
         transformer_layer_spec=transformer_layer_spec,
+        mtp_block_spec=mtp_block_spec,
         vocab_size=vocab_size,
         max_sequence_length=max_sequence_length,
         pre_process=is_pipeline_first_stage(),
@@ -241,11 +302,13 @@ def get_mcore_gpt_model(
 def get_mcore_qwen3_600m(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    context_parallel_size: int = 1,
     workspace_dir: str | None = None,
 ) -> GPTModel:
     config = TransformerConfig(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
+        context_parallel_size=context_parallel_size,
         sequence_parallel=False,
         num_layers=28,
         hidden_size=1024,

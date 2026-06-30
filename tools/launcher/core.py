@@ -75,9 +75,19 @@ def set_slurm_config_type(cls):
     """Register the SlurmConfig dataclass type used by SandboxTask."""
     global _SLURM_CONFIG_TYPE
     _SLURM_CONFIG_TYPE = cls
-    # Patch SandboxTask's type annotation so nemo-run's CLI parser can resolve factories
-    SandboxTask.__dataclass_fields__["slurm_config"].type = cls
-    SandboxTask.__annotations__["slurm_config"] = cls
+    # Patch every task dataclass so nemo-run's CLI parser sees the concrete
+    # SlurmConfig type for task_0/task_1/... fields, not the base `object`.
+    for task_cls in (
+        SandboxTask,
+        SandboxTask0,
+        SandboxTask1,
+        SandboxTask2,
+        SandboxTask3,
+        SandboxTask4,
+    ):
+        task_cls.__dataclass_fields__["slurm_config"].type = cls
+        task_cls.__annotations__["slurm_config"] = cls
+        task_cls.__init__.__annotations__["slurm_config"] = cls
 
 
 def register_factory(name, fn):
@@ -247,6 +257,7 @@ def build_slurm_executor(
     job_dir,
     task_name,
     packager,
+    modelopt_src_path=None,
     experiment_title="cicd",
 ):
     """Build a SlurmExecutor for remote job submission."""
@@ -254,25 +265,28 @@ def build_slurm_executor(
 
     scratch_dst = "/scratchspace"
     scratch_src = f"{job_dir}/{experiment_title}/{experiment_id}"
-    modelopt_dst = slurm_config.modelopt_install_path
-    modelopt_src = (
-        f"{job_dir}/{experiment_title}/{experiment_id}"
-        f"/{task_name}/code/modules/Model-Optimizer/modelopt"
-    )
-    modelopt_recipes_dst = os.path.join(
-        os.path.dirname(os.path.normpath(slurm_config.modelopt_install_path)),
-        "modelopt_recipes",
-    )
-    modelopt_recipes_src = (
-        f"{job_dir}/{experiment_title}/{experiment_id}"
-        f"/{task_name}/code/modules/Model-Optimizer/modelopt_recipes"
-    )
     container_mounts += [
         f"{scratch_src}:{scratch_dst}",
-        f"{modelopt_src}:{modelopt_dst}",
-        f"{modelopt_recipes_src}:{modelopt_recipes_dst}",
         f"{job_dir}/{experiment_title}:/{experiment_title}",
     ]
+    if modelopt_src_path:
+        modelopt_dst = slurm_config.modelopt_install_path
+        modelopt_src = (
+            f"{job_dir}/{experiment_title}/{experiment_id}"
+            f"/{task_name}/code/modules/Model-Optimizer/modelopt"
+        )
+        modelopt_recipes_dst = os.path.join(
+            os.path.dirname(os.path.normpath(slurm_config.modelopt_install_path)),
+            "modelopt_recipes",
+        )
+        modelopt_recipes_src = (
+            f"{job_dir}/{experiment_title}/{experiment_id}"
+            f"/{task_name}/code/modules/Model-Optimizer/modelopt_recipes"
+        )
+        container_mounts += [
+            f"{modelopt_src}:{modelopt_dst}",
+            f"{modelopt_recipes_src}:{modelopt_recipes_dst}",
+        ]
 
     # When launching from a login node inside the cluster (host is localhost),
     # use a LocalTunnel: nemo_run then runs sbatch and copies artifacts via local
@@ -312,7 +326,7 @@ def build_slurm_executor(
         container_mounts=container_mounts,
         array=slurm_config.array,
         time=slurm_config.time,
-        mem="0",
+        mem=getattr(slurm_config, "mem", None) or "0",
         retries=0,
         packager=packager,
         srun_args=slurm_config.srun_args,
@@ -386,25 +400,64 @@ def build_docker_executor(
 
 def _git_info(path):
     """Get git commit hash and branch for a directory."""
-    import subprocess  # nosec B404
-
     try:
-        commit = subprocess.run(  # nosec B603 B607
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=path,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        branch = subprocess.run(  # nosec B603 B607
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=path,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        return commit, branch
-    except Exception:
+        worktree_dir = os.path.abspath(path)
+        while True:
+            git_path = os.path.join(worktree_dir, ".git")
+            if os.path.isdir(git_path):
+                git_dir = git_path
+                break
+            if os.path.isfile(git_path):
+                with open(git_path, encoding="utf-8") as file:
+                    marker = file.read().strip()
+                if not marker.startswith("gitdir:"):
+                    return "unknown", "unknown"
+                git_dir = marker.removeprefix("gitdir:").strip()
+                if not os.path.isabs(git_dir):
+                    git_dir = os.path.normpath(os.path.join(worktree_dir, git_dir))
+                break
+
+            parent = os.path.dirname(worktree_dir)
+            if parent == worktree_dir:
+                return "unknown", "unknown"
+            worktree_dir = parent
+
+        common_dir = git_dir
+        commondir_path = os.path.join(git_dir, "commondir")
+        if os.path.exists(commondir_path):
+            with open(commondir_path, encoding="utf-8") as file:
+                common_dir = file.read().strip()
+            if not os.path.isabs(common_dir):
+                common_dir = os.path.normpath(os.path.join(git_dir, common_dir))
+
+        with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as file:
+            head = file.read().strip()
+        if not head.startswith("ref:"):
+            return head[:7], "HEAD"
+
+        ref = head.removeprefix("ref:").strip()
+        branch = ref.removeprefix("refs/heads/")
+        commit = ""
+        for refs_dir in (git_dir, common_dir):
+            ref_path = os.path.join(refs_dir, *ref.split("/"))
+            if os.path.exists(ref_path):
+                with open(ref_path, encoding="utf-8") as file:
+                    commit = file.read().strip()
+                break
+
+        if not commit:
+            packed_refs = os.path.join(common_dir, "packed-refs")
+            if os.path.exists(packed_refs):
+                with open(packed_refs, encoding="utf-8") as file:
+                    for line in file:
+                        if line.startswith(("#", "^")):
+                            continue
+                        sha, _, packed_ref = line.strip().partition(" ")
+                        if packed_ref == ref:
+                            commit = sha
+                            break
+        return (commit[:7] if commit else "unknown"), branch
+    except OSError:
         return "unknown", "unknown"
 
 
@@ -518,6 +571,7 @@ def run_jobs(
                         job_dir,
                         task_name,
                         packager,
+                        modelopt_src_path,
                         experiment_title,
                     )
                     task_env.update(default_slurm_env)

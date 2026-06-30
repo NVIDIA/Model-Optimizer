@@ -30,7 +30,8 @@ from conftest import make_qkv, make_varlen_meta
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
-    from modelopt.torch.kernels.common.attention import attention, attention_calibrate
+    from modelopt.torch.kernels.common.attention import attention
+    from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")

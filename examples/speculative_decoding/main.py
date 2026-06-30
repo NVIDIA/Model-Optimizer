@@ -56,6 +56,7 @@ from modelopt.recipe.config import (
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
+from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
 )
@@ -295,6 +296,13 @@ def train():
         and recipe.eagle.eagle_base_lora_warmup_steps > 0
     ):
         callbacks.append(LoRAWarmupCallback(recipe.eagle.eagle_base_lora_warmup_steps))
+    # Domino (dflash recipe with projector_type=domino) needs the lambda_base
+    # curriculum schedule driven by the trainer's global step.
+    if (
+        isinstance(recipe, ModelOptDFlashRecipe)
+        and recipe.dflash.dflash_architecture_config.get("projector_type") == "domino"
+    ):
+        callbacks.append(DominoLambdaCallback())
     # Leave training_args.ignore_data_skip at its default (False). The dataset is
     # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
     # level (accelerate.skip_first_batches) without re-fetching them, landing at the

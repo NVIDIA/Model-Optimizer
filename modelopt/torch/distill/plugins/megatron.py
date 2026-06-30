@@ -568,8 +568,14 @@ def adjust_distillation_model_for_mcore(
     model.sharded_state_dict = MethodType(_sharded_state_dict, model)
 
     # Skip `lm_loss` bypassing it when training if not needed for backprop.
+    # Uses a per-forward call counter so that MTP head calls (which always precede the
+    # main LM head call in _postprocess) still receive real CE loss even when
+    # skip_lm_loss=True — only the final main-head call is zeroed.
     def _compute_student_lm_loss(self, labels, logits) -> Tensor:
-        if distill_cfg.skip_lm_loss and self.training:
+        self._lm_loss_call_count += 1
+        mtp_num_layers = self.config.mtp_num_layers or 0
+        is_mtp_call = self._lm_loss_call_count <= mtp_num_layers
+        if distill_cfg.skip_lm_loss and self.training and not is_mtp_call:
             return torch.zeros_like(labels, dtype=logits.dtype)
         return type(self).compute_language_model_loss(self, labels, logits)
 
@@ -605,6 +611,9 @@ def adjust_distillation_model_for_mcore(
         with torch.no_grad():
             self._teacher_model.eval()
             teacher_output = self._teacher_model(*args, **kwargs)
+
+        self._lm_loss_call_count = 0  # reset loss-fn call counter for MTP tracking
+
         with self.only_student_forward():
             student_output = type(self).forward(self, *args, **kwargs)
 

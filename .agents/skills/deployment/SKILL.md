@@ -130,9 +130,8 @@ For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
 > default cu12 build has **no sm_103 FP4 kernel**, so vLLM loads the checkpoint
 > then dies at engine init with `CUDA error: no kernel image is available for
 > execution on the device` (affects the `flashinfer` and `cutlass` NVFP4
-> backends; `marlin` separately fails on non-64-divisible layer dims). If a
-> pinned release predates the model's arch, use `cu130-nightly-<arch>` instead
-> (Qwen3.5-9B's `qwen3_5` needed it). Cross-check via
+> backends; `marlin` separately fails on non-64-divisible layer dims).
+> Cross-check via
 > `recipes.vllm.ai/<org>/<model>?hardware=b300` (JS-rendered — fetch the raw
 > markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`). For
 > multimodal models on sm_103, also pass `--mm-encoder-attn-backend TRITON_ATTN`

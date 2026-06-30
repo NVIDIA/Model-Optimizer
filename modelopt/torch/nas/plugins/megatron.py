@@ -27,12 +27,14 @@ from megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
     TEDotProductAttention,
     TELayerNormColumnParallelLinear,
+    TELinear,
     TERowParallelLinear,
 )
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
+from megatron.core.ssm.gated_delta_net import GatedDeltaNet
 from megatron.core.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -46,6 +48,7 @@ from megatron.core.transformer.moe.experts import SequentialMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
+from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
@@ -93,10 +96,12 @@ try:
 except ImportError:
     HAS_HYBRID = False
 
+# Attention module types that _DynamicTransformerLayer converts.
+_ATTENTION_TYPES: tuple[type, ...] = (SelfAttention, MLASelfAttention, GatedDeltaNet)
+
 __all__ = ["get_te_mamba_stack_spec"]
 
 
-# TODO: Maybe upstream this to Megatron-LM
 def get_te_mamba_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
     """Return the TE Mamba stack spec."""
     assert HAS_MAMBA
@@ -207,6 +212,11 @@ class _DynamicTEColumnParallelLinear(_DynamicTEParallelLinear):
 )
 class _DynamicTERowParallelLinear(_DynamicTEParallelLinear):
     """A TERowParallelLinear layer with dynamic hyperparams."""
+
+
+@DMRegistry.register({TELinear: "megatron.core.extensions.transformer_engine.TELinear"})
+class _DynamicTELinear(_DynamicTEParallelLinear):
+    """A (non-parallel) TELinear layer with dynamic hyperparams (e.g. MLA down projections)."""
 
 
 @DMRegistry.register(
@@ -405,8 +415,10 @@ class _DynamicTEQKVLayerNormColumnParallelLinear(DynamicModule, TELayerNormColum
         self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
             "out_features",
-            lambda mod, val: (num_attention_heads.active + 2 * mod.config.num_query_groups)
-            * mod.config.kv_channels,
+            lambda mod, val: (
+                (num_attention_heads.active + 2 * mod.config.num_query_groups)
+                * mod.config.kv_channels
+            ),
         )
         # in_features must track input_size so TE's forward-time inp_shape[-1] == in_features
         # assertion holds when hidden_size is pruned.
@@ -546,15 +558,61 @@ class _DynamicTEProjRowParallelLinear(DynamicModule, TERowParallelLinear):
         return get_sliced_tensor(mod, bias, "output_size")
 
 
-@DMRegistry.register({SelfAttention: "megatron.core.transformer.attention.SelfAttention"})
-class _DynamicSelfAttention(DynamicModule):
-    """A SelfAttention layer with dynamic hyperparams.
+class _DynamicAttention(DynamicModule):
+    """Base for dynamic attention modules. Default policy prunes hidden_size only (not heads).
 
-    NOTE: Layernorms apply on hidden_size_per_attention_head hence no need to convert to dynamic
+    Subclasses set the input projection(s) reading hidden_size (``_column_proj_name``, or override
+    ``_input_proj_names``) and the row/output projection (``_row_proj_name``), and may override
+    ``_prunes_attention_heads`` (+ ``_setup``/``export``) to also prune attention heads.
+    ``_has_fused_input_layernorm`` is False when the input layernorm is a separate module (e.g. MLA)
+    rather than fused into the input projection (used by the hidden_size importance estimator).
     """
+
+    _column_proj_name = "linear_qkv"
+    _row_proj_name = "linear_proj"
+    _has_fused_input_layernorm = True
+
+    def _input_proj_names(self) -> tuple[str, ...]:
+        """Names of the input projections that read hidden_size (one for fused QKV)."""
+        return (self._column_proj_name,)
+
+    def _prunes_attention_heads(self) -> bool:
+        return False
+
+    def _setup(self, *, hidden_size: TracedHp):
+        # hidden_size-only: tie input projection(s) input and row output to hidden_size, rest static.
+        for name in self._input_proj_names():
+            col = getattr(self, name)
+            DMRegistry.convert(
+                col, input_size=hidden_size, output_size=TracedHp([col.out_features])
+            )
+        row = getattr(self, self._row_proj_name)
+        DMRegistry.convert(row, input_size=TracedHp([row.in_features]), output_size=hidden_size)
+
+    def export(self) -> torch.nn.Module:
+        for name in self._input_proj_names():
+            getattr(self, name).export()
+        getattr(self, self._row_proj_name).export()
+        return super().export()
+
+
+@DMRegistry.register({SelfAttention: "megatron.core.transformer.attention.SelfAttention"})
+class _DynamicSelfAttention(_DynamicAttention):
+    """A SelfAttention layer with dynamic hyperparams (prunes num_attention_heads and hidden_size).
+
+    NOTE: Layernorms apply on hidden_size_per_attention_head hence no need to convert to dynamic.
+    When a fused output gate is present (``config.attention_output_gate``, e.g. Qwen3.5), head
+    pruning is not yet supported, so only hidden_size is pruned (base-class policy).
+    """
+
+    def _prunes_attention_heads(self) -> bool:
+        return not getattr(self.config, "attention_output_gate", False)
 
     def _setup(self, *, hidden_size: TracedHp):
         """Setup the SelfAttention dynamic module with global hidden_size hparam."""
+        if not self._prunes_attention_heads():
+            super()._setup(hidden_size=hidden_size)
+            return
         # Register hparams
         num_attention_heads = NumAttentionHeadsHp(
             self.num_attention_heads_per_partition, self.num_query_groups_per_partition
@@ -604,10 +662,35 @@ class _DynamicSelfAttention(DynamicModule):
 
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
-        self.core_attention.export()
-        self.linear_qkv.export()
-        self.linear_proj.export()
-        return super().export()
+        if self._prunes_attention_heads():
+            self.core_attention.export()  # core_attention is converted only when pruning heads
+        return super().export()  # exports the column/row projections + base machinery
+
+
+@DMRegistry.register({GatedDeltaNet: "megatron.core.ssm.gated_delta_net.GatedDeltaNet"})
+class _DynamicGatedDeltaNet(_DynamicAttention):
+    """A GatedDeltaNet (Qwen3.5 et al.) layer with dynamic hyperparams (prunes hidden_size only)."""
+
+    _column_proj_name = "in_proj"
+    _row_proj_name = "out_proj"
+
+
+@DMRegistry.register(
+    {MLASelfAttention: "megatron.core.transformer.multi_latent_attention.MLASelfAttention"}
+)
+class _DynamicMLASelfAttention(_DynamicAttention):
+    """An MLA (DeepSeek et al.) layer with dynamic hyperparams (prunes hidden_size only).
+
+    Q/KV latent ranks and head dims stay static (the separate input layernorm is pruned to
+    hidden_size by _DynamicTransformerLayer, not here).
+    """
+
+    _has_fused_input_layernorm = False
+
+    def _input_proj_names(self) -> tuple[str, ...]:
+        # Q reads hidden via linear_q_down_proj (Q-LoRA) or linear_q_proj; KV via linear_kv_down_proj.
+        q_proj = "linear_q_down_proj" if self.config.q_lora_rank else "linear_q_proj"
+        return (q_proj, "linear_kv_down_proj")
 
 
 # MoE DynamicModules ###############################################################################
@@ -672,10 +755,28 @@ class _DynamicMoELayer(DynamicModule):
 
     def _setup(self, *, hidden_size: TracedHp):
         """Setup the MoELayer dynamic module with global hidden_size hparam."""
+        # Routed experts run on hidden_size, unless MoE latent projections (e.g. Nemotron-3 latent
+        # MoE) compress to a static latent dim; then fc1/fc2_latent_proj carry hidden_size and the
+        # experts run in the latent dim. The router and shared experts always run on hidden_size.
+        expert_io_size = hidden_size
+        if getattr(self.config, "moe_latent_size", None):
+            # TODO: also prune moe_latent_size. Make latent_size a configurable TracedHp shared
+            # across fc1/fc2_latent_proj and every expert's fc1.input / fc2.output, register an
+            # activation-based importance estimator on the latent projection output (like ffn), and
+            # add a moe_latent_size_divisor to get_mcore_minitron_config. Kept static for now.
+            latent_size = TracedHp([self.config.moe_latent_size])
+            DMRegistry.convert(
+                self.fc1_latent_proj, input_size=hidden_size, output_size=latent_size
+            )
+            DMRegistry.convert(
+                self.fc2_latent_proj, input_size=latent_size, output_size=hidden_size
+            )
+            expert_io_size = latent_size
+
         # Convert to dynamic modules
         # Reuse _DynamicSequentialMLP's num_moe_experts hparam for _DynamicTopKRouter's hparam so
         #   importance estimator and depth hparam is retained.
-        DMRegistry.convert(self.experts, hidden_size=hidden_size)
+        DMRegistry.convert(self.experts, hidden_size=expert_io_size)
         num_moe_experts_hp = self.experts.get_hparam("num_local_experts")
         DMRegistry.convert(self.router, hidden_size=hidden_size, num_experts=num_moe_experts_hp)
 
@@ -742,6 +843,9 @@ class _DynamicMoELayer(DynamicModule):
         """Export the dynamic module to a standard MoELayer."""
         self.router.export()
         self.experts.export()
+        if getattr(self.config, "moe_latent_size", None):
+            self.fc1_latent_proj.export()
+            self.fc2_latent_proj.export()
         if self.use_shared_expert:
             self.shared_experts.export()
         self._export_reinit_token_dispatcher()
@@ -759,8 +863,11 @@ class _DynamicTransformerLayer(DynamicModule):
         """Setup the TransformerLayer dynamic module with global hidden_size hparam."""
         # Convert the self-attention and mlp/moe layers to dynamic modules
         # NOTE: Mamba stack layers have either Attention or MLP, not both unlike GPT models
-        if isinstance(self.self_attention, SelfAttention):
+        if isinstance(self.self_attention, _ATTENTION_TYPES):
             DMRegistry.convert(self.self_attention, hidden_size=hidden_size)
+            # MLA has a separate input layernorm on hidden_size (not fused into the input projection).
+            if not isinstance(self.input_layernorm, IdentityOp):
+                DMRegistry.convert(self.input_layernorm, num_features=hidden_size)
 
         if isinstance(self.mlp, (MLP, MoELayer)):
             # pre_mlp_layernorm is IdentityOp for dense MLP (fused into linear_fc1),
@@ -790,8 +897,11 @@ class _DynamicTransformerLayer(DynamicModule):
 
     def export(self):
         """Export the dynamic module to a torch.nn.Module."""
-        if isinstance(self.self_attention, SelfAttention):
+        # self_attention / input_layernorm are DynamicModules once converted in _setup.
+        if isinstance(self.self_attention, DynamicModule):
             self.self_attention.export()
+            if isinstance(self.input_layernorm, DynamicModule):  # separate input LN (MLA only)
+                self.input_layernorm.export()
         if isinstance(self.mlp, (MLP, MoELayer)):
             if not isinstance(self.pre_mlp_layernorm, IdentityOp):
                 self.pre_mlp_layernorm.export()
@@ -822,7 +932,7 @@ class MambaNumHeadsHp(TracedHp):
         else:
             slice_order = self._slice_order
         target_nheads_per_group = self.active // self._ngroups
-        return slice_order.view(self._ngroups, -1)[:, :target_nheads_per_group].flatten()  # type: ignore[misc]
+        return slice_order.view(self._ngroups, -1)[:, :target_nheads_per_group].flatten()
 
 
 class MambaDInnerHp(TracedHp):

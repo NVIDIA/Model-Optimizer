@@ -33,9 +33,12 @@ need — keeps the surface area auditable.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
-import subprocess  # nosec B404
+import shutil
+import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,90 +50,150 @@ import yaml
 # uvx-from-git installs (the launcher is a sibling site-packages install).
 _THIS_DIR = Path(__file__).resolve().parent
 
+_DEFAULT_SOURCE_REPO = "https://github.com/NVIDIA/Model-Optimizer.git"
+_DEFAULT_SOURCE_REF = "main"
+
 # Canonical task-status failure tokens — matched against the FIRST word
 # of each ``status_<task>.out`` file by ``job_status_impl``.
 _STATUS_FAILURE_WORDS: frozenset[str] = frozenset(
     {"failed", "error", "errored", "cancelled", "canceled"}
 )
 
+_SAFE_EXPERIMENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-def _find_launcher_dir() -> Path | None:
-    """Resolve the modelopt launcher's directory.
+_LAUNCHER_ERROR_RE = re.compile(
+    r"(?:^|\n)(?:Unexpected error:|Error processing argument )",
+    re.IGNORECASE,
+)
 
-    Tries, in order:
-
-    1. ``$MODELOPT_LAUNCHER_DIR`` env override — the deterministic
-       path agents/operators can set when the package layout doesn't
-       match the in-repo expectation.
-    2. ``_THIS_DIR.parent.parent / "launcher"`` — the in-repo layout
-       (``tools/mcp/modelopt_mcp/bridge.py`` → ``tools/launcher/``).
-       Works in dev installs (``pip install -e tools/mcp``) and in
-       direct ``Model-Optimizer`` clones.
-    3. Walk up from ``os.getcwd()`` looking for
-       ``modules/Model-Optimizer/tools/launcher/`` (intern-agent
-       workspace layout) or ``tools/launcher/`` (direct
-       Model-Optimizer checkout) at each ancestor. Stops at the
-       filesystem root.
-
-    Returns ``None`` if no candidate resolves to an existing dir.
-    Callers surface that as a structured ``launcher_dir_not_found``
-    failure with the searched paths in the diagnostic.
-
-    Empirically: when modelopt-mcp is installed via ``uv tool install``
-    (intern-agent's CI install pattern, MR !226), ``_THIS_DIR`` lives
-    inside ``~/.local/share/uv/tools/modelopt-mcp/lib/.../site-packages/``
-    and step 2's parent-walk doesn't find the launcher. Step 3 (cwd
-    walk-up) handles that case — the agent's CWD is always inside
-    its cloned nmm-sandbox workspace where ``modules/Model-Optimizer/
-    tools/launcher/`` does exist.
-    """
-    env = os.environ.get("MODELOPT_LAUNCHER_DIR")
-    if env:
-        p = Path(env)
-        if p.exists():
-            return p
-
-    # In-repo layout (dev install / direct clone)
-    candidate = _THIS_DIR.parent.parent / "launcher"
-    if candidate.exists():
-        return candidate
-
-    # cwd walk-up (uv-tool-install + agent workspace layout)
-    cwd = Path.cwd().resolve()
-    for ancestor in (cwd, *cwd.parents):
-        for rel in ("modules/Model-Optimizer/tools/launcher", "tools/launcher"):
-            candidate = ancestor / rel
-            if candidate.exists():
-                return candidate
-
-    return None
+_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_SAFE_PATH_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
-def _launcher_dir_not_found_response(*, dry_run: bool = False) -> dict:
-    """Structured failure when ``_find_launcher_dir()`` returns None.
+@dataclass
+class SourceCheckout:
+    """A managed Model-Optimizer checkout used for one launcher invocation."""
 
-    Centralized so the five callsites that need the launcher dir
-    return a consistent diagnostic listing the searched paths.
-    """
-    env_path = os.environ.get("MODELOPT_LAUNCHER_DIR") or "(unset)"
-    in_repo = _THIS_DIR.parent.parent / "launcher"
-    resp: dict = {
+    repo: str
+    ref: str
+    resolved_sha: str
+    root: Path
+
+    @property
+    def launcher_dir(self) -> Path:
+        """Return the launcher package directory inside this checkout."""
+        return self.root / "tools" / "launcher"
+
+    @property
+    def examples_dir(self) -> Path:
+        """Return the launcher examples directory inside this checkout."""
+        return self.launcher_dir / "examples"
+
+
+def _launcher_reported_error(stdout: str, stderr: str) -> bool:
+    """Return True when launcher text contains a fatal error despite exit 0."""
+    return bool(_LAUNCHER_ERROR_RE.search(f"{stdout}\n{stderr}"))
+
+
+def _parse_launcher_submission(text: str) -> tuple[str | None, str | None, str | None]:
+    """Best-effort parse of launcher/nemo_run submission output."""
+    experiment_id = None
+    experiment_dir = None
+    slurm_job_id = None
+
+    # nemo_run prints "Experiment Status for <id>" and often also the
+    # reconstructable form `Experiment.from_id("<id>")`.
+    m = re.search(r'Experiment\.from_id\("([^"]+)"\)', text)
+    if m:
+        experiment_id = m.group(1)
+    else:
+        m = re.search(
+            r"Experiment Status for\s+(\S+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    if not experiment_id:
+        m = re.search(
+            r"experiment[_\s-]+id[:\s]+(\S+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    if not experiment_id:
+        # Fallback for older nemo_run output that lacked the explicit
+        # "id:" label. Accepts any path-safe id token following the
+        # word "experiment" — not just timestamp-style.
+        m = re.search(
+            r"experiment[_\s-]+([A-Za-z0-9_-]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m and m.group(1).lower() not in {"status", "dir", "directory"}:
+            experiment_id = m.group(1)
+
+    # Match any path containing `/experiments/<id>/` — don't anchor on
+    # cluster-specific filesystem roots (NVIDIA's /lustre, partner
+    # clusters' /scratch / /work / /data / /p / ...).
+    m = re.search(r"(?:experiment_dir[:=]\s*|(?<!\S))(\S+/experiments/[^\s/]+)", text)
+    if m:
+        experiment_dir = m.group(1)
+    m = re.search(r"Submitted batch job (\d+)", text)
+    if m:
+        slurm_job_id = m.group(1)
+    else:
+        m = re.search(r"Job id:\s*(\d+)", text, re.IGNORECASE)
+        if m:
+            slurm_job_id = m.group(1)
+
+    return experiment_id, experiment_dir, slurm_job_id
+
+
+def _docker_experiment_id_capture_timeout() -> float:
+    """Return how long Docker submit should tail launcher output for an id."""
+    raw = os.environ.get("MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC", "10")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 10.0
+
+
+def _tail_docker_launch_log(log_path: Path, proc: subprocess.Popen) -> tuple[str | None, str]:
+    """Tail detached Docker launcher output for an early experiment id."""
+    deadline = time.monotonic() + _docker_experiment_id_capture_timeout()
+    text = ""
+    while True:
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            text = ""
+        complete_text = text if text.endswith(("\n", "\r")) else text.rsplit("\n", 1)[0]
+        experiment_id, _, _ = _parse_launcher_submission(complete_text)
+        if experiment_id:
+            return experiment_id, _tail(text, 2000)
+        if time.monotonic() >= deadline or proc.poll() is not None:
+            experiment_id, _, _ = _parse_launcher_submission(text)
+            if experiment_id:
+                return experiment_id, _tail(text, 2000)
+            return None, _tail(text, 2000)
+        time.sleep(0.2)
+
+
+def _validate_experiment_id(experiment_id: str) -> dict | None:
+    """Reject experiment ids that could escape path joins or alter glob matching."""
+    if _SAFE_EXPERIMENT_ID_RE.fullmatch(experiment_id):
+        return None
+    return {
         "ok": False,
-        "reason": "launcher_dir_not_found",
+        "experiment_id": experiment_id,
+        "reason": "invalid_experiment_id",
         "diagnostic": (
-            "Could not locate tools/launcher/. Searched:\n"
-            f"  1. $MODELOPT_LAUNCHER_DIR={env_path}\n"
-            f"  2. in-repo layout: {in_repo} (exists={in_repo.exists()})\n"
-            f"  3. cwd walk-up from {Path.cwd().resolve()} looking for "
-            "modules/Model-Optimizer/tools/launcher or tools/launcher\n"
-            "Fix: set $MODELOPT_LAUNCHER_DIR to the absolute path of your "
-            "Model-Optimizer checkout's tools/launcher/, or run modelopt-mcp "
-            "from inside such a checkout."
+            "experiment_id must be a single path-safe token containing "
+            "only letters, numbers, underscores, and hyphens."
         ),
     }
-    if dry_run:
-        resp["dry_run"] = True
-    return resp
 
 
 def _find_launcher_examples_dir() -> Path | None:
@@ -139,12 +202,9 @@ def _find_launcher_examples_dir() -> Path | None:
     Strategy (in order):
     1. ``MODELOPT_LAUNCHER_EXAMPLES_DIR`` env override — for tests + ad-hoc
        relocations.
-    2. ``../../launcher/examples/`` from this file — the in-repo layout
-       when running from a Model-Optimizer clone (this is the dev mode
-       AND the uvx-from-git mode, since uvx checks out the whole repo).
-    3. Site-packages install: walk back through the modelopt_launcher
-       package to find its examples/ — fallback for the case where the
-       launcher was pip-installed standalone.
+    2. ``import modelopt_launcher`` — works whether the launcher is
+       installed via pip/uvx or in editable dev mode; ``PACKAGE_DIR``
+       points at ``tools/launcher/``, which contains ``examples/``.
 
     Returns None if no candidate exists; callers surface that as a
     structured failure rather than blowing up.
@@ -154,24 +214,352 @@ def _find_launcher_examples_dir() -> Path | None:
         p = Path(env)
         return p if p.exists() else None
 
-    # In-repo: this file is at tools/mcp/modelopt_mcp/bridge.py;
-    # examples are at tools/launcher/examples/.
-    candidate = _THIS_DIR.parent.parent / "launcher" / "examples"
-    if candidate.exists():
-        return candidate
-
-    # Site-packages fallback: the modelopt-launcher package may carry
-    # its examples next to its core.py.
     try:
         import modelopt_launcher
 
-        pkg_dir = Path(modelopt_launcher.__file__).resolve().parent
-        candidate = pkg_dir / "examples"
+        candidate = Path(modelopt_launcher.PACKAGE_DIR) / "examples"
         if candidate.exists():
             return candidate
     except ImportError:
         pass
     return None
+
+
+def _find_launcher_package_dir() -> Path | None:
+    """Resolve the installed launcher's package directory."""
+    try:
+        import modelopt_launcher
+
+        candidate = Path(modelopt_launcher.PACKAGE_DIR)
+        if candidate.exists():
+            return candidate
+    except ImportError:
+        pass
+    return None
+
+
+def _launcher_not_installed(argv: list[str]) -> dict:
+    """Structured failure when the ``modelopt-launcher`` binary is not on PATH."""
+    if argv and argv[0] == _uv_binary():
+        return {
+            "ok": False,
+            "reason": "uv_not_installed",
+            "diagnostic": (
+                "`uv` was not found on PATH. Managed Model-Optimizer source "
+                "checkouts use `uv run --project <checkout>/tools/launcher "
+                "modelopt-launcher ...`. Install uv or set "
+                "MODELOPT_MCP_DISABLE_MANAGED_SOURCE=1 to use the installed "
+                "`modelopt-launcher` entrypoint directly."
+            ),
+            "argv": argv,
+        }
+    return {
+        "ok": False,
+        "reason": "launcher_not_installed",
+        "diagnostic": (
+            "`modelopt-launcher` was not found on PATH. "
+            "Install it with `pip install modelopt-launcher` or "
+            "`uv tool install modelopt-launcher` and retry."
+        ),
+        "argv": argv,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Managed Model-Optimizer source checkouts
+# ---------------------------------------------------------------------------
+
+
+def _uv_binary() -> str:
+    """Return the uv executable used for managed-source launcher runs."""
+    return os.environ.get("MODELOPT_MCP_UV", "uv")
+
+
+def _source_cache_root() -> Path:
+    """Return the root directory for MCP-managed source checkouts."""
+    env = os.environ.get("MODELOPT_MCP_SOURCE_CACHE")
+    if env:
+        return Path(env).expanduser()
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg_cache).expanduser() if xdg_cache else Path.home() / ".cache"
+    return base / "modelopt-mcp" / "sources"
+
+
+def _source_disabled() -> bool:
+    """Return True when callers explicitly opt out of managed source checkouts."""
+    return os.environ.get("MODELOPT_MCP_DISABLE_MANAGED_SOURCE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _sanitize_path_token(value: str, *, fallback: str) -> str:
+    """Make a short, filesystem-safe display token."""
+    token = _SAFE_PATH_TOKEN_RE.sub("-", value.strip()).strip(".-")
+    return (token or fallback)[:48]
+
+
+def _tail(text: str | None, limit: int = 1200) -> str:
+    """Return a short tail suitable for structured diagnostics."""
+    return str(text or "")[-limit:]
+
+
+def _git_failure(
+    *,
+    reason: str,
+    diagnostic: str,
+    argv: list[str],
+    proc: subprocess.CompletedProcess | None = None,
+) -> dict:
+    """Return a structured managed-source git failure."""
+    result = {
+        "ok": False,
+        "reason": reason,
+        "diagnostic": diagnostic,
+        "argv": argv,
+    }
+    if proc is not None:
+        result.update(
+            {
+                "exit_code": proc.returncode,
+                "stdout_tail": _tail(proc.stdout),
+                "stderr_tail": _tail(proc.stderr),
+            }
+        )
+    return result
+
+
+def _run_git(argv: list[str], *, cwd: Path | None = None, timeout: int = 300) -> dict:
+    """Run a fixed git argv list and return either proc or a structured failure."""
+    try:
+        proc = subprocess.run(  # nosec B603 B607 - fixed git argv list; no shell.
+            argv,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _git_failure(
+            reason="git_not_installed",
+            diagnostic="`git` was not found on PATH; cannot prepare the managed source checkout.",
+            argv=argv,
+        )
+    except subprocess.TimeoutExpired as e:
+        return {
+            "ok": False,
+            "reason": "git_timeout",
+            "diagnostic": f"`{' '.join(argv)}` did not finish within {timeout}s.",
+            "argv": argv,
+            "stdout_tail": (e.stdout or b"").decode(errors="replace")[-1200:]
+            if isinstance(e.stdout, bytes)
+            else _tail(e.stdout),
+            "stderr_tail": (e.stderr or b"").decode(errors="replace")[-1200:]
+            if isinstance(e.stderr, bytes)
+            else _tail(e.stderr),
+        }
+    if proc.returncode != 0:
+        return _git_failure(
+            reason="git_failed",
+            diagnostic=f"`{' '.join(argv)}` failed while preparing the managed source checkout.",
+            argv=argv,
+            proc=proc,
+        )
+    return {"ok": True, "proc": proc}
+
+
+def _resolve_source_ref(repo: str, ref: str) -> dict:
+    """Resolve a branch/tag/ref to a commit SHA without mutating local state."""
+    if _GIT_SHA_RE.fullmatch(ref):
+        return {"ok": True, "resolved_sha": ref.lower()}
+
+    patterns = [ref]
+    if not ref.startswith("refs/"):
+        patterns.extend([f"refs/heads/{ref}", f"refs/tags/{ref}", f"refs/tags/{ref}^{{}}"])
+
+    argv = ["git", "ls-remote", repo, *patterns]
+    result = _run_git(argv, timeout=60)
+    if not result.get("ok"):
+        return {
+            **result,
+            "reason": "source_ref_resolve_failed",
+            "diagnostic": (
+                f"Could not resolve Model-Optimizer source ref {ref!r} from {repo}. "
+                "Check the branch/tag/SHA and network credentials."
+            ),
+        }
+
+    lines = [line.split() for line in result["proc"].stdout.splitlines() if line.strip()]
+    by_name = {name: sha for sha, name, *_ in lines if len(sha) == 40}
+    for name in (
+        f"refs/heads/{ref}",
+        f"refs/tags/{ref}^{{}}",
+        f"refs/tags/{ref}",
+        ref,
+    ):
+        sha = by_name.get(name)
+        if sha:
+            return {"ok": True, "resolved_sha": sha}
+    for sha, *_ in lines:
+        if len(sha) == 40:
+            return {"ok": True, "resolved_sha": sha}
+
+    return {
+        "ok": False,
+        "reason": "source_ref_not_found",
+        "diagnostic": f"Model-Optimizer source ref {ref!r} was not found in {repo}.",
+        "argv": argv,
+        "stdout_tail": result["proc"].stdout[-1200:],
+        "stderr_tail": result["proc"].stderr[-1200:],
+    }
+
+
+def _checkout_path(repo: str, ref: str, resolved_sha: str) -> Path:
+    """Return the immutable checkout path for a resolved source ref."""
+    repo_hash = hashlib.sha256(repo.encode()).hexdigest()[:12]
+    ref_token = _sanitize_path_token(ref, fallback="ref")
+    sha_token = resolved_sha[:12]
+    return _source_cache_root() / repo_hash / f"{ref_token}-{sha_token}"
+
+
+def _checkout_ready(path: Path, resolved_sha: str) -> bool:
+    """Return True when a managed checkout already exists at the requested SHA."""
+    if not (path / ".git").exists() or not (path / "tools" / "launcher" / "launch.py").exists():
+        return False
+    result = _run_git(["git", "-C", str(path), "rev-parse", "HEAD"], timeout=30)
+    return bool(result.get("ok") and result["proc"].stdout.strip().startswith(resolved_sha))
+
+
+def _materialize_checkout(repo: str, ref: str, resolved_sha: str, path: Path) -> dict:
+    """Clone Model-Optimizer and initialize submodules for a resolved ref."""
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    tmp = (
+        parent / f".tmp-{_sanitize_path_token(ref, fallback='ref')}-{os.getpid()}-{time.time_ns()}"
+    )
+    if tmp.exists():
+        shutil.rmtree(tmp)
+
+    clone = ["git", "clone", "--no-checkout", "--filter=blob:none", repo, str(tmp)]
+    fetch_refs = [resolved_sha] if _GIT_SHA_RE.fullmatch(ref) else [ref, resolved_sha]
+    post_fetch_steps = [
+        ["git", "-C", str(tmp), "checkout", "--detach", "FETCH_HEAD"],
+        ["git", "-C", str(tmp), "submodule", "sync", "--recursive"],
+        ["git", "-C", str(tmp), "submodule", "update", "--init", "--recursive", "--depth=1"],
+    ]
+    try:
+        result = _run_git(clone)
+        if not result.get("ok"):
+            return _source_checkout_failure(result, repo, ref, resolved_sha, path)
+
+        fetch_result = None
+        for fetch_ref in fetch_refs:
+            fetch = ["git", "-C", str(tmp), "fetch", "--depth=1", "origin", fetch_ref]
+            fetch_result = _run_git(fetch)
+            if fetch_result.get("ok"):
+                break
+        if fetch_result is None or not fetch_result.get("ok"):
+            return _source_checkout_failure(fetch_result or {}, repo, ref, resolved_sha, path)
+
+        for argv in post_fetch_steps:
+            result = _run_git(argv)
+            if not result.get("ok"):
+                return _source_checkout_failure(result, repo, ref, resolved_sha, path)
+        if path.exists():
+            if _checkout_ready(path, resolved_sha):
+                shutil.rmtree(tmp)
+            else:
+                shutil.rmtree(path)
+                tmp.rename(path)
+        else:
+            tmp.rename(path)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp)
+
+    return {"ok": True}
+
+
+def _source_checkout_failure(
+    result: dict,
+    repo: str,
+    ref: str,
+    resolved_sha: str,
+    path: Path,
+) -> dict:
+    """Attach source provenance to a failed checkout step."""
+    return {
+        **result,
+        "ok": False,
+        "reason": "source_checkout_failed",
+        "diagnostic": (
+            "Failed to prepare the managed Model-Optimizer source checkout. "
+            "The launcher was not run."
+        ),
+        "source_repo": repo,
+        "source_ref": ref,
+        "source_sha": resolved_sha,
+        "source_root": str(path),
+    }
+
+
+def _ensure_source_checkout(
+    source_ref: str | None = None,
+    source_repo: str | None = None,
+) -> dict:
+    """Return a managed source checkout, or None when explicitly disabled."""
+    if _source_disabled():
+        return {"ok": True, "checkout": None}
+
+    repo = source_repo or os.environ.get("MODELOPT_MCP_SOURCE_REPO") or _DEFAULT_SOURCE_REPO
+    ref = source_ref or os.environ.get("MODELOPT_MCP_SOURCE_REF") or _DEFAULT_SOURCE_REF
+
+    resolved = _resolve_source_ref(repo, ref)
+    if not resolved.get("ok"):
+        return {**resolved, "source_repo": repo, "source_ref": ref}
+
+    resolved_sha = resolved["resolved_sha"]
+    path = _checkout_path(repo, ref, resolved_sha)
+    if not _checkout_ready(path, resolved_sha):
+        materialized = _materialize_checkout(repo, ref, resolved_sha, path)
+        if not materialized.get("ok"):
+            return materialized
+
+    checkout = SourceCheckout(repo=repo, ref=ref, resolved_sha=resolved_sha, root=path)
+    return {"ok": True, "checkout": checkout}
+
+
+def _source_result_fields(checkout: SourceCheckout | None) -> dict:
+    """Return source provenance fields for tool results."""
+    if checkout is None:
+        return {}
+    return {
+        "source_repo": checkout.repo,
+        "source_ref": checkout.ref,
+        "source_sha": checkout.resolved_sha,
+        "source_root": str(checkout.root),
+    }
+
+
+def _launcher_argv(abs_yaml: Path, checkout: SourceCheckout | None, *flags: str) -> list[str]:
+    """Build the launcher argv for installed or managed-source execution."""
+    if checkout is None:
+        return ["modelopt-launcher", "--yaml", str(abs_yaml), *flags]
+    return [
+        _uv_binary(),
+        "run",
+        "--reinstall-package",
+        "modelopt-launcher",
+        "--project",
+        str(checkout.launcher_dir),
+        "modelopt-launcher",
+        "--yaml",
+        str(abs_yaml),
+        *flags,
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +661,7 @@ def verify_docker_setup_impl() -> dict:
     # invoking the docker CLI by name with a fixed argv list, no
     # shell-interpretation, no untrusted input.
     try:
-        proc = subprocess.run(  # nosec B603 B607
+        proc = subprocess.run(  # nosec B603 B607 - fixed docker CLI argv; no shell.
             ["docker", "info"],
             capture_output=True,
             text=True,
@@ -327,7 +715,7 @@ def verify_docker_setup_impl() -> dict:
     # runtime when nvidia-ctk runtime configure was last invoked.
     # B603/B607 same false-positive shape as daemon check.
     try:
-        gpu = subprocess.run(  # nosec B603 B607
+        gpu = subprocess.run(  # nosec B603 B607 - fixed docker CLI argv; no shell.
             ["docker", "info", "--format", "{{json .}}"],
             capture_output=True,
             text=True,
@@ -402,7 +790,7 @@ def verify_slurm_setup_impl(
     # B603/B607 false positive — `ssh` invoked by name with a controlled
     # argv (BatchMode, ConnectTimeout, identity path, target). No shell.
     try:
-        proc = subprocess.run(  # nosec B603 B607
+        proc = subprocess.run(  # nosec B603 B607 - fixed ssh CLI argv; no shell.
             argv,
             capture_output=True,
             text=True,
@@ -460,13 +848,14 @@ def verify_slurm_setup_impl(
 # ---------------------------------------------------------------------------
 
 
-def _normalize_yaml_path(yaml_path: str) -> Path:
+def _normalize_yaml_path(yaml_path: str, *, examples_dir: Path | None = None) -> Path:
     """Resolve a launcher YAML path to an absolute Path.
 
     Lookup order:
     1. Absolute path — use as-is
-    2. Relative to ``MODELOPT_LAUNCHER_EXAMPLES_DIR`` (or its parent)
-    3. Relative to cwd
+    2. Relative to the managed checkout's examples dir, when present
+    3. Relative to ``MODELOPT_LAUNCHER_EXAMPLES_DIR`` (or its parent)
+    4. Relative to cwd
 
     The double-fallback lets the agent pass either ``examples/Qwen/.../X.yaml``
     or just the absolute path.
@@ -474,13 +863,18 @@ def _normalize_yaml_path(yaml_path: str) -> Path:
     p = Path(yaml_path)
     if p.is_absolute():
         return p
-    # Look under examples dir
-    examples_dir = _find_launcher_examples_dir()
+    # Look under a managed checkout first, then the installed examples dir.
+    examples_dirs: list[Path] = []
     if examples_dir is not None:
-        candidate = examples_dir / yaml_path
+        examples_dirs.append(examples_dir)
+    installed_examples_dir = _find_launcher_examples_dir()
+    if installed_examples_dir is not None and installed_examples_dir not in examples_dirs:
+        examples_dirs.append(installed_examples_dir)
+    for root in examples_dirs:
+        candidate = root / yaml_path
         if candidate.exists():
             return candidate
-        candidate = examples_dir.parent / yaml_path
+        candidate = root.parent / yaml_path
         if candidate.exists():
             return candidate
     # cwd fallback
@@ -499,6 +893,8 @@ def submit_job_impl(
     extra_overrides: dict[str, str] | None,
     skip_verify: bool,
     dry_run: bool = False,
+    source_ref: str | None = None,
+    source_repo: str | None = None,
 ) -> dict:
     """Submit a launcher YAML.
 
@@ -531,6 +927,8 @@ def submit_job_impl(
             job_dir=job_dir,
             job_name=job_name,
             extra_overrides=extra_overrides,
+            source_ref=source_ref,
+            source_repo=source_repo,
         )
 
     # ---- Mode resolution -------------------------------------------
@@ -578,14 +976,23 @@ def submit_job_impl(
                 "verify_result": check,
             }
 
-    # ---- Resolve the YAML path ------------------------------------
-    abs_yaml = _normalize_yaml_path(yaml_path)
+    # ---- Resolve source + YAML path -------------------------------
+    source = _ensure_source_checkout(source_ref=source_ref, source_repo=source_repo)
+    if not source.get("ok"):
+        return source
+    checkout: SourceCheckout | None = source["checkout"]
+
+    abs_yaml = _normalize_yaml_path(
+        yaml_path,
+        examples_dir=checkout.examples_dir if checkout else None,
+    )
     if not abs_yaml.exists():
         return {
             "ok": False,
             "reason": "yaml_not_found",
             "yaml_path": yaml_path,
             "resolved_path": str(abs_yaml),
+            **_source_result_fields(checkout),
             "diagnostic": (
                 f"YAML not found at {abs_yaml}. Pass a path under "
                 f"tools/launcher/examples/ (relative), an absolute path, "
@@ -604,15 +1011,14 @@ def submit_job_impl(
     # list never goes through a shell, so quoting bakes literal quote chars
     # into the values that nemo-run's CLI parser sees. Verbatim values
     # carry spaces / special chars safely.
-    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--yes"]
+    argv = _launcher_argv(abs_yaml, checkout, "--yes")
     if hf_local:
         argv.append(f"hf_local={hf_local}")
     else:
-        # Slurm mode — `launch.py`'s entrypoint does not accept a
-        # `cluster_host` arg (see tools/launcher/launch.py:82). The host
-        # is sourced via the SLURM_HOST env var, consumed by
-        # `slurm_factory(host=os.environ.get("SLURM_HOST", ""))` in
-        # tools/launcher/slurm_config.py. Propagate via env, not argv.
+        # Slurm mode — the launcher entrypoint does not accept a
+        # `cluster_host` arg. The host is sourced via the SLURM_HOST env
+        # var, consumed by slurm_factory in slurm_config.py.
+        # Propagate via env, not argv.
         if cluster_user:
             argv.append(f"user={cluster_user}")
         if identity:
@@ -625,11 +1031,6 @@ def submit_job_impl(
     for k, v in (extra_overrides or {}).items():
         argv.append(f"{k}={v}")
 
-    # Run from the launcher dir so it picks up its own ./core.py etc.
-    launcher_dir = _find_launcher_dir()
-    if launcher_dir is None:
-        return _launcher_dir_not_found_response()
-
     # Propagate env so submit-side and status-side agree on NEMORUN_HOME.
     # Without this, `launch.py` defaults NEMORUN_HOME to its own cwd
     # (tools/launcher/), but `_resolve_experiment_dir` later checks the
@@ -637,6 +1038,10 @@ def submit_job_impl(
     # experiment_dir_not_found for jobs that actually succeeded.
     child_env = os.environ.copy()
     child_env.setdefault("NEMORUN_HOME", os.getcwd())
+    if checkout is not None:
+        child_env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
+        child_env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
+        child_env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
     if executor == "slurm":
         # Required for slurm_factory's host default. Verify_setup ran
         # against this same host above (when verify_setup=True), so the
@@ -644,35 +1049,69 @@ def submit_job_impl(
         child_env["SLURM_HOST"] = cluster_host or ""
 
     if executor == "docker":
-        # Docker mode: spawn detached. Discard stdout/stderr to /dev/null —
-        # leaving them as Popen.PIPE without a reader fills the kernel's
-        # ~64 KB pipe buffer and BLOCKS the launcher's next write(), which
-        # would hang long-running PTQ jobs forever while the MCP server
-        # appears to have "succeeded".
+        # Docker mode: spawn detached. Redirect stdout/stderr to a side-channel
+        # log file, then tail it briefly for nemo_run's experiment id. This
+        # avoids PIPE deadlock while still giving callers the id needed for
+        # job_status/job_logs polling.
         # `start_new_session=True` detaches from the MCP server's process
         # group so an MCP server restart / SIGINT doesn't SIGHUP the
         # in-flight launcher.
         # B603 false positive — argv is a controlled list built above.
-        proc = subprocess.Popen(  # nosec B603
-            argv,
-            cwd=str(launcher_dir),
-            env=child_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        log_dir = Path(child_env["NEMORUN_HOME"]) / ".modelopt-mcp" / "docker-submit-logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = tempfile.NamedTemporaryFile(
+                prefix="submit-",
+                suffix=".log",
+                dir=log_dir,
+                delete=False,
+                mode="w+b",
+            )
+        except OSError as e:
+            return {
+                "ok": False,
+                "executor": "docker",
+                "reason": "docker_submit_log_unavailable",
+                "diagnostic": f"Unable to create Docker submit log under {log_dir}: {e}",
+                "argv": argv,
+                **_source_result_fields(checkout),
+            }
+        log_path = Path(log_file.name)
+        try:
+            proc = subprocess.Popen(  # nosec B603 - fixed launcher argv list; no shell.
+                argv,
+                env=child_env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            log_file.close()
+            log_path.unlink(missing_ok=True)
+            return _launcher_not_installed(argv)
+        finally:
+            log_file.close()
+
+        experiment_id, stdout_tail = _tail_docker_launch_log(log_path, proc)
         return {
             "ok": True,
             "executor": "docker",
             "pid": proc.pid,
             "argv": argv,
             "nemorun_home": child_env["NEMORUN_HOME"],
-            "experiment_id": None,  # Phase 2: tail launcher's output
-            # via a side-channel log file to capture nemo_run's id
-            "spike_note": (
-                "Docker mode launched detached. Phase 1: experiment_id "
-                "is None — list under $NEMORUN_HOME/experiments/ or use "
-                "Phase 2's tail-based id capture."
+            "experiment_id": experiment_id,
+            "stdout_log": str(log_path),
+            "stdout_tail": stdout_tail,
+            **_source_result_fields(checkout),
+            "diagnostic": (
+                "Docker mode launched detached and experiment_id was captured from launcher output."
+                if experiment_id
+                else (
+                    "Docker mode launched detached, but no experiment_id was "
+                    "captured before the short output-tail timeout. Inspect "
+                    "stdout_log or retry with MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC "
+                    "set higher."
+                )
             ),
         }
 
@@ -680,15 +1119,16 @@ def submit_job_impl(
     # with detach=true). Capture stdout to parse experiment_id.
     # B603 false positive — argv is a controlled list built above.
     try:
-        proc = subprocess.run(  # nosec B603
+        proc = subprocess.run(  # nosec B603 - fixed launcher argv list; no shell.
             argv,
-            cwd=str(launcher_dir),
             env=child_env,
             capture_output=True,
             text=True,
             timeout=300,
             check=False,
         )
+    except FileNotFoundError:
+        return _launcher_not_installed(argv)
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
@@ -700,6 +1140,7 @@ def submit_job_impl(
                 f"{(e.stdout or b'').decode(errors='replace')[-400:]}"
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
     # `proc` here is the CompletedProcess from subprocess.run with
@@ -708,7 +1149,7 @@ def submit_job_impl(
     stdout_tail = str(proc.stdout or "")[-2000:]
     stderr_tail = str(proc.stderr or "")[-2000:]
 
-    if proc.returncode != 0:
+    if proc.returncode != 0 or _launcher_reported_error(stdout_tail, stderr_tail):
         return {
             "ok": False,
             "executor": "slurm",
@@ -717,50 +1158,34 @@ def submit_job_impl(
             "stdout_tail": stdout_tail,
             "stderr_tail": stderr_tail,
             "diagnostic": (
-                f"launch.py exited with code {proc.returncode}. Common "
-                f"causes: SSH publickey rejection, malformed YAML, "
-                f"NEMORUN_HOME unset. Inspect stderr_tail."
+                "launch.py failed or printed a fatal launcher error. "
+                "Common causes: SSH publickey rejection, malformed YAML, "
+                "factory parsing failure, or NEMORUN_HOME unset. Inspect "
+                "stdout_tail/stderr_tail."
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
-    # Best-effort experiment_id + dir + slurm_job_id parse. nemo_run's
-    # output format may shift across versions; on parse miss, fields
-    # come back None and the caller still gets stdout_tail to inspect
-    # by hand.
-    experiment_id = None
-    experiment_dir = None
-    slurm_job_id = None
-    # nemo_run prints "Entering Experiment <title>_<id> with id: <id>" —
-    # match the trailing id directly so we don't have to encode the
-    # title prefix or hard-code timestamp width.
-    m = re.search(
-        r"experiment[_\s-]+id[:\s]+(\S+)",
-        stdout_tail,
-        re.IGNORECASE,
-    )
-    if m:
-        experiment_id = m.group(1)
-    else:
-        # Fallback for older nemo_run output that lacked the explicit
-        # "id:" label. Accepts any path-safe id token following the
-        # word "experiment" — not just timestamp-style.
-        m = re.search(
-            r"experiment[_\s-]+([A-Za-z0-9_-]+)",
-            stdout_tail,
-            re.IGNORECASE,
-        )
-        if m:
-            experiment_id = m.group(1)
-    # Match any path containing `/experiments/<id>/` — don't anchor on
-    # cluster-specific filesystem roots (NVIDIA's /lustre, partner
-    # clusters' /scratch / /work / /data / /p / ...).
-    m = re.search(r"(\S+/experiments/[^\s/]+)", stdout_tail)
-    if m:
-        experiment_dir = m.group(1)
-    m = re.search(r"Submitted batch job (\d+)", stdout_tail)
-    if m:
-        slurm_job_id = m.group(1)
+    experiment_id, experiment_dir, slurm_job_id = _parse_launcher_submission(stdout_tail)
+
+    if not experiment_id:
+        return {
+            "ok": False,
+            "executor": "slurm",
+            "reason": "launch_result_unparsed",
+            "exit_code": 0,
+            "slurm_job_id": slurm_job_id,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "diagnostic": (
+                "launch.py exited 0 but did not report an experiment_id "
+                "that callers can use for job_status/job_logs polling. "
+                "Treating this as failed even if a Slurm job id was parsed."
+            ),
+            "argv": argv,
+            **_source_result_fields(checkout),
+        }
 
     return {
         "ok": True,
@@ -771,6 +1196,7 @@ def submit_job_impl(
         "exit_code": 0,
         "stdout_tail": stdout_tail,
         "argv": argv,
+        **_source_result_fields(checkout),
     }
 
 
@@ -784,6 +1210,8 @@ def _submit_job_dry_run(
     job_dir: str | None,
     job_name: str | None,
     extra_overrides: dict[str, str] | None,
+    source_ref: str | None,
+    source_repo: str | None,
 ) -> dict:
     """Validate a launcher YAML by running ``launch.py --dryrun``.
 
@@ -799,9 +1227,17 @@ def _submit_job_dry_run(
     failure / timeout branches (the validated-success branch omits
     it since there's nothing to diagnose).
     """
-    # Same path resolution as the live submit, so dry-run and live use
-    # exactly the same YAML.
-    abs_yaml = _normalize_yaml_path(yaml_path)
+    # Same source + path resolution as the live submit, so dry-run and live
+    # use exactly the same launcher checkout and YAML.
+    source = _ensure_source_checkout(source_ref=source_ref, source_repo=source_repo)
+    if not source.get("ok"):
+        return {**source, "dry_run": True}
+    checkout: SourceCheckout | None = source["checkout"]
+
+    abs_yaml = _normalize_yaml_path(
+        yaml_path,
+        examples_dir=checkout.examples_dir if checkout else None,
+    )
     if not abs_yaml.exists():
         return {
             "ok": False,
@@ -809,6 +1245,7 @@ def _submit_job_dry_run(
             "reason": "yaml_not_found",
             "yaml_path": yaml_path,
             "resolved_path": str(abs_yaml),
+            **_source_result_fields(checkout),
             "diagnostic": (
                 f"YAML not found at {abs_yaml}. Pass a path under "
                 f"tools/launcher/examples/ (relative), an absolute path, "
@@ -825,7 +1262,7 @@ def _submit_job_dry_run(
     # blocks on its confirmation prompt — and since we're capturing
     # stdout (no TTY), the prompt would hang until the 60-second
     # timeout fires.
-    argv = ["uv", "run", "launch.py", "--yaml", str(abs_yaml), "--dryrun", "--yes"]
+    argv = _launcher_argv(abs_yaml, checkout, "--dryrun", "--yes")
     if hf_local:
         argv.append(f"hf_local={hf_local}")
     if cluster_user:
@@ -839,15 +1276,15 @@ def _submit_job_dry_run(
     for k, v in (extra_overrides or {}).items():
         argv.append(f"{k}={v}")
 
-    launcher_dir = _find_launcher_dir()
-    if launcher_dir is None:
-        return _launcher_dir_not_found_response(dry_run=True)
-
     # Propagate env so the launcher's factory resolution matches what
     # the live submit would see (mainly: SLURM_HOST for slurm-factory
     # default when cluster_host is set).
     child_env = os.environ.copy()
     child_env.setdefault("NEMORUN_HOME", os.getcwd())
+    if checkout is not None:
+        child_env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
+        child_env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
+        child_env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
     if cluster_host:
         child_env["SLURM_HOST"] = cluster_host
 
@@ -862,15 +1299,16 @@ def _submit_job_dry_run(
     # `submit_job_impl` (Popen at line 563 + run at line 590), the
     # verify probes (line 197 + 251), and the SSH probe (line 326).
     try:
-        proc = subprocess.run(  # nosec B603
+        proc = subprocess.run(  # nosec B603 - fixed dry-run launcher argv list; no shell.
             argv,
-            cwd=str(launcher_dir),
             env=child_env,
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
+    except FileNotFoundError:
+        return {**_launcher_not_installed(argv), "dry_run": True}
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
@@ -885,12 +1323,13 @@ def _submit_job_dry_run(
                 "hung."
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
     stdout_tail = str(proc.stdout or "")[-2000:]
     stderr_tail = str(proc.stderr or "")[-2000:]
 
-    if proc.returncode != 0:
+    if proc.returncode != 0 or _launcher_reported_error(stdout_tail, stderr_tail):
         return {
             "ok": True,  # The tool itself ran cleanly
             "dry_run": True,
@@ -899,14 +1338,15 @@ def _submit_job_dry_run(
             "stdout_tail": stdout_tail,
             "stderr_tail": stderr_tail,
             "diagnostic": (
-                f"launch.py --dryrun rejected the YAML (exit code "
-                f"{proc.returncode}). Common reasons: invalid YAML "
-                f"syntax, missing required fields, factory function "
-                f"not registered, or a referenced file (HF model path, "
-                f"container tag) doesn't exist. See stderr_tail for the "
-                f"specific error."
+                "launch.py --dryrun rejected the YAML or printed a fatal "
+                "launcher error. Common reasons: invalid YAML syntax, "
+                "missing required fields, factory function not registered, "
+                "factory parsing failure, or a referenced file (HF model "
+                "path, container tag) doesn't exist. See stdout_tail/"
+                "stderr_tail for the specific error."
             ),
             "argv": argv,
+            **_source_result_fields(checkout),
         }
 
     # Success branch returns the same field set as the failure branch
@@ -920,6 +1360,7 @@ def _submit_job_dry_run(
         "stdout_tail": stdout_tail,
         "stderr_tail": stderr_tail,
         "argv": argv,
+        **_source_result_fields(checkout),
     }
 
 
@@ -942,27 +1383,37 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
        for the case where the operator didn't set NEMORUN_HOME at all
        AND the MCP server's cwd differs from where launch.py ran.
     """
-    candidates = []
+    for root in _experiment_search_roots():
+        direct = root / experiment_id
+        if direct.exists():
+            return direct
+        for nested in root.glob(f"*/{experiment_id}"):
+            if nested.exists():
+                return nested
+    return None
+
+
+def _experiment_search_roots() -> list[Path]:
+    """Return experiment roots searched by status/log tools."""
+    roots = []
     nemorun_home = os.environ.get("NEMORUN_HOME")
     if nemorun_home:
-        candidates.append(Path(nemorun_home) / "experiments" / experiment_id)
-    candidates.append(Path.cwd() / "experiments" / experiment_id)
-    candidates.append(Path.cwd() / "local_experiments" / experiment_id)
-    # The launcher's own experiments dir — submit_job_impl uses
-    # cwd=str(launcher_dir) for the subprocess, so when NEMORUN_HOME is
-    # unset, launch.py defaults to launcher_dir/experiments/. If the
-    # launcher dir can't be resolved (uv-tool-install without an
-    # override + the agent's cwd doesn't see a launcher checkout),
-    # we skip this fallback rather than crashing — the env-vs-cwd
-    # candidates above still cover the common cases.
-    launcher_dir = _find_launcher_dir()
+        roots.append(Path(nemorun_home) / "experiments")
+    roots.append(Path.cwd() / "experiments")
+    roots.append(Path.cwd() / "local_experiments")
+    launcher_dir = _find_launcher_package_dir()
     if launcher_dir is not None:
-        candidates.append(launcher_dir / "experiments" / experiment_id)
-        candidates.append(launcher_dir / "local_experiments" / experiment_id)
-    for c in candidates:
-        if c.exists():
-            return c
-    return None
+        roots.append(launcher_dir / "experiments")
+    return roots
+
+
+def _experiment_not_found_diagnostic() -> str:
+    """Describe all experiment roots used by _resolve_experiment_dir."""
+    roots = ", ".join(str(root) for root in _experiment_search_roots())
+    return (
+        f"Searched experiment roots: {roots}. Either the id is wrong or "
+        "NEMORUN_HOME isn't set the same as it was at submit time."
+    )
 
 
 def job_status_impl(experiment_id: str) -> dict:
@@ -979,18 +1430,17 @@ def job_status_impl(experiment_id: str) -> dict:
     Per-task statuses (``status_<task_name>.out``) are also surfaced so
     multi-task pipelines can be inspected.
     """
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid:
+        return invalid
+
     exp_dir = _resolve_experiment_dir(experiment_id)
     if exp_dir is None:
         return {
             "ok": False,
             "experiment_id": experiment_id,
             "reason": "experiment_dir_not_found",
-            "diagnostic": (
-                "Searched NEMORUN_HOME/experiments/, ./experiments/, "
-                "./local_experiments/ — no match. Either the id is "
-                "wrong or NEMORUN_HOME isn't set the same as it was "
-                "at submit time."
-            ),
+            "diagnostic": _experiment_not_found_diagnostic(),
         }
 
     done_marker = exp_dir / "_DONE"
@@ -1034,6 +1484,10 @@ def job_logs_impl(
     If ``task`` is None, returns logs for ALL tasks.
     If ``tail`` is set, returns only the last N lines per task.
     """
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid:
+        return invalid
+
     exp_dir = _resolve_experiment_dir(experiment_id)
     if exp_dir is None:
         return {
@@ -1281,12 +1735,9 @@ def read_cluster_artifact_impl(
             experiment_id,
             str(job_idx),
         ]
-        launcher_dir = _find_launcher_dir()
-        cwd = str(launcher_dir) if launcher_dir is not None else None
         try:
-            proc = subprocess.run(  # nosec B603 B607
+            proc = subprocess.run(  # nosec B603 B607 - fixed nemo CLI argv; no shell.
                 argv,
-                cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -1464,7 +1915,7 @@ def open_draft_pr_impl(
 
     # Step 1: push
     try:
-        push = subprocess.run(  # nosec B603 B607
+        push = subprocess.run(  # nosec B603 B607 - fixed git CLI argv; no shell.
             ["git", "push", "-u", "origin", "HEAD"],
             cwd=str(cwd_path),
             capture_output=True,
@@ -1490,7 +1941,7 @@ def open_draft_pr_impl(
 
     # Step 2: gh pr create
     try:
-        gh = subprocess.run(  # nosec B603 B607
+        gh = subprocess.run(  # nosec B603 B607 - fixed gh CLI argv; no shell.
             [
                 "gh",
                 "pr",

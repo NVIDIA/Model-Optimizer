@@ -13,4 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ModelOpt Launcher — submit quantization, training, and evaluation jobs to Slurm clusters."""
+"""modelopt_launcher — installable package exposing launcher scripts and examples."""
+
+import os as _os
+
+__all__ = ["PACKAGE_DIR"]
+
+PACKAGE_DIR: str = _os.path.dirname(_os.path.abspath(__file__))

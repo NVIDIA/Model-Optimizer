@@ -58,4 +58,4 @@ For quantized formats like NVFP4, you can reduce memory usage by up to 4x compar
 .. note::
 
     An example implementation of this workflow can be found in:
-    ``examples/llm_ptq/hf_ptq.py``, which reduces the memory requirements of model calibration.
+    ``examples/hf_ptq/hf_ptq.py``, which reduces the memory requirements of model calibration.

@@ -1,0 +1,1007 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import copy
+import glob
+import hashlib
+import inspect
+import json
+import logging
+import os
+import shutil
+import warnings
+from collections.abc import Callable, Iterable
+from pathlib import Path
+from typing import Any
+
+import torch
+import transformers
+from accelerate import infer_auto_device_map, init_empty_weights
+from accelerate.utils import get_max_memory
+from safetensors import safe_open
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoProcessor,
+    AutoTokenizer,
+    PreTrainedTokenizerBase,
+    ProcessorMixin,
+)
+
+from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
+
+try:
+    from huggingface_hub import snapshot_download
+except ImportError:
+    snapshot_download = None
+
+logger = logging.getLogger(__name__)
+
+SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
+
+# TODO: Refactor into the config system.
+_QWEN36_AUTOQ_DISABLED_LAYERS = ("*shared_expert_gate*",)
+_VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
+
+
+def _is_qwen_model(model) -> bool:
+    """Return True when model/config identifiers indicate a Qwen-family model."""
+    candidates = [type(model).__name__]
+    config = getattr(model, "config", None)
+    configs = [
+        config,
+        getattr(config, "text_config", None),
+        getattr(config, "language_config", None),
+    ]
+    for cfg in configs:
+        if cfg is None:
+            continue
+        candidates.append(type(cfg).__name__)
+        model_type = getattr(cfg, "model_type", None)
+        if model_type is not None:
+            candidates.append(str(model_type))
+        architectures = getattr(cfg, "architectures", ()) or ()
+        if isinstance(architectures, str):
+            architectures = (architectures,)
+        candidates.extend(str(architecture) for architecture in architectures)
+    return any("qwen" in candidate.lower() for candidate in candidates)
+
+
+def _get_auto_quantize_disabled_layers(model) -> list[str]:
+    """Return layer patterns that should be excluded from AutoQuantize search."""
+    disabled_layers = [
+        entry["quantizer_name"]
+        for entry in _default_disabled_quantizer_cfg
+        if "parent_class" not in entry and entry["quantizer_name"] != "*lm_head*"
+    ]
+    if _is_qwen_model(model):
+        disabled_layers.extend(p for p in _QWEN36_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    if is_multimodal_model(model):
+        disabled_layers.extend(p for p in _VLM_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
+    return disabled_layers
+
+
+def _get_auto_quantize_cost_excluded_patterns(model) -> list[str]:
+    """Return layer patterns excluded only from AutoQuantize cost accounting."""
+    if is_multimodal_model(model):
+        return list(_VLM_AUTOQ_DISABLED_LAYERS)
+    return []
+
+
+def run_nemotron_vl_preview(
+    full_model,
+    tokenizer,
+    input_ids,
+    pyt_ckpt_path,
+    stage_name,
+    allow_fallback=False,
+    trust_remote_code=False,
+):
+    """Run text-only and VL preview generation for Nemotron VL models.
+
+    Args:
+        full_model: The full VL model
+        tokenizer: The tokenizer
+        input_ids: Input tensor for generation
+        pyt_ckpt_path: Path to the model checkpoint
+        stage_name: Description of the stage (e.g., "before quantization", "after quantization")
+        allow_fallback: Whether to allow fallback to standard generate on failure
+        trust_remote_code: Whether to trust remote code for Huggingface models and tokenizers
+    Returns:
+        Generated text response or None if generation failed
+    """
+    from vlm_utils import run_text_only_generation, run_vl_preview_generation
+
+    print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
+    question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+    generation_config = {
+        "max_new_tokens": 100,
+        "do_sample": False,
+        "eos_token_id": tokenizer.eos_token_id,
+    }
+
+    # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
+    text_response = run_text_only_generation(
+        full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
+    )
+
+    generated_ids = None
+    if text_response is not None:
+        print(f"✅ Text-only generation successful: {text_response[:100]}...")
+        generated_ids = text_response
+    elif allow_fallback:
+        print("Text-only generation failed, falling back to standard generate...")
+        generated_ids = full_model.generate(input_ids, max_new_tokens=100)
+
+    # Run additional VL test with images
+    print(f"Running additional VL test with images ({stage_name})...")
+    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code)
+
+    return generated_ids
+
+
+def _is_multimodal_config(config):
+    """Check if a config indicates a multimodal model (config-only version of is_multimodal_model)."""
+    return (
+        hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
+        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
+        or hasattr(config, "vision_lora")  # Vision LoRA configurations
+        or hasattr(config, "audio_processor")  # Audio processing capabilities
+        or (
+            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
+        )  # Image embedding layers
+        or getattr(config, "is_encoder_decoder", False)  # Encoder-decoder VL models
+        or any(  # Architecture-based detection for custom VL models (e.g., Nemotron-Parse)
+            "conditionalgeneration" in arch.lower() for arch in getattr(config, "architectures", [])
+        )
+    )
+
+
+def is_nemotron_vl(model_or_config):
+    """Check if model or config indicates a Nemotron VL model.
+
+    Args:
+        model_or_config: Either a model instance or a config object.
+
+    Returns:
+        bool: True if it's a Nemotron VL model, False otherwise.
+    """
+    # Try to get config from model, or use directly if it's a config
+    if hasattr(model_or_config, "config"):
+        config = model_or_config.config
+
+        if not is_multimodal_model(model_or_config):
+            return False
+    else:
+        config = model_or_config
+        if not _is_multimodal_config(config):
+            return False
+
+    architectures = getattr(config, "architectures", [])
+    return any("nemotron" in arch.lower() for arch in architectures)
+
+
+def create_vlm_calibration_loop(full_model, calib_dataloader):
+    """Create a calibration loop for VLM models that handles multimodal inputs.
+
+    This function inspects the model's forward signature and filters batch kwargs
+    to only include supported parameters, then calls the appropriate forward method.
+
+    Args:
+        full_model: The full VLM model
+        calib_dataloader: DataLoader yielding multimodal batches
+
+    Returns:
+        A calibration function that can be passed to mtq.quantize()
+    """
+    # Import here to avoid circular dependency
+    from nemotron_vl_calib import safe_nemotron_vl_forward
+
+    def calibrate_loop(_model):
+        # Inspect model's forward signature to determine what parameters it accepts
+        forward_params = inspect.signature(full_model.forward).parameters
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in forward_params.values()
+        )
+        allowed_keys = set(forward_params.keys())
+
+        # Check if model is encoder-decoder (needs decoder_input_ids instead of input_ids)
+        is_enc_dec = getattr(full_model.config, "is_encoder_decoder", False)
+
+        full_model.eval()
+        with torch.no_grad():
+            for batch in calib_dataloader:
+                # For encoder-decoder models, rename input_ids → decoder_input_ids
+                # and disable KV caching to avoid tuple index errors in decoder layers
+                if is_enc_dec and "input_ids" in batch and "pixel_values" in batch:
+                    batch["decoder_input_ids"] = batch.pop("input_ids")
+                    if "attention_mask" in batch:
+                        batch["decoder_attention_mask"] = batch.pop("attention_mask")
+                    batch["use_cache"] = False
+
+                # Filter batch to only include parameters the model accepts
+                if accepts_kwargs:
+                    call_kwargs = batch
+                else:
+                    call_kwargs = {k: v for k, v in batch.items() if k in allowed_keys}
+                # Remove None values
+                call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
+
+                # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style)
+                # For other VLMs (like Nemotron-Parse), use standard forward
+                if hasattr(full_model, "img_context_token_id"):
+                    safe_nemotron_vl_forward(full_model, call_kwargs)
+                else:
+                    full_model(**call_kwargs)
+
+    return calibrate_loop
+
+
+def build_quant_cfg(
+    quant_cfg,
+    awq_block_size,
+    moe_calib_experts_ratio: float | None = None,
+) -> dict[str, Any]:
+    quant_cfg = copy.deepcopy(quant_cfg)
+    if "awq" in str(quant_cfg.get("algorithm")):
+        from modelopt.torch.quantization.config import find_quant_cfg_entry_by_path
+
+        weight_quantizer_entry = find_quant_cfg_entry_by_path(
+            quant_cfg["quant_cfg"], "*weight_quantizer"
+        )
+        weight_quantizer = weight_quantizer_entry.get("cfg") or {}
+        if isinstance(weight_quantizer, list):
+            weight_quantizer = weight_quantizer[0]
+        # If awq_block_size argument is provided, update weight_quantizer
+        if awq_block_size:
+            weight_quantizer["block_sizes"][-1] = awq_block_size
+
+    if moe_calib_experts_ratio:
+        assert 0 < moe_calib_experts_ratio <= 1, "moe_calib_experts_ratio must be between 0 and 1"
+        if isinstance(quant_cfg["algorithm"], str):
+            quant_cfg["algorithm"] = {
+                "method": quant_cfg["algorithm"],
+                "moe_calib_experts_ratio": moe_calib_experts_ratio,
+            }
+        elif isinstance(quant_cfg["algorithm"], dict):
+            quant_cfg["algorithm"]["moe_calib_experts_ratio"] = moe_calib_experts_ratio
+        else:
+            warnings.warn(
+                f"Quantization algorithm: {quant_cfg['algorithm']} does not support setting moe_calib_experts_ratio"
+            )
+
+    return quant_cfg
+
+
+def is_speculative(hf_config):
+    """Check if the model architecture is a speculative model."""
+    return hf_config.architectures and any(
+        name in hf_config.architectures[0] for name in SPECULATIVE_MODEL_LIST
+    )
+
+
+def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
+    print(f"Initializing tokenizer from {ckpt_path}")
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        ckpt_path, trust_remote_code=trust_remote_code, **kwargs
+    )
+
+    # can't set attribute 'pad_token' for "<unk>"
+    if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    assert tokenizer.pad_token is not None, f"Pad token for {ckpt_path} cannot be set!"
+
+    return tokenizer
+
+
+def get_processor(
+    ckpt_path,
+    model_type,
+    trust_remote_code=False,
+    attn_implementation=None,
+) -> ProcessorMixin | None:
+    """Load a processor appropriate for the given model type."""
+    model_kwargs = {"trust_remote_code": trust_remote_code}
+    if attn_implementation is not None:
+        model_kwargs["attn_implementation"] = attn_implementation
+
+    if model_type == "whisper":
+        processor = AutoProcessor.from_pretrained(
+            ckpt_path,
+            padding_side="left",
+            **model_kwargs,
+        )
+        if processor.tokenizer.pad_token is None:
+            processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        assert processor.tokenizer.pad_token is not None, (
+            f"Pad token for {ckpt_path} cannot be set!"
+        )
+
+        return processor
+    else:
+        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
+        try:
+            processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
+            print(f"Loaded AutoProcessor for model type: {model_type}")
+            return processor
+        except Exception as e:
+            print(f"Could not load processor for {model_type}: {e}")
+            return None
+
+
+def get_inlined_mtp_prefixes(config: Any) -> list[str]:
+    """Turn an HF config into the list of state-dict prefixes for inlined-MTP layers."""
+    # ``or 0``: some configs set num_nextn_predict_layers=None rather than omit it.
+    num_nextn = int(getattr(config, "num_nextn_predict_layers", 0) or 0)
+    if not num_nextn:
+        return []
+    num_hidden = config.num_hidden_layers
+    return [f"model.layers.{i}" for i in range(num_hidden, num_hidden + num_nextn)]
+
+
+def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
+    """Invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
+    ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
+    ``{"mtp", "mtp.layers.0"}``. ``"model"`` top-level is dropped to avoid the
+    ``"model*"`` wildcard covering the whole backbone.
+    """
+    prefixes: set[str] = set()
+    for key in keys:
+        parts = key.split(".")
+        if parts and parts[0] != "model":
+            prefixes.add(parts[0])
+        for i, part in enumerate(parts):
+            if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+                prefixes.add(".".join(parts[: i + 2]))
+                break
+    return prefixes
+
+
+def _load_tensors_matching(
+    model_dir: Path, predicate: Callable[[str], bool]
+) -> dict[str, torch.Tensor]:
+    """Stream tensors satisfying ``predicate(key)`` from every safetensors
+    source in ``model_dir`` (indexed shards + standalone files, each opened
+    at most once).
+    """
+    tensors: dict[str, torch.Tensor] = {}
+    seen_shards: set[str] = set()
+
+    index_file = model_dir / "model.safetensors.index.json"
+    if index_file.exists():
+        with open(index_file) as f:
+            weight_map = json.load(f)["weight_map"]
+        per_shard: dict[str, list[str]] = {}
+        for key, shard_name in weight_map.items():
+            if predicate(key):
+                per_shard.setdefault(shard_name, []).append(key)
+        for shard_name, keys in per_shard.items():
+            seen_shards.add(shard_name)
+            with safe_open(str(model_dir / shard_name), framework="pt", device="cpu") as f:
+                for k in keys:
+                    tensors[k] = f.get_tensor(k)
+
+    for shard in sorted(model_dir.glob("*.safetensors")):
+        if shard.name in seen_shards:
+            continue
+        with safe_open(str(shard), framework="pt", device="cpu") as f:
+            for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                if predicate(k):
+                    tensors[k] = f.get_tensor(k)
+    return tensors
+
+
+def _apply_to_model_state_dict(
+    model: torch.nn.Module, tensors: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Load tensors with a slot in ``model.state_dict()`` in-place; return the
+    rest as orphans for ``extra_state_dict``.
+    """
+    model_state = model.state_dict()
+    in_state_dict = {k: v for k, v in tensors.items() if k in model_state}
+    out_state_dict = {k: v for k, v in tensors.items() if k not in model_state}
+    if in_state_dict:
+        model.load_state_dict(in_state_dict, strict=False)
+    return out_state_dict
+
+
+def load_mtp_weights(
+    model: torch.nn.Module, model_path: str
+) -> tuple[list[str], dict[str, torch.Tensor]]:
+    """Detect and load MTP weights. Support matrix:
+
+        Convention     Architectures             On-disk shape
+        -------------  ------------------------  -------------------------------
+        inlined        GLM-5.1 (``GlmMoeDsa``),  ``model.layers.{N}.*``
+                       DeepSeek-V3
+        separate-file  GLM-4.7                   standalone ``mtp.safetensors``
+        separate-file  Qwen3-Next                indexed ``mtp.*`` tail shard
+
+    Inlined ``N`` in ``[num_hidden, num_hidden + num_nextn_predict_layers)``;
+    may be orphaned at ``from_pretrained`` time if the HF class only builds
+    ``num_hidden`` decoders.
+
+    Returns ``(prefixes, not_in_state_dict)``: ``prefixes`` populates
+    ``quantization_config.exclude_modules``; ``not_in_state_dict`` is fed to
+    ``export_hf_checkpoint(extra_state_dict=...)``.
+    """
+    model_dir = Path(model_path)
+
+    inlined_prefixes = set(get_inlined_mtp_prefixes(model.config))
+    inlined_tuple = tuple(p + "." for p in inlined_prefixes)
+
+    # Combined predicate covering both conventions in one pass.
+    def predicate(key: str) -> bool:
+        return key.startswith(inlined_tuple) or "mtp" in key
+
+    tensors = _load_tensors_matching(model_dir, predicate)
+    if not tensors:
+        return [], {}
+
+    separate_keys = [k for k in tensors if not k.startswith(inlined_tuple)]
+    prefixes = inlined_prefixes | _keys_to_prefixes(separate_keys)
+
+    not_in_state_dict = _apply_to_model_state_dict(model, tensors)
+
+    print(
+        f"✓ Detected {len(tensors)} MTP tensors under {sorted(prefixes)} "
+        f"(loaded into model: {len(tensors) - len(not_in_state_dict)}, "
+        f"orphaned: {len(not_in_state_dict)})"
+    )
+
+    return sorted(prefixes), not_in_state_dict
+
+
+def get_dtype(dtype):
+    if dtype == "bf16":
+        dtype = torch.bfloat16
+    elif dtype == "fp16":
+        dtype = torch.float16
+    elif dtype == "fp32":
+        dtype = torch.float32
+    else:
+        raise NotImplementedError(f"Unknown dtype {dtype}")
+
+    return dtype
+
+
+def _unpack_compressed_linear_weights(model, ckpt_path=None):
+    """Hybrid restoration: restores BF16 layers and fixes expert metadata.
+
+    1. BF16 layers (vision, lm_head) are restored from checkpoint and marked non-compressed.
+    2. INT4 experts stay compressed in HBM to save memory (decompressed on-the-fly).
+    3. Metadata (weight_shape) is fixed to avoid decompression errors.
+    """
+    try:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+        from compressed_tensors.quantization import QuantizationStatus
+    except ImportError:
+        return
+
+    if ckpt_path is None:
+        ckpt_path = getattr(model.config, "_name_or_path", None)
+    if not ckpt_path:
+        return
+
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+
+    is_local = os.path.isdir(ckpt_path)
+
+    def _resolve_file(filename):
+        if is_local:
+            local = os.path.join(ckpt_path, filename)
+            return local if os.path.exists(local) else None
+        try:
+            return hf_hub_download(repo_id=ckpt_path, filename=filename)
+        except Exception:
+            return None
+
+    # Load non-expert weights and metadata from safetensors
+    checkpoint_weights = {}
+    index_file = _resolve_file("model.safetensors.index.json")
+    if index_file:
+        with open(index_file) as f:
+            index = json.load(f)
+        st_filenames = list(set(index.get("weight_map", {}).values()))
+    else:
+        st_filenames = ["model.safetensors"]
+
+    for fname in st_filenames:
+        sf_path = _resolve_file(fname)
+        if sf_path is None:
+            continue
+        with safe_open(sf_path, framework="pt") as f:
+            for key in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                if ".mlp.experts." not in key or "weight_shape" in key:
+                    checkpoint_weights[key] = f.get_tensor(key)
+
+    # Hybrid restoration
+    for name, module in model.named_modules():
+        if not isinstance(module, CompressedLinear):
+            continue
+
+        with torch.no_grad():
+            target_device = next(module.parameters()).device
+
+            # CASE A: Real BF16 weight exists (vision, lm_head)
+            if f"{name}.weight" in checkpoint_weights:
+                w = checkpoint_weights[f"{name}.weight"].to(target_device)
+                module._parameters.pop("weight", None)
+                module._buffers.pop("weight", None)
+                module.__dict__.pop("weight", None)
+                param = torch.nn.Parameter(w, requires_grad=False)
+                module._parameters["weight"] = param
+                module.__dict__["weight"] = param
+                module.quantization_status = QuantizationStatus.FROZEN
+                logger.debug("Restored BF16 layer: %s", name)
+
+            # CASE B: Expert (stay compressed, fix metadata)
+            elif f"{name}.weight_shape" in checkpoint_weights:
+                ws = checkpoint_weights[f"{name}.weight_shape"]
+                if f"{name}.weight_packed" in checkpoint_weights:
+                    module.weight_packed = checkpoint_weights[f"{name}.weight_packed"].to(
+                        torch.int32
+                    )
+                module._parameters.pop("weight", None)
+                module._buffers.pop("weight", None)
+                module.__dict__.pop("weight", None)
+                shape_param = torch.nn.Parameter(ws.to(torch.int32), requires_grad=False)
+                module._parameters.pop("weight_shape", None)
+                module.__dict__.pop("weight_shape", None)
+                module._parameters["weight_shape"] = shape_param
+                module.__dict__["weight_shape"] = shape_param
+
+    # Ensure compressed experts do not carry a stale weight attribute
+    for name, module in model.named_modules():
+        if not isinstance(module, CompressedLinear):
+            continue
+        if getattr(module, "quantization_status", None) != QuantizationStatus.COMPRESSED:
+            continue
+        module._parameters.pop("weight", None)
+        module._buffers.pop("weight", None)
+        module.__dict__.pop("weight", None)
+
+
+def get_original_hf_quant_method(config) -> str | None:
+    """Return the checkpoint's original ``quantization_config.quant_method``, if any.
+
+    Returns e.g. ``"mxfp4"`` for native MXFP4 checkpoints (OpenAI's gpt-oss family), or
+    ``None`` for unquantized models. Handles ``quantization_config`` stored as a dict or a
+    config object, and the nested ``text_config`` of multi-modal models.
+    """
+    for cfg in (config, getattr(config, "text_config", None)):
+        quant_cfg = getattr(cfg, "quantization_config", None)
+        method = (
+            quant_cfg.get("quant_method")
+            if isinstance(quant_cfg, dict)
+            else getattr(quant_cfg, "quant_method", None)
+        )
+        if method:
+            return str(method)
+    return None
+
+
+def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs):
+    """Re-derive a built-in config when a remote-code config is used with a built-in model
+    class, so it matches the model definition's version; fall back to hf_config otherwise.
+    """
+    if auto_model_module in [AutoModelForCausalLM, AutoModel]:
+        return hf_config
+    if not type(hf_config).__module__.startswith("transformers_modules"):
+        return hf_config
+    builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    try:
+        return AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
+    except Exception as e:
+        warnings.warn(
+            f"Could not re-derive a built-in config for {ckpt_path} ({e}); using the "
+            "remote-code config for device-map inference."
+        )
+        return hf_config
+
+
+def get_model(
+    ckpt_path,
+    device="cuda",
+    gpu_mem_percentage=0.8,
+    trust_remote_code=False,
+    use_seq_device_map=False,
+    attn_implementation=None,
+):
+    print(f"Initializing model from {ckpt_path}")
+
+    device_map = "auto"
+    if device == "cpu":
+        device_map = "cpu"
+
+    # Prepare config kwargs for loading
+    config_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
+
+    # Load config once and handle VL model detection
+    try:
+        hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+
+        if is_nemotron_vl(hf_config):
+            print(
+                "Detected Nemotron VL model from config. "
+                "Disabling automatic device mapping for compatibility."
+            )
+            device_map = None
+    except Exception as e:
+        print(f"Error: Could not load config from {ckpt_path}: {e}")
+        raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
+    if attn_implementation is not None:
+        config_kwargs["attn_implementation"] = attn_implementation
+
+    # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
+    model_kwargs = config_kwargs.copy()
+    model_kwargs.setdefault("dtype", "auto")
+
+    if use_seq_device_map:
+        device_map = "sequential"
+        # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
+        max_memory = get_max_memory()
+        max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
+        model_kwargs["max_memory"] = max_memory
+
+    if hf_config.model_type == "bart":
+        # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
+        device_map = None
+
+    if hf_config.model_type == "t5":
+        # device_map "auto" can naively shard T5's tied encoder/decoder embeddings and
+        # position-bias buffers across GPUs, which non-deterministically produces NaN
+        # activations during calibration on multi-GPU machines (see HF transformers #21093).
+        device_map = None
+
+    # Helper function to check if model has pack-quantized config. Checks both the top-level
+    # config and the nested ``text_config`` of multi-modal models (e.g. kimi k2.5), and handles
+    # ``quantization_config`` stored as either a dict or a config object.
+    def has_pack_quantized_config(config):
+        for cfg in (config, getattr(config, "text_config", None)):
+            quant_cfg = getattr(cfg, "quantization_config", None)
+            fmt = (
+                quant_cfg.get("format")
+                if isinstance(quant_cfg, dict)
+                else getattr(quant_cfg, "format", None)
+            )
+            if fmt == "pack-quantized":
+                return True
+        return False
+
+    if is_speculative(hf_config):
+        model = AutoModelForCausalLM.from_pretrained(
+            ckpt_path,
+            device_map=device_map,
+            **model_kwargs,
+        )
+    elif has_pack_quantized_config(hf_config):
+        from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
+
+        with patch_compressed_linear_loading():
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path,
+                device_map="auto",
+                trust_remote_code=trust_remote_code,
+                dtype="auto",
+            )
+    elif get_original_hf_quant_method(hf_config) == "mxfp4":
+        # Native MXFP4 checkpoints (e.g. openai/gpt-oss-*) must be dequantized to
+        # plain BF16 experts (``GptOssExperts``) so ModelOpt can insert and export
+        # quantizers: the packed-kernel experts wrapper (``Mxfp4GptOssExperts``,
+        # used when the optional ``kernels`` package is present) is not supported by
+        # the unified HF export. Force dequantization regardless of whether
+        # ``kernels`` is installed.
+        # Local import: ``Mxfp4Config`` only exists in newer Transformers (gpt-oss support);
+        # importing it at module scope would break example_utils for users on older
+        # Transformers running unrelated (non-MXFP4) models.
+        from transformers import Mxfp4Config
+
+        # Load with a *sequential* device map (not "auto"): the MXFP4->BF16 dequant
+        # runs inside Transformers' threaded weight loader, and an "auto"/balanced
+        # split across multiple GPUs trips a CUDA illegal-memory access during dequant
+        # materialization. Sequential keeps each shard's dequant on a single device
+        # (the whole model lands on one GPU when it fits there).
+        model_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            ckpt_path,
+            device_map="cpu" if device == "cpu" else "sequential",
+            **model_kwargs,
+        )
+    else:
+        if not hf_config.architectures:
+            raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
+        architecture = hf_config.architectures[0]
+
+        if not hasattr(transformers, architecture) or "Deepseek" in architecture:
+            if not hasattr(transformers, architecture):
+                warnings.warn(
+                    f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
+                    "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
+                )
+            assert trust_remote_code, (
+                "Please set trust_remote_code to True if you want to use this architecture"
+            )
+
+            # Use AutoModelForCausalLM for causal LMs, AutoModel for encoder-decoder models
+            if getattr(hf_config, "is_encoder_decoder", False):
+                auto_model_module = AutoModel
+            else:
+                auto_model_module = AutoModelForCausalLM
+            from_config = auto_model_module.from_config
+        else:
+            auto_model_module = getattr(transformers, architecture)
+            from_config = auto_model_module._from_config
+
+        config_for_init = _resolve_init_config(
+            hf_config, auto_model_module, ckpt_path, config_kwargs
+        )
+
+        with init_empty_weights(include_buffers=True):
+            # When computing the device_map, assuming bfloat16 precision by default,
+            # unless specified by the hf_config.
+            torch_dtype = getattr(config_for_init, "torch_dtype", torch.bfloat16)
+            model_kwargs2 = model_kwargs.copy()
+            if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
+                model_kwargs2.pop("trust_remote_code", None)
+            model_kwargs2["dtype"] = torch_dtype
+            model_kwargs2.pop("max_memory", None)
+            model = from_config(config_for_init, **model_kwargs2)
+
+        max_memory = get_max_memory()
+        inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
+
+        on_cpu = "cpu" in inferred_device_map.values()
+
+        if on_cpu:
+            for _device in max_memory:
+                if isinstance(_device, int):
+                    max_memory[_device] *= gpu_mem_percentage
+
+            print(
+                "Model does not fit to the GPU mem. "
+                f"We apply the following memory limit for calibration: \n{max_memory}\n"
+                "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
+                "reduce the calibration `batch_size` manually."
+            )
+            model_kwargs["max_memory"] = max_memory
+
+        model = auto_model_module.from_pretrained(
+            ckpt_path,
+            device_map=device_map,
+            **model_kwargs,
+        )
+    model.eval()
+    if has_pack_quantized_config(hf_config):
+        _unpack_compressed_linear_weights(model, ckpt_path)
+
+    # If device_map was disabled (None), manually move model to target device
+    if device_map is None and device != "cpu":
+        print(f"Moving model to {device} device...")
+        model = model.to(device)
+
+    if device == "cuda" and not is_model_on_gpu(model):
+        print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")
+
+    return model
+
+
+def is_model_on_gpu(model) -> bool:
+    """Returns if the model is fully loaded on GPUs."""
+    return all("cuda" in str(param.device) for param in model.parameters())
+
+
+def is_enc_dec(model_type) -> bool:
+    """Return whether the model_type uses encoder-decoder-style preview decode.
+
+    Controls whether ``hf_ptq.py`` slices off the prompt prefix from
+    ``.generate()`` output. ``diffusion_gemma`` is structurally encoder-decoder
+    but returns prompt+canvas concatenated, so it stays OFF this list (AR-style
+    decode applies).
+    """
+    return model_type in ["t5", "bart", "whisper"]
+
+
+def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False) -> str:
+    """Resolve a model name or path to a local directory path.
+
+    If the input is already a local directory, returns it as-is.
+    If the input is a HuggingFace model ID, attempts to resolve it to the local cache path.
+
+    Args:
+        model_name_or_path: Either a local directory path or HuggingFace model ID
+        trust_remote_code: Whether to trust remote code when loading the model
+
+    Returns:
+        Local directory path to the model files
+    """
+    # If it's already a local directory, return as-is
+    if os.path.isdir(model_name_or_path):
+        return model_name_or_path
+
+    # Try to resolve HuggingFace model ID to local cache path
+    try:
+        # First try to load the config to trigger caching
+        config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
+
+        # The config object should have the local path information
+        # Try different ways to get the cached path
+        if hasattr(config, "_name_or_path") and os.path.isdir(config._name_or_path):
+            return config._name_or_path
+
+        # Alternative: use snapshot_download if available
+        if snapshot_download is not None:
+            try:
+                local_path = snapshot_download(
+                    repo_id=model_name_or_path,
+                    allow_patterns=["*.py", "*.json"],  # Only download Python files and config
+                )
+                return local_path
+            except Exception as e:
+                print(f"Warning: Could not download model files using snapshot_download: {e}")
+
+        # Fallback: try to find in HuggingFace cache
+        from transformers.utils import TRANSFORMERS_CACHE
+
+        # Look for the model in the cache directory
+        cache_pattern = os.path.join(TRANSFORMERS_CACHE, "models--*")
+        cache_dirs = glob.glob(cache_pattern)
+
+        # Convert model name to cache directory format
+        model_cache_name = model_name_or_path.replace("/", "--")
+        for cache_dir in cache_dirs:
+            if model_cache_name in cache_dir:
+                # Look for the snapshots directory
+                snapshots_dir = os.path.join(cache_dir, "snapshots")
+                if os.path.exists(snapshots_dir):
+                    # Get the latest snapshot
+                    snapshot_dirs = [
+                        d
+                        for d in os.listdir(snapshots_dir)
+                        if os.path.isdir(os.path.join(snapshots_dir, d))
+                    ]
+                    if snapshot_dirs:
+                        latest_snapshot = max(snapshot_dirs)  # Use lexicographically latest
+                        snapshot_path = os.path.join(snapshots_dir, latest_snapshot)
+                        return snapshot_path
+
+    except Exception as e:
+        print(f"Warning: Could not resolve model path for {model_name_or_path}: {e}")
+
+    # If all else fails, return the original path
+    # This will cause the copy function to skip with a warning
+    return model_name_or_path
+
+
+def copy_custom_model_files(source_path: str, export_path: str, trust_remote_code: bool = False):
+    """Copy custom model files (configuration_*.py, modeling_*.py, *.json, etc.) from source to export directory.
+
+    This function copies custom Python files and JSON configuration files that are needed for
+    models with custom code. It excludes config.json and model.safetensors.index.json as these
+    are typically handled separately by the model export process.
+
+    Args:
+        source_path: Path to the original model directory or HuggingFace model ID
+        export_path: Path to the exported model directory
+        trust_remote_code: Whether trust_remote_code was used (only copy files if True)
+    """
+    if not trust_remote_code:
+        return
+
+    # Resolve the source path (handles both local paths and HF model IDs)
+    resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
+
+    source_dir = Path(resolved_source_path)
+    export_dir = Path(export_path)
+
+    if not source_dir.exists():
+        if resolved_source_path != source_path:
+            print(
+                f"Warning: Could not find local cache for HuggingFace model '{source_path}' "
+                f"(resolved to '{resolved_source_path}')"
+            )
+        else:
+            print(f"Warning: Source directory '{source_path}' does not exist")
+        return
+
+    if not export_dir.exists():
+        print(f"Warning: Export directory {export_path} does not exist")
+        return
+
+    # Common patterns for custom model files that need to be copied
+    custom_file_patterns = [
+        "configuration_*.py",
+        "modeling*.py",
+        "tokenization_*.py",
+        "processing_*.py",
+        "image_processing*.py",
+        "feature_extraction_*.py",
+        "*.json",
+    ]
+
+    copied_files = []
+    for pattern in custom_file_patterns:
+        for file_path in source_dir.glob(pattern):
+            if file_path.is_file():
+                # Skip config.json and model.safetensors.index.json as they're handled separately
+                if file_path.name in ["config.json", "model.safetensors.index.json"]:
+                    continue
+                dest_path = export_dir / file_path.name
+                try:
+                    shutil.copy2(file_path, dest_path)
+                    copied_files.append(file_path.name)
+                    print(f"Copied custom model file: {file_path.name}")
+                except Exception as e:
+                    print(f"Warning: Failed to copy {file_path.name}: {e}")
+
+    if copied_files:
+        print(f"Successfully copied {len(copied_files)} custom model files to {export_path}")
+    else:
+        print("No custom model files found to copy")
+
+
+def _layerwise_checkpoint_dir_location(algorithm) -> tuple[str, str] | None:
+    """Return ``("flat"/"nested", checkpoint_dir)`` for the layerwise checkpoint dir, or None."""
+    if not isinstance(algorithm, dict):
+        return None
+    flat = algorithm.get("layerwise_checkpoint_dir")
+    if flat is not None:
+        return "flat", flat
+    nested = algorithm.get("layerwise") or {}
+    ckpt = nested.get("checkpoint_dir") if isinstance(nested, dict) else None
+    return ("nested", ckpt) if ckpt is not None else None
+
+
+def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
+    """Check if quant_cfg has a layerwise checkpoint_dir that should be auto-resolved to a unique subpath."""
+    return _layerwise_checkpoint_dir_location(quant_cfg.get("algorithm")) is not None
+
+
+def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]:
+    """Append a unique ``<model_name>_<config_hash>`` subdirectory to the layerwise checkpoint_dir.
+
+    Allows a single recipe to be reused across models without checkpoint collisions.
+    Supports both the legacy flat ``layerwise_checkpoint_dir`` and the nested
+    ``layerwise.checkpoint_dir`` shape, writing back to whichever the user provided.
+    Must only be called when :func:`needs_checkpoint_path_update` returns True.
+
+    Returns ``(updated_quant_cfg, resolved_path)`` so the caller can log or
+    reference the resolved path without re-deriving the dict shape.
+    """
+    location = _layerwise_checkpoint_dir_location(quant_cfg["algorithm"])
+    assert location is not None  # guaranteed by needs_checkpoint_path_update
+    shape, base_dir = location
+
+    name = model_path.rstrip("/")
+    if "/" in name and not os.path.isabs(name):
+        name = name.replace("/", "--")
+    else:
+        name = Path(name).name
+
+    config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
+    resolved = os.path.join(base_dir, f"{name}_{config_hash}")
+
+    quant_cfg = copy.deepcopy(quant_cfg)
+    algo = quant_cfg["algorithm"]
+    if "layerwise_checkpoint_dir" in algo:
+        algo["layerwise_checkpoint_dir"] = resolved
+    if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
+        algo["layerwise"]["checkpoint_dir"] = resolved
+    return quant_cfg, resolved

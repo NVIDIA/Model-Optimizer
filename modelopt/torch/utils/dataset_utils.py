@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import requests
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from .logging import print_rank_0, warn_rank_0
@@ -730,9 +731,9 @@ def get_dataloader_from_dataset(
 ) -> DataLoader:
     """Wrap a pre-tokenized torch Dataset in a DataLoader, with optional DistributedSampler."""
     if distributed:
-        from torch.utils.data.distributed import DistributedSampler
-
-        sampler = DistributedSampler(dataset, **(sampler_kwargs or {}))
+        # Default the sampler's shuffle to this function's ``shuffle`` (DistributedSampler otherwise
+        # defaults to True); an explicit ``sampler_kwargs["shuffle"]`` still wins.
+        sampler = DistributedSampler(dataset, **{"shuffle": shuffle, **(sampler_kwargs or {})})
         return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
@@ -747,6 +748,8 @@ def get_dataset_dataloader(
     include_labels: bool = False,
     apply_chat_template: bool = False,
     pack: bool = False,
+    distributed: bool = False,
+    sampler_kwargs: dict | None = None,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
@@ -776,6 +779,10 @@ def get_dataset_dataloader(
             ``num_samples`` rows) is padded. Default ``False`` for backwards-compatibility
             with the prior one-doc-per-row tokenize-and-pad behavior; calibration
             callers should pass ``True``.
+        distributed: If True, shard the dataset across ranks with a ``DistributedSampler``
+            (e.g. for data-parallel calibration). ``sampler_kwargs`` supplies ``num_replicas``
+            and ``rank``.
+        sampler_kwargs: Keyword args for the ``DistributedSampler`` when ``distributed=True``.
 
     Returns:
         An instance of dataloader.
@@ -865,7 +872,12 @@ def get_dataset_dataloader(
         tokenized_dataset = _CustomDataset(
             {"input_ids": input_ids, "attention_mask": attention_mask}
         )
-        return DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
+        return get_dataloader_from_dataset(
+            tokenized_dataset,
+            batch_size=batch_size,
+            distributed=distributed,
+            sampler_kwargs=sampler_kwargs,
+        )
 
     batch_encoded = tokenizer(
         all_samples,
@@ -898,9 +910,12 @@ def get_dataset_dataloader(
             }
         )
 
-    calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
-
-    return calib_dataloader
+    return get_dataloader_from_dataset(
+        tokenized_dataset,
+        batch_size=batch_size,
+        distributed=distributed,
+        sampler_kwargs=sampler_kwargs,
+    )
 
 
 def get_supported_datasets() -> list[str]:
@@ -1231,7 +1246,17 @@ def create_forward_loop(
 
 
 def model_type_is_enc_dec(model):
-    enc_dec_model_list = ["t5", "bart", "whisper"]
+    # Substring match against `model.__class__.__name__.lower()` — entries are
+    # the lowercased class-name form (no underscores). Calibration then uses
+    # `model.generate` to run the full denoising loop.
+    #
+    # Note: this list intentionally diverges from ``is_enc_dec`` in
+    # ``examples/llm_ptq/example_utils.py`` (which keys by ``model_type``
+    # string and is used for preview-decode slicing). DiffusionGemma is
+    # included here so calibration uses ``.generate()`` end-to-end, but
+    # deliberately excluded there so the preview decode treats its
+    # prompt+canvas output as AR-style.
+    enc_dec_model_list = ["t5", "bart", "whisper", "diffusiongemma"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
 
 
