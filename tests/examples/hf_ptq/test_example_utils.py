@@ -263,6 +263,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     )
     if model_class_name == "AutoModelForCausalLM":
         monkeypatch.setattr(example_utils, "AutoModelForCausalLM", FakeAutoModelForCausalLM)
+        monkeypatch.delattr(example_utils.transformers, architecture, raising=False)
     else:
         monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
     monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
