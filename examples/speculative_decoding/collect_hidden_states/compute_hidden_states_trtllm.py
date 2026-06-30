@@ -23,7 +23,13 @@ import asyncio
 from pathlib import Path
 
 import torch
-from common import add_aux_layers_args, resolve_aux_layers
+from common import (
+    add_aux_layers_args,
+    normalize_trtllm_hidden_state_dump,
+    resolve_aux_layers,
+    resolve_num_hidden_layers,
+    trtllm_capture_layers_with_final_hidden,
+)
 from datasets import load_dataset
 from tensorrt_llm import LLM, SamplingParams
 from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig, SaveHiddenStatesDecodingConfig
@@ -170,7 +176,8 @@ def main(args: argparse.Namespace) -> None:
 
     # Get model config and tokenizer
     model_config = AutoConfig.from_pretrained(args.model)
-    num_hidden_layers = getattr(model_config, "num_hidden_layers", None)
+    num_hidden_layers = resolve_num_hidden_layers(model_config)
+    aux_layer_ids = resolve_aux_layers(args, num_hidden_layers)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -196,7 +203,7 @@ def main(args: argparse.Namespace) -> None:
         "output_directory": str(args.output_dir),
         "write_interval": 1,
         "file_prefix": f"dp_{args.dp_rank}",
-        "eagle3_layers_to_capture": set(resolve_aux_layers(args, num_hidden_layers)),
+        "eagle3_layers_to_capture": trtllm_capture_layers_with_final_hidden(aux_layer_ids),
     }
     sampling_params = SamplingParams(max_tokens=32, temperature=0)
 
@@ -222,22 +229,15 @@ def main(args: argparse.Namespace) -> None:
             return False
         with open(trtllm_dumped_file, "rb") as f:
             trtllm_dumped = torch.load(f)
-        assert isinstance(trtllm_dumped, list) and len(trtllm_dumped) == 1, (
-            "TRTLLM dumped should be a list with one element"
+        trtllm_dumped = normalize_trtllm_hidden_state_dump(
+            trtllm_dumped,
+            conversation_id,
+            len(aux_layer_ids),
         )
-        assert (
-            isinstance(trtllm_dumped[0], dict)
-            and "id" in trtllm_dumped[0]
-            and "hidden_state" in trtllm_dumped[0]
-        ), "TRTLLM dumped should have an 'id' and 'hidden_states' field"
-        trtllm_dumped = trtllm_dumped[0]
-        trtllm_dumped.pop("id")
-        trtllm_dumped["conversation_id"] = conversation_id
-        trtllm_dumped["hidden_states"] = trtllm_dumped.pop("hidden_state")
         output_file = args.output_dir / f"{conversation_id}.pt"
         with open(output_file, "wb") as f:
             torch.save(trtllm_dumped, f)
-        trtllm_dumped_file.unlink()
+        trtllm_dumped_file.unlink(missing_ok=True)
         return True
 
     async def dump_hidden_states(idx: int, conversation_id: int, input_ids: list[int]):
@@ -261,6 +261,7 @@ def main(args: argparse.Namespace) -> None:
             conversations = entry.get("messages") or entry.get("conversations")
             if not conversations or not isinstance(conversations, list):
                 num_invalid += 1
+                pbar.update(1)
                 continue
 
             input_ids = tokenizer.apply_chat_template(conversations, add_generation_template=False)
@@ -269,6 +270,7 @@ def main(args: argparse.Namespace) -> None:
             )
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
                 num_skipped_too_long += 1
+                pbar.update(1)
                 continue
 
             tasks.append(dump_hidden_states(idx, conversation_id, input_ids))

@@ -29,6 +29,7 @@ Groups two concerns used by both the HF and vLLM dump entry points:
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -48,6 +49,21 @@ def add_aux_layers_args(parser: argparse.ArgumentParser) -> None:
             "or a comma-separated list like '2,5,8' to override. Default: eagle."
         ),
     )
+
+
+def resolve_num_hidden_layers(model_config: dict[str, Any]) -> int:
+    """Return the decoder layer count from a model config or nested text config."""
+    for config in (model_config, getattr(model_config, "text_config", None)):
+        if config is None:
+            continue
+        num_hidden_layers = (
+            config.get("num_hidden_layers")
+            if isinstance(config, dict)
+            else getattr(config, "num_hidden_layers", None)
+        )
+        if num_hidden_layers is not None:
+            return num_hidden_layers
+    raise ValueError(f"Could not resolve num_hidden_layers from model config: {model_config}")
 
 
 def resolve_aux_layers(args: argparse.Namespace, num_hidden_layers: int) -> list[int]:
@@ -76,6 +92,66 @@ def resolve_aux_layers(args: argparse.Namespace, num_hidden_layers: int) -> list
         if not 0 <= i < num_hidden_layers:
             raise ValueError(f"--aux-layers index {i} out of range [0, {num_hidden_layers})")
     return sorted(set(indices))
+
+
+def trtllm_capture_layers_with_final_hidden(aux_layer_ids: list[int]) -> set[int]:
+    """Return TRT-LLM capture layer IDs, always including final post-norm hidden state."""
+    return {*aux_layer_ids, -1}
+
+
+def normalize_trtllm_hidden_state_dump(
+    trtllm_dumped: Any,
+    conversation_id: str,
+    num_aux_layers: int,
+) -> dict[str, Any]:
+    """Convert a raw TRT-LLM SaveHiddenStates dump to ModelOpt offline format.
+
+    TRT-LLM stores the final post-norm hidden state as ``hidden_state`` and may
+    also duplicate it as the last block in ``aux_hidden_states`` when ``-1`` is
+    explicitly requested. ModelOpt offline training expects ``hidden_states`` to
+    contain only the final post-norm state and ``aux_hidden_states`` to contain
+    the requested intermediate EAGLE/DFlash layers, so this helper removes the
+    duplicate final block from aux data.
+    """
+    assert isinstance(trtllm_dumped, list) and len(trtllm_dumped) == 1, (
+        "TRTLLM dumped should be a list with one element"
+    )
+    assert (
+        isinstance(trtllm_dumped[0], dict)
+        and "id" in trtllm_dumped[0]
+        and "hidden_state" in trtllm_dumped[0]
+    ), "TRTLLM dumped should have an 'id' and 'hidden_state' field"
+
+    out = trtllm_dumped[0]
+    out.pop("id")
+    out["conversation_id"] = conversation_id
+
+    hidden_states = out.pop("hidden_state")
+    if not isinstance(hidden_states, torch.Tensor):
+        raise TypeError(f"TRTLLM hidden_state should be a tensor, got {type(hidden_states)!r}")
+    if hidden_states.numel() == 0 or not torch.any(hidden_states != 0).item():
+        raise RuntimeError(
+            f"TRTLLM dumped all-zero final hidden_state for conversation {conversation_id}. "
+            "This usually means the final post-norm layer (-1) was not captured."
+        )
+    out["hidden_states"] = hidden_states
+
+    if "aux_hidden_states" in out:
+        aux_hidden_states = out["aux_hidden_states"]
+        if not isinstance(aux_hidden_states, torch.Tensor):
+            raise TypeError(
+                f"TRTLLM aux_hidden_states should be a tensor, got {type(aux_hidden_states)!r}"
+            )
+        expected_aux_width = hidden_states.shape[-1] * num_aux_layers
+        if aux_hidden_states.shape[-1] < expected_aux_width:
+            raise RuntimeError(
+                "TRTLLM aux_hidden_states is narrower than expected: "
+                f"got {aux_hidden_states.shape[-1]}, expected at least {expected_aux_width}"
+            )
+        if aux_hidden_states.shape[-1] > expected_aux_width:
+            out["aux_hidden_states"] = aux_hidden_states[..., :expected_aux_width].contiguous()
+
+    return out
 
 
 def add_answer_only_loss_args(parser: argparse.ArgumentParser) -> None:

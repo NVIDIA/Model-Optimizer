@@ -25,6 +25,7 @@ from common import (
     add_aux_layers_args,
     load_chat_template,
     resolve_aux_layers,
+    resolve_num_hidden_layers,
     tokenize_with_loss_mask,
     verify_generation_tags,
 )
@@ -147,9 +148,7 @@ def main(args: argparse.Namespace) -> None:
     model = AutoModel.from_pretrained(
         args.model, dtype="auto", device_map="auto", trust_remote_code=args.trust_remote_code
     )
-    num_hidden_layers = getattr(model.config, "num_hidden_layers", None)
-    if num_hidden_layers is None:
-        raise ValueError(f"model.config has no 'num_hidden_layers' attribute: {model.config}")
+    num_hidden_layers = resolve_num_hidden_layers(model.config)
     selected_layer_ids = resolve_aux_layers(args, num_hidden_layers)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
