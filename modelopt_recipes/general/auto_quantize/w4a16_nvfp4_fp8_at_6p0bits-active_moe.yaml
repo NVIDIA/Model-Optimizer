@@ -20,6 +20,7 @@
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
   fp8: configs/ptq/presets/model/fp8
   w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
 
@@ -49,17 +50,4 @@ auto_quantize:
   # Base (model-agnostic) non-quantizable layers. Arch-specific models use a recipe under
   # huggingface/<model>/auto_quantize/ that extends this set.
   disabled_layers:
-    - "*block_sparse_moe.gate*"
-    - "*linear_attn.conv1d*"
-    - "*linear_attn.in_proj_a*"
-    - "*linear_attn.in_proj_b*"
-    - "*mixer.conv1d*"
-    - "*mlp.gate.*"
-    - "*mlp.shared_expert_gate.*"
-    - "*output_layer*"
-    - "*proj_out.*"
-    - "*router*"
-    - "output.*"
-    - "*embed_vision*"
-    - "*vision_tower*"
-    - "*visual*"
+    - $import: base_disabled_layers

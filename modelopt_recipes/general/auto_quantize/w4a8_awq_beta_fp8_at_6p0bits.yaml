@@ -17,6 +17,7 @@
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
   w4a8_awq_beta: configs/ptq/presets/model/w4a8_awq_beta
   fp8: configs/ptq/presets/model/fp8
 
@@ -35,21 +36,7 @@ auto_quantize:
   auto_quantize_method: gradient
   num_score_steps: 128
 
-  # Base (model-agnostic) non-quantizable layers. Arch-specific models use a recipe under
-  # huggingface/<model>/auto_quantize/ that extends this set. (TODO: share via $import once
-  # the loader supports schema-less list snippets — mirrors PTQ's disabled-layer units.)
+  # Base (model-agnostic) non-quantizable layers, spliced from the shared unit. Arch-specific
+  # models use a recipe under huggingface/<model>/auto_quantize/ that appends to this set.
   disabled_layers:
-    - "*block_sparse_moe.gate*"
-    - "*linear_attn.conv1d*"
-    - "*linear_attn.in_proj_a*"
-    - "*linear_attn.in_proj_b*"
-    - "*mixer.conv1d*"
-    - "*mlp.gate.*"
-    - "*mlp.shared_expert_gate.*"
-    - "*output_layer*"
-    - "*proj_out.*"
-    - "*router*"
-    - "output.*"
-    - "*embed_vision*"
-    - "*vision_tower*"
-    - "*visual*"
+    - $import: base_disabled_layers
