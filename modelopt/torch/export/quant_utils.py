@@ -1165,6 +1165,26 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
     Returns:
         fused_modules: A list of modules of which pre_quant_scale is fused to the previous linear layer.
     """
+    # When models are loaded with accelerate's device_map (e.g. `device_map="auto"` plus
+    # tight `max_memory`), offloaded leaf modules have weights on the meta device until
+    # their forward hook fires. ``weight_access_and_writeback_context`` materializes the
+    # weight from the offload hook, lets us mutate it, and writes the fused value back to
+    # the offload weights_map so it survives once the hook is removed. Fall back to a
+    # no-op context when the module isn't hooked or accelerate is unavailable (#795).
+    from contextlib import nullcontext
+
+    try:
+        from modelopt.torch.quantization.plugins.accelerate import (
+            weight_access_and_writeback_context,
+        )
+    except ImportError:
+        weight_access_and_writeback_context = None
+
+    def _materialize(mod):
+        if weight_access_and_writeback_context is not None and hasattr(mod, "_hf_hook"):
+            return weight_access_and_writeback_context(mod)
+        return nullcontext()
+
     # Fuse pre_quant_scale to the linear weights
     for _, module in model.named_modules():
         for module_map in PQS_FUSE_MODULE_MAPPING:
@@ -1176,60 +1196,61 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
                 if hasattr(linear_pqs_from, "input_quantizer") and hasattr(
                     linear_pqs_from.input_quantizer, "_pre_quant_scale"
                 ):
-                    pre_quant_scale = linear_pqs_from.input_quantizer._pre_quant_scale
+                    with _materialize(linear_fuse_into):
+                        pre_quant_scale = linear_pqs_from.input_quantizer._pre_quant_scale
 
-                    # for GQA/MQA models, we can apply averaging to the pre_quant_scale for shared head groups
-                    if pre_quant_scale.numel() != linear_fuse_into.weight.shape[-2]:
-                        if (
-                            not fuse_grouped_heads
-                            or "attention" not in type(module).__name__.lower()
-                        ):
-                            warn(
-                                f"Skipping pattern fuse prequant for {type(module).__name__}"
-                                f"pre_quant_scale dim {pre_quant_scale.numel()} != "
-                                f"out_channel dim {linear_fuse_into.weight.shape[-2]}"
+                        # for GQA/MQA models, we can apply averaging to the pre_quant_scale for shared head groups
+                        if pre_quant_scale.numel() != linear_fuse_into.weight.shape[-2]:
+                            if (
+                                not fuse_grouped_heads
+                                or "attention" not in type(module).__name__.lower()
+                            ):
+                                warn(
+                                    f"Skipping pattern fuse prequant for {type(module).__name__}"
+                                    f"pre_quant_scale dim {pre_quant_scale.numel()} != "
+                                    f"out_channel dim {linear_fuse_into.weight.shape[-2]}"
+                                )
+                                continue
+                            config = module.config
+                            num_kv_heads = config.num_key_value_heads
+                            kv_head_dim = linear_fuse_into.weight.shape[0] // num_kv_heads
+                            n_rep = pre_quant_scale.numel() // num_kv_heads // kv_head_dim
+
+                            # Reshape:(num_kv_heads, n_rep, kv_head_dim)
+                            # n_rep is the number of query group
+                            averaged_scale = pre_quant_scale.view(
+                                num_kv_heads, n_rep, kv_head_dim
+                            ).mean(dim=1)
+
+                            # To update o_proj, we need to repeat back to original shape
+                            repeated_scale = (
+                                averaged_scale.unsqueeze(1)
+                                .expand(num_kv_heads, n_rep, kv_head_dim)
+                                .reshape(-1)
                             )
-                            continue
-                        config = module.config
-                        num_kv_heads = config.num_key_value_heads
-                        kv_head_dim = linear_fuse_into.weight.shape[0] // num_kv_heads
-                        n_rep = pre_quant_scale.numel() // num_kv_heads // kv_head_dim
+                            # Update o_proj's pre_quant_scale
+                            _update_pre_quant_scale(linear_pqs_from, repeated_scale)
 
-                        # Reshape:(num_kv_heads, n_rep, kv_head_dim)
-                        # n_rep is the number of query group
-                        averaged_scale = pre_quant_scale.view(
-                            num_kv_heads, n_rep, kv_head_dim
-                        ).mean(dim=1)
+                            # Use averaged scale (flattened) for v_proj fusion
+                            pre_quant_scale = averaged_scale.reshape(-1)
 
-                        # To update o_proj, we need to repeat back to original shape
-                        repeated_scale = (
-                            averaged_scale.unsqueeze(1)
-                            .expand(num_kv_heads, n_rep, kv_head_dim)
-                            .reshape(-1)
+                        # Fuse the pre_quant_scale to weight
+                        linear_fuse_into.weight = torch.nn.Parameter(
+                            linear_fuse_into.weight * pre_quant_scale.view(-1, 1)
                         )
-                        # Update o_proj's pre_quant_scale
-                        _update_pre_quant_scale(linear_pqs_from, repeated_scale)
+                        if hasattr(linear_fuse_into, "bias") and linear_fuse_into.bias is not None:
+                            linear_fuse_into.bias = torch.nn.Parameter(
+                                linear_fuse_into.bias * pre_quant_scale
+                            )
 
-                        # Use averaged scale (flattened) for v_proj fusion
-                        pre_quant_scale = averaged_scale.reshape(-1)
+                        # Recalibrate the weight quantizer for linear_fuse_into
+                        linear_fuse_into.weight_quantizer.reset_amax()
+                        enable_stats_collection(linear_fuse_into.weight_quantizer)
+                        linear_fuse_into.weight_quantizer(linear_fuse_into.weight)
+                        finish_stats_collection(linear_fuse_into.weight_quantizer)
 
-                    # Fuse the pre_quant_scale to weight
-                    linear_fuse_into.weight = torch.nn.Parameter(
-                        linear_fuse_into.weight * pre_quant_scale.view(-1, 1)
-                    )
-                    if hasattr(linear_fuse_into, "bias") and linear_fuse_into.bias is not None:
-                        linear_fuse_into.bias = torch.nn.Parameter(
-                            linear_fuse_into.bias * pre_quant_scale
-                        )
-
-                    # Recalibrate the weight quantizer for linear_fuse_into
-                    linear_fuse_into.weight_quantizer.reset_amax()
-                    enable_stats_collection(linear_fuse_into.weight_quantizer)
-                    linear_fuse_into.weight_quantizer(linear_fuse_into.weight)
-                    finish_stats_collection(linear_fuse_into.weight_quantizer)
-
-                    delattr(linear_pqs_from.input_quantizer, "_pre_quant_scale")
-                    setattr(linear_pqs_from, "fused_with_prequant", True)
+                        delattr(linear_pqs_from.input_quantizer, "_pre_quant_scale")
+                        setattr(linear_pqs_from, "fused_with_prequant", True)
 
 
 def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
