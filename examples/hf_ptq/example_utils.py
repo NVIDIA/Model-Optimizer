@@ -626,7 +626,7 @@ def _get_config_dtype(config):
     return config_dtype
 
 
-def _apply_decilm_config_dtype(model_kwargs, config_dtype, is_decilm):
+def _apply_dtype_to_config(model_kwargs, config_dtype, is_decilm):
     model_kwargs = model_kwargs.copy()
     if is_decilm:
         model_kwargs["torch_dtype"] = config_dtype
@@ -776,7 +776,7 @@ def get_model(
             # When computing the device_map, assuming bfloat16 precision by default,
             # unless specified by the hf_config.
             config_dtype = _get_config_dtype(config_for_init)
-            model_kwargs2 = _apply_decilm_config_dtype(model_kwargs, config_dtype, is_decilm)
+            model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, is_decilm)
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
             if not is_decilm:
@@ -802,7 +802,7 @@ def get_model(
             )
             model_kwargs["max_memory"] = max_memory
 
-        model_kwargs2 = _apply_decilm_config_dtype(model_kwargs, config_dtype, is_decilm)
+        model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, is_decilm)
         model = auto_model_module.from_pretrained(
             ckpt_path,
             device_map=device_map,
