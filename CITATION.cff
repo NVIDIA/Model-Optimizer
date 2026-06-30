@@ -5,10 +5,9 @@ message: >-
 title: NVIDIA Model Optimizer
 authors:
   - name: NVIDIA Corporation
-version: 0.44.0
 date-released: "2026-05-13"
 repository-code: https://github.com/NVIDIA/Model-Optimizer
-url: https://github.com/NVIDIA/Model-Optimizer/releases/tag/0.44.0
+url: https://github.com/NVIDIA/Model-Optimizer
 license: Apache-2.0
 abstract: >-
   NVIDIA Model Optimizer is a library for model optimization techniques

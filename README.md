@@ -148,6 +148,20 @@ Model Optimizer follows a structured approach to managing deprecated features:
 - **Scope:** The policy addresses both complete deprecations (entire APIs removed) and partial ones (specific parameters removed while methods remain).
 - **Removal:** Following the migration period, deprecated elements are removed in alignment with semantic versioning standards, potentially including breaking changes in minor version updates while Model Optimizer remains in 0.x.
 
+## Citation
+
+If you use NVIDIA Model Optimizer in your research, please cite it as follows:
+
+```bibtex
+@misc{nvidia-modelopt,
+  author       = {{NVIDIA Corporation}},
+  title        = {{NVIDIA Model Optimizer}},
+  howpublished = {\url{https://github.com/NVIDIA/Model-Optimizer}},
+  year         = {2024--2026},
+  note         = {GitHub repository}
+}
+```
+
 ## Contributing
 
 Model Optimizer is now open source! We welcome any feedback, feature requests and PRs.
