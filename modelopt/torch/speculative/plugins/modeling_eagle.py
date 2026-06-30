@@ -22,7 +22,60 @@ from torch import nn
 from transformers import Cache
 from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaRotaryEmbedding
 
-__all__ = ["EagleBaseModelOutput", "EagleModule"]
+__all__ = ["EagleBaseModelOutput", "EagleModule", "EagleShareKVCache"]
+
+
+class EagleShareKVCache(Cache):
+    """HF Cache subclass implementing EAGLE3 ShareKV (sliding window of one).
+
+    Each TTT step N reuses the (K, V) computed at step N-1, mirroring the Megatron
+    MTP ShareKV reference (``prev_kv_list`` is injected for the current iteration and
+    then refreshed from the current iteration's captured KV):
+
+    - ``"capture"`` (TTT step 0): store the local post-RoPE (K, V) per layer and use
+      them as-is (no prior step to reuse).
+    - ``"inject"`` (TTT step N>0): store *this* step's local (K, V) for step N+1, but
+      return the (K, V) captured at step N-1 so attention reuses the prior step's KV.
+
+    Captured tensors keep their grad graph so backward at step N flows into step
+    N-1's q/k/v projections.
+    """
+
+    def __init__(self, num_layers: int):
+        """Init function for EagleShareKVCache."""
+        # transformers 5.x Cache.__init__ requires `layers` or `layer_class_to_replicate`;
+        # transformers 4.x takes no args. Try the new signature first and fall back.
+        try:
+            super().__init__(layers=[])
+        except TypeError:
+            super().__init__()
+        self.num_layers = num_layers
+        self._stored: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * num_layers
+        self._mode: str = "passthrough"
+
+    def set_mode(self, mode: str) -> None:
+        """Set the mode of the cache."""
+        assert mode in ("passthrough", "capture", "inject"), f"Unknown mode {mode!r}"
+        self._mode = mode
+
+    def reset(self) -> None:
+        """Reset the cache."""
+        self._stored = [None] * self.num_layers
+
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        """Capture local (K,V); in inject mode return the *previous* step's (K,V)."""
+        if self._mode == "inject":
+            prev = self._stored[layer_idx]
+            # Refresh storage with this step's local KV so step N+1 reuses step N.
+            self._stored[layer_idx] = (key_states, value_states)
+            return prev if prev is not None else (key_states, value_states)
+        if self._mode == "capture":
+            self._stored[layer_idx] = (key_states, value_states)
+        return key_states, value_states
+
+    def get_seq_length(self, layer_idx: int = 0) -> int:
+        """Get the sequence length of the cache, not used in ShareKV and always return 0."""
+        return 0
 
 
 class EagleModule(nn.Module):
@@ -78,6 +131,15 @@ class EagleModule(nn.Module):
                 config.hidden_size, eps=config.rms_norm_eps
             )
             self.layers[0].hidden_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # ShareKV roll-query marker. Read by the attention-function patch in hf_eagle.py.
+        for layer in self.layers:
+            layer.self_attn._eagle_roll_query_active = False
+
+    def _set_roll_query_active(self, enabled: bool) -> None:
+        """Toggle the roll-query marker on every draft self-attention."""
+        for layer in self.layers:
+            layer.self_attn._eagle_roll_query_active = enabled
 
     def _maybe_init_rope(self, device=None):
         if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):

@@ -23,6 +23,37 @@ from pydantic import ValidationError
 from modelopt.recipe.config import ModelOptEagleRecipe
 from modelopt.torch.speculative.config import EagleConfig
 
+# --- HSM mode validator tests ---
+
+
+def test_hsm_mode_default_sparse_replace():
+    """Default HSM mode preserves the existing sparse replacement behavior."""
+    cfg = EagleConfig.model_validate({})
+
+    assert cfg.eagle_hsm_mode == "sparse_replace"
+
+
+def test_hsm_mode_uniform_layer_sample_ok_with_hsm_enabled():
+    """Uniform layer sampling is valid when hidden-state mixing is enabled."""
+    cfg = EagleConfig.model_validate(
+        {"eagle_mix_hidden_states": True, "eagle_hsm_mode": "uniform_layer_sample"}
+    )
+
+    assert cfg.eagle_hsm_mode == "uniform_layer_sample"
+
+
+def test_hsm_mode_unknown_error():
+    """Unknown HSM modes fail at config validation time."""
+    with pytest.raises(ValidationError, match="eagle_hsm_mode must be one of"):
+        EagleConfig.model_validate({"eagle_hsm_mode": "random_weights"})
+
+
+def test_hsm_mode_uniform_layer_sample_requires_hsm_enabled():
+    """Uniform layer sampling is a hidden-state mixing mode, not a separate switch."""
+    with pytest.raises(ValidationError, match="requires eagle_mix_hidden_states=True"):
+        EagleConfig.model_validate({"eagle_hsm_mode": "uniform_layer_sample"})
+
+
 # --- rope scaling consistency validator tests ---
 
 

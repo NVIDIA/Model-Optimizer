@@ -256,7 +256,7 @@ class EagleTrainingPlot(TrainerCallback):
 
     def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False):
         self.ar_validate_steps = ar_validate_steps
-        if wandb is not None and wandb.run is not None and is_master():
+        if wandb is not None and is_master():
             wandb.init()
         self.estimate_ar = estimate_ar
 

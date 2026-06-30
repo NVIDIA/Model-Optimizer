@@ -39,6 +39,9 @@ class EagleModel(DynamicModule):
         self.eagle_decoder_type = config.eagle_decoder_type
         self.eagle_ttt_steps = config.eagle_ttt_steps
         self.eagle_mix_hidden_states = config.eagle_mix_hidden_states
+        self.eagle_hsm_mode = config.eagle_hsm_mode
+        self.eagle_share_kv = config.eagle_share_kv
+        self.eagle_share_kv_roll_query = config.eagle_share_kv_roll_query
         self.eagle_use_torch_compile = config.eagle_use_torch_compile
         self.eagle_enable_nvtx = config.eagle_enable_nvtx
         self.eagle_export_rope_scaling = config.eagle_export_rope_scaling

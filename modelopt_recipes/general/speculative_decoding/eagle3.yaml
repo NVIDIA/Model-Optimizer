@@ -55,6 +55,9 @@ eagle:
   eagle_decoder_type: llama
   eagle_ttt_steps: 3
   eagle_mix_hidden_states: false
+  eagle_hsm_mode: sparse_replace
+  eagle_share_kv: false
+  eagle_share_kv_roll_query: false
   eagle_use_torch_compile: true
   eagle_self_logit_distillation: true
   eagle_freeze_base_model: true

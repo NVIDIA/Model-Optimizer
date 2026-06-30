@@ -31,6 +31,8 @@ eagle_mtp_default_config = deepcopy(default_eagle_config)
 eagle3_default_config.update({"use_aux_hidden_state": True, "use_last_layernorm": True})
 eagle_mtp_default_config.update({"use_last_layernorm": True, "use_mtp_layernorm": True})
 
+_EAGLE_HSM_MODES = ("sparse_replace", "uniform_layer_sample", "no_replace")
+
 
 EAGLE3_DEFAULT_CFG = {
     "algorithm": "eagle",
@@ -189,6 +191,37 @@ class EagleConfig(ModeloptBaseConfig):
         ),
     )
 
+    eagle_hsm_mode: str = ModeloptField(
+        default="sparse_replace",
+        description=(
+            "Hidden state mixing variant used when eagle_mix_hidden_states=True. "
+            "Available options: sparse_replace, uniform_layer_sample."
+        ),
+    )
+
+    eagle_share_kv: bool = ModeloptField(
+        default=False,
+        description=(
+            "Whether to share K/V across TTT steps: each draft self-attention captures its "
+            "post-RoPE (K, V) at step 0 and reuses them in subsequent steps instead of "
+            "recomputing. This narrows the train-infer gap by mimicking the inference-time "
+            "KV-cache reuse. Disables the TTT triangular mask (the original eagle_attn_mask_0 "
+            "is reused, like with eagle_mix_hidden_states). Composable with eagle_mix_hidden_states. "
+            "Memory cost: each TTT step retains the prior step's (K, V) activations with gradients. "
+            "Not supported with flex_attention or torch.compile."
+        ),
+    )
+
+    eagle_share_kv_roll_query: bool = ModeloptField(
+        default=False,
+        description=(
+            "When eagle_share_kv is on, roll Q right by +1 inside the draft attention so "
+            "Q'_i attends to K_0..K_{i+1}. Preserves K_0 in the context and gives correct "
+            "RoPE relative positions, at the cost of monkey-patching the HF attention "
+            "function. Requires eagle_share_kv=True."
+        ),
+    )
+
     eagle_use_torch_compile: bool = ModeloptField(
         default=True,
         description="Whether to use torch.compile on eagle forward/loss methods for faster training.",
@@ -259,6 +292,24 @@ class EagleConfig(ModeloptBaseConfig):
             "of base model quality. 1.0 = always detach (no logits gradient), 0.0 = never detach."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_hsm_mode_consistency(self) -> "EagleConfig":
+        if self.eagle_hsm_mode not in _EAGLE_HSM_MODES:
+            raise ValueError(
+                f"eagle_hsm_mode must be one of {_EAGLE_HSM_MODES}, got {self.eagle_hsm_mode!r}."
+            )
+        if self.eagle_hsm_mode != "sparse_replace" and not self.eagle_mix_hidden_states:
+            raise ValueError(
+                f"eagle_hsm_mode={self.eagle_hsm_mode!r} requires eagle_mix_hidden_states=True."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_share_kv_consistency(self) -> "EagleConfig":
+        if self.eagle_share_kv_roll_query and not self.eagle_share_kv:
+            raise ValueError("eagle_share_kv_roll_query=True requires eagle_share_kv=True.")
+        return self
 
     @model_validator(mode="after")
     def _check_rope_scaling_consistency(self) -> "EagleConfig":

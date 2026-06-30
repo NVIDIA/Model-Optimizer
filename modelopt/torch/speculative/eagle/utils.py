@@ -35,6 +35,8 @@
 
 """Eagle model utils."""
 
+import warnings
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -114,8 +116,30 @@ class OfflineSupervisedDataset(Dataset):
     def __len__(self):
         return len(self.dumped_files)
 
+    def _load_offline_data(self, i) -> tuple[Mapping[str, torch.Tensor], str]:
+        last_error = None
+        for offset in range(len(self.dumped_files)):
+            path = self.dumped_files[(i + offset) % len(self.dumped_files)]
+            try:
+                offline_data = torch.load(path, weights_only=True)
+                if not isinstance(offline_data, Mapping):
+                    raise TypeError(f"expected mapping, got {type(offline_data).__name__}")
+                for key in ("input_ids", "hidden_states", "aux_hidden_states"):
+                    if key not in offline_data:
+                        raise KeyError(key)
+                return offline_data, path
+            except Exception as e:
+                last_error = e
+                warnings.warn(
+                    f"Skipping failed offline .pt file {path}: {type(e).__name__}: {e}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        raise RuntimeError("Could not load any valid offline .pt files.") from last_error
+
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
-        offline_data = torch.load(self.dumped_files[i], weights_only=True)
+        offline_data, path = self._load_offline_data(i)
 
         labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
         labels[..., :-1] = offline_data["input_ids"][..., 1:]
@@ -124,7 +148,7 @@ class OfflineSupervisedDataset(Dataset):
             if "loss_mask" not in offline_data:
                 raise ValueError(
                     f"answer_only_loss=True requires a 'loss_mask' entry in the offline "
-                    f".pt file, but {self.dumped_files[i]} does not have one. Re-dump "
+                    f".pt file, but {path} does not have one. Re-dump "
                     f"with --answer-only-loss in compute_hidden_states_*.py."
                 )
             loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)

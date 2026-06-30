@@ -39,7 +39,7 @@ from ..utils import (
     get_ttt_msk_func,
     temporary_set_config_value,
 )
-from .modeling_eagle import EagleBaseModelOutput, EagleModule
+from .modeling_eagle import EagleBaseModelOutput, EagleModule, EagleShareKVCache
 from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
 
 __all__ = ["HFARValidation", "HFEagleModel", "default_eagle_aux_layer_ids"]
@@ -47,6 +47,56 @@ __all__ = ["HFARValidation", "HFEagleModel", "default_eagle_aux_layer_ids"]
 ENABLE_CP_TTT_PATCH = False
 # module variable to cache attention mask for cp ttt
 CACHED_SHARD_TTT_MASKS = {}
+
+
+@contextlib.contextmanager
+def _eagle_q_roll_attention_patch():
+    """Context manager wrapping HF attention impls to roll Q right by +1.
+
+    Active only for modules marked ``_eagle_roll_query_active=True``. Other modules
+    (including the base model's own attentions) fall through to the original kernel
+    unchanged. Q is rolled out-of-place to preserve autograd; the attention output is
+    rolled left by -1 before ``o_proj`` consumes it.
+
+    Patches the ``sdpa`` and ``flash_attention_2`` entries in
+    ``transformers.modeling_utils.ALL_ATTENTION_FUNCTIONS``. The ``eager`` path is
+    not patched because HF Llama imports ``eager_attention_forward`` as a local
+    symbol rather than looking it up via the registry; ``modify`` asserts that
+    ``_attn_implementation != "eager"`` when ``eagle_share_kv_roll_query=True``.
+    """
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    def _make_wrapper(orig):
+        def wrapper(module, query, key, value, attention_mask, *args, **kwargs):
+            if not getattr(module, "_eagle_roll_query_active", False):
+                return orig(module, query, key, value, attention_mask, *args, **kwargs)
+            # query: [batch, num_heads, seq, head_dim] — seq is dim=2.
+            query_rolled = torch.cat(
+                [torch.zeros_like(query[:, :, :1, :]), query[:, :, :-1, :]], dim=2
+            )
+            attn_out, attn_weights = orig(
+                module, query_rolled, key, value, attention_mask, *args, **kwargs
+            )
+            # attn_out: [batch, seq, num_heads, head_dim] — seq is dim=1.
+            attn_out_rolled = torch.cat(
+                [attn_out[:, 1:, ...], torch.zeros_like(attn_out[:, :1, ...])], dim=1
+            )
+            return attn_out_rolled, attn_weights
+
+        return wrapper
+
+    saved = {}
+    for impl_name in ("sdpa", "flash_attention_2"):
+        if impl_name not in ALL_ATTENTION_FUNCTIONS:
+            continue
+        orig = ALL_ATTENTION_FUNCTIONS[impl_name]
+        saved[impl_name] = orig
+        ALL_ATTENTION_FUNCTIONS[impl_name] = _make_wrapper(orig)
+    try:
+        yield
+    finally:
+        for impl_name, orig in saved.items():
+            ALL_ATTENTION_FUNCTIONS[impl_name] = orig
 
 
 def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
@@ -167,6 +217,23 @@ class HFEagleModel(EagleModel):
         if self.training and not self.eagle_mix_hidden_states:
             return enable_cp_ttt_patch()
         return contextlib.nullcontext()
+
+    @staticmethod
+    def _sample_uniform_hidden_state_history(
+        hidden_states_history: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Sample one aligned hidden-state candidate per token from HSM history."""
+        stacked = torch.stack(hidden_states_history, dim=0)
+        num_candidates, batch_size, seq_len, hidden_size = stacked.shape
+        candidate_indices = torch.randint(
+            num_candidates,
+            (1, batch_size, seq_len, 1),
+            device=stacked.device,
+        )
+        return stacked.gather(
+            0,
+            candidate_indices.expand(-1, -1, -1, hidden_size),
+        ).squeeze(0)
 
     def _set_default_aux_hidden_state_layers(self):
         # Read a custom config attribute since we override num_hidden_layers for offline training
@@ -316,6 +383,20 @@ class HFEagleModel(EagleModel):
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
 
+        if self.eagle_share_kv:
+            # ShareKV is internal to the EAGLE draft module's attention, so it works in
+            # both online and offline (pre-computed hidden states) training. Only the
+            # flex_attention path is unsupported (its mask handling bypasses Cache.update).
+            assert self.eagle_config._attn_implementation != "flex_attention", (
+                "eagle_share_kv is not supported with _attn_implementation='flex_attention'."
+            )
+        if self.eagle_share_kv_roll_query:
+            assert self.eagle_config._attn_implementation != "eager", (
+                "eagle_share_kv_roll_query is not supported with _attn_implementation='eager' "
+                "(HF Llama uses a local symbol for the eager kernel that bypasses the patched "
+                "registry). Use sdpa or flash_attention_2."
+            )
+
         # Set default aux_hidden_state layers
         if (
             self.eagle_config.use_aux_hidden_state
@@ -362,7 +443,13 @@ class HFEagleModel(EagleModel):
         # https://github.com/huggingface/transformers/blob/v4.56-release/src/transformers/trainer.py#L566
         self.is_quantized = False
 
-        if self.eagle_use_torch_compile:
+        if self.eagle_use_torch_compile and self.eagle_share_kv:
+            print_rank_0(
+                "Warning: eagle_share_kv=True; disabling torch.compile on eagle methods. "
+                "The Q-roll patch and the cache-mode toggle change between TTT steps and "
+                "would force constant recompilation."
+            )
+        elif self.eagle_use_torch_compile:
             self._activate_torch_compile()
 
         self._cached_attn_blk_masks = {}
@@ -668,7 +755,9 @@ class HFEagleModel(EagleModel):
 
         if not isinstance(past_key_values, Cache):
             past_key_values = DynamicCache(config=self._base_llm_config)
-        if not isinstance(eagle_cache, Cache):
+        if self.eagle_share_kv:
+            eagle_cache = EagleShareKVCache(num_layers=self.eagle_config.num_hidden_layers)
+        elif not isinstance(eagle_cache, Cache):
             eagle_cache = DynamicCache(config=self.eagle_module.config)
         past_key_values.eagle_cache = eagle_cache
 
@@ -698,57 +787,89 @@ class HFEagleModel(EagleModel):
 
         # ====Run eagle forward with extra training-time-test steps====
         num_ttt_steps = self.eagle_ttt_steps if self.training else 1
-        for ttt_step in range(num_ttt_steps):
-            # TODO: (hg) during cp training, this mask is not used. Maybe turn it off then.
-            eagle_attention_mask = (
-                eagle_attn_mask_0
-                if self.eagle_mix_hidden_states or ttt_step == 0
-                else self._get_ttt_attention_mask(b, seq_length, ttt_step)
-            )
-            with self._enable_cp_ttt(), self._nvtx_range("eagle_forward"):
-                _, eagle_output_hiddens, eagle_logits, eagle_cache = self._eagle_forward(
-                    eagle_input_hiddens,
-                    eagle_input_embeds,
-                    eagle_attention_mask,
-                    eagle_position_ids,
-                    None if self.eagle_mix_hidden_states else eagle_cache,
+        aligned_hidden_states_history = (
+            [eagle_input_hiddens]
+            if self.eagle_mix_hidden_states and self.eagle_hsm_mode == "uniform_layer_sample"
+            else None
+        )
+        share_kv_ctx = (
+            _eagle_q_roll_attention_patch()
+            if self.eagle_share_kv_roll_query
+            else contextlib.nullcontext()
+        )
+        with share_kv_ctx:
+            for ttt_step in range(num_ttt_steps):
+                if self.eagle_share_kv:
+                    eagle_cache.set_mode("capture" if ttt_step == 0 else "inject")
+                    self.eagle_module._set_roll_query_active(
+                        self.eagle_share_kv_roll_query and ttt_step > 0
+                    )
+
+                # TODO: (hg) during cp training, this mask is not used. Maybe turn it off then.
+                eagle_attention_mask = (
+                    eagle_attn_mask_0
+                    if (self.eagle_mix_hidden_states or self.eagle_share_kv or ttt_step == 0)
+                    else self._get_ttt_attention_mask(b, seq_length, ttt_step)
                 )
-            eagle_output_hiddens = eagle_output_hiddens.roll(1, 1)
+                if self.eagle_share_kv:
+                    cache_to_pass = eagle_cache
+                elif self.eagle_mix_hidden_states:
+                    cache_to_pass = None
+                else:
+                    cache_to_pass = eagle_cache
+                with self._enable_cp_ttt(), self._nvtx_range("eagle_forward"):
+                    _, eagle_output_hiddens, eagle_logits, eagle_cache = self._eagle_forward(
+                        eagle_input_hiddens,
+                        eagle_input_embeds,
+                        eagle_attention_mask,
+                        eagle_position_ids,
+                        cache_to_pass,
+                    )
+                eagle_output_hiddens = eagle_output_hiddens.roll(1, 1)
 
-            if self.eagle_mix_hidden_states:
-                batch_size, seq_len_s, _ = eagle_input_hiddens.shape
-                num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
+                if self.eagle_mix_hidden_states:
+                    if self.eagle_hsm_mode == "uniform_layer_sample":
+                        assert aligned_hidden_states_history is not None
+                        aligned_hidden_states_history.append(eagle_output_hiddens)
+                        eagle_input_hiddens = self._sample_uniform_hidden_state_history(
+                            aligned_hidden_states_history
+                        )
+                    elif self.eagle_hsm_mode == "sparse_replace":
+                        batch_size, seq_len_s, _ = eagle_input_hiddens.shape
+                        num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
 
-                # Randomly select positions for each batch to replace
-                rand_indices = torch.rand(
-                    batch_size, seq_len_s, device=eagle_input_hiddens.device
-                ).argsort(dim=1)[:, :num_to_replace]
+                        # Randomly select positions for each batch to replace
+                        rand_indices = torch.rand(
+                            batch_size, seq_len_s, device=eagle_input_hiddens.device
+                        ).argsort(dim=1)[:, :num_to_replace]
 
-                # Clone to avoid inplace modification that breaks autograd
-                eagle_input_hiddens = eagle_input_hiddens.clone()
-                batch_indices = torch.arange(batch_size)[:, None]
-                eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
-                    batch_indices, rand_indices
-                ]
-            else:
-                eagle_input_hiddens = eagle_output_hiddens
+                        # Clone to avoid inplace modification that breaks autograd
+                        eagle_input_hiddens = eagle_input_hiddens.clone()
+                        batch_indices = torch.arange(batch_size)[:, None]
+                        eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
+                            batch_indices, rand_indices
+                        ]
+                    elif self.eagle_hsm_mode == "no_replace":
+                        eagle_input_hiddens = eagle_output_hiddens
+                else:
+                    eagle_input_hiddens = eagle_output_hiddens
 
-            with self._nvtx_range("eagle_loss"):
-                classification_loss, acc = self._eagle_loss(
-                    # base model predict +1 tok, while eagle predict +2
-                    # so we shift base model outputs compared to eagle outputs
-                    # additionally, we mask the first n tok of eagle outputs at nth TTT step
-                    base_output_softmax_logits[:, 1 + ttt_step :],
-                    base_output_predict_tok[:, 1 + ttt_step :],
-                    eagle_logits[:, ttt_step:-1],
-                    loss_mask[:, 1 + ttt_step :],
+                with self._nvtx_range("eagle_loss"):
+                    classification_loss, acc = self._eagle_loss(
+                        # base model predict +1 tok, while eagle predict +2
+                        # so we shift base model outputs compared to eagle outputs
+                        # additionally, we mask the first n tok of eagle outputs at nth TTT step
+                        base_output_softmax_logits[:, 1 + ttt_step :],
+                        base_output_predict_tok[:, 1 + ttt_step :],
+                        eagle_logits[:, ttt_step:-1],
+                        loss_mask[:, 1 + ttt_step :],
+                    )
+                # Apply loss decay factor to focus on early steps
+                classification_loss *= self.eagle_loss_decay_factor**ttt_step
+                eagle_loss = (
+                    classification_loss if eagle_loss is None else eagle_loss + classification_loss
                 )
-            # Apply loss decay factor to focus on early steps
-            classification_loss *= self.eagle_loss_decay_factor**ttt_step
-            eagle_loss = (
-                classification_loss if eagle_loss is None else eagle_loss + classification_loss
-            )
-            train_accs[0, ttt_step] = acc
+                train_accs[0, ttt_step] = acc
 
         train_accs = train_accs[:, :num_ttt_steps].tolist()
 
