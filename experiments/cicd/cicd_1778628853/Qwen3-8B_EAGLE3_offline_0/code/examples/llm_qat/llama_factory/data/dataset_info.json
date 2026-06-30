@@ -1,0 +1,42 @@
+{
+  "open_thoughts": {
+    "hf_hub_url": "llamafactory/OpenThoughts-114k",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "open_thoughts2": {
+    "hf_hub_url": "open-thoughts/OpenThoughts2-1M",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "from",
+      "content_tag": "value",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
+  "open_thoughts3": {
+    "hf_hub_url": "open-thoughts/OpenThoughts3-1.2M",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations"
+    },
+    "tags": {
+      "role_tag": "from",
+      "content_tag": "value",
+      "user_tag": "human",
+      "assistant_tag": "gpt"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{# Qwen3 chat template with {% generation %} tags for answer_only_loss training.
+   Based on the official Qwen3 template but simplified:
+   - Preserves system/user/assistant formatting and <think> injection
+   - Adds {% generation %} tags around assistant content for loss masking
+   - Drops tool_call/tool_response formatting (not needed for SFT/spec-dec training)
+
+   Usage in YAML: data.chat_template=path/to/chat_template_train.jinja
+
+   See https://huggingface.co/docs/transformers/en/chat_templating#train-on-completions-only
+#}
+{%- if messages[0].role == 'system' -%}
+    {{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' -}}
+{%- endif -%}
+{%- for message in messages -%}
+    {%- if message.role == 'user' -%}
+        {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' -}}
+    {%- elif message.role == 'assistant' -%}
+        {{- '<|im_start|>assistant\n' -}}
+        {%- generation -%}
+            {%- if loop.last and not message.content.startswith('<think>') -%}
+                {{- '<think>\n\n</think>\n\n' -}}
+            {%- endif -%}
+            {{- message.content -}}
+        {%- endgeneration -%}
+        {{- '<|im_end|>\n' -}}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<|im_start|>assistant\n' -}}
+{%- endif -%}
