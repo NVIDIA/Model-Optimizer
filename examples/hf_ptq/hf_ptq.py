@@ -302,7 +302,7 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
     }
 
 
-def auto_quantize_recipe(
+def auto_quantize(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
     calib_dataloader: DataLoader,
@@ -311,8 +311,8 @@ def auto_quantize_recipe(
 ):
     """Recipe-driven auto_quantize, organized around an AutoQuantizeConfig.
 
-    Forward-looking (recipe-only) entry point. The CLI ``auto_quantize`` helper is left
-    untouched as the equivalence baseline and will be retired once the recipe path is verified.
+    The sole AutoQuantize entry point: it is driven entirely by the recipe's AutoQuantizeConfig
+    (candidate formats, constraints, disabled/cost-excluded layers) and wraps ``mtq.auto_quantize``.
     """
     if args.calib_with_images:
         raise NotImplementedError(
@@ -1062,7 +1062,7 @@ def quantize_main(
         # Recipe-driven auto_quantize. For VL models the search walks the OUTER CausalLM
         # (which carries lm_head and the LM-head forward path); architecture-specific
         # exclusions come from the recipe's disabled_layers.
-        auto_quantize_recipe(
+        auto_quantize(
             args,
             full_model,
             calib_dataloader,
@@ -1182,9 +1182,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recipe",
         help=(
-            "PTQ recipe YAML file or name without suffix (e.g. general/ptq/fp8_default-kv_fp8_cast, "
-            "general/ptq/nvfp4_default-kv_fp8_cast, general/ptq/nvfp4_default-kv_nvfp4_cast). "
-            "When set, --kv_cache_qformat is ignored; the recipe fully determines KV cache config."
+            "PTQ or AutoQuantize recipe YAML file or name without suffix (e.g. "
+            "general/ptq/nvfp4_default-kv_fp8_cast, general/auto_quantize/nvfp4_fp8_at_4p8bits). "
+            "KV cache source depends on the recipe type: PTQ recipes bake KV cache into quant_cfg "
+            "and --kv_cache_qformat is ignored; AutoQuantize recipes fall back to --kv_cache_qformat "
+            "unless the recipe sets an explicit kv_cache field."
         ),
         default=None,
     )
@@ -1263,8 +1265,9 @@ def parse_args() -> argparse.Namespace:
             "Formats whose preset pins use_constant_amax on the KV bmm quantizer "
             "(e.g. fp8_cast, nvfp4_cast) set the amax to FP8 range without data-driven "
             "calibration; all other formats (fp8, nvfp4, ...) use data-driven calibration. "
-            "Ignored when --recipe is given: the recipe YAML is authoritative for KV "
-            "cache config (use the *_cast_kv.yaml recipes for the cast variants)."
+            "With --recipe, the source depends on the recipe type: a PTQ recipe is "
+            "authoritative for KV cache and ignores this flag; an AutoQuantize recipe "
+            "falls back to this flag unless it sets an explicit kv_cache field."
         ),
     )
     parser.add_argument(
