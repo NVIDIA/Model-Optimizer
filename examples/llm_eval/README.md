@@ -26,7 +26,7 @@ python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or mode
 
 For a quick smoke test, add `--limit 10` to any of the above commands to evaluate on only 10 samples.
 
-- With model-sharding (for models which require multiple GPUs):
+- To fit one model across multiple GPUs (model sharding; this does not speed up evaluation):
 
 ```sh
 python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or model card>,parallelize=True --tasks <comma separated tasks> --batch_size 4
@@ -36,7 +36,11 @@ python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or mode
 
 - For data-parallel evaluation with model-sharding:
 
-With the following command, the model will be sharded across `total_num_of_available_gpus/num_copies_of_your_model` with a data-parallelism of `num_copies_of_your_model`
+`--num_processes` controls how many model copies evaluate samples concurrently. More
+copies usually make evaluation faster but leave fewer GPUs for each copy. With `N`
+GPUs, each copy uses approximately `N / num_processes` GPUs. For example, on 8 GPUs,
+8 processes run eight single-GPU copies. Choose the largest number of processes for
+which each model copy fits.
 
 ```sh
 accelerate launch --multi_gpu --num_processes <num_copies_of_your_model> \
