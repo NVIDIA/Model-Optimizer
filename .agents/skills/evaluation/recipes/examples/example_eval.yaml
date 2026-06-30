@@ -46,6 +46,8 @@ defaults:
   - execution: slurm/default
   - deployment: vllm
   - _self_
+cluster:
+  sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"Eval benchmark low GPU utilization"}}'
 execution:
   hostname: ???
   username: ${oc.env:USER}

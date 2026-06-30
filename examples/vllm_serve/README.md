@@ -65,10 +65,10 @@ lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,
 
 Step 1: export the model with bf16 weights and quantizer state. To export the model:
 
-- For **HF** models, use `examples/llm_ptq/hf_ptq.py` with `--vllm_fakequant_export`:
+- For **HF** models, use `examples/hf_ptq/hf_ptq.py` with `--vllm_fakequant_export`:
 
 ```bash
-python ../llm_ptq/hf_ptq.py \
+python ../hf_ptq/hf_ptq.py \
   --pyt_ckpt_path <MODEL_PATH> \
   --recipe <PATH_TO_RECIPE> \
   --calib_size 512 \

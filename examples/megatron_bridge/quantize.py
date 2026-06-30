@@ -73,7 +73,7 @@ from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calib
 from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
 
 # The --quant_cfg / --kv_cache_quant CLI vocabularies are discovered from the preset
-# YAMLs (shared with the llm_ptq examples via modelopt.recipe.presets). --quant_cfg
+# YAMLs (shared with the hf_ptq examples via modelopt.recipe.presets). --quant_cfg
 # additionally accepts any full config name from ``mtq.config.choices`` (e.g.
 # ``FP8_DEFAULT_CFG``); see get_quant_config below.
 

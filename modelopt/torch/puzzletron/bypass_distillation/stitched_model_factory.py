@@ -547,18 +547,22 @@ def bypass_factory_fn(
                 .stitch(
                     ExternalTarget().output(
                         name=output_descriptor,
-                        adapter=lambda v: InputArgs(target=v)
-                        if not isinstance(v, tuple)
-                        else InputArgs(target=v[0]),
+                        adapter=lambda v: (
+                            InputArgs(target=v)
+                            if not isinstance(v, tuple)
+                            else InputArgs(target=v[0])
+                        ),
                     ),
                     student_stitched_module_loss_target.input(),
                 )
                 .stitch(
                     student_submodule_target.output(
                         name=submodule_output_descriptor,
-                        adapter=lambda v: InputArgs(input=v)
-                        if not isinstance(v, tuple)
-                        else InputArgs(input=v[0]),
+                        adapter=lambda v: (
+                            InputArgs(input=v)
+                            if not isinstance(v, tuple)
+                            else InputArgs(input=v[0])
+                        ),
                     ),
                     student_stitched_module_loss_target.input(),
                 )

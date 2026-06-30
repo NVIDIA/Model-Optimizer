@@ -203,7 +203,7 @@ One can also use [examples/specdec_bench](../specdec_bench) to validate the trai
 
 ### Deploying Quantized model
 
-See more details on deployment of quantized model to TRTLLM [here](../llm_ptq/README.md).
+See more details on deployment of quantized model to TRTLLM [here](../hf_ptq/README.md).
 
 ## Advanced Usage
 

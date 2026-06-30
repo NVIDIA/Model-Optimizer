@@ -1518,7 +1518,7 @@ def register_dbrx_moe_on_the_fly(model):
 
     The MoE class in DBRX is `transformers_modules.modeling_dbrx.DbrxExpertGLU`, which loads dynamically.
     """
-    if type(model).__name__ in ["DbrxForCausalLM"]:
+    if type(model).__name__ == "DbrxForCausalLM":
         moe_type = type(model.transformer.blocks[0].ffn.experts.mlp)
         # Create a QuantDbrxExpertGLU class on the fly
         if QuantModuleRegistry.get(moe_type) is None:
@@ -1606,20 +1606,24 @@ def register_sparse_moe_on_the_fly(model):
 def _fused_experts_wrapper_class(module):
     """Return the _QuantFusedExperts subclass for a fused MoE expert container, or None.
 
-    Two 3-D fused layouts are recognized, both requiring ``num_experts`` + ``act_fn``
-    and a 3-D ``down_proj`` parameter:
+    Two 3-D fused layouts are recognized, both requiring ``num_experts`` and a
+    3-D ``down_proj`` parameter:
 
     * gated (``_QuantFusedExperts``): a 3-D ``gate_up_proj`` fusing gate+up. Matches
       ``MixtralExperts``, ``Qwen2MoeExperts``, ``Qwen3MoeExperts``,
       ``Qwen3_5MoeExperts``, ``DeepseekV3NaiveMoe``, ``JambaExperts``,
-      ``OlmoeExperts``, etc.
+      ``OlmoeExperts``, ``MiniMaxM2Experts``, ``MiniMaxM3VLExperts``, etc.
     * non-gated (``_QuantNonGatedFusedExperts``): a 3-D ``up_proj`` with no
       ``gate_proj`` and no ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
 
     Returns ``None`` for non-standard layouts (DBRX, GptOss, GraniteMoE,
     Llama4TextExperts) which have their own explicit registrations.
+
+    ``act_fn`` is not required: these wrappers only intercept the two ``F.linear``
+    calls, so modules with a custom gated activation (e.g. ``MiniMaxM3VLExperts``)
+    are still supported.
     """
-    if not hasattr(module, "num_experts") or not hasattr(module, "act_fn"):
+    if not hasattr(module, "num_experts"):
         return None
     down = getattr(module, "down_proj", None)
     if not isinstance(down, (nn.Parameter, Tensor)) or down.dim() != 3:

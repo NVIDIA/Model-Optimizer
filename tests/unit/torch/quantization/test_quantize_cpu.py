@@ -152,7 +152,7 @@ def test_quantize_invalid_cfg():
         ],
         "algorithm": "max",
     }
-    with pytest.raises(ValidationError, match="axis must be None when block_sizes is not None."):
+    with pytest.raises(ValidationError, match=r"axis must be None when block_sizes is not None."):
         model = mtq.quantize(model, config_invalid)
 
 

@@ -41,7 +41,7 @@ bash tools/debugger/client.sh --timeout 1800 run "<command>"
 
 ```bash
 # Run PTQ test
-bash tools/debugger/client.sh run "bash llm_ptq/scripts/huggingface_example.sh"
+bash tools/debugger/client.sh run "bash hf_ptq/scripts/huggingface_example.sh"
 
 # Run pytest
 bash tools/debugger/client.sh run "python -m pytest tests/gpu -k test_quantize"

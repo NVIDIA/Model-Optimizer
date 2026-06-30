@@ -7,12 +7,13 @@
 ## Params
 
 Tau2 uses the evaluated model as the agent plus a separate user-simulator endpoint;
-keep both fixed across runs. Substitute the user-sim & judger `model_id`/`url` with the
-literal values you keep in `.env` (`TAU2_USER_MODEL_ID` rec. **Qwen3 235B**,
-`TAU2_JUDGER_MODEL_ID` rec. **gpt-oss-120B**, `TAU2_ENDPOINT_URL`; see
-`recipes/env.example`) — config, not secrets, so no export needed; only `api_key`
-(`INFERENCE_API_KEY`) is exported. tau2-bench needs the full `/v1/chat/completions`
-URL (nemo-skills judges use the `/v1` base).
+keep both fixed across runs. The judger (**gpt-oss-120B**) and user-simulator
+(**Qwen3 235B**) `model_id`s are hardcoded in the fragment below — swap them for
+equivalents on your own endpoint if needed. Only the shared `url`
+(`TAU2_ENDPOINT_URL`) comes from `.env` (see `recipes/env.example`) — config, not a
+secret, so no export needed; only `api_key` (`INFERENCE_API_KEY`) is exported.
+tau2-bench needs the full `/v1/chat/completions` URL (nemo-skills judges use the
+`/v1` base).
 
 For parallelism, we have to throttle to a smaller cap due to the test may be throttled by
 user and judger API rate limit. If frequent 429 errors are hit, the reported scores could be much lower.
@@ -56,11 +57,11 @@ Use this inside the top-level `evaluation.tasks` list:
           skip_failed_samples: true
           n_samples: 8
           user:
-            model_id: <TAU2_USER_MODEL_ID>     # from .env; recommended Qwen3 235B
+            model_id: nvidia/qwen/qwen-235b    # Qwen3 235B; use an equivalent on your own endpoint if needed
             url: <TAU2_ENDPOINT_URL>           # from .env (full /v1/chat/completions)
             api_key: INFERENCE_API_KEY         # env-var name; exported, read by harness
           judger:
-            model_id: <TAU2_JUDGER_MODEL_ID>   # from .env; recommended gpt-oss-120B
+            model_id: nvidia/openai/gpt-oss-120b   # gpt-oss-120B; use an equivalent on your own endpoint if needed
             url: <TAU2_ENDPOINT_URL>           # from .env (full /v1/chat/completions)
             api_key: INFERENCE_API_KEY         # env-var name; exported, read by harness
 ```

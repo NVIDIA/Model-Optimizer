@@ -350,7 +350,7 @@ def compare_amax_sync_across_expert_parallel(model, compare_across_experts=True)
     # Group ranks by ETP rank for fc1 (ColumnParallel: same output channels should match)
     etp_groups = defaultdict(list)
     for info in all_rank_info:
-        etp_groups[info["etp_rank"] if info["etp_rank"] else 0].append(info["global_rank"])
+        etp_groups[info["etp_rank"] or 0].append(info["global_rank"])
 
     for quantizer_type, rank_values in expert_quantizers.items():
         # Determine which ranks should have same amax

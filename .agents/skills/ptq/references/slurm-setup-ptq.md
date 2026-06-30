@@ -7,7 +7,7 @@ monitoring), see `skills/common/slurm-setup.md`.
 
 ## 1. Container
 
-Get the recommended image version from `examples/llm_ptq/README.md`, then look for an existing `.sqsh` file:
+Get the recommended image version from `examples/hf_ptq/README.md`, then look for an existing `.sqsh` file:
 
 ```bash
 ls *.sqsh ../*.sqsh ~/containers/*.sqsh 2>/dev/null
@@ -63,17 +63,17 @@ pip install -U transformers --no-deps
 
 Estimate GPU count from model size and available GPU memory. `hf_ptq.py` uses `device_map="auto"` so it fills GPUs automatically — request only as many as needed.
 
-For multi-node PTQ (200B+ params), use `examples/llm_ptq/multinode_ptq.py` with FSDP2 and accelerate:
+For multi-node PTQ (200B+ params), use `examples/hf_ptq/multinode_ptq.py` with FSDP2 and accelerate:
 
 ```bash
 accelerate launch \
-    --config_file examples/llm_ptq/fsdp2.yaml \
+    --config_file examples/hf_ptq/fsdp2.yaml \
     --num_machines $NUM_NODES \
     --num_processes $((NUM_NODES * GPUS_PER_NODE)) \
     --main_process_ip $MASTER_ADDR \
     --main_process_port $MASTER_PORT \
     --machine_rank $SLURM_PROCID \
-    examples/llm_ptq/multinode_ptq.py \
+    examples/hf_ptq/multinode_ptq.py \
         --pyt_ckpt_path <model> \
         --qformat <format> \
         --export_path <output>

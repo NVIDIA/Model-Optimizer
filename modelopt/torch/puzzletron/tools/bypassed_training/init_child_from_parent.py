@@ -106,7 +106,7 @@ def init_child_from_parent(
     block_config_overrides = {}
 
     for key, value in model_config_overrides_dict.items():
-        if key in ["hidden_size"]:
+        if key == "hidden_size":
             global_config_overrides[key] = value
         else:
             block_config_overrides[key] = value
@@ -175,7 +175,7 @@ def init_child_from_parent(
 
     # Profile _save_checkpoint with automatic I/O worker calculation
     mprint("Starting _save_checkpoint...")
-    actual_io_workers = max_workers if max_workers else "auto"
+    actual_io_workers = max_workers or "auto"
     mprint(f"I/O Settings: max_workers={actual_io_workers}")
     start_time = time.time()
     _save_checkpoint(
@@ -190,8 +190,8 @@ def init_child_from_parent(
 
     # Print profiling summary with actual worker counts used
     total_core_time = create_child_state_dict_time + save_checkpoint_time
-    actual_layer_workers = max_layer_workers if max_layer_workers else "auto"
-    actual_io_workers = max_workers if max_workers else "auto"
+    actual_layer_workers = max_layer_workers or "auto"
+    actual_io_workers = max_workers or "auto"
     mprint(f"\n=== PROFILING SUMMARY ===")
     mprint(
         f"create_child_state_dict: {create_child_state_dict_time:.2f}s ({create_child_state_dict_time / total_core_time * 100:.1f}%)"
