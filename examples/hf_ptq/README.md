@@ -198,7 +198,7 @@ python hf_ptq.py \
 
 Built-in recipes are located in `modelopt_recipes/general/ptq/` for model-agnostic recipes and in `modelopt_recipes/huggingface/<model_type>/ptq/` for recipes tuned to a specific Hugging Face `model_type` (see [`modelopt_recipes/huggingface/README.md`](../../modelopt_recipes/huggingface/README.md)). You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
 
-> *When `--recipe` is specified, `--qformat` and `--kv_cache_qformat` are ignored. The recipe fully defines the quantization configuration.*
+> *When `--recipe` is specified, `--qformat` is ignored. KV cache handling depends on the recipe type: a **PTQ** recipe bakes KV cache into its config and ignores `--kv_cache_qformat`; an **AutoQuantize** recipe falls back to `--kv_cache_qformat` unless it sets an explicit `kv_cache` field.*
 
 #### KV Cache Quantization
 
@@ -352,11 +352,20 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
 `AutoQuantize` can be performed for Huggingface LLM models like [Qwen](https://huggingface.co/Qwen/Qwen3-8B) / [Nemotron](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) as shown below:
 
 `AutoQuantize` is driven by an **AutoQuantize recipe** passed with `--recipe`. The recipe defines the
-candidate formats, the `effective_bits` target, cost model, scoring method, and disabled layers — see
-[`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
+candidate formats, the `effective_bits` target, cost model, scoring method, search-disabled layers, and
+cost-excluded layers — see [`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
 [`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/huggingface/<model>/auto_quantize/`.
+
+> *Migration: AutoQuantize is now recipe-only. The former `--auto_quantize_bits`, `--auto_quantize_method`,
+> `--auto_quantize_score_size`, `--auto_quantize_cost_model`, and `--auto_quantize_active_moe_expert_ratio`
+> CLI flags are removed and map to recipe fields: `--auto_quantize_bits` → `constraints.effective_bits`,
+> `--auto_quantize_method` → `auto_quantize_method`, `--auto_quantize_score_size` → `num_score_steps`,
+> `--auto_quantize_cost_model` → `constraints.cost_model`, `--auto_quantize_active_moe_expert_ratio` →
+> `constraints.cost.active_moe_expert_ratio`, and the `--qformat fp8,nvfp4` candidate list →
+> `candidate_formats`. `--auto_quantize_checkpoint` is unchanged. Start from a shipped recipe under
+> `modelopt_recipes/general/auto_quantize/` and adjust as needed.*
 
 [Script](./scripts/huggingface_example.sh)
 
@@ -370,8 +379,13 @@ scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/n
 The recipe quantizes the less accuracy-sensitive layers with the more aggressive format (e.g. NVFP4) and
 keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
-`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `num_score_steps`, and
-`disabled_layers`.
+`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `num_score_steps`,
+`disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
+accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via
+`$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+
+KV cache is applied as a uniform post-step, not part of the per-layer search. An AutoQuantize recipe
+falls back to `--kv_cache_qformat` (default `fp8_cast`) unless it sets an explicit `kv_cache` field.
 
 The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
 interrupted search (skips re-scoring):
