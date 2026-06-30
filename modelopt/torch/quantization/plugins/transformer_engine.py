@@ -274,6 +274,11 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             # path; fall back to the cuda_ext per-quantizer loop.
             if isinstance(q, SequentialQuantizer):
                 return False
+            # grouped_axis0_fakequant implements scalar/axis integer fake
+            # quantization only. Tuple formats (for example NVFP4 E2M1) and
+            # block quantization need TensorQuantizer's format-specific path.
+            if not isinstance(q.num_bits, int) or q.block_sizes:
+                return False
             if not hasattr(q, "_amax"):
                 return False
             # During calibration each quantizer still needs the cuda_ext path
