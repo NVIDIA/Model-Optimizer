@@ -77,13 +77,33 @@ SEED = 1234
 
 @contextmanager
 def _timed_section(rank, label):
+    if rank == 0:
+        print(f"[gpu_megatron timing] START {label}", flush=True)
     start = time.perf_counter()
     try:
         yield
     finally:
         if rank == 0:
             elapsed = time.perf_counter() - start
-            print(f"[gpu_megatron timing] {label}: {elapsed:.2f}s", flush=True)
+            print(f"[gpu_megatron timing] END {label}: {elapsed:.2f}s", flush=True)
+
+
+def _quant_config_debug_name(config):
+    known_configs = [
+        ("fp8", mtq.FP8_DEFAULT_CFG),
+        ("int8_sq", mtq.INT8_SMOOTHQUANT_CFG),
+        ("int4_blockwise", mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG),
+        ("int4_awq", mtq.INT4_AWQ_CFG),
+        ("w4a8_awq", mtq.W4A8_AWQ_BETA_CFG),
+        ("nvfp4", mtq.NVFP4_DEFAULT_CFG),
+        ("fp8_2d_blockwise", mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG),
+        ("fp8_kv", mtq.FP8_KV_CFG),
+        ("nvfp4_kv", mtq.NVFP4_KV_CFG),
+    ]
+    for name, known_config in known_configs:
+        if config is known_config:
+            return name
+    return "custom"
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -337,64 +357,77 @@ def _test_sharded_state_dict(
     # Hybrid mamba MOE parameters
     is_hybrid = model_config.get("is_hybrid", False)
     hybrid_override_pattern = model_config.get("hybrid_override_pattern", None)
-
-    initialize_for_megatron(
-        tensor_model_parallel_size=tp_size,
-        seed=SEED,
-        expert_model_parallel_size=ep_size,
-        expert_tensor_parallel_size=etp_size,
+    timing_label = model_config.get(
+        "test_label",
+        f"ssd:{transformer_impl}:compress={compress}:meta={meta_device}:world={size}",
     )
 
-    model_ref = _gpt_model_provider(
-        tp_size,
-        hidden_size,
-        vocab_size=256,
-        num_moe_experts=num_moe_experts,
-        moe_grouped_gemm=moe_grouped_gemm,
-        ep_size=ep_size,
-        etp_size=etp_size,
-        transformer_impl=transformer_impl,
-        is_hybrid=is_hybrid,
-        hybrid_override_pattern=hybrid_override_pattern,
-    )
-    model_test = _gpt_model_provider(
-        tp_size,
-        hidden_size,
-        vocab_size=256,
-        num_moe_experts=num_moe_experts,
-        moe_grouped_gemm=moe_grouped_gemm,
-        meta_device=meta_device,
-        ep_size=ep_size,
-        etp_size=etp_size,
-        transformer_impl=transformer_impl,
-        is_hybrid=is_hybrid,
-        hybrid_override_pattern=hybrid_override_pattern,
-    )
+    with _timed_section(rank, f"{timing_label}:initialize"):
+        initialize_for_megatron(
+            tensor_model_parallel_size=tp_size,
+            seed=SEED,
+            expert_model_parallel_size=ep_size,
+            expert_tensor_parallel_size=etp_size,
+        )
 
-    forward = get_forward(model_ref)
-    model_ref = mtq.quantize(model_ref, config, forward)
+    with _timed_section(rank, f"{timing_label}:build_model_ref"):
+        model_ref = _gpt_model_provider(
+            tp_size,
+            hidden_size,
+            vocab_size=256,
+            num_moe_experts=num_moe_experts,
+            moe_grouped_gemm=moe_grouped_gemm,
+            ep_size=ep_size,
+            etp_size=etp_size,
+            transformer_impl=transformer_impl,
+            is_hybrid=is_hybrid,
+            hybrid_override_pattern=hybrid_override_pattern,
+        )
+    with _timed_section(rank, f"{timing_label}:build_model_test"):
+        model_test = _gpt_model_provider(
+            tp_size,
+            hidden_size,
+            vocab_size=256,
+            num_moe_experts=num_moe_experts,
+            moe_grouped_gemm=moe_grouped_gemm,
+            meta_device=meta_device,
+            ep_size=ep_size,
+            etp_size=etp_size,
+            transformer_impl=transformer_impl,
+            is_hybrid=is_hybrid,
+            hybrid_override_pattern=hybrid_override_pattern,
+        )
+
+    with _timed_section(rank, f"{timing_label}:get_forward"):
+        forward = get_forward(model_ref)
+    with _timed_section(rank, f"{timing_label}:quantize"):
+        model_ref = mtq.quantize(model_ref, config, forward)
     if compress:
-        mtq.compress(model_ref)
+        with _timed_section(rank, f"{timing_label}:compress"):
+            mtq.compress(model_ref)
 
-    for module in model_ref.modules():
-        if hasattr(module, "_amax_for_smoothing"):
-            delattr(module, "_amax_for_smoothing")
+    with _timed_section(rank, f"{timing_label}:strip_smoothing_attrs"):
+        for module in model_ref.modules():
+            if hasattr(module, "_amax_for_smoothing"):
+                delattr(module, "_amax_for_smoothing")
 
-    sharded_state_dict_test_helper(
-        tmp_path,
-        model_ref,
-        model_test,
-        forward,
-        meta_device=meta_device,
-        version=modelopt_version,
-    )
+    with _timed_section(rank, f"{timing_label}:sharded_state_dict_helper"):
+        sharded_state_dict_test_helper(
+            tmp_path,
+            model_ref,
+            model_test,
+            forward,
+            meta_device=meta_device,
+            version=modelopt_version,
+        )
 
     if modelopt_version is not None:
         mto.conversion.__version__ = modelopt.__version__
         mtq.plugins.megatron.__version__ = modelopt.__version__
 
     # Make sure all ranks have arrived before destroying NCCL
-    torch.distributed.barrier()
+    with _timed_section(rank, f"{timing_label}:barrier"):
+        torch.distributed.barrier()
 
 
 mixed_precision_config = copy.deepcopy(mtq.W4A8_AWQ_BETA_CFG)
@@ -467,7 +500,14 @@ def test_homogeneous_sharded_state_dict(
                 "KV cache configs require transformer_impl='modelopt' and no compress/meta_device"
             )
 
-    model_config = {"transformer_impl": transformer_impl}
+    config_name = _quant_config_debug_name(config)
+    model_config = {
+        "transformer_impl": transformer_impl,
+        "test_label": (
+            f"ssd:homogeneous:{transformer_impl}:compress={compress}:"
+            f"meta={meta_device}:config={config_name}"
+        ),
+    }
     dist_workers.run(
         partial(
             _test_sharded_state_dict,
