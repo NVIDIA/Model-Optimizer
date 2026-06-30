@@ -223,6 +223,8 @@ def test_get_model_empty_init_uses_torch_dtype_not_dtype(monkeypatch):
         @staticmethod
         def from_pretrained(*args, **kwargs):
             calls["from_pretrained"] = kwargs
+            assert "dtype" not in kwargs
+            assert kwargs["torch_dtype"] == "auto"
             return FakeModel()
 
     monkeypatch.setattr(
@@ -242,3 +244,4 @@ def test_get_model_empty_init_uses_torch_dtype_not_dtype(monkeypatch):
     assert isinstance(model, FakeModel)
     assert calls["eval"]
     assert calls["from_config"]["trust_remote_code"] is True
+    assert calls["from_pretrained"]["trust_remote_code"] is True

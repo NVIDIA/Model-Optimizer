@@ -767,10 +767,12 @@ def get_model(
             )
             model_kwargs["max_memory"] = max_memory
 
+        model_kwargs2 = model_kwargs.copy()
+        model_kwargs2["torch_dtype"] = model_kwargs2.pop("dtype", "auto")
         model = auto_model_module.from_pretrained(
             ckpt_path,
             device_map=device_map,
-            **model_kwargs,
+            **model_kwargs2,
         )
     model.eval()
     if has_pack_quantized_config(hf_config):
