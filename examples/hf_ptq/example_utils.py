@@ -731,21 +731,25 @@ def get_model(
             auto_model_module = getattr(transformers, architecture)
             from_config = auto_model_module._from_config
 
+        is_decilm = "DeciLM" in architecture
         with init_empty_weights(include_buffers=True):
             # When computing the device_map, assuming bfloat16 precision by default,
             # unless specified by the hf_config.
-            torch_dtype = (
+            config_dtype = (
                 getattr(hf_config, "dtype", None)
                 or getattr(hf_config, "torch_dtype", None)
                 or torch.bfloat16
             )
-            if isinstance(torch_dtype, str):
-                torch_dtype = getattr(torch, torch_dtype)
+            if isinstance(config_dtype, str):
+                config_dtype = getattr(torch, config_dtype)
             model_kwargs2 = model_kwargs.copy()
             if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                 model_kwargs2.pop("trust_remote_code", None)
-            model_kwargs2["torch_dtype"] = torch_dtype
-            model_kwargs2.pop("dtype", None)
+            if is_decilm:
+                model_kwargs2["torch_dtype"] = config_dtype
+                model_kwargs2.pop("dtype", None)
+            else:
+                model_kwargs2["dtype"] = config_dtype
             model_kwargs2.pop("max_memory", None)
             model = from_config(hf_config, **model_kwargs2)
 
@@ -768,7 +772,8 @@ def get_model(
             model_kwargs["max_memory"] = max_memory
 
         model_kwargs2 = model_kwargs.copy()
-        model_kwargs2.pop("dtype", None)
+        if is_decilm:
+            model_kwargs2.pop("dtype", None)
         model = auto_model_module.from_pretrained(
             ckpt_path,
             device_map=device_map,
