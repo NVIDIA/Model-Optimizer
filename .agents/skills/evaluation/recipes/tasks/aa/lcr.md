@@ -12,9 +12,17 @@ The judge `url` still comes from `.env` (`INFERENCE_JUDGE_URL`; see `recipes/env
 — config, not a secret, so no export; only `api_key` (`INFERENCE_API_KEY`) is
 exported. Keep the judge fixed.
 
-AA-LCR needs long context: plan for roughly 120K input tokens plus 16K
-generation tokens. Set deployment `--max-model-len` to at least `131072`, and
-use a larger value when the model supports it.
+AA-LCR needs long context. The longest prompts are ~120K **input** tokens, and
+the **generation** budget adds on top of that — ~16K for non-reasoning models but
+**up to ~64K for reasoning models**. `--max-model-len` must cover
+**input + max generation**, so the old `131072` floor is **too low**: 120K + 64K
+≈ 185K overflows it, and every AA-LCR request then fails with vLLM HTTP 400
+(`maximum context length` / `VLLMValidationError`) — no generations reach the
+judge, so the whole task fails with no score (this hit **5 of 9 day0 models**).
+
+Set `--max-model-len` to **`max(163840, longest_input + max_new_tokens)`**, capped
+at the model's `max_position_embeddings` (working day0 values were 163840–262144).
+Use the **same value on both the baseline and the quantized deployment**.
 
 **Parallelism — set this *lower* than the top-level default.** AA-LCR is the
 suite's most concurrency-sensitive task on two fronts at once. (1) *KV-bound:* each
@@ -31,12 +39,15 @@ SKILL.md Step 3 (sized off the *max* parallelism across all tasks).
 
 ## YAML Fragment
 
-LCR has a deployment-side requirement (`--max-model-len 131072`) and a task
-block. Per SKILL.md Step 3, the deployment flag must live inside
+LCR has a deployment-side requirement (a large `--max-model-len`, see above) and
+a task block. Per SKILL.md Step 3, the deployment flag must live inside
 `deployment.command:` — not in the deprecated `extra_args` field.
 
 **Deployment requirement:** ensure the `vllm serve ...` invocation in
-`deployment.command` includes `--max-model-len 131072` (or higher).
+`deployment.command` includes `--max-model-len` set to
+`max(163840, longest_input + max_new_tokens)` (capped at the model's
+`max_position_embeddings`) — **not** the old `131072`, which overflows for
+reasoning models. Match the value on baseline and quantized deployments.
 
 ```yaml
 - name: ns_aa_lcr

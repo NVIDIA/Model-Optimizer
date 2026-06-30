@@ -56,6 +56,16 @@ the validated runs are comparable:
 6. Judge-backed or simulator-backed tasks use the same judge/user model,
    endpoint class, prompt, and scoring config.
 7. The same accuracy metric and score field is used for both runs.
+8. **The baseline is a true full-precision reference, not an already-quantized
+   release.** Some models ship *natively quantized* (e.g. INT4 `W4A16` or
+   block-wise FP8). For these there is **no BF16 baseline**: comparing a new
+   `W4A4` candidate against the released `W4A16`/FP8 weights measures only the
+   *activation*-precision step, not total quantization error, so a strict
+   `<1pp vs BF16` gate is not well-defined. Either (a) compare like-for-like
+   against the released precision and label it as such, or (b) declare the
+   BF16-baseline gate **N/A** for that model and report it as inconclusive.
+   (Day0 Kimi-K2.6: a `W4A4`-vs-`W4A16` delta was scored as a loss that was partly
+   an artifact of the missing BF16 reference.)
 
 If any item differs, either rerun with matched settings or label the result as
 not an apples-to-apples quantization comparison.
