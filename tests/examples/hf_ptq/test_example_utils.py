@@ -246,15 +246,8 @@ def test_get_model_uses_expected_dtype_kwarg(
             assert "torch_dtype" not in kwargs
             return FakeModel()
 
-    class FakeLlamaForCausalLM:
-        @staticmethod
-        def _from_config(config, **kwargs):
-            calls["from_config"] = kwargs
-            assert config is hf_config
-            assert kwargs[expected_config_dtype_kwarg] is torch.float16
-            assert unexpected_config_dtype_kwarg not in kwargs
-            assert "max_memory" not in kwargs
-            return FakeModel()
+    class FakeLlamaForCausalLM(FakeAutoModelForCausalLM):
+        _from_config = FakeAutoModelForCausalLM.from_config
 
         @staticmethod
         def from_pretrained(*args, **kwargs):
