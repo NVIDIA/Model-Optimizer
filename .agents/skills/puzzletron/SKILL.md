@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu), distill (run/list/summary/progress). Usage: /puzzletron COMMAND [ARGS]"
+description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu/mmlu-pro), distill (run/list/summary/progress). Usage: /puzzletron COMMAND [ARGS]"
 license: Apache-2.0
 ---
 
@@ -29,6 +29,7 @@ Available commands:
 - `eval list [puzzle_dir]` — List all available checkpoints (teacher + sweep solutions) with their index numbers; auto-discovers puzzle_dir if omitted
 - `eval progress [puzzle_dir]` — Show per-checkpoint MMLU status, full-vs-limited accuracy, and phase-aware timing; auto-discovers puzzle_dir if omitted
 - `eval mmlu <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>]` — Evaluate a checkpoint on MMLU (5-shot); pass index from `eval list` or a direct path; default `--limit 10` (smoke test)
+- `eval mmlu-pro <index|hf_model_path> [--puzzle_dir <dir>] [--limit <N>] [--batch_size <B>] [--gpus <ids>...]` — Evaluate MMLU-Pro subjects concurrently; results use a limit-specific directory
 - `distill run [--puzzle_dir <dir>] [--ratio <r>] [--nproc_per_node <n>] [--train_iters <n>] [--output_dir <dir>] [--use_mock_data] [--data_paths <p>...]` — Run distillation for a MIP solution
 - `distill list [puzzle_dir]` — List all distillation runs with status
 - `distill summary [puzzle_dir]` — Compare datasets, recipes, checkpoints, MMLU, and disk usage across runs
@@ -257,7 +258,7 @@ python3 .agents/skills/puzzletron/mip_sweep.py $PUZZLE_DIR
 
 ## Command: eval
 
-- If the second word is not exactly `list`, `progress`, or `mmlu`, tell the user: "Unknown eval sub-command. Available: `list`, `progress`, `mmlu`." and **STOP**.
+- If the second word is not exactly `list`, `progress`, `mmlu`, or `mmlu-pro`, tell the user: "Unknown eval sub-command. Available: `list`, `progress`, `mmlu`, `mmlu-pro`." and **STOP**.
 
 ### eval list
 
@@ -359,6 +360,21 @@ another evaluation using the inherited port.
 Stream output to the user as it arrives. When the command finishes:
 - Report the exit code.
 - Show a results summary table with: model path, total questions evaluated, loglikelihood requests, and the mmlu/category accuracy scores parsed from the output.
+
+### eval mmlu-pro
+
+Resolve `index_or_path` and optional `--puzzle_dir` as for `eval mmlu`. Parse `--limit <N>`
+(default `10`), `--batch_size <B>` (default `4`), and `--gpus <ids>...` (default `0`).
+Run in the background because the evaluation can take several minutes:
+
+```bash
+python3 .agents/skills/puzzletron/eval_mmlu_pro.py <hf_model_path> \
+  --limit <N> --batch-size <B> --gpus <ids>...
+```
+
+The limit applies to each of MMLU-Pro's 14 subjects. Results are stored under
+`<hf_model_path>/eval_results/mmlu_pro_limit_<N>/`, with a manifest recording the limit,
+model, tasks, batch size, and GPU allocation. Never store a limited run in the full-run directory.
 
 ## Command: add-model
 
