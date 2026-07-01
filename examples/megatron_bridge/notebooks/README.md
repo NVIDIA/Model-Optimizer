@@ -12,7 +12,7 @@ The pipeline covers:
 | **Distill** | `distill.py` (Megatron-Bridge) | Knowledge distillation from the unpruned teacher on a Nemotron CC + Math + Code corpus |
 | **Quantize** | `hf_ptq.py` | FP8 PTQ with image-aware calibration (~2× throughput vs BF16) |
 | **Serve** | vLLM | OpenAI-compatible endpoint |
-| **Evaluate** | lmms-eval + aiperf | 4-way accuracy comparison (MathVista / PAI-Bench / RealWorldQA) + throughput benchmarks |
+| **Evaluate** | lmms-eval + aiperf | 4-way accuracy comparison (PAI-Bench / RealWorldQA) + throughput benchmarks |
 
 The compressed checkpoint (pruned + distilled + FP8, ~1.7 B total) targets near-full recovery of the 2 B BF16 baseline while halving memory footprint and roughly doubling serving throughput on a single H100.
 
@@ -39,13 +39,12 @@ Go to https://huggingface.co/nvidia/Cosmos-Reason2-2B and request access. You wi
 ```bash
 docker run --gpus all \
   --shm-size=16GB \
-  -p 8888:8888 \
+  -p 8889:8889 \
   -p 6006:6006 \
   --rm -it \
-  -e HF_TOKEN=<YOUR_HF_TOKEN> \
   -v <BASE_PATH>/Model-Optimizer:/dli/Model-Optimizer \
   modelopt-notebooks \
-  jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root \
+  jupyter lab --ip=0.0.0.0 --port=8889 --no-browser --allow-root \
   --notebook-dir=/dli/Model-Optimizer/examples/megatron_bridge/notebooks \
   --IdentityProvider.token='' \
   --ServerApp.password=''
@@ -67,5 +66,5 @@ http://127.0.0.1:8888/lab
 | `jupyterlab` | 4.4.10 | Notebook UI |
 | `ipywidgets` | 8.1.7 | Progress bars in notebook |
 | `nvidia-modelopt` | from source (`lmikaelyan/compress-vlms`) | Pruning, distillation, PTQ |
-| `lmms-eval` | v0.7.1 | VLM accuracy benchmarks (§1.6: MathVista / BLINK / RealWorldQA) |
+| `lmms-eval` | v0.7.1 | VLM accuracy benchmarks (§1.6: BLINK / RealWorldQA) |
 | `python-Levenshtein` | latest | Required by lmms-eval string metrics |
