@@ -19,8 +19,11 @@ separate-file-standalone, separate-file-indexed) plus a negative case.
 """
 
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import pytest
 import torch
 from _test_utils.examples.llm_ptq_example_utils import example_utils
 from safetensors.torch import save_file
@@ -194,3 +197,122 @@ def test_get_original_hf_quant_method_none_for_unquantized():
         example_utils.get_original_hf_quant_method(SimpleNamespace(quantization_config=None))
         is None
     )
+
+
+# ---------- _resolve_init_config ---------------------------------------------
+
+
+def _remote_config():
+    # Config whose class module lives under "transformers_modules" (remote code).
+    cls = type("_RemoteConfig", (), {"__module__": "transformers_modules.ckpt.config"})
+    return cls()
+
+
+def test_resolve_init_config_rederives_for_remote_config():
+    builtin_cfg = SimpleNamespace()
+    with patch.object(
+        example_utils.AutoConfig, "from_pretrained", return_value=builtin_cfg
+    ) as mock:
+        out = example_utils._resolve_init_config(
+            _remote_config(), object, "/ckpt", {"trust_remote_code": True}
+        )
+    assert out is builtin_cfg
+    mock.assert_called_once_with("/ckpt")  # trust_remote_code stripped
+
+
+def test_resolve_init_config_keeps_non_remote_config():
+    cfg = SimpleNamespace()  # module is "types", not remote
+    with patch.object(example_utils.AutoConfig, "from_pretrained") as mock:
+        assert example_utils._resolve_init_config(cfg, object, "/ckpt", {}) is cfg
+    mock.assert_not_called()
+
+
+def test_resolve_init_config_falls_back_when_rederive_raises():
+    cfg = _remote_config()
+    with patch.object(example_utils.AutoConfig, "from_pretrained", side_effect=ValueError()):
+        assert example_utils._resolve_init_config(cfg, object, "/ckpt", {}) is cfg
+
+
+@pytest.mark.parametrize(
+    (
+        "architecture",
+        "model_class_name",
+        "expected_config_dtype_kwarg",
+        "unexpected_config_dtype_kwarg",
+    ),
+    [
+        ("DeciLMForCausalLM", "AutoModelForCausalLM", "torch_dtype", "dtype"),
+        ("LlamaForCausalLM", "LlamaForCausalLM", "dtype", "torch_dtype"),
+    ],
+)
+def test_get_model_uses_expected_dtype_kwarg(
+    monkeypatch,
+    architecture,
+    model_class_name,
+    expected_config_dtype_kwarg,
+    unexpected_config_dtype_kwarg,
+):
+    calls = {}
+    hf_config = SimpleNamespace(
+        architectures=[architecture],
+        dtype=torch.float16,
+        model_type="llama",
+        torch_dtype=torch.bfloat16,
+    )
+
+    class FakeModel:
+        def eval(self):
+            calls["eval"] = True
+
+    class FakeAutoModelForCausalLM:
+        @staticmethod
+        def from_config(config, **kwargs):
+            calls["from_config"] = kwargs
+            assert config is hf_config
+            assert kwargs[expected_config_dtype_kwarg] is torch.float16
+            assert unexpected_config_dtype_kwarg not in kwargs
+            assert "max_memory" not in kwargs
+            return FakeModel()
+
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["from_pretrained"] = kwargs
+            assert "dtype" not in kwargs
+            assert kwargs["torch_dtype"] is torch.float16
+            return FakeModel()
+
+    class FakeLlamaForCausalLM(FakeAutoModelForCausalLM):
+        _from_config = FakeAutoModelForCausalLM.from_config
+
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["from_pretrained"] = kwargs
+            assert kwargs["dtype"] == "auto"
+            assert "torch_dtype" not in kwargs
+            return FakeModel()
+
+    monkeypatch.setattr(
+        example_utils.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: hf_config,
+    )
+    if model_class_name == "AutoModelForCausalLM":
+        monkeypatch.setattr(example_utils, "AutoModelForCausalLM", FakeAutoModelForCausalLM)
+        monkeypatch.delattr(example_utils.transformers, architecture, raising=False)
+    else:
+        monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
+
+    model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
+
+    assert isinstance(model, FakeModel)
+    assert calls["eval"]
+    if expected_config_dtype_kwarg == "torch_dtype":
+        assert calls["from_config"]["trust_remote_code"] is True
+    else:
+        assert "trust_remote_code" not in calls["from_config"]
+    assert calls["from_pretrained"]["trust_remote_code"] is True
