@@ -25,13 +25,15 @@ from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_gpt_oss,
     get_tiny_llama,
+    get_tiny_nemotron_h,
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
 from packaging.version import Version
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
+from modelopt.recipe.loader import load_recipe
+from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _TransposedExpertsCalibMixin,
     get_homogeneous_hf_decoder_layers,
@@ -152,6 +154,47 @@ def test_dbrx():
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1[0], out_2[0])
+
+
+@pytest.mark.skipif(
+    not hasattr(transformers, "NemotronHConfig"),
+    reason="NemotronH is not supported by this Transformers version",
+)
+@pytest.mark.parametrize(
+    "recipe_path",
+    [
+        "general/ptq/nvfp4_experts_only-kv_fp8",
+        "general/ptq/nvfp4_experts_only-kv_fp8_cast",
+        "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
+        "general/ptq/nvfp4_experts_only_mse-kv_fp8_cast",
+    ],
+)
+def test_nemotron_h_experts_only_recipes_target_routed_experts(recipe_path):
+    model = get_tiny_nemotron_h(
+        num_hidden_layers=1,
+        hybrid_override_pattern="E",
+        n_routed_experts=2,
+    )
+    mtq.replace_quant_module(model)
+
+    recipe = load_recipe(recipe_path)
+    mtq.set_quantizer_by_cfg(model, recipe.quantize.model_dump()["quant_cfg"])
+
+    routed_expert_quantizers = {
+        name: module
+        for name, module in model.named_modules()
+        if ".mixer.experts." in name and isinstance(module, TensorQuantizer)
+    }
+    shared_expert_quantizers = {
+        name: module
+        for name, module in model.named_modules()
+        if ".mixer.shared_experts." in name and isinstance(module, TensorQuantizer)
+    }
+
+    assert routed_expert_quantizers
+    assert all(module.is_enabled for module in routed_expert_quantizers.values())
+    assert shared_expert_quantizers
+    assert not any(module.is_enabled for module in shared_expert_quantizers.values())
 
 
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
