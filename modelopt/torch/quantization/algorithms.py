@@ -43,6 +43,9 @@ from . import model_calib
 from ._auto_quantize_cost import (
     ACTIVE_MOE_EXPERT_RATIO_KEY,
     AUTO_QUANTIZE_CONSTRAINT_KEYS,
+    AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT,
+    AUTO_QUANTIZE_SCORE_MODEL_RAW,
+    AUTO_QUANTIZE_SCORE_MODELS,
     COST_MODEL_ACTIVE_MOE,
     COST_MODEL_WEIGHT,
     _get_module_weight_numel,
@@ -436,6 +439,17 @@ class QuantRecipeHparam(Hparam):
 
 _LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
 _LINEAR_ATTN_BA_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_a|in_proj_b)$")
+_SELF_ATTN_GROUP_RE = re.compile(r"^((?:.*\.)?self_attn)\.(?:q_proj|k_proj|v_proj|o_proj)$")
+_LINEAR_ATTN_GROUP_RE = re.compile(
+    r"^((?:.*\.)?linear_attn)\.(?:in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj)$"
+)
+_FUSED_EXPERTS_GROUP_RE = re.compile(r"^((?:.*\.)?mlp)\.experts$")
+
+AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL = "local"
+AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP = "group"
+AUTO_QUANTIZE_SCORE_BOUNDARIES = frozenset(
+    {AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL, AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP}
+)
 
 
 def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
@@ -446,6 +460,27 @@ def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
 def _linear_attn_ba_group_key(_model, name: str) -> str | None:
     m = _LINEAR_ATTN_BA_RE.match(name)
     return f"{m.group(1)}/ba" if m else None
+
+
+def _self_attn_group_score_module(_model, name: str) -> str | None:
+    match = _SELF_ATTN_GROUP_RE.match(name)
+    return match.group(1) if match else None
+
+
+def _linear_attn_group_score_module(_model, name: str) -> str | None:
+    match = _LINEAR_ATTN_GROUP_RE.match(name)
+    return match.group(1) if match else None
+
+
+def _fused_experts_group_score_module(model, name: str) -> str | None:
+    match = _FUSED_EXPERTS_GROUP_RE.match(name)
+    if match is None:
+        return None
+    try:
+        module = model.get_submodule(name)
+    except AttributeError:
+        return None
+    return match.group(1) if _is_hf_quant_fused_experts_module(module) else None
 
 
 class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
@@ -465,6 +500,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
+        # Keep shared-expert projections in one deployable fused-MoE decision.
+        r"^((?:.*\.)?mlp\.shared_expert)\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
@@ -495,6 +532,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": COST_MODEL_WEIGHT,
             "cost": {},
             "active_moe_expert_ratio": None,
+            "score_boundary": AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL,
         }
 
     @property
@@ -505,6 +543,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": "weight",
             "cost": {},
             "active_moe_expert_ratio": None,
+            "score_model": AUTO_QUANTIZE_SCORE_MODEL_RAW,
+            "score_boundary": AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL,
             "cost_denominator": None,
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
@@ -522,7 +562,25 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert config["forward_step"] is not None, (
             "`forward_step` must be provided for `auto_quantize`."
         )
+        if config["score_boundary"] not in AUTO_QUANTIZE_SCORE_BOUNDARIES:
+            raise ValueError(
+                f"score_boundary must be one of {sorted(AUTO_QUANTIZE_SCORE_BOUNDARIES)}."
+            )
         return config
+
+    def _get_score_module_rules(self):
+        rules = []
+        if self.config["score_boundary"] == AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP:
+            rules.extend(
+                [
+                    _self_attn_group_score_module,
+                    _linear_attn_group_score_module,
+                    _fused_experts_group_score_module,
+                    r"^((?:.*\.)?mlp)\.shared_expert\.(gate_proj|up_proj|down_proj)$",
+                ]
+            )
+        rules.extend(self.score_module_rules)
+        return rules
 
     def load_search_checkpoint(self) -> bool:
         return super().load_search_checkpoint(strict=False)
@@ -651,7 +709,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
             # Apply score_module_rules to determine the score module name, then get the actual module
             score_module_name = name  # Default: score from same module
-            for rule in self.score_module_rules:
+            for rule in self._get_score_module_rules():
                 result = self._apply_score_group_rule(name, rule)
                 if result is not None:
                     score_module_name = result
@@ -714,22 +772,25 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
 
-            formats, scores, costs = [], [], []
+            formats, scores, costs, element_costs = [], [], [], []
             prev_score = float("inf")
             for recipe in hparam.choices:
                 formats.append(recipe)
 
                 score = hparam.get_score(recipe)  # type: ignore [arg-type]
                 cost = hparam.get_cost(recipe)  # type: ignore [arg-type]
+                element_cost = hparam.get_cost(recipe, cost_weight=1.0)  # type: ignore [arg-type]
 
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
                 scores.append(score)
                 costs.append(cost)
+                element_costs.append(element_cost)
                 prev_score = score
 
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["costs"] = costs
+            self.candidate_stats[name]["element_costs"] = element_costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
@@ -752,6 +813,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         super().before_search()
         self.constraints = normalize_auto_quantize_constraints(self.model, self.constraints)
+        if self.method_name not in {"gradient", "group_recon"} and (
+            self.constraints["score_model"] != AUTO_QUANTIZE_SCORE_MODEL_RAW
+            or self.config["score_boundary"] != AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL
+        ):
+            raise ValueError(
+                "score_model='per_element' and score_boundary='group' are supported only "
+                "with method='gradient' or method='group_recon'."
+            )
         self.config["cost_model"] = self.constraints["cost_model"]
         self.config["cost"] = self.constraints.get("cost", {})
         self.config["active_moe_expert_ratio"] = self.config["cost"].get(
@@ -766,6 +835,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
         restored_cost_model = getattr(self, "cost_model", "weight")
         restored_active_moe_expert_ratio = getattr(self, "active_moe_expert_ratio", None)
+        restored_score_boundary = getattr(
+            self, "score_boundary", AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL
+        )
         if self.candidate_stats and (
             restored_cost_model != self.config["cost_model"]
             or restored_active_moe_expert_ratio != self.config["active_moe_expert_ratio"]
@@ -776,10 +848,18 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 f"current=({self.config['cost_model']}, {self.config['active_moe_expert_ratio']}). "
                 "Use a different checkpoint path."
             )
+        if self.candidate_stats and restored_score_boundary != self.config["score_boundary"]:
+            raise ValueError(
+                "Checkpoint AutoQuantize score boundary does not match current search config: "
+                f"checkpoint={restored_score_boundary}, current={self.config['score_boundary']}. "
+                "Use a different checkpoint path."
+            )
         self.method = self.method_name
         self.cost_model = self.config["cost_model"]
         self.cost = self.config["cost"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
+        self.score_model = self.constraints["score_model"]
+        self.score_boundary = self.config["score_boundary"]
         self.disabled_layers = self.config["disabled_layers"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
 
@@ -900,7 +980,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert "effective_bits" in self.constraints and (
             set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
         ), (
-            "`constraints` must contain 'effective_bits' and may contain 'cost_model' and 'cost'. "
+            "`constraints` must contain 'effective_bits' and may contain 'cost_model', 'cost', "
+            "and 'score_model'. "
             f"Got {self.constraints.keys()}."
         )
 
@@ -950,7 +1031,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             effective_bits_from_search = (best_constraints / total_weight_size) * 16
 
         self.best["recipe"] = best_recipe
-        self.best["constraints"] = {"effective_bits": effective_bits_from_search}
+        self.best["constraints"] = {
+            "effective_bits": effective_bits_from_search,
+            "score_model": self.constraints["score_model"],
+        }
         self.best["score"] = best_scores
 
         QuantRecipe.fold_pqs_to_weights(self.model)
@@ -1233,6 +1317,32 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                 max_weight_size, lower_bound
             )
 
+            candidate_scores = [
+                self._candidate_scores_for_search(candidate_stat)
+                for candidate_stat in self.candidate_stats.values()
+            ]
+            requires_objective_rescaling = (
+                getattr(self, "constraints", {}).get("score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW)
+                == AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT
+                or self.method_name == "group_recon"
+            )
+            max_abs_score = (
+                max(
+                    (abs(float(score)) for scores in candidate_scores for score in scores),
+                    default=0.0,
+                )
+                if requires_objective_rescaling
+                else 0.0
+            )
+            if max_abs_score > 0.0:
+                # Per-element coefficients can fall below CBC's objective
+                # tolerance. Group reconstruction scores are normalized and
+                # can be similarly small. Global rescaling preserves the
+                # optimum without changing the default gradient objective.
+                candidate_scores = [
+                    [score / max_abs_score for score in scores] for scores in candidate_scores
+                ]
+
             lps = LPS(
                 name="AutoQuantize",
                 constraints=constraints,
@@ -1241,9 +1351,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                         candidate_stat["costs"] for candidate_stat in self.candidate_stats.values()
                     ]
                 },
-                candidate_scores=[
-                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
-                ],
+                candidate_scores=candidate_scores,
                 objective_type="minimize",
                 verbose=verbose,
             )
@@ -1268,6 +1376,160 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             }
 
         return best_recipes, is_satisfied
+
+    def _candidate_scores_for_search(self, candidate_stat: dict[str, Any]) -> list[float]:
+        """Return objective coefficients for the configured score model."""
+        score_model = getattr(self, "constraints", {}).get(
+            "score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW
+        )
+        if score_model == AUTO_QUANTIZE_SCORE_MODEL_RAW:
+            return candidate_stat["scores"]
+        if score_model == AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT:
+            element_costs = candidate_stat.get("element_costs")
+            if element_costs is None:
+                cost_weight = candidate_stat.get("cost_weight", 1.0)
+                element_costs = [
+                    cost / cost_weight if cost_weight > 0 else cost
+                    for cost in candidate_stat["costs"]
+                ]
+            return [
+                score / cost if cost > 0 else score
+                for score, cost in zip(candidate_stat["scores"], element_costs)
+            ]
+        raise ValueError(
+            f"Unsupported AutoQuantize score_model: {score_model}. "
+            f"Expected one of {sorted(AUTO_QUANTIZE_SCORE_MODELS)}."
+        )
+
+
+def _get_primary_output_tensor(output: Any) -> torch.Tensor:
+    """Return the tensor carrying a score module's hidden states."""
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, tuple | list) and output and isinstance(output[0], torch.Tensor):
+        return output[0]
+    raise TypeError(
+        "Group reconstruction scoring expects a Tensor or a tuple/list whose first item "
+        f"is a Tensor, got {type(output)!r}."
+    )
+
+
+def _get_group_reconstruction_score(reference_output: Any, quantized_output: Any) -> torch.Tensor:
+    """Return normalized MSE between reference and quantized score-group outputs."""
+    reference = _get_primary_output_tensor(reference_output)
+    quantized = _get_primary_output_tensor(quantized_output)
+    if reference.shape != quantized.shape:
+        raise ValueError(
+            "Reference and quantized score-group outputs must have the same shape, got "
+            f"{tuple(reference.shape)} and {tuple(quantized.shape)}."
+        )
+    reference = reference.float()
+    quantized = quantized.float()
+    return (quantized - reference).square().mean() / reference.square().mean().clamp_min(1e-12)
+
+
+def _get_model_config_objects(model: nn.Module) -> list[Any]:
+    """Return unique model configs that may carry generation cache defaults."""
+    configs = []
+    seen = set()
+    for module in model.modules():
+        for attr_name in ("config", "generation_config"):
+            config = getattr(module, attr_name, None)
+            if config is None or id(config) in seen:
+                continue
+            seen.add(id(config))
+            configs.append(config)
+            for nested_name in ("text_config", "language_config"):
+                nested = getattr(config, nested_name, None)
+                if nested is not None and id(nested) not in seen:
+                    seen.add(id(nested))
+                    configs.append(nested)
+    return configs
+
+
+def _set_model_use_cache(model: nn.Module, use_cache: bool) -> list[tuple[Any, Any]]:
+    """Set use_cache on model configs and return values to restore."""
+    originals = []
+    for config in _get_model_config_objects(model):
+        if hasattr(config, "use_cache"):
+            originals.append((config, config.use_cache))
+            config.use_cache = use_cache
+    return originals
+
+
+def _restore_model_use_cache(originals: list[tuple[Any, Any]]) -> None:
+    for config, use_cache in originals:
+        config.use_cache = use_cache
+
+
+class AutoQuantizeGroupReconSearcher(AutoQuantizeGradientSearcher):
+    """AutoQuantize searcher using normalized score-group reconstruction error."""
+
+    method_name = "group_recon"
+
+    def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
+        """Ignore backward-only inputs and require the group score boundary."""
+        config = dict(config or {})
+        for ignored_key in ("score_func", "loss_func", "forward_backward_step"):
+            if config.get(ignored_key) is not None:
+                warnings.warn(f"`{ignored_key}` is ignored for group_recon auto_quantize.")
+            config.pop(ignored_key, None)
+        config = _AutoQuantizeBaseSearcher.sanitize_search_config(self, config)
+        if config["score_boundary"] != AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP:
+            raise ValueError("method='group_recon' requires score_boundary='group'.")
+        return config
+
+    @torch.inference_mode()
+    def estimate_sensitivity_scores(self) -> None:
+        """Measure each recipe's normalized reconstruction error at score modules."""
+
+        def score_forward(module, *args, **kwargs):
+            hparams = [h for h in module._hparams_for_scoring if h.is_configurable]
+            no_quant = QuantRecipe(quant_cfg=None)
+            for hparam in hparams:
+                hparam.active = no_quant
+            reference_output = module._forward_original(*args, **kwargs)
+
+            for hparam in hparams:
+                try:
+                    for recipe in hparam.choices:
+                        if recipe == no_quant:
+                            continue
+                        hparam.active = recipe
+                        quantized_output = module._forward_original(*args, **kwargs)
+                        score = _get_group_reconstruction_score(reference_output, quantized_output)
+                        importance = hparam._importance_dict[recipe][module]
+                        hparam._importance_dict[recipe][module] = (
+                            score if importance is None else importance + score
+                        )
+                finally:
+                    hparam.active = no_quant
+            return reference_output
+
+        score_modules = set()
+        for module in self.model.modules():
+            if hasattr(module, "_hparams_for_scoring") and any(
+                hparam.is_configurable for hparam in module._hparams_for_scoring
+            ):
+                module._forward_original = module.forward
+                module.forward = types.MethodType(score_forward, module)
+                score_modules.add(module)
+
+        self.model.eval()
+        cache_originals = _set_model_use_cache(self.model, False)
+        try:
+            self._run_func(
+                self.config["forward_step"],
+                num_iters=self.config["num_score_steps"],
+                desc="Estimating group reconstruction scores",
+            )
+        finally:
+            _restore_model_use_cache(cache_originals)
+            for module in score_modules:
+                module.forward = module._forward_original
+                del module._forward_original
+
+        gc.collect()
 
 
 @torch.compile(dynamic=True)
@@ -1600,11 +1862,14 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 
     if method == "gradient":
         searcher = AutoQuantizeGradientSearcher()
+    elif method == "group_recon":
+        searcher = AutoQuantizeGroupReconSearcher()
     elif method == "kl_div":
         searcher = AutoQuantizeKLDivSearcher()
     else:
         raise ValueError(
-            f"Unknown autoquant search method: {method!r}. Expected 'gradient' or 'kl_div'."
+            f"Unknown autoquant search method: {method!r}. "
+            "Expected 'gradient', 'group_recon', or 'kl_div'."
         )
 
     searcher.candidate_stats = candidate_stats
@@ -1622,6 +1887,17 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
         "cost_model": searcher.cost_model,
         "cost": searcher.cost,
         "active_moe_expert_ratio": searcher.active_moe_expert_ratio,
+    }
+    score_model = constraints.get(
+        "score_model", search_state.get("score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW)
+    )
+    if score_model not in AUTO_QUANTIZE_SCORE_MODELS:
+        raise ValueError(
+            f"constraints['score_model'] must be one of {sorted(AUTO_QUANTIZE_SCORE_MODELS)}."
+        )
+    searcher.constraints = {
+        "effective_bits": effective_bits,
+        "score_model": score_model,
     }
     best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
 
