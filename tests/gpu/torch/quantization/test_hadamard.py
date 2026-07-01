@@ -48,6 +48,9 @@ def test_hadamard_transform(dim):
     xxt_h = x_h @ x_h.T
     # The numerical error can be large, especially for 16-bit floats.
     assert torch.allclose(xxt_h, xxt, atol=0.05)
+    x_roundtrip = normalized_hadamard_transform(x_h)
+    assert torch.allclose(x_roundtrip, x, rtol=1e-5, atol=1e-6)
+
     x_h_fp32 = normalized_hadamard_transform(x, rotate_fp32=True)
     xxt_h_fp32 = x_h_fp32 @ x_h_fp32.T
     assert torch.allclose(xxt_h_fp32, xxt, atol=0.05)
@@ -66,6 +69,8 @@ def test_hadamard_transform_block(dim, block_size):
     # Use rtol instead of atol: float32 accumulated error scales with value magnitude,
     # which grows with dim. 1e-3 relative tolerance is appropriate for float32 block RHT.
     assert torch.allclose(xxt_h, xxt, rtol=1e-3, atol=1e-6)
+    x_roundtrip = normalized_hadamard_transform(x_h, block_size=block_size)
+    assert torch.allclose(x_roundtrip, x, rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.parametrize(
