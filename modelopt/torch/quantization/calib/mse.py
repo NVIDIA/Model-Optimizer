@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from .. import utils as quant_utils
 from .calibrator import _Calibrator
 
-__all__ = ["MseCalibrator", "NVFP4MSECalibrator"]
+__all__ = ["MseCalibrator", "NVFP4DSSCalibrator", "NVFP4MSECalibrator"]
 
 
 class MseCalibrator(_Calibrator):
@@ -38,7 +38,7 @@ class MseCalibrator(_Calibrator):
         step_size: float = 0.1,
         start_multiplier: float = 0.25,
         stop_multiplier: float = 4.0,
-        quant_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+        quant_func: Callable[..., torch.Tensor] | None = None,
         error_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     ):
         """Initialize MSE calibrator.
@@ -80,6 +80,15 @@ class MseCalibrator(_Calibrator):
             candidates = candidates.view_as(self._initial_amax)
         return self._initial_amax * candidates
 
+    def _reduced_loss(self, x: torch.Tensor, xq: torch.Tensor, reduce_axis) -> torch.Tensor:
+        """Error between ``x`` and ``xq`` reduced over the quantization axes (metric-aware)."""
+        error = (
+            self._error_func(x, xq)
+            if self._error_func is not None
+            else F.mse_loss(x, xq, reduction="none")
+        )
+        return quant_utils.reduce_sum(error, axis=reduce_axis, keepdims=False)
+
     @torch.no_grad()
     def collect(self, x: torch.Tensor):
         """Collect input tensor statistics and compute losses for MSE calibration.
@@ -105,13 +114,7 @@ class MseCalibrator(_Calibrator):
         for step, candidate in enumerate(candidates):
             candidate_amax = self._compute_candidate_amax(candidate)
             xq = self._quant_func(x, candidate_amax)
-
-            if self._error_func is not None:
-                error = self._error_func(x, xq)
-            else:
-                error = F.mse_loss(x, xq, reduction="none")
-
-            loss = quant_utils.reduce_sum(error, axis=reduce_axis, keepdims=False)
+            loss = self._reduced_loss(x, xq, reduce_axis)
 
             if self._losses_sum[step] is None:
                 self._losses_sum[step] = loss.clone()
@@ -282,3 +285,122 @@ class NVFP4MSECalibrator(MseCalibrator):
         self._losses_sum = None
         self._candidates = None
         self._amax = None
+
+
+def default_dss_betas(step: float = 0.05) -> torch.Tensor:
+    """Quant-scale multipliers ``s_q = beta * s_d`` centered on ``1.0`` and spanning ``[0.5, 1.5]``.
+
+    Built symmetrically around 1.0 so the coupled reference (``beta == 1``) is always searched;
+    ``step`` trades search density for calibration cost. The span is exactly ``[0.5, 1.5]`` when
+    ``0.5 / step`` is an integer (e.g. the recommended ``0.05`` or ``0.01``); otherwise it is the
+    nearest symmetric grid. ``step`` is bounded to a sane range so a stray value can't build a
+    multi-million-entry grid (which would make calibration hang).
+    """
+    if step is None or not (0.005 <= step <= 0.5):
+        raise ValueError(f"dss_beta_step must be in [0.005, 0.5]; got {step!r}")
+    n = round(0.5 / step)
+    return 1.0 + torch.arange(-n, n + 1, dtype=torch.float32) * step
+
+
+class NVFP4DSSCalibrator(NVFP4MSECalibrator):
+    """Decoupled Scale Search (DSS) calibrator for NVFP4 static weights (SOAR, arXiv:2605.12245).
+
+    Extends the coupled per-block sweep with a decoupled ``(s_d, s_q)`` search under a custom
+    (typically local-Hessian) ``error_func``: the FP4 codes are chosen with a high-precision
+    quantization scale ``s_q = beta * s_d`` while reconstruction uses the FP8-representable stored
+    scale ``s_d``. Following SOAR, the dequant scale is searched over the coupled optimum's nearest
+    FP8 neighbors while ``s_q`` sweeps a multiplicative ``beta`` grid.
+
+    Because ``beta == 1`` at the coupled optimum is always in the search, the result never does
+    worse than the coupled sweep. Populates ``compute_amax`` (``s_d`` amax -> ``_amax``) and
+    ``compute_quant_amax`` (``s_q`` amax -> the quantizer's ``_quant_amax``).
+    """
+
+    _SD_NEIGHBOR_OFFSETS = (-1, 0, 1)
+
+    def __init__(
+        self,
+        amax: torch.Tensor,
+        global_amax: torch.Tensor,
+        axis: int | tuple | list | None = None,
+        quant_func: Callable | None = None,
+        error_func: Callable | None = None,
+        betas: torch.Tensor | None = None,
+    ):
+        """Initialize the DSS calibrator; ``betas`` defaults to :func:`default_dss_betas`."""
+        super().__init__(
+            amax=amax,
+            global_amax=global_amax,
+            axis=axis,
+            quant_func=quant_func,
+            error_func=error_func,
+        )
+        self._betas = default_dss_betas() if betas is None else betas.to(dtype=torch.float32)
+        self._best_quant_amax: torch.Tensor | None = None
+
+    def _block_loss(self, x: torch.Tensor, xq: torch.Tensor, reduce_axis) -> torch.Tensor:
+        """Per-block error flattened to ``[num_blocks]`` under the configured metric."""
+        return self._reduced_loss(x, xq, reduce_axis).reshape(-1)
+
+    @torch.no_grad()
+    def collect(self, x: torch.Tensor):
+        """Run the decoupled 2-D search and cache the per-block ``s_d`` and ``s_q`` amaxes."""
+        if self._best_amax is not None:
+            raise RuntimeError(
+                "NVFP4DSSCalibrator: a previous collect() produced final scales; call reset()."
+            )
+        if self._quant_func is None:
+            raise RuntimeError("Quantization function not set.")
+
+        x = x.detach().to(dtype=torch.float32)
+        candidates = self._generate_candidates(x.device)  # FP8 E4M3 values / 448
+        ncand = len(candidates)
+        betas = self._betas.to(x.device)
+        reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(x, self._axis)
+        shape = self._initial_amax.shape
+
+        # Step 1 — coupled sweep to locate each block's best FP8 dequant candidate.
+        coupled = torch.stack(
+            [
+                self._block_loss(
+                    x, self._quant_func(x, self._compute_candidate_amax(c)), reduce_axis
+                )
+                for c in candidates
+            ]
+        )  # [ncand, num_blocks]
+        coupled_idx = torch.argmin(coupled, dim=0)  # [num_blocks]
+
+        # Step 2 — decoupled search over the coupled optimum's FP8 neighbors x the beta grid.
+        # Seeded from the coupled optimum (beta == 1), so DSS never does worse than coupling.
+        best_loss = coupled.gather(0, coupled_idx.unsqueeze(0)).squeeze(0)
+        best_amax = self._global_amax * candidates[coupled_idx]  # [num_blocks]
+        best_quant_amax = best_amax
+        for offset in self._SD_NEIGHBOR_OFFSETS:
+            idx = (coupled_idx + offset).clamp(0, ncand - 1)
+            amax_d = self._global_amax * candidates[idx]  # per-block s_d amax [num_blocks]
+            amax_d_arg = amax_d.reshape(shape)  # shape the quant func / quantizer expects
+            for beta in betas:
+                quant_amax = beta * amax_d
+                xq = self._quant_func(x, amax_d_arg, quant_amax=quant_amax.reshape(shape))
+                loss = self._block_loss(x, xq, reduce_axis)
+                better = loss < best_loss
+                best_loss = torch.where(better, loss, best_loss)
+                best_amax = torch.where(better, amax_d, best_amax)
+                best_quant_amax = torch.where(better, quant_amax, best_quant_amax)
+
+        self._best_amax = best_amax.reshape(shape).to(dtype=torch.float32)
+        self._best_quant_amax = best_quant_amax.reshape(shape).to(dtype=torch.float32)
+        # Sync before the next weight so this weight's ~189 async sweeps and the [ncand, num_blocks]
+        # transients drain instead of piling up across weights (mirrors the reference sweep path).
+        if x.is_cuda:
+            torch.cuda.synchronize(x.device)
+
+    @torch.no_grad()
+    def compute_quant_amax(self):
+        """Return the cached per-block quantization amax (``s_q`` scale * 6)."""
+        return self._best_quant_amax
+
+    def reset(self):
+        """Reset per-cycle state (keeps ``_initial_amax`` and ``_betas`` for reuse)."""
+        super().reset()
+        self._best_quant_amax = None

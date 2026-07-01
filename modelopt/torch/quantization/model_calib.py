@@ -39,7 +39,8 @@ from modelopt.torch.utils.distributed import is_initialized as dist_is_initializ
 from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib import MseCalibrator, NVFP4DSSCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib.mse import default_dss_betas
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -406,10 +407,20 @@ def max_calibrate(
                     )
 
 
-def _mse_quant_func(x, amax, quantizer):
-    """Quantization function for MSE calibration."""
+def _mse_quant_func(x, amax, quantizer, quant_amax=None):
+    """Quantization function for MSE calibration.
+
+    ``quant_amax`` (Decoupled Scale Search) temporarily sets the quantizer's per-block
+    quantization amax so codes are chosen with ``quant_amax / 6`` while reconstruction uses the
+    ``amax``-derived (FP8) scale. ``quant_amax=None`` forces coupled behavior for this call,
+    neutralizing any ``_quant_amax`` left over from an earlier DSS pass so the coupled sweep is
+    never silently decoupled.
+    """
     original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
     quantizer._amax = amax
+    had_quant_amax = hasattr(quantizer, "_quant_amax")
+    original_quant_amax = quantizer._quant_amax if had_quant_amax else None
+    quantizer._quant_amax = quant_amax  # None -> coupled forward regardless of prior state
 
     try:
         with (
@@ -428,6 +439,10 @@ def _mse_quant_func(x, amax, quantizer):
             quantizer._amax = original_amax
         else:
             delattr(quantizer, "_amax")
+        if had_quant_amax:
+            quantizer._quant_amax = original_quant_amax
+        else:
+            delattr(quantizer, "_quant_amax")
 
     return xq
 
@@ -439,11 +454,15 @@ def _make_weight_mse_calibrator(
     stop_multiplier: float,
     fp8_scale_sweep: bool,
     error_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+    decoupled_scale_search: bool = False,
+    dss_betas: torch.Tensor | None = None,
 ) -> _Calibrator | None:
     """Create the MSE calibrator for one eligible weight quantizer (``None`` if ineligible).
 
     ``error_func`` overrides the squared-error metric (local-Hessian's per-block weighting);
-    when set, NVFP4's Triton fast path is bypassed for the reference sweep.
+    when set, NVFP4's Triton fast path is bypassed for the reference sweep. When
+    ``decoupled_scale_search`` is set (and an ``error_func`` is present), NVFP4 static weights use
+    :class:`NVFP4DSSCalibrator` to search decoupled quant/dequant scales.
     """
     if (
         not isinstance(weight_quantizer, TensorQuantizer)
@@ -473,6 +492,17 @@ def _make_weight_mse_calibrator(
                 return None
             return backend_factory(initial_amax, axis, quant_func)
         if _uses_modelopt_fp8_weight_scales(weight_quantizer):
+            # DSS only changes the result under a non-separable metric; for plain squared error
+            # it is a provable no-op, so fall back to the coupled calibrator when error_func is None.
+            if decoupled_scale_search and error_func is not None:
+                return NVFP4DSSCalibrator(
+                    amax=initial_amax,
+                    axis=axis,
+                    global_amax=weight_quantizer.global_amax,
+                    quant_func=quant_func,
+                    error_func=error_func,
+                    betas=dss_betas,
+                )
             return NVFP4MSECalibrator(
                 amax=initial_amax,
                 axis=axis,
@@ -550,11 +580,14 @@ def _mse_calibrate_weights(
     stop_multiplier: float,
     fp8_scale_sweep: bool,
     error_func_for: Callable[[TensorQuantizer], Callable | None] | None = None,
+    decoupled_scale_search: bool = False,
+    dss_betas: torch.Tensor | None = None,
 ):
     """Run MSE weight calibration over all eligible quantizers (shared by mse / local-Hessian).
 
     ``error_func_for`` maps a weight quantizer to an optional per-weight error function
-    (local-Hessian's Hessian metric); ``None`` means plain squared error.
+    (local-Hessian's Hessian metric); ``None`` means plain squared error. ``decoupled_scale_search``
+    enables the DSS calibrator (NVFP4 static weights with an error function).
     """
     seen_modules: set[int] = set()
     pbar = tqdm(desc="MSE weight calibration")
@@ -572,6 +605,8 @@ def _mse_calibrate_weights(
                     stop_multiplier,
                     fp8_scale_sweep,
                     error_func=error_func,
+                    decoupled_scale_search=decoupled_scale_search,
+                    dss_betas=dss_betas,
                 )
                 if cal is None:
                     continue
@@ -579,6 +614,13 @@ def _mse_calibrate_weights(
                 _run_and_load_max_stats(
                     weight_quantizer, partial(_collect_weight_stats, weight=weight)
                 )
+                # DSS: persist the decoupled quantization scale (read before reset() clears it);
+                # otherwise clear any scale left over from a previous DSS calibration of this weight.
+                quant_amax = cal.compute_quant_amax()
+                if quant_amax is not None:
+                    weight_quantizer.quant_amax = quant_amax
+                elif getattr(weight_quantizer, "quant_amax", None) is not None:
+                    weight_quantizer.quant_amax = None
                 if hasattr(cal, "reset"):
                     cal.reset()
 
@@ -755,6 +797,8 @@ def local_hessian_calibrate(
     fp8_scale_sweep: bool = True,
     block_size: int = 16,
     debug: bool = False,
+    decoupled_scale_search: bool = False,
+    dss_beta_step: float = 0.05,
 ):
     """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
@@ -780,6 +824,10 @@ def local_hessian_calibrate(
         block_size: Block size for local Hessian computation (default: 16).
         debug: If True, retain the per-quantizer Hessian accumulators on the model
             (``model._local_hessian_accumulators``) for inspection.
+        decoupled_scale_search: If True, use Decoupled Scale Search (DSS) for NVFP4 static
+            weights — search a high-precision quantization scale separately from the stored FP8
+            dequantization scale (default: False).
+        dss_beta_step: Step of the DSS quant-scale grid over [0.5, 1.5] (default: 0.05).
 
     See :class:`LocalHessianCalibConfig <modelopt.torch.quantization.config.LocalHessianCalibConfig>`
     for details on the configuration options.
@@ -834,6 +882,7 @@ def local_hessian_calibrate(
         qid: acc.build_error_func(keep_buffer=debug) for qid, acc in accumulators.items()
     }
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
+    dss_betas = default_dss_betas(dss_beta_step or 0.05) if decoupled_scale_search else None
     _mse_calibrate_weights(
         model,
         name_to_module,
@@ -842,6 +891,8 @@ def local_hessian_calibrate(
         stop_multiplier=stop_multiplier,
         fp8_scale_sweep=fp8_scale_sweep,
         error_func_for=lambda q: error_funcs.get(id(q)),
+        decoupled_scale_search=decoupled_scale_search,
+        dss_betas=dss_betas,
     )
 
     # Free the per-block Hessians (pinned by error_func closures) and the sweep's cached

@@ -833,8 +833,14 @@ def to_quantized_weight(
     quantization: str,
     weights_scaling_factor2: torch.Tensor | None = None,
     block_size: int | None = None,
+    quant_scaling_factor: torch.Tensor | None = None,
 ):
-    """Converts the weight to the quantized (packed) format."""
+    """Converts the weight to the quantized (packed) format.
+
+    ``quant_scaling_factor`` (NVFP4 only) is the optional absolute per-block quantization scale for
+    Decoupled Scale Search — codes are chosen with it while ``weights_scaling_factor`` stays the
+    stored FP8 scale. ``None`` keeps the standard coupled behavior.
+    """
     if weights_scaling_factor is not None:
         weights_scaling_factor = weights_scaling_factor.to(weight.device)
 
@@ -924,6 +930,7 @@ def to_quantized_weight(
             weights_scaling_factor2.view(-1, 1, 1)
             if weights_scaling_factor2.dim() != 0
             else weights_scaling_factor2,
+            quant_scaling_factor=quant_scaling_factor,
         )[0]._quantized_data
 
     if quantization in [QUANTIZATION_W4A8_MXFP4_FP8, QUANTIZATION_MXFP4]:

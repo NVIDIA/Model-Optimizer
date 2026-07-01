@@ -24,7 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .nvfp4_quant import nvfp4_scalar_quant
+from .nvfp4_quant import nvfp4_scalar_quant, nvfp4_scalar_quant_decoupled
 
 __all__ = ["compute_fp4_scales", "fp4_dequantize", "static_blockwise_fp4_fake_quant"]
 
@@ -207,6 +207,32 @@ def static_blockwise_fp4_fake_quant_kernel(
     tl.store(y_ptr + idx, x_quant.to(OUT_DTYPE))
 
 
+@triton.jit
+def static_blockwise_fp4_fake_quant_decoupled_kernel(
+    x_ptr,  # [NUM_FP4_BLOCKS * BLOCK_SIZE]
+    y_ptr,  # [NUM_FP4_BLOCKS * BLOCK_SIZE]
+    quant_scale_ptr,  # [NUM_FP4_BLOCKS] high-precision scale for choosing codes (s_q)
+    dequant_scale_ptr,  # [NUM_FP4_BLOCKS] FP8 stored scale for reconstruction (s_d)
+    NUM_FP4_BLOCKS,
+    BLOCK_SIZE: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    if pid >= NUM_FP4_BLOCKS:
+        return
+
+    block_offset = pid * BLOCK_SIZE
+    idx = block_offset + tl.arange(0, BLOCK_SIZE)
+
+    quant_scale = tl.load(quant_scale_ptr + pid).to(tl.float32)
+    dequant_scale = tl.load(dequant_scale_ptr + pid).to(tl.float32)
+    x = tl.load(x_ptr + idx).to(tl.float32)
+
+    x_quant = nvfp4_scalar_quant_decoupled(x, quant_scale, dequant_scale, BLOCK_SIZE)
+
+    tl.store(y_ptr + idx, x_quant.to(OUT_DTYPE))
+
+
 def compute_fp4_scales(
     amax: torch.Tensor,
     global_amax: torch.Tensor | None = None,
@@ -247,6 +273,7 @@ def static_blockwise_fp4_fake_quant(
     global_amax: torch.Tensor | None = None,
     quantize_block_scales: bool = True,
     out_dtype: torch.dtype | None = None,
+    quant_amax: torch.Tensor | None = None,
 ):
     """Static blockwise FP4 fake quantization using Triton kernel.
 
@@ -262,6 +289,10 @@ def static_blockwise_fp4_fake_quant(
         global_amax: FP32 scalar global amax. If provided, used to compute scale_fp8_quant_amax.
         quantize_block_scales: If True, quantize block scales to FP8.
         out_dtype: Output dtype. Defaults to x.dtype if None.
+        quant_amax: Optional per-block *quantization* amax for Decoupled Scale Search (DSS).
+            When given, codes are chosen with the high-precision scale ``quant_amax / 6`` while
+            reconstruction uses the (FP8) dequant scale derived from ``amax``. ``None`` (default)
+            keeps the coupled behavior (``s_q == s_d``). Same shape/count as ``amax``.
     """
     original_shape = x.shape
     NUM_FP4_BLOCKS = amax.numel()
@@ -285,10 +316,30 @@ def static_blockwise_fp4_fake_quant(
 
     grid = (NUM_FP4_BLOCKS,)
 
+    if quant_amax is None:
+        with torch.cuda.device(x.device):
+            static_blockwise_fp4_fake_quant_kernel[grid](
+                x_flat,
+                y_flat,
+                scale_flat,
+                NUM_FP4_BLOCKS,
+                BLOCK_SIZE,
+                OUT_DTYPE=tl_out_dtype,
+            )
+        return y_flat.view(original_shape)
+
+    # DSS: choose codes with the high-precision quant scale (quant_amax / 6), reconstruct
+    # with the FP8 dequant scale computed above.
+    if quant_amax.numel() != NUM_FP4_BLOCKS:
+        raise ValueError(
+            f"quant_amax.numel() ({quant_amax.numel()}) must equal amax.numel() ({NUM_FP4_BLOCKS})."
+        )
+    quant_scale_flat = (quant_amax.float() / 6.0).contiguous().view(NUM_FP4_BLOCKS)
     with torch.cuda.device(x.device):
-        static_blockwise_fp4_fake_quant_kernel[grid](
+        static_blockwise_fp4_fake_quant_decoupled_kernel[grid](
             x_flat,
             y_flat,
+            quant_scale_flat,
             scale_flat,
             NUM_FP4_BLOCKS,
             BLOCK_SIZE,

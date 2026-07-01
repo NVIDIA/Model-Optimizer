@@ -832,6 +832,24 @@ class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
         description="If True, module's local Hessian metadata will be kept as a module attribute.",
     )
 
+    decoupled_scale_search: bool | None = ModeloptField(
+        default=False,
+        title="Enable Decoupled Scale Search (DSS) for NVFP4 static weights.",
+        description="If True, decouple the FP4 quantization scale (high precision) from the stored "
+        "FP8 dequantization scale (SOAR, arXiv:2605.12245), searching per block for the pair that "
+        "minimizes the local-Hessian error. Only affects ModelOpt static NVFP4 weights with a "
+        "Hessian error function; other quantizers use the coupled sweep.",
+    )
+
+    dss_beta_step: float | None = ModeloptField(
+        default=0.05,
+        gt=0.0,
+        title="Quantization-scale grid step for Decoupled Scale Search.",
+        description="Step of the multiplicative quant-scale grid s_q = beta * s_d over [0.5, 1.5] "
+        "(smaller = denser search, higher calibration cost). Only used when "
+        "decoupled_scale_search is True.",
+    )
+
 
 class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
     """The config for ``smoothquant`` algorithm (SmoothQuant).

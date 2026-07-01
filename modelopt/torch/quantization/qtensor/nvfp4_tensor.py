@@ -105,6 +105,25 @@ class NVFP4QTensor(BaseQuantizedTensor):
             return weight_quantizer._amax.float() / (6.0 * 448.0)
 
     @classmethod
+    def get_weights_quant_scaling_factor_from_quantizer(
+        cls, weight_quantizer, weight: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Return the per-block *quantization* scale ``s_q = quant_amax / 6`` for DSS export.
+
+        Decoupled Scale Search (DSS) picks FP4 codes with this high-precision scale while storing
+        the FP8 dequant scale. Returns ``None`` when the quantizer has no ``quant_amax`` (coupled),
+        so callers fall back to the standard single-scale path.
+        """
+        quant_amax = getattr(weight_quantizer, "quant_amax", None)
+        if quant_amax is None:
+            return None
+        block_size = weight_quantizer.block_sizes[-1]
+        per_block_quant_scale = quant_amax.float() / 6.0
+        per_block_quant_scale[per_block_quant_scale == 0] = 1.0
+        num_blocks_per_row = weight.shape[-1] // block_size
+        return per_block_quant_scale.view((*weight.shape[:-1], num_blocks_per_row))
+
+    @classmethod
     def get_weights_scaling_factor_from_quantizer(
         cls,
         weight_quantizer,
@@ -249,6 +268,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
         weights_scaling_factor_2: torch.Tensor | None = None,
         keep_high_precision: bool = False,
         try_tensorrt: bool = False,
+        quant_scaling_factor: torch.Tensor | None = None,
     ):
         """Converting a tensor to a quantized format based on NVFP4 quantization.
 
@@ -258,6 +278,10 @@ class NVFP4QTensor(BaseQuantizedTensor):
             weights_scaling_factor (torch.Tensor): The scaling factor for the weights.
             weights_scaling_factor_2 (torch.Tensor): The scaling factor for the weights.
             keep_high_precision (bool): Whether to keep output scales at high precision.
+            quant_scaling_factor (torch.Tensor): Optional absolute per-block *quantization* scale
+                (``quant_amax / 6``) for Decoupled Scale Search. When given, FP4 codes are chosen
+                by dividing by this high-precision scale, while the stored/returned scale remains
+                ``weights_scaling_factor`` (the FP8 dequant scale). ``None`` keeps coupling.
 
         Returns:
         tuple: Contains quantized data, quantized per block scaling factor, and per tensor scaling factor.
@@ -312,10 +336,14 @@ class NVFP4QTensor(BaseQuantizedTensor):
         original_shape = input.shape
         input = input.view((*tuple(input.shape[:-1]), -1, block_size))
 
-        # Scale weights
-        scaled_weight = input / (
-            (weights_scaling_factor.to(torch.float32) * weights_scaling_factor_2).unsqueeze(-1)
-        )
+        # Scale weights. DSS: choose codes with the high-precision quant scale (absolute), but keep
+        # weights_scaling_factor (the FP8 dequant scale) as the stored/returned scale.
+        round_divisor = (
+            quant_scaling_factor.to(torch.float32)
+            if quant_scaling_factor is not None
+            else weights_scaling_factor.to(torch.float32) * weights_scaling_factor_2
+        ).unsqueeze(-1)
+        scaled_weight = input / round_divisor
 
         # Reshape weights to original
         scaled_weight = scaled_weight.view(original_shape)

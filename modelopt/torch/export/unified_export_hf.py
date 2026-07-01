@@ -646,12 +646,18 @@ def _export_quantized_weight(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
 
+        # Decoupled Scale Search: choose FP4 codes with the high-precision quant scale (if the
+        # quantizer carries ``_quant_amax``); the stored ``weight_scale`` remains the FP8 scale.
+        quant_scaling_factor = None
         if NVFP4QTensor._is_static_quantizer(weight_quantizer):
             weight_scale = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
                 weight_quantizer,
                 weight,
                 weight_scale_2,
             )[0]
+            quant_scaling_factor = NVFP4QTensor.get_weights_quant_scaling_factor_from_quantizer(
+                weight_quantizer, weight
+            )
         else:
             weight_scale = NVFP4QTensor.get_weights_scaling_factor(
                 weight,
@@ -665,6 +671,7 @@ def _export_quantized_weight(
             quantization_format,
             weight_scale_2,
             block_size,
+            quant_scaling_factor=quant_scaling_factor,
         )
 
         quantized_weight, weight_scale = maybe_transpose_expert_weight_dimensions(

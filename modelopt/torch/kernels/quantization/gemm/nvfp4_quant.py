@@ -96,6 +96,30 @@ def nvfp4_scalar_quant(
 
 
 @triton.jit
+def nvfp4_scalar_quant_decoupled(
+    x,  # [N] float32, already loaded
+    quant_scale,  # float32 scalar: high-precision scale used to pick FP4 codes (s_q)
+    dequant_scale,  # float32 scalar: stored FP8 block scale used to reconstruct (s_d)
+    N: tl.constexpr,
+):
+    """NVFP4 scalar fake quantization with decoupled quant/dequant scales (DSS).
+
+    Codes are chosen by rounding ``|x| / quant_scale`` to the nearest FP4 magnitude, but the
+    reconstruction multiplies by ``dequant_scale`` (the FP8-representable stored scale). With
+    ``quant_scale == dequant_scale`` this is identical to :func:`nvfp4_scalar_quant`.
+    """
+    x_abs = tl.abs(x)
+    quant_scale_safe = tl.where(
+        (quant_scale == 0.0) | libdevice.isnan(quant_scale) | (tl.abs(quant_scale) == float("inf")),
+        1.0,
+        quant_scale,
+    )
+    q_val = fp4_round_magnitude(x_abs / quant_scale_safe)
+    x_rescaled = q_val * dequant_scale
+    return tl.where(x >= 0, x_rescaled, -x_rescaled)
+
+
+@triton.jit
 def fp8_quantize_scale(block_amax, global_scale):
     """FP8 E4M3 fake-quantize the per-block NVFP4 scale.
 
