@@ -15,6 +15,7 @@
 
 """Support quantization for Transformer Engine layers."""
 
+import copy
 import inspect
 import warnings
 
@@ -27,7 +28,7 @@ from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
-from ..nn import QuantModuleRegistry
+from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer
 from .custom import _ParallelLinear
 
 _TE_VERSION = Version(te.__version__)
@@ -137,8 +138,12 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # Remove self.weight after setup.
         delattr(self, "weight")
 
-        # TODO: GroupedLinear supports weights split by `num_gemms`, to support quantization
-        # with static parameters beyond per-tensor, we need to support a unique quantizer for each gemm.
+        # Each fused expert gets its own weight quantizer (independent amax). Storing them in a
+        # GroupedQuantizer (an nn.ModuleList) surfaces them as ``weight_quantizer.{i}``, which the
+        # fused-experts name normalizer maps to ``*weight_quantizer`` so the stock configs apply.
+        self.weight_quantizer = GroupedQuantizer(
+            *(copy.deepcopy(self.weight_quantizer) for _ in range(self.num_gemms))
+        )
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
@@ -150,12 +155,29 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # Remove self.weight after post_restore.
         delattr(self, "weight")
 
+        # Base post_restore only re-calibrates the first member; the other per-expert
+        # quantizers also need re-calibration so a TP/EP change between save and restore
+        # produces correctly shaped per-channel _amax. Mirror base behavior: only
+        # re-calibrate quantizers whose loaded state had _amax (skip unused ones).
+        from modelopt.torch.quantization.model_calib import max_calibrate
+
+        for i in range(self.num_gemms):
+            weight_i = getattr(self, f"weight{i}", None)
+            if weight_i is None:
+                continue
+            wq_i = self.weight_quantizer[i]
+            q = wq_i[0] if isinstance(wq_i, SequentialQuantizer) else wq_i
+            if not hasattr(q, "_amax"):
+                continue
+            wq_i.reset_amax()
+            max_calibrate(wq_i, lambda wq, w=weight_i: wq(w), distributed_sync=False)
+
     def iter_weights_for_calibration(self):
         """Yield ``(weight_i, weight_quantizer)`` for each of the ``num_gemms`` grouped weights."""
         for i in range(self.num_gemms):
             weight_i = getattr(self, f"weight{i}", None)
             if weight_i is not None:
-                yield weight_i, self.weight_quantizer
+                yield weight_i, self.weight_quantizer[i]
 
     @staticmethod
     def te_grouped_quantized_linear_fn(package, func_name, self, *args):
@@ -182,8 +204,9 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
         new_args = list(args)
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
-        for i in range(weights_start, weights_start + num_gemms):
-            new_args[i] = self.weight_quantizer(args[i])
+        for gemm_idx in range(num_gemms):
+            pos = weights_start + gemm_idx
+            new_args[pos] = self.weight_quantizer[gemm_idx](args[pos])
         output = getattr(package, func_name)(*new_args)
         # TE 2.15+ returns `(out, new_workspaces)`; TE <= 2.14 returns just `out`.
         # Only the activation tensor participates in output quantization.

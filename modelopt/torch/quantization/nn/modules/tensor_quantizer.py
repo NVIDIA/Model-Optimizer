@@ -65,6 +65,7 @@ from ...utils.numeric_utils import fp8_max_for_normalization
 from ..functional import normalized_hadamard_transform
 
 __all__ = [
+    "GroupedQuantizer",
     "HardDisabledTensorQuantizer",
     "NVFP4StaticQuantizer",
     "SequentialQuantizer",
@@ -1594,3 +1595,67 @@ class SequentialQuantizer(nn.Sequential):
         ) in original_sequential_quantizers.items():
             for name, sequential_quantizer in sequential_quantizers_list:
                 setattr(parent_module, name, sequential_quantizer)
+
+
+class GroupedQuantizer(nn.ModuleList):
+    """A container for per-group :class:`TensorQuantizer` modules.
+
+    Used when a single linear holds several independently-quantized weights — e.g. the
+    fused experts of a TEGroupedLinear, where each of the ``num_gemms`` weights needs its
+    own ``amax``. Unlike :class:`SequentialQuantizer` (an ``nn.Sequential`` that *chains*
+    quantizers over one tensor), the contained quantizers act on *different* tensors, so
+    there is no inherent forward path: index in with ``grouped[i](weight_i)``.
+
+    Property reads (``amax``, ``is_enabled``) delegate to the first quantizer — all members
+    share one config, so the first is representative for "is this calibrated/enabled"
+    checks; the real per-group values live on the members and are used via indexing.
+    Lifecycle/config methods broadcast to every member.
+    """
+
+    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
+    _delegated_methods = [
+        "reset_amax",
+        "disable",
+        "enable",
+        "load_calib_amax",
+        "load_calib_bias",
+    ]
+
+    def __init__(self, *quantizers: "TensorQuantizer | SequentialQuantizer"):
+        """Initialize GroupedQuantizer module."""
+        super().__init__(quantizers)
+        assert all(isinstance(q, (TensorQuantizer, SequentialQuantizer)) for q in self), (
+            "All quantizers must be a TensorQuantizer or SequentialQuantizer."
+        )
+
+    def __getattr__(self, name):
+        """Delegate property reads to the first member and method calls to all members."""
+        if name in self._delegated_properties:
+            return getattr(self[0], name)
+
+        if name in self._delegated_methods:
+
+            def method_wrapper(*args, **kwargs):
+                return [getattr(quantizer, name)(*args, **kwargs) for quantizer in self]
+
+            return method_wrapper
+
+        return super().__getattr__(name)
+
+    def __setattr__(self, name, value):
+        if name in self._delegated_properties:
+            for quantizer in self:
+                setattr(quantizer, name, value)
+        else:
+            super().__setattr__(name, value)
+
+    def set_from_attribute_config(self, attributes):
+        """Set the attributes of contained quantizers; a single config broadcasts to all."""
+        if not isinstance(attributes, (list, tuple)):
+            attributes = [attributes] * len(self)
+        for attribute, quantizer in zip(attributes, self):
+            quantizer.set_from_attribute_config(attribute)
+
+    def get_modelopt_state(self) -> dict[str, Any]:
+        """Get meta state to be saved in checkpoint."""
+        return {"num_quantizers": len(self), "is_grouped_quantizer": True}

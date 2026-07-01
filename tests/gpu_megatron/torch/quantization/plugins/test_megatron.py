@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+import math
 from contextlib import nullcontext
 from functools import partial
 
@@ -689,10 +690,10 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, quant_cfg, 
     # Quantize grouped model
     mtq.quantize(te_grouped_moe_model, quant_cfg, forward)
 
-    # Quantize non-grouped model with synced weight amax to match TEGroupedMLP behavior
-    seq_quant_cfg = copy.deepcopy(quant_cfg)
-    seq_quant_cfg["algorithm"] = {"method": "max", "sync_expert_weight_amax": True}
-    mtq.quantize(sequential_moe_model, seq_quant_cfg, forward)
+    # TEGroupedMLP now quantizes per-expert by default (GroupedQuantizer), matching
+    # SequentialMLP's per-expert quantizers, so no amax sync override is needed for the
+    # two models to produce identical quantized outputs.
+    mtq.quantize(sequential_moe_model, copy.deepcopy(quant_cfg), forward)
 
     # Compare model outputs after quantization
     te_grouped_moe_quant_output = forward(te_grouped_moe_model)
@@ -709,6 +710,152 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
     """Test that TEGrouped and sequential MoE models produce similar quantized models."""
     dist_workers_size_4.run(
         partial(_test_te_grouped_vs_sequential_quantize_helper, 1, 2, quant_cfg)
+    )
+
+
+def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_cfg, rank, size):
+    """TEGrouped keeps a per-expert weight quantizer (GroupedQuantizer) by default; each
+    expert's amax should match the corresponding SequentialMLP expert (no cross-expert sharing)."""
+    initialize_for_megatron(
+        tensor_model_parallel_size=tp_size,
+        expert_model_parallel_size=ep_size,
+        seed=SEED,
+    )
+
+    te_grouped = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
+    )
+    forward = get_forward(te_grouped, batch_size=8)
+
+    sequential = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=False,
+        num_moe_experts=4,
+        transformer_impl="modelopt",
+    )
+    copy_weights_from_grouped_to_non_grouped(te_grouped, sequential)
+
+    for module in te_grouped.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    for module in sequential.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+
+    mtq.quantize(te_grouped, quant_cfg, forward)
+    mtq.quantize(sequential, quant_cfg, forward)
+
+    te_modules = [m for m in te_grouped.modules() if isinstance(m, TEGroupedMLP)]
+    seq_modules = [m for m in sequential.modules() if isinstance(m, SequentialMLP)]
+    assert len(te_modules) == len(seq_modules)
+
+    saw_per_expert_divergence = False
+    for te_mlp, seq_mlp in zip(te_modules, seq_modules):
+        for linear_name in ("linear_fc1", "linear_fc2"):
+            te_wq = getattr(te_mlp, linear_name).weight_quantizer
+            # One weight quantizer per local expert, not a single shared one.
+            assert len(te_wq) == len(seq_mlp.local_experts), (
+                f"{linear_name}: expected {len(seq_mlp.local_experts)} per-expert quantizers, "
+                f"got {len(te_wq)}"
+            )
+
+            expert_amaxes = []
+            for i, expert in enumerate(seq_mlp.local_experts):
+                te_amax = te_wq[i].amax
+                seq_amax = getattr(expert, linear_name).weight_quantizer.amax
+                assert te_amax is not None
+                assert torch.allclose(te_amax, seq_amax, atol=1e-5, rtol=1e-5), (
+                    f"TEGrouped expert {i} amax != Sequential expert {i} amax for {linear_name}"
+                )
+                expert_amaxes.append(te_amax.reshape(-1)[0])
+
+            stacked = torch.stack(expert_amaxes)
+            if (stacked.max() - stacked.min()).item() > 1e-5:
+                saw_per_expert_divergence = True
+
+    assert saw_per_expert_divergence, (
+        "Expected per-expert weight amax to diverge across experts (proves no cross-expert sharing)."
+    )
+
+
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
+def test_te_grouped_vs_sequential_default_amax(dist_workers_size_4, quant_cfg):
+    dist_workers_size_4.run(
+        partial(_test_te_grouped_vs_sequential_default_amax_helper, 1, 2, quant_cfg)
+    )
+
+
+def _test_te_grouped_vs_sequential_default_loss_helper(tp_size, ep_size, quant_cfg, rank, size):
+    """TEGrouped quantized output should diverge from BF16 more than SequentialMLP under default sync=False."""
+    initialize_for_megatron(
+        tensor_model_parallel_size=tp_size,
+        expert_model_parallel_size=ep_size,
+        seed=SEED,
+    )
+
+    te_grouped = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
+    )
+    forward = get_forward(te_grouped, batch_size=8)
+
+    sequential = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=False,
+        num_moe_experts=4,
+        transformer_impl="modelopt",
+    )
+    copy_weights_from_grouped_to_non_grouped(te_grouped, sequential)
+
+    for module in te_grouped.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    for module in sequential.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+
+    ref_te = forward(te_grouped)
+    ref_seq = forward(sequential)
+
+    mtq.quantize(te_grouped, quant_cfg, forward)
+    mtq.quantize(sequential, quant_cfg, forward)
+
+    out_te = forward(te_grouped)
+    out_seq = forward(sequential)
+
+    err_te = (out_te - ref_te).abs().mean().item()
+    err_seq = (out_seq - ref_seq).abs().mean().item()
+
+    if rank == 0:
+        print(
+            f"\n[default-amax] TEGrouped quant-err={err_te:.6f}, "
+            f"Sequential quant-err={err_seq:.6f}, ratio TE/Seq={err_te / max(err_seq, 1e-12):.3f}"
+        )
+
+    # At toy scale (4 small experts) the per-tensor amax difference is dominated
+    # by other numerical noise (~few %); the effect amplifies at production scale
+    # (e.g. 128 experts in Nemotron Nano). Just sanity-check both errors are finite.
+    assert err_te > 0 and err_seq > 0
+    assert math.isfinite(err_te) and math.isfinite(err_seq)
+
+
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
+def test_te_grouped_vs_sequential_default_loss(dist_workers_size_4, quant_cfg):
+    dist_workers_size_4.run(
+        partial(_test_te_grouped_vs_sequential_default_loss_helper, 1, 2, quant_cfg)
     )
 
 

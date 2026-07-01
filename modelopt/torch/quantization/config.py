@@ -852,8 +852,8 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description=(
             "If True, max-calibration synchronizes the weight quantizer amax across local "
             "experts within each SequentialMLP layer, so all experts in that layer share "
-            "one effective weight amax. TEGroupedMLP already fuses experts into a single "
-            "GEMM with one weight quantizer, so this flag is irrelevant there."
+            "one effective weight amax. TEGroupedMLP keeps a per-expert weight quantizer "
+            "(GroupedQuantizer) whose amax follows the same expert-parallel sync rule."
         ),
     )
 
