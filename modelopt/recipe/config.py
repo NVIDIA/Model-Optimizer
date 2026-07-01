@@ -190,10 +190,11 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         title="Sensitivity scoring method",
         description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
     )
-    num_score_steps: int = ModeloptField(
+    score_size: int = ModeloptField(
         default=128,
         title="Scoring sample count",
-        description="Number of batches used for sensitivity scoring.",
+        description="Number of samples used for sensitivity scoring (divided by batch_size to get "
+        "the number of mtq scoring steps). Matches the former --auto_quantize_score_size.",
     )
     disabled_layers: LayerPatternList = ModeloptField(
         default=[],

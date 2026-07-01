@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# AutoQuantize: per-layer search over {NVFP4 (W4A4), FP8 (W8A8)} at 4.8 effective bits.
+# AutoQuantize: per-layer search over {NVFP4 (W4A4), FP8 (W8A8)} at 5.4 effective bits.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
@@ -23,18 +23,18 @@ imports:
 
 metadata:
   recipe_type: auto_quantize
-  description: Mixed NVFP4 + FP8 per-layer search at 4.8 effective bits.
+  description: Mixed NVFP4 + FP8 per-layer search at 5.4 effective bits.
 
 auto_quantize:
   constraints:
-    effective_bits: 4.8
+    effective_bits: 5.4
 
   candidate_formats:
     - $import: nvfp4
     - $import: fp8
 
   auto_quantize_method: gradient
-  num_score_steps: 128
+  score_size: 128
 
   # Base (model-agnostic) non-quantizable layers, spliced from the shared unit. Arch-specific
   # models use a recipe under huggingface/<model>/auto_quantize/ that appends to this set.

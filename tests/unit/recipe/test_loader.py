@@ -1720,7 +1720,7 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     aq = recipe.auto_quantize
     assert aq.auto_quantize_method == "gradient"
-    assert aq.num_score_steps == 128
+    assert aq.score_size == 128
     assert aq.kv_cache is None
     assert aq.constraints.effective_bits == 4.8
     assert aq.constraints.cost_model == "weight"
@@ -1803,7 +1803,8 @@ def test_load_recipe_autoquantize_builtin_active_moe():
 @pytest.mark.parametrize(
     "recipe_path",
     [
-        "general/auto_quantize/nvfp4_fp8_at_4p8bits",
+        "general/auto_quantize/nvfp4_fp8_at_5p4bits",
+        "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_mse_fp8_at_6p0bits",
         "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits",
         "general/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe",

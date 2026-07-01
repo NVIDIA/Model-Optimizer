@@ -255,18 +255,45 @@ def make_calib_dataloader(
     return calib_dataloader, first_text_speech_dataset
 
 
-def _canonical_candidate_dict(fmt) -> dict:
-    """Return a candidate as a known preset dict when it matches one, else its full dump.
+# Presets safe to mix into an AutoQuantize search *and* write via the unified HF checkpoint
+# exporter. Export-compatibility is a property of the export path, not of a preset's validity for
+# plain PTQ, so this is a curated set rather than something derived from QUANT_CFG_CHOICES.
+# TODO: drop the partial-model presets (e.g. nvfp4_mlp_only, nvfp4_experts_only) from this set as future work.
+_AUTO_QUANTIZE_QFORMATS: frozenset[str] = frozenset(
+    {
+        "fp8",
+        "int8_smoothquant",
+        "int8_weight_only",
+        "int4_awq",
+        "nvfp4",
+        "nvfp4_awq_lite",
+        "nvfp4_w4a4_weight_mse_fp8_sweep",
+        "w4a8_awq_beta",
+        "w4a16_nvfp4",
+        "fp8_2d_blockwise_weight_only",
+        "w4a8_mxfp4_fp8",
+        "nvfp4_mlp_only",
+        "nvfp4_experts_only",
+        "nvfp4_omlp_only",
+        "nvfp4_w4a4_weight_local_hessian",
+        "mxfp8",
+    }
+)
 
-    Mirrors the CLI (which passes ``QUANT_CFG_CHOICES[name]`` directly): matching the preset
-    makes the search name the candidate after the preset (e.g. FP8_DEFAULT_CFG) instead of
-    CUSTOM_N, keeping format identity consistent with CLI-produced auto_quantize checkpoints.
+
+def _match_candidate_to_preset(fmt) -> tuple[str | None, dict]:
+    """Match a recipe candidate against the shipped QUANT_CFG_CHOICES presets by value.
+
+    Returns ``(preset_name, quant_cfg)``: ``preset_name`` is the matched preset (or None for a
+    custom config matching none), and ``quant_cfg`` is the dict passed to mtq.auto_quantize.
+    Passing the matched preset dict (rather than the candidate's own dump) keeps the search naming
+    the candidate after the preset (e.g. FP8_DEFAULT_CFG), consistent with CLI-produced checkpoints.
     """
     stripped = fmt.model_dump(exclude_unset=True)
-    for preset in QUANT_CFG_CHOICES.values():
+    for name, preset in QUANT_CFG_CHOICES.items():
         if preset == stripped:
-            return preset
-    return fmt.model_dump()
+            return name, preset
+    return None, fmt.model_dump()
 
 
 def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -> dict:
@@ -290,15 +317,30 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
         kv_cache_quant_cfg = None
     else:
         kv_cache_quant_cfg = copy.deepcopy(KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])
+    # Translate each candidate to its mtq preset dict and, in the same pass, guard export
+    # compatibility (fails fast, before the expensive search). Custom configs matching no shipped
+    # preset can't be verified, so warn rather than block.
+    quantization_formats = []
+    for fmt in aq_config.candidate_formats:
+        preset_name, quant_cfg = _match_candidate_to_preset(fmt)
+        if preset_name is not None and preset_name not in _AUTO_QUANTIZE_QFORMATS:
+            raise ValueError(
+                f"AutoQuantize candidate_formats entry '{preset_name}' is not supported for "
+                "unified checkpoint export. Use an export-compatible format."
+            )
+        if preset_name is None:
+            warnings.warn(
+                "An AutoQuantize candidate_formats entry matches no shipped preset; its export "
+                "compatibility cannot be verified. Ensure it is safe for HF checkpoint export."
+            )
+        quantization_formats.append(quant_cfg)
     return {
         "constraints": constraints,
-        "quantization_formats": [
-            _canonical_candidate_dict(fmt) for fmt in aq_config.candidate_formats
-        ],
+        "quantization_formats": quantization_formats,
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
         "method": aq_config.auto_quantize_method,
-        "num_score_steps": aq_config.num_score_steps,
+        "score_size": aq_config.score_size,
     }
 
 
@@ -378,9 +420,7 @@ def auto_quantize(
         loss_func=loss_func,
         quantization_formats=inputs["quantization_formats"],
         num_calib_steps=len(calib_dataloader),
-        num_score_steps=min(
-            len(calib_dataloader), max(inputs["num_score_steps"] // args.batch_size, 1)
-        ),
+        num_score_steps=min(len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)),
         verbose=True,
         disabled_layers=inputs["disabled_layers"],
         method=inputs["method"],

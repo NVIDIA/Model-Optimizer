@@ -8,7 +8,7 @@ Changelog
 
 - Remove the ``examples/diffusers/eval`` image-quality evaluation example (ImageReward / CLIP-IQA / CLIP metrics) and its references in ``examples/diffusers/README.md``. The example was deprecated in 0.45 and is no longer maintained.
 - Remove the deprecated ``examples/llm_autodeploy`` example (deprecated in 0.45). Use TensorRT-LLM's `AutoDeploy <https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy>`_ directly together with ModelOpt PTQ in ``examples/llm_ptq``.
-- ``examples/hf_ptq`` AutoQuantize is now driven by an **AutoQuantize recipe** (``--recipe``) instead of CLI flags. The ``--auto_quantize_bits``, ``--auto_quantize_method``, ``--auto_quantize_score_size``, ``--auto_quantize_cost_model``, and ``--auto_quantize_active_moe_expert_ratio`` flags (and their ``scripts/huggingface_example.sh`` / ``parser.sh`` equivalents) are removed; ``--auto_quantize_checkpoint`` remains as a runtime save/restore path. See ``examples/hf_ptq/README.md`` and ``modelopt_recipes/general/auto_quantize/``.
+- ``examples/hf_ptq`` AutoQuantize is now driven by an **AutoQuantize recipe** (``--recipe``) instead of CLI flags. The ``--auto_quantize_bits``, ``--auto_quantize_method``, ``--auto_quantize_score_size``, ``--auto_quantize_cost_model``, and ``--auto_quantize_active_moe_expert_ratio`` flags (and their ``scripts/huggingface_example.sh`` / ``parser.sh`` equivalents) are removed; ``--auto_quantize_checkpoint`` remains as a runtime save/restore path. The old AutoQuantize CLI remains available on the 0.45 release branch. See ``examples/hf_ptq/README.md`` and ``modelopt_recipes/general/auto_quantize/``.
 
 **Deprecations**
 

@@ -17,8 +17,12 @@ import importlib
 import sys
 from pathlib import Path
 
+import pytest
+
 from modelopt.recipe import load_recipe
+from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.torch.quantization.config import QuantizeConfig
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
@@ -46,13 +50,13 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
-    aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_4p8bits").auto_quantize
+    aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
-    assert inputs["constraints"] == {"effective_bits": 4.8, "cost_model": "weight"}
+    assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "weight"}
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
-    assert inputs["num_score_steps"] == 128
+    assert inputs["score_size"] == 128
     # disabled_layers come straight from the recipe (no model introspection).
     assert inputs["disabled_layers"] == aq.disabled_layers
     assert "*output_layer*" in inputs["disabled_layers"]
@@ -81,3 +85,34 @@ def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
     # The two exclusions are independent: cost-excluded patterns are also disabled here, but the
     # roles (cost-accounting vs search) are tracked separately.
     assert "*visual*" in inputs["disabled_layers"]
+
+
+def test_autoquant_rejects_non_export_safe_candidate(monkeypatch):
+    """A candidate that resolves to a preset outside the export-safe set is rejected before search."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    non_safe = next(k for k in QUANT_CFG_CHOICES if k not in hf_ptq._AUTO_QUANTIZE_QFORMATS)
+    aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=4.8),
+        candidate_formats=[
+            QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]),
+            QuantizeConfig(**QUANT_CFG_CHOICES[non_safe]),
+        ],
+    )
+    with pytest.raises(ValueError, match="not supported for unified checkpoint export"):
+        hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+
+def test_autoquant_warns_on_custom_candidate(monkeypatch):
+    """A candidate matching no shipped preset can't be export-verified, so it warns (not blocks)."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    custom = QuantizeConfig(quant_cfg=[{"quantizer_name": "*", "enable": False}])
+    aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=4.8),
+        candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]), custom],
+    )
+    with pytest.warns(UserWarning, match="export compatibility cannot be verified"):
+        hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
