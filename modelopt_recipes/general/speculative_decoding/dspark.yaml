@@ -1,0 +1,96 @@
+# DSpark speculative-decoding training recipe.
+#
+# DSpark reuses the DFlash mode/pipeline and adds a lightweight sequential
+# (Markov) head plus an optional confidence head, selected via
+# dflash_architecture_config.projector_type=dspark. The Markov head adds a
+# prefix-dependent transition bias to the backbone base logits, inducing a causal
+# block distribution (semi-autoregressive generation). Trained with a three-term
+# loss: ce_alpha*CE + l1_alpha*TVD + conf_alpha*confidence_BCE. Online training is
+# the default path (data.mode=online). Override fields via an OmegaConf dotlist.
+
+metadata:
+  recipe_type: speculative_dflash
+  description: DSpark training recipe (DFlash backbone + Markov head + confidence head).
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path:
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  mode: online
+  data_path:
+  offline_data_path:
+  # Jinja chat template with {% generation %} tags for answer_only_loss.
+  chat_template:
+
+# maps to TrainingArguments (main.py)
+training:
+  # --- commonly modified ---
+  output_dir:
+  num_train_epochs: 6
+  per_device_train_batch_size: 1
+  learning_rate: 6.0e-4
+  warmup_ratio: 0.04
+  training_seq_len: 3072
+  logging_steps: 50
+  save_steps: 2000
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  # Keep off: eval runs the DFlash backbone only (Markov head not applied yet),
+  # so AR would reflect the backbone alone, not the trained model. Compare via
+  # export + the offline acceptance-length harness instead.
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+
+  # --- rarely modified ---
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  # Safe default: the confidence head params are unused when
+  # dflash_confidence_head_alpha == 0, which would otherwise trip DDP.
+  ddp_find_unused_parameters: true
+  ddp_timeout: 1800
+  report_to: tensorboard
+
+# maps to DFlashConfig (modelopt/torch/speculative/config.py).
+dflash:
+  dflash_block_size: 16
+  dflash_num_anchors: 256
+  dflash_use_torch_compile: false
+  # DSpark computes the target distribution internally for its TVD/confidence
+  # terms; the DFlash KD path is unused.
+  dflash_self_logit_distillation: false
+  # gamma for exponential loss decay (block_size=16 -> 7).
+  dflash_loss_decay_factor: 7.0
+  # Qwen3 has no native mask token; 151669 is an unused id used by the reference.
+  dflash_mask_token_id: 151669
+  # Three-term loss weights (DeepSpec defaults: L1/TVD-dominant).
+  dflash_ce_loss_alpha: 0.1
+  dflash_l1_loss_alpha: 0.9
+  dflash_confidence_head_alpha: 1.0
+  dflash_architecture_config:
+    num_hidden_layers: 5
+    # Draft attention/MLP dims — set explicitly (the draft is an independent
+    # Qwen3 model and does NOT inherit these from the base). GQA: 8 KV heads.
+    num_attention_heads: 32
+    num_key_value_heads: 8
+    head_dim: 128
+    intermediate_size: 12288
+    projector_type: dspark
+    # Markov head: low-rank first-order transition bias. 'vanilla' (memoryless),
+    # 'gated' (hidden-gated), or 'rnn' (recurrent, closest to Domino's GRU).
+    markov_rank: 256
+    markov_head_type: vanilla
+    # Build + train the confidence head (per-position acceptance predictor).
+    use_confidence_head: true
