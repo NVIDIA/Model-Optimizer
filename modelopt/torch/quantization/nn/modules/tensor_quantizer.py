@@ -619,6 +619,22 @@ class TensorQuantizer(nn.Module):
             return self._rotate.get("block_size", None)
         return None
 
+    @property
+    def rotate_back_is_enabled(self):
+        """Check if inverse rotation should be applied after quantization."""
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.enable and self._rotate.mode == "rotate_back"
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("mode", "rotate") == "rotate_back"
+        return False
+
+    def _rotate_inputs(self, inputs):
+        return normalized_hadamard_transform(
+            inputs,
+            rotate_fp32=self.rotate_is_fp32,
+            block_size=self.rotate_block_size,
+        )
+
     def disable_calib(self):
         """Disable calibration."""
         self._if_calib = False
@@ -1092,11 +1108,7 @@ class TensorQuantizer(nn.Module):
 
         # Rotating the input
         if self.rotate_is_enabled:
-            inputs = normalized_hadamard_transform(
-                inputs,
-                rotate_fp32=self.rotate_is_fp32,
-                block_size=self.rotate_block_size,
-            )
+            inputs = self._rotate_inputs(inputs)
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
@@ -1149,6 +1161,8 @@ class TensorQuantizer(nn.Module):
                 with same_device_as(inputs):
                     outputs = self._fake_quantize(inputs)
             elif not self._dequantize:
+                if self.rotate_back_is_enabled:
+                    raise ValueError("rotate_back mode is only supported with fake_quant=True.")
                 outputs = self._real_quantize(inputs)
             else:
                 raise ValueError(
@@ -1158,6 +1172,9 @@ class TensorQuantizer(nn.Module):
 
         if self.is_static_block_quant:
             outputs = self._reset_to_original_shape(outputs)
+
+        if self.rotate_back_is_enabled and isinstance(outputs, torch.Tensor):
+            outputs = self._rotate_inputs(outputs)
 
         return outputs
 
@@ -1209,6 +1226,7 @@ class TensorQuantizer(nn.Module):
             else ""
         )
         s += " rotated" if self.rotate_is_enabled else ""
+        s += " (rotate_back)" if self.rotate_back_is_enabled else ""
         s += " (fp32)" if self.rotate_is_fp32 else ""
         if self.rotate_block_size is not None:
             s += f" (block={self.rotate_block_size})"

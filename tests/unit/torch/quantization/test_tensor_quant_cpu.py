@@ -22,8 +22,13 @@ from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    TensorQuantizer,
+    register_quant_backend,
+    unregister_quant_backend,
+)
 
 
 class TestFakeTensorQuantCPU(FakeTensorQuantTester):
@@ -55,6 +60,18 @@ class TestQuantizerAttributeConfig:
         quant_attr_cfg_1 = QuantizerAttributeConfig(num_bits=2, unsigned=True)
         quant_attr_cfg_2 = QuantizerAttributeConfig(**quant_attr_cfg_1.dict())
         assert quant_attr_cfg_1 == quant_attr_cfg_2
+
+    def test_rotate_mode_serialization(self):
+        quant_attr_cfg = QuantizerAttributeConfig(
+            rotate={"enable": True, "mode": "rotate_back", "rotate_fp32": True, "block_size": 8}
+        )
+
+        assert quant_attr_cfg.model_dump(exclude_unset=True)["rotate"] == {
+            "enable": True,
+            "mode": "rotate_back",
+            "rotate_fp32": True,
+            "block_size": 8,
+        }
 
     def test_num_bits(self):
         """Test num_bits for both integer and tuple cases."""
@@ -90,6 +107,65 @@ class TestQuantizerAttributeConfig:
             match=r"num_bits must be a positive integer or a tuple of positive integers.",
         ):
             QuantizerAttributeConfig(enable=True, num_bits=(-1, 2))
+
+
+def _run_rotated_backend(monkeypatch, rotate):
+    calls = []
+
+    def rotate_fn(inputs, rotate_fp32=False, block_size=None):
+        calls.append((rotate_fp32, block_size))
+        return inputs + 10
+
+    def backend(inputs, _tq):
+        return inputs * 2
+
+    monkeypatch.setattr(tensor_quantizer_module, "normalized_hadamard_transform", rotate_fn)
+    register_quant_backend("test_rotate_mode_backend", backend)
+    try:
+        quantizer = TensorQuantizer(
+            QuantizerAttributeConfig(rotate=rotate, backend="test_rotate_mode_backend")
+        )
+        inputs = torch.tensor([[1.0, 2.0]])
+        return quantizer(inputs), inputs, calls, quantizer
+    finally:
+        unregister_quant_backend("test_rotate_mode_backend")
+
+
+def test_tensor_quantizer_rotate_mode_preserves_default_path(monkeypatch):
+    outputs, inputs, calls, quantizer = _run_rotated_backend(monkeypatch, rotate={"enable": True})
+
+    assert not quantizer.rotate_back_is_enabled
+    assert torch.equal(outputs, (inputs + 10) * 2)
+    assert calls == [(False, None)]
+
+
+def test_tensor_quantizer_rotate_mode_can_rotate_back(monkeypatch):
+    outputs, inputs, calls, quantizer = _run_rotated_backend(
+        monkeypatch,
+        rotate={"enable": True, "mode": "rotate_back", "rotate_fp32": True, "block_size": 8},
+    )
+
+    assert quantizer.rotate_back_is_enabled
+    assert torch.equal(outputs, ((inputs + 10) * 2) + 10)
+    assert calls == [(True, 8), (True, 8)]
+
+
+def test_tensor_quantizer_rotate_back_rejects_real_quant(monkeypatch):
+    monkeypatch.setattr(
+        tensor_quantizer_module,
+        "normalized_hadamard_transform",
+        lambda inputs, rotate_fp32=False, block_size=None: inputs,
+    )
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=8,
+            fake_quant=False,
+            rotate={"enable": True, "mode": "rotate_back"},
+        )
+    )
+
+    with pytest.raises(ValueError, match="rotate_back mode is only supported with fake_quant=True"):
+        quantizer(torch.tensor([[1.0, 2.0]]))
 
 
 WINT4INT8_CFG = {
