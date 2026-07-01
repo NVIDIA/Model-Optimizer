@@ -346,6 +346,10 @@ def max_calibrate(
         if getattr(module, "_parallel_state", None) is None:
             continue
 
+        weight_quantizers = [module.weight_quantizer] if hasattr(module, "weight_quantizer") else []
+        if getattr(module, "_per_expert_weight_quantizer", False):
+            weight_quantizers = [module._get_weight_quantizer(i) for i in range(module.num_gemms)]
+
         if is_quantized_column_parallel_linear(module):
             sync_quantizer_amax_across_tp(
                 module.input_quantizer,
@@ -354,13 +358,14 @@ def max_calibrate(
                 axes_for_sync=[None, -1],
                 parallel_state=module.parallel_state,
             )
-            sync_quantizer_amax_across_tp(
-                module.weight_quantizer,
-                name,
-                "weight_quantizer",
-                axes_for_sync=[None, -1],
-                parallel_state=module.parallel_state,
-            )
+            for weight_quantizer in weight_quantizers:
+                sync_quantizer_amax_across_tp(
+                    weight_quantizer,
+                    name,
+                    "weight_quantizer",
+                    axes_for_sync=[None, -1],
+                    parallel_state=module.parallel_state,
+                )
 
         if is_quantized_row_parallel_linear(module):
             sync_quantizer_amax_across_tp(
@@ -371,13 +376,14 @@ def max_calibrate(
                 parallel_state=module.parallel_state,
             )
 
-            sync_quantizer_amax_across_tp(
-                module.weight_quantizer,
-                name,
-                "weight_quantizer",
-                axes_for_sync=[None, 0],
-                parallel_state=module.parallel_state,
-            )
+            for weight_quantizer in weight_quantizers:
+                sync_quantizer_amax_across_tp(
+                    weight_quantizer,
+                    name,
+                    "weight_quantizer",
+                    axes_for_sync=[None, 0],
+                    parallel_state=module.parallel_state,
+                )
 
         # KV Cache Quantization
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):

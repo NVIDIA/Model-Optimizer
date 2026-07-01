@@ -27,9 +27,9 @@ import transformer_engine.pytorch.module.layernorm_linear as te_layernorm_linear
 import transformer_engine.pytorch.module.linear as te_linear
 from packaging.version import Version
 
+import modelopt.torch.kernels.quantization.gemm as _triton_kernels
 from modelopt.torch.quantization.utils import replace_function
 
-import modelopt.torch.kernels.quantization.gemm as _triton_kernels
 from ..nn import QuantModuleRegistry, SequentialQuantizer
 from .custom import _ParallelLinear
 
@@ -111,8 +111,8 @@ class _QuantTELinear(_ParallelLinear):
     _quantized_linear_fn = te_quantized_linear_fn
 
 
-class _GroupedAxis0FakeQuantFn(torch.autograd.Function):
-    """Triton-backed per-expert fake-quant adapter for the N-modules path.
+class _GroupedAxis0INTFakeQuantFn(torch.autograd.Function):
+    """Triton-backed per-expert integer fake-quant adapter for the N-modules path.
 
     Forward: single-launch Triton kernel over N expert weights (tensor-of-pointers,
     no stack memcopy). Backward honors modelopt's default `pass_through_bwd=True`
@@ -142,6 +142,20 @@ class _GroupedAxis0FakeQuantFn(torch.autograd.Function):
             weights, list(grad_outputs), amax_vec
         )
         return (None, None, None, None, *grad_inputs)
+
+
+class _GroupedAxis0NVFP4FakeQuantFn(torch.autograd.Function):
+    """Grouped dynamic-NVFP4 forward with pass-through STE backward."""
+
+    @staticmethod
+    def forward(ctx, expert_amax, block_size, *weights):
+        return _triton_kernels.grouped_nvfp4_fakequant(
+            list(weights), block_size, expert_amax=expert_amax
+        )
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        return (None, None, *grad_outputs)
 
 
 # Register the public te.pytorch.GroupedLinear class
@@ -261,7 +275,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             self._per_expert_amax_cache = None
 
     def _can_use_triton_per_expert_path(self, num_gemms: int) -> bool:
-        """Soft-gate the Triton dispatch on availability + ready-to-quantize state."""
+        """Gate the scalar-amax integer Triton path on its exact format contract."""
         if not getattr(self, "_per_expert_weight_quantizer", False):
             return False
         if not _triton_kernels.IS_AVAILABLE:
@@ -274,11 +288,68 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             # path; fall back to the cuda_ext per-quantizer loop.
             if isinstance(q, SequentialQuantizer):
                 return False
-            if not hasattr(q, "_amax"):
+            if not q.is_enabled or not getattr(q, "_if_quant", False) or not q.fake_quant:
+                return False
+            # grouped_axis0_fakequant implements symmetric integer rounding.
+            # FP8 and FP4 use tuple num_bits plus different scale semantics.
+            if not isinstance(q.num_bits, int):
+                return False
+            if q.block_sizes is not None:
+                return False
+            if not hasattr(q, "_amax") or q._amax.numel() != 1:
                 return False
             # During calibration each quantizer still needs the cuda_ext path
             # so its _amax gets updated; skip Triton until calib finishes.
             if getattr(q, "_if_calib", False):
+                return False
+            if q.bias is not None or q.pre_quant_scale is not None or q.rotate_is_enabled:
+                return False
+        return True
+
+    def _can_use_grouped_nvfp4_path(self, num_gemms: int, weights: list[torch.Tensor]) -> bool:
+        """Return whether dynamic NVFP4 can use the grouped two-launch path."""
+        if not getattr(self, "_per_expert_weight_quantizer", False):
+            return False
+        if not _triton_kernels.IS_AVAILABLE:
+            return False
+        if not hasattr(_triton_kernels, "grouped_nvfp4_fakequant"):
+            return False
+        if len(weights) != num_gemms or not weights:
+            return False
+
+        reference = weights[0]
+        if not reference.is_cuda or not reference.is_contiguous():
+            return False
+        if reference.shape[-1] % 16 != 0:
+            return False
+        if any(
+            weight.shape != reference.shape
+            or weight.dtype != reference.dtype
+            or weight.device != reference.device
+            or not weight.is_contiguous()
+            for weight in weights[1:]
+        ):
+            return False
+
+        for i in range(num_gemms):
+            q = self._get_weight_quantizer(i)
+            if isinstance(q, SequentialQuantizer):
+                return False
+            # max_calibrate disables quantization for its forward loop. Dynamic
+            # quantizers do not enter calibration mode, so keep that pass a no-op.
+            if not q.is_enabled or not getattr(q, "_if_quant", False) or not q.fake_quant:
+                return False
+            if getattr(q, "_if_calib", False):
+                return False
+            if q.num_bits != (2, 1):
+                return False
+            if q.block_sizes is None or q.block_sizes.get("type") != "dynamic":
+                return False
+            if q.block_sizes.get(-1) != 16 or q.block_sizes.get("scale_bits") != (4, 3):
+                return False
+            if not getattr(q, "_pass_through_bwd", True):
+                return False
+            if q.bias is not None or q.pre_quant_scale is not None or q.rotate_is_enabled:
                 return False
         return True
 
@@ -314,18 +385,26 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
         new_args = list(args)
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
-        if self._can_use_triton_per_expert_path(num_gemms):
+        weights = list(args[weights_start : weights_start + num_gemms])
+        if self._can_use_grouped_nvfp4_path(num_gemms, weights):
+            has_static_amax = all(
+                hasattr(self._get_weight_quantizer(i), "_amax") for i in range(num_gemms)
+            )
+            expert_amax = self._gather_per_expert_amax() if has_static_amax else None
+            qweights = _GroupedAxis0NVFP4FakeQuantFn.apply(expert_amax, 16, *weights)
+            for gemm_idx in range(num_gemms):
+                new_args[weights_start + gemm_idx] = qweights[gemm_idx]
+        elif self._can_use_triton_per_expert_path(num_gemms):
             # Single-launch Triton fakequant for the N expert weights.
             # Replaces the per-expert cuda_ext loop (N kernel launches -> 1).
             # All per-expert quantizers share the same config (each is a
             # copy.deepcopy of the base weight_quantizer in _setup), so
             # num_bits/narrow_range/pass_through_bwd read from quantizer 0
             # apply to the whole layer.
-            weights = list(args[weights_start : weights_start + num_gemms])
             amax_vec = self._gather_per_expert_amax()
             q0 = self._get_weight_quantizer(0)
             pass_through_bwd = getattr(q0, "_pass_through_bwd", True)
-            qweights = _GroupedAxis0FakeQuantFn.apply(
+            qweights = _GroupedAxis0INTFakeQuantFn.apply(
                 amax_vec, q0.num_bits, q0.narrow_range, pass_through_bwd, *weights
             )
             for gemm_idx in range(num_gemms):
