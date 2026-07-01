@@ -1,0 +1,124 @@
+# Qwen-Image-Edit-2511 DMD2 — paired image-edit training.
+#
+# Preprocess a paired dataset first (SpatialEdit-500K is supported directly):
+#
+#   python examples/diffusers/fastgen/preprocess_qwen_image_edit.py \
+#       --input-dir /path/to/SpatialEdit-500K \
+#       --output-dir /path/to/qwen_image_edit_2511_cache \
+#       --model-name Qwen/Qwen-Image-Edit-2511
+#
+# Then launch with torchrun and override the cache/checkpoint paths as needed.
+# A local model snapshot can be selected with:
+#   --model.pretrained_model_name_or_path=/path/to/Qwen-Image-Edit-2511
+
+seed: 42
+
+wandb:
+  project: fastgen-dmd2-qwen-image-edit
+  mode: online
+  name: qwen_image_edit_2511_dmd2
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 60
+
+model:
+  pretrained_model_name_or_path: Qwen/Qwen-Image-Edit-2511
+  mode: finetune
+
+step_scheduler:
+  global_batch_size: 128
+  local_batch_size: 1
+  ckpt_every_steps: 500
+  num_epochs: 4
+  log_every: 1
+  max_steps: 5000
+
+dmd2:
+  recipe_path: general/distillation/dmd2_qwen_image
+  # Unlike text-to-image, this plugin appends the cached reference-image tokens
+  # to the noisy target tokens and trains on the target prefix only.
+  pipeline_plugin: qwen_image_edit
+  qwen_image_guidance:
+
+  pred_type: flow
+  num_train_timesteps:
+  guidance_scale: 4.0
+  student_sample_steps: 4
+  student_sample_type: ode
+  backward_simulation: false
+  student_update_freq: 5
+  fake_score_pred_type: x0
+
+  gan_loss_weight_gen: 0.03
+  gan_use_same_t_noise: true
+  gan_r1_reg_weight: 0.1
+  gan_r1_reg_alpha: 0.1
+
+  fake_score_lr: 2.0e-6
+  discriminator_lr: 2.0e-6
+  gan_feature_indices: [30]
+  gan_num_blocks: 60
+  gan_inner_dim: 3072
+
+  sample_t_cfg:
+    time_dist_type: uniform
+    min_t: 0.001
+    max_t: 0.999
+    p_mean: 0.0
+    p_std: 1.0
+    t_list: [0.999, 0.74925, 0.4995, 0.24975, 0.0]
+
+  # Full-tensor EMA materializes a complete FP32 copy of this 20B-class student on
+  # every rank, which is not viable on 80-GiB workers alongside the three DMD2 models.
+  # Keep it disabled until the EMA checkpoint path supports sharded shadows end to end.
+  ema: null
+
+  # Restore-only student QAT uses the same recipe. Enable after calibrating the
+  # exact FP edit student with reference-token + multimodal conditioning and this
+  # t_list; the text-only qwen-image-dmd2 calibration path is not representative.
+  quant:
+    enabled: false
+    quant_state_path:
+    init_weights_from:
+
+optim:
+  learning_rate: 2.0e-6
+  optimizer:
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+
+lr_scheduler:
+  lr_decay_style: constant
+  lr_warmup_steps: 0
+  min_lr: 2.0e-6
+
+fsdp:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  dp_size: 128
+  activation_checkpointing: true
+
+# Each cache item contains:
+#   target latent, 1..N reference latents, multimodal positive prompt embedding,
+#   and a per-sample multimodal negative embedding built from the same references.
+data:
+  dataloader:
+    _target_: fastgen_data.build_image_to_image_multiresolution_dataloader
+    cache_dir: /path/to/preprocessed/qwen_image_edit_2511
+    base_resolution: [1024, 1024]
+    batch_size: 1
+    drop_last: false
+    shuffle: true
+    num_workers: 0
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /path/to/output/qwen_image_edit_2511_dmd2/checkpoints
+  model_save_format: safetensors
+  save_consolidated: true
+  v4_compatible: true
+  diffusers_compatible: true
+  restore_from: LATEST

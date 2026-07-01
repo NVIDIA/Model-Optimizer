@@ -23,6 +23,7 @@ from .caption_loaders import (
     get_caption_loader,
 )
 from .qwen_image import QwenImageProcessor
+from .qwen_image_edit import QwenImageEditProcessor
 from .registry import ProcessorRegistry
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "JSONSidecarCaptionLoader",
     "MetaJSONCaptionLoader",
     "ProcessorRegistry",
+    "QwenImageEditProcessor",
     "QwenImageProcessor",
     "get_caption_loader",
 ]

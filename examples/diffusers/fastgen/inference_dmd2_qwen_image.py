@@ -294,15 +294,6 @@ class QwenImageDMDInferencePipeline:
                 num_images_per_prompt=num_images_per_prompt,
                 max_sequence_length=max_sequence_length,
             )
-        txt_seq_lens = (
-            prompt_embeds_mask.sum(dim=1).int().tolist() if prompt_embeds_mask is not None else None
-        )
-        neg_txt_seq_lens = (
-            neg_prompt_embeds_mask.sum(dim=1).int().tolist()
-            if neg_prompt_embeds_mask is not None
-            else None
-        )
-
         # ---- 3. Build initial noisy latents at t = schedule[0] ---------------
         if isinstance(prompt, str):
             batch_size = 1
@@ -334,7 +325,6 @@ class QwenImageDMDInferencePipeline:
                 encoder_hidden_states_mask=prompt_embeds_mask,
                 timestep=timestep,
                 img_shapes=img_shapes,
-                txt_seq_lens=txt_seq_lens,
                 guidance=None,
                 return_dict=False,
             )[0]
@@ -352,7 +342,6 @@ class QwenImageDMDInferencePipeline:
                     encoder_hidden_states_mask=neg_prompt_embeds_mask,
                     timestep=timestep,
                     img_shapes=img_shapes,
-                    txt_seq_lens=neg_txt_seq_lens,
                     guidance=None,
                     return_dict=False,
                 )[0]

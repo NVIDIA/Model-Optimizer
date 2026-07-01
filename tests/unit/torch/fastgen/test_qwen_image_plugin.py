@@ -33,6 +33,7 @@ import torch
 from torch import nn
 
 from modelopt.torch.fastgen import DMDConfig
+from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
 from modelopt.torch.fastgen.plugins.qwen_image import (
     QwenImageDMDPipeline,
     build_img_shapes,
@@ -162,12 +163,13 @@ def _make_pipeline(student: nn.Module) -> QwenImageDMDPipeline:
     )
 
 
-def test_call_model_forwards_qwen_kwargs():
+def test_call_model_forwards_qwen_kwargs(monkeypatch):
     """``_call_model`` must forward the exact Qwen signature (hidden_states packed
     to ``[B, num_patches, 64]``, encoder_hidden_states verbatim,
-    encoder_hidden_states_mask verbatim, txt_seq_lens derived from the mask,
+    encoder_hidden_states_mask verbatim (Diffusers derives sequence lengths from it),
     img_shapes as ``[[(1, h//2, w//2)]] * B``, guidance=None, return_dict=False,
     timestep verbatim with no /1000 rescale)."""
+    monkeypatch.setattr(qwen_image_plugin, "_DIFFUSERS_NEEDS_TXT_SEQ_LENS", False)
     b, c, h, w = 2, 16, 32, 32
     student = _CapturingModel(out_shape=(b, (h // 2) * (w // 2), c * 4), style="tensor")
     pipe = _make_pipeline(student)
@@ -191,12 +193,33 @@ def test_call_model_forwards_qwen_kwargs():
     assert tuple(kw["hidden_states"].shape) == (b, (h // 2) * (w // 2), c * 4)
     assert tuple(kw["encoder_hidden_states"].shape) == (b, 512, 3584)
     assert torch.equal(kw["encoder_hidden_states_mask"], mask)
-    assert kw["txt_seq_lens"] == [37, 42]
+    assert "txt_seq_lens" not in kw
     assert kw["img_shapes"] == [[(1, h // 2, w // 2)]] * b
     assert kw["guidance"] is None
     assert kw["return_dict"] is False
     assert torch.equal(kw["timestep"], t)  # no /1000 rescale when num_train_timesteps=None
     assert tuple(out.shape) == (b, c, h, w)
+
+
+def test_call_model_forwards_legacy_txt_seq_lens(monkeypatch):
+    """Diffusers 0.35/0.36 still needs lengths derived from the attention mask."""
+    monkeypatch.setattr(qwen_image_plugin, "_DIFFUSERS_NEEDS_TXT_SEQ_LENS", True)
+    b, c, h, w = 2, 16, 8, 8
+    student = _CapturingModel(out_shape=(b, (h // 2) * (w // 2), c * 4))
+    pipe = _make_pipeline(student)
+    mask = torch.zeros(b, 9, dtype=torch.long)
+    mask[0, :4] = 1
+    mask[1, :7] = 1
+
+    pipe._call_model(
+        student,
+        torch.randn(b, c, h, w),
+        torch.tensor([0.25, 0.5]),
+        encoder_hidden_states=torch.randn(b, 9, 32),
+        encoder_hidden_states_mask=mask,
+    )
+
+    assert student.last_kwargs["txt_seq_lens"] == [4, 7]
 
 
 @pytest.mark.parametrize("style", ["tensor", "tuple", "sample"])

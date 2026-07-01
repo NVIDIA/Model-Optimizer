@@ -1,10 +1,14 @@
-# DMD2 distillation for Qwen-Image
+# DMD2 distillation for Qwen-Image and Qwen-Image-Edit
 
 Distill [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image) into a **few-step
 generator** with DMD2 (Distribution Matching Distillation). The distilled student
 produces images in as few as **1–4 sampling steps** while matching the base model's
 output distribution. Built on `modelopt.torch.fastgen` and NeMo AutoModel's
 [`TrainDiffusionRecipe`](https://github.com/NVIDIA-NeMo/Automodel/blob/main/nemo_automodel/recipes/diffusion/train.py).
+
+The paired image-edit path supports
+[`Qwen/Qwen-Image-Edit-2511`](https://huggingface.co/Qwen/Qwen-Image-Edit-2511),
+including its one-or-more reference-image input contract.
 
 > [!NOTE]
 > Qwen-Image is a third-party model with its own license terms. Review the
@@ -115,13 +119,134 @@ torchrun --nproc-per-node=8 \
 
 Any `DMDConfig` field can be overridden on the CLI (e.g. `--dmd2.guidance_scale=3.5`).
 
+## Qwen-Image-Edit-2511 training
+
+Image editing uses `configs/dmd2_qwen_image_edit_2511.yaml`. It is not a text-to-image
+cache with an extra tensor: Edit-2511 conditions every transformer call with packed
+reference-image latents, and its Qwen2.5-VL prompt embedding jointly encodes the edit
+instruction and those same ordered references. Stable `diffusers>=0.37.0` is required so
+the transformer's `zero_cond_t` path applies `t=0` modulation to the reference tokens.
+
+Preprocess native SpatialEdit WebDataset shards directly, without extracting the image
+corpus:
+
+```bash
+python examples/diffusers/fastgen/preprocess_qwen_image_edit.py \
+    --input-dir /path/to/SpatialEdit-500K \
+    --output-dir /path/to/qwen_image_edit_2511_cache \
+    --model-name /path/to/Qwen-Image-Edit-2511 \
+    --gpu-id 0
+```
+
+The preprocessor also accepts `--manifest pairs.jsonl`. A row supplies a target, an edit
+instruction, and one or more ordered references; image values may be local paths or
+`{"archive": "/path/shard.tar", "member": "sample.0.jpg"}` descriptors:
+
+```json
+{"id":"sample-1","target":"target.png","conditioning":["source.png"],"prompt":"Move the red cube left."}
+```
+
+Each cached sample contains the target latent, a list of deterministic reference latents,
+and image-aware positive **and negative** embeddings. Consequently the edit dataloader
+does not take `negative_prompt_embedding_path`; one global text-only negative embedding
+would omit the reference-image visual tokens.
+
+Keep the edit dataloader at `batch_size: 1` with the current sampler. It buckets target
+resolution only; batching multiple samples also requires matching reference count and every
+reference-slot shape. The collate rejects incompatible batches instead of padding image tokens.
+
+```bash
+torchrun --nproc-per-node=8 \
+    examples/diffusers/fastgen/dmd2_finetune.py \
+    --config examples/diffusers/fastgen/configs/dmd2_qwen_image_edit_2511.yaml \
+    --model.pretrained_model_name_or_path=/path/to/Qwen-Image-Edit-2511 \
+    --data.dataloader.cache_dir=/path/to/qwen_image_edit_2511_cache \
+    --fsdp.dp_size=8 --step_scheduler.global_batch_size=8
+```
+
+The `qwen_image_edit` plugin packs the noisy target first, appends every clean reference,
+builds `img_shapes=[target, reference_1, ...]`, and slices the transformer prediction back
+to the target-token prefix. The same references are forwarded through student,
+teacher, fake-score, CFG, backward-simulation, and GAN paths.
+
 ### Checkpoints & resuming
 
 Checkpoints land under `checkpoint.checkpoint_dir`. Alongside the student, the recipe
 saves the DMD2 sidecars needed to resume exactly: the fake-score model + optimizer, the
-student EMA (`ema_shadow.pt`), and the DMD iteration counter (`dmd_state.pt`). With
+DMD iteration counter (`dmd_state.pt`), and, when EMA is enabled, the student EMA
+(`ema_shadow.pt`). With
 `restore_from: LATEST` a re-launch auto-resumes from the newest checkpoint; pin a
 specific one with `--checkpoint.restore_from=epoch_0_step_500`.
+
+## Quantization-aware training (QAT)
+
+Continue a full-precision DMD2 run with the **student quantized**, so the few-step model
+stays accurate at FP8/NVFP4. QAT here is **restore-only**: the trainer loads a ModelOpt
+quantizer state (recipe + frozen `amax`) from disk and **never calibrates**. Only the
+student is quantized; the frozen teacher and trainable fake-score stay full precision so
+the distribution-matching gradient is exact, and `amax` stays frozen for the whole run.
+
+QAT is driven by a `dmd2.quant` block — there's no dedicated config file. The cleanest
+way to launch is to **reuse the exact config + overrides of the full-precision run you're
+continuing** and add only the three `dmd2.quant.*` keys (plus a reduced LR), so the QAT
+run is provably identical to the FP run except for quantization and learning rate. The
+CLI parser creates the `dmd2.quant` subtree even when it's absent from the YAML.
+
+| Key | Role |
+| --- | --- |
+| `dmd2.quant.enabled` | Turn QAT on (restore-only student quantization). |
+| `dmd2.quant.quant_state_path` | The `transformer.pt` from step 1 below (recipe + frozen `amax`). |
+| `dmd2.quant.init_weights_from` | FP DMD2 checkpoint to warm-start student / fake-score / optimizers from on the first launch (the run `amax` was calibrated against). |
+
+1. **Calibrate once** with the quantization example to produce the quantizer state
+   (`amax`, no weights) for a trained student checkpoint:
+
+   ```bash
+   python examples/diffusers/quantization/quantize.py \
+       --model qwen-image-dmd2 --format fp8 \
+       --extra-param student_path=<.../epoch_4_step_15999/model/consolidated> \
+       --quantized-torch-ckpt-save-path <.../epoch_4_step_15999/quant>
+   # -> writes <.../epoch_4_step_15999/quant/transformer.pt>
+   ```
+
+2. **Launch QAT** by re-running the FP run's command with a new output dir, a reduced
+   student LR, and the three quant keys appended:
+
+   ```bash
+   torchrun --nproc-per-node=<gpus> \
+       examples/diffusers/fastgen/dmd2_finetune.py \
+       --config examples/diffusers/fastgen/configs/<the FP run's config>.yaml \
+       --checkpoint.checkpoint_dir=<NEW output dir> \
+       <... the FP run's other overrides, unchanged ...> \
+       --optim.learning_rate=<FP lr / 10> --lr_scheduler.min_lr=<FP lr / 10> \
+       --dmd2.quant.enabled=true \
+       --dmd2.quant.quant_state_path=<.../epoch_4_step_15999/quant/transformer.pt> \
+       --dmd2.quant.init_weights_from=<.../epoch_4_step_15999>
+   ```
+
+On the first launch (empty `checkpoint_dir`) the student / fake-score / discriminator /
+optimizers warm-start from `init_weights_from`, then the student is quantized from
+`quant_state_path`. `restore_from: LATEST` auto-resumes the new `checkpoint_dir`
+thereafter. Because QAT is restore-only — amax never recalibrates — the recipe re-applies
+`quant_state_path` on every resume rather than persisting a per-checkpoint copy, so keep
+that file accessible for the whole run (it's the only quantization dependency). The saved
+student weights are clean full precision (`model/consolidated` is a normal
+`QwenImageTransformer2DModel`); re-apply `quant_state_path` to deploy or evaluate the
+quantized QAT student via the quantization example.
+
+> The `quant_state_path` `amax` must have been calibrated against the student in
+> `init_weights_from`, with the same few-step schedule (`dmd2.sample_t_cfg.t_list`) the
+> student trains/infers with. Pass `dmd2.quant.enabled=true` on every resume too (it is
+> what tells the recipe to quantize). Reduce only the student LR by keeping
+> `--dmd2.fake_score_lr` / `--dmd2.discriminator_lr` at the FP value.
+
+For Qwen-Image-Edit, the restore-only QAT path itself is unchanged because the student is
+still a `QwenImageTransformer2DModel`. The quantizer state must, however, be calibrated on
+the exact edit student using target + reference tokens, multimodal image/instruction
+embeddings, and the same `t_list`. The existing `--model qwen-image-dmd2` text-only
+calibrator does **not** provide representative activation ranges for Edit-2511. Also
+calibrate the non-EMA weights restored by `dmd2.quant.init_weights_from`; do not calibrate
+an EMA overlay for that warm start.
 
 ## Inference
 
@@ -162,6 +287,23 @@ Set `num_inference_steps` to the number of steps the student was trained for
 (`dmd2.student_sample_steps` — e.g. 4 for the canonical config, or 1 for a single-step
 student).
 
+For an edit student, use the companion pipeline and pass one or more ordered references:
+
+```python
+from inference_dmd2_qwen_image_edit import QwenImageEditDMDInferencePipeline
+from diffusers.utils import load_image
+
+pipe = QwenImageEditDMDInferencePipeline.from_pretrained(
+    student_path="/path/to/checkpoint/model/consolidated",
+    base_pipeline_path="Qwen/Qwen-Image-Edit-2511",
+).to("cuda")
+image = pipe(
+    [load_image("source.png")],
+    "Move the red cube left.",
+    num_inference_steps=4,
+).images[0]
+```
+
 ## Config reference
 
 | Section | Key | Role |
@@ -170,7 +312,7 @@ student).
 | `model` | `mode` | `finetune` — loads the pretrained weights. |
 | `step_scheduler` | `global_batch_size`, `local_batch_size`, `max_steps`, `ckpt_every_steps`, `log_every` | Standard AutoModel scheduling knobs. |
 | `dmd2` | `recipe_path` | Built-in fastgen recipe to hydrate `DMDConfig` from (`general/distillation/dmd2_qwen_image`). |
-| `dmd2` | `pipeline_plugin` | `qwen_image` — selects `QwenImageDMDPipeline` (2×2 patch packing / img_shapes). |
+| `dmd2` | `pipeline_plugin` | `qwen_image` for T2I or `qwen_image_edit` for target + reference token packing. |
 | `dmd2` | `student_sample_steps` | Number of student sampling steps (e.g. 4). |
 | `dmd2` | `guidance_scale` | CFG strength on the teacher (`null` disables CFG; requires a negative-prompt embedding when set). |
 | `dmd2` | `gan_loss_weight_gen`, `gan_r1_reg_weight`, `gan_feature_indices`, … | GAN branch (set `gan_loss_weight_gen: 0` to disable). |
@@ -178,7 +320,7 @@ student).
 | `dmd2` | `sample_t_cfg`, `ema` | Timestep sampling + student EMA settings. |
 | `optim` | `learning_rate`, `optimizer.*` | Student AdamW knobs. |
 | `fsdp` | `dp_size`, `tp_size`, `activation_checkpointing`, … | FSDP2 parallelism (set `dp_size` to your GPU count). |
-| `data` | `dataloader._target_`, `cache_dir`, `negative_prompt_embedding_path` | Latent cache dir + optional CFG negative-prompt embedding. |
+| `data` | `dataloader._target_`, `cache_dir`, `negative_prompt_embedding_path` | Latent cache. The static negative path is T2I-only; edit negatives are cached per sample. |
 | `checkpoint` | `checkpoint_dir`, `model_save_format`, `restore_from` | Output dir, save format, resume behavior. |
 
 ## Troubleshooting

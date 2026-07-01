@@ -48,15 +48,27 @@ the diffusers ``[0, 1000]`` scale used for Wan / SD3 / Flux does NOT apply here)
 from __future__ import annotations
 
 import contextlib
+from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 
 import torch
+from packaging.version import Version
 from torch import nn
 
 from ..methods.dmd import DMDPipeline
 
 if TYPE_CHECKING:
     from ..config import DMDConfig
+
+
+try:
+    # Diffusers 0.35/0.36 requires explicit Python sequence lengths in Qwen's
+    # positional-embedding path. Starting in 0.37 the mask is authoritative and
+    # passing txt_seq_lens is deprecated. Keep the shared T2I plugin compatible
+    # with ModelOpt's broader diffusers extra while Edit-2511 pins the newer API.
+    _DIFFUSERS_NEEDS_TXT_SEQ_LENS = Version(version("diffusers")) < Version("0.37.0")
+except PackageNotFoundError:  # pragma: no cover - optional plugin import guard
+    _DIFFUSERS_NEEDS_TXT_SEQ_LENS = False
 
 __all__ = [
     "QwenImageDMDPipeline",
@@ -65,6 +77,7 @@ __all__ = [
     "pack_latents",
     "remove_feature_capture",
     "unpack_latents",
+    "update_feature_capture_shape",
 ]
 
 
@@ -206,6 +219,7 @@ class QwenImageDMDPipeline(DMDPipeline):
 
         packed = pack_latents(hidden_states)
         img_shapes = build_img_shapes(b, h, w)
+        update_feature_capture_shape(model, h, w)
 
         call_kwargs: dict[str, Any] = dict(model_kwargs)
         call_kwargs.pop("hidden_states", None)
@@ -214,8 +228,10 @@ class QwenImageDMDPipeline(DMDPipeline):
         call_kwargs.pop("guidance", None)
         call_kwargs.pop("return_dict", None)
         txt_seq_lens = call_kwargs.pop("txt_seq_lens", None)
-        if txt_seq_lens is None and encoder_hidden_states_mask is not None:
-            txt_seq_lens = encoder_hidden_states_mask.sum(dim=1).int().tolist()
+        if _DIFFUSERS_NEEDS_TXT_SEQ_LENS:
+            if txt_seq_lens is None and encoder_hidden_states_mask is not None:
+                txt_seq_lens = encoder_hidden_states_mask.sum(dim=1).int().tolist()
+            call_kwargs["txt_seq_lens"] = txt_seq_lens
 
         guidance = None
         if self._guidance_value is not None:
@@ -232,7 +248,6 @@ class QwenImageDMDPipeline(DMDPipeline):
             encoder_hidden_states=encoder_hidden_states,
             encoder_hidden_states_mask=encoder_hidden_states_mask,
             img_shapes=img_shapes,
-            txt_seq_lens=txt_seq_lens,
             guidance=guidance,
             return_dict=False,
             **call_kwargs,
@@ -266,6 +281,16 @@ _INDICES_ATTR = "_fastgen_capture_indices"
 _SHAPE_ATTR = "_fastgen_capture_shape"
 
 
+def update_feature_capture_shape(model: nn.Module, h_lat: int, w_lat: int) -> None:
+    """Refresh a hooked teacher's target shape for the current multiresolution batch."""
+    if h_lat % 2 or w_lat % 2:
+        raise ValueError(
+            f"feature capture requires even latent dims, got h_lat={h_lat}, w_lat={w_lat}."
+        )
+    if hasattr(model, _HANDLES_ATTR):
+        setattr(model, _SHAPE_ATTR, (h_lat // 2, w_lat // 2))
+
+
 def attach_feature_capture(
     teacher: nn.Module,
     feature_indices: list[int],
@@ -273,6 +298,7 @@ def attach_feature_capture(
     w_lat: int,
     *,
     blocks_attr: str = "transformer_blocks",
+    target_prefix_only: bool = False,
 ) -> None:
     """Install forward hooks on ``teacher.transformer_blocks[i]`` for each ``i`` in ``feature_indices``.
 
@@ -297,6 +323,11 @@ def attach_feature_capture(
         blocks_attr: Attribute under which the teacher exposes its block stack.
             Default ``"transformer_blocks"`` matches diffusers'
             ``QwenImageTransformer2DModel``.
+        target_prefix_only: When ``True``, allow the captured image-token sequence to
+            contain extra tokens after the target image and retain only the leading
+            ``(h_lat // 2) * (w_lat // 2)`` target tokens. Qwen-Image-Edit concatenates
+            packed reference-image tokens after the noisy target tokens. The default is
+            ``False`` so the text-to-image path keeps its strict sequence-length check.
 
     Raises:
         AttributeError: ``teacher`` does not expose ``blocks_attr``.
@@ -336,8 +367,6 @@ def attach_feature_capture(
     setattr(teacher, _SHAPE_ATTR, (h_lat // 2, w_lat // 2))
 
     handles: list[Any] = []
-    h_half = h_lat // 2
-    w_half = w_lat // 2
     for idx in sorted_indices:
         block = blocks[idx]
 
@@ -354,13 +383,20 @@ def attach_feature_capture(
                 )
             # hidden: [B, num_image_patches, C] -> [B, C, H_half, W_half].
             b, s, c = hidden.shape
+            h_half, w_half = getattr(teacher, _SHAPE_ATTR)
             expected_s = h_half * w_half
-            if s != expected_s:
+            if s < expected_s or (not target_prefix_only and s != expected_s):
+                expected_description = (
+                    f"at least {expected_s}" if target_prefix_only else str(expected_s)
+                )
                 raise RuntimeError(
                     f"QwenImage feature-capture got hidden_states seq_len={s} but expected "
-                    f"{expected_s} = (h_lat // 2) * (w_lat // 2). Did the input resolution "
-                    f"drift from the attach_feature_capture-time setting?"
+                    f"{expected_description} target tokens, where {expected_s} = "
+                    "(h_lat // 2) * (w_lat // 2). Did the input resolution drift from "
+                    "the attach_feature_capture-time setting?"
                 )
+            if target_prefix_only:
+                hidden = hidden[:, :expected_s]
             feat = hidden.permute(0, 2, 1).reshape(b, c, h_half, w_half)
             captured.append(feat)
 

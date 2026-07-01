@@ -38,9 +38,12 @@ The training configs reference these via ``_target_: fastgen_data.build_*`` once
 # Convert a missing-helper ImportError into an actionable message naming the supported range.
 try:
     from .collate_fns import (
+        build_image_to_image_multiresolution_dataloader,
         build_text_to_image_multiresolution_dataloader,
+        collate_fn_image_to_image,
         collate_fn_text_to_image,
     )
+    from .image_to_image_dataset import ImageToImageDataset
     from .text_to_image_dataset import TextToImageDataset
 except ImportError as exc:  # pragma: no cover - environment guard
     raise ImportError(
@@ -53,8 +56,11 @@ except ImportError as exc:  # pragma: no cover - environment guard
     ) from exc
 
 __all__ = [
+    "ImageToImageDataset",
     "TextToImageDataset",
+    "build_image_to_image_multiresolution_dataloader",
     "build_text_to_image_multiresolution_dataloader",
+    "collate_fn_image_to_image",
     "collate_fn_text_to_image",
 ]
 

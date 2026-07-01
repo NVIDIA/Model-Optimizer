@@ -25,3 +25,4 @@ from modelopt.torch.utils import import_plugin
 
 with import_plugin("qwen_image"):
     from .qwen_image import *
+    from .qwen_image_edit import *

@@ -38,9 +38,114 @@ import torch
 from nemo_automodel.components.datasets.diffusion.sampler import SequentialBucketSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from .image_to_image_dataset import ImageToImageDataset
 from .text_to_image_dataset import TextToImageDataset
 
 logger = logging.getLogger(__name__)
+
+
+def _pad_text_conditioning(
+    batch: list[dict],
+    embedding_key: str,
+    mask_key: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Right-pad variable-length embeddings and masks from cached edit samples."""
+
+    embeddings = [item[embedding_key] for item in batch]
+    masks = [item[mask_key] for item in batch]
+    if any(not torch.is_tensor(value) or value.ndim != 2 for value in embeddings):
+        shapes = [getattr(value, "shape", None) for value in embeddings]
+        raise ValueError(f"{embedding_key} values must have shape [seq,dim], got {shapes}")
+    hidden_dims = {value.shape[1] for value in embeddings}
+    dtypes = {value.dtype for value in embeddings}
+    if len(hidden_dims) != 1 or len(dtypes) != 1:
+        raise ValueError(
+            f"{embedding_key} hidden dimensions/dtypes must match across a batch: "
+            f"dims={hidden_dims}, dtypes={dtypes}"
+        )
+
+    max_length = max(value.shape[0] for value in embeddings)
+    hidden_dim = embeddings[0].shape[1]
+    padded = embeddings[0].new_zeros((len(batch), max_length, hidden_dim))
+    padded_mask = torch.zeros((len(batch), max_length), dtype=torch.long)
+    for index, (embedding, mask) in enumerate(zip(embeddings, masks)):
+        if not torch.is_tensor(mask) or mask.ndim != 1 or mask.shape[0] != embedding.shape[0]:
+            raise ValueError(
+                f"{mask_key} for sample {index} must have shape [{embedding.shape[0]}], "
+                f"got {getattr(mask, 'shape', None)}"
+            )
+        length = embedding.shape[0]
+        padded[index, :length] = embedding
+        padded_mask[index, :length] = mask.to(dtype=torch.long)
+    return padded, padded_mask
+
+
+def collate_fn_image_to_image(batch: list[dict]) -> dict:
+    """Build a Qwen-Image-Edit batch and validate reference compatibility.
+
+    ``conditioning_latents`` remains a list, one entry per reference image.  Each entry is a
+    stacked ``[B,C,H,W]`` tensor, which preserves support for references with different aspect
+    ratios while ensuring a given reference slot is stackable across the batch.
+    """
+
+    if not batch:
+        raise ValueError("Cannot collate an empty image-to-image batch")
+    resolutions = {tuple(item["crop_resolution"].tolist()) for item in batch}
+    if len(resolutions) != 1:
+        raise ValueError(f"Mixed target resolutions in batch: {resolutions}")
+
+    reference_counts = {len(item["conditioning_latents"]) for item in batch}
+    if len(reference_counts) != 1:
+        raise ValueError(f"Mixed conditioning-image counts in batch: {reference_counts}")
+    reference_count = reference_counts.pop()
+    if reference_count < 1:
+        raise ValueError("Every image-to-image sample must contain at least one reference")
+
+    conditioning_latents = []
+    for reference_index in range(reference_count):
+        shapes = {tuple(item["conditioning_latents"][reference_index].shape) for item in batch}
+        if len(shapes) != 1:
+            raise ValueError(
+                f"Reference {reference_index} has mixed latent shapes in batch: {shapes}"
+            )
+        conditioning_latents.append(
+            torch.stack([item["conditioning_latents"][reference_index] for item in batch])
+        )
+
+    text_embeddings, text_mask = _pad_text_conditioning(
+        batch, "prompt_embeds", "prompt_embeds_mask"
+    )
+    negative_embeddings, negative_mask = _pad_text_conditioning(
+        batch, "negative_prompt_embeds", "negative_prompt_embeds_mask"
+    )
+
+    image_batch = {
+        "image_latents": torch.stack([item["latent"] for item in batch]),
+        "conditioning_latents": conditioning_latents,
+        "data_type": "image_edit",
+        "text_embeddings": text_embeddings,
+        "text_embeddings_mask": text_mask,
+        "negative_text_embeddings": negative_embeddings,
+        "negative_text_embeddings_mask": negative_mask,
+        "metadata": {
+            "sample_ids": [item["sample_id"] for item in batch],
+            "prompts": [item["prompt"] for item in batch],
+            "negative_prompts": [item["negative_prompt"] for item in batch],
+            "image_paths": [item["image_path"] for item in batch],
+            "conditioning_image_paths": [item["conditioning_image_paths"] for item in batch],
+            "conditioning_resolutions": [item["conditioning_resolutions"] for item in batch],
+            "target_latent_shapes": [item["target_latent_shape"] for item in batch],
+            "conditioning_latent_shapes": [item["conditioning_latent_shapes"] for item in batch],
+            "bucket_ids": [item["bucket_id"] for item in batch],
+            "aspect_ratios": [item["aspect_ratio"] for item in batch],
+            "crop_resolution": torch.stack([item["crop_resolution"] for item in batch]),
+            "original_resolution": torch.stack([item["original_resolution"] for item in batch]),
+            "crop_offset": torch.stack([item["crop_offset"] for item in batch]),
+        },
+    }
+    if "source_metadata" in batch[0]:
+        image_batch["metadata"]["source_metadata"] = [item.get("source_metadata") for item in batch]
+    return image_batch
 
 
 def collate_fn_text_to_image(
@@ -240,3 +345,69 @@ def build_text_to_image_multiresolution_dataloader(
         dp_world_size,
     )
     return dataloader, sampler
+
+
+def build_image_to_image_multiresolution_dataloader(
+    *,
+    cache_dir: str,
+    train_text_encoder: bool = False,
+    batch_size: int = 1,
+    dp_rank: int = 0,
+    dp_world_size: int = 1,
+    base_resolution: tuple[int, int] = (256, 256),
+    drop_last: bool = True,
+    shuffle: bool = True,
+    dynamic_batch_size: bool = False,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    prefetch_factor: int = 2,
+) -> tuple[StatefulDataLoader, SequentialBucketSampler]:
+    """Build the cached Qwen-Image-Edit multiresolution dataloader.
+
+    Positive and negative embeddings are both sample-specific because each contains visual
+    tokens from that sample's references, so this builder intentionally has no static negative
+    prompt embedding argument.
+    """
+
+    dataset = ImageToImageDataset(
+        cache_dir=cache_dir,
+        train_text_encoder=train_text_encoder,
+    )
+    sampler = SequentialBucketSampler(
+        dataset,
+        base_batch_size=batch_size,
+        base_resolution=base_resolution,
+        drop_last=drop_last,
+        shuffle_buckets=shuffle,
+        shuffle_within_bucket=shuffle,
+        dynamic_batch_size=dynamic_batch_size,
+        num_replicas=dp_world_size,
+        rank=dp_rank,
+    )
+    dataloader = StatefulDataLoader(
+        dataset,
+        batch_sampler=sampler,
+        collate_fn=collate_fn_image_to_image,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
+    )
+    logger.info(
+        "image-to-image dataloader | cache_dir=%s size=%d batches/epoch=%d batch_size=%d dp=%d/%d",
+        cache_dir,
+        len(dataset),
+        len(sampler),
+        batch_size,
+        dp_rank,
+        dp_world_size,
+    )
+    return dataloader, sampler
+
+
+__all__ = [
+    "build_image_to_image_multiresolution_dataloader",
+    "build_text_to_image_multiresolution_dataloader",
+    "collate_fn_image_to_image",
+    "collate_fn_text_to_image",
+]

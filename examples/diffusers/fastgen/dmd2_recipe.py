@@ -20,10 +20,10 @@ so it inherits AutoModel's student + optimizer + dataloader + checkpoint plumbin
 drives ``modelopt.torch.fastgen.DMDPipeline`` (or a plugin subclass) through the
 three-phase DMD2 alternation (student update / fake-score update / EMA step).
 
-Backbone: **Qwen-Image** (``Qwen/Qwen-Image``) — 4D ``image_latents``,
-:class:`QwenImageDMDPipeline` handles 2x2 patch packing / img_shapes /
-unpacking. Config: ``configs/dmd2_qwen_image.yaml`` — the canonical
-real-data run (4-step + CFG + GAN).
+Backbones: **Qwen-Image** and **Qwen-Image-Edit-2511** — both train 4D target
+``image_latents``. :class:`QwenImageDMDPipeline` handles T2I patch packing;
+:class:`QwenImageEditDMDPipeline` additionally appends clean reference-image tokens and
+crops predictions back to the target prefix. Canonical configs live under ``configs/``.
 
 Launch::
 
@@ -37,6 +37,8 @@ alternation diagram + troubleshooting notes.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -54,6 +56,11 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 # and surfaced as a downstream ``TypeError: takes no arguments``.
 try:
     from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
+    from nemo_automodel.components.distributed.parallelizer import (
+        PARALLELIZATION_STRATEGIES,
+        DefaultParallelizationStrategy,
+        register_parallel_strategy,
+    )
     from nemo_automodel.recipes.diffusion.train import TrainDiffusionRecipe, is_main_process
 except ImportError as exc:
     raise ImportError(
@@ -68,10 +75,67 @@ from fastgen_checkpoint import make_optimizer_partial_load_tolerant
 from torch import nn
 
 import modelopt.torch.fastgen as mtf
+import modelopt.torch.opt as mto
 from modelopt.torch.fastgen.config import DMDConfig
 from modelopt.torch.fastgen.discriminators import Discriminator_ImageDiT
 from modelopt.torch.fastgen.methods.dmd import DMDPipeline
 from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
+from modelopt.torch.quantization.utils.core_utils import set_quantizer_state_dict
+
+
+class _QwenImageParallelizationStrategy(DefaultParallelizationStrategy):
+    """Add full-block activation checkpointing to AutoModel's native FSDP flow.
+
+    AutoModel's default decoder-layer checkpointing recognizes ``self_attn`` / ``mlp``
+    attributes. Diffusers' Qwen image blocks instead contain joint ``attn``, ``img_mlp``,
+    and ``txt_mlp`` paths, so that generic logic wraps nothing. Diffusers checkpoints each
+    complete block; mirror that boundary, then delegate TP/FSDP behavior unchanged.
+    """
+
+    def parallelize(
+        self,
+        model,
+        device_mesh,
+        activation_checkpointing: bool = False,
+        **kwargs,
+    ):
+        if activation_checkpointing:
+            from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                CheckpointImpl,
+                checkpoint_wrapper,
+            )
+
+            blocks = getattr(model, "transformer_blocks", None)
+            if blocks is None:
+                raise AttributeError(
+                    "QwenImageTransformer2DModel does not expose `transformer_blocks`"
+                )
+            for index, block in enumerate(blocks):
+                blocks[index] = checkpoint_wrapper(
+                    block,
+                    checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                )
+            logging.info(
+                "[DMD2] Qwen-Image activation checkpointing enabled for %d full blocks",
+                len(blocks),
+            )
+
+        return super().parallelize(
+            model,
+            device_mesh,
+            activation_checkpointing=False,
+            **kwargs,
+        )
+
+
+def _register_qwen_image_parallelization_strategy() -> None:
+    """Install the Qwen strategy unless AutoModel already provides a native one."""
+    model_class_name = "QwenImageTransformer2DModel"
+    if model_class_name not in PARALLELIZATION_STRATEGIES:
+        register_parallel_strategy(name=model_class_name)(_QwenImageParallelizationStrategy)
+
+
+_register_qwen_image_parallelization_strategy()
 
 # Keys under the ``dmd2:`` YAML block that shadow fields on :class:`DMDConfig`. The
 # recipe deep-merges these on top of the loaded built-in recipe so users can tweak DMD2
@@ -98,17 +162,69 @@ def _deep_merge_dicts(base: dict, override: dict) -> dict:
     return merged
 
 
+def restore_quantizer_state(model: nn.Module, path: str) -> nn.Module:
+    """Re-insert the quantizer modules + load the frozen amax onto ``model`` from ``path``.
+
+    ``path`` is the weight-free ModelOpt quantizer state written by the
+    ``examples/diffusers/quantization`` calibration example
+    (``--quantized-torch-ckpt-save-path`` → ``transformer.pt``): ``mto.modelopt_state``
+    (which layers are quantized, FP8/NVFP4, axes) bundled with the per-quantizer buffers
+    (``amax``, ...) under ``modelopt_state_weights``. It carries NO model weights; ``model``
+    must already hold the weights the amax was calibrated against (here: the DMD2 student
+    warm-started from the FP checkpoint).
+
+    This re-applies the quantization recipe (module conversion -- ``nn.Linear`` ->
+    ``QuantLinear``, in place, preserving the existing ``weight``/``bias`` Parameter objects
+    so any pre-built FSDP2 optimizer's references stay valid) and loads the saved amax. It
+    is RESTORE-ONLY: no calibration forward pass is run, so amax stays exactly as it was on
+    disk and remains frozen for the whole training run.
+    """
+    modelopt_state = mto.load_modelopt_state(str(path))
+    quantizer_state = modelopt_state.pop("modelopt_state_weights", None)
+    mto.restore_from_modelopt_state(model, modelopt_state)
+    if quantizer_state is not None:
+        set_quantizer_state_dict(model, quantizer_state)
+    return model
+
+
 # Auto-detect substrings (matched case-insensitively against ``model_id``) that map to
 # DMDPipeline plugin subclasses. Keep this list small — adding a new entry is only the
 # right move when the model has a non-diffusers transformer signature that requires a
 # pack/unpack wrapper. Models with the standard ``(hidden_states, timestep,
 # encoder_hidden_states)`` signature work with the base :class:`DMDPipeline`.
 _PIPELINE_PLUGIN_BY_MODEL_SUBSTR = (
+    # Edit must precede the generic Qwen-Image match: the edit transformer consumes
+    # target tokens followed by one or more reference-image token sequences.
+    ("qwen-image-edit", "qwen_image_edit"),
+    ("qwen_image_edit", "qwen_image_edit"),
     ("qwen-image", "qwen_image"),
     ("qwen_image", "qwen_image"),
 )
 
 _DMD_COMPLETE_MARKER = "dmd2_complete.marker"
+
+
+@dataclasses.dataclass(frozen=True)
+class _QuantSettings:
+    """Resolved ``dmd2.quant`` block — restore-only QAT of the student (no calibration).
+
+    Attributes:
+        enabled: When ``True`` the student is quantized by RESTORING a ModelOpt quantizer
+            state from disk (recipe + frozen amax). The trainer never calibrates.
+        quant_state_path: Path to the quantizer-state file produced by the
+            ``examples/diffusers/quantization`` calibration example
+            (``--quantized-torch-ckpt-save-path`` → ``transformer.pt``). Used on the FIRST
+            launch (warm-start) to quantize the FP student. Required when ``enabled``.
+        init_weights_from: Optional path to the full-precision DMD2 checkpoint to
+            warm-start the student / fake_score / discriminator / EMA / optimizers from
+            when the run's own ``checkpoint_dir`` has no QAT checkpoint yet. The amax in
+            ``quant_state_path`` must have been calibrated against this checkpoint's
+            student weights.
+    """
+
+    enabled: bool
+    quant_state_path: str | None
+    init_weights_from: str | None
 
 
 class DMD2DiffusionRecipe(TrainDiffusionRecipe):
@@ -379,6 +495,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                         neg_text_embeds,
                         neg_text_mask,
                     ) = self._prepare_micro_batch(micro_batch)
+                    model_kwargs = self._prepare_model_kwargs(micro_batch)
 
                     if is_student_phase:
                         # ``compute_student_loss`` reads ``guidance_scale`` from the
@@ -394,6 +511,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                             negative_encoder_hidden_states=neg_text_embeds,
                             negative_encoder_hidden_states_mask=neg_text_mask,
                             guidance_scale=None,
+                            **model_kwargs,
                         )
                         micro_vsd_losses.append(float(losses["vsd"].item()))
                     else:
@@ -402,6 +520,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                             noise,
                             encoder_hidden_states=text_embeds,
                             encoder_hidden_states_mask=text_mask,
+                            **model_kwargs,
                         )
 
                     (losses["total"] / len(batch_group)).backward()
@@ -421,6 +540,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                             noise,
                             encoder_hidden_states=text_embeds,
                             encoder_hidden_states_mask=text_mask,
+                            **model_kwargs,
                         )
                         (disc_losses["total"] / len(batch_group)).backward()
                         # Manual gradient all-reduce across DP ranks (the
@@ -538,10 +658,33 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         # ``nemo_automodel`` can be used unmodified.
         make_optimizer_partial_load_tolerant(self.checkpointer)
 
+        quant = self._resolve_quant_settings()
+
         resolved = self._resolve_complete_dmd_checkpoint(restore_from)
+
+        # QAT first launch: the run's own checkpoint_dir has no QAT checkpoint yet, so
+        # warm-start the FP student / fake_score / EMA / optimizers from the full-precision
+        # checkpoint named by ``dmd2.quant.init_weights_from`` (the FP run the amax was
+        # calibrated against). On later resumes ``resolved`` already points at a QAT
+        # checkpoint in checkpoint_dir, so this branch is skipped.
+        if quant.enabled and resolved is None and quant.init_weights_from:
+            resolved = self._resolve_complete_dmd_checkpoint(quant.init_weights_from)
+            if is_main_process():
+                logging.info(
+                    "[DMD2][qat] no QAT checkpoint in checkpoint_dir; warm-starting FP "
+                    "state from dmd2.quant.init_weights_from=%s",
+                    quant.init_weights_from,
+                )
+
         self.__dict__["_dmd2_resolved_restore_from"] = resolved
 
         if resolved is None:
+            if quant.enabled and is_main_process():
+                logging.warning(
+                    "[DMD2][qat] QAT enabled but no checkpoint resolved (checkpoint_dir empty "
+                    "and dmd2.quant.init_weights_from unset). Quantizing a fresh base model — "
+                    "its weights will NOT match the calibrated amax."
+                )
             if (
                 restore_from is not None
                 and str(restore_from).upper() == "LATEST"
@@ -552,9 +695,136 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                     "Starting fresh.",
                     self.checkpointer.config.checkpoint_dir,
                 )
+            # Even with no weights to restore, honor QAT by quantizing from the recipe file.
+            if quant.enabled:
+                self._quantize_student(quant.quant_state_path)
             return
 
+        # Single restore path. The student-weight checkpoints are always clean FP (the QAT
+        # save hides the quantizer buffers — see ``_student_quant_buffers_hidden``), so the
+        # strict DCP load matches an unquantized student whether this is a warm-start from
+        # the FP checkpoint or a resume from a QAT checkpoint. Quantization always happens
+        # AFTER the weights are in place.
         super().load_checkpoint(resolved)
+
+        if quant.enabled:
+            # Restore-only QAT never recalibrates, so the recipe + amax are invariant for the
+            # whole run — re-apply the same configured quantizer-state file on every (re)start
+            # rather than persisting an unchanging copy per checkpoint.
+            self._quantize_student(quant.quant_state_path)
+
+    def _resolve_quant_settings(self) -> _QuantSettings:
+        """Parse and cache the ``dmd2.quant`` block (restore-only student QAT)."""
+        cached = self.__dict__.get("_quant_settings")
+        if cached is not None:
+            return cached
+
+        node = self.cfg.get("dmd2.quant", None)
+        if node is None:
+            settings = _QuantSettings(enabled=False, quant_state_path=None, init_weights_from=None)
+            self.__dict__["_quant_settings"] = settings
+            return settings
+
+        d = node.to_dict() if hasattr(node, "to_dict") else dict(node)
+        enabled = bool(d.get("enabled", False))
+        quant_state_path = d.get("quant_state_path")
+        init_weights_from = d.get("init_weights_from")
+        if enabled and not quant_state_path:
+            raise ValueError(
+                "dmd2.quant.enabled is true but dmd2.quant.quant_state_path is not set. Point it "
+                "at the quantizer-state file produced by examples/diffusers/quantization "
+                "(its --quantized-torch-ckpt-save-path, e.g. .../quant/transformer.pt)."
+            )
+        settings = _QuantSettings(
+            enabled=enabled,
+            quant_state_path=quant_state_path,
+            init_weights_from=init_weights_from,
+        )
+        self.__dict__["_quant_settings"] = settings
+        return settings
+
+    def _quantize_student(self, quant_state_path: str | None) -> None:
+        """Quantize the student by RESTORING a ModelOpt quantizer state from disk.
+
+        Restore-only: re-inserts the quantizer modules from the saved recipe and loads the
+        precomputed, frozen amax. No ``mtq.quantize`` / calibration forward pass is ever
+        run, so amax stays exactly as it was on disk for the whole training run. Only the
+        student (``self.model``) is quantized — the frozen teacher and the trainable
+        fake_score stay full precision so the distribution-matching gradient is exact.
+
+        Safe after FSDP2 wrapping: the conversion is an in-place ``__class__`` swap that
+        preserves the existing ``weight``/``bias`` Parameter objects, so the already-built
+        student optimizer's references stay valid (verified by ModelOpt's
+        ``tests/gpu/torch/quantization/test_fsdp2.py``).
+        """
+        if not quant_state_path:
+            raise ValueError(
+                "[DMD2][qat] _quantize_student called without a quant_state_path. Set "
+                "dmd2.quant.quant_state_path."
+            )
+        if not os.path.isfile(quant_state_path):
+            raise FileNotFoundError(
+                f"[DMD2][qat] quantizer-state file not found: {quant_state_path}. QAT here is "
+                "restore-only (no on-the-fly calibration); produce it with "
+                "examples/diffusers/quantization first."
+            )
+
+        if is_main_process():
+            logging.info(
+                "[DMD2][qat] restoring student quantizer state (recipe + frozen amax) <- %s",
+                quant_state_path,
+            )
+        restore_quantizer_state(self.model, quant_state_path)
+
+        # amax (and any other quantizer buffers) come off disk on CPU. Move just the
+        # TensorQuantizer buffers onto the student device — these modules carry no
+        # parameters, so this never touches the FSDP2 DTensor weights.
+        from modelopt.torch.quantization.nn import TensorQuantizer
+
+        for module in self.model.modules():
+            if isinstance(module, TensorQuantizer):
+                module.to(self.device)
+
+        if is_main_process():
+            import modelopt.torch.quantization as mtq
+
+            logging.info("[DMD2][qat] student quantized (restore-only). Quantizer summary:")
+            mtq.print_quant_summary(self.model)
+
+    @contextlib.contextmanager
+    def _student_quant_buffers_hidden(self):
+        """Temporarily mark the student's quantizer buffers non-persistent.
+
+        Wraps the parent ``save_checkpoint`` so the student's DCP shards AND the
+        consolidated/diffusers export stay clean full-precision (``ModelState.state_dict()``
+        — and hence the consolidated index, which re-adds every state_dict key
+        (checkpointing.py:941-948) — excludes the ``amax`` buffers). The frozen amax is not
+        persisted per checkpoint at all: it is re-applied from ``dmd2.quant.quant_state_path``
+        on every (re)start. Keeping the saved student weights amax-free both yields a clean
+        ``model/consolidated`` (a normal ``QwenImageTransformer2DModel``, re-quantizable for
+        deploy/eval) and makes every restore a clean ``load FP weights -> quantize`` path
+        (the strict DCP load matches an unquantized student). Mirrors ModelOpt's own trick in
+        ``quantization/plugins/transformers_trainer.py`` (``_modelopt_prepare``).
+
+        No-op when QAT is disabled.
+        """
+        if not self._resolve_quant_settings().enabled:
+            yield
+            return
+
+        from modelopt.torch.quantization.nn import TensorQuantizer
+
+        saved: list[tuple[TensorQuantizer, set[str]]] = []
+        for module in self.model.modules():
+            if isinstance(module, TensorQuantizer):
+                saved.append((module, set(module._non_persistent_buffers_set)))
+                module._non_persistent_buffers_set.update(module._buffers.keys())
+        try:
+            yield
+        finally:
+            for module, original in saved:
+                module._non_persistent_buffers_set.clear()
+                module._non_persistent_buffers_set.update(original)
 
     def save_checkpoint(
         self,
@@ -588,7 +858,11 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                 self.checkpointer.config.checkpoint_dir
             )
 
-        super().save_checkpoint(epoch, step, train_loss, val_loss, best_metric_key)
+        # Hide the student's quantizer buffers during the parent save so the DCP shards and
+        # consolidated/diffusers export stay clean FP. Frozen amax remains external in
+        # ``dmd2.quant.quant_state_path`` and is re-applied on restore. No-op when QAT is disabled.
+        with self._student_quant_buffers_hidden():
+            super().save_checkpoint(epoch, step, train_loss, val_loss, best_metric_key)
 
         if not self.checkpointer.config.enabled:
             return
@@ -861,6 +1135,9 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if not complete:
             return False
 
+        # QAT adds no per-checkpoint artifact (the quantizer recipe + frozen amax are
+        # re-applied from dmd2.quant.quant_state_path on every (re)start), so QAT
+        # checkpoints use the same completeness criteria as full-precision ones.
         if self._cfg_gan_enabled():
             return os.path.isfile(os.path.join(path, "discriminator.pt")) and os.path.isfile(
                 os.path.join(path, "discriminator_optimizer.pt")
@@ -976,10 +1253,10 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     def _attach_gan_feature_capture(self) -> None:
         """Install Qwen-Image feature-capture hooks on the teacher when GAN is enabled.
 
-        Reads the latent resolution from the dataloader so the hook can reshape
+        Reads an initial latent resolution from the dataloader so the hook can reshape
         ``[B, num_image_patches, 3072]`` into ``[B, 3072, H_lat//2, W_lat//2]``.
-        Mock dataloader → spatial_h/spatial_w from the YAML. Real dataloader →
-        base_resolution / vae_scale.
+        The Qwen plugin refreshes that shape before every teacher forward, so real
+        multiresolution batches are captured using their actual target dimensions.
         """
         feature_indices = list(self.cfg.get("dmd2.gan_feature_indices", [30]))
 
@@ -1020,6 +1297,11 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             feature_indices=feature_indices,
             h_lat=h_lat,
             w_lat=w_lat,
+            # Edit models append reference-image tokens after the target tokens. The GAN
+            # discriminator is defined on the generated target only, so capture its prefix.
+            target_prefix_only=(
+                self._resolve_pipeline_cls().__name__ == "QwenImageEditDMDPipeline"
+            ),
         )
         if is_main_process():
             logging.info(
@@ -1123,13 +1405,18 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             from modelopt.torch.fastgen.plugins.qwen_image import QwenImageDMDPipeline
 
             return QwenImageDMDPipeline
+        if explicit == "qwen_image_edit":
+            from modelopt.torch.fastgen.plugins.qwen_image_edit import QwenImageEditDMDPipeline
+
+            return QwenImageEditDMDPipeline
         raise ValueError(
-            f"Unknown dmd2.pipeline_plugin={explicit!r}. Supported: null/'base', 'qwen_image'."
+            f"Unknown dmd2.pipeline_plugin={explicit!r}. Supported: null/'base', "
+            "'qwen_image', 'qwen_image_edit'."
         )
 
     def _resolve_pipeline_kwargs(self, pipeline_cls: type[DMDPipeline]) -> dict[str, Any]:
         """Extra kwargs to forward to the pipeline subclass constructor (plugin-specific)."""
-        if pipeline_cls.__name__ == "QwenImageDMDPipeline":
+        if pipeline_cls.__name__ in {"QwenImageDMDPipeline", "QwenImageEditDMDPipeline"}:
             # Optional ``guidance`` value passed to the transformer's guidance kwarg every
             # call. Independent of DMDConfig.guidance_scale (which drives the negative-
             # prompt CFG path on the teacher). Leave ``None`` to skip the embedding when
@@ -1288,6 +1575,59 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         # Fresh noise per micro-batch — DMD2 samples noise independently at each loss call.
         noise = torch.randn_like(latents)
         return latents, noise, text_embeds, text_mask, negative_text_embeds, negative_text_mask
+
+    def _prepare_model_kwargs(self, micro_batch: dict[str, Any]) -> dict[str, Any]:
+        """Move optional model-specific conditioning to the training device.
+
+        Qwen-Image-Edit caches one or more VAE-encoded reference images separately from
+        the clean target latent. The edit plugin packs these tensors and appends them to
+        every student / teacher / fake-score forward. Keeping the data as a list allows
+        references with different aspect ratios while retaining a regular batch dimension
+        for each reference slot.
+        """
+        conditioning = micro_batch.get("conditioning_latents")
+        if conditioning is None:
+            return {}
+
+        if torch.is_tensor(conditioning):
+            if conditioning.ndim == 4:
+                conditioning = [conditioning]
+            elif conditioning.ndim == 5:
+                # Collates may represent refs as [B, N, C, H, W]. Convert to the
+                # plugin's list-of-[B,C,H,W] contract.
+                conditioning = list(conditioning.unbind(dim=1))
+            else:
+                raise ValueError(
+                    "conditioning_latents tensor must be [B,C,H,W] or [B,N,C,H,W], "
+                    f"got shape {tuple(conditioning.shape)}."
+                )
+        elif isinstance(conditioning, (list, tuple)):
+            conditioning = list(conditioning)
+        else:
+            raise TypeError(
+                "conditioning_latents must be a tensor or a list/tuple of tensors; "
+                f"got {type(conditioning).__name__}."
+            )
+
+        if not conditioning:
+            raise ValueError("conditioning_latents must contain at least one reference image.")
+
+        expected_batch = int(micro_batch["image_latents"].shape[0])
+        prepared: list[torch.Tensor] = []
+        for ref_index, ref in enumerate(conditioning):
+            if not torch.is_tensor(ref) or ref.ndim != 4:
+                shape = tuple(ref.shape) if torch.is_tensor(ref) else None
+                raise ValueError(
+                    f"conditioning_latents[{ref_index}] must be [B,C,H,W], got {shape}."
+                )
+            if int(ref.shape[0]) != expected_batch:
+                raise ValueError(
+                    f"conditioning_latents[{ref_index}] batch={ref.shape[0]} does not match "
+                    f"target batch={expected_batch}."
+                )
+            prepared.append(ref.to(self.device, dtype=self.bf16, non_blocking=True))
+
+        return {"conditioning_latents": tuple(prepared)}
 
     def _log_step(
         self,

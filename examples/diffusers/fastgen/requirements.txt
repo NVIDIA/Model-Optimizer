@@ -9,5 +9,9 @@
 # fastgen_data/__init__.py adds a runtime guard with an actionable message if the helpers move.
 nemo_automodel[diffusion]>=0.4.0,<1.0
 
+# Qwen-Image-Edit-2511 needs EditPlus plus the transformer's ``zero_cond_t`` handling,
+# which landed after the stable 0.36 release (the checkpoint reports 0.36.0.dev0).
+diffusers>=0.37.0
+
 # Optional but recommended for the smoke logs.
 wandb

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Entrypoint for the DMD2 Qwen-Image AutoModel example.
+"""Entrypoint for the DMD2 Qwen-Image / Qwen-Image-Edit AutoModel examples.
 
 Parses the YAML config + CLI overrides with AutoModel's argument parser, then hands
 control to :class:`DMD2DiffusionRecipe`.
