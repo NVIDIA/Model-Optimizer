@@ -193,6 +193,6 @@ lands in E4M3's representable window; the rare out-of-range block falls back to 
 data-derived scale). The flag only affects routed-expert **weights** — activation
 `input_scale` still comes from `${AMAX}` calibration — and the run prints a
 `[cast] lossless MXFP4->NVFP4 blocks: …` summary. This mirrors the GPTOSS cast in
-[`examples/llm_ptq/cast_mxfp4_to_nvfp4.py`](../llm_ptq/cast_mxfp4_to_nvfp4.py); the
+[`examples/hf_ptq/cast_mxfp4_to_nvfp4.py`](../hf_ptq/cast_mxfp4_to_nvfp4.py); the
 V4 twist is that w1/w3 share one `scale_2` (fused GEMM1), so `k_max` is taken over
 both projections.

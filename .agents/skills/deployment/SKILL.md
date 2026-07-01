@@ -194,6 +194,14 @@ curl -s http://localhost:8000/v1/completions \
 
 All checks must pass before reporting success to the user.
 
+### 5b. Benchmark throughput/latency (optional)
+
+If the user asks to benchmark, measure throughput/latency, or compare precisions,
+use **AIPerf** (Apache-2.0, OpenAI-compatible client benchmark). See
+`references/benchmarking.md` for install, the pre-benchmark coherence gate, the
+`aiperf profile` flags (notably `--extra-inputs ignore_eos:true`), suggested
+token shapes, and how to read `profile_export_aiperf.json`.
+
 ### 6. Remote deployment (SSH/SLURM)
 
 If a cluster config exists (`~/.config/modelopt/clusters.yaml`, `.agents/clusters.yaml`, or `.claude/clusters.yaml`), or the user mentions running on a remote machine:

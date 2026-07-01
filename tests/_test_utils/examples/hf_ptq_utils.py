@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 
 import pytest
 import torch
-from _test_utils.examples.run_command import run_llm_ptq_command
+from _test_utils.examples.run_command import run_hf_ptq_command
 
 
 @dataclass
@@ -62,7 +62,7 @@ class PTQCommand:
         param_dict.pop("min_gpu", None)
 
         quant = param_dict.pop("quant")
-        run_llm_ptq_command(model=model_path, quant=quant, **param_dict)
+        run_hf_ptq_command(model=model_path, quant=quant, **param_dict)
 
     def param_str(self):
         param_dict = asdict(self)

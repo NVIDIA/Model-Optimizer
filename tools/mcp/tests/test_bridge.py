@@ -394,6 +394,140 @@ def test_submit_job_source_checkout_failure_short_circuits(monkeypatch):
     assert result["reason"] == "source_ref_not_found"
 
 
+def test_submit_job_docker_captures_experiment_id_from_launcher_output(monkeypatch, tmp_path):
+    """Docker submit tails launcher output long enough to return nemo_run's id."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "nemo"))
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    class FakePopen:
+        pid = 4242
+
+        def __init__(self, argv, **kwargs):
+            self.argv = argv
+            out = kwargs["stdout"]
+            out.write(
+                b"Experiment Status for docker_1782173197\n"
+                b'experiment = run.Experiment.from_id("docker_1782173197")\n'
+            )
+            out.flush()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local="/tmp/hf",
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+
+    assert result["ok"] is True
+    assert result["executor"] == "docker"
+    assert result["pid"] == 4242
+    assert result["experiment_id"] == "docker_1782173197"
+    assert "docker_1782173197" in result["stdout_tail"]
+    assert result["stdout_log"].endswith(".log")
+
+
+def test_submit_job_docker_no_experiment_id_returns_pid_and_log(monkeypatch, tmp_path):
+    """Docker submit stays detached when the id is not printed immediately."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "nemo"))
+    monkeypatch.setenv("MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC", "0")
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    class FakePopen:
+        pid = 4243
+
+        def __init__(self, argv, **kwargs):
+            kwargs["stdout"].write(b"launcher starting\n")
+            kwargs["stdout"].flush()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local="/tmp/hf",
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+
+    assert result["ok"] is True
+    assert result["executor"] == "docker"
+    assert result["pid"] == 4243
+    assert result["experiment_id"] is None
+    assert "launcher starting" in result["stdout_tail"]
+    assert "no experiment_id was captured" in result["diagnostic"]
+
+
+def test_parse_launcher_submission_ignores_experiment_dir_as_id():
+    """A path field must not be misread as a usable experiment id."""
+    experiment_id, experiment_dir, slurm_job_id = bridge._parse_launcher_submission(
+        "experiment_dir=/tmp/nemorun/experiments/docker_1782173197\n"
+    )
+
+    assert experiment_id is None
+    assert experiment_dir == "/tmp/nemorun/experiments/docker_1782173197"
+    assert slurm_job_id is None
+
+
+def test_submit_job_docker_log_creation_failure_is_structured(monkeypatch, tmp_path):
+    """Docker submit should not raise if the side-channel log cannot be created."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "nemo"))
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    def fail_named_temporary_file(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bridge.tempfile, "NamedTemporaryFile", fail_named_temporary_file)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local="/tmp/hf",
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+
+    assert result["ok"] is False
+    assert result["executor"] == "docker"
+    assert result["reason"] == "docker_submit_log_unavailable"
+    assert "disk full" in result["diagnostic"]
+
+
 def test_submit_job_slurm_zero_exit_without_ids_is_failure(monkeypatch, tmp_path):
     """Slurm submit must not report success when launcher emits no ids."""
     yaml_dir = tmp_path / "examples"

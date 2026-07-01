@@ -61,29 +61,33 @@ class TestQuantizerAttributeConfig:
 
         with pytest.raises(
             ValueError,
-            match="Invalid quantizer config: Cannot specify only {'enable': True}. "
-            "Additional parameters are required when enabling quantization.",
+            match=r"Invalid quantizer config: Cannot specify only {'enable': True}. "
+            r"Additional parameters are required when enabling quantization.",
         ):
             QuantizerAttributeConfig(enable=True)
 
         with pytest.raises(
-            ValueError, match="num_bits must be a positive integer or a tuple of positive integers."
+            ValueError,
+            match=r"num_bits must be a positive integer or a tuple of positive integers.",
         ):
             QuantizerAttributeConfig(enable=True, num_bits=0)
 
         with pytest.raises(
-            ValueError, match="num_bits must be a positive integer or a tuple of positive integers."
+            ValueError,
+            match=r"num_bits must be a positive integer or a tuple of positive integers.",
         ):
             QuantizerAttributeConfig(enable=True, num_bits=-1)
 
         # # Test positive tuple validation
         with pytest.raises(
-            ValueError, match="num_bits must be a positive integer or a tuple of positive integers."
+            ValueError,
+            match=r"num_bits must be a positive integer or a tuple of positive integers.",
         ):
             QuantizerAttributeConfig(enable=True, num_bits=(0, 3))
 
         with pytest.raises(
-            ValueError, match="num_bits must be a positive integer or a tuple of positive integers."
+            ValueError,
+            match=r"num_bits must be a positive integer or a tuple of positive integers.",
         ):
             QuantizerAttributeConfig(enable=True, num_bits=(-1, 2))
 

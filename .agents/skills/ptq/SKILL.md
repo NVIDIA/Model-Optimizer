@@ -5,7 +5,7 @@ description: This skill should be used when the user asks to "quantize a model",
 
 # ModelOpt Post-Training Quantization
 
-Produce a quantized checkpoint from a pretrained model. **Read `examples/llm_ptq/README.md` first** — it has the support matrix, CLI flags, and accuracy guidance.
+Produce a quantized checkpoint from a pretrained model. **Read `examples/hf_ptq/README.md` first** — it has the support matrix, CLI flags, and accuracy guidance.
 
 ## Step 1 — Environment
 
@@ -19,7 +19,7 @@ Read `skills/common/environment-setup.md` and `skills/common/workspace-managemen
 
 ## Step 2 — Is the model supported?
 
-Check the support table in `examples/llm_ptq/README.md` for verified HF models.
+Check the support table in `examples/hf_ptq/README.md` for verified HF models.
 
 - **Listed** → supported, use `hf_ptq.py` (step 4A/4B)
 - **Not listed** → read `references/unsupported-models.md` to determine if `hf_ptq.py` can still work or if a custom script is needed (step 4C)
@@ -53,7 +53,7 @@ ls modelopt_recipes/huggingface/<model_type>/ptq/ 2>/dev/null  # per-arch; <mode
 
 If a model-specific recipe exists, prefer `--recipe <path>` — but **inspect its include/exclude patterns** rather than assuming (e.g. for VLMs, confirm the vision tower is actually excluded).
 
-**If no model-specific recipe**, choose a format based on GPU (details in `examples/llm_ptq/README.md`):
+**If no model-specific recipe**, choose a format based on GPU (details in `examples/hf_ptq/README.md`):
 
 - **Blackwell** (B100/B200/GB200): `nvfp4` variants
 - **Hopper** (H100/H200) or older: `fp8` or `int4_awq`
@@ -90,9 +90,9 @@ In README table? ─→ YES ──→ SLURM (local or remote)? ──→ LAUNCHE
 
 ```bash
 pip install --no-build-isolation "nvidia-modelopt[hf]"
-pip install -r examples/llm_ptq/requirements.txt
+pip install -r examples/hf_ptq/requirements.txt
 
-python examples/llm_ptq/hf_ptq.py \
+python examples/hf_ptq/hf_ptq.py \
     --pyt_ckpt_path <model> \
     --qformat <format> \
     --calib_size 512 \
@@ -105,7 +105,7 @@ For remote: use `remote_run` from `remote_exec.sh` (see `skills/common/remote-ex
 
 ### 4B — Launcher: supported model on SLURM or local Docker
 
-Write a YAML config using `common/hf_ptq/hf_ptq.sh`. See `references/launcher-guide.md` for the full template.
+Write a YAML config using `common/hf/ptq.sh`. See `references/launcher-guide.md` for the full template.
 
 ```bash
 cd tools/launcher
@@ -179,7 +179,7 @@ Report the gate result before moving on. The report must include source size, ou
 | `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
 | `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
 | `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, GPU sizing, FSDP2) |
-| `examples/llm_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
+| `examples/hf_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
 | `modelopt/torch/quantization/config.py` | Step 3: format definitions |
 | `modelopt/torch/export/model_utils.py` | Step 4C: TRT-LLM export type mapping |
 | `modelopt_recipes/` | Step 3: pre-built recipes |

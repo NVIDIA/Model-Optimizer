@@ -716,7 +716,7 @@ def test_mtq_quantize_layerwise_raises_for_unsupported_algorithm():
     config = _svdquant_layerwise_config()
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
-    with pytest.raises(ValueError, match="does not support layerwise.enable=True"):
+    with pytest.raises(ValueError, match=r"does not support layerwise.enable=True"):
         mtq.quantize(
             model,
             config,

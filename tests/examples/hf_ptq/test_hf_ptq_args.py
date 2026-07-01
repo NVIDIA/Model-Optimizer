@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-_EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "llm_ptq"
+_EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
 
 def _import_hf_ptq(monkeypatch):

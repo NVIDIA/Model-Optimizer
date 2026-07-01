@@ -35,13 +35,17 @@ from .nemotron_vlm_dataset_utils import NemotronTarPlusJsonlIterable, list_repo_
 # Use dict to store the config for each dataset.
 # If we want to export more options to user like target languages, we need more standardized approach like dataclass.
 SUPPORTED_VLM_DATASET_CONFIG: dict[str, dict[str, Any]] = {
+    # Small dataset; good for tests and lightweight calibration
     "scienceqa": {"config": {"path": "derek-thomas/ScienceQA", "split": "train"}},
     # Large multi-subset dataset (use streaming to avoid downloading the entire dataset)
     "nemotron_vlm_dataset_v2": {
         "config": {"path": "nvidia/Nemotron-VLM-Dataset-v2", "split": "train", "streaming": True},
-        # Provide a sane default that (a) includes in-repo media shards and (b) is document-centric.
-        # Subsets like docvqa_cot/chartqa_cot are JSONL-only in the dataset repo and require --vlm_image_root.
+        # Document-centric subsets with in-repo media shards (charts + tables + diagrams/general),
+        # a reasonable default for document/figure-heavy VLM benchmarks (e.g. MMMU). Subsets like
+        # docvqa_cot/chartqa_cot are JSONL-only in the repo and require --vlm_image_root.
         "default_subsets": ["sparsetables", "plotqa_cot", "wiki_en"],
+        # Cap tar shards per subset so the default download stays bounded (~9.5GB vs ~49GB for all).
+        "max_shards": 1,
     },
 }
 
@@ -61,6 +65,23 @@ class _HFDatasetsIterableWrapper(torch.utils.data.IterableDataset):
 
     def __len__(self):
         return self._num_samples
+
+
+class _ShardedIterable(torch.utils.data.IterableDataset):
+    """Shard an iterable dataset across ranks by strided iteration (rank ``r`` of ``world``).
+
+    Disjoint shards require every rank to iterate the same order, so the underlying stream must be
+    seeded identically across ranks (as our VLM datasets are).
+    """
+
+    def __init__(self, base, rank: int, world: int):
+        super().__init__()
+        self._base = base
+        self._rank = rank
+        self._world = world
+
+    def __iter__(self):
+        return itertools.islice(iter(self._base), self._rank, None, self._world)
 
 
 def _extract_text_from_messages(messages: Any) -> str | None:
@@ -220,12 +241,14 @@ def _get_vlm_dataset(
     Returns:
         A hugging face Dataset.
     """
+    from datasets import interleave_datasets, load_dataset
+
     # Load the dataset
     if dataset_name in SUPPORTED_VLM_DATASET_CONFIG:
-        from datasets import load_dataset
-
         cfg = SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"].copy()
         streaming = bool(cfg.pop("streaming", False))
+        if max_shards is None:
+            max_shards = SUPPORTED_VLM_DATASET_CONFIG[dataset_name].get("max_shards")
 
         if dataset_name == "nemotron_vlm_dataset_v2":
             # This dataset contains many subsets; load only the requested ones via `name=...`.
@@ -273,8 +296,6 @@ def _get_vlm_dataset(
                 for subset in subsets
             ]
             try:
-                from datasets import interleave_datasets
-
                 ds = interleave_datasets(streams)
             except Exception:
                 # Fallback: round-robin by chaining (less balanced than interleave).
@@ -289,8 +310,8 @@ def _get_vlm_dataset(
             f" {get_supported_vlm_datasets()}."
         )
 
-    # Streaming datasets: shuffle with bounded buffer and wrap into a torch IterableDataset.
-    if dataset_name == "nemotron_vlm_dataset_v2":
+    # Streaming datasets: shuffle with a bounded buffer for sample diversity
+    if streaming:
         with contextlib.suppress(Exception):
             ds = ds.shuffle(seed=seed, buffer_size=shuffle_buffer_size)
 
@@ -298,9 +319,11 @@ def _get_vlm_dataset(
         # Keep only samples with a non-null image field (ScienceQA has both).
         with contextlib.suppress(Exception):
             ds = ds.filter(
-                lambda ex: ex.get("image", None) is not None
-                or ex.get("images", None) is not None
-                or _extract_image_ref_from_example(ex) is not None
+                lambda ex: (
+                    ex.get("image", None) is not None
+                    or ex.get("images", None) is not None
+                    or _extract_image_ref_from_example(ex) is not None
+                )
             )
 
     # Select the first `num_samples` entries (or fewer if dataset is smaller).
@@ -334,7 +357,6 @@ def get_vlm_dataset_dataloader(
     batch_size: int = 1,
     num_samples: int = 512,
     device: str | torch.device | None = None,
-    max_length: int | None = None,
     require_image: bool = True,
     subsets: list[str] | None = None,
     shuffle_buffer_size: int = 10_000,
@@ -342,6 +364,8 @@ def get_vlm_dataset_dataloader(
     image_root: str | Path | None = None,
     use_media_shards: bool = True,
     max_shards: int | None = None,
+    dp_size: int = 1,
+    dp_rank: int = 0,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and processor of the target model.
 
@@ -351,8 +375,9 @@ def get_vlm_dataset_dataloader(
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset.
         device: Device to move returned tensors to. If None, keep on CPU.
-        max_length: Optional max length for text tokenization (if supported by the processor).
         require_image: If True, keep only samples that have an image field.
+        dp_size: Data-parallel world size; if > 1, the dataset is sharded across DP ranks.
+        dp_rank: This process's rank within the data-parallel group.
 
     Returns:
         An instance of dataloader.
@@ -402,6 +427,20 @@ def get_vlm_dataset_dataloader(
             # Prompt extraction
             prompt = None
             tok = getattr(processor, "tokenizer", None)
+
+            # Datasets that ship images but no chat-style ``messages`` (e.g. ScienceQA) would
+            # otherwise fall back to a text-only prompt with no image placeholder, so the processor
+            # emits no image tokens and the VLM forward fails. Synthesize a single user turn with an
+            # image part + the question text so the chat template emits the image token(s).
+            if messages is None and img is not None:
+                question = ex.get("question") or "Describe this image in detail."
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [{"type": "image"}, {"type": "text", "text": question}],
+                    }
+                ]
+
             if tok is not None and messages is not None:
                 trimmed = _messages_up_to_last_user(messages) or []
                 # For some Nemotron-style templates, the image content expects an empty string.
@@ -444,9 +483,7 @@ def get_vlm_dataset_dataloader(
             "return_tensors": "pt",
             "padding": True,
         }
-        if max_length is not None and "images" not in kwargs:
-            kwargs.update({"truncation": True, "max_length": max_length})
-
+        # No truncation: it clips image tokens and breaks the VLM forward
         enc = processor(**kwargs)
 
         # Some processors return BatchEncoding; normalize to plain dict of tensors.
@@ -461,4 +498,19 @@ def get_vlm_dataset_dataloader(
                     out[k] = v.to(device)
         return out
 
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=_collate_fn)
+    # Data-parallel sharding: DistributedSampler for map-style datasets, strided iteration for
+    # iterable/streaming ones (each rank then processes ~num_samples / dp_size samples).
+    sampler = None
+    if dp_size > 1:
+        # Discriminate on dataset kind, not __len__: the streaming wrapper is an IterableDataset
+        # that also defines __len__, and DataLoader rejects a sampler on an IterableDataset.
+        if isinstance(dataset, torch.utils.data.IterableDataset):
+            dataset = _ShardedIterable(dataset, rank=dp_rank, world=dp_size)
+        else:
+            from torch.utils.data.distributed import DistributedSampler
+
+            sampler = DistributedSampler(dataset, num_replicas=dp_size, rank=dp_rank, shuffle=False)
+
+    return DataLoader(
+        dataset, batch_size=batch_size, sampler=sampler, shuffle=False, collate_fn=_collate_fn
+    )

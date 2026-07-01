@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +93,92 @@ class SourceCheckout:
 def _launcher_reported_error(stdout: str, stderr: str) -> bool:
     """Return True when launcher text contains a fatal error despite exit 0."""
     return bool(_LAUNCHER_ERROR_RE.search(f"{stdout}\n{stderr}"))
+
+
+def _parse_launcher_submission(text: str) -> tuple[str | None, str | None, str | None]:
+    """Best-effort parse of launcher/nemo_run submission output."""
+    experiment_id = None
+    experiment_dir = None
+    slurm_job_id = None
+
+    # nemo_run prints "Experiment Status for <id>" and often also the
+    # reconstructable form `Experiment.from_id("<id>")`.
+    m = re.search(r'Experiment\.from_id\("([^"]+)"\)', text)
+    if m:
+        experiment_id = m.group(1)
+    else:
+        m = re.search(
+            r"Experiment Status for\s+(\S+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    if not experiment_id:
+        m = re.search(
+            r"experiment[_\s-]+id[:\s]+(\S+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    if not experiment_id:
+        # Fallback for older nemo_run output that lacked the explicit
+        # "id:" label. Accepts any path-safe id token following the
+        # word "experiment" — not just timestamp-style.
+        m = re.search(
+            r"experiment[_\s-]+([A-Za-z0-9_-]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m and m.group(1).lower() not in {"status", "dir", "directory"}:
+            experiment_id = m.group(1)
+
+    # Match any path containing `/experiments/<id>/` — don't anchor on
+    # cluster-specific filesystem roots (NVIDIA's /lustre, partner
+    # clusters' /scratch / /work / /data / /p / ...).
+    m = re.search(r"(?:experiment_dir[:=]\s*|(?<!\S))(\S+/experiments/[^\s/]+)", text)
+    if m:
+        experiment_dir = m.group(1)
+    m = re.search(r"Submitted batch job (\d+)", text)
+    if m:
+        slurm_job_id = m.group(1)
+    else:
+        m = re.search(r"Job id:\s*(\d+)", text, re.IGNORECASE)
+        if m:
+            slurm_job_id = m.group(1)
+
+    return experiment_id, experiment_dir, slurm_job_id
+
+
+def _docker_experiment_id_capture_timeout() -> float:
+    """Return how long Docker submit should tail launcher output for an id."""
+    raw = os.environ.get("MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC", "10")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 10.0
+
+
+def _tail_docker_launch_log(log_path: Path, proc: subprocess.Popen) -> tuple[str | None, str]:
+    """Tail detached Docker launcher output for an early experiment id."""
+    deadline = time.monotonic() + _docker_experiment_id_capture_timeout()
+    text = ""
+    while True:
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            text = ""
+        complete_text = text if text.endswith(("\n", "\r")) else text.rsplit("\n", 1)[0]
+        experiment_id, _, _ = _parse_launcher_submission(complete_text)
+        if experiment_id:
+            return experiment_id, _tail(text, 2000)
+        if time.monotonic() >= deadline or proc.poll() is not None:
+            experiment_id, _, _ = _parse_launcher_submission(text)
+            if experiment_id:
+                return experiment_id, _tail(text, 2000)
+            return None, _tail(text, 2000)
+        time.sleep(0.2)
 
 
 def _validate_experiment_id(experiment_id: str) -> dict | None:
@@ -962,38 +1049,69 @@ def submit_job_impl(
         child_env["SLURM_HOST"] = cluster_host or ""
 
     if executor == "docker":
-        # Docker mode: spawn detached. Discard stdout/stderr to /dev/null —
-        # leaving them as Popen.PIPE without a reader fills the kernel's
-        # ~64 KB pipe buffer and BLOCKS the launcher's next write(), which
-        # would hang long-running PTQ jobs forever while the MCP server
-        # appears to have "succeeded".
+        # Docker mode: spawn detached. Redirect stdout/stderr to a side-channel
+        # log file, then tail it briefly for nemo_run's experiment id. This
+        # avoids PIPE deadlock while still giving callers the id needed for
+        # job_status/job_logs polling.
         # `start_new_session=True` detaches from the MCP server's process
         # group so an MCP server restart / SIGINT doesn't SIGHUP the
         # in-flight launcher.
         # B603 false positive — argv is a controlled list built above.
+        log_dir = Path(child_env["NEMORUN_HOME"]) / ".modelopt-mcp" / "docker-submit-logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = tempfile.NamedTemporaryFile(
+                prefix="submit-",
+                suffix=".log",
+                dir=log_dir,
+                delete=False,
+                mode="w+b",
+            )
+        except OSError as e:
+            return {
+                "ok": False,
+                "executor": "docker",
+                "reason": "docker_submit_log_unavailable",
+                "diagnostic": f"Unable to create Docker submit log under {log_dir}: {e}",
+                "argv": argv,
+                **_source_result_fields(checkout),
+            }
+        log_path = Path(log_file.name)
         try:
             proc = subprocess.Popen(  # nosec B603 - fixed launcher argv list; no shell.
                 argv,
                 env=child_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
         except FileNotFoundError:
+            log_file.close()
+            log_path.unlink(missing_ok=True)
             return _launcher_not_installed(argv)
+        finally:
+            log_file.close()
+
+        experiment_id, stdout_tail = _tail_docker_launch_log(log_path, proc)
         return {
             "ok": True,
             "executor": "docker",
             "pid": proc.pid,
             "argv": argv,
             "nemorun_home": child_env["NEMORUN_HOME"],
-            "experiment_id": None,  # Phase 2: tail launcher's output
+            "experiment_id": experiment_id,
+            "stdout_log": str(log_path),
+            "stdout_tail": stdout_tail,
             **_source_result_fields(checkout),
-            # via a side-channel log file to capture nemo_run's id
-            "spike_note": (
-                "Docker mode launched detached. Phase 1: experiment_id "
-                "is None — list under $NEMORUN_HOME/experiments/ or use "
-                "Phase 2's tail-based id capture."
+            "diagnostic": (
+                "Docker mode launched detached and experiment_id was captured from launcher output."
+                if experiment_id
+                else (
+                    "Docker mode launched detached, but no experiment_id was "
+                    "captured before the short output-tail timeout. Inspect "
+                    "stdout_log or retry with MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC "
+                    "set higher."
+                )
             ),
         }
 
@@ -1049,59 +1167,7 @@ def submit_job_impl(
             **_source_result_fields(checkout),
         }
 
-    # Best-effort experiment_id + dir + slurm_job_id parse. nemo_run's
-    # output format may shift across versions; on parse miss, fields
-    # come back None and the caller still gets stdout_tail to inspect
-    # by hand.
-    experiment_id = None
-    experiment_dir = None
-    slurm_job_id = None
-    # nemo_run prints "Entering Experiment <title>_<id> with id: <id>" —
-    # match the trailing id directly so we don't have to encode the
-    # title prefix or hard-code timestamp width.
-    m = re.search(r'Experiment\.from_id\("([^"]+)"\)', stdout_tail)
-    if m:
-        experiment_id = m.group(1)
-    else:
-        m = re.search(
-            r"Experiment Status for\s+(\S+)",
-            stdout_tail,
-            re.IGNORECASE,
-        )
-        if m:
-            experiment_id = m.group(1)
-    if not experiment_id:
-        m = re.search(
-            r"experiment[_\s-]+id[:\s]+(\S+)",
-            stdout_tail,
-            re.IGNORECASE,
-        )
-        if m:
-            experiment_id = m.group(1)
-    if not experiment_id:
-        # Fallback for older nemo_run output that lacked the explicit
-        # "id:" label. Accepts any path-safe id token following the
-        # word "experiment" — not just timestamp-style.
-        m = re.search(
-            r"experiment[_\s-]+([A-Za-z0-9_-]+)",
-            stdout_tail,
-            re.IGNORECASE,
-        )
-        if m and m.group(1).lower() not in {"status"}:
-            experiment_id = m.group(1)
-    # Match any path containing `/experiments/<id>/` — don't anchor on
-    # cluster-specific filesystem roots (NVIDIA's /lustre, partner
-    # clusters' /scratch / /work / /data / /p / ...).
-    m = re.search(r"(\S+/experiments/[^\s/]+)", stdout_tail)
-    if m:
-        experiment_dir = m.group(1)
-    m = re.search(r"Submitted batch job (\d+)", stdout_tail)
-    if m:
-        slurm_job_id = m.group(1)
-    else:
-        m = re.search(r"Job id:\s*(\d+)", stdout_tail, re.IGNORECASE)
-        if m:
-            slurm_job_id = m.group(1)
+    experiment_id, experiment_dir, slurm_job_id = _parse_launcher_submission(stdout_tail)
 
     if not experiment_id:
         return {

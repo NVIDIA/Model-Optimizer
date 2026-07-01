@@ -744,7 +744,7 @@ class GPTModelImporter:
                 elif get_expert_tensor_parallel_world_size() > 1:
                     # ETP supports for packed MoE
                     # ETP is not supported for gpt-oss model
-                    if self.arch in ["GptOssForCausalLM"]:
+                    if self.arch == "GptOssForCausalLM":
                         raise ValueError("ETP is not supported for gpt-oss model")
                     self.rules["local_experts.linear_fc1_etp"](
                         layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
