@@ -288,10 +288,17 @@ def _match_candidate_to_preset(fmt) -> tuple[str | None, dict]:
     custom config matching none), and ``quant_cfg`` is the dict passed to mtq.auto_quantize.
     Passing the matched preset dict (rather than the candidate's own dump) keeps the search naming
     the candidate after the preset (e.g. FP8_DEFAULT_CFG), consistent with CLI-produced checkpoints.
+
+    ``effective_bits`` is cost-only metadata (it does not affect export), so it is excluded when
+    identifying the preset — otherwise a per-candidate override would make a shipped preset look
+    "custom" and slip past the export-compat whitelist. Any override is preserved in the return.
     """
     stripped = fmt.model_dump(exclude_unset=True)
+    match_key = {k: v for k, v in stripped.items() if k != "effective_bits"}
     for name, preset in QUANT_CFG_CHOICES.items():
-        if preset == stripped:
+        if preset == match_key:
+            if "effective_bits" in stripped:
+                return name, {**preset, "effective_bits": stripped["effective_bits"]}
             return name, preset
     return None, fmt.model_dump()
 

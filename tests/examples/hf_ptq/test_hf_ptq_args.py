@@ -116,3 +116,18 @@ def test_autoquant_warns_on_custom_candidate(monkeypatch):
     )
     with pytest.warns(UserWarning, match="export compatibility cannot be verified"):
         hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+
+def test_autoquant_export_guard_not_bypassed_by_effective_bits(monkeypatch):
+    """A non-export-safe preset can't dodge the guard by adding a cost-only effective_bits override."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    non_safe = next(k for k in QUANT_CFG_CHOICES if k not in hf_ptq._AUTO_QUANTIZE_QFORMATS)
+    tampered = QuantizeConfig(**{**QUANT_CFG_CHOICES[non_safe], "effective_bits": 4.5})
+    aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=5.4),
+        candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]), tampered],
+    )
+    with pytest.raises(ValueError, match="not supported for unified checkpoint export"):
+        hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
