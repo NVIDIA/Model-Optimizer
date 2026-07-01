@@ -42,7 +42,6 @@ from transformers import (
 )
 
 from modelopt.torch.export.model_utils import is_multimodal_model
-from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
 
 try:
     from huggingface_hub import snapshot_download
@@ -52,54 +51,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
-
-# TODO: Refactor into the config system.
-_QWEN36_AUTOQ_DISABLED_LAYERS = ("*shared_expert_gate*",)
-_VLM_AUTOQ_DISABLED_LAYERS = ("*visual*", "*mtp*", "*vision_tower*")
-
-
-def _is_qwen_model(model) -> bool:
-    """Return True when model/config identifiers indicate a Qwen-family model."""
-    candidates = [type(model).__name__]
-    config = getattr(model, "config", None)
-    configs = [
-        config,
-        getattr(config, "text_config", None),
-        getattr(config, "language_config", None),
-    ]
-    for cfg in configs:
-        if cfg is None:
-            continue
-        candidates.append(type(cfg).__name__)
-        model_type = getattr(cfg, "model_type", None)
-        if model_type is not None:
-            candidates.append(str(model_type))
-        architectures = getattr(cfg, "architectures", ()) or ()
-        if isinstance(architectures, str):
-            architectures = (architectures,)
-        candidates.extend(str(architecture) for architecture in architectures)
-    return any("qwen" in candidate.lower() for candidate in candidates)
-
-
-def _get_auto_quantize_disabled_layers(model) -> list[str]:
-    """Return layer patterns that should be excluded from AutoQuantize search."""
-    disabled_layers = [
-        entry["quantizer_name"]
-        for entry in _default_disabled_quantizer_cfg
-        if "parent_class" not in entry and entry["quantizer_name"] != "*lm_head*"
-    ]
-    if _is_qwen_model(model):
-        disabled_layers.extend(p for p in _QWEN36_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
-    if is_multimodal_model(model):
-        disabled_layers.extend(p for p in _VLM_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
-    return disabled_layers
-
-
-def _get_auto_quantize_cost_excluded_patterns(model) -> list[str]:
-    """Return layer patterns excluded only from AutoQuantize cost accounting."""
-    if is_multimodal_model(model):
-        return list(_VLM_AUTOQ_DISABLED_LAYERS)
-    return []
 
 
 def run_nemotron_vl_preview(

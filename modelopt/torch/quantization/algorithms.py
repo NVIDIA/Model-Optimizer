@@ -127,9 +127,11 @@ def _make_fresh_quantizer_for_attr(module: nn.Module, attr_name: str) -> nn.Modu
 def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     """Estimate the compression ratio of a quantization configuration.
 
-    Right now, we find the minimum compression ratio across all quantizer attribute configs.
-    This is not perfect but is a good proxy for the overall compression ratio. We will improve
-    this in future releases.
+    Effective bits per element resolve in priority order: (1) recipe-level
+    ``quant_cfg.effective_bits``; (2) per-entry ``cfg.effective_bits`` (library default,
+    e.g. NVFP4 = 4.5); (3) the ``num_bits`` heuristic (``num_bits / 16`` for ints,
+    ``(E + M + 1) / 16`` for FP tuples). Per-entry values are aggregated via ``min``, which
+    still under-counts activation cost for mixed weight+activation formats.
 
     Args:
         quant_cfg: The quantization configuration to estimate compression for.
@@ -137,6 +139,8 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     Returns:
         float: The estimated compression ratio (0.0 to 1.0).
     """
+    if quant_cfg.effective_bits is not None:
+        return quant_cfg.effective_bits / 16.0
 
     def estimate_quant_compression_for_quantizer(quantizer_attr_cfg):
         if isinstance(quantizer_attr_cfg, list):
@@ -147,6 +151,9 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
             # Handle raw quantizer cfg dicts (e.g. {"num_bits": (4, 3), "axis": None})
             if not quantizer_attr_cfg.get("enable", True):
                 return 1.0
+            effective_bits = quantizer_attr_cfg.get("effective_bits")
+            if effective_bits is not None:
+                return effective_bits / 16
             num_bits = quantizer_attr_cfg.get("num_bits")
             if num_bits is None:
                 return 1.0
@@ -160,6 +167,8 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
         if isinstance(quantizer_attr_cfg, QuantizerAttributeConfig):
             if not quantizer_attr_cfg.enable:
                 return 1.0
+            if quantizer_attr_cfg.effective_bits is not None:
+                return quantizer_attr_cfg.effective_bits / 16
             if not hasattr(quantizer_attr_cfg, "num_bits"):
                 return 1.0
             if isinstance(quantizer_attr_cfg.num_bits, tuple):

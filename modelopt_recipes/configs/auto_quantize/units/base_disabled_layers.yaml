@@ -13,14 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dynamic NVFP4 E2M1 block quantizer attributes with FP8 E4M3 scales.
+# Base set of non-quantizable layer patterns excluded from the AutoQuantize search (gates,
+# routers, conv/mixer projections, output/embedding heads, vision towers). Spliced into a
+# recipe's ``disabled_layers`` via ``$import``; recipes append architecture-specific patterns.
 
-# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
-num_bits: e2m1
-block_sizes:
-  -1: 16
-  type: dynamic
-  scale_bits: e4m3
-# Autoquant LP cost: 4 value bits + an FP8 (8-bit) scale per 16-element block = 4.5 bits/element
-# (the num_bits heuristic under-counts this as 4.0). Read only by autoquant.
-effective_bits: 4.5
+# modelopt-schema: modelopt.recipe.config.LayerPatternList
+  - "*block_sparse_moe.gate*"
+  - "*linear_attn.conv1d*"
+  - "*linear_attn.in_proj_a*"
+  - "*linear_attn.in_proj_b*"
+  - "*mixer.conv1d*"
+  - "*mlp.gate.*"
+  - "*mlp.shared_expert_gate.*"
+  - "*output_layer*"
+  - "*proj_out.*"
+  - "*router*"
+  - "output.*"
+  - "*embed_vision*"
+  - "*vision_tower*"
+  - "*visual*"

@@ -62,7 +62,7 @@ def run_command_in_background(
     return process
 
 
-def run_hf_ptq_command(*, model: str, quant: str, vlm: bool = False, **kwargs):
+def run_hf_ptq_command(*, model: str, quant: str | None = None, vlm: bool = False, **kwargs):
     kwargs.update({"model": model, "quant": quant})
     kwargs.setdefault("tasks", "quant")
     kwargs.setdefault("calib", 16)

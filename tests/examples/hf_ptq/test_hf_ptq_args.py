@@ -16,9 +16,13 @@
 import importlib
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+
+from modelopt.recipe import load_recipe
+from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
+from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.torch.quantization.config import QuantizeConfig
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 
@@ -26,11 +30,6 @@ _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
 def _import_hf_ptq(monkeypatch):
     monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
     return importlib.import_module("hf_ptq")
-
-
-def _import_example_utils(monkeypatch):
-    monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
-    return importlib.import_module("example_utils")
 
 
 def _parse_hf_ptq_args(monkeypatch, *args):
@@ -46,63 +45,89 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
-def test_parse_args_rejects_autoquant_image_calibration(monkeypatch):
-    hf_ptq = _import_hf_ptq(monkeypatch)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "hf_ptq.py",
-            "--pyt_ckpt_path",
-            "nemotron-vl",
-            "--auto_quantize_bits",
-            "5.0",
-            "--calib_with_images",
+def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
+    """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "weight"}
+    assert inputs["kv_cache_quant_cfg"] is None
+    assert inputs["method"] == "gradient"
+    assert inputs["score_size"] == 128
+    # disabled_layers come straight from the recipe (no model introspection).
+    assert inputs["disabled_layers"] == aq.disabled_layers
+    assert "*output_layer*" in inputs["disabled_layers"]
+    # Candidates resolve to the exact preset dicts mtq expects (preset identity preserved).
+    assert inputs["quantization_formats"][0] == QUANT_CFG_CHOICES["nvfp4"]
+    assert inputs["quantization_formats"][1] == QUANT_CFG_CHOICES["fp8"]
+
+
+def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
+    """Top-level cost_excluded_layers maps to the mtq constraints.cost.excluded_module_name_patterns
+    key (distinct from disabled_layers), so a cost-exclusion recipe matches the nested mtq dict."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    aq = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe"
+    ).auto_quantize
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    # cost-exclusion is hoisted to a sibling of disabled_layers but still reaches the mtq cost dict.
+    assert aq.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+    assert inputs["constraints"]["cost"] == {
+        "active_moe_expert_ratio": 0.03125,
+        "excluded_module_name_patterns": ["*visual*", "*mtp*", "*vision_tower*"],
+    }
+    # The two exclusions are independent: cost-excluded patterns are also disabled here, but the
+    # roles (cost-accounting vs search) are tracked separately.
+    assert "*visual*" in inputs["disabled_layers"]
+
+
+def test_autoquant_rejects_non_export_safe_candidate(monkeypatch):
+    """A candidate that resolves to a preset outside the export-safe set is rejected before search."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    non_safe = next(k for k in QUANT_CFG_CHOICES if k not in hf_ptq._AUTO_QUANTIZE_QFORMATS)
+    aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=4.8),
+        candidate_formats=[
+            QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]),
+            QuantizeConfig(**QUANT_CFG_CHOICES[non_safe]),
         ],
     )
-
-    with pytest.raises(SystemExit) as error:
-        hf_ptq.parse_args()
-
-    assert error.value.code == 2
+    with pytest.raises(ValueError, match="not supported for unified checkpoint export"):
+        hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
 
-def test_load_model_keeps_nemotron_vl_text_calibration_for_autoquant(monkeypatch):
+def test_autoquant_warns_on_custom_candidate(monkeypatch):
+    """A candidate matching no shipped preset can't be export-verified, so it warns (not blocks)."""
     hf_ptq, args = _parse_hf_ptq_args(
-        monkeypatch,
-        "--pyt_ckpt_path",
-        "nemotron-vl",
-        "--auto_quantize_bits",
-        "5.0",
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
-    fake_model = SimpleNamespace(device="cpu")
-    fake_tokenizer = SimpleNamespace(padding_side="right", pad_token="<pad>")
-
-    monkeypatch.setattr(hf_ptq, "get_model", lambda *args, **kwargs: fake_model)
-    monkeypatch.setattr(hf_ptq, "get_model_type", lambda model: "qwen2")
-    monkeypatch.setattr(hf_ptq, "get_tokenizer", lambda *args, **kwargs: fake_tokenizer)
-    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: True)
-
-    full_model, language_model, _, _, _, tokenizer, _, _, _ = hf_ptq.load_model(args)
-
-    assert args.calib_with_images is False
-    assert full_model is fake_model
-    assert language_model is fake_model
-    assert tokenizer is fake_tokenizer
+    custom = QuantizeConfig(quant_cfg=[{"quantizer_name": "*", "enable": False}])
+    aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=4.8),
+        candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]), custom],
+    )
+    with pytest.warns(UserWarning, match="export compatibility cannot be verified"):
+        hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
 
-def test_qwen_autoquant_disabled_layers_are_scoped_to_qwen_models(monkeypatch):
-    example_utils = _import_example_utils(monkeypatch)
-    qwen_model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3_moe"))
-    llama_model = SimpleNamespace(config=SimpleNamespace(model_type="llama"))
-    qwen_only_patterns = {
-        "*shared_expert_gate*",
-    }
-
-    monkeypatch.setattr(example_utils, "is_multimodal_model", lambda model: False)
-
-    qwen_disabled_layers = set(example_utils._get_auto_quantize_disabled_layers(qwen_model))
-    llama_disabled_layers = set(example_utils._get_auto_quantize_disabled_layers(llama_model))
-
-    assert qwen_only_patterns <= qwen_disabled_layers
-    assert qwen_only_patterns.isdisjoint(llama_disabled_layers)
+def test_autoquant_export_guard_not_bypassed_by_effective_bits(monkeypatch):
+    """A non-export-safe preset can't dodge the guard by adding a cost-only effective_bits override."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    non_safe = next(k for k in QUANT_CFG_CHOICES if k not in hf_ptq._AUTO_QUANTIZE_QFORMATS)
+    tampered = QuantizeConfig(**{**QUANT_CFG_CHOICES[non_safe], "effective_bits": 4.5})
+    aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=5.4),
+        candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]), tampered],
+    )
+    with pytest.raises(ValueError, match="not supported for unified checkpoint export"):
+        hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)

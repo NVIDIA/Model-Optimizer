@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# AutoQuantize: per-layer search over {W4A8 AWQ-beta, FP8 (W8A8)} at 6.0 effective bits.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  w4a8_awq_beta: configs/ptq/presets/model/w4a8_awq_beta
+  fp8: configs/ptq/presets/model/fp8
+
+metadata:
+  recipe_type: auto_quantize
+  description: Mixed W4A8 AWQ-beta + FP8 per-layer search at 6.0 effective bits.
+
+auto_quantize:
+  constraints:
+    effective_bits: 6.0
+
+  candidate_formats:
+    - $import: w4a8_awq_beta
+    - $import: fp8
+
+  auto_quantize_method: gradient
+  score_size: 128
+
+  # Base (model-agnostic) non-quantizable layers, spliced from the shared unit. Arch-specific
+  # models use a recipe under huggingface/<model>/auto_quantize/ that appends to this set.
+  disabled_layers:
+    - $import: base_disabled_layers
