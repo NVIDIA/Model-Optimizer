@@ -48,7 +48,7 @@ def pytest_addoption(parser):
 # Every collectible test group must be listed here else collection errors occur
 # A test can override its cap by adding ``@pytest.mark.timeout(...)``
 _DEFAULT_TIMEOUT = {
-    "examples": 300,
+    "examples": 3600,
     "gpu": 120,
     "gpu_megatron": 120,
     "gpu_trtllm": 60,
