@@ -78,6 +78,7 @@ from .layer_utils import (
 from .model_config import (
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
+    QUANTIZATION_FP8_PB_W8A8,
     QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -741,9 +742,22 @@ def _export_quantized_weight(
 
     setattr(sub_module, weight_name, nn.Parameter(quantized_weight, requires_grad=False))
 
-    # Register the corrected weight_scale as a buffer
+    # Register the corrected weight scale as a buffer.
     if weight_scale is not None:
-        sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
+        if quantization_format == QUANTIZATION_FP8_PB_W8A8:
+            # Store per-block scale as 2-D weight_scale_inv (amax/448, not
+            # inverted); squeeze the keepdim block-amax [out, 1, in, 1].
+            if (
+                weight_scale.dim() == 4
+                and weight_scale.shape[1] == 1
+                and weight_scale.shape[3] == 1
+            ):
+                weight_scale = weight_scale.squeeze(3).squeeze(1)
+            sub_module.register_buffer(quantizer_attrs.weight_scale_inv, weight_scale)
+            if quantizer_attrs.weight_scale in sub_module._buffers:
+                del sub_module._buffers[quantizer_attrs.weight_scale]
+        else:
+            sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
     # Tied-weight dedup: if a previously-processed module shared the same
     # source weight memory, alias the packed weight + scale buffers so the
@@ -758,6 +772,7 @@ def _export_quantized_weight(
                 setattr(sub_module, weight_name, getattr(_prior, weight_name))
             for _attr in (
                 quantizer_attrs.weight_scale,
+                quantizer_attrs.weight_scale_inv,
                 quantizer_attrs.weight_scale_2,
                 quantizer_attrs.input_scale,
             ):

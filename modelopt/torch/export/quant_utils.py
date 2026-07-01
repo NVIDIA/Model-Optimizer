@@ -54,6 +54,7 @@ from .model_config import (
     KV_CACHE_NVFP4_AFFINE,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
+    QUANTIZATION_FP8_PB_W8A8,
     QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_INT4_AWQ,
@@ -537,10 +538,12 @@ def get_quantization_format(module) -> str | None:
                     and block_sizes.get("scale_bits") == (8, 0)
                 ):
                     return QUANTIZATION_MXFP8
-                if weight_quantizer.fake_quant:
-                    return QUANTIZATION_FP8_PB_WO
-                else:
+                # Block FP8: input quantizer enabled -> W8A8, else weight-only.
+                if not weight_quantizer.fake_quant:
                     return QUANTIZATION_FP8_PB_REAL
+                if input_quantizer is not None and input_quantizer.is_enabled:
+                    return QUANTIZATION_FP8_PB_W8A8
+                return QUANTIZATION_FP8_PB_WO
             if weight_quantizer.axis == 0:
                 return QUANTIZATION_FP8_PC_PT
             return QUANTIZATION_FP8
@@ -758,6 +761,12 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
+        elif v == "fp8_pb_w8a8":
+            # Block-wise FP8, W8A8 at serve time.
+            layer_config = {
+                "quant_algo": "FP8_PB",
+                "group_size": block_size_value,
+            }
         else:
             layer_config = {"quant_algo": v}
 
@@ -865,7 +874,7 @@ def to_quantized_weight(
     if quantization == QUANTIZATION_MXFP8:
         return MXFP8QTensor.quantize_with_scale(weight, weights_scaling_factor)
 
-    if quantization == QUANTIZATION_FP8_PB_WO:
+    if quantization in (QUANTIZATION_FP8_PB_WO, QUANTIZATION_FP8_PB_W8A8):
         return FP8QTensor.quantize(
             weight, weights_scaling_factor.squeeze(), block_sizes={-1: block_size, -2: block_size}
         )[0]._quantized_data
