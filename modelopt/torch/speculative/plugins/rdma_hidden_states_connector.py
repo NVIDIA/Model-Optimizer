@@ -249,7 +249,14 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 max_num_seqs,
             )
 
-        self._nixl = nixl_agent(f"hs-producer-{uuid.uuid4()}", nixl_agent_config(backends=["UCX"]))
+        # Backend(s) from NIXL_BACKENDS; shared helper keeps this locked to the trainer-side
+        # agent (they must use the same backend to hand off over RDMA).
+        from .hf_streaming_dataset import nixl_backends_from_env
+
+        _backends = nixl_backends_from_env()
+        self._nixl = nixl_agent(
+            f"hs-producer-{uuid.uuid4()}", nixl_agent_config(backends=_backends)
+        )
         # ONE-TIME pool registration (the only ibv_reg_mr).
         t0 = time.time()
         self._pool = torch.empty(
@@ -389,8 +396,16 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         return meta
 
     def request_finished(self, request, block_ids):
-        """Return the request id + sidecar port for the trainer to fetch over RDMA."""
-        return True, {"hs_req_id": request.request_id, "hs_sidecar_port": self._sidecar_port}
+        """Return the request id + sidecar port for the trainer to fetch over RDMA.
+
+        ``hs_max_tokens`` lets the trainer fail loud if its ``max_seq_len`` exceeds our pool
+        slot capacity (which would otherwise silently drop long prompts and hang the fetch).
+        """
+        return True, {
+            "hs_req_id": request.request_id,
+            "hs_sidecar_port": self._sidecar_port,
+            "hs_max_tokens": self._max_tokens,
+        }
 
     def request_finished_all_groups(self, request, block_ids):
         """Multi-group variant of :meth:`request_finished` (first group's blocks)."""

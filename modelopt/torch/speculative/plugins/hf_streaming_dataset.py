@@ -63,6 +63,19 @@ __all__ = [
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
+
+def nixl_backends_from_env() -> list[str]:
+    """NIXL backend list from ``NIXL_BACKENDS`` (comma-separated), defaulting to ``["UCX"]``.
+
+    Shared by the trainer-side agent (here) and the producer-side connector
+    (rdma_hidden_states_connector.py) so the two ALWAYS agree — they must use the same
+    backend to hand off over RDMA. Default UCX (InfiniBand clusters like HSG/nrt); on AWS EFA
+    set ``NIXL_BACKENDS=LIBFABRIC`` — UCX needs the EFA verbs driver (libefa-rdmav34.so) which
+    the container lacks, so UCX RDMA dies there.
+    """
+    return os.environ.get("NIXL_BACKENDS", "UCX").split(",")
+
+
 # Errors from ``_fetch`` that are genuinely transient (server overloaded / connection
 # reset / timeout) and so count against the circuit breaker and trigger a resample.
 # Anything else -- notably the ``RuntimeError`` raised on server token drift, or a
@@ -242,12 +255,16 @@ class StreamingDataset(Dataset):
     def _tokenize_entry(self, entry: dict) -> dict | None:
         """Tokenize a single entry.
 
-        Returns ``None`` for entries missing ``cid`` / ``messages``, or when
+        Returns ``None`` for entries missing ``cid`` / ``conversations``, or when
         right-truncation to ``max_seq_len`` drops the entire supervised span
         (``answer_only_loss`` mode with the assistant turn at the tail).
         """
         cid = entry.get("conversation_id") or entry.get("uuid")
-        convs = entry.get("messages") or entry.get("conversations")
+        # Only ``conversations`` is accepted. Some corpora (e.g. Spec-Decoding-Dataset-v2)
+        # also carry a user-only ``messages`` stub (no assistant turn) alongside the real
+        # dialogue in ``conversations``; reading ``messages`` there yields a degenerate
+        # sample whose hidden-state capture stalls, so it is intentionally ignored.
+        convs = entry.get("conversations")
         if cid is None or not convs or not isinstance(convs, list):
             return None
         input_ids, loss_mask = _tokenize_with_loss_mask(
@@ -370,7 +387,8 @@ class EagleVllmStreamingDataset(StreamingDataset):
         if getattr(self, "_nixl_pid", None) != pid:
             from nixl._api import nixl_agent, nixl_agent_config
 
-            self._nixl = nixl_agent(f"hs-trainer-{pid}", nixl_agent_config(backends=["UCX"]))
+            _backends = nixl_backends_from_env()
+            self._nixl = nixl_agent(f"hs-trainer-{pid}", nixl_agent_config(backends=_backends))
             self._nixl_pid = pid
             self._remote_by_host: dict = {}
             self._recv = None
@@ -413,6 +431,17 @@ class EagleVllmStreamingDataset(StreamingDataset):
         )
         r.raise_for_status()
         kv = r.json().get("kv_transfer_params") or {}
+        # Fail loud on undersized pool slots: if the serve connector's max_tokens is below our
+        # max_seq_len, long prompts overflow the slot and the producer silently skips capture,
+        # so /desc never readies and the fetch would hang. Surface it as a clear error instead.
+        conn_max_tokens = kv.get("hs_max_tokens")
+        if conn_max_tokens is not None and conn_max_tokens < self.config.max_seq_len:
+            raise RuntimeError(
+                f"serve connector max_tokens={conn_max_tokens} < trainer max_seq_len="
+                f"{self.config.max_seq_len}: prompts longer than {conn_max_tokens} tokens would "
+                "be silently dropped (capture skipped) and the fetch would hang. Raise "
+                "HS_MAX_TOKENS to >= max_seq_len, or unset it to auto-size from max_model_len."
+            )
         rid = kv.get("hs_req_id")
         if rid is None:
             warn_rank_0(f"[streaming] no hs_req_id for {sample['cid']}")
@@ -532,4 +561,7 @@ class EagleVllmStreamingDataset(StreamingDataset):
             "attention_mask": torch.ones_like(input_ids),
             "loss_mask": loss_mask,
             "labels": labels,
+            # vLLM captures the residual stream BEFORE the final norm; tell the trainer to
+            # re-apply it before lm_head (see HFDFlashModel.forward).
+            "base_hidden_prenorm": True,
         }

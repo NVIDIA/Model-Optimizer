@@ -40,7 +40,13 @@ from ..utils import (
     temporary_set_config_value,
 )
 from .modeling_eagle import EagleBaseModelOutput, EagleModule
-from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
+from .modeling_fakebase import (
+    _BASE_MODEL_PATHS,
+    _EMBED_TOKENS_PATHS,
+    _FINAL_NORM_PATHS,
+    _LM_HEAD_PATHS,
+)
+from .modeling_final_norm import _maybe_apply_base_final_norm
 
 __all__ = ["HFARValidation", "HFEagleModel", "default_eagle_aux_layer_ids"]
 
@@ -72,6 +78,16 @@ class HFEagleModel(EagleModel):
     @property
     def _base_model_lm_head(self):
         return self.get_submodule(self.base_model_lm_head_path)
+
+    @property
+    def _base_model_norm(self):
+        """Base model's final pre-lm_head norm, or None if none was located.
+
+        Applied before lm_head in the offline/streaming distillation path only when the
+        producer captured a pre-norm hidden (base_hidden_prenorm), to reconstruct true logits.
+        """
+        path = getattr(self, "base_model_norm_path", None)
+        return self.get_submodule(path) if path else None
 
     @property
     def _base_llm_config(self):
@@ -116,6 +132,17 @@ class HFEagleModel(EagleModel):
                     continue
             if not found_submodule:
                 raise ValueError(f"Part {name} not found in model")
+
+        # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
+        # un-normed final hidden captured by vLLM in the offline/streaming path.
+        self.base_model_norm_path = None
+        for path in _FINAL_NORM_PATHS:
+            try:
+                assert isinstance(self.get_submodule(path), torch.nn.Module)
+                self.base_model_norm_path = path
+                break
+            except Exception:
+                continue
 
     def _activate_torch_compile(self):
         import torch._dynamo
@@ -683,7 +710,12 @@ class HFEagleModel(EagleModel):
             assert "base_model_outputs" in kwargs
             base_outputs = EagleBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
             if base_outputs.logits is None:
-                base_outputs.logits = self._base_model_lm_head(base_outputs.out_hiddens)
+                # Re-apply the base final norm when the producer captured a pre-norm hidden
+                # (vLLM streaming); fails loud if pre-norm is declared but no norm was located.
+                out_hiddens = _maybe_apply_base_final_norm(
+                    base_outputs.out_hiddens, kwargs["base_model_outputs"], self._base_model_norm
+                )
+                base_outputs.logits = self._base_model_lm_head(out_hiddens)
             past_key_values = None
         else:
             with self._nvtx_range("base_model_forward"):

@@ -32,6 +32,8 @@ from transformers import (
     PreTrainedModel,
 )
 
+from .modeling_final_norm import _FINAL_NORM_CLASSES, _select_final_norm_type
+
 # Candidate module paths searched in order — shared with HFEagleModel._find_base_model_parts
 _EMBED_TOKENS_PATHS = [
     "embed_tokens",
@@ -46,6 +48,15 @@ _LM_HEAD_PATHS = [
     "lm_head",
     "language_model.lm_head",
     "output",  # Mistral native checkpoints (consolidated.safetensors)
+]
+_FINAL_NORM_PATHS = [
+    "model.norm",
+    "language_model.model.norm",
+    "norm",
+    "backbone.norm_f",
+    "backbone.norm",
+    "language_model.backbone.norm",
+    "model.language_model.norm",
 ]
 _BASE_MODEL_PATHS = [
     "language_model.model",
@@ -78,16 +89,25 @@ class FakeBaseConfig(PretrainedConfig):
         num_attention_heads=None,
         num_key_value_heads=None,
         intermediate_size=None,
+        rms_norm_eps=1e-6,
+        rope_theta=None,
+        final_norm_type=None,
         **kwargs,
     ):
         """Initialize FakeBaseConfig with minimal model configuration parameters."""
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
+        self.rms_norm_eps = rms_norm_eps
+        # Which self-implemented final-norm class FakeBaseModel builds, or None to build no norm
+        # (model whose final-norm type we don't know). See _FINAL_NORM_CLASSES /
+        # _FINAL_NORM_TYPE_BY_MODEL_TYPE. Persisted so a reloaded config rebuilds the same norm.
+        self.final_norm_type = final_norm_type
         self.num_hidden_layers = num_hidden_layers
         # Mirror the original base layer count. The non-fake offline path loads with
         # num_hidden_layers=0 and stashes the real count here (see utils.load_vlm_or_llm);
         # the fake base keeps num_hidden_layers as the real count, so default to it. DFlash's
         # offline modify() reads num_orig_hidden_layers directly (hf_dflash.py), so it must
         # always be present on the base config.
+        # TODO: Deprecate the old offline path.
         self.num_orig_hidden_layers = (
             num_orig_hidden_layers if num_orig_hidden_layers is not None else num_hidden_layers
         )
@@ -103,6 +123,8 @@ class FakeBaseConfig(PretrainedConfig):
             num_key_value_heads if num_key_value_heads is not None else num_attention_heads
         )
         self.intermediate_size = intermediate_size
+        # For some drafter algo (e.g. DFlash) rope theta must match target model. Extract here.
+        self.rope_theta = rope_theta
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
         self.dtype = dtype
@@ -135,6 +157,14 @@ class FakeBaseModel(PreTrainedModel):
         self.lm_head = nn.Linear(
             config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype
         )
+        # Final pre-lm_head norm, applied before lm_head when reconstructing base logits for
+        # self-logit-distillation (vLLM-captured final hidden states are un-normed). Built ONLY
+        # when the base model's final-norm type is known (config.final_norm_type set); otherwise
+        # no ``norm`` attribute exists and downstream skips re-norming. The concrete class comes
+        # from config.final_norm_type (see _FINAL_NORM_CLASSES); weight loaded in from_source.
+        if config.final_norm_type is not None:
+            norm_cls = _FINAL_NORM_CLASSES[config.final_norm_type]
+            self.norm = norm_cls(config.hidden_size, eps=config.rms_norm_eps, dtype=config.dtype)
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -172,14 +202,13 @@ class FakeBaseModel(PreTrainedModel):
             num_attention_heads=getattr(base_cfg, "num_attention_heads", None),
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
+            rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
+            rope_theta=getattr(base_cfg, "rope_theta", None),
+            final_norm_type=_select_final_norm_type(getattr(base_cfg, "model_type", None)),
         )
         model = cls(config)
-        # Load lm_head and embed_tokens only from checkpoint
-        lm_head_w, embed_tokens_w = model._load_weights(source)
-        assert lm_head_w.shape == (config.vocab_size, config.hidden_size)
-        assert embed_tokens_w.shape == (config.vocab_size, config.hidden_size)
-        model.lm_head.weight.data.copy_(lm_head_w)
-        model.embed_tokens.weight.data.copy_(embed_tokens_w)
+        # Load lm_head, embed_tokens, and (for known models) the final norm into the model.
+        model._load_weights(source)
         return model
 
     @staticmethod
@@ -234,8 +263,13 @@ class FakeBaseModel(PreTrainedModel):
             return [os.path.join(source, name) for name in shard_filenames]
         return [hf_hub_download(repo_id=source, filename=name) for name in shard_filenames]
 
-    def _load_weights(self, source: str):
-        """Load lm_head and embed_tokens weights from a local directory or HuggingFace Hub repo."""
+    def _load_weights(self, source: str) -> None:
+        """Load lm_head, embed_tokens, and (for known models) the final norm into this model.
+
+        Reads only the tensors needed (never materializes a whole shard) and copies them into
+        the already-constructed submodules. For unknown models (``final_norm_type`` unset) the
+        norm is neither loaded nor present (``self.norm`` does not exist; see :meth:`__init__`).
+        """
         weight_map = self._load_index(source)
 
         embed_tokens_key = self._find_weight_key(weight_map, _EMBED_TOKENS_PATHS, "embed_tokens")
@@ -247,16 +281,29 @@ class FakeBaseModel(PreTrainedModel):
                 raise
             lm_head_key = embed_tokens_key
 
-        lm_head_path, embed_tokens_path = self._resolve_shard_paths(
-            source, [weight_map[lm_head_key], weight_map[embed_tokens_key]]
-        )
-
-        # Pull only the two tensors we need; avoids materializing the whole file.
-        def _read(path: str, key: str) -> torch.Tensor:
+        # Pull only the tensor we need; avoids materializing the whole file.
+        def _read(key: str) -> torch.Tensor:
+            (path,) = self._resolve_shard_paths(source, [weight_map[key]])
             with safe_open(path, framework="pt", device="cpu") as h:
                 return h.get_tensor(key)
 
-        return _read(lm_head_path, lm_head_key), _read(embed_tokens_path, embed_tokens_key)
+        # Explicit shape checks: copy_ would broadcast a wrong-but-compatible shape silently.
+        hidden, vocab = self.config.hidden_size, self.config.vocab_size
+        embed_tokens_w = _read(embed_tokens_key)
+        lm_head_w = _read(lm_head_key)
+        assert embed_tokens_w.shape == (vocab, hidden)
+        assert lm_head_w.shape == (vocab, hidden)
+        self.embed_tokens.weight.data.copy_(embed_tokens_w)
+        self.lm_head.weight.data.copy_(lm_head_w)
+
+        # Final norm only for models whose norm type we know (final_norm_type set); when known it
+        # MUST be present — a missing key is a hard error, never a silent skip. Unknown: no norm.
+        if self.config.final_norm_type is not None:
+            norm_w = _read(self._find_weight_key(weight_map, _FINAL_NORM_PATHS, "final_norm"))
+            assert norm_w.shape == (hidden,), (
+                f"final-norm weight shape {tuple(norm_w.shape)} != ({hidden},)"
+            )
+            self.norm.weight.data.copy_(norm_w)
 
     def forward(self, *args, **kwargs):
         """Not implemented: FakeBaseModel omits full model weights and cannot run inference."""

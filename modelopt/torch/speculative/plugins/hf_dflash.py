@@ -88,7 +88,13 @@ from .modeling_dflash import (  # noqa: F401
     DFlashModule,
     build_target_layer_ids,
 )
-from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
+from .modeling_fakebase import (
+    _BASE_MODEL_PATHS,
+    _EMBED_TOKENS_PATHS,
+    _FINAL_NORM_PATHS,
+    _LM_HEAD_PATHS,
+)
+from .modeling_final_norm import _maybe_apply_base_final_norm
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +167,16 @@ class HFDFlashModel(DFlashModel):
         return self.get_submodule(self.base_model_lm_head_path)
 
     @property
+    def _base_model_norm(self):
+        """Base model's final pre-lm_head RMSNorm, or None if none was located.
+
+        Applied before lm_head in the offline/streaming distillation path only when the
+        producer captured a pre-norm hidden (base_hidden_prenorm), to reconstruct true logits.
+        """
+        path = getattr(self, "base_model_norm_path", None)
+        return self.get_submodule(path) if path else None
+
+    @property
     def _base_llm_config(self):
         return (
             getattr(self.config, "text_config", None)
@@ -188,6 +204,16 @@ class HFDFlashModel(DFlashModel):
                     continue
             else:
                 raise ValueError(f"Part {name} not found in model")
+        # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
+        # un-normed final hidden collect by vllm.
+        self.base_model_norm_path = None
+        for path in _FINAL_NORM_PATHS:
+            try:
+                assert isinstance(self.get_submodule(path), torch.nn.Module)
+                self.base_model_norm_path = path
+                break
+            except Exception:
+                continue
 
     def modify(self, config):
         """Initialize DFlash draft module."""
@@ -571,7 +597,15 @@ class HFDFlashModel(DFlashModel):
                 # Compute logits from last-layer hidden states for KD loss.
                 # base_model_hidden_states is required on this path — fail fast
                 # with KeyError rather than lm_head(None).
-                out_hiddens = kwargs["base_model_outputs"]["base_model_hidden_states"]
+                bmo = kwargs["base_model_outputs"]
+                out_hiddens = bmo["base_model_hidden_states"]
+                # Re-apply the base model's final norm before lm_head when the producer captured
+                # a pre-(final-)norm hidden (vLLM does; HF/TRT-LLM capture post-norm and declare
+                # base_hidden_prenorm False). Honoring the producer's declaration keeps this
+                # consumer backend-agnostic. If the producer says pre-norm but no final norm was
+                # located, we CANNOT reconstruct correct logits — fail loud rather than silently
+                # feeding an un-normed hidden into lm_head (a corrupt distillation target).
+                out_hiddens = _maybe_apply_base_final_norm(out_hiddens, bmo, self._base_model_norm)
                 base_outputs.logits = self._base_model_lm_head(out_hiddens)
             target_hidden = base_outputs.target_hidden
         else:
