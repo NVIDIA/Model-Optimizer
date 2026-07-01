@@ -581,6 +581,7 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
         fp8_max_for_normalization=E4M3_MAX,
         out_dtype=None,
         pass_through_bwd=False,
+        quant_amax=None,
     ):
         """Forward method."""
         if not triton_kernel.IS_AVAILABLE:
@@ -596,6 +597,7 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
             quantize_block_scales,
             fp8_max_for_normalization,
             out_dtype,
+            quant_amax=quant_amax,
         )
 
     @staticmethod

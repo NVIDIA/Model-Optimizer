@@ -68,6 +68,14 @@ class _Calibrator:
         """
         raise NotImplementedError
 
+    def compute_quant_amax(self, *args, **kwargs):
+        """Per-block quantization amax for Decoupled Scale Search, or ``None`` if unsupported.
+
+        Only calibrators that decouple the quantization scale from the stored dequantization
+        scale (e.g. :class:`NVFP4DSSCalibrator`) return a tensor; all others use the default.
+        """
+        return None
+
     def __repr__(self):
         s = "num_bits={_num_bits}"
         s += " axis={_axis}"
