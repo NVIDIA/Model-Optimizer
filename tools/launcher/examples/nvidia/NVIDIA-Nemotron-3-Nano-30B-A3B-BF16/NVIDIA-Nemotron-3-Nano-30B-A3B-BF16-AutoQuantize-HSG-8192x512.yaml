@@ -1,0 +1,46 @@
+# Nemotron-3-Nano-30B-A3B-BF16 AutoQuantize + inline MMLU.
+# Tested on one OCI-HSG B200 node.
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-AutoQuantize-HSG-8192x512.yaml --yes
+
+job_name: Nemotron-3-Nano-30B-A3B_AutoQuantize_8192x512
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "AutoQuantize on Nemotron-3-Nano-30B-A3B-BF16: 8192 sequence length, 512 calibration samples, inline MMLU, 1 node x 4 GPUs"
+
+  task_0:
+    script: common/megatron_lm/quantize/quantize.sh
+    args:
+      - --calib-size 512
+      - --calib-max-sequence-length 8192
+      - --auto-quantize-bits 4.8
+      - --auto-quantize-formats NVFP4_DEFAULT_CFG FP8_DEFAULT_CFG
+      - --auto-quantize-score-size 256
+      - --auto-quantize-checkpoint /cicd/auto_quantize_8192x512_score256
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: auto
+      - MMLU_DATASET: /hf-local/cais/mmlu
+      - MMLU_LOWER_BOUND: "0.60"
+      - RUN_MMLU: "true"
+      - RUN_EXPORT: "false"
+      - TP: "1"
+      - ETP: "1"
+      - EP: "4"
+      - PP: "1"
+      - CP: "1"
+      - DP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:25.11.nemotron_3_nano
+      modelopt_install_path: /opt/TensorRT-Model-Optimizer/modelopt
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+      time: "04:00:00"
