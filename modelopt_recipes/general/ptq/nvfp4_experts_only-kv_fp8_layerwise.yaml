@@ -30,10 +30,10 @@ quantize:
       enable: true
   quant_cfg:
     - $import: base_disable_all
-    - quantizer_name: '*mlp.experts*weight_quantizer'
+    - quantizer_name: '*.experts.*weight_quantizer'
       cfg:
         $import: nvfp4
-    - quantizer_name: '*mlp.experts*input_quantizer'
+    - quantizer_name: '*.experts.*input_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*block_sparse_moe*weight_quantizer'

@@ -211,8 +211,17 @@ def test_nvfp4_mlp_only_novit_recipe_disables_vision_quantizers():
     assert {"*visual*", "*vision_tower*"} <= disabled_quantizers
 
 
-def test_nvfp4_experts_only_mse_recipe_matches_nemotron_h_experts():
-    recipe = load_recipe("general/ptq/nvfp4_experts_only_mse-kv_fp8_cast")
+@pytest.mark.parametrize(
+    "recipe_path",
+    [
+        "general/ptq/nvfp4_experts_only-kv_fp8",
+        "general/ptq/nvfp4_experts_only-kv_fp8_cast",
+        "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
+        "general/ptq/nvfp4_experts_only_mse-kv_fp8_cast",
+    ],
+)
+def test_nvfp4_experts_only_recipes_match_nemotron_h_experts(recipe_path):
+    recipe = load_recipe(recipe_path)
     enabled_patterns = [
         entry["quantizer_name"]
         for entry in recipe.quantize.model_dump()["quant_cfg"]
