@@ -3,7 +3,8 @@ Basic Concepts
 
 A quantization format consists of the precision format, the block format, and the calibration
 algorithm.
-The detailed list of available quantization formats can be found in :any:`quantization-formats`.
+The detailed list of available quantization formats can be found in the
+:ref:`Support Matrix <Support_Matrix>`.
 Below we provide an overview of the important topics:
 
 Precision format
