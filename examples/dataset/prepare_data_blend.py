@@ -21,8 +21,6 @@ from typing import Any, cast
 
 import yaml
 
-__all__ = ["load_config", "main"]
-
 
 def load_config(path: Path) -> dict[str, Any]:
     """Load a data-blend YAML configuration as a dictionary.
