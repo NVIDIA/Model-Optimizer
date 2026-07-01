@@ -18,12 +18,6 @@ Both runs use the same MIP solver and the same constraint (`target_num_kv_heads:
 - 8×H100 80GB (the teacher needs ≥60 GiB for activation scoring on a 4096 context).
 - Container: `nvcr.io/nvidia/nemo:26.04` or later.
 - `pip install -e ".[dev]"` from the modelopt repo root.
-- Mamba kernels (required by Nemotron-3-Nano's hybrid backbone):
-
-  ```bash
-  pip install mamba-ssm[causal-conv1d] --no-build-isolation
-  ```
-
 - HF auth set up so the model is downloadable: `huggingface-cli login`.
 
 ## Step A — pipeline without bypass
@@ -31,8 +25,8 @@ Both runs use the same MIP solver and the same constraint (`target_num_kv_heads:
 Edit `examples/puzzletron/configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b.yaml` to point `puzzle_dir` and `dataset_path` at writable locations, then:
 
 ```bash
-torchrun --nproc_per_node=8 examples/puzzletron/main.py \
-    --config examples/puzzletron/configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b.yaml
+torchrun --nproc_per_node=8 main.py \
+    --config configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b.yaml
 ```
 
 This runs the no-bypass puzzletron pipeline (convert → score pruning activations → prune → build replacement library → score replacements → MIP → realize). The progress counter includes start/complete messages and prints `N/8`. With `bypass:` added in Step B the pipeline grows to 9 steps. Wall-clock: roughly **1h on 8×H100** for this KV-heads-only task (KV-head importance scoring is one forward pass via `IndependentKvHeadContributionHook`, much cheaper than iterative FFN-channel scoring).
@@ -63,8 +57,8 @@ defaults:
 Run the bypass config:
 
 ```bash
-torchrun --nproc_per_node=8 examples/puzzletron/main.py \
-    --config examples/puzzletron/configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b-with-bypass.yaml
+torchrun --nproc_per_node=8 main.py \
+    --config configs/nemotron-3-nano-30b-a3b/nemotron-3-nano-30b-a3b-with-bypass.yaml
 ```
 
 Skip-if-done caching reuses Step A's converted teacher checkpoint, activation scores, and pruned checkpoints. Only Step 5 (bypass distillation, ~50M tokens) and the downstream library/scoring/MIP rerun.

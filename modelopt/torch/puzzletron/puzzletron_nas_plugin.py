@@ -123,8 +123,7 @@ _STAGE_ORDER: tuple[_StageName, ...] = (
 
 def _total_steps(hydra_cfg) -> int:
     """Return total pipeline step count derived from ``_STAGE_ORDER``."""
-    has_bypass = hydra_cfg.get("bypass", None) is not None
-    return sum(1 for s in _STAGE_ORDER if s != "bypass" or has_bypass)
+    return len(_STAGE_ORDER) if hydra_cfg.get("bypass", None) is not None else len(_STAGE_ORDER) - 1
 
 
 def _progress_step(hydra_cfg, stage: _StageName) -> tuple[int, int]:
