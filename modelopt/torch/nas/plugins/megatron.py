@@ -581,13 +581,16 @@ class _DynamicAttention(DynamicModule):
 
     def _setup(self, *, hidden_size: TracedHp):
         # hidden_size-only: tie input projection(s) input and row output to hidden_size, rest static.
+        # Read the static out/in sizes from the weight shape ([out_features, in_features]) so this
+        # works for both TE linears (out_features/in_features) and Megatron Column/RowParallelLinear
+        # (output_size/input_size, e.g. Gemma4's local-spec attention).
         for name in self._input_proj_names():
             col = getattr(self, name)
             DMRegistry.convert(
-                col, input_size=hidden_size, output_size=TracedHp([col.out_features])
+                col, input_size=hidden_size, output_size=TracedHp([col.weight.shape[0]])
             )
         row = getattr(self, self._row_proj_name)
-        DMRegistry.convert(row, input_size=TracedHp([row.in_features]), output_size=hidden_size)
+        DMRegistry.convert(row, input_size=TracedHp([row.weight.shape[1]]), output_size=hidden_size)
 
     def export(self) -> torch.nn.Module:
         for name in self._input_proj_names():
@@ -1290,3 +1293,164 @@ class _DynamicMCoreLanguageModel(DynamicModule):
             ).export()
             self.output_layer.export()
         return super().export()
+
+
+# Gemma4 DynamicModules ############################################################################
+# Gemma4 (E4B) is a GPTModel-family language model defined in megatron-core (fork
+# `JRD971000:Megatron-LM:alit/gemma4-e4b-tp-sp`). Its Gemma4Model / Gemma4SelfAttention /
+# Gemma4TransformerLayer override forward/__init__, so DMRegistry's exact-class match misses them
+# and they must be registered explicitly. Guarded import: gemma4 only exists on that branch.
+#
+# Pruning policy (width-only): hidden_size + ffn_hidden_size. Attention heads are NOT pruned (like
+# GDN/MLA) -- heterogeneous sliding/full kv_channels and the cross-layer KV bus make head pruning
+# unsafe -- so the base _DynamicAttention hidden_size-only path is used. Depth (num_layers) pruning
+# is not yet supported (PLE per-layer slabs + KV-bus producer/borrower integrity must be handled).
+try:
+    from megatron.core.models.gemma4.gemma4_model import Gemma4Model
+    from megatron.core.transformer.gemma4_attention import Gemma4SelfAttention
+    from megatron.core.transformer.gemma4_layer import Gemma4TransformerLayer
+    from megatron.core.transformer.gemma4_norm import Gemma4RMSNorm
+
+    HAS_GEMMA4 = True
+except ImportError:
+    HAS_GEMMA4 = False
+
+
+class _DynamicGemma4RMSNorm(_DynamicLayerNorm):
+    """A ``Gemma4RMSNorm`` (custom RMSNorm used by the local spec) with dynamic hyperparams.
+
+    The local Gemma4 layer spec wires this in place of ``TENorm``/``te.pytorch.RMSNorm`` (which
+    ``_DynamicTENorm`` handles for the TE spec). Only the weighted variant is ever converted; the
+    scaleless per-head v_norm (``with_scale=False``, no ``weight``) is over head_dim and stays
+    static since attention heads are not pruned.
+    """
+
+    def _setup(self, *, num_features: TracedHp):
+        self._register_hparam("num_features", num_features)
+        if hasattr(self, "weight"):
+            self._register_dynamic_attribute("weight", self._cut_to_active_features)
+
+
+# NOTE: Not registered to DMRegistry (``nn.Linear`` already maps to ``_DynamicLinear`` with its
+# own independent hparams); converted directly so its in_features tracks the shared hidden_size.
+class _DynamicGemma4PLEProjection(DynamicModule, nn.Linear):
+    """Gemma4 PLE ``per_layer_model_projection`` (``nn.Linear(hidden_size, num_layers*ple_dim)``).
+
+    Slices the input dim with the global ``hidden_size`` hparam; the output dim (num_layers *
+    ple_dim) stays static. Built with ``bias=False`` so there is no bias to slice.
+    """
+
+    def _setup(self, *, hidden_size: TracedHp):
+        self._register_hparam("in_features", hidden_size)
+        self._register_hparam("out_features", TracedHp([self.out_features]))
+        self._register_dynamic_attribute("weight", self._get_weight)
+        if self.bias is not None:
+            self._register_dynamic_attribute("bias", self._get_bias)
+
+    @staticmethod
+    def _get_weight(mod: "_DynamicGemma4PLEProjection", weight: torch.Tensor) -> torch.Tensor:
+        return get_sliced_tensor(mod, weight, "out_features", "in_features")
+
+    @staticmethod
+    def _get_bias(
+        mod: "_DynamicGemma4PLEProjection", bias: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        return get_sliced_tensor(mod, bias, "out_features")
+
+
+class _DynamicGemma4SelfAttention(_DynamicAttention):
+    """A Gemma4SelfAttention layer with dynamic hyperparams (prunes hidden_size only).
+
+    Uses the default fused-QKV ``linear_qkv`` / ``linear_proj`` projection names. Unlike the
+    standard GPT path, Gemma4's input layernorm is a SEPARATE ``TENorm`` (not fused into
+    ``linear_qkv``), so ``_has_fused_input_layernorm`` is False -- the hidden_size importance
+    estimator then hooks ``layer.input_layernorm`` instead of the projection. q/k/v norms are
+    per-head (over head_dim) and stay static since heads are not pruned.
+    """
+
+    _has_fused_input_layernorm = False
+
+
+class _DynamicGemma4TransformerLayer(_DynamicTransformerLayer):
+    """A Gemma4TransformerLayer with dynamic hyperparams.
+
+    Adds, on top of the base layer (attention + input/pre_mlp norms + MLP), the Gemma4-specific
+    hidden_size-coupled submodules: the sandwich norms applied before each residual add and the
+    Per-Layer-Embedding (PLE) injection sub-block (gate Column linear hidden->ple_dim, projection
+    Row linear ple_dim->hidden). The PLE dim (``hidden_size_per_layer_input``) stays static.
+    """
+
+    def _setup(self, *, hidden_size: TracedHp):
+        super()._setup(hidden_size=hidden_size)
+        # Sandwich + PLE-output norms all normalize over hidden_size.
+        for ln_name in (
+            "post_self_attn_layernorm",
+            "post_mlp_layernorm",
+            "post_per_layer_input_norm",
+        ):
+            DMRegistry.convert(getattr(self, ln_name), num_features=hidden_size)
+        # PLE injection sub-block: hidden_size -> ple_dim -> hidden_size (ple_dim static).
+        DMRegistry.convert(
+            self.per_layer_input_gate,
+            input_size=hidden_size,
+            output_size=TracedHp([self.per_layer_input_gate.output_size]),
+        )
+        DMRegistry.convert(
+            self.per_layer_projection,
+            input_size=TracedHp([self.per_layer_projection.input_size]),
+            output_size=hidden_size,
+        )
+
+    def export(self) -> torch.nn.Module:
+        """Export the dynamic module to a torch.nn.Module."""
+        for ln_name in (
+            "post_self_attn_layernorm",
+            "post_mlp_layernorm",
+            "post_per_layer_input_norm",
+        ):
+            getattr(self, ln_name).export()
+        self.per_layer_input_gate.export()
+        self.per_layer_projection.export()
+        return super().export()
+
+
+class _DynamicGemma4Model(_DynamicMCoreLanguageModel):
+    """A Gemma4Model with dynamic hyperparams.
+
+    Identical to ``_DynamicMCoreLanguageModel`` except for the model-level PLE projection
+    (``ple.per_layer_model_projection``: ``nn.Linear(hidden_size, num_layers * ple_dim)``), whose
+    input dimension must shrink with ``hidden_size``. Its output dimension scales with num_layers
+    and stays static (depth pruning is not yet supported).
+    """
+
+    def _setup(self):
+        super()._setup()
+        if is_pipeline_first_stage():
+            # per_layer_model_projection reads hidden_size; output (num_layers * ple_dim) static.
+            _DynamicGemma4PLEProjection.convert(
+                self.ple.per_layer_model_projection,
+                hidden_size=self.get_hparam("hidden_size"),
+            )
+
+    def export(self) -> torch.nn.Module:
+        """Export the dynamic module to a torch.nn.Module."""
+        if is_pipeline_first_stage():
+            self.ple.per_layer_model_projection.export()
+        return super().export()
+
+
+# Register the Gemma4 dynamic modules only when the megatron-core Gemma4 model is importable
+# (fork-only), mirroring the HAS_MAMBA / HAS_HYBRID registration guards above.
+if HAS_GEMMA4:
+    DMRegistry.register({Gemma4RMSNorm: "megatron.core.transformer.gemma4_norm.Gemma4RMSNorm"})(
+        _DynamicGemma4RMSNorm
+    )
+    DMRegistry.register(
+        {Gemma4SelfAttention: "megatron.core.transformer.gemma4_attention.Gemma4SelfAttention"}
+    )(_DynamicGemma4SelfAttention)
+    DMRegistry.register(
+        {Gemma4TransformerLayer: "megatron.core.transformer.gemma4_layer.Gemma4TransformerLayer"}
+    )(_DynamicGemma4TransformerLayer)
+    DMRegistry.register({Gemma4Model: "megatron.core.models.gemma4.gemma4_model.Gemma4Model"})(
+        _DynamicGemma4Model
+    )

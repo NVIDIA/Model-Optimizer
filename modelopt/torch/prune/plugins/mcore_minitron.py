@@ -46,6 +46,7 @@ from megatron.core.tensor_parallel import (
     gather_from_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
 )
+from megatron.core.transformer.identity_op import IdentityOp
 from pydantic import create_model
 from rich.console import Console
 from rich.markup import escape as rich_escape
@@ -1156,18 +1157,59 @@ def _register_hidden_size_importance(
                     hook_type="forward",
                 )
             elif isinstance(layer.mlp, _DynamicMLP):
-                # Dense MLP: pre_mlp_layernorm is fused into mlp.linear_fc1
-                registry.register_hook(
-                    layer.mlp.linear_fc1,
-                    partial(_fused_ln_linear_forward_hook, module),
-                    hook_type="forward",
-                )
+                if isinstance(layer.pre_mlp_layernorm, IdentityOp):
+                    # Dense MLP: pre_mlp_layernorm is fused into mlp.linear_fc1
+                    # (TELayerNormColumnParallelLinear)
+                    registry.register_hook(
+                        layer.mlp.linear_fc1,
+                        partial(_fused_ln_linear_forward_hook, module),
+                        hook_type="forward",
+                    )
+                else:
+                    # Dense MLP with a SEPARATE pre_mlp_layernorm (e.g. Gemma4, whose linear_fc1 is a
+                    # plain TEColumnParallelLinear with no fused layernorm) -- hook the norm directly.
+                    registry.register_hook(
+                        layer.pre_mlp_layernorm,
+                        partial(_layernorm_forward_hook, module),
+                        hook_type="forward",
+                    )
+
+            # Sandwich / PLE post-norms (Gemma4) write additional signal into the residual before
+            # each residual-add; the pre-norm hooks above miss it. Hook their outputs so hidden_size
+            # importance reflects those contributions. These attrs exist only on sandwich-norm layers
+            # (e.g. Gemma4), so GPT/Mamba/MoE ranking is unchanged.
+            for post_norm_name in (
+                "post_self_attn_layernorm",
+                "post_mlp_layernorm",
+                "post_per_layer_input_norm",
+            ):
+                post_norm = getattr(layer, post_norm_name, None)
+                if isinstance(post_norm, DynamicModule):
+                    registry.register_hook(
+                        post_norm,
+                        partial(_layernorm_forward_hook, module),
+                        hook_type="forward",
+                    )
         elif isinstance(layer, _DynamicMambaLayer):
             # Mamba norm is fused into mixer.in_proj
             registry.register_hook(
                 layer.mixer.in_proj,
                 partial(_fused_ln_linear_forward_hook, module),
                 hook_type="forward",
+            )
+
+    # Gemma4: also hook the final norm feeding the (tied) LM head -- its output channels directly
+    # determine the logits, so they matter for hidden_size importance. Gated to models with a PLE
+    # (Gemma4) so GPT/Mamba hidden_size ranking (already validated) is unchanged.
+    # (final_norm is a converted DynamicModule only on the last pipeline stage; the isinstance
+    # check below naturally skips other stages.)
+    if hasattr(module, "ple"):
+        final_norm = getattr(module.decoder, "final_layernorm", None) or getattr(
+            module.decoder, "final_norm", None
+        )
+        if isinstance(final_norm, DynamicModule):
+            registry.register_hook(
+                final_norm, partial(_layernorm_forward_hook, module), hook_type="forward"
             )
 
     registry.register_importance(
