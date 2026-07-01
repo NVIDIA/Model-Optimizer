@@ -2,7 +2,7 @@
 
 ## Task Details
 
-- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html#nemo-skills-ns-mmlu-pro>
+- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/index.html>
 
 ## Params
 
