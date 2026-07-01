@@ -287,6 +287,7 @@ class RotateConfig(ModeloptBaseConfig):
     """
 
     enable: bool = False
+    mode: Literal["rotate", "rotate_back"] = "rotate"
     rotate_fp32: bool = False
     block_size: int | None = None
 
@@ -328,7 +329,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     def validate_config(cls, values):
         """Validate quantizer config."""
 
-        def _validate_recursive(value):
+        def _validate_recursive(value, field_name=None):
             """Recursively validate config structure."""
             if value is None:
                 return
@@ -337,14 +338,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
                 for item in value:
                     _validate_recursive(item)
             elif isinstance(value, dict):
+                if field_name == "rotate":
+                    return
                 if len(value) == 1 and "enable" in value and value["enable"] is True:
                     raise ValueError(
                         "Invalid quantizer config: Cannot specify only {'enable': True}. "
                         "Additional parameters are required when enabling quantization."
                     )
                 # Recurse into nested dicts
-                for v in value.values():
-                    _validate_recursive(v)
+                for k, v in value.items():
+                    _validate_recursive(v, k)
 
         _validate_recursive(values)
         return values
