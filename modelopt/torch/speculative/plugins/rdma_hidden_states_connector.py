@@ -37,7 +37,6 @@ trusted cluster fabric -- any reachable peer can read descriptors / free slots.
 
 import base64
 import json
-import os
 import socket
 import threading
 import time
@@ -250,10 +249,11 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 max_num_seqs,
             )
 
-        # Backend(s) overridable via NIXL_BACKENDS (comma-sep). Default UCX (InfiniBand);
-        # set NIXL_BACKENDS=LIBFABRIC on AWS EFA (UCX needs the absent EFA verbs driver). Must
-        # match the trainer-side agent (hf_streaming_dataset.py).
-        _backends = os.environ.get("NIXL_BACKENDS", "UCX").split(",")
+        # Backend(s) from NIXL_BACKENDS; shared helper keeps this locked to the trainer-side
+        # agent (they must use the same backend to hand off over RDMA).
+        from .hf_streaming_dataset import nixl_backends_from_env
+
+        _backends = nixl_backends_from_env()
         self._nixl = nixl_agent(
             f"hs-producer-{uuid.uuid4()}", nixl_agent_config(backends=_backends)
         )

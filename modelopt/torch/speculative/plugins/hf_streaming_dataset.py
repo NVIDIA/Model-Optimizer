@@ -63,6 +63,19 @@ __all__ = [
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
+
+def nixl_backends_from_env() -> list[str]:
+    """NIXL backend list from ``NIXL_BACKENDS`` (comma-separated), defaulting to ``["UCX"]``.
+
+    Shared by the trainer-side agent (here) and the producer-side connector
+    (rdma_hidden_states_connector.py) so the two ALWAYS agree — they must use the same
+    backend to hand off over RDMA. Default UCX (InfiniBand clusters like HSG/nrt); on AWS EFA
+    set ``NIXL_BACKENDS=LIBFABRIC`` — UCX needs the EFA verbs driver (libefa-rdmav34.so) which
+    the container lacks, so UCX RDMA dies there.
+    """
+    return os.environ.get("NIXL_BACKENDS", "UCX").split(",")
+
+
 # Errors from ``_fetch`` that are genuinely transient (server overloaded / connection
 # reset / timeout) and so count against the circuit breaker and trigger a resample.
 # Anything else -- notably the ``RuntimeError`` raised on server token drift, or a
@@ -374,10 +387,7 @@ class EagleVllmStreamingDataset(StreamingDataset):
         if getattr(self, "_nixl_pid", None) != pid:
             from nixl._api import nixl_agent, nixl_agent_config
 
-            # Backend(s) overridable via NIXL_BACKENDS (comma-sep). Default UCX (InfiniBand
-            # clusters like HSG/nrt). On AWS EFA set NIXL_BACKENDS=LIBFABRIC — UCX needs the
-            # EFA verbs driver (libefa-rdmav34.so) which the container lacks, so UCX RDMA dies.
-            _backends = os.environ.get("NIXL_BACKENDS", "UCX").split(",")
+            _backends = nixl_backends_from_env()
             self._nixl = nixl_agent(f"hs-trainer-{pid}", nixl_agent_config(backends=_backends))
             self._nixl_pid = pid
             self._remote_by_host: dict = {}

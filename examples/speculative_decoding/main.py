@@ -266,34 +266,6 @@ def train():
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
 
-        # Optional warm-start: seed the DFlash/DSpark backbone from an existing DFlash
-        # checkpoint and continue training (same LR, joint, no freeze). Applies only on a
-        # fresh run -- a resume is an HF-format checkpoint handled above and must not be
-        # re-seeded. The DSpark correction head's final vocab projection (markov_w2) and
-        # the confidence head are zero-inited so the warm-started model starts numerically
-        # identical to the source DFlash (B_k == 0 => p_k == softmax(U_k)).
-        warmstart_ckpt = os.environ.get("DFLASH_WARMSTART_CKPT")
-        if warmstart_ckpt and checkpoint is None:
-            import safetensors.torch as _st
-
-            src = _st.load_file(os.path.join(warmstart_ckpt, "model.safetensors"))
-            own = model.state_dict()
-            transfer = {k: v for k, v in src.items() if k in own and own[k].shape == v.shape}
-            model.load_state_dict(transfer, strict=False)
-            dflash_module = getattr(model, "dflash_module", None)
-            zeroed = []
-            for head_name in ("markov_w2", "confidence_proj"):
-                head = getattr(dflash_module, head_name, None) if dflash_module else None
-                if head is not None:
-                    torch.nn.init.zeros_(head.weight)
-                    if getattr(head, "bias", None) is not None:
-                        torch.nn.init.zeros_(head.bias)
-                    zeroed.append(head_name)
-            print_rank_0(
-                f"[warmstart] loaded {len(transfer)} tensors from {warmstart_ckpt}; "
-                f"zero-inited DSpark head: {zeroed or 'none'}"
-            )
-
     if dry_run:
         # is_master() is unreliable here: we return before the HF Trainer inits torch.distributed,
         # so use local_rank() (env-based) to keep a single writer to output_dir.
