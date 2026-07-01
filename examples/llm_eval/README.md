@@ -14,6 +14,9 @@ The following instructions show how to evaluate the Model Optimizer quantized LL
 
 The supported eval tasks are [here](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks).
 
+For guidance on shortening research iteration cycles while preserving meaningful model comparisons, see
+[ModelOpt for Researchers: Fast Experimentation Workflows](../researcher_guide/README.md#efficient-evaluation-with-lm-eval-harness).
+
 ### Baseline
 
 Both standard HuggingFace models and heterogeneous pruned checkpoints produced by Puzzletron are supported.
@@ -24,7 +27,7 @@ Both standard HuggingFace models and heterogeneous pruned checkpoints produced b
 python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or model card> --tasks <comma separated tasks> --batch_size 4
 ```
 
-For a quick smoke test, add `--limit 10` to any of the above commands to evaluate on only 10 samples.
+For a quick smoke test, add `--limit 10` to any of the above commands to evaluate on only 10 samples per task.
 
 - With model-sharding (for models which require multiple GPUs):
 
