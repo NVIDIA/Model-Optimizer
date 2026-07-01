@@ -33,13 +33,9 @@ def _prebuild_quant_cuda_extensions():
     First-use JIT compilation can take minutes in CI, so build the base, FP8, and MX
     extensions during session setup and let tests fall back to on-demand JIT if needed.
     """
-    if torch.cuda.is_available():
-        with contextlib.suppress(Exception):  # best-effort; tests fall back to on-demand JIT
-            from modelopt.torch.quantization import extensions as quant_ext
+    import modelopt.torch.quantization.extensions as ext
 
-            quant_ext.get_cuda_ext(raise_if_failed=False)
-            quant_ext.get_cuda_ext_fp8(raise_if_failed=False)
-            quant_ext.get_cuda_ext_mx(raise_if_failed=False)
+    ext.precompile()
 
 
 def megatron_worker_teardown(rank, world_size):

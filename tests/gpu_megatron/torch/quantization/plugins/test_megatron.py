@@ -455,7 +455,6 @@ def test_homogeneous_sharded_state_dict(
     )
 
 
-# Compressed state dict takes longer due to real quant conversion & saving/loading
 @pytest.mark.parametrize(
     "config",
     [
@@ -467,6 +466,7 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
+# Compressed state dict takes longer due to real quant conversion & saving/loading
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -807,9 +807,9 @@ def _mamba_hybrid_forward_step(model, batch):
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
-def test_gptq_mamba_hybrid(dist_workers):
+def test_gptq_mamba_hybrid(dist_workers_size_1):
     """End-to-end GPTQ (NVFP4) on a tiny Megatron-Core NemotronH-style hybrid model."""
-    dist_workers.run(_test_gptq_mamba_hybrid)
+    dist_workers_size_1.run(_test_gptq_mamba_hybrid)
 
 
 def _test_gptq_mamba_hybrid(rank, size):
@@ -858,6 +858,7 @@ def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_si
     )
     model = get_mcore_mamba_hybrid_model(
         tensor_model_parallel_size=1,
+        expert_model_parallel_size=expert_model_parallel_size,
         hidden_size=32,
         num_attention_heads=4,
         ffn_hidden_size=64,
@@ -868,7 +869,6 @@ def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_si
         moe_ffn_hidden_size=32,
         moe_shared_expert_intermediate_size=16,
         transformer_impl="modelopt",
-        expert_model_parallel_size=expert_model_parallel_size,
     ).cuda()
 
     def forward_backward_step(model, batch):
@@ -962,11 +962,8 @@ def _test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(rank, size):
     assert all(layer is not output_layer for layer in decoder_layers)
 
 
-def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(dist_workers):
-    if not HAS_TE:
-        pytest.skip("Transformer Engine is not installed")
-
-    dist_workers.run(_test_mcore_layerwise_calibration_layers_do_not_mutate_decoder)
+def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(dist_workers_size_1):
+    dist_workers_size_1.run(_test_mcore_layerwise_calibration_layers_do_not_mutate_decoder)
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
@@ -1242,8 +1239,6 @@ def test_kv_cache_amax_sync(dist_workers):
 
 
 def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
-    if not HAS_TE:
-        pytest.skip("Transformer Engine is not installed")
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
     model = get_mcore_gpt_model(tensor_model_parallel_size=1, transformer_impl="transformer_engine")
 
