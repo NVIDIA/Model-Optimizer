@@ -17,6 +17,7 @@
 
 # TODO: Add unit tests for this plugin
 import copy
+import inspect
 import os
 from pathlib import Path
 from typing import Any
@@ -132,7 +133,17 @@ def save_sharded_modelopt_state(
         os.makedirs(modelopt_checkpoint_name, exist_ok=True)
     modelopt_state = copy.deepcopy(mto.modelopt_state(model[0]))
     remove_per_module_state(modelopt_state)
-    dist_checkpointing.save(modelopt_state, modelopt_checkpoint_name, sharded_strategy)
+    save_kwargs = {}
+    if "content_metadata" in inspect.signature(dist_checkpointing.save).parameters:
+        # Some MCore releases unconditionally access this key in their common
+        # save strategy even though the public save API makes it optional.
+        save_kwargs["content_metadata"] = {}
+    dist_checkpointing.save(
+        modelopt_state,
+        modelopt_checkpoint_name,
+        sharded_strategy,
+        **save_kwargs,
+    )
 
 
 def _load_extra_state_from_sharded_checkpoint(
@@ -165,6 +176,10 @@ def _load_extra_state_from_sharded_checkpoint(
         get_default_load_sharded_strategy(checkpoint_name),
         strict=StrictHandling.LOG_UNEXPECTED,
     )
+    # Checkpoint content metadata is not part of the model state dict. MCore
+    # returns it alongside loaded state in releases where save requires the
+    # reserved key to be present.
+    extra_state_dict.pop("content_metadata", None)
     extra_state_dict_no_prefix = {}
 
     for k, v in extra_state_dict.items():
@@ -205,6 +220,7 @@ def restore_sharded_modelopt_state(
 
     # Loading the common modelopt_state (replicated on all ranks)
     common_modelopt_state = safe_load(modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME)
+    common_modelopt_state.pop("content_metadata", None)
 
     modelopt_load_version = common_modelopt_state["modelopt_version"]
 

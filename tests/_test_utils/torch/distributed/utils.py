@@ -159,15 +159,14 @@ class DistributedWorkerPool:
             except Exception:
                 status = "error"
                 tb = traceback.format_exc()
-            finally:
-                if teardown_fn is not None:
-                    try:
-                        teardown_fn(rank, world_size)
-                    except Exception as e:
-                        print(f"Error tearing down worker: {e}")
-                        status = "error"
-                        teardown_tb = traceback.format_exc()
-                        tb = (tb + "\n" if tb else "") + f"[teardown] {teardown_tb}"
+            if status == "ok" and teardown_fn is not None:
+                try:
+                    teardown_fn(rank, world_size)
+                except Exception as e:
+                    print(f"Error tearing down worker: {e}")
+                    status = "error"
+                    teardown_tb = traceback.format_exc()
+                    tb = (tb + "\n" if tb else "") + f"[teardown] {teardown_tb}"
             result_queue.put((status, rank, tb))
 
         dist.destroy_process_group()
@@ -186,6 +185,15 @@ class DistributedWorkerPool:
             status, rank, tb = self._result_queue.get(timeout=600)
             if status == "error":
                 errors.append(f"--- Rank {rank} ---\n{tb}")
+                # A failed rank may have diverged from peers that are blocked in
+                # a collective. Do not wait for their 10-minute NCCL watchdog or
+                # let synchronized teardown enter a different collective.
+                for process in self._processes:
+                    if process.is_alive():
+                        process.terminate()
+                for process in self._processes:
+                    process.join(timeout=10)
+                break
 
         if errors:
             raise RuntimeError("Worker(s) failed:\n" + "\n".join(errors))

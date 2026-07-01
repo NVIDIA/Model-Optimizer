@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import inspect
 import re
 from collections import defaultdict
 
@@ -172,7 +173,14 @@ def initialize_for_megatron(
 
 def save_distributed_checkpoint(checkpoint_path, gpt_model):
     sharded_state_dict = gpt_model.sharded_state_dict(prefix="")
-    dist_checkpointing.save(sharded_state_dict=sharded_state_dict, checkpoint_dir=checkpoint_path)
+    save_kwargs = {}
+    if "content_metadata" in inspect.signature(dist_checkpointing.save).parameters:
+        save_kwargs["content_metadata"] = {}
+    dist_checkpointing.save(
+        sharded_state_dict=sharded_state_dict,
+        checkpoint_dir=checkpoint_path,
+        **save_kwargs,
+    )
 
 
 def load_distributed_checkpoint(checkpoint_path, gpt_model):
@@ -180,6 +188,7 @@ def load_distributed_checkpoint(checkpoint_path, gpt_model):
     checkpoint = dist_checkpointing.load(
         sharded_state_dict=sharded_state_dict, checkpoint_dir=checkpoint_path
     )
+    checkpoint.pop("content_metadata", None)
     gpt_model.load_state_dict(checkpoint)
     return gpt_model
 
