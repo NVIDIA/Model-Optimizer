@@ -40,7 +40,13 @@ from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
 from ..conversion import maybe_promote_nvfp4_static_quantizer
-from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
+from ..nn import (
+    GroupedQuantizer,
+    QuantModule,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
@@ -87,7 +93,7 @@ def _check_nvfp4_static_tp_supported(model: torch.nn.Module) -> None:
             continue
         leaves = (
             list(weight_quantizer)
-            if isinstance(weight_quantizer, SequentialQuantizer)
+            if isinstance(weight_quantizer, (SequentialQuantizer, GroupedQuantizer))
             else [weight_quantizer]
         )
         if any(leaf.is_nvfp4_static for leaf in leaves):

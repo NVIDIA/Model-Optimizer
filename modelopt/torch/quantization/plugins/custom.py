@@ -24,7 +24,13 @@ import torch
 
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
+from ..nn import (
+    GroupedQuantizer,
+    NVFP4StaticQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from ..nn.modules.quant_linear import _QuantLinear
 from ..utils import multi_context, replace_function
 
@@ -134,11 +140,19 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
 
         def _has_state(quantizer, name):
             # Handling for SequentialQuantizer
-            quantizer = quantizer[0] if isinstance(quantizer, SequentialQuantizer) else quantizer
+            quantizer = (
+                quantizer[0]
+                if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer))
+                else quantizer
+            )
             return hasattr(quantizer, name)
 
         def _has_complete_static_nvfp4_weight_state(quantizer, weight):
-            quantizer = quantizer[0] if isinstance(quantizer, SequentialQuantizer) else quantizer
+            quantizer = (
+                quantizer[0]
+                if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer))
+                else quantizer
+            )
             if not isinstance(quantizer, NVFP4StaticQuantizer):
                 return False
             amax = getattr(quantizer, "_amax", None)
