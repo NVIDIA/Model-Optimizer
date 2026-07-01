@@ -37,6 +37,11 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
 )
 
+from modelopt.torch.kernels.common.attention.decode_attention import (
+    _ONWRITE_BLOCK_N,
+    attention_decode,
+    fake_quant_v_onwrite,
+)
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
 
 
@@ -113,6 +118,96 @@ def _build_sparse_kw(layer_cfg: dict) -> dict:
     return sparse_kw
 
 
+def _bmm_qdq_from_layer(layer, attr: str, default_amax: float | None):
+    """Map a layer's ``attr`` BMM2 quantizer to ``(qdq mode, amax)`` for the kernels.
+
+    Mirrors ``_QuantAttention._p_qdq_mode``: per-tensor FP8 -> ``"fp8"``; dynamic NVFP4
+    at block size 16 -> ``"nvfp4"``; otherwise (missing/disabled quantizer or an
+    unsupported format) -> ``(None, default_amax)``. A calibrated per-tensor ``_amax``,
+    if present, is forwarded so the kernel uses it instead of ``default_amax``.
+    """
+    q = getattr(layer, attr, None)
+    if q is None or not getattr(q, "is_enabled", False):
+        return None, default_amax
+    if q.is_fp8:
+        mode = "fp8"
+    elif q.is_nvfp4_dynamic and (q.block_sizes or {}).get(-1, None) == 16:
+        mode = "nvfp4"
+    else:
+        return None, default_amax
+    amax = getattr(q, "_amax", None)
+    if amax is not None:
+        if amax.numel() != 1:
+            raise NotImplementedError(
+                f"{attr} via the sparse Triton kernel supports only a per-tensor "
+                f"(scalar) amax, got shape {tuple(amax.shape)}."
+            )
+        return mode, float(amax)
+    return mode, default_amax
+
+
+def _p_qdq_from_layer(layer) -> tuple[str | None, float]:
+    """P (softmax) BMM2 operand from ``p_bmm_quantizer``; default amax 1.0 (P in [0, 1])."""
+    return _bmm_qdq_from_layer(layer, "p_bmm_quantizer", 1.0)
+
+
+def _v_qdq_from_layer(layer) -> tuple[str | None, float | None]:
+    """V (value) BMM2 operand from ``v_bmm_quantizer``.
+
+    Default amax ``None`` -> the constant 1.0 global scale (V's dynamic per-16
+    block amax carries the range).
+    """
+    return _bmm_qdq_from_layer(layer, "v_bmm_quantizer", None)
+
+
+def _assert_bmm_quant_supported(layer, name: str = "") -> None:
+    """Raise if a BMM2 quantizer is enabled but in a format the kernel cannot map.
+
+    ``_bmm_qdq_from_layer`` returns ``None`` for both a disabled quantizer and an
+    enabled one in an unsupported format (only per-tensor FP8 or block-16 dynamic
+    NVFP4 map). The latter must not be served silently: the kernel would skip it and,
+    for V, ``_value_quant_in_kernel`` would also skip the pre-step quantizer, leaving
+    the operand unquantized. Detect that case (enabled, yet unmapped) and fail loud.
+    """
+    for attr, (qdq, _) in (
+        ("p_bmm_quantizer", _p_qdq_from_layer(layer)),
+        ("v_bmm_quantizer", _v_qdq_from_layer(layer)),
+    ):
+        q = getattr(layer, attr, None)
+        if qdq is None and q is not None and getattr(q, "is_enabled", False):
+            where = f"{name}." if name else ""
+            raise NotImplementedError(
+                f"{where}{attr} is enabled but its quant format is unsupported by the "
+                f"sparse attention kernel (supported: per-tensor FP8, block-16 dynamic "
+                f"NVFP4). Re-export with a supported format or disable this quantizer."
+            )
+
+
+def _bake_v_onwrite(value_cache, block_table, seq_lens, query_lens, page_size, v_qdq_amax, decode):
+    """Quantize-on-write the newly-complete BLOCK_N V tiles so decode reads them as-is.
+
+    Bakes the tiles that completed since the previous step (``[prev, seq)`` clipped to whole
+    ``_ONWRITE_BLOCK_N`` tiles) into the paged cache, NVFP4, with the same scale the kernel applies
+    on read — turning decode V quant from ``O(S²)`` on-read into ``O(S)`` quantize-once. NVFP4-only;
+    the caller skips it for FP8 V.
+    """
+    bn = _ONWRITE_BLOCK_N
+    prev = (seq_lens - query_lens).to(torch.int32)
+    seqk = seq_lens.to(torch.int32)
+    v_lo = (prev // bn) * bn
+    v_hi = (seqk // bn) * bn
+    v_scale = 1.0 if v_qdq_amax is None else v_qdq_amax / (6.0 * 448.0)
+    fake_quant_v_onwrite(
+        value_cache,
+        block_table,
+        v_lo,
+        v_hi,
+        page_size=page_size,
+        v_qdq_scale=v_scale,
+        decode=decode,
+    )
+
+
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
     """Attention implementation that uses the ModelOpt Triton kernel.
 
@@ -167,9 +262,20 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             return output.fill_(0)
 
         if getattr(attn_metadata, "use_cascade", False):
-            # vLLM cascade metadata splits the request into shared-prefix and
-            # suffix pieces. The ModelOpt paged kernel consumes plain per-request
-            # KV lengths, so delegate cascade launches back to vLLM's impl.
+            # Cascade metadata splits a shared-prefix batch into prefix + suffix; the
+            # ModelOpt paged kernel consumes plain per-request KV lengths and cannot.
+            # For a sparse-only layer the native fallback is harmless (dense output, no
+            # skip-softmax). But when attention QUANT is active, native attention serves
+            # the model UN-quantized (wrong numerics, silently), so fail loud instead.
+            # The quant worker also disables cascade up front, so this should not be hit.
+            p_qdq, _ = _p_qdq_from_layer(layer)
+            v_qdq, _ = _v_qdq_from_layer(layer)
+            if p_qdq is not None or v_qdq is not None:
+                raise NotImplementedError(
+                    "vLLM cascade attention is incompatible with ModelOpt attention "
+                    "quant (the native fallback would serve P/V un-quantized). Disable "
+                    "cascade (model_config.disable_cascade_attn=True) or the quantizers."
+                )
             return self._forward_vllm_flash_attn(
                 layer,
                 query,
@@ -198,6 +304,14 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         page_size = key_cache.shape[1]
 
+        # BMM2-operand quant from the layer's p/v_bmm_quantizer (config-driven, exported);
+        # None when no/disabled/unsupported quantizer. P or V quant alone (no sparsity)
+        # still engages the kernel below. K/Q quant is applied upstream by the
+        # _QuantVLLMAttention pre-step (head_dim axis); only the keys-axis BMM2 operands
+        # (P, V) are quantized in-kernel here.
+        p_qdq, p_qdq_amax = _p_qdq_from_layer(layer)
+        v_qdq, v_qdq_amax = _v_qdq_from_layer(layer)
+
         # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
         sparse_kw = dict(getattr(self, "sparse_kw", {}))
         _resolve_skip_softmax_calibration(
@@ -209,11 +323,9 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             # N:M sparse softmax is prefill-only.
             for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
                 sparse_kw.pop(name, None)
-            if set(sparse_kw) <= {"skip_softmax_threshold"}:
-                # The current ModelOpt paged kernel is only validated for
-                # sparse prefill in vLLM. Decode-only skip-softmax would route
-                # through the dense Triton path for every non-skipped tile, so
-                # keep decode on vLLM FlashAttention until that path is covered.
+            threshold = sparse_kw.get("skip_softmax_threshold")
+            if threshold is None and p_qdq is None and v_qdq is None:
+                # No decode sparsity and no BMM quant for this launch; use vLLM FlashAttention.
                 return self._forward_vllm_flash_attn(
                     layer,
                     query,
@@ -225,10 +337,41 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                     output_scale,
                     output_block_scale,
                 )
-        if not sparse_kw:
-            # Dynamic calibration can disable sparse work for a launch, e.g.
-            # short-prefill thresholds outside the valid lambda range. Avoid
-            # swapping in the ModelOpt dense kernel when no sparse feature is active.
+            # NVFP4 V: bake the newly-complete tiles on write so the decode kernel reads them
+            # as-is (O(S)) instead of re-fake-quantizing the whole cache every step (O(S²)).
+            # FP8 V stays on-read. Bake BEFORE the attention so it reads the baked cache.
+            v_cache_quantized = v_qdq == "nvfp4"
+            if v_cache_quantized:
+                _bake_v_onwrite(
+                    value_cache,
+                    attn_metadata.block_table,
+                    seq_lens,
+                    b_seq_len,
+                    page_size,
+                    v_qdq_amax,
+                    decode=True,
+                )
+            # Decode runs on the dedicated paged decode kernel (one query vector per
+            # request, split-K): skip-softmax and/or P quant, not the prefill kernel.
+            return self._forward_sparse_decode(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                page_size=page_size,
+                seq_lens=seq_lens,
+                block_table=attn_metadata.block_table,
+                num_actual_tokens=num_actual_tokens,
+                skip_softmax_threshold=threshold,
+                p_qdq=p_qdq,
+                p_qdq_amax=p_qdq_amax,
+                v_qdq=v_qdq,
+                v_qdq_amax=v_qdq_amax,
+                v_cache_quantized=v_cache_quantized,
+                output=output,
+            )
+        if not sparse_kw and p_qdq is None and v_qdq is None:
+            # No sparse feature and no BMM2 quant active (e.g. dynamic calibration
+            # disabled the threshold); avoid swapping in the ModelOpt kernel.
             return self._forward_vllm_flash_attn(
                 layer,
                 query,
@@ -247,6 +390,23 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         # k_cache/v_cache via block_table), but shape[1] must be num_kv_heads
         # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).
         k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
+
+        # NVFP4 V: bake the prompt's complete tiles on write BEFORE the kernel, so the kernel
+        # reads them as-is (V_CACHE_QUANTIZED) and re-fake-quantizes only the trailing partial.
+        # This quantizes each V tile exactly once — no double-quant of tiles a prior chunked-
+        # prefill step already baked — and still leaves decode a pre-quantized cache. FP8 V and
+        # no-quant stay fully on-read (v_cache_quantized False).
+        v_cache_quantized = v_qdq == "nvfp4"
+        if v_cache_quantized:
+            _bake_v_onwrite(
+                value_cache,
+                attn_metadata.block_table,
+                seq_lens,
+                b_seq_len,
+                page_size,
+                v_qdq_amax,
+                decode=False,
+            )
 
         # Call ModelOpt Triton kernel with paged KV.
         # b_seq_len is the query length (e.g., 6 for prefill, 1 for decode).
@@ -271,10 +431,62 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             v_cache=value_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
             block_table=attn_metadata.block_table,  # [batch, max_blocks]
             page_size=page_size,  # tokens per page in the KV cache
+            p_qdq=p_qdq,
+            p_qdq_amax=p_qdq_amax,
+            v_qdq=v_qdq,
+            v_qdq_amax=v_qdq_amax,
+            v_cache_quantized=v_cache_quantized,
             **sparse_kw,
         )
 
         output[:num_actual_tokens] = triton_out
+        return output
+
+    def _forward_sparse_decode(
+        self,
+        *,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        page_size: int,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        num_actual_tokens: int,
+        skip_softmax_threshold: float | None = None,
+        p_qdq: str | None = None,
+        p_qdq_amax: float = 1.0,
+        v_qdq: str | None = None,
+        v_qdq_amax: float | None = None,
+        v_cache_quantized: bool = False,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode via the dedicated paged decode kernel (skip-softmax and/or P/V quant).
+
+        Standard decode schedules exactly one query token per request, so the
+        ``num_actual_tokens`` query rows are the per-request decode queries. The
+        decode kernel computes one query vector per ``(request, head)`` over the
+        paged cache (split-K over the KV sequence) and applies the same prefix-max
+        skip criterion as the prefill kernel, so realized decode sparsity matches
+        the calibrated ``(a, b)``. The prefill kernel would tile this single query
+        token into ``BLOCK_M`` rows, wasting ~127/128 of the work.
+        """
+        q = query[:num_actual_tokens].contiguous()  # [batch, num_q_heads, head_dim]
+        decode_out = attention_decode(
+            q,
+            key_cache,
+            value_cache,
+            block_table[:num_actual_tokens],
+            seq_lens[:num_actual_tokens],
+            softmax_scale=self.scale,
+            skip_softmax_threshold=skip_softmax_threshold,
+            page_size=page_size,
+            p_qdq=p_qdq,
+            p_qdq_amax=p_qdq_amax,
+            v_qdq=v_qdq,
+            v_qdq_amax=v_qdq_amax,
+            v_cache_quantized=v_cache_quantized,
+        )
+        output[:num_actual_tokens] = decode_out
         return output
 
 

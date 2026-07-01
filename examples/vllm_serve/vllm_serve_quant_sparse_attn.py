@@ -13,19 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Launch vLLM with sparse attention.
+"""Launch vLLM with combined attention quantization + sparse attention.
 
-Configuration is read exclusively from ``<ckpt>/config.json``'s
-``sparse_attention_config`` block, written during calibration by
-``examples/llm_sparsity/attention_sparsity/hf_sa.py``. If the checkpoint has
-no such block, the worker logs a message and the server runs as standard
-vLLM.
-
-Combined sparse attention + quantization is handled by the separate
-``vllm_serve_quant_sparse_attn.py`` launcher; this one is sparse-only.
+Restores ModelOpt fakequant (env knobs: ``MODELOPT_STATE_PATH`` / ``QUANT_CFG`` /
+``KV_QUANT_CFG`` / ...) **and** installs the sparse attention impl driven by the
+checkpoint's ``sparse_attention_config`` block. A single served checkpoint then
+runs attention quant (Q/K pre-step, P/V in-kernel) together with skip-softmax
+sparsity. Layers with neither active quant nor a sparse feature fall back to
+vLLM's native attention.
 
 Usage:
-    python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>
+    MODELOPT_STATE_PATH=<ckpt>/modelopt_state.pth \\
+        python vllm_serve_quant_sparse_attn.py <path/to/modelopt-exported-ckpt>
 """
 
 import os
@@ -46,19 +45,21 @@ else:
 
 
 def main():
-    """Launch vLLM with sparse attention worker."""
-    parser = FlexibleArgumentParser(description="vLLM model server with sparse attention")
+    """Launch vLLM with the combined quant + sparse attention worker."""
+    parser = FlexibleArgumentParser(
+        description="vLLM model server with attention quantization + sparse attention"
+    )
     parser.add_argument("model", type=str, help="The path or name of the model to serve")
     parser = make_arg_parser(parser)
 
-    # Ensure workers can import our custom worker module
+    # Ensure workers can import our custom worker modules (and its fakequant_worker sibling).
     repo_root = str(Path(__file__).resolve().parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     current = os.environ.get("PYTHONPATH")
     os.environ["PYTHONPATH"] = os.pathsep.join([current, repo_root]) if current else repo_root
 
-    parser.set_defaults(worker_cls="sparse_attn_worker.SparseAttnWorker")
+    parser.set_defaults(worker_cls="quant_sparse_attn_worker.QuantSparseAttnWorker")
 
     args = parser.parse_args()
     uvloop.run(run_server(args))

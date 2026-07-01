@@ -188,8 +188,34 @@ def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
 
 
+_NVFP4_GLOBAL_SCALE_ONE_AMAX = 6.0 * 448.0
+
+
+def _set_vllm_attention_kv_runtime_amax(module, device: torch.device) -> None:
+    """Set global-scale-one fallback state on supported NVFP4 K/V quantizers."""
+    for attr in ("k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = getattr(module, attr, None)
+        if not isinstance(quantizer, TensorQuantizer):
+            continue
+        supported = (
+            quantizer.is_enabled
+            and quantizer.is_nvfp4_dynamic
+            and (quantizer.block_sizes or {}).get(-1) == 16
+        )
+        runtime_amax = (
+            torch.tensor(
+                _NVFP4_GLOBAL_SCALE_ONE_AMAX,
+                device=device,
+                dtype=torch.float32,
+            )
+            if supported
+            else None
+        )
+        quantizer._set_runtime_default_amax(runtime_amax)
+
+
 def _vllm_attention_modelopt_post_restore(self) -> None:
-    """Move Attention module to its correct device after ModelOpt state restore."""
+    """Restore Attention placement and supported NVFP4 K/V runtime defaults."""
     device, dtype = _get_device_dtype(self)
     if device is None or dtype is None:
         raise RuntimeError(
@@ -197,6 +223,7 @@ def _vllm_attention_modelopt_post_restore(self) -> None:
             "Ensure vllm_replace_quant_module_hook runs before replace_quant_module."
         )
     self.to(device=device)
+    _set_vllm_attention_kv_runtime_amax(self, device)
 
 
 class FakeQuantMethod:
@@ -310,6 +337,16 @@ def post_restore_vllm_parallel_linears(model: torch.nn.Module) -> None:
     for module in model.modules():
         if isinstance(module, _VLLMParallelLinear):
             module.modelopt_post_restore("")
+
+
+def post_restore_vllm_attentions(model: torch.nn.Module) -> None:
+    """Re-run vLLM attention post-restore hooks after final quantizer state loading."""
+    for module in model.modules():
+        if not isinstance(module, _ATTENTION_TYPES):
+            continue
+        post_restore = getattr(module, "modelopt_post_restore", None)
+        if callable(post_restore):
+            post_restore("")
 
 
 @QuantModuleRegistry.register({vllm_linear.RowParallelLinear: "vllm_RowParallelLinear"})
@@ -501,12 +538,18 @@ class _QuantVLLMAttention(QuantModule):
         self.q_bmm_quantizer = TensorQuantizer()
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
+        # When ``_value_quant_in_kernel`` is set (sparse path), V is quantized along the key axis
+        # in-kernel by that impl, so the V pre-step below is skipped to avoid double-quantizing V on
+        # the wrong (head_dim) axis. Default off keeps native behavior.
+        self.p_bmm_quantizer = TensorQuantizer()
+        self._value_quant_in_kernel = False
         self.parallel_state = create_parallel_state()
 
     def forward(self, query, key, value, *args, **kwargs):
         query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        if not self._value_quant_in_kernel:
+            value = self.v_bmm_quantizer(value)
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:

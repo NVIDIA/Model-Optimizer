@@ -33,7 +33,12 @@ import torch
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    ModelOptSparseAttentionImpl,
+    _assert_bmm_quant_supported,
+    _p_qdq_from_layer,
+    _v_qdq_from_layer,
+)
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention as triton_attention
@@ -44,6 +49,97 @@ _ACTIVE_PREFILL_SPARSE_KW = {
     "dense_sink_tokens": 0,
     "dense_recent_tokens": 0,
 }
+
+
+def test_p_qdq_from_layer():
+    """_p_qdq_from_layer maps a layer's p_bmm_quantizer to (p_qdq mode, amax)."""
+    # Missing / disabled quantizer -> no P quant.
+    assert _p_qdq_from_layer(None) == (None, 1.0)
+    assert _p_qdq_from_layer(SimpleNamespace()) == (None, 1.0)
+    disabled = SimpleNamespace(p_bmm_quantizer=SimpleNamespace(is_enabled=False))
+    assert _p_qdq_from_layer(disabled) == (None, 1.0)
+
+    def _layer(**kw):
+        return SimpleNamespace(p_bmm_quantizer=SimpleNamespace(is_enabled=True, **kw))
+
+    # Per-tensor FP8 -> "fp8"; a calibrated scalar _amax is forwarded, else default 1.0.
+    fp8 = {"is_fp8": True, "is_nvfp4_dynamic": False, "block_sizes": None}
+    assert _p_qdq_from_layer(_layer(**fp8, _amax=None)) == ("fp8", 1.0)
+    assert _p_qdq_from_layer(_layer(**fp8, _amax=torch.tensor(0.5))) == ("fp8", 0.5)
+
+    # Dynamic NVFP4 at block size 16 -> "nvfp4"; any other block size -> None.
+    nvfp4 = {"is_fp8": False, "is_nvfp4_dynamic": True, "_amax": None}
+    assert _p_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 16})) == ("nvfp4", 1.0)
+    assert _p_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 32})) == (None, 1.0)
+
+
+def test_v_qdq_from_layer():
+    """_v_qdq_from_layer maps a layer's v_bmm_quantizer to (v_qdq mode, amax).
+
+    Same FP8/NVFP4 mapping as P, but V has no natural amax bound, so the default
+    (no calibrated _amax) is ``None`` -> the kernel's constant 1.0 global scale.
+    """
+    # Missing / disabled quantizer -> no V quant, default amax None.
+    assert _v_qdq_from_layer(None) == (None, None)
+    assert _v_qdq_from_layer(SimpleNamespace()) == (None, None)
+    disabled = SimpleNamespace(v_bmm_quantizer=SimpleNamespace(is_enabled=False))
+    assert _v_qdq_from_layer(disabled) == (None, None)
+
+    def _layer(**kw):
+        return SimpleNamespace(v_bmm_quantizer=SimpleNamespace(is_enabled=True, **kw))
+
+    # Per-tensor FP8 -> "fp8"; calibrated scalar _amax forwarded, else default None.
+    fp8 = {"is_fp8": True, "is_nvfp4_dynamic": False, "block_sizes": None}
+    assert _v_qdq_from_layer(_layer(**fp8, _amax=None)) == ("fp8", None)
+    assert _v_qdq_from_layer(_layer(**fp8, _amax=torch.tensor(0.5))) == ("fp8", 0.5)
+
+    # Dynamic NVFP4 at block size 16 -> "nvfp4"; any other block size -> None.
+    nvfp4 = {"is_fp8": False, "is_nvfp4_dynamic": True, "_amax": None}
+    assert _v_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 16})) == ("nvfp4", None)
+    assert _v_qdq_from_layer(_layer(**nvfp4, block_sizes={-1: 32})) == (None, None)
+
+
+def test_assert_bmm_quant_supported():
+    """An enabled BMM2 quantizer in an unmapped format must raise -- never serve unquantized.
+
+    Regression for the silent V-quant skip: when P maps but ``v_bmm_quantizer`` is enabled
+    in a format the kernel cannot map (e.g. block size != 16), the layer would otherwise be
+    served with V unquantized (kernel skips it and ``_value_quant_in_kernel`` skips the
+    pre-step). Install must fail loud instead.
+    """
+    # Disabled / missing / sparse-only -> no raise.
+    _assert_bmm_quant_supported(SimpleNamespace())
+    _assert_bmm_quant_supported(SimpleNamespace(v_bmm_quantizer=SimpleNamespace(is_enabled=False)))
+
+    def _layer(attr, **kw):
+        return SimpleNamespace(**{attr: SimpleNamespace(is_enabled=True, **kw)})
+
+    mapped_fp8 = {"is_fp8": True, "is_nvfp4_dynamic": False, "block_sizes": None, "_amax": None}
+    mapped_nvfp4 = {
+        "is_fp8": False,
+        "is_nvfp4_dynamic": True,
+        "block_sizes": {-1: 16},
+        "_amax": None,
+    }
+    unmapped = {"is_fp8": False, "is_nvfp4_dynamic": True, "block_sizes": {-1: 32}, "_amax": None}
+
+    # Mapped formats (per-tensor FP8, block-16 NVFP4) on either operand -> no raise.
+    _assert_bmm_quant_supported(_layer("p_bmm_quantizer", **mapped_fp8))
+    _assert_bmm_quant_supported(_layer("v_bmm_quantizer", **mapped_nvfp4))
+
+    # Enabled but unmapped (block 32) -> raise, for P and for V.
+    with pytest.raises(NotImplementedError, match="unsupported"):
+        _assert_bmm_quant_supported(_layer("p_bmm_quantizer", **unmapped))
+    with pytest.raises(NotImplementedError, match="unsupported"):
+        _assert_bmm_quant_supported(_layer("v_bmm_quantizer", **unmapped))
+
+    # The motivating case: P maps, V enabled-but-unmapped -> must raise (not silently skip V).
+    p_ok_v_bad = SimpleNamespace(
+        p_bmm_quantizer=SimpleNamespace(is_enabled=True, **mapped_fp8),
+        v_bmm_quantizer=SimpleNamespace(is_enabled=True, **unmapped),
+    )
+    with pytest.raises(NotImplementedError, match="v_bmm_quantizer"):
+        _assert_bmm_quant_supported(p_ok_v_bad)
 
 
 def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size):
@@ -93,6 +189,20 @@ def _make_impl(num_heads, head_dim, num_kv_heads):
         kv_cache_dtype="auto",
         logits_soft_cap=None,
     )
+
+
+def _dense_decode_ref(q, k, v, kv_start, kv_lens, num_heads, num_kv_heads, scale):
+    """Reference decode attention per request. q [batch, H, D]; k/v [total_kv, KVH, D]."""
+    g = num_heads // num_kv_heads
+    outs = []
+    for b in range(q.shape[0]):
+        s, length = int(kv_start[b].item()), int(kv_lens[b].item())
+        kb = k[s : s + length].transpose(0, 1).repeat_interleave(g, dim=0)  # [H, L, D]
+        vb = v[s : s + length].transpose(0, 1).repeat_interleave(g, dim=0)
+        scores = (q[b].unsqueeze(1) @ kb.transpose(-1, -2)).squeeze(1) * scale  # [H, L]
+        p = scores.float().softmax(dim=-1).to(v.dtype)
+        outs.append((p.unsqueeze(1) @ vb).squeeze(1))  # [H, D]
+    return torch.stack(outs, dim=0)
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
@@ -300,6 +410,58 @@ class TestModelOptSparseAttentionImpl:
         assert called["attn_metadata"] is attn_metadata
         assert result is output
         assert torch.all(result == 9)
+
+    def test_decode_skip_softmax_uses_decode_kernel(self, monkeypatch):
+        """Decode-only skip-softmax routes through the ModelOpt decode kernel.
+
+        With a near-zero threshold (skips almost nothing) the paged decode kernel
+        must reproduce dense decode attention, and must NOT fall back to vLLM's
+        native attention.
+        """
+        batch = 2
+        kv_lens = torch.tensor([130, 200], device="cuda", dtype=torch.int32)  # multi-tile
+        num_heads, num_kv_heads, head_dim = 4, 2, 64
+        page_size = 16
+        dtype = torch.float16
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(3)
+        q = torch.randn(batch, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.randn(int(kv_lens.sum()), num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        v = torch.randn_like(k)
+        kv_start = torch.tensor([0, int(kv_lens[0].item())], device="cuda", dtype=torch.int32)
+        kv_cache, block_table = _make_paged_cache(
+            k, v, kv_start, kv_lens, num_kv_heads, head_dim, page_size
+        )
+        attn_metadata = SimpleNamespace(
+            num_actual_tokens=batch,
+            max_query_len=1,
+            max_seq_len=int(kv_lens.max().item()),
+            query_start_loc=torch.tensor([0, 1, 2], device="cuda", dtype=torch.int32),
+            seq_lens=kv_lens,
+            block_table=block_table,
+        )
+
+        # Native attention must NOT be reached for a skip-softmax decode launch.
+        def _fail_fallback(*args, **kwargs):
+            raise AssertionError("decode skip-softmax should not delegate to vLLM")
+
+        monkeypatch.setattr(FlashAttentionImpl, "forward", _fail_fallback)
+
+        impl = _make_impl(num_heads, head_dim, num_kv_heads)
+        impl.sparse_kw = {"skip_softmax_threshold": 2**-20}  # ~dense
+        out = impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=torch.empty_like(q),
+        )
+
+        ref = _dense_decode_ref(q, k, v, kv_start, kv_lens, num_heads, num_kv_heads, scale)
+        torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
 
     def test_profiling_run_returns_zeros(self):
         """attn_metadata=None (vLLM profiling pass) must zero-fill output and return."""

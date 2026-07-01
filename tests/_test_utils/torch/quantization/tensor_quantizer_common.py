@@ -237,6 +237,48 @@ class TensorQuantizerTester:
         out = tq(x)
         assert out.shape == x.shape
 
+    def test_runtime_default_amax(self):
+        inputs = torch.tensor([-2.0, 4.0], device=self.device)
+        quantizer = TensorQuantizer().to(self.device)
+        runtime_amax = torch.tensor(2688.0, device=self.device)
+
+        quantizer._set_runtime_default_amax(runtime_amax)
+        torch.testing.assert_close(quantizer._get_amax(inputs), runtime_amax)
+        assert "_runtime_default_amax" not in quantizer.state_dict()
+        assert (
+            "_runtime_default_amax"
+            not in quantizer.get_modelopt_state()["_pytorch_state_metadata"]["buffers"]
+        )
+
+        calibrated_amax = torch.tensor(7.25, device=self.device)
+        quantizer.amax = calibrated_amax
+        torch.testing.assert_close(quantizer._get_amax(inputs), calibrated_amax)
+
+        quantizer._set_runtime_default_amax(None)
+        quantizer.reset_amax()
+        torch.testing.assert_close(quantizer._get_amax(inputs), inputs.abs().amax())
+
+    def test_runtime_default_amax_overrides_constant_amax(self):
+        inputs = torch.tensor([-2.0, 4.0], device=self.device)
+        quantizer = TensorQuantizer(QuantizerAttributeConfig(use_constant_amax=True)).to(
+            self.device
+        )
+        calibrated_amax = torch.tensor(7.25, device=self.device)
+        runtime_amax = torch.tensor(2688.0, device=self.device)
+
+        quantizer.amax = calibrated_amax
+        # Preserve legacy behavior before opt-in fallback.
+        assert quantizer._get_amax(inputs).item() == torch.finfo(torch.float8_e4m3fn).max
+
+        quantizer._set_runtime_default_amax(runtime_amax)
+        torch.testing.assert_close(quantizer._get_amax(inputs), calibrated_amax)
+
+        quantizer.reset_amax()
+        torch.testing.assert_close(quantizer._get_amax(inputs), runtime_amax)
+
+        quantizer._set_runtime_default_amax(None)
+        assert quantizer._get_amax(inputs).item() == torch.finfo(torch.float8_e4m3fn).max
+
     def test_use_constant_amax_skips_calibration(self):
         """Test that use_constant_amax quantizers are disabled during calibration and re-enabled after."""
         # Build a small model with one use_constant_amax quantizer and one normal quantizer

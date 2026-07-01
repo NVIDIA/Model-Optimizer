@@ -35,6 +35,7 @@ if torch.cuda.is_available():
             "kernel. Try to install triton with `pip install triton`."
         ),
     ):
+        from .decode_attention import attention_decode
         from .hf_triton_attention import (
             register_triton_attention,
             triton_attention_forward,
@@ -47,6 +48,7 @@ if torch.cuda.is_available():
 __all__ = [
     "IS_AVAILABLE",
     "attention",
+    "attention_decode",
     "register_triton_attention",
     "triton_attention_forward",
     "validate_triton_attention_envelope",

@@ -89,8 +89,10 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     if "quantizer" not in key:
         return ("copy", key, value)
 
-    # Skip p_bmm_quantizer (softmax-P) and lm_head quantizers (not needed in vLLM).
-    if "p_bmm_quantizer" in key or (key.startswith("lm_head.") and "quantizer" in key):
+    # Skip lm_head quantizers (not used in vLLM). p_bmm_quantizer is NOT skipped: the sparse Triton
+    # attention applies softmax-P quant in-kernel from it (ModelOptSparseAttentionImpl), so its config
+    # must reach the served _QuantVLLMAttention.p_bmm_quantizer carrier (see the bmm transform below).
+    if key.startswith("lm_head.") and "quantizer" in key:
         return ("skip", None, None)
 
     # Check if this is a q/k/v projection that needs merging
@@ -123,9 +125,9 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         group_key = expert_down_match.group(1) + ".w2_" + expert_down_match.group(2) + suffix
         return ("group", group_key, value)
 
-    # Transform bmm_quantizer keys: self_attn.q/k/v_bmm_quantizer -> self_attn.attn.q/k/v_bmm_quantizer
-    bmm_match = re.search(r"(.*\.self_attn)\.([qkv]_bmm_quantizer.*)$", key) or re.search(
-        r"(.*\.mixer)\.([qkv]_bmm_quantizer.*)$", key
+    # Transform bmm_quantizer keys: self_attn.q/k/v/p_bmm_quantizer -> self_attn.attn.{...}
+    bmm_match = re.search(r"(.*\.self_attn)\.([qkvp]_bmm_quantizer.*)$", key) or re.search(
+        r"(.*\.mixer)\.([qkvp]_bmm_quantizer.*)$", key
     )
     if bmm_match:
         new_key = bmm_match.group(1) + ".attn." + bmm_match.group(2)

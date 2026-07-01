@@ -13,14 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Softmax-P quant-dequant helpers for the unified flash attention kernel.
+"""Softmax-P quant-dequant helper for flash attention.
 
-These ``@triton.jit`` helpers fake-quantize the softmax probabilities ``P``
-before the ``P @ V`` matmul (BMM2) — the in-kernel counterpart of the
-``p_bmm_quantizer`` config. They are called conditionally from the baseline
-flash-attention kernel in ``common/attention/triton_fa.py`` under the
-``P_QDQ`` constexpr guard, following the same composition pattern as
-the sparsity helpers in ``sparsity/attention/skip_softmax_helpers.py``.
+The in-kernel counterpart of ``p_bmm_quantizer``: :func:`_p_qdq_nvfp4` fake-quantizes
+the softmax probabilities ``P`` before the ``P @ V`` matmul (BMM2). Its sibling for the
+value operand of the same matmul is ``attention/v_qdq._v_qdq_nvfp4``; both block 16
+along the key dimension (the contraction axis of ``P @ V``). Called conditionally from
+the baseline flash-attention kernel in ``common/attention/triton_fa.py`` (and the paged
+decode kernel) under the ``P_QDQ`` constexpr guard, following the same composition
+pattern as the sparsity helpers in ``sparsity/attention/skip_softmax_helpers.py``.
 
 Only NVFP4 needs a P-specific helper (tiling policy and block amaxes); the
 per-tensor FP8 mode uses ``quantization/common/fp8_quant.fp8_scalar_qdq``

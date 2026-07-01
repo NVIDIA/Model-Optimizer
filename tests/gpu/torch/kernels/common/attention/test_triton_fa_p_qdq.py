@@ -15,6 +15,8 @@
 
 """GPU tests for the softmax quant-dequant (P_QDQ) feature of the Triton FA kernel."""
 
+# ruff: noqa: N803 — Triton JIT wrapper uses uppercase for constexpr and tensor args
+
 import pytest
 import torch
 from conftest import make_qkv, make_varlen_meta, sdpa_reference
@@ -24,13 +26,33 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor, e2m1_
 from modelopt.torch.quantization.tensor_quant import fp8_eager
 
 if TRITON_KERNEL_AVAILABLE:
+    import triton
+    import triton.language as tl
+
     from modelopt.torch.kernels.common.attention import attention
     from modelopt.torch.kernels.common.attention.triton_fa import LOG2E
+    from modelopt.torch.kernels.quantization.common.nvfp4_quant import nvfp4_scalar_qdq
+
+    @triton.jit
+    def _nvfp4_qdq_block_kernel(X, OUT, GS, N: tl.constexpr):
+        """Run the P/V in-kernel quant primitive ``nvfp4_scalar_qdq`` on one N-block."""
+        i = tl.arange(0, N)
+        xv = tl.load(X + i)
+        block_amax = tl.max(tl.abs(xv))
+        tl.store(OUT + i, nvfp4_scalar_qdq(xv, block_amax, tl.load(GS), N))
+
 
 # The kernel runs with a single pinned config under pytest (see _FWD_CONFIGS):
 # BLOCK_M=128, BLOCK_N=64. The tile-looped reference below relies on it.
 BLOCK_N = 64
 FP8_E4M3_MAX = 448.0
+
+# NVFP4's E4M3 block scale uses ``tl.float8e4nv``, which requires SM89+ (Ada/Hopper/Blackwell).
+_HAS_SM89 = (
+    TRITON_KERNEL_AVAILABLE
+    and torch.cuda.is_available()
+    and torch.cuda.get_device_capability() >= (8, 9)
+)
 
 
 def _qdq_fp8(p, scale=1.0):
@@ -322,3 +344,66 @@ class TestSoftmaxQdqBackward:
             assert torch.isfinite(g_qdq).all()
             rel_err = (g_qdq - g_dense).norm() / g_dense.norm()
             assert rel_err < 5e-2, f"relative gradient error too large: {rel_err:.4f}"
+
+
+@pytest.mark.skipif(not _HAS_SM89, reason="NVFP4 E4M3 block scale (tl.float8e4nv) requires SM89+")
+class TestNvfp4ScaleUnderflow:
+    """Boundary behavior of the NVFP4 block-scale clamp (P/V path).
+
+    ``fp8_quantize_scale`` clamps the per-block scale to the E4M3 range
+    ``[2**-9, 448]`` (matching ``qtensor/nvfp4_tensor.py``) before the cast, so an
+    underflowed block is floored at the min subnormal instead of letting the scale
+    round to a 0 (which would zero the whole block). Two regimes result, both finite:
+    a block far below the floor still rounds to 0 on the E2M1 grid (its entries over
+    the floored scale fall under 0.25), while a block in the reconstruction band
+    ``[~1.8e-7, 2.2e-6]`` comes back nonzero. Tiny softmax-P blocks occur naturally in
+    long context (keys many log2-units below the row max).
+
+    With P's fixed global scale ``1/(6*448)``, ``fp8_quantize_scale`` forms the
+    in-range value ``block_amax * 448``; below ``block_amax ~= 2.2e-6`` it clamps to
+    the ``2**-9`` floor (dequant scale ``2**-9 / 2688 ~= 7.27e-7``).
+    """
+
+    P_GLOBAL_SCALE = 1.0 / (6.0 * 448.0)
+
+    def _run(self, x):
+        gs = torch.tensor(self.P_GLOBAL_SCALE, device="cuda", dtype=torch.float32)
+        out = torch.empty_like(x)
+        _nvfp4_qdq_block_kernel[(1,)](x, out, gs, N=x.shape[0])
+        return out
+
+    def test_tiny_block_underflow_is_finite_and_zeroed(self):
+        # Far below the reconstruction band: the scale clamps to 2^-9, but the entries
+        # (1e-7 / 7.27e-7 = 0.14 < 0.25) still round to 0 on the E2M1 grid. No NaN/inf.
+        x = torch.full((16,), 1e-7, device="cuda", dtype=torch.float32)
+        out = self._run(x)
+        assert torch.isfinite(out).all()
+        assert torch.all(out == 0.0)
+
+    def test_underflow_band_reconstructs_nonzero(self):
+        # In the reconstruction band (amax 2e-6, below the E4M3 min but above the E2M1
+        # round-to-0 threshold): the scale clamps to the 2^-9 floor and the block comes
+        # back nonzero instead of zeroing, matching canonical NVFP4 (nvfp4_tensor.py).
+        x = torch.full((16,), 2e-6, device="cuda", dtype=torch.float32)
+        out = self._run(x)
+        assert torch.isfinite(out).all()
+        assert torch.all(out != 0.0)
+        expected = 3.0 * (2**-9) * self.P_GLOBAL_SCALE  # E2M1 value 3 * floored dequant scale
+        assert torch.allclose(out, torch.full_like(out, expected), rtol=1e-3, atol=1e-9), (
+            f"{out[0].item():.6e} vs {expected:.6e}"
+        )
+
+    def test_zero_block_is_finite(self):
+        # An all-zero block (amax 0) clamps the scale to 2^-9 (> 0), so 0/scale = 0, finite.
+        x = torch.zeros(16, device="cuda", dtype=torch.float32)
+        out = self._run(x)
+        assert torch.isfinite(out).all()
+        assert torch.all(out == 0.0)
+
+    def test_in_range_block_is_finite_and_nonzero(self):
+        # A normal block (amax 0.5) keeps its scale inside E4M3 range -> no clamp,
+        # round-trips to a nonzero, finite result.
+        x = torch.full((16,), 0.5, device="cuda", dtype=torch.float32)
+        out = self._run(x)
+        assert torch.isfinite(out).all()
+        assert torch.any(out != 0.0)
