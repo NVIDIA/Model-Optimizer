@@ -46,14 +46,11 @@ python -m pip install -r examples/puzzletron/requirements.txt
 export PYTHONPATH="$(pwd):/opt/Megatron-Bridge/src:/opt/Megatron-Bridge/3rdparty/Megatron-LM:${PYTHONPATH:-}"
 ```
 
-> **GPT-OSS only:** Megatron Bridge ships an upstream `gpt_oss_bridge.py` that does not yet
-> handle Puzzletron's heterogeneous GPT-OSS layouts. Overlay the patched copy bundled with
-> this example before running:
->
-> ```bash
-> cp examples/puzzletron/distillation/gpt_oss_bridge.py \
->    /opt/Megatron-Bridge/src/megatron/bridge/models/gpt_oss/gpt_oss_bridge.py
-> ```
+> **GPT-OSS only:** Megatron Bridge ships an upstream GPT-OSS bridge that does not yet
+> handle Puzzletron's heterogeneous GPT-OSS layouts. ModelOpt now registers a patched
+> `GPTOSSBridge` automatically (imported via the `puzzletron_mbridge` plugin from
+> `modelopt/torch/puzzletron/plugins/mbridge/gpt_oss.py`), overriding the upstream bridge
+> for `GptOssForCausalLM` — no manual file overlay is required.
 
 ## Run Distillation
 
@@ -212,15 +209,21 @@ examples/puzzletron/distillation/
 ├── distill.py                      # KD entrypoint (HF -> Bridge -> distill loop)
 ├── export_to_hf.py                 # MCore -> HF checkpoint export
 ├── _common.py                      # MODEL_REGISTRY + shared HF/Bridge helpers
+├── hooks.py                        # PuzzletronHooks: thin DistillHooks glue
+├── kd-container-default.yaml       # Default ConfigContainer overrides
+└── kd-container-{llama,nemotron3,qwen}.yaml  # Per-model recipes
+```
+
+The reusable "patcher technique" logic now lives in the ModelOpt library under
+`modelopt/torch/puzzletron/plugins/mbridge/` and is imported by the scripts above:
+
+```text
+modelopt/torch/puzzletron/plugins/mbridge/
+├── __init__.py                     # registers bridges + re-exports patcher API
+├── base.py                         # HeterogeneousBridgeMixin / GenericHeterogeneousProvider
+├── llama.py, qwen3.py, gpt_oss.py  # block_configs-aware Megatron-Bridge adapters
 ├── block_config_utils.py           # Per-layer block_configs loader & translation
 ├── layer_patchers.py               # mbridge_patcher: per-layer MCore overrides
 ├── provider_patch.py               # ModelProviderMixin / DistillationProvider patches
-├── model_bridge_patch.py           # Misc Bridge model-class patches
-├── gpt_oss_bridge.py               # Patched Megatron-Bridge GPT-OSS bridge (overlay)
-├── kd-container-default.yaml       # Default ConfigContainer overrides
-├── kd-container-{llama,nemotron3,qwen}.yaml  # Per-model recipes
-├── kd-dummy.yaml                   # Smoke-test config
-├── data_prep_{llama,nemotron3,qwen3}.ipynb   # Dataset tokenization notebooks
-├── interactive.sh                  # Reference srun + torchrun command snippets
-└── run_validate.py                 # Standalone validation-loss runner
+└── distill_patches.py              # Reusable distillation helpers (MoE aux-loss fix, sync)
 ```

@@ -65,9 +65,13 @@ from _common import (
     configure_logging,
     run_entrypoint,
 )
-from layer_patchers import mbridge_patcher
 from megatron.bridge.utils.common_utils import print_rank_0
-from provider_patch import apply_distillation_patch, apply_patch
+
+from modelopt.torch.puzzletron.plugins.mbridge import (
+    apply_distillation_patch,
+    apply_patch,
+    mbridge_patcher,
+)
 
 configure_logging()
 logger = logging.getLogger(__name__)

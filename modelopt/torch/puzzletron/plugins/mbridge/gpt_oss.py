@@ -13,6 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Megatron Bridge for GPT-OSS (heterogeneous AnyModel/Puzzletron) checkpoints.
+
+Registers a ``GPTOSSBridge`` for ``GptOssForCausalLM`` that handles Puzzletron's
+heterogeneous GPT-OSS layouts (per-layer ``num_local_experts``) and MXFP4
+de-quantization on import / re-quantized export. Importing this module registers
+the bridge with Megatron Bridge's ``MegatronModelBridge`` registry, overriding
+the upstream GPT-OSS bridge for the same source class.
+"""
+
 import logging
 import math
 import re
@@ -36,6 +45,8 @@ try:
 except ImportError:
     # Fallback if fused_bias_geglu is not available
     quick_gelu = torch.nn.functional.gelu
+
+__all__ = ["GPTOSSBridge"]
 
 
 def extract_layer_idx_from_param(param_name: str) -> int:
@@ -105,7 +116,7 @@ class GPTOSSBridge(MegatronModelBridge):
 
         provider.moe_router_pre_softmax = False
         provider.moe_grouped_gemm = True
-        provider.moe_token_dispatcher_type = "alltoall"
+        provider.moe_token_dispatcher_type = "alltoall"  # nosec B105 - MoE dispatcher type, not a password
         provider.moe_permute_fusion = True
         provider.moe_router_load_balancing_type = "none"
 

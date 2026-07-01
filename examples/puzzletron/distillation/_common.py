@@ -102,7 +102,7 @@ def _get_block_configs(hf_config, converter_name: str) -> list | None:
         2. ``ConverterFactory`` — generated from global model config (fallback).
         3. ``None`` — homogeneous model (no per-layer overrides).
     """
-    from block_config_utils import load_block_configs
+    from modelopt.torch.puzzletron.plugins.mbridge import load_block_configs
 
     return load_block_configs(hf_config, converter_name)
 

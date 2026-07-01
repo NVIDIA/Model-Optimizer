@@ -98,8 +98,7 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 if os.environ.get("MBRIDGE_PATCHER_DEBUG", "0").lower() in ("1", "true", "yes", "on"):
-    logging.getLogger("layer_patchers").setLevel(logging.DEBUG)
-    logging.getLogger("provider_patch").setLevel(logging.DEBUG)
+    logging.getLogger("modelopt.torch.puzzletron.plugins.mbridge").setLevel(logging.DEBUG)
     logging.getLogger(__name__).setLevel(logging.DEBUG)
 
 

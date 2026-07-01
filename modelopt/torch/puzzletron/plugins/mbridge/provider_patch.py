@@ -54,6 +54,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "apply_distillation_patch",
+    "apply_patch",
+    "remove_distillation_patch",
+    "remove_patch",
+    "set_provider_block_configs",
+    "set_student_block_configs",
+]
+
 _PATCH_SENTINEL = "_mbridge_provider_patch_applied"
 _DISTILLATION_PATCH_SENTINEL = "_mbridge_distillation_patch_applied"
 
@@ -207,7 +216,7 @@ def _patched_provide(self: Any, *args: Any, **kwargs: Any) -> Any:
         2. Detects whether this is a Mamba/hybrid provider (to set ``apply_no_ops``).
         3. Activates ``mbridge_patcher`` and delegates to the original ``provide()``.
     """
-    from layer_patchers import mbridge_patcher
+    from .layer_patchers import mbridge_patcher
 
     block_configs = getattr(self, "block_configs", None)
 
@@ -326,7 +335,7 @@ def apply_distillation_patch() -> None:
         self: Any, pre_process: Any = None, post_process: Any = None, vp_stage: Any = None
     ) -> Any:
         """Wrap the student model build in mbridge_patcher when student_block_configs is set."""
-        from layer_patchers import mbridge_patcher
+        from .layer_patchers import mbridge_patcher
 
         student_bc = getattr(self, "student_block_configs", None)
         num_attn_heads = getattr(self, "num_attention_heads", None) or getattr(

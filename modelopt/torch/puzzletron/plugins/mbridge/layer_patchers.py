@@ -51,7 +51,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from block_config_utils import MCoreLayerOverrides, get_overrides_for_layer
+
+from .block_config_utils import MCoreLayerOverrides, get_overrides_for_layer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -623,12 +624,12 @@ def mbridge_patcher(
     # -------------------------------------------------------------------------
 
     try:
-        spec_utils_mod.build_module = patched_build_module
-        transformer_block_mod.build_module = patched_build_module
+        setattr(spec_utils_mod, "build_module", patched_build_module)
+        setattr(transformer_block_mod, "build_module", patched_build_module)
         if mamba_block_mod is not None:
-            mamba_block_mod.build_module = patched_build_module
+            setattr(mamba_block_mod, "build_module", patched_build_module)
         if hybrid_block_mod is not None:
-            hybrid_block_mod.build_module = patched_build_module
+            setattr(hybrid_block_mod, "build_module", patched_build_module)
 
         logger.info(
             "mbridge_patcher: active — block_configs=%d layers, apply_no_ops=%s, "
@@ -642,12 +643,12 @@ def mbridge_patcher(
         yield
 
     finally:
-        spec_utils_mod.build_module = orig_build_module
-        transformer_block_mod.build_module = orig_build_module
+        setattr(spec_utils_mod, "build_module", orig_build_module)
+        setattr(transformer_block_mod, "build_module", orig_build_module)
         if mamba_block_mod is not None:
-            mamba_block_mod.build_module = orig_build_module
+            setattr(mamba_block_mod, "build_module", orig_build_module)
         if hybrid_block_mod is not None:
-            hybrid_block_mod.build_module = orig_build_module
+            setattr(hybrid_block_mod, "build_module", orig_build_module)
 
         if has_mamba_layer_patch:
             MambaLayer.__init__ = orig_mamba_init
