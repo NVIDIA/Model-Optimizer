@@ -41,7 +41,7 @@ parse_options() {
     CALIB_WITH_IMAGES=false
 
   # Parse command-line options
-  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,auto_quantize_bits:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,simple_eval_limit:,mmlu_limit:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_checkpoint:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4,vlm,calib_with_images" -n "$0" -- "$@")
+  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,auto_quantize_bits:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,simple_eval_limit:,mmlu_limit:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_score_model:,auto_quantize_score_boundary:,auto_quantize_checkpoint:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4,vlm,calib_with_images" -n "$0" -- "$@")
 
   eval set -- "$ARGS"
   while true; do
@@ -75,6 +75,8 @@ parse_options() {
       --calib_seq ) CALIB_SEQ="$2"; shift 2;;
       --auto_quantize_method ) AUTO_QUANTIZE_METHOD="$2"; shift 2;;
       --auto_quantize_score_size ) AUTO_QUANTIZE_SCORE_SIZE="$2"; shift 2;;
+      --auto_quantize_score_model ) AUTO_QUANTIZE_SCORE_MODEL="$2"; shift 2;;
+      --auto_quantize_score_boundary ) AUTO_QUANTIZE_SCORE_BOUNDARY="$2"; shift 2;;
       --auto_quantize_checkpoint ) AUTO_QUANTIZE_CHECKPOINT="$2"; shift 2;;
       --moe_calib_experts_ratio ) MOE_CALIB_EXPERTS_RATIO="$2"; shift 2;;
       --cast_mxfp4_to_nvfp4 ) CAST_MXFP4_TO_NVFP4=true; shift;;
@@ -177,6 +179,8 @@ parse_options() {
   echo "calib_seq: $CALIB_SEQ"
   echo "auto_quantize_method: $AUTO_QUANTIZE_METHOD"
   echo "auto_quantize_score_size: $AUTO_QUANTIZE_SCORE_SIZE"
+  echo "auto_quantize_score_model: $AUTO_QUANTIZE_SCORE_MODEL"
+  echo "auto_quantize_score_boundary: $AUTO_QUANTIZE_SCORE_BOUNDARY"
   echo "auto_quantize_checkpoint: $AUTO_QUANTIZE_CHECKPOINT"
   echo "moe_calib_experts_ratio: $MOE_CALIB_EXPERTS_RATIO"
   echo "cast_mxfp4_to_nvfp4: $CAST_MXFP4_TO_NVFP4"

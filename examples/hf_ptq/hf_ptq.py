@@ -366,7 +366,7 @@ def auto_quantize(
         def loss_func(output, data):
             return output.loss
 
-    if auto_quantize_method == "gradient":
+    if auto_quantize_method in {"gradient", "group_recon"}:
 
         def forward_step(model, batch):
             inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
@@ -384,12 +384,14 @@ def auto_quantize(
 
     else:
         raise ValueError(
-            f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
+            f"Invalid auto_quantize_method: {auto_quantize_method}. "
+            "Must be 'gradient', 'group_recon', or 'kl_div'"
         )
 
     auto_quantize_constraints = {
         "effective_bits": args.auto_quantize_bits,
         "cost_model": args.auto_quantize_cost_model,
+        "score_model": args.auto_quantize_score_model,
     }
     auto_quantize_cost = {}
     if args.auto_quantize_active_moe_expert_ratio is not None:
@@ -405,7 +407,7 @@ def auto_quantize(
         constraints=auto_quantize_constraints,
         data_loader=calib_dataloader,
         forward_step=forward_step,
-        loss_func=loss_func,  # Only used for gradient-based method
+        loss_func=loss_func if auto_quantize_method == "gradient" else None,
         # TRTLLM only support one quantization format or None (do not quantize, internally supported)
         quantization_formats=[QUANT_CFG_CHOICES[format] for format in qformat_list],
         num_calib_steps=len(calib_dataloader),
@@ -416,6 +418,7 @@ def auto_quantize(
         verbose=True,
         disabled_layers=_get_auto_quantize_disabled_layers(language_model),
         method=auto_quantize_method,
+        score_boundary=args.auto_quantize_score_boundary,
         checkpoint=auto_quantize_checkpoint,
     )
 
@@ -1384,11 +1387,12 @@ def parse_args() -> argparse.Namespace:
         "--auto_quantize_method",
         type=str,
         default="gradient",
-        choices=["gradient", "kl_div"],
+        choices=["gradient", "group_recon", "kl_div"],
         help=(
             "Method for auto_quantize sensitivity analysis. 'gradient' uses gradient-based method "
-            "(requires labels in dataset). 'kl_div' uses KL divergence between original and "
-            "quantized model outputs (no labels required). Default: 'gradient'"
+            "(requires labels in dataset). 'group_recon' uses normalized reconstruction error at "
+            "attention/MLP group outputs. 'kl_div' uses KL divergence between original and "
+            "quantized model outputs. The latter two do not require labels. Default: 'gradient'"
         ),
     )
     parser.add_argument(
@@ -1399,6 +1403,29 @@ def parse_args() -> argparse.Namespace:
             "Number of samples to use for auto_quantize scoring. Most of auto_quantize time is spent on "
             "sensitivity score estimation, so reducing this speeds it up while only minimally affecting "
             "final model accuracy compared to lowering --calib_size (the number of samples used for calibration)."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_score_model",
+        type=str,
+        default="raw",
+        choices=["raw", "per_element"],
+        help=(
+            "Objective used by AutoQuantize's budgeted selector. 'raw' uses the sensitivity "
+            "scores. 'per_element' divides each score by the represented weight-element count "
+            "while leaving the effective-bits constraint unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_score_boundary",
+        type=str,
+        default=None,
+        choices=["local", "group"],
+        help=(
+            "Boundary used for AutoQuantize sensitivity scoring. 'group' measures attention and "
+            "MoE projection perturbations at their attention/MLP group outputs without grouping "
+            "the projection recipe decisions. Defaults to 'group' for group_recon and 'local' "
+            "for other methods."
         ),
     )
     parser.add_argument(

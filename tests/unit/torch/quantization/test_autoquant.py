@@ -24,6 +24,7 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.algorithms as quant_algorithms
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     get_auto_quantize_cost_model,
@@ -64,6 +65,40 @@ class TransformerBlock(torch.nn.Module):
         x = self.attn(x)
         x = self.mlp(x)
         return x
+
+    def get_input(self):
+        return torch.randn(1, 4, 32)
+
+
+class _LinearAttentionLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.in_proj_qkv = torch.nn.Linear(32, 32)
+        self.in_proj_z = torch.nn.Linear(32, 32)
+        self.in_proj_a = torch.nn.Linear(32, 32)
+        self.in_proj_b = torch.nn.Linear(32, 32)
+        self.out_proj = torch.nn.Linear(32, 32)
+
+    def forward(self, x):
+        x = self.in_proj_qkv(x) + self.in_proj_z(x)
+        x = x + self.in_proj_a(x) + self.in_proj_b(x)
+        return self.out_proj(x)
+
+
+class _GroupBoundaryModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(
+            use_cache=True,
+            text_config=SimpleNamespace(use_cache=True),
+        )
+        self.use_cache_seen = []
+        self.self_attn = _AttentionLayer()
+        self.linear_attn = _LinearAttentionLayer()
+
+    def forward(self, x):
+        self.use_cache_seen.append((self.config.use_cache, self.config.text_config.use_cache))
+        return self.linear_attn(self.self_attn(x))
 
     def get_input(self):
         return torch.randn(1, 4, 32)
@@ -287,6 +322,114 @@ def test_active_moe_search_prefers_budget_lower_bound():
 
     assert is_satisfied
     assert best_recipes["layers.0.mlp.quant_recipe"]["format"] == "near_budget"
+
+
+def test_auto_quantize_per_element_changes_selector_objective():
+    candidate_stats = {
+        "small.quant_recipe": {
+            "formats": ["compressed", "bf16"],
+            "costs": [4.0, 8.0],
+            "element_costs": [4.0, 8.0],
+            "scores": [8.0, 0.0],
+        },
+        "large.quant_recipe": {
+            "formats": ["compressed", "bf16"],
+            "costs": [4.0, 8.0],
+            "element_costs": [400.0, 800.0],
+            "scores": [80.0, 0.0],
+        },
+    }
+
+    def solve(score_model):
+        searcher = AutoQuantizeGradientSearcher()
+        searcher.config = {"cost_model": "weight"}
+        searcher.cost_model = "weight"
+        searcher.constraints = {"effective_bits": 6.0, "score_model": score_model}
+        searcher.candidate_stats = copy.deepcopy(candidate_stats)
+        recipes, is_satisfied = searcher.run_search_with_stats(12.0)
+        assert is_satisfied
+        return {name: info["format"] for name, info in recipes.items()}
+
+    assert solve("raw") == {
+        "small.quant_recipe": "compressed",
+        "large.quant_recipe": "bf16",
+    }
+    assert solve("per_element") == {
+        "small.quant_recipe": "bf16",
+        "large.quant_recipe": "compressed",
+    }
+
+
+def test_auto_quantize_groups_shared_expert_projections():
+    searcher = AutoQuantizeGradientSearcher()
+    group_keys = []
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        name = f"model.layers.0.mlp.shared_expert.{projection}"
+        group_key = next(
+            (
+                result
+                for rule in searcher.quant_grouping_rules
+                if (result := searcher._apply_quant_group_rule(name, rule)) is not None
+            ),
+            name,
+        )
+        group_keys.append(group_key)
+
+    assert group_keys == ["model.layers.0.mlp.shared_expert"] * 3
+
+
+def test_auto_quantize_group_reconstruction_score_is_normalized_mse():
+    reference = torch.tensor([[1.0, 2.0]])
+    quantized = torch.tensor([[2.0, 4.0]])
+
+    score = quant_algorithms._get_group_reconstruction_score(reference, quantized)
+
+    expected = (quantized - reference).square().mean() / reference.square().mean()
+    assert score.item() == pytest.approx(expected.item())
+    with pytest.raises(ValueError, match="same shape"):
+        quant_algorithms._get_group_reconstruction_score(torch.ones(2), torch.ones(3))
+    with pytest.raises(TypeError, match="expects a Tensor"):
+        quant_algorithms._get_group_reconstruction_score({"hidden": reference}, quantized)
+
+
+def test_auto_quantize_group_score_boundary_does_not_group_recipe_decisions():
+    model = _GroupBoundaryModel()
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0, "score_model": "per_element"},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method="group_recon",
+    )
+
+    self_qkv = model.self_attn.q_proj.get_hparam("quant_recipe")
+    self_o = model.self_attn.o_proj.get_hparam("quant_recipe")
+    linear_qkvz = model.linear_attn.in_proj_qkv.get_hparam("quant_recipe")
+    linear_ba = model.linear_attn.in_proj_a.get_hparam("quant_recipe")
+    linear_out = model.linear_attn.out_proj.get_hparam("quant_recipe")
+
+    assert self_qkv is not self_o
+    assert linear_qkvz is not linear_ba
+    assert linear_qkvz is not linear_out
+    assert linear_ba is not linear_out
+    assert self_qkv.score_modules == [model.self_attn]
+    assert self_o.score_modules == [model.self_attn]
+    assert linear_qkvz.score_modules == [model.linear_attn]
+    assert linear_ba.score_modules == [model.linear_attn]
+    assert linear_out.score_modules == [model.linear_attn]
+    assert search_state["score_boundary"] == "group"
+    assert search_state["score_model"] == "per_element"
+    assert search_state["method"] == "group_recon"
+    assert all("element_costs" in stats for stats in search_state["candidate_stats"].values())
+    assert any(
+        score > 0 for stats in search_state["candidate_stats"].values() for score in stats["scores"]
+    )
+    assert model.config.use_cache is True
+    assert model.config.text_config.use_cache is True
+    assert (False, False) in model.use_cache_seen
 
 
 # use this config to test custom quantization config
@@ -556,7 +699,7 @@ def test_estimate_quant_compression():
     assert estimate_quant_compression(fp8_affine_kv_cfg) == 0.5
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize("method", ["gradient", "group_recon", "kl_div"])
 def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     """Test that checkpoint can be used to resume an interrupted search."""
     model = SimpleLinear()
@@ -646,7 +789,39 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
                 )
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_auto_quantize_checkpoint_rejects_score_boundary_mismatch(tmp_path):
+    checkpoint_path = str(tmp_path / "autoquant_group_boundary.pth")
+    model = _GroupBoundaryModel()
+    common = {
+        "constraints": {"effective_bits": 8.0, "score_model": "per_element"},
+        "quantization_formats": [
+            mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+            mtq.INT8_DEFAULT_CFG,
+        ],
+        "forward_step": lambda model, batch: model(batch),
+        "loss_func": lambda output, data: output.sum(),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "checkpoint": checkpoint_path,
+    }
+    mtq.auto_quantize(
+        model,
+        data_loader=[model.get_input()],
+        score_boundary="group",
+        **common,
+    )
+
+    resumed_model = _GroupBoundaryModel()
+    with pytest.raises(ValueError, match="score boundary does not match"):
+        mtq.auto_quantize(
+            resumed_model,
+            data_loader=[resumed_model.get_input()],
+            score_boundary="local",
+            **common,
+        )
+
+
+@pytest.mark.parametrize("method", ["gradient", "group_recon", "kl_div"])
 def test_get_auto_quantize_config(method):
     model = TransformerBlock()
 

@@ -36,7 +36,12 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.utils import atomic_print
 
-from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
+from .algorithms import (
+    AutoQuantizeGradientSearcher,
+    AutoQuantizeGroupReconSearcher,
+    AutoQuantizeKLDivSearcher,
+    QuantRecipe,
+)
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
@@ -282,13 +287,15 @@ def auto_quantize(
     num_score_steps: int = 128,
     verbose: bool = False,
     method: str = "gradient",
+    score_boundary: str | None = None,
     checkpoint: str | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
     ``auto_quantize`` uses sensitivity scores to rank the per-layer quantization formats and search
     for the best quantization formats per-layer. The sensitivity score can be computed using gradient-based
-    methods (default) or KL divergence loss, controlled by the ``method`` parameter.
+    methods (default), parent-output reconstruction, or KL divergence loss, controlled by the
+    ``method`` parameter.
 
     Internally this API runs two main phases:
 
@@ -318,11 +325,16 @@ def auto_quantize(
                 constraints = {
                     "effective_bits": 4.8,
                     "cost_model": "active_moe",
+                    "score_model": "per_element",
                     "cost": {
                         "active_moe_expert_ratio": 0.25,
                         "excluded_module_name_patterns": ["*visual*", "*vision_tower*", "*mtp*"],
                     },
                 }
+
+            ``score_model="per_element"`` normalizes each sensitivity score by the
+            number of weight elements represented by that search decision. The default
+            ``"raw"`` preserves the original objective.
 
         quantization_formats: A list of quantization format config dictionaries or string names to search for.
             Each config dictionary should be valid as a ``config`` argument in
@@ -440,9 +452,17 @@ def auto_quantize(
         verbose: If True, prints the search progress/intermediate results.
         method: Method to use for estimating sensitivity loss. Higher loss indicates greater sensitivity
             to quantization. Options are ``"gradient"`` (default; uses gradient-based loss estimation,
-            linear programming search, and requires ``loss_func`` or ``forward_backward_step``) and
+            linear programming search, and requires ``loss_func`` or ``forward_backward_step``),
+            ``"group_recon"`` (uses normalized group-output reconstruction and requires only
+            ``forward_step``), and
             ``"kl_div"`` (uses KL divergence between unquantized and quantized outputs, relies on
             threshold-based binary search, and only requires ``forward_step`` returning logits).
+        score_boundary: Boundary used to measure perturbations. ``"local"``
+            preserves the existing per-module behavior. ``"group"`` scores attention
+            projections at their shared self-attention or linear-attention group output and scores
+            fused/shared MoE projections at the MLP group output. This does not group recipe
+            decisions or force modules to use the same quantization format. Defaults to ``"group"`` for
+            ``method="group_recon"`` and ``"local"`` otherwise.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
@@ -522,10 +542,16 @@ def auto_quantize(
     # Select the appropriate searcher based on method
     if method == "gradient":
         searcher = AutoQuantizeGradientSearcher()
+    elif method == "group_recon":
+        searcher = AutoQuantizeGroupReconSearcher()
     elif method == "kl_div":
         searcher = AutoQuantizeKLDivSearcher()
     else:
-        raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
+        raise ValueError(
+            f"Invalid method: {method}. Valid options are 'gradient', 'group_recon', or 'kl_div'."
+        )
+
+    score_boundary = score_boundary or ("group" if method == "group_recon" else "local")
 
     model = apply_mode(
         model,
@@ -540,6 +566,7 @@ def auto_quantize(
         "forward_backward_step": forward_backward_step,
         "num_calib_steps": num_calib_steps,
         "num_score_steps": num_score_steps,
+        "score_boundary": score_boundary,
         "disabled_layers": disabled_layers,
         "verbose": verbose,
         "checkpoint": checkpoint,

@@ -106,6 +106,14 @@ if [ -n "$AUTO_QUANTIZE_SCORE_SIZE" ]; then
     PTQ_ARGS+=" --auto_quantize_score_size=$AUTO_QUANTIZE_SCORE_SIZE "
 fi
 
+if [ -n "$AUTO_QUANTIZE_SCORE_MODEL" ]; then
+    PTQ_ARGS+=" --auto_quantize_score_model=$AUTO_QUANTIZE_SCORE_MODEL "
+fi
+
+if [ -n "$AUTO_QUANTIZE_SCORE_BOUNDARY" ]; then
+    PTQ_ARGS+=" --auto_quantize_score_boundary=$AUTO_QUANTIZE_SCORE_BOUNDARY "
+fi
+
 # Automatically generate auto_quantize checkpoint path if not provided
 if [ -n "$AUTO_QUANTIZE_BITS" ] && [ -z "$AUTO_QUANTIZE_CHECKPOINT" ]; then
     # Create a descriptive checkpoint name based on model and quantization settings

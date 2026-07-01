@@ -26,7 +26,14 @@ import torch.nn as nn
 # constraint is supplied. The value is intentionally kept for backward compatibility.
 DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS: Final = 4.8
 
-AUTO_QUANTIZE_CONSTRAINT_KEYS: Final = frozenset({"effective_bits", "cost_model", "cost"})
+AUTO_QUANTIZE_CONSTRAINT_KEYS: Final = frozenset(
+    {"effective_bits", "cost_model", "cost", "score_model"}
+)
+AUTO_QUANTIZE_SCORE_MODEL_RAW: Final = "raw"
+AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT: Final = "per_element"
+AUTO_QUANTIZE_SCORE_MODELS: Final = frozenset(
+    {AUTO_QUANTIZE_SCORE_MODEL_RAW, AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT}
+)
 ACTIVE_MOE_EXPERT_RATIO_KEY: Final = "active_moe_expert_ratio"
 EXCLUDED_MODULE_NAME_PATTERNS_KEY: Final = "excluded_module_name_patterns"
 COST_MODEL_WEIGHT: Final = "weight"
@@ -248,8 +255,15 @@ def normalize_auto_quantize_constraints(
     if unexpected_constraint_keys:
         raise ValueError(
             f"Unsupported auto_quantize constraints: {unexpected_constraint_keys}. "
-            "Supported constraints are 'effective_bits', 'cost_model', and 'cost'."
+            "Supported constraints are 'effective_bits', 'cost_model', 'cost', and 'score_model'."
         )
+
+    score_model = constraints.get("score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW)
+    if score_model not in AUTO_QUANTIZE_SCORE_MODELS:
+        raise ValueError(
+            f"constraints['score_model'] must be one of {sorted(AUTO_QUANTIZE_SCORE_MODELS)}."
+        )
+    constraints["score_model"] = score_model
 
     cost_model_name = constraints.get("cost_model", COST_MODEL_WEIGHT)
     if not isinstance(cost_model_name, str):
