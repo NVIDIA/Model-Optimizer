@@ -10,8 +10,10 @@ how the attention operands are represented. The two are orthogonal in code and
 compose in one Triton kernel launch.
 
 This is a **fake-quantization accuracy study**: operands are rounded to the
-NVFP4/FP8 grid and dequantized to bf16 for the matmul. Real KV-cache *memory*
-savings are a downstream deployment concern (see "On-write V, deferred").
+NVFP4/FP8 grid and dequantized back to a float type for the matmul. Real KV-cache
+*memory* savings are a downstream deployment concern (see "On-write V, deferred").
+The matmul precision is **phase-specific** — bf16 tensor-core in prefill, fp32 in
+decode — see "Matmul precision by phase" below.
 
 ## The two matmuls set the quantization axis
 
@@ -52,6 +54,34 @@ write as that axis allows; the operands whose axis a per-token write cannot form
   V; 16-blocks along axis 0 of the loaded tile `[BLOCK_N keys, BLOCK_D head_dim]`;
   masked-to-0 loads keep a partial tail from poisoning a block amax). *Where* it
   runs differs by phase — see below.
+
+## Matmul precision by phase (prefill bf16 tensor-core, decode fp32)
+
+The NVFP4/FP8 operand *grid* is identical in both phases, but the matmuls run at
+different precision, by design:
+
+- **Prefill** (a GEMM over `BLOCK_M` query rows) uses `tl.dot` on **bf16** operands
+  for both `Q·Kᵀ` and `P·V` (`p.to(v.dtype)` before BMM2). Tensor-core throughput,
+  at the cost of rounding the dequantized operands to bf16.
+- **Decode** (a GEMV — one query row) uses **fp32** elementwise reductions for both
+  matmuls (`tl.sum(q[:,None]*kᵀ)`, `tl.sum(p[:,None]*v)`); P stays fp32 (V is still
+  dequantized to bf16 to match the on-write cache, then upcast). `tl.dot` is
+  wasteful at M=1, and fp32 is more accurate: vs an fp64-exact reference the
+  fp32-elementwise decode is **5.70e-8** (the fp32 floor) while a bf16/tf32x3
+  `tl.dot` is **1.39e-4** (~2400× worse); the fp32 decode also reproduces the
+  reference branch's default decode bit-for-bit.
+
+Consequence: the **P dtype entering `P·V` differs** — bf16 in prefill, fp32 in
+decode. This is an intentional phase-specific asymmetry (prefill trades precision
+for GEMM throughput; decode, cheap at M=1, keeps full fp32), not a bug. Note
+`tl.dot` does not *require* bf16 (it also accepts fp32 via
+`input_precision=tf32|tf32x3|ieee`); the bf16 prefill path is a throughput choice,
+not a hard constraint. A `P·V`-tile micro-benchmark (A6000, vs fp64, V held at
+bf16) puts numbers on it: fp32 `tf32x3` is **~9000× more accurate** than bf16
+(rel-L2 ~1.6e-7 vs ~1.5e-3) at **~1.3×** the matmul latency, `ieee` ~1.6×. So
+switching prefill to fp32 is viable and much more accurate; it is left as bf16 for
+GEMM throughput, and revisiting it is a measured, deliberate choice (re-measure on
+target hardware).
 
 ## V: on-read for prefill, on-write for decode (required)
 
