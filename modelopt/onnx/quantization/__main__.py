@@ -63,6 +63,12 @@ def get_parser() -> argparse.ArgumentParser:
         "--onnx_path", required=True, type=str, help="Input onnx model without Q/DQ nodes."
     )
     argparser.add_argument(
+        "--abi_ep_path",
+        required=False,
+        type=str,
+        help="Path to an external NvTensorRtRtx ABI execution-provider library.",
+    )
+    argparser.add_argument(
         "--quantize_mode",
         type=str,
         choices=["fp8", "int8", "int4"],
@@ -110,7 +116,8 @@ def get_parser() -> argparse.ArgumentParser:
         nargs="+",
         help=(
             "Priority order for the execution providers (EP) to calibrate the model. "
-            "Any subset of ['trt', 'cuda:x', dml:x, 'cpu'], where 'x' is the device id."
+            "Any subset of ['trt', 'cuda:x', dml:x, 'cpu', 'NvTensorRtRtx', "
+            "'NvTensorRtRtx-abi'], where 'x' is the device id."
             "If a custom op is detected in the model, 'trt' will automatically be added to the EP list."
         ),
     )
@@ -507,6 +514,7 @@ def main():
         autotune_warmup_runs=args.autotune_warmup_runs,
         autotune_timing_runs=args.autotune_timing_runs,
         autotune_trtexec_args=args.autotune_trtexec_args,
+        abi_ep_path=args.abi_ep_path,
     )
 
 

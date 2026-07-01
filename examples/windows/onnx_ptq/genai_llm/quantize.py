@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoTokenizer
 
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
+from modelopt.onnx.quantization.ort_utils import register_abi_ep
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -72,7 +73,7 @@ def make_input_shapes_profile_for_ep_list(ep_list, model_name_or_path):
     # Using empty shapes_profile for non-NvTensorRtRtx EPs.
     input_shapes_profile_sequence = []
     for ep in ep_list:
-        if ep == "NvTensorRtRtx":
+        if ep in {"NvTensorRtRtx", "NvTensorRtRtx-abi"}:
             min_shapes, max_shapes, opt_shapes = get_input_shapes_profile(model_name_or_path)
             input_shapes_profile = {
                 "nv_profile_min_shapes": min_shapes,
@@ -304,14 +305,15 @@ def get_calib_inputs(
 
 def parse_calibration_eps(value):
     """Parse and validate the calibration_eps input."""
-    valid_choices = {"cuda", "cpu", "dml", "NvTensorRtRtx"}
+    valid_choices = {"cuda", "cpu", "dml", "NvTensorRtRtx", "NvTensorRtRtx-abi"}
     # Split the input by commas and remove any surrounding whitespace
     eps = [item.strip() for item in value.split(",")]
     # Validate each calibration endpoint
     for ep in eps:
         if ep not in valid_choices:
             raise argparse.ArgumentTypeError(
-                f"Invalid calibration endpoint: '{ep}'. Choose from 'cuda', 'cpu', 'dml', 'NvTensorRtRtx'."
+                f"Invalid calibration endpoint: '{ep}'. Choose from 'cuda', 'cpu', 'dml', "
+                "'NvTensorRtRtx', 'NvTensorRtRtx-abi'."
             )
     return eps
 
@@ -413,8 +415,13 @@ def main(args):
         args.trust_remote_code,
     )
 
+    if "NvTensorRtRtx-abi" in args.calibration_eps:
+        register_abi_ep(args.abi_ep_path)
+
     input_shapes_profile_data = None
-    if "NvTensorRtRtx" in args.calibration_eps and (args.algo not in ["rtn", "rtn_dq"]):
+    if any(ep in args.calibration_eps for ep in {"NvTensorRtRtx", "NvTensorRtRtx-abi"}) and (
+        args.algo not in ["rtn", "rtn_dq"]
+    ):
         # NvTensorRtRtx EP uses (min, max, opt) profile for dynamic shapes in the model's inputs.
         input_shapes_profile_data = make_input_shapes_profile_for_ep_list(
             args.calibration_eps, args.model_name
@@ -607,7 +614,16 @@ if __name__ == "__main__":
         "--calibration_eps",
         type=parse_calibration_eps,  # Use the custom parser
         default=["cuda", "cpu"],  # Default as a list
-        help="Comma-separated list of calibration endpoints. Choose from 'cuda', 'cpu', 'dml', 'NvTensorRtRtx'.",
+        help=(
+            "Comma-separated list of calibration endpoints. Choose from 'cuda', 'cpu', 'dml', "
+            "'NvTensorRtRtx', 'NvTensorRtRtx-abi'."
+        ),
+    )
+    parser.add_argument(
+        "--abi_ep_path",
+        type=str,
+        default=None,
+        help="Path to an external NvTensorRtRtx ABI execution-provider library.",
     )
     parser.add_argument(
         "--trust_remote_code",
