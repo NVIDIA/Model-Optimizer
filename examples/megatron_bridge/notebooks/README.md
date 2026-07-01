@@ -39,13 +39,12 @@ Go to https://huggingface.co/nvidia/Cosmos-Reason2-2B and request access. You wi
 ```bash
 docker run --gpus all \
   --shm-size=16GB \
-  -p 8888:8888 \
+  -p 8889:8889 \
   -p 6006:6006 \
   --rm -it \
-  -e HF_TOKEN=<YOUR_HF_TOKEN> \
   -v <BASE_PATH>/Model-Optimizer:/dli/Model-Optimizer \
   modelopt-notebooks \
-  jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root \
+  jupyter lab --ip=0.0.0.0 --port=8889 --no-browser --allow-root \
   --notebook-dir=/dli/Model-Optimizer/examples/megatron_bridge/notebooks \
   --IdentityProvider.token='' \
   --ServerApp.password=''
