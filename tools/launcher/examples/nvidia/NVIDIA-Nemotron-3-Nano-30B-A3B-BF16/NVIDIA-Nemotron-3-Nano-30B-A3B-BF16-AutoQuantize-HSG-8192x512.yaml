@@ -37,7 +37,7 @@ pipeline:
       - DP: "1"
     slurm_config:
       _factory_: "slurm_factory"
-      container: nvcr.io/nvidia/nemo:25.11.nemotron_3_nano
+      container: nvcr.io/nvidia/nemo:26.04
       modelopt_install_path: /opt/TensorRT-Model-Optimizer/modelopt
       partition: batch
       nodes: 1
