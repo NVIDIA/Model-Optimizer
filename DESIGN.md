@@ -77,11 +77,16 @@ for GEMM throughput; decode, cheap at M=1, keeps full fp32), not a bug. Note
 `tl.dot` does not *require* bf16 (it also accepts fp32 via
 `input_precision=tf32|tf32x3|ieee`); the bf16 prefill path is a throughput choice,
 not a hard constraint. A `P·V`-tile micro-benchmark (A6000, vs fp64, V held at
-bf16) puts numbers on it: fp32 `tf32x3` is **~9000× more accurate** than bf16
-(rel-L2 ~1.6e-7 vs ~1.5e-3) at **~1.3×** the matmul latency, `ieee` ~1.6×. So
-switching prefill to fp32 is viable and much more accurate; it is left as bf16 for
-GEMM throughput, and revisiting it is a measured, deliberate choice (re-measure on
-target hardware).
+bf16) shows fp32 `tf32x3` is ~9000× more accurate than bf16 on the tile (rel-L2
+~1.6e-7 vs ~1.5e-3) at ~1.3× the *tile* matmul latency. **That gain does not reach
+the attention output.** Re-measured on **B200** (full-quant prefill, 4096-tok GQA),
+fp32 `tf32x3` prefill is **2.4× end-to-end** — not the 1.3× tile ratio; the tf32x3
+3-pass dominates the whole kernel — for a **negligible** accuracy change: cos-vs-dense
+is unchanged (**0.9918** either way), because the NVFP4 *quantization* error (~8e-3)
+dominates the output and the bf16-accumulation artifact (~1.5e-3) washes out after
+softmax normalization. **So prefill `P·V` stays bf16**: fp32 accumulation is more
+faithful to native FP4 in principle, but here it costs ~2.4× for no measurable eval
+benefit.
 
 ## V: on-read for prefill, on-write for decode (required)
 
