@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import types
+from fnmatch import fnmatch
 from importlib.resources import files
 
 import pytest
@@ -208,6 +209,25 @@ def test_nvfp4_mlp_only_novit_recipe_disables_vision_quantizers():
     }
 
     assert {"*visual*", "*vision_tower*"} <= disabled_quantizers
+
+
+def test_nvfp4_experts_only_mse_recipe_matches_nemotron_h_experts():
+    recipe = load_recipe("general/ptq/nvfp4_experts_only_mse-kv_fp8_cast")
+    enabled_patterns = [
+        entry["quantizer_name"]
+        for entry in recipe.quantize.model_dump()["quant_cfg"]
+        if entry["enable"]
+    ]
+
+    for quantizer_name in (
+        "model.layers.0.mlp.experts.0.gate_proj.weight_quantizer",
+        "model.layers.0.mixer.experts.up_proj_weight_quantizer",
+        "model.layers.0.mixer.experts.down_proj_input_quantizer",
+    ):
+        assert any(fnmatch(quantizer_name, pattern) for pattern in enabled_patterns)
+
+    shared_expert = "model.layers.0.mixer.shared_experts.up_proj.weight_quantizer"
+    assert not any(fnmatch(shared_expert, pattern) for pattern in enabled_patterns)
 
 
 # ---------------------------------------------------------------------------
