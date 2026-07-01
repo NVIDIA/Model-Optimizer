@@ -440,10 +440,47 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
         mtq.NVFP4_KV_CFG,
     ],
 )
-@pytest.mark.parametrize("compress", [False, True])
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 def test_homogeneous_sharded_state_dict(
+    dist_workers, tmp_path, config, meta_device, transformer_impl
+):
+    _run_homogeneous_sharded_state_dict(
+        dist_workers,
+        tmp_path,
+        config,
+        compress=False,
+        meta_device=meta_device,
+        transformer_impl=transformer_impl,
+    )
+
+
+# Compressed state dict takes longer due to real quant conversion & saving/loading
+@pytest.mark.parametrize(
+    "config",
+    [
+        mtq.FP8_DEFAULT_CFG,
+        mtq.INT4_AWQ_CFG,
+        mtq.NVFP4_DEFAULT_CFG,
+    ],
+)
+@pytest.mark.parametrize("meta_device", [False, True])
+@pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
+@pytest.mark.timeout(240)
+def test_homogeneous_compressed_sharded_state_dict(
+    dist_workers, tmp_path, config, meta_device, transformer_impl
+):
+    _run_homogeneous_sharded_state_dict(
+        dist_workers,
+        tmp_path,
+        config,
+        compress=True,
+        meta_device=meta_device,
+        transformer_impl=transformer_impl,
+    )
+
+
+def _run_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, compress, meta_device, transformer_impl
 ):
     if compress and config is mtq.W4A8_AWQ_BETA_CFG:
