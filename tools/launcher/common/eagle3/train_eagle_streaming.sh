@@ -92,6 +92,14 @@ fi
 pip install --no-cache-dir -e modules/Model-Optimizer/
 pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
+
+# Some trust_remote_code models pin an older transformers (e.g. MiniMax-M2.7
+# needs 4.57.x whose modeling code is incompatible with the 5.x that the
+# requirements pull in). Must run AFTER the requirements install to win.
+if [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
+    pip install --no-cache-dir "transformers==${OVERRIDE_TRANSFORMERS}"
+fi
+
 export PATH=$PATH:/workspace/.local/bin
 
 ###################################################################################################
