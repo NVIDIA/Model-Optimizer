@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Model-family export descriptors.
+
+Holds per-model export data organized by model family. The export code resolves a
+``ModelSpec`` via the registry lookups and reads its fields; an unmatched lookup
+returns ``None`` so callers fall back to their default behavior.
+"""
+
+from . import families
+from .base import ModelSpec
+from .context import ExportContext
+from .hooks import NULL_HOOKS, ModelHooks
+from .registry import (
+    iter_pqs_fuse_rules,
+    match_by_architecture,
+    match_by_decoder_type,
+    match_mlp_block,
+    match_moe_block,
+    register,
+)
+
+__all__ = [
+    "NULL_HOOKS",
+    "ExportContext",
+    "ModelHooks",
+    "ModelSpec",
+    "iter_pqs_fuse_rules",
+    "match_by_architecture",
+    "match_by_decoder_type",
+    "match_mlp_block",
+    "match_moe_block",
+    "register",
+]

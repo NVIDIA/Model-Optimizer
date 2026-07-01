@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Qwen family export specs."""
+
+from ..base import ModelSpec
+from ..registry import register
+
+register(
+    ModelSpec(
+        name="qwen_moe",
+        moe_block_names=(
+            "Qwen2MoeSparseMoeBlock",
+            "Qwen3MoeSparseMoeBlock",
+            "Qwen3NextSparseMoeBlock",
+            "Qwen3_5MoeSparseMoeBlock",
+        ),
+        expert_linear_names=("gate_proj", "down_proj", "up_proj"),
+        has_iterable_experts=True,
+    )
+)
+
+# Qwen3 (dense + MoE) AWQ pre_quant_scale fusion: fold o_proj into v_proj,
+# down_proj into up_proj.
+register(
+    ModelSpec(
+        name="qwen3",
+        pqs_fuse_rules=(
+            (("Qwen3Attention", "Qwen3MoeAttention"), "v_proj", "o_proj"),
+            (("Qwen3MLP", "Qwen3MoeMLP"), "up_proj", "down_proj"),
+        ),
+    )
+)

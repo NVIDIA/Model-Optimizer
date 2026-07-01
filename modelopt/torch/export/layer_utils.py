@@ -60,6 +60,13 @@ from .model_config import (
     RgLruConfig,
 )
 from .model_config_utils import pad_weights
+from .modeling import (
+    NULL_HOOKS,
+    ExportContext,
+    match_by_decoder_type,
+    match_mlp_block,
+    match_moe_block,
+)
 from .postprocess import view_as_float8_e4m3fn_if_needed, view_as_uint8_if_needed
 from .quant_utils import (
     get_activation_scaling_factor,
@@ -93,25 +100,14 @@ def get_experts_list(
     """
     experts_list = []
 
-    # Define linear layer names for different model types
-    if "mixtralforcausallm" in model_type:
-        linear_names = ["w1", "w2", "w3"]
-    elif any(
-        qwen_variant in model_type
-        for qwen_variant in [
-            "qwenmoeforcausallm",
-            "qwen2moeforcausallm",
-            "qwen3moeforcausallm",
-            "qwen3nextforcausallm",
-        ]
-    ):
-        linear_names = ["gate_proj", "down_proj", "up_proj"]
-    elif "nemotronhforcausallm" in model_type:
-        linear_names = ["up_proj", "down_proj"]
-    elif "gemma4" in model_type:
-        linear_names = ["gate_proj", "down_proj", "up_proj"]
-    else:
+    # Expert linear names live in modeling/families/*. The grouped export path only
+    # supports families whose experts are iterable per-expert sub-modules (Mixtral,
+    # Qwen MoE, NemotronH, Gemma4); stacked/fused layouts (DBRX, GptOss, ...) raise
+    # NotImplementedError here and are handled by other paths.
+    spec = match_moe_block(module)
+    if spec is None or not spec.has_iterable_experts or spec.expert_linear_names is None:
         raise NotImplementedError(f" {model_type} not supported")
+    linear_names = list(spec.expert_linear_names)
 
     # Common logic for all supported model types
     experts_list.extend(
@@ -770,26 +766,18 @@ def build_mlp_config(
         "c_fc_1",  # exaone
     }
 
-    # Arctic (llama-based MoE, decoder_type is "llama") has MLP keyword conflicts with Qwen
-    # Arctic's residual MLP use w1 for fc, w2 for proj, w3 for gate
-    if type(module).__name__ in ["ArcticMLP", "InternLM2MLP"]:
-        fc_keywords.discard("w2")
-        gate_keywords.discard("w1")
-        fc_keywords.add("w1")
-        proj_keywords.add("w2")
-        gate_keywords.add("w3")
-
-    if decoder_type == "mpt":
-        fc_keywords.add("up_proj")
-        gate_keywords.discard("up_proj")
-
-    if type(module).__name__ in [
-        "TLGv4MLP",
-        "Phi3SmallMLP",
-        "NemotronMLP",
-    ]:  # for TLGv4ForCausalLM
-        fc_keywords.add("up_proj")
-        gate_keywords.discard("up_proj")
+    # Per-family MLP keyword role overrides live in modeling/families/* (e.g. Arctic/
+    # InternLM2 w1/w2/w3 remap; MPT/Phi3Small/TLGv4/Nemotron up_proj→fc). Resolve by the
+    # MLP module class and by decoder_type; apply on top of the shared keyword sets.
+    _role_sets = {"fc": fc_keywords, "gate": gate_keywords, "proj": proj_keywords}
+    for _spec in (match_mlp_block(module), match_by_decoder_type(decoder_type)):
+        if _spec is None or not _spec.mlp_keyword_roles:
+            continue
+        for _kw, _role in _spec.mlp_keyword_roles.items():
+            fc_keywords.discard(_kw)
+            gate_keywords.discard(_kw)
+            proj_keywords.discard(_kw)
+            _role_sets[_role].add(_kw)
 
     fc_linear: nn.Module = None
     gate_linear: nn.Module = None
@@ -865,11 +853,11 @@ def build_mlp_config(
 
     assert config.proj is not None and config.fc is not None, "proj or fc can not be found"
 
-    # Override hidden_act based on decoder_type
-    if decoder_type in ["bloom", "glm"]:
-        hidden_act = "gelu"
-    if decoder_type == "phi3":
-        hidden_act = "swiglu"
+    # Per-family activation override lives in modeling/families/* (e.g. bloom/glm → gelu,
+    # phi3 → swiglu). Unmatched families fall through to activation detection below.
+    _spec = match_by_decoder_type(decoder_type)
+    if _spec is not None and _spec.forced_activation is not None:
+        hidden_act = _spec.forced_activation
 
     if hidden_act is None:
         if hasattr(module, "activation"):
@@ -991,6 +979,12 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         first_proj_attr = getattr(module.experts, "_first_proj_attr", "gate_up_proj")
         if hasattr(module.experts, f"{first_proj_attr}_weight_quantizers"):
             return [first_proj_attr, "down_proj"]
+
+    # Resolve expert names from the model-family registry; fall back to the mapping
+    # below when no family spec matches the MoE block.
+    spec = match_moe_block(module)
+    if spec is not None and spec.expert_linear_names is not None:
+        return list(spec.expert_linear_names)
 
     if module_match_name_list(
         module,
@@ -1581,6 +1575,11 @@ def build_decoder_config(
     """Builds the full decoder config from the module."""
     quantization = get_quantization_format(module)
     config = DecoderLayerConfig(decoder_type=decoder_type)
+
+    # Per-model behavioral hooks (default no-op) and the context passed into them.
+    _spec = match_by_decoder_type(decoder_type)
+    hooks = _spec.hooks if (_spec is not None and _spec.hooks is not None) else NULL_HOOKS
+    hook_ctx = ExportContext(build_layernorm_config=build_layernorm_config)
     # Supporting different attention layer config in MCoreGPTModel. If per layer config
     # exists, override the global config.
     if hasattr(module, "self_attention") and hasattr(module.self_attention, "config"):
@@ -1641,26 +1640,17 @@ def build_decoder_config(
         # and residual_layernorm could be after post_layernorm
         if is_layernorm(layer):
             layernorm_config = build_layernorm_config(layer)
+            # Family-specific layernorm slots (e.g. Gemma2/3) are placed by the hook.
+            if hooks.place_submodule(name, layer, layernorm_config, config, hook_ctx):
+                pass
             # Special attributes naming for Encoder-Decoder models
-            if model_type_is_enc_dec(decoder_type):
+            elif model_type_is_enc_dec(decoder_type):
                 _update_encoder_decoder_layernorm_config(
                     model_metadata_config, config, layernorm_config
                 )
             # For all decoder only models
             elif name == "ln_mlp":
                 config.mlp_layernorm = layernorm_config
-            elif (
-                config.decoder_type in ["gemma2", "gemma3"]
-            ) and "post_attention_layernorm" in name:
-                config.post_layernorm = layernorm_config
-            elif (
-                config.decoder_type in ["gemma2", "gemma3"]
-            ) and "pre_feedforward_layernorm" in name:
-                config.pre_feedforward_layernorm = layernorm_config
-            elif (
-                config.decoder_type in ["gemma2", "gemma3"]
-            ) and "post_feedforward_layernorm" in name:
-                config.post_feedforward_layernorm = layernorm_config
             elif config.input_layernorm is None:
                 config.input_layernorm = layernorm_config
             elif config.post_layernorm is None:
@@ -1681,8 +1671,12 @@ def build_decoder_config(
                 attention_config = build_attention_config(
                     layer, model_metadata_config, config, tp_size=tp_size
                 )
+                # Family-specific attention placement (self/cross routing, extra norms)
+                # is handled by the hook; otherwise use the default placement below.
+                if hooks.place_submodule(name, layer, attention_config, config, hook_ctx):
+                    pass
                 # For decoder of Encoder-Decoder model with self, cross attention
-                if (
+                elif (
                     model_type_is_enc_dec(decoder_type)
                     and model_metadata_config["enc_dec"] == "dec"
                 ):
@@ -1691,19 +1685,8 @@ def build_decoder_config(
                         config.self_attention = attention_config
                     else:
                         config.cross_attention = attention_config
-                elif decoder_type == "mllama":
-                    if "cross" in type(layer).__name__.lower():
-                        config.cross_attention = attention_config
-                    else:
-                        config.self_attention = attention_config
                 else:
                     config.attention = attention_config
-                    if decoder_type == "gemma3":
-                        # Gemma3 has q_norm and k_norm within self_attn
-                        q_layernorm_config = build_layernorm_config(layer.q_norm)
-                        k_layernorm_config = build_layernorm_config(layer.k_norm)
-                        config.attention.q_layernorm = q_layernorm_config
-                        config.attention.k_layernorm = k_layernorm_config
 
         elif is_moe(layer):
             if quantization not in [QUANTIZATION_NONE, QUANTIZATION_FP8]:
