@@ -26,6 +26,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
+    _get_module_weight_numel,
     get_auto_quantize_cost_model,
     infer_active_moe_expert_ratio,
 )
@@ -173,25 +174,15 @@ def test_quant_recipe_hparam_zero_cost_weight():
 
 
 def test_auto_quantize_cost_model_excludes_module_name_patterns():
-    visual = torch.nn.Linear(4, 16)
-    mtp = torch.nn.Linear(4, 16)
-    lm_head = torch.nn.Linear(4, 16)
     cost_model = get_auto_quantize_cost_model("weight")
     cost_constraints = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*", "*vision_tower*", "*mtp*"]}
 
-    total_weight_size = cost_model.total_weight_size(
-        [
-            ("model.visual.blocks.0.attn.qkv", visual),
-            ("model.mtp.layers.0.mlp", mtp),
-            ("lm_head", lm_head),
-        ],
-        is_auto_quantize_module=lambda module: True,
-        cost_constraints=cost_constraints,
-    )
-
-    assert total_weight_size == pytest.approx(lm_head.weight.numel())
+    # Modules whose name matches an excluded pattern contribute zero cost weight.
     assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
     assert cost_model.module_cost_weight(["model.mtp.layers.0.mlp"], cost_constraints) == 0
+    # Non-excluded modules keep full weight.
+    assert cost_model.module_cost_weight(["lm_head"], cost_constraints) == 1.0
+    # A group is only excluded when *all* of its module names match; a mixed group is not.
     assert (
         cost_model.module_cost_weight(
             ["model.visual.blocks.0.attn.qkv", "lm_head"], cost_constraints
@@ -204,24 +195,19 @@ def test_active_moe_cost_model_counts_fused_experts_without_weight():
     fused_experts = torch.nn.Module()
     fused_experts.gate_up_proj = torch.nn.Parameter(torch.empty(2, 3, 5))
     fused_experts.down_proj = torch.nn.Parameter(torch.empty(2, 5, 3))
-    visual = torch.nn.Linear(4, 16)
     cost_model = get_auto_quantize_cost_model("active_moe")
+    cost_constraints = {
+        "active_moe_expert_ratio": 0.25,
+        EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
+    }
 
-    total_weight_size = cost_model.total_weight_size(
-        [
-            ("layers.0.mlp.experts", fused_experts),
-            ("model.visual.blocks.0.attn.qkv", visual),
-        ],
-        is_auto_quantize_module=lambda module: True,
-        cost_constraints={
-            "active_moe_expert_ratio": 0.25,
-            EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
-        },
+    # Fused experts expose no `.weight`; their size is summed across all parameters.
+    assert _get_module_weight_numel(fused_experts) == (
+        fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()
     )
-
-    assert total_weight_size == pytest.approx(
-        (fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()) * 0.25
-    )
+    # Routed MoE experts are scaled by the active-expert ratio; excluded modules drop to zero.
+    assert cost_model.module_cost_weight(["layers.0.mlp.experts"], cost_constraints) == 0.25
+    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
 
 
 @pytest.mark.parametrize("num_experts_attr", ["num_experts", "num_local_experts"])

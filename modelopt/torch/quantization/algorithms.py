@@ -916,14 +916,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         )
 
         compression = self._get_formatted_weight_compression_constraint()
-        if self.candidate_stats:
-            total_weight_size = self._get_total_weight_size_from_candidate_stats(
-                self.candidate_stats
-            )
-        else:
-            total_weight_size = self._cost_model.total_weight_size(
-                self.model.named_modules(), self._is_auto_quantize_module, self.config["cost"]
-            )
+        assert self.candidate_stats, (
+            "candidate_stats must be populated by before_search() before run_search()"
+        )
+        total_weight_size = self._get_total_weight_size_from_candidate_stats(self.candidate_stats)
         self.cost_denominator = total_weight_size
         max_weight_size = total_weight_size * compression
         if verbose:
