@@ -391,6 +391,23 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).
         k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
 
+        # NVFP4 V: bake the prompt's complete tiles on write BEFORE the kernel, so the kernel
+        # reads them as-is (V_CACHE_QUANTIZED) and re-fake-quantizes only the trailing partial.
+        # This quantizes each V tile exactly once — no double-quant of tiles a prior chunked-
+        # prefill step already baked — and still leaves decode a pre-quantized cache. FP8 V and
+        # no-quant stay fully on-read (v_cache_quantized False).
+        v_cache_quantized = v_qdq == "nvfp4"
+        if v_cache_quantized:
+            _bake_v_onwrite(
+                value_cache,
+                attn_metadata.block_table,
+                seq_lens,
+                b_seq_len,
+                page_size,
+                v_qdq_amax,
+                decode=False,
+            )
+
         # Call ModelOpt Triton kernel with paged KV.
         # b_seq_len is the query length (e.g., 6 for prefill, 1 for decode).
         # b_seq_len_k is the total KV length including cache (e.g., 6 for first
@@ -418,24 +435,11 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             p_qdq_amax=p_qdq_amax,
             v_qdq=v_qdq,
             v_qdq_amax=v_qdq_amax,
+            v_cache_quantized=v_cache_quantized,
             **sparse_kw,
         )
 
         output[:num_actual_tokens] = triton_out
-        # NVFP4 V: prefill attention read raw V on-read above (O(S), single pass); now bake the
-        # prompt's complete tiles on write so the following decode steps inherit a pre-quantized
-        # cache and stay O(S). (Chunked prefill re-reads earlier baked tiles on-read with a small
-        # idempotency drift; a prefill-side V_CACHE_QUANTIZED gate would remove it — follow-up.)
-        if v_qdq == "nvfp4":
-            _bake_v_onwrite(
-                value_cache,
-                attn_metadata.block_table,
-                seq_lens,
-                b_seq_len,
-                page_size,
-                v_qdq_amax,
-                decode=False,
-            )
         return output
 
     def _forward_sparse_decode(

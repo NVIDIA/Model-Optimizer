@@ -88,13 +88,18 @@ softmax normalization. **So prefill `P·V` stays bf16**: fp32 accumulation is mo
 faithful to native FP4 in principle, but here it costs ~2.4× for no measurable eval
 benefit.
 
-## V: on-read for prefill, on-write for decode (required)
+## V: baked on write for both phases (required for decode)
 
 The keys axis means V cannot be quantized by a per-token write, so it is
 fake-quantized around the kernel. But the *cost* differs sharply by phase:
 
-- **Prefill** is a single pass that touches each tile once → on-read FQ is
-  `O(S)`. Fine; the kernel FQs V tiles as it reads them.
+- **Prefill** is a single pass that touches each tile once → `O(S)` either way. It
+  bakes its complete tiles on write *before* the kernel and reads them as-is
+  (`V_CACHE_QUANTIZED`, same as decode), re-FQ'ing only the trailing partial, so V is
+  **quantized exactly once** — a *chunked* prefill never re-FQ's an earlier chunk's
+  baked tiles. (That double-quant is usually a no-op anyway: NVFP4 QDQ is a near
+  fixed-point — measured `maxabs 0` on B200 random data — but the gate makes
+  quantize-once exact.)
 - **Decode** is autoregressive: every step re-reads the whole growing cache, so
   on-read re-FQ's the entire cache each step → `Σ O(s) = O(S²)`, and it is almost
   all redundant (a written token is immutable, so re-quantizing token 5 at steps

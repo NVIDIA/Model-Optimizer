@@ -82,6 +82,12 @@ _QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
 
 LOG2E: float = 1.44269504088896
 
+# V-bake tile granularity for the on-write NVFP4 cache. Must match
+# ``decode_attention._ONWRITE_BLOCK_N`` (defined there, not imported here, to avoid a
+# circular import — decode_attention imports this module). The prefill ``V_CACHE_QUANTIZED``
+# dense boundary aligns to this bake tile, not the (autotuned) kernel ``BLOCK_N``.
+_V_BAKE_BLOCK_N = 128
+
 # ---------------------------------------------------------------------------
 # Autotune configs for forward kernel
 # ---------------------------------------------------------------------------
@@ -268,6 +274,8 @@ def _attn_fwd(
     p_qdq_scale=1.0,  # Per-tensor scale for softmax qdq (runtime scalar; amax/448 or amax/(6*448))
     V_QDQ: tl.constexpr = 0,  # Fake quant-dequant of value V: 0=off, 1=FP8 E4M3, 2=NVFP4 (block-16 keys)
     v_qdq_scale=1.0,  # Per-tensor scale for V qdq (runtime scalar; amax/448 or amax/(6*448))
+    V_CACHE_QUANTIZED: tl.constexpr = False,  # baked V: read complete tiles as-is; re-FQ only the trailing partial
+    V_BAKE_BLOCK: tl.constexpr = 128,  # bake tile granularity; dense boundary aligns to this, not BLOCK_N
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
     Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
     MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
@@ -328,6 +336,12 @@ def _attn_fwd(
         if not IS_CAUSAL
         else tl.minimum(causal_offset + (tile_q + 1) * BLOCK_M, seq_len_kv)
     )
+
+    # V baked on write (V_CACHE_QUANTIZED): complete V_BAKE_BLOCK-aligned tiles below this
+    # boundary are already on the NVFP4 grid (read as-is); the trailing partial — or a tile
+    # not yet baked by this chunked-prefill step — is re-FQ'd on read. Aligns to the bake tile
+    # (V_BAKE_BLOCK), NOT the autotuned BLOCK_N, which can differ.
+    v_dense_boundary = (seq_len_kv // V_BAKE_BLOCK) * V_BAKE_BLOCK
 
     # --- Main loop: iterate over KV tiles ---
     for kv_start in range(0, kv_bound, BLOCK_N):
@@ -443,10 +457,14 @@ def _attn_fwd(
             # Optional V quant-dequant (BMM2 B-side). NVFP4 blocks of 16 run along the
             # key axis (axis 0 of [BLOCK_N, BLOCK_D]); the masked-to-0 loads keep a partial
             # tile from poisoning a block amax. FQ in fp32, then back to v.dtype for the dot.
-            if V_QDQ == 1:
-                v = _qdq_fp8(v.to(tl.float32), v_qdq_scale).to(v.dtype)
-            elif V_QDQ == 2:
-                v = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_D).to(v.dtype)
+            # When V is baked on write (V_CACHE_QUANTIZED), complete tiles below v_dense_boundary
+            # are already on the grid -> read as-is; only the trailing partial (or a tile not yet
+            # baked by this chunk) is re-FQ'd, avoiding a double-quant of earlier-chunk baked tiles.
+            if V_QDQ != 0 and ((not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_dense_boundary)):
+                if V_QDQ == 1:
+                    v = _qdq_fp8(v.to(tl.float32), v_qdq_scale).to(v.dtype)
+                else:  # V_QDQ == 2 (NVFP4)
+                    v = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_D).to(v.dtype)
             acc = tl.dot(p.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
@@ -847,6 +865,7 @@ class _Attention(torch.autograd.Function):
         p_qdq_scale,
         v_qdq_mode,
         v_qdq_scale,
+        v_cache_quantized,
         k_cache,
         v_cache,
         block_table,
@@ -948,6 +967,8 @@ class _Attention(torch.autograd.Function):
             "p_qdq_scale": p_qdq_scale,
             "V_QDQ": v_qdq_mode,
             "v_qdq_scale": v_qdq_scale,
+            "V_CACHE_QUANTIZED": v_cache_quantized,
+            "V_BAKE_BLOCK": _V_BAKE_BLOCK_N,
             "Sparsity_total": sparsity_total,
             "Sparsity_skipped": sparsity_skipped,
             "MEASURE_SPARSITY": do_measure,
@@ -1155,6 +1176,7 @@ class _Attention(torch.autograd.Function):
             None,  # p_qdq_scale
             None,  # v_qdq_mode
             None,  # v_qdq_scale
+            None,  # v_cache_quantized
             None,  # k_cache
             None,  # v_cache
             None,  # block_table
@@ -1185,6 +1207,7 @@ def attention(
     p_qdq_amax: float = 1.0,
     v_qdq: str | None = None,
     v_qdq_amax: float | None = None,
+    v_cache_quantized: bool = False,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1325,6 +1348,7 @@ def attention(
         p_qdq_scale,
         v_qdq_mode,
         v_qdq_scale,
+        v_cache_quantized,
         k_cache,
         v_cache,
         block_table,
