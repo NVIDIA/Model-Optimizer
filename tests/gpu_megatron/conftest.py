@@ -32,6 +32,12 @@ def _prebuild_quant_cuda_extensions():
 
     First-use JIT compilation can take minutes in CI, so build the base, FP8, and MX
     extensions during session setup and let tests fall back to on-demand JIT if needed.
+
+    Doing it here in session setup (``pyproject`` sets ``timeout_func_only``) keeps the
+    build off the per-test clock and, unlike the ``_extensions/test_torch_extensions.py``
+    prebuild tests, runs regardless of test selection/ordering (e.g. ``-k`` filters) and
+    is not itself capped by a per-test timeout. Worker subprocesses then load the cached
+    .so from the shared ``TORCH_EXTENSIONS_DIR``.
     """
     import modelopt.torch.quantization.extensions as ext
 
