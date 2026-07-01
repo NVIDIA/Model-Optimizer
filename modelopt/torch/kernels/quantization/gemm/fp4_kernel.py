@@ -24,7 +24,9 @@ import torch
 import triton
 import triton.language as tl
 
-from .nvfp4_quant import nvfp4_scalar_quant
+from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
+
+from ..common.nvfp4_quant import nvfp4_scalar_quant
 
 __all__ = ["compute_fp4_scales", "fp4_dequantize", "static_blockwise_fp4_fake_quant"]
 
@@ -211,6 +213,7 @@ def compute_fp4_scales(
     amax: torch.Tensor,
     global_amax: torch.Tensor | None = None,
     quantize_block_scales: bool = True,
+    fp8_max_for_normalization: float = E4M3_MAX,
 ) -> torch.Tensor:
     """Compute per-block FP4 scales from amax values.
 
@@ -220,6 +223,8 @@ def compute_fp4_scales(
         amax: Per-block amax values (any shape).
         global_amax: Global amax for FP8 two-level scaling. Computed from *amax* if None.
         quantize_block_scales: If True, quantize scales to FP8 E4M3.
+        fp8_max_for_normalization: FP8 max value used to normalize per-block scales
+            before FP8 quantization (default 448.0; use 256.0 for NVFP4 4/6 mode).
 
     Returns:
         Per-block scales (same shape as *amax*), float32.
@@ -235,7 +240,7 @@ def compute_fp4_scales(
             global_amax = reduce_amax(amax, axis=None, keepdims=False, squeeze_scalar=True)
 
         global_amax = global_amax.float()
-        scale_fp8_quant_amax = global_amax / 6.0
+        scale_fp8_quant_amax = global_amax * (E4M3_MAX / fp8_max_for_normalization) / 6.0
         scale = scaled_e4m3_impl(scale, scale_fp8_quant_amax)
 
     return scale
@@ -246,6 +251,7 @@ def static_blockwise_fp4_fake_quant(
     amax: torch.Tensor,
     global_amax: torch.Tensor | None = None,
     quantize_block_scales: bool = True,
+    fp8_max_for_normalization: float = E4M3_MAX,
     out_dtype: torch.dtype | None = None,
 ):
     """Static blockwise FP4 fake quantization using Triton kernel.
@@ -261,6 +267,8 @@ def static_blockwise_fp4_fake_quant(
             consumes it as a flat 1-D buffer of length ``NUM_FP4_BLOCKS``.
         global_amax: FP32 scalar global amax. If provided, used to compute scale_fp8_quant_amax.
         quantize_block_scales: If True, quantize block scales to FP8.
+        fp8_max_for_normalization: FP8 max value used to normalize per-block scales
+            before FP8 quantization (default 448.0; use 256.0 for NVFP4 4/6 mode).
         out_dtype: Output dtype. Defaults to x.dtype if None.
     """
     original_shape = x.shape
@@ -275,7 +283,12 @@ def static_blockwise_fp4_fake_quant(
     if out_dtype is None:
         out_dtype = x.dtype
 
-    scale = compute_fp4_scales(amax, global_amax, quantize_block_scales)
+    scale = compute_fp4_scales(
+        amax,
+        global_amax,
+        quantize_block_scales,
+        fp8_max_for_normalization=fp8_max_for_normalization,
+    )
 
     x_flat = x.contiguous().view(-1)
     y_flat = torch.empty_like(x_flat, dtype=out_dtype)

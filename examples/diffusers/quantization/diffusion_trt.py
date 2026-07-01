@@ -194,7 +194,7 @@ def main():
     )
     args = parser.parse_args()
 
-    image_name = args.save_image_as if args.save_image_as else f"{args.model}.png"
+    image_name = args.save_image_as or f"{args.model}.png"
     model_dtype = DTYPE_MAP[args.model]
 
     pipe = PipelineManager.create_pipeline_from(

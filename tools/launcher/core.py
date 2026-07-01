@@ -257,6 +257,7 @@ def build_slurm_executor(
     job_dir,
     task_name,
     packager,
+    modelopt_src_path=None,
     experiment_title="cicd",
 ):
     """Build a SlurmExecutor for remote job submission."""
@@ -264,25 +265,28 @@ def build_slurm_executor(
 
     scratch_dst = "/scratchspace"
     scratch_src = f"{job_dir}/{experiment_title}/{experiment_id}"
-    modelopt_dst = slurm_config.modelopt_install_path
-    modelopt_src = (
-        f"{job_dir}/{experiment_title}/{experiment_id}"
-        f"/{task_name}/code/modules/Model-Optimizer/modelopt"
-    )
-    modelopt_recipes_dst = os.path.join(
-        os.path.dirname(os.path.normpath(slurm_config.modelopt_install_path)),
-        "modelopt_recipes",
-    )
-    modelopt_recipes_src = (
-        f"{job_dir}/{experiment_title}/{experiment_id}"
-        f"/{task_name}/code/modules/Model-Optimizer/modelopt_recipes"
-    )
     container_mounts += [
         f"{scratch_src}:{scratch_dst}",
-        f"{modelopt_src}:{modelopt_dst}",
-        f"{modelopt_recipes_src}:{modelopt_recipes_dst}",
         f"{job_dir}/{experiment_title}:/{experiment_title}",
     ]
+    if modelopt_src_path:
+        modelopt_dst = slurm_config.modelopt_install_path
+        modelopt_src = (
+            f"{job_dir}/{experiment_title}/{experiment_id}"
+            f"/{task_name}/code/modules/Model-Optimizer/modelopt"
+        )
+        modelopt_recipes_dst = os.path.join(
+            os.path.dirname(os.path.normpath(slurm_config.modelopt_install_path)),
+            "modelopt_recipes",
+        )
+        modelopt_recipes_src = (
+            f"{job_dir}/{experiment_title}/{experiment_id}"
+            f"/{task_name}/code/modules/Model-Optimizer/modelopt_recipes"
+        )
+        container_mounts += [
+            f"{modelopt_src}:{modelopt_dst}",
+            f"{modelopt_recipes_src}:{modelopt_recipes_dst}",
+        ]
 
     # When launching from a login node inside the cluster (host is localhost),
     # use a LocalTunnel: nemo_run then runs sbatch and copies artifacts via local
@@ -567,6 +571,7 @@ def run_jobs(
                         job_dir,
                         task_name,
                         packager,
+                        modelopt_src_path,
                         experiment_title,
                     )
                     task_env.update(default_slurm_env)

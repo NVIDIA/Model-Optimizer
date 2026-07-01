@@ -18,7 +18,7 @@ If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md
 
 ```text
 - [ ] Step 0: Check workspace (if MODELOPT_WORKSPACE_ROOT set)
-- [ ] Step 1: Check `nel` install + existing config
+- [ ] Step 1: Check `nel` install + existing config; set up `.env` (+ `modelopttools:eval-config` for judge-scored runs)
 - [ ] Step 2: Build base config (5-question flow OR shortcut)
 - [ ] Step 3: Configure deployment (model path, params, cross-check)
 - [ ] Step 4: Fill remaining ??? values
@@ -32,14 +32,36 @@ If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md
 
 ---
 
+### nel-next path (Terminal-Bench 2.x, SWE-bench, …) — branch here FIRST
+
+A few **agentic** AA benchmarks do **not** run on the default
+`nemo-evaluator-launcher` 0.2.6 (Steps 1–9 don't apply). They run on **nel-next**
+(`nemo-evaluator[harbor]` 0.3.x) — a separate package, CLI (`nel eval run`), `-O`
+overrides, and `services`/`benchmarks`/`cluster`/`output` schema. If the user asks
+for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
+
+1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
+2. Isolated 0.3.x venv: `.agents/scripts/nel-next.sh --setup-only` (keeps 0.2.6 `nel` untouched).
+3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
+4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
+
+Steps 1–9 below are the 0.2.6 path — use them for everything else.
+
+---
+
 ### Step 1 — Prerequisites
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
 
+**Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp .agents/skills/evaluation/recipes/env.example .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
+
+**Secret safety — never open `.env` with Read/Write/Edit.** The harness mirrors later edits of any agent-opened file into the transcript, so touching `.env` leaks the keys the user adds afterward. Use shell only (`cp` to create, `source` to load — neither echoes); edit `env.example`, never `.env`; leave value entry to the user / `modelopttools:eval-config`.
+
 **Task recipes** (always read before editing the relevant task in the config):
 
-- AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom}.md`
+- AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom,omniscience}.md`
 - Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
+- **nel-next only** (different evaluator — see the nel-next section below, NOT the 0.2.6 steps): shared reference `references/nel-next.md` + per-benchmark recipes `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md` (agentic). The `aa_next/` dir holds tasks that require nemo-evaluator-next (0.3.x); `aa/` is the 0.2.6 suite.
 
 **AA rule:** If the user mentions "AA" / "Artificial Analysis", generate **only** tasks under `recipes/tasks/aa/`. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked.
 
@@ -48,7 +70,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 1. Read the task reference file(s).
 2. Use `recipes/examples/example_eval.yaml` as the base.
 3. Copy the YAML fragment(s) into `evaluation.tasks`, applying any per-task notes.
-4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` is fine — it's an env var). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. Fill `tracking_uri` in Step 4.
+4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` and `${oc.env:MLFLOW_TRACKING_URI}` are fine — they're env vars). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. `tracking_uri` = `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config` (not hand-filled), and auto-export needs `execution.cpu_partition` (e.g. gcp-nrt `cpu`) — it's a separate CPU-only sbatch that GPU-only partitions reject (`Cannot find GPU specification`), silently dropping the link.
 5. Proceed to Step 3, then Step 4, then Step 7.5/8. Skip Step 2's 5-question flow.
 
 ---
@@ -95,7 +117,7 @@ Some models need extra vLLM backend env vars (model-card research) — e.g. `VLL
 
 #### Cross-check both sources for vLLM (mandatory, neither replaces the other)
 
-**Source 1 — `recipes.vllm.ai/<org>/<model>`** (curated vLLM recipes; authoritative for parallelism, family-specific flags like `--reasoning-parser` / `--tool-call-parser` / `--mm-encoder-tp-mode`, vLLM version, spec-decoding, GPU count). Pin variants via query params (e.g. `?variant=fp8&strategy=single_node_tep`).
+**Source 1 — `recipes.vllm.ai/<org>/<model>`** (curated vLLM recipes; authoritative for parallelism, family-specific flags like `--reasoning-parser` / `--tool-call-parser` / `--mm-encoder-tp-mode`, vLLM version, spec-decoding, GPU count). **Fetch the page for the EXACT model id, not a base/sibling** — variant minimums differ (e.g. MiniMax-M2 ≥0.11.0 vs M2.7 ≥0.20.0). Pin variants via query params (e.g. `?variant=fp8&strategy=single_node_tep`).
 
 > **WebFetch caveat — triage the summary:**
 >
@@ -142,7 +164,7 @@ Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--
 
 For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
 
-**Image / vLLM version.** Default `image: vllm/vllm-openai:v0.19.1` (pinned for reproducibility). If `recipes.vllm.ai` states a higher minimum version for the chosen variant (e.g. "vLLM >= 0.20.0"), bump the image tag accordingly (e.g. `v0.20.0`) — do **not** stay on `0.19.1` when the recipe explicitly requires newer. Do **not** use `:latest` (drifts across re-runs, breaks reproducibility). The version is part of the cross-check: surface to the user when bumping.
+**Image / vLLM version.** Treat default `image: vllm/vllm-openai:v0.19.1` as a floor to verify: bump to the **exact model's** `recipes.vllm.ai` minimum if higher (e.g. `v0.20.0`). Running below minimum is a trap — the server starts, then a worker dies mid-inference with `CUDA error: an illegal memory access` (MiniMax-M2.7 NVFP4 needed ≥0.20.0), easy to misread as a kernel bug. Never `:latest` (breaks reproducibility). Surface version bumps to the user.
 
 > **NVFP4 on Blackwell B300/GB300 (sm_103): append `-cu130` to the image tag** (e.g. `vllm/vllm-openai:v0.19.1-cu130` — release tags are multi-arch). The default cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. If a pinned release predates the model's arch, use `cu130-nightly-<arch>` (Qwen3.5-9B's `qwen3_5` needed it, vLLM 0.19.2rc1.dev134). Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
 
@@ -150,6 +172,7 @@ For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipelin
 
 Silence is not contradiction. Drop/override only when the recipe sets a different value for the same setting (e.g. recipe pins `--max-num-batched-tokens 16384` → use 16384).
 
+- `--model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}'` — **parallelizes checkpoint load**, the single biggest deploy-time cost for large checkpoints. A big MoE otherwise loads shards ~sequentially (~1 min/shard → e.g. ~40 min for a ~450 GB / 45-shard checkpoint); on a **preemptible** queue that long load window is exactly where jobs get killed before they ever serve. `num_threads` defaults to **128**; scale it to the checkpoint (smaller for small models, bounded by the shared-FS read bandwidth — too high yields no gain). Safe to always include.
 - `--max-num-batched-tokens 8192` — caps per-step batched tokens; prevents long-prefill stalls.
 - `--enable-chunked-prefill` — interleaves long prefills with decode steps (required for AA-LCR's ~120K input). Modern vLLM defaults this on for many models; set explicitly to avoid drift.
 - `--enable-expert-parallel` — **MoE-only default.** Detect MoE from handle suffix (`-A10B`, `-A3B`, etc.), `num_experts` / `num_local_experts` / `n_routed_experts` in `config.json`, or card. No-op when TP=DP=1, safe to always include for MoE. Do not add for dense models. See `references/parallelism.md` for what EP does and the DP-attention + EP-MoE throughput pattern.
@@ -226,7 +249,7 @@ Hostname match → set `defaults: - execution: internal/slurm/<cluster>`, drop t
 
 On SLURM, several deploy/eval failures are invisible to `--dry-run` and only surface at canary (`mount_home`, HF cache, `cpu_partition`, top-level vs per-stage `env_vars`) — read `references/slurm.md`.
 
-- Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, MLflow tracking URI, etc.). Don't propose defaults; let them give plain text.
+- Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, the `cpu_partition` for auto-export, etc.). Don't propose defaults; let them give plain text. (`tracking_uri` is **not** one of these — it's `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config`.)
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
 - **`execution.gres`** — auto-set if you used a predefined `internal/slurm/<cluster>` config (above). On the `slurm/default` fallback it's `gpu:8`, so set it to the node's GPU count (and match `--data-parallel-size`/`--tensor-parallel-size`) or `sbatch` rejects the job with *"Requested node configuration is not available"* (e.g. 4-GPU GB300 → `gres: gpu:4`; check with `sinfo -o '%P %G'`).
@@ -234,6 +257,14 @@ On SLURM, several deploy/eval failures are invisible to `--dry-run` and only sur
 **Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.
 
 Evals that exceed 4h of wall-clock time are handled by **NEL's built-in dependency-chain resume**, not by shrinking the eval. NEL submits the first SLURM job; if it hits walltime, a dependent follow-on job resumes from the response/result caches the first job wrote, then queues another follow-on. Long evals continue across walltime windows automatically. See `references/run-validation.md#nel-timeout-and-resume-behavior` for the full mechanism.
+
+**Preemption / external kill — resume manually with `sbatch run.sub`.** On a preemptible account (common on busy internal clusters) the scheduler can **CANCEL** a run mid-eval for a higher-priority job — `sacct -j <id>` shows `CANCELLED by <uid>` (a `svc-*` service account) with `Elapsed` well under the 4h walltime. NEL does **not** auto-resume this (its dependency chain only fires on a genuine walltime timeout). But the `run.sub` that NEL generated for the job (in its run dir) is **re-submittable** and resumes from the same `output_dir` + response cache (`skip_filled`), continuing from the partial output rather than restarting:
+
+```bash
+ssh <host> "cd <output_dir>/<timestamp>-<invocation>/<task>/ && sbatch run.sub"
+```
+
+Re-submit again if it's preempted again — each resume re-deploys, then skips already-generated samples, so progress is **cumulative** across attempts until it completes. Always confirm via `sacct -j <id>` that the prior job was `CANCELLED` (not a real failure) before resuming.
 
 Implications for the agent:
 
@@ -261,7 +292,7 @@ Implications for the agent:
 
 4. Apply, show updated list, ask "Final, or more changes?" Loop until confirmed.
 
-**Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness. All nemo-skills/tau2 judges + user-sims (HLE, AA-LCR, Tau2) use one `INFERENCE_API_KEY` against one OpenAI-compatible host — *not* `build.nvidia.com`'s `JUDGE_API_KEY` (that's for simple-evals, e.g. AIME). Get the `*_MODEL_ID`/`*_URL` values from the `eval-config` skill if your org ships one, rather than guessing a host.
+**Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness. All nemo-skills/tau2 judges + user-sims (HLE, AA-LCR, Tau2) use one `INFERENCE_API_KEY` against one OpenAI-compatible host — *not* `build.nvidia.com`'s `JUDGE_API_KEY` (that's for simple-evals, e.g. AIME). Get the `*_MODEL_ID`/`*_URL` values via `modelopttools:eval-config` (see Step 1) rather than guessing a host; only fill them by hand if it's unavailable. `.env` should already exist (Step 1) — if not, set it up now (don't defer to Step 8) before substituting.
 
 **Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks (`ns_*`) with self-deployment (vLLM/SGLang/NIM), you need **both** of these:
 
@@ -319,10 +350,11 @@ Add credentials per `skills/common/slurm-setup.md` §6 if missing. If you can't 
 
 Run directly when the user asked to launch; otherwise ask before submitting.
 
-**Env setup:** Copy `recipes/env.example` → `.env`, fill, source:
+**Env setup:** `.env` is normally already created and filled back in Step 1 (via `modelopttools:eval-config`), at the **workspace root** — the dir you run `nel` from, not under the skill dir. Ensure it exists and source it — do **not** clobber an existing `.env`:
 
 ```bash
-cp recipes/env.example .env
+# .env lives at the workspace root (where you run nel); the template ships under the skill dir
+[ -f .env ] || cp .agents/skills/evaluation/recipes/env.example .env   # create only if Step 1 didn't
 set -a && source .env && set +a
 
 # If pre_cmd/post_cmd in config (review pre_cmd first — runs arbitrary commands):
@@ -340,6 +372,8 @@ nel run --config <path> --dry-run
 ```
 
 Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, image issues, sbatch errors, obvious deployment errors before proceeding.
+
+> **Dry-run does NOT validate the image/vLLM version** (image pulled only at deploy). Confirm `image:` ≥ the exact model's `recipes.vllm.ai` minimum (Step 3) before submitting — too-old passes dry-run, then crashes mid-inference.
 
 > **Non-fatal noise:** "Failed to get manifest"/`401`/`404`, "Could not extract frame definition file", "proceeding with minimal task definition", "Found N unlisted task(s)" — expected for `ns_*`/recipe tasks and private (gitlab) containers; the task still runs in-container. Set `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1`. Real blockers: unresolved `???`, interpolation errors, bad mounts, sbatch rejections.
 

@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""CPU tests for NVFP4 Four-Over-Six (4/6) adaptive weight scaling.
+
+4/6 is weight-only: the ``four_over_six: True`` block_sizes flag selects the 256 FP8
+normalization max (vs 448); the per-block M=6 vs M=4 choice is made by MSE weight
+calibration (arXiv:2512.02010).
+"""
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import QuantizerAttributeConfig, choices
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils.numeric_utils import E2M1_MAX, E4M3_MAX, E4M3_MAX_46
+
+BLOCK_SIZE = 16
+
+
+class TestConstants:
+    def test_fp8_and_e2m1_constants(self):
+        assert E4M3_MAX == 448.0
+        assert E4M3_MAX_46 == 256.0
+        assert E2M1_MAX == 6.0
+
+
+class TestScalingFactor2:
+    def test_256_vs_448_denominator(self):
+        # 4/6 selects the 256 FP8 normalization via the static quantizer path.
+        global_amax = torch.tensor(2.0)
+        q_default = SimpleNamespace(block_sizes={-1: BLOCK_SIZE}, global_amax=global_amax)
+        q_46 = SimpleNamespace(
+            block_sizes={-1: BLOCK_SIZE, "four_over_six": True}, global_amax=global_amax
+        )
+        wsf2_default = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q_default)
+        wsf2_46 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q_46)
+        # wsf2 = global_amax / (6 * m_fp8); only m_fp8 differs (448 vs 256).
+        assert torch.allclose(
+            wsf2_46 / wsf2_default, torch.tensor(E4M3_MAX / E4M3_MAX_46), rtol=1e-6
+        )
+
+
+class TestRoundTripScales:
+    def test_no_zero_or_nan_scales(self):
+        torch.manual_seed(1)
+        weight = torch.cat([torch.randn(4, BLOCK_SIZE), torch.full((4, BLOCK_SIZE), 1e-12)], dim=0)
+        per_block_scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, BLOCK_SIZE)
+        s = per_block_scale.float()
+        assert torch.isfinite(s).all(), f"Non-finite 4/6 scales: {s.tolist()}"
+        assert (s > 0).all(), f"Zero 4/6 scales: {s.tolist()}"
+
+
+class TestNVFP4FourOverSixConfig:
+    @staticmethod
+    def _block_sizes(cfg, name):
+        entry = next(e for e in cfg["quant_cfg"] if e["quantizer_name"] == name)
+        return entry["cfg"]["block_sizes"]
+
+    def test_weight_quantizer_is_static_with_four_over_six(self):
+        bs = self._block_sizes(mtq.NVFP4_FOUR_OVER_SIX_CFG, "*weight_quantizer")
+        assert bs.get("type") == "static"
+        # Schema coerces the bool to int 1; the feature reads it truthily.
+        assert bs.get("four_over_six")
+
+    def test_input_quantizer_unchanged(self):
+        bs = self._block_sizes(mtq.NVFP4_FOUR_OVER_SIX_CFG, "*input_quantizer")
+        assert not bs.get("four_over_six", False)
+
+    def test_registered_in_choices(self):
+        assert "NVFP4_FOUR_OVER_SIX_CFG" in choices
+
+
+class TestStaticQuantizerFourOverSixThreading:
+    """NVFP4StaticQuantizer._fake_quantize threads fp8_max_for_normalization from the
+    four_over_six flag: 256 when enabled, 448 otherwise.
+
+    The per-block M=6/M=4 choice itself is made by MSE calibration.
+    """
+
+    @staticmethod
+    def _make_static_quantizer(four_over_six: bool) -> NVFP4StaticQuantizer:
+        block_sizes = {-1: BLOCK_SIZE, "type": "static", "scale_bits": (4, 3)}
+        if four_over_six:
+            block_sizes["four_over_six"] = True
+        cfg = QuantizerAttributeConfig(num_bits=(2, 1), block_sizes=block_sizes)
+        q = NVFP4StaticQuantizer(quant_attribute_cfg=cfg)
+        q.amax = torch.full((1, 4), 0.5)
+        q.global_amax = torch.tensor(2.0)
+        return q
+
+    def _captured_fp8_max(self, monkeypatch, four_over_six: bool) -> float:
+        import modelopt.torch.quantization.nn.modules.tensor_quantizer as tqm
+
+        captured = {}
+
+        def spy(*args, **kwargs):
+            # Call site: (inputs, amax, global_amax, quantize_block_scales,
+            #             fp8_max_for_normalization, dtype, pass_through_bwd).
+            # The 4/6 → 256 vs 448 selection happens before this call, so capturing the
+            # threaded value is enough; return a passthrough to avoid the triton kernel
+            # (unavailable on CPU) — this tests the threading, not the kernel.
+            captured["fp8_max"] = args[4]
+            return args[0]
+
+        monkeypatch.setattr(tqm, "static_blockwise_fp4_fake_quant", spy)
+        q = self._make_static_quantizer(four_over_six)
+        q._fake_quantize(torch.randn(1, 4 * BLOCK_SIZE))
+        return captured["fp8_max"]
+
+    def test_four_over_six_threads_256(self, monkeypatch):
+        assert self._captured_fp8_max(monkeypatch, four_over_six=True) == E4M3_MAX_46
+
+    def test_default_threads_448(self, monkeypatch):
+        assert self._captured_fp8_max(monkeypatch, four_over_six=False) == E4M3_MAX
+
+
+class TestCompressUnsupported:
+    """mtq.compress (TensorQuantizer._real_quantize) must reject 4/6: the per-block
+    M=4/M=6 choice baked into amax by MSE calibration is not preserved by real quantization.
+    """
+
+    def test_real_quantize_raises_for_four_over_six(self):
+        q = TestStaticQuantizerFourOverSixThreading._make_static_quantizer(four_over_six=True)
+        with pytest.raises(NotImplementedError, match="Four-Over-Six"):
+            q._real_quantize(torch.randn(1, 4 * BLOCK_SIZE))

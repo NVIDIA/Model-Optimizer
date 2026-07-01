@@ -1030,7 +1030,7 @@ class DanglingSymProcessor:
 
         def mod_str(mod_name: str | Iterable) -> str | list[str]:
             def name_or_root(name: str) -> str:
-                return name if name else '""'
+                return name or '""'
 
             if isinstance(mod_name, str):
                 return name_or_root(mod_name)

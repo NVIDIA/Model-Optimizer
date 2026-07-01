@@ -136,8 +136,10 @@ def convert_to_mixed_precision(
     graph_sanitizer.sanitize()
     model = graph_sanitizer.model
 
-    # Setup internal mappings
-    model = onnx_utils.infer_types(model, use_standalone_type_inference)
+    # Setup internal mappings. Use strict shape inference so an op ONNX cannot resolve surfaces
+    # as an exception (triggering infer_types' standalone type-inference fallback) instead of
+    # silently leaving tensors untyped, which would break later type lookups.
+    model = onnx_utils.infer_types(model, use_standalone_type_inference, strict_mode=True)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     # Automatically add 'trt' to list of providers if custom ops are detected
@@ -267,8 +269,10 @@ def convert_to_f16(
     sanitizer.convert_fp64_to_fp32()
     model = sanitizer.model
 
-    # Setup internal mappings
-    model = onnx_utils.infer_types(model, use_standalone_type_inference)
+    # Setup internal mappings. Use strict shape inference so an op ONNX cannot resolve surfaces
+    # as an exception (triggering infer_types' standalone type-inference fallback) instead of
+    # silently leaving tensors untyped, which would break later type lookups.
+    model = onnx_utils.infer_types(model, use_standalone_type_inference, strict_mode=True)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     precision_converter = PrecisionConverter(

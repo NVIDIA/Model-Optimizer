@@ -23,6 +23,7 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
+    get_gpt_mtp_block_spec,
 )
 from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import (
@@ -277,9 +278,17 @@ def get_mcore_gpt_model(
                 multi_latent_attention=multi_latent_attention,
             )
 
+    mtp_block_spec = None
+    if config.mtp_num_layers:
+        use_te = transformer_impl != "local"
+        mtp_block_spec = get_gpt_mtp_block_spec(
+            config=config, spec=transformer_layer_spec, use_transformer_engine=use_te
+        )
+
     model = GPTModel(
         config=config,
         transformer_layer_spec=transformer_layer_spec,
+        mtp_block_spec=mtp_block_spec,
         vocab_size=vocab_size,
         max_sequence_length=max_sequence_length,
         pre_process=is_pipeline_first_stage(),
@@ -293,11 +302,13 @@ def get_mcore_gpt_model(
 def get_mcore_qwen3_600m(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    context_parallel_size: int = 1,
     workspace_dir: str | None = None,
 ) -> GPTModel:
     config = TransformerConfig(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
+        context_parallel_size=context_parallel_size,
         sequence_parallel=False,
         num_layers=28,
         hidden_size=1024,
