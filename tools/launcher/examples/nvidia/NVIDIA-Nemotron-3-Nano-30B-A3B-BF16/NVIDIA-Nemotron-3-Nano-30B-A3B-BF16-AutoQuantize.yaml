@@ -1,12 +1,12 @@
 # Nemotron-3-Nano-30B-A3B-BF16 AutoQuantize + inline MMLU.
-# Tested on one OCI-HSG B200 node.
+# Tested on one B200 node (4 x B200).
 #
 # Usage:
 #   source .env-slurm
 #   cd tools/launcher
-#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-AutoQuantize-HSG-8192x512.yaml --yes
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-AutoQuantize.yaml --yes
 
-job_name: Nemotron-3-Nano-30B-A3B_AutoQuantize_8192x512
+job_name: Nemotron-3-Nano-30B-A3B_AutoQuantize
 pipeline:
   skip: false
   allow_to_fail: false
@@ -38,7 +38,7 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       container: nvcr.io/nvidia/nemo:26.04
-      modelopt_install_path: /opt/TensorRT-Model-Optimizer/modelopt
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       partition: batch
       nodes: 1
       ntasks_per_node: 4
