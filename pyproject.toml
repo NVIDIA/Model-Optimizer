@@ -100,15 +100,16 @@ dev-lint = [
     "pre-commit==4.6.0",
     "ruff==0.15.20",
 ]
+# Docs are only built on Python >=3.12 (sphinx 9.x requires it); markers keep `uv lock` from resolving these for 3.10/3.11, which we don't care about for building docs.
 dev-docs = [
-    "autodoc_pydantic>=2.1.0",
-    "sphinx~=9.1.0",
-    "sphinx-argparse>=0.5.2",
-    "sphinx-autobuild>=2024.10.3",
-    "sphinx-copybutton>=0.5.2",
-    "sphinx-inline-tabs>=2023.4.21",
-    "sphinx-rtd-theme~=3.1.0",
-    "sphinx-togglebutton>=0.3.2",
+    "autodoc_pydantic>=2.1.0; python_version >= '3.12'",
+    "sphinx~=9.1.0; python_version >= '3.12'",
+    "sphinx-argparse>=0.5.2; python_version >= '3.12'",
+    "sphinx-autobuild>=2024.10.3; python_version >= '3.12'",
+    "sphinx-copybutton>=0.5.2; python_version >= '3.12'",
+    "sphinx-inline-tabs>=2023.4.21; python_version >= '3.12'",
+    "sphinx-rtd-theme~=3.1.0; python_version >= '3.12'",
+    "sphinx-togglebutton>=0.3.2; python_version >= '3.12'",
 ]
 dev-test = [
     "coverage[toml]>=7.13.0", # a1_coverage.pth for subprocess tracking requires this

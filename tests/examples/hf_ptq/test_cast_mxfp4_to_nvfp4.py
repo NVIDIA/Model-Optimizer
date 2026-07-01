@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for ``examples/llm_ptq/cast_mxfp4_to_nvfp4.py``.
+"""Unit tests for ``examples/hf_ptq/cast_mxfp4_to_nvfp4.py``.
 
 The module lives next to the example script (not inside the ``modelopt`` package),
-so we add ``examples/llm_ptq/`` to ``sys.path`` before importing it.
+so we add ``examples/hf_ptq/`` to ``sys.path`` before importing it.
 """
 
 import json
@@ -26,9 +26,9 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-_LLM_PTQ_DIR = Path(__file__).resolve().parents[3] / "examples" / "llm_ptq"
-if str(_LLM_PTQ_DIR) not in sys.path:
-    sys.path.insert(0, str(_LLM_PTQ_DIR))
+_HF_PTQ_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
+if str(_HF_PTQ_DIR) not in sys.path:
+    sys.path.insert(0, str(_HF_PTQ_DIR))
 
 import cast_mxfp4_to_nvfp4 as cast
 

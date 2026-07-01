@@ -14,7 +14,7 @@
 # limitations under the License.
 import pytest
 import transformers
-from _test_utils.examples.llm_ptq_utils import PTQCommand
+from _test_utils.examples.hf_ptq_utils import PTQCommand
 from _test_utils.examples.models import (
     BART_PATH,
     MIXTRAL_PATH,

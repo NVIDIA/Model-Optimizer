@@ -112,6 +112,10 @@ repos:
               modelopt/torch/quantization/plugins/attention.py|
               modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
               modelopt/torch/speculative/eagle/utils.py|
+              modelopt/torch/speculative/plugins/hf_domino.py|
+              modelopt/torch/speculative/plugins/modeling_domino.py|
+              modelopt/torch/speculative/plugins/hf_dflash.py|
+              modelopt/torch/speculative/plugins/modeling_dflash.py|
               modelopt/torch/speculative/plugins/hf_medusa.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
               examples/deepseek/deepseek_v3/quantize_to_nvfp4.py|

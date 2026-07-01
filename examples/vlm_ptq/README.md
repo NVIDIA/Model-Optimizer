@@ -1,15 +1,15 @@
 # [Deprecated] Post-training quantization (PTQ) for Vision Language Models
 
-> **This example has been consolidated into [`examples/llm_ptq`](../llm_ptq/README.md) and is
+> **This example has been consolidated into [`examples/hf_ptq`](../hf_ptq/README.md) and is
 > deprecated.** It will be removed in a future release. VLM PTQ now shares the same entry point
 > (`hf_ptq.py`) and shell script as LLM PTQ.
 
 ## Migration
 
-Use the `llm_ptq` script with the `--vlm` flag:
+Use the `hf_ptq` script with the `--vlm` flag:
 
 ```bash
-cd examples/llm_ptq
+cd examples/hf_ptq
 scripts/huggingface_example.sh --model <Hugging Face model card or checkpoint> --quant [fp8|nvfp4|int8_sq|int4_awq|w4a8_awq] --vlm
 ```
 
@@ -20,9 +20,9 @@ prints a deprecation warning and forwards to the command above.
 
 | Topic | New location |
 | :--- | :--- |
-| Supported VLMs / support matrix | [llm_ptq/README.md#hugging-face-supported-models](../llm_ptq/README.md#hugging-face-supported-models) |
-| VLM quantization workflow (`--vlm`) | [llm_ptq/README.md#vlm-quantization](../llm_ptq/README.md#vlm-quantization) |
-| Image-text calibration (`--calib_with_images`) | [llm_ptq/README.md#vlm-calibration-with-image-text-pairs-eg-nemotron-vl](../llm_ptq/README.md#vlm-calibration-with-image-text-pairs-eg-nemotron-vl) |
+| Supported VLMs / support matrix | [hf_ptq/README.md#hugging-face-supported-models](../hf_ptq/README.md#hugging-face-supported-models) |
+| VLM quantization workflow (`--vlm`) | [hf_ptq/README.md#vlm-quantization](../hf_ptq/README.md#vlm-quantization) |
+| Image-text calibration (`--calib_with_images`) | [hf_ptq/README.md#vlm-calibration-with-image-text-pairs-eg-nemotron-vl](../hf_ptq/README.md#vlm-calibration-with-image-text-pairs-eg-nemotron-vl) |
 | Megatron-Bridge VLM PTQ | [examples/megatron_bridge/](../megatron_bridge/README.md) |
 
 ## Resources

@@ -74,7 +74,7 @@ and the NVFP4 nibbles equal the source MXFP4 nibbles bit-for-bit (for every
 block whose ``k_j`` lands in E4M3's representable window). The flag only affects
 routed-expert *weights*; activation ``input_scale`` still comes from
 ``--amax_path`` calibration. This mirrors the GPTOSS cast in
-``examples/llm_ptq/cast_mxfp4_to_nvfp4.py`` (PR #1372); the V4 twist is that
+``examples/hf_ptq/cast_mxfp4_to_nvfp4.py`` (PR #1372); the V4 twist is that
 w1/w3 share one ``scale_2`` (fused GEMM1), so ``k_max`` is taken over both.
 
 Usage (single compute node, CPU-default; dequant+requant math is cheap
