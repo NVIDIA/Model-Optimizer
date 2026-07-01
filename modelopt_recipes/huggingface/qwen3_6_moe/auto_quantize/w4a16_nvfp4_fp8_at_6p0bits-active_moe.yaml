@@ -42,7 +42,7 @@ auto_quantize:
     - $import: w4a16_nvfp4
 
   auto_quantize_method: gradient
-  num_score_steps: 128
+  score_size: 128
 
   # Shared base patterns spliced in; this architecture adds the Qwen MoE shared-expert gate.
   disabled_layers:

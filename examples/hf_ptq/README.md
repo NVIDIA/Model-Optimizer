@@ -308,9 +308,9 @@ Megatron-LM framework PTQ and TensorRT-LLM deployment examples are maintained in
 `AutoQuantize` uses an effective-bits target (`effective_bits`) as the performance constraint (for both
 weight-only and weight & activation quantization) — the effective number of bits for the quantized model.
 
-You may specify an `effective_bits` target such as 4.8 for mixed precision quantization using `NVFP4_DEFAULT_CFG` & `FP8_DEFAULT_CFG`.
+You may specify an `effective_bits` target such as 5.4 for mixed precision quantization using `NVFP4_DEFAULT_CFG` & `FP8_DEFAULT_CFG`.
 `AutoQuantize` will automatically quantize highly sensitive layers in `FP8_DEFAULT_CFG` while keeping less sensitive layers in `NVFP4_DEFAULT_CFG` (and even skip quantization for any extremely sensitive layers) so that
-the the final mixed precision quantized model has an effective quantized bits of 4.8. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
+the the final mixed precision quantized model has an effective quantized bits of 5.4. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
 
 Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) API for more details):
 
@@ -337,7 +337,7 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
     # Perform AutoQuantize
     model, search_state_dict = mtq.auto_quantize(
         model,
-        constraints = {"effective_bits": 4.8},
+        constraints = {"effective_bits": 5.4},
         # supported quantization formats are listed in `modelopt.torch.quantization.config.choices`
         quantization_formats = ["NVFP4_DEFAULT_CFG", "FP8_DEFAULT_CFG"]
         data_loader = calib_dataloader,
@@ -361,28 +361,32 @@ recipes (carrying architecture-specific disabled layers — e.g. VL vision tower
 > *Migration: AutoQuantize is now recipe-only. The former `--auto_quantize_bits`, `--auto_quantize_method`,
 > `--auto_quantize_score_size`, `--auto_quantize_cost_model`, and `--auto_quantize_active_moe_expert_ratio`
 > CLI flags are removed and map to recipe fields: `--auto_quantize_bits` → `constraints.effective_bits`,
-> `--auto_quantize_method` → `auto_quantize_method`, `--auto_quantize_score_size` → `num_score_steps`,
+> `--auto_quantize_method` → `auto_quantize_method`, `--auto_quantize_score_size` → `score_size`,
 > `--auto_quantize_cost_model` → `constraints.cost_model`, `--auto_quantize_active_moe_expert_ratio` →
 > `constraints.cost.active_moe_expert_ratio`, and the `--qformat fp8,nvfp4` candidate list →
 > `candidate_formats`. `--auto_quantize_checkpoint` is unchanged. Start from a shipped recipe under
-> `modelopt_recipes/general/auto_quantize/` and adjust as needed.*
+> `modelopt_recipes/general/auto_quantize/` and adjust as needed. The removed AutoQuantize CLI
+> remains available on the 0.45 release branch for anyone who needs the old flags.*
 
 [Script](./scripts/huggingface_example.sh)
 
 ```bash
 export HF_PATH=<the downloaded checkpoint from the Hugging Face hub, or simply the model card>
 # --recipe selects an AutoQuantize recipe; the recipe defines the candidate formats and the
-# effective-bits target (here NVFP4 + FP8 at 4.8 effective bits).
-scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_4p8bits --calib_batch_size 4
+# effective-bits target (here NVFP4 + FP8 at 5.4 effective bits).
+scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_5p4bits --calib_batch_size 4
 ```
 
 The recipe quantizes the less accuracy-sensitive layers with the more aggressive format (e.g. NVFP4) and
 keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
-`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `num_score_steps`,
+`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `score_size`,
 `disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
 accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via
 `$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+
+For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
+`general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
 
 KV cache is applied as a uniform post-step, not part of the per-layer search. An AutoQuantize recipe
 falls back to `--kv_cache_qformat` (default `fp8_cast`) unless it sets an explicit `kv_cache` field.
@@ -391,7 +395,7 @@ The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search
 interrupted search (skips re-scoring):
 
 ```bash
-scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_4p8bits \
+scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_5p4bits \
   --auto_quantize_checkpoint /path/to/auto_quantize.pth --calib_batch_size 4
 ```
 

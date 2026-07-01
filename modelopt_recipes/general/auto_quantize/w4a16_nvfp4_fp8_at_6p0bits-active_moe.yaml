@@ -44,7 +44,7 @@ auto_quantize:
     - $import: w4a16_nvfp4
 
   auto_quantize_method: gradient
-  num_score_steps: 128
+  score_size: 128
   # kv_cache omitted -> falls back to --kv_cache_qformat (none in the reference command).
 
   # Base (model-agnostic) non-quantizable layers. Arch-specific models use a recipe under

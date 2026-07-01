@@ -13,27 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# AutoQuantize: per-layer search over {NVFP4 W4A4 (weight-MSE + FP8 sweep), FP8} at 6.0 bits.
+# AutoQuantize: per-layer search over {NVFP4 (W4A4), FP8 (W8A8)} at 5.4 effective bits, using the
+# kl_div scoring method. kl_div needs no labels/backprop, so it suits models without backprop
+# support (e.g. Llama-4) where the default gradient method cannot run.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
   base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
-  nvfp4_mse: configs/ptq/presets/model/nvfp4_w4a4_weight_mse_fp8_sweep
+  nvfp4: configs/ptq/presets/model/nvfp4
   fp8: configs/ptq/presets/model/fp8
 
 metadata:
   recipe_type: auto_quantize
-  description: Mixed NVFP4 (weight-MSE + FP8 sweep) + FP8 per-layer search at 6.0 effective bits.
+  description: Mixed NVFP4 + FP8 per-layer search at 5.4 effective bits, kl_div scoring (no backprop).
 
 auto_quantize:
   constraints:
-    effective_bits: 6.0
+    effective_bits: 5.4
 
   candidate_formats:
-    - $import: nvfp4_mse
+    - $import: nvfp4
     - $import: fp8
 
-  auto_quantize_method: gradient
+  auto_quantize_method: kl_div
   score_size: 128
 
   # Base (model-agnostic) non-quantizable layers, spliced from the shared unit. Arch-specific

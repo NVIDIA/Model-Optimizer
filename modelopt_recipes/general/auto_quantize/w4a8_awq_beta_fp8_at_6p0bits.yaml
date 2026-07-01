@@ -34,7 +34,7 @@ auto_quantize:
     - $import: fp8
 
   auto_quantize_method: gradient
-  num_score_steps: 128
+  score_size: 128
 
   # Base (model-agnostic) non-quantizable layers, spliced from the shared unit. Arch-specific
   # models use a recipe under huggingface/<model>/auto_quantize/ that appends to this set.
