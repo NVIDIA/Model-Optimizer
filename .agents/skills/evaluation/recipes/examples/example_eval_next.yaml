@@ -90,15 +90,17 @@ cluster:
 
 output:
   dir: ???                           # <lustre>/eval-output/<model>-<benchmark>
-  # MLflow auto-export — ALWAYS include. Runs cluster-side at finalize (a local
-  # `nel export` is SSO-blocked). Hardcode experiment_name (${USER}=root in-container).
+  # MLflow export config (experiment/tags/description). SLURM does NOT auto-export —
+  # push after the run finishes: `nel-next.sh mlflow-push -r <run_id> -c <this>.yaml`
+  # (reads this block, stages the bundle off the cluster, exports with traces off).
   export: [mlflow]
   export_config:
     mlflow:
-      tracking_uri: https://mlflow-nemo-evaluator.nvidia.com/
-      experiment_name: ???           # <user>/<model>-<benchmark>
+      tracking_uri: ${MLFLOW_TRACKING_URI}   # from modelopttools:eval-config (canonical mlflow.frontier-evals host; NOT the -nemo-evaluator alias)
+      experiment_name: ???           # <user>/<model>-<benchmark> (hardcode; ${USER}=root in-container)
       log_config_params: true
       copy_logs: true
       exclude_patterns: ["shard*"]
       description: ???               # '<model> | T=1.0 top_p=0.95 | <benchmark> (timeout_strategy=…) | r8'
-      tags: {framework: vllm, model: "???", temperature: '1.0', top_p: '0.95'}   # aligned with example_eval.yaml (add any extra sampling the card sets)
+      # model/checkpoint_path/benchmark drive dashboard attribution (engine logs only a generic metric key); temperature/top_p mirror generation above.
+      tags: {framework: vllm, model: "???", checkpoint_path: "???", benchmark: "???", temperature: '1.0', top_p: '0.95'}

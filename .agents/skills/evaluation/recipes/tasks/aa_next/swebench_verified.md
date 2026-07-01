@@ -86,5 +86,7 @@ Report **`pass@1`** only — benchmark `swebench-verified@1.0`, scorer `pass@1` 
 the resolved rate over the 500 tasks, **already averaged over repeats** (nel-next
 reports a single `pass@1`; there is **no `avg-of-N` key** like the 0.2.6 nemo-skills
 metrics). MLflow logs it as `pass_at_1`. Read from `report.md` (Benchmark / Scorer
-table) in the run dir or `nel eval report -r <run_id>`. Keep `timeout_strategy` +
-the instruction/system prompt fixed across baseline vs quantized for a valid delta.
+table) in the run dir or `nel eval report -r <run_id>`, then push to MLflow with
+`nel-next.sh mlflow-push -r <run_id> -c <cfg>` (SLURM doesn't auto-export). Keep
+`timeout_strategy` + the instruction/system prompt fixed across baseline vs quantized
+for a valid delta.

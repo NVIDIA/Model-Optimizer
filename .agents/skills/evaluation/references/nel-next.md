@@ -37,9 +37,9 @@ Default install is public PyPI `nemo-evaluator[harbor]==0.3.*`; set
   `AWS_SECRET_ACCESS_KEY`. Never open `.env` with file tools — shell only.
 - **Internal harbor infra is NOT hardcoded** — configs read `${NEL_NEXT_EVAL_IMAGE}`,
   `${HARBOR_ECR_REPOSITORY}` (Terminal-Bench), `${HARBOR_SWEBENCH_ECR_REPOSITORY}`
-  (SWE-bench) from `.env`. Run **`modelopttools:eval-config`** (Step 3b) to write
-  them — it holds the canonical values, arch/region rules, and points to the
-  per-benchmark `bench.yaml` source of truth.
+  (SWE-bench), and `${MLFLOW_TRACKING_URI}` from `.env`. Run **`modelopttools:eval-config`**
+  (Step 3b) to write them — it holds the canonical values, arch/region rules, and
+  points to the per-benchmark `bench.yaml` source of truth.
 - `set -a && source .env && set +a` before running so `${VAR}` resolves.
 
 ## Architecture — where each piece runs
@@ -140,17 +140,16 @@ with its own `run_id`, copying the shared `services:` block.
 - **`timeout_strategy`**: `task` = each task's own timeout (leaderboard-comparable);
   `max` = `max(task, playbook)`; `override` = always playbook. Match the benchmark's
   canonical `bench.yaml`.
-- **MLflow export — always add** `output.export: [mlflow]` + `export_config.mlflow`
-  (`tracking_uri: https://mlflow-nemo-evaluator.nvidia.com/`, **hardcoded**
-  `experiment_name: <user>/<model>` since `${USER}=root` in-container; tags aligned
-  with `recipes/examples/example_eval.yaml`: `framework`/`model`/`temperature`/
-  `top_p`). It runs cluster-side at finalize. **Caveat:** the public-0.3.0
-  host's SLURM-submit path drops `output.export` from the sidecar (the internal host
-  propagates it), and a local `nel export` is SSO-blocked (MLflow needs an auth
-  token from the internal run env) — so a link only appears on the internal host /
-  with that token.
+- **MLflow export — config + a post-run push.** Add `output.export: [mlflow]` +
+  `export_config.mlflow` (hardcode `experiment_name: <user>/<model>` — `${USER}=root`
+  in-container; tags `framework`/`model`/`temperature`/`top_p` + `checkpoint_path`/`benchmark`
+  for dashboard attribution). `tracking_uri: ${MLFLOW_TRACKING_URI}` (from `eval-config`
+  Step 3b — canonical `mlflow.frontier-evals.nvidia.com`; **not** the `mlflow-nemo-evaluator`
+  alias, whose 308 strips `/api/...` → 405). **SLURM does NOT auto-export** — push after
+  the run with `nel-next.sh mlflow-push` (Run flow), which resolves the var and falls back
+  to the canonical host.
 
-## Run (dry-run → canary → full) + lifecycle
+## Run (dry-run → canary → full) → push to MLflow
 
 ```bash
 set -a && source .env && set +a; NEL=.agents/scripts/nel-next.sh
@@ -158,11 +157,17 @@ $NEL eval run <cfg>.yaml --dry-run                                  # validate/r
 $NEL eval run <cfg>.yaml --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
 $NEL eval run <cfg>.yaml --submit                                   # full
 $NEL eval {status|logs -f|report -f markdown|merge} -r <run_id>     # lifecycle
+$NEL mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push merged bundle(s) to MLflow
 ```
 
 `eval run` on a slurm cluster scp's the sbatch + redacted `.secrets.env` and
 submits via SSH; a built-in afternotok chain auto-resumes across walltime windows;
-sharded runs auto-merge.
+sharded runs auto-merge. **SLURM does not auto-export** — `mlflow-push` is the final
+step: it reads the config's `export_config.mlflow`, stages each merged bundle's
+`eval-*.json` off the cluster (the dev box doesn't mount the run dir), and exports with
+`emit_traces=false` (the default emits one trace per sample → minutes-long hang).
+Idempotent (re-push updates the same run, deduped by `job_id`); forward extra exporter
+kwargs after `--` (e.g. `-- -o copy_artifacts=true`).
 
 ## Non-fatal noise
 

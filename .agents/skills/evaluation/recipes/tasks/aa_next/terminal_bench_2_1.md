@@ -39,6 +39,7 @@ benchmarks:
     solver:
       service: <svc-name>
       timeout_strategy: max       # canonical bench.yaml; use "task" for leaderboard-comparable
+      run_timeout: 7200           # per-task agent wall-clock ceiling (2h)
       agent_kwargs:
         llm_kwargs:
           timeout: 3600           # per-request LLM timeout (canonical)
@@ -57,6 +58,7 @@ come from `modelopttools:eval-config` (run it first) + the workspace `.env`.
 Report **`pass@1`** only — benchmark `terminal-bench@2.1`, scorer `pass@1` (0–1):
 the resolved rate over the 2.1 task set, **already averaged over repeats** (a single
 `pass@1`; no `avg-of-N` key). MLflow logs it as `pass_at_1`. Read from `report.md`
-(Benchmark / Scorer table) or `nel eval report -r <run_id>`. Keep `timeout_strategy`
-fixed across baseline vs quantized for a valid delta. (Terminal-Bench 2.0 and 2.1 use
-different task sets, so their `pass@1` numbers aren't directly comparable.)
+(Benchmark / Scorer table) or `nel eval report -r <run_id>`, then push to MLflow with
+`nel-next.sh mlflow-push -r <run_id> -c <cfg>` (SLURM doesn't auto-export). Keep
+`timeout_strategy` fixed across baseline vs quantized for a valid delta. (Terminal-Bench
+2.0 and 2.1 use different task sets, so their `pass@1` numbers aren't directly comparable.)
