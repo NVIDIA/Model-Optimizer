@@ -690,10 +690,10 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, quant_cfg, 
     # Quantize grouped model
     mtq.quantize(te_grouped_moe_model, quant_cfg, forward)
 
-    # Quantize non-grouped model with synced weight amax to match TEGroupedMLP behavior
-    seq_quant_cfg = copy.deepcopy(quant_cfg)
-    seq_quant_cfg["algorithm"] = {"method": "max", "sync_expert_weight_amax": True}
-    mtq.quantize(sequential_moe_model, seq_quant_cfg, forward)
+    # TEGroupedMLP now quantizes per-expert by default (GroupedQuantizer), matching
+    # SequentialMLP's per-expert quantizers, so no amax sync override is needed for the
+    # two models to produce identical quantized outputs.
+    mtq.quantize(sequential_moe_model, copy.deepcopy(quant_cfg), forward)
 
     # Compare model outputs after quantization
     te_grouped_moe_quant_output = forward(te_grouped_moe_model)
@@ -714,7 +714,8 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
 
 
 def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_cfg, rank, size):
-    """TEGrouped per-linear amax should equal max-over-Sequential-experts under default sync=False."""
+    """TEGrouped keeps a per-expert weight quantizer (GroupedQuantizer) by default; each
+    expert's amax should match the corresponding SequentialMLP expert (no cross-expert sharing)."""
     initialize_for_megatron(
         tensor_model_parallel_size=tp_size,
         expert_model_parallel_size=ep_size,
@@ -722,14 +723,22 @@ def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_c
     )
 
     te_grouped = _gpt_model_provider(
-        tp_size=tp_size, ep_size=ep_size, hidden_size=32, moe_grouped_gemm=True,
-        transformer_impl="transformer_engine", num_moe_experts=4,
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
     )
     forward = get_forward(te_grouped, batch_size=8)
 
     sequential = _gpt_model_provider(
-        tp_size=tp_size, ep_size=ep_size, hidden_size=32, moe_grouped_gemm=False,
-        num_moe_experts=4, transformer_impl="modelopt",
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=False,
+        num_moe_experts=4,
+        transformer_impl="modelopt",
     )
     copy_weights_from_grouped_to_non_grouped(te_grouped, sequential)
 
@@ -750,25 +759,29 @@ def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_c
     saw_per_expert_divergence = False
     for te_mlp, seq_mlp in zip(te_modules, seq_modules):
         for linear_name in ("linear_fc1", "linear_fc2"):
-            te_amax = getattr(te_mlp, linear_name).weight_quantizer.amax
-            assert te_amax is not None and te_amax.numel() == 1
-
-            seq_amaxes = torch.stack([
-                getattr(expert, linear_name).weight_quantizer.amax.view(())
-                for expert in seq_mlp.local_experts
-            ])
-            seq_max = seq_amaxes.max()
-
-            assert torch.allclose(te_amax.view(()), seq_max, atol=1e-5, rtol=1e-5), (
-                f"TEGrouped per-linear amax ({te_amax.item()}) != "
-                f"max-over-Sequential-experts ({seq_max.item()}) for {linear_name}"
+            te_wq = getattr(te_mlp, linear_name).weight_quantizer
+            # One weight quantizer per local expert, not a single shared one.
+            assert len(te_wq) == len(seq_mlp.local_experts), (
+                f"{linear_name}: expected {len(seq_mlp.local_experts)} per-expert quantizers, "
+                f"got {len(te_wq)}"
             )
 
-            if (seq_amaxes.max() - seq_amaxes.min()).item() > 1e-5:
+            expert_amaxes = []
+            for i, expert in enumerate(seq_mlp.local_experts):
+                te_amax = te_wq[i].amax
+                seq_amax = getattr(expert, linear_name).weight_quantizer.amax
+                assert te_amax is not None
+                assert torch.allclose(te_amax, seq_amax, atol=1e-5, rtol=1e-5), (
+                    f"TEGrouped expert {i} amax != Sequential expert {i} amax for {linear_name}"
+                )
+                expert_amaxes.append(te_amax.reshape(-1)[0])
+
+            stacked = torch.stack(expert_amaxes)
+            if (stacked.max() - stacked.min()).item() > 1e-5:
                 saw_per_expert_divergence = True
 
     assert saw_per_expert_divergence, (
-        "Expected per-expert weight amax to diverge across SequentialMLP experts."
+        "Expected per-expert weight amax to diverge across experts (proves no cross-expert sharing)."
     )
 
 
@@ -780,7 +793,7 @@ def test_te_grouped_vs_sequential_default_amax(dist_workers_size_4, quant_cfg):
 
 
 def _test_te_grouped_vs_sequential_default_loss_helper(tp_size, ep_size, quant_cfg, rank, size):
-    """TEGrouped quantized output should diverge from BF16 reference more than SequentialMLP under default sync=False."""
+    """TEGrouped quantized output should diverge from BF16 more than SequentialMLP under default sync=False."""
     initialize_for_megatron(
         tensor_model_parallel_size=tp_size,
         expert_model_parallel_size=ep_size,
@@ -788,14 +801,22 @@ def _test_te_grouped_vs_sequential_default_loss_helper(tp_size, ep_size, quant_c
     )
 
     te_grouped = _gpt_model_provider(
-        tp_size=tp_size, ep_size=ep_size, hidden_size=32, moe_grouped_gemm=True,
-        transformer_impl="transformer_engine", num_moe_experts=4,
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
     )
     forward = get_forward(te_grouped, batch_size=8)
 
     sequential = _gpt_model_provider(
-        tp_size=tp_size, ep_size=ep_size, hidden_size=32, moe_grouped_gemm=False,
-        num_moe_experts=4, transformer_impl="modelopt",
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=False,
+        num_moe_experts=4,
+        transformer_impl="modelopt",
     )
     copy_weights_from_grouped_to_non_grouped(te_grouped, sequential)
 
