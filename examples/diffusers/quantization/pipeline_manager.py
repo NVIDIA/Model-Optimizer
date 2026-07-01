@@ -43,6 +43,9 @@ class PipelineManager:
         self.pipe_upsample: LTXLatentUpsamplePipeline | None = None  # For LTX-Video upsampling
         self._transformer: torch.nn.Module | None = None
         self._video_decoder: torch.nn.Module | None = None
+        # Few-step sampler config for DMD2 students (populated when loading a
+        # qwen-image-dmd2 pipeline); consumed by the calibrator / sanity check.
+        self.dmd_sampler_cfg: dict[str, Any] | None = None
 
     @staticmethod
     def create_pipeline_from(
@@ -98,6 +101,11 @@ class PipelineManager:
                 ltx2_plugin.register_ltx2_quant_linear()
                 self.pipe = self._create_ltx2_pipeline()
                 self.logger.info("LTX-2 pipeline created successfully")
+                return self.pipe
+
+            if self.config.model_type == ModelType.QWEN_IMAGE_DMD2:
+                self.pipe = self._create_qwen_image_dmd2_pipeline()
+                self.logger.info("Qwen-Image DMD2 pipeline created successfully")
                 return self.pipe
 
             pipeline_cls = MODEL_PIPELINE[self.config.model_type]
@@ -265,6 +273,113 @@ class PipelineManager:
         }
         pipeline_kwargs.update(params)
         return TI2VidTwoStagesPipeline(**pipeline_kwargs)
+
+    def _create_qwen_image_dmd2_pipeline(self) -> Any:
+        """Build a QwenImagePipeline whose transformer is a DMD2-trained student.
+
+        Loads the consolidated student transformer (the ``model/consolidated`` dir
+        produced by ``examples/diffusers/fastgen`` training), optionally overlays an
+        EMA shadow, and swaps it into the base Qwen-Image pipeline so the VAE /
+        text-encoder / tokenizer / scheduler come from the base checkpoint.
+
+        Reads from ``extra_params``:
+            student_path (required): consolidated student dir.
+            base_pipeline_path: base Qwen-Image dir/HF id (defaults to the
+                registry id or ``--override-model-path``).
+            ema_path: optional ``ema_shadow.pt`` to overlay onto the student.
+            sample_steps / t_list / sample_type / guidance_scale / max_t:
+                few-step sampler schedule (defaults match the canonical 4-step
+                shift=3 student); stashed in ``self.dmd_sampler_cfg``.
+        """
+        from qwen_image_dmd2_sampler import DEFAULT_MAX_T, resolve_schedule
+
+        try:
+            from diffusers import QwenImagePipeline, QwenImageTransformer2DModel
+        except ImportError as e:
+            raise ImportError(
+                "qwen-image-dmd2 requires a diffusers version providing QwenImagePipeline "
+                "and QwenImageTransformer2DModel; upgrade diffusers."
+            ) from e
+
+        params = dict(self.config.extra_params)
+        student_path = params.get("student_path")
+        if not student_path:
+            raise ValueError(
+                "Missing required extra_param: student_path (the consolidated DMD2 student "
+                "dir, e.g. .../epoch_4_step_17999/model/consolidated)."
+            )
+        base_pipeline_path = params.get("base_pipeline_path") or self.config.model_path
+        ema_path = params.get("ema_path")
+
+        default_dtype = self.config.model_dtype["default"]
+        transformer_dtype = self.config.model_dtype.get("transformer", default_dtype)
+        if torch.float16 in (default_dtype, transformer_dtype):
+            self.logger.warning(
+                "Qwen-Image is trained/served in bfloat16; float16 (Half) can overflow the "
+                "VAE and produce NaNs. Consider --model-dtype BFloat16."
+            )
+
+        self.logger.info("Loading DMD2 student transformer from %s", student_path)
+        transformer = QwenImageTransformer2DModel.from_pretrained(
+            student_path, torch_dtype=transformer_dtype
+        )
+
+        if ema_path:
+            self.logger.info("Overlaying EMA shadow from %s", ema_path)
+            ema_state = torch.load(str(ema_path), map_location="cpu")
+            shadow = (
+                ema_state.get("shadow", ema_state) if isinstance(ema_state, dict) else ema_state
+            )
+            if not isinstance(shadow, dict):
+                raise ValueError(
+                    f"ema_path content has unexpected type {type(shadow).__name__}; "
+                    "expected dict[str, Tensor]."
+                )
+            missing, unexpected = transformer.load_state_dict(shadow, strict=False)
+            if unexpected:
+                self.logger.warning("EMA overlay had %d unexpected key(s)", len(unexpected))
+            if missing:
+                self.logger.warning("EMA overlay missed %d student key(s)", len(missing))
+
+        transformer.eval()
+
+        self.logger.info(
+            "Loading base Qwen-Image pipeline from %s (transformer replaced by student)",
+            base_pipeline_path,
+        )
+        pipe = QwenImagePipeline.from_pretrained(
+            base_pipeline_path, transformer=transformer, torch_dtype=default_dtype
+        )
+        pipe.set_progress_bar_config(disable=True)
+
+        # Resolve and stash the few-step sampler config. Defaults match the
+        # canonical 4-step shift=3 student; the schedule MUST match training.
+        sample_steps = params.get("sample_steps")
+        sample_steps = int(sample_steps) if sample_steps is not None else 4
+        t_list = params.get("t_list")
+        if isinstance(t_list, str):
+            t_list = [float(x) for x in t_list.split(",") if x.strip()]
+        max_t = float(params.get("max_t", DEFAULT_MAX_T))
+        schedule = resolve_schedule(t_list, sample_steps, max_t)
+        defaults = MODEL_DEFAULTS[self.config.model_type].get("inference_extra_args", {})
+        self.dmd_sampler_cfg = {
+            "schedule": schedule,
+            "sample_type": str(params.get("sample_type", "ode")),
+            "guidance_scale": float(params.get("guidance_scale", 1.0)),
+            "negative_prompt": params.get("negative_prompt"),
+            "height": int(params.get("height", defaults.get("height", 1024))),
+            "width": int(params.get("width", defaults.get("width", 1024))),
+            "max_sequence_length": int(params.get("max_sequence_length", 512)),
+        }
+        self.logger.info(
+            "DMD2 few-step sampler: steps=%d schedule=%s sample_type=%s guidance_scale=%s "
+            "(schedule must match the student's training t_list)",
+            len(schedule) - 1,
+            schedule,
+            self.dmd_sampler_cfg["sample_type"],
+            self.dmd_sampler_cfg["guidance_scale"],
+        )
+        return pipe
 
     def print_quant_summary(self):
         for name, backbone in self.iter_backbones():

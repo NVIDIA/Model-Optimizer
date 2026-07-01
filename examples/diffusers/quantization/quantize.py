@@ -39,7 +39,6 @@ from models_utils import (
     get_model_filter_func,
     parse_extra_params,
 )
-from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from pipeline_manager import PipelineManager
 from quantize_config import (
     CalibrationConfig,
@@ -51,9 +50,8 @@ from quantize_config import (
     QuantFormat,
     QuantizationConfig,
 )
-from utils import check_conv_and_mha, check_lora
+from utils import check_conv_and_mha, check_lora, restore_quantizer_state, save_quantizer_state
 
-import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
 
@@ -295,8 +293,11 @@ class ExportManager:
         filename = f"{backbone_name}.pt" if backbone_name else "backbone.pt"
         target_path = ckpt_path / filename
 
-        self.logger.info(f"Saving backbone to {target_path}")
-        mto.save(backbone, str(target_path))
+        # Save ONLY the quantization state (recipe + quantizer buffers incl. amax),
+        # not the model weights. The weights live in the base HF/diffusers checkpoint
+        # and are reloaded there on restore; this keeps the artifact tiny.
+        self.logger.info(f"Saving quantizer state (amax + recipe, no weights) to {target_path}")
+        save_quantizer_state(backbone, str(target_path))
 
         self.logger.info("Checkpoint saved successfully")
 
@@ -318,6 +319,12 @@ class ExportManager:
         """
         if not self.config.onnx_dir:
             return
+
+        # Imported lazily: the ONNX export tooling (onnx_graphsurgeon, etc.) is only
+        # needed when --onnx-dir is set, so the calibration + amax-save path still
+        # works in environments without the ONNX deps (e.g. the diffusers/fastgen
+        # container used for Qwen-Image DMD2 students).
+        from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 
         self.logger.info(f"Starting ONNX export to {self.config.onnx_dir}")
 
@@ -362,7 +369,9 @@ class ExportManager:
                     f"Checkpoint not found for '{backbone_name}' in {restore_path}"
                 )
             self.logger.info(f"Restoring {backbone_name} from {source_path}")
-            mto.restore(backbone, str(source_path))
+            # The pipeline was just created with the base (unquantized) weights, so
+            # this re-applies the quantization recipe + amax on top of them.
+            restore_quantizer_state(backbone, str(source_path))
 
         self.logger.info("Checkpoints restored successfully")
 
