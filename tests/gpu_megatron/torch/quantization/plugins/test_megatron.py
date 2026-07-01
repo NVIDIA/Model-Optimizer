@@ -14,8 +14,7 @@
 # limitations under the License.
 
 import copy
-import time
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 
@@ -73,37 +72,6 @@ except ImportError:
     HAS_TE = False
 
 SEED = 1234
-
-
-@contextmanager
-def _timed_section(rank, label):
-    if rank == 0:
-        print(f"[gpu_megatron timing] START {label}", flush=True)
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        if rank == 0:
-            elapsed = time.perf_counter() - start
-            print(f"[gpu_megatron timing] END {label}: {elapsed:.2f}s", flush=True)
-
-
-def _quant_config_debug_name(config):
-    known_configs = [
-        ("fp8", mtq.FP8_DEFAULT_CFG),
-        ("int8_sq", mtq.INT8_SMOOTHQUANT_CFG),
-        ("int4_blockwise", mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG),
-        ("int4_awq", mtq.INT4_AWQ_CFG),
-        ("w4a8_awq", mtq.W4A8_AWQ_BETA_CFG),
-        ("nvfp4", mtq.NVFP4_DEFAULT_CFG),
-        ("fp8_2d_blockwise", mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG),
-        ("fp8_kv", mtq.FP8_KV_CFG),
-        ("nvfp4_kv", mtq.NVFP4_KV_CFG),
-    ]
-    for name, known_config in known_configs:
-        if config is known_config:
-            return name
-    return "custom"
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -357,77 +325,64 @@ def _test_sharded_state_dict(
     # Hybrid mamba MOE parameters
     is_hybrid = model_config.get("is_hybrid", False)
     hybrid_override_pattern = model_config.get("hybrid_override_pattern", None)
-    timing_label = model_config.get(
-        "test_label",
-        f"ssd:{transformer_impl}:compress={compress}:meta={meta_device}:world={size}",
+
+    initialize_for_megatron(
+        tensor_model_parallel_size=tp_size,
+        seed=SEED,
+        expert_model_parallel_size=ep_size,
+        expert_tensor_parallel_size=etp_size,
     )
 
-    with _timed_section(rank, f"{timing_label}:initialize"):
-        initialize_for_megatron(
-            tensor_model_parallel_size=tp_size,
-            seed=SEED,
-            expert_model_parallel_size=ep_size,
-            expert_tensor_parallel_size=etp_size,
-        )
+    model_ref = _gpt_model_provider(
+        tp_size,
+        hidden_size,
+        vocab_size=256,
+        num_moe_experts=num_moe_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+        ep_size=ep_size,
+        etp_size=etp_size,
+        transformer_impl=transformer_impl,
+        is_hybrid=is_hybrid,
+        hybrid_override_pattern=hybrid_override_pattern,
+    )
+    model_test = _gpt_model_provider(
+        tp_size,
+        hidden_size,
+        vocab_size=256,
+        num_moe_experts=num_moe_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+        meta_device=meta_device,
+        ep_size=ep_size,
+        etp_size=etp_size,
+        transformer_impl=transformer_impl,
+        is_hybrid=is_hybrid,
+        hybrid_override_pattern=hybrid_override_pattern,
+    )
 
-    with _timed_section(rank, f"{timing_label}:build_model_ref"):
-        model_ref = _gpt_model_provider(
-            tp_size,
-            hidden_size,
-            vocab_size=256,
-            num_moe_experts=num_moe_experts,
-            moe_grouped_gemm=moe_grouped_gemm,
-            ep_size=ep_size,
-            etp_size=etp_size,
-            transformer_impl=transformer_impl,
-            is_hybrid=is_hybrid,
-            hybrid_override_pattern=hybrid_override_pattern,
-        )
-    with _timed_section(rank, f"{timing_label}:build_model_test"):
-        model_test = _gpt_model_provider(
-            tp_size,
-            hidden_size,
-            vocab_size=256,
-            num_moe_experts=num_moe_experts,
-            moe_grouped_gemm=moe_grouped_gemm,
-            meta_device=meta_device,
-            ep_size=ep_size,
-            etp_size=etp_size,
-            transformer_impl=transformer_impl,
-            is_hybrid=is_hybrid,
-            hybrid_override_pattern=hybrid_override_pattern,
-        )
-
-    with _timed_section(rank, f"{timing_label}:get_forward"):
-        forward = get_forward(model_ref)
-    with _timed_section(rank, f"{timing_label}:quantize"):
-        model_ref = mtq.quantize(model_ref, config, forward)
+    forward = get_forward(model_ref)
+    model_ref = mtq.quantize(model_ref, config, forward)
     if compress:
-        with _timed_section(rank, f"{timing_label}:compress"):
-            mtq.compress(model_ref)
+        mtq.compress(model_ref)
 
-    with _timed_section(rank, f"{timing_label}:strip_smoothing_attrs"):
-        for module in model_ref.modules():
-            if hasattr(module, "_amax_for_smoothing"):
-                delattr(module, "_amax_for_smoothing")
+    for module in model_ref.modules():
+        if hasattr(module, "_amax_for_smoothing"):
+            delattr(module, "_amax_for_smoothing")
 
-    with _timed_section(rank, f"{timing_label}:sharded_state_dict_helper"):
-        sharded_state_dict_test_helper(
-            tmp_path,
-            model_ref,
-            model_test,
-            forward,
-            meta_device=meta_device,
-            version=modelopt_version,
-        )
+    sharded_state_dict_test_helper(
+        tmp_path,
+        model_ref,
+        model_test,
+        forward,
+        meta_device=meta_device,
+        version=modelopt_version,
+    )
 
     if modelopt_version is not None:
         mto.conversion.__version__ = modelopt.__version__
         mtq.plugins.megatron.__version__ = modelopt.__version__
 
     # Make sure all ranks have arrived before destroying NCCL
-    with _timed_section(rank, f"{timing_label}:barrier"):
-        torch.distributed.barrier()
+    torch.distributed.barrier()
 
 
 mixed_precision_config = copy.deepcopy(mtq.W4A8_AWQ_BETA_CFG)
@@ -500,14 +455,7 @@ def test_homogeneous_sharded_state_dict(
                 "KV cache configs require transformer_impl='modelopt' and no compress/meta_device"
             )
 
-    config_name = _quant_config_debug_name(config)
-    model_config = {
-        "transformer_impl": transformer_impl,
-        "test_label": (
-            f"ssd:homogeneous:{transformer_impl}:compress={compress}:"
-            f"meta={meta_device}:config={config_name}"
-        ),
-    }
+    model_config = {"transformer_impl": transformer_impl}
     dist_workers.run(
         partial(
             _test_sharded_state_dict,
@@ -773,20 +721,19 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
 
 
 def _test_auto_quantize_moe_ep_helper(rank, size):
-    with _timed_section(rank, f"auto_quantize_moe_ep_world{size}:init_model"):
-        initialize_for_megatron(
-            tensor_model_parallel_size=1,
-            expert_model_parallel_size=size,
-            seed=SEED,
-        )
-        model = _gpt_model_provider(
-            tp_size=1,
-            ep_size=size,
-            hidden_size=32,
-            num_moe_experts=4,
-            moe_grouped_gemm=False,
-            transformer_impl="modelopt",
-        )
+    initialize_for_megatron(
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=size,
+        seed=SEED,
+    )
+    model = _gpt_model_provider(
+        tp_size=1,
+        ep_size=size,
+        hidden_size=32,
+        num_moe_experts=4,
+        moe_grouped_gemm=False,
+        transformer_impl="modelopt",
+    )
 
     def forward_step(model, batch):
         input_ids, labels, position_ids, attention_mask, loss_mask = batch
@@ -798,14 +745,13 @@ def _test_auto_quantize_moe_ep_helper(rank, size):
             loss_mask=loss_mask,
         )
 
-    with _timed_section(rank, f"auto_quantize_moe_ep_world{size}:auto_quantize"):
-        auto_quantize_helper(
-            model,
-            data_loader=[get_batch(model, batch_size=2) for _ in range(2)],
-            forward_step=forward_step,
-            forward_backward_step=lambda m, b: forward_step(m, b).mean().backward(),
-            quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
-        )
+    auto_quantize_helper(
+        model,
+        data_loader=[get_batch(model, batch_size=2) for _ in range(2)],
+        forward_step=forward_step,
+        forward_backward_step=lambda m, b: forward_step(m, b).mean().backward(),
+        quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+    )
 
 
 def test_auto_quantize_moe_ep(dist_workers):
@@ -830,104 +776,97 @@ def test_gptq_mamba_hybrid(dist_workers):
 
 
 def _test_gptq_mamba_hybrid(rank, size):
-    with _timed_section(rank, f"gptq_mamba_hybrid_world{size}:init_model"):
-        initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
-        model = get_mcore_mamba_hybrid_model(
-            tensor_model_parallel_size=1,
-            hidden_size=32,
-            num_attention_heads=4,
-            ffn_hidden_size=64,
-            mamba_state_dim=16,
-            mamba_head_dim=8,
-            num_moe_experts=4,
-            moe_grouped_gemm=False,
-            moe_ffn_hidden_size=32,
-            moe_shared_expert_intermediate_size=16,
-            transformer_impl="modelopt",
-        ).cuda()
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = get_mcore_mamba_hybrid_model(
+        tensor_model_parallel_size=1,
+        hidden_size=32,
+        num_attention_heads=4,
+        ffn_hidden_size=64,
+        mamba_state_dim=16,
+        mamba_head_dim=8,
+        num_moe_experts=4,
+        moe_grouped_gemm=False,
+        moe_ffn_hidden_size=32,
+        moe_shared_expert_intermediate_size=16,
+        transformer_impl="modelopt",
+    ).cuda()
 
     quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
     quant_cfg["algorithm"] = {"method": "gptq"}
     forward = get_forward(model, batch_size=1)
-    with _timed_section(rank, f"gptq_mamba_hybrid_world{size}:quantize"):
-        model = mtq.quantize(model, quant_cfg, forward)
+    model = mtq.quantize(model, quant_cfg, forward)
 
-    with _timed_section(rank, f"gptq_mamba_hybrid_world{size}:verify"):
-        for m in model.modules():
-            if isinstance(m, SequentialMLP):
-                assert all(
-                    is_quantized_linear(e.linear_fc1)
-                    and e.linear_fc1.weight_quantizer.is_enabled
-                    and e.linear_fc1.input_quantizer.is_enabled
-                    for e in m.local_experts
-                )
-                assert all(
-                    is_quantized_linear(e.linear_fc2)
-                    and e.linear_fc2.weight_quantizer.is_enabled
-                    and e.linear_fc2.input_quantizer.is_enabled
-                    for e in m.local_experts
-                )
-        assert torch.isfinite(forward(model)).all()
+    for m in model.modules():
+        if isinstance(m, SequentialMLP):
+            assert all(
+                is_quantized_linear(e.linear_fc1)
+                and e.linear_fc1.weight_quantizer.is_enabled
+                and e.linear_fc1.input_quantizer.is_enabled
+                for e in m.local_experts
+            )
+            assert all(
+                is_quantized_linear(e.linear_fc2)
+                and e.linear_fc2.weight_quantizer.is_enabled
+                and e.linear_fc2.input_quantizer.is_enabled
+                for e in m.local_experts
+            )
+    assert torch.isfinite(forward(model)).all()
 
 
 def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_size, result_path):
-    label = f"auto_quantize_mamba_hybrid_ep{expert_model_parallel_size}_world{size}"
-    with _timed_section(rank, f"{label}:init_model"):
-        initialize_for_megatron(
-            tensor_model_parallel_size=1,
-            expert_model_parallel_size=expert_model_parallel_size,
-            seed=SEED,
-        )
-        model = get_mcore_mamba_hybrid_model(
-            tensor_model_parallel_size=1,
-            hidden_size=32,
-            num_attention_heads=4,
-            ffn_hidden_size=64,
-            mamba_state_dim=16,
-            mamba_head_dim=8,
-            num_moe_experts=4,
-            moe_grouped_gemm=False,
-            moe_ffn_hidden_size=32,
-            moe_shared_expert_intermediate_size=16,
-            transformer_impl="modelopt",
-            expert_model_parallel_size=expert_model_parallel_size,
-        ).cuda()
+    initialize_for_megatron(
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=expert_model_parallel_size,
+        seed=SEED,
+    )
+    model = get_mcore_mamba_hybrid_model(
+        tensor_model_parallel_size=1,
+        hidden_size=32,
+        num_attention_heads=4,
+        ffn_hidden_size=64,
+        mamba_state_dim=16,
+        mamba_head_dim=8,
+        num_moe_experts=4,
+        moe_grouped_gemm=False,
+        moe_ffn_hidden_size=32,
+        moe_shared_expert_intermediate_size=16,
+        transformer_impl="modelopt",
+        expert_model_parallel_size=expert_model_parallel_size,
+    ).cuda()
 
     def forward_backward_step(model, batch):
         _mamba_hybrid_forward_step(model, batch).mean().backward()
 
-    with _timed_section(rank, f"{label}:auto_quantize"):
-        _, search_state = mtq.auto_quantize(
-            model,
-            constraints={"effective_bits": 8.0},
-            quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
-            data_loader=[get_batch(model, batch_size=1)],
-            forward_step=_mamba_hybrid_forward_step,
-            forward_backward_step=forward_backward_step,
-            num_calib_steps=1,
-            num_score_steps=1,
-            verbose=True,
-        )
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+        data_loader=[get_batch(model, batch_size=1)],
+        forward_step=_mamba_hybrid_forward_step,
+        forward_backward_step=forward_backward_step,
+        num_calib_steps=1,
+        num_score_steps=1,
+        verbose=True,
+    )
 
-    with _timed_section(rank, f"{label}:verify"):
-        no_quant = QuantRecipe(quant_cfg=None)
-        summed_cost = sum(
-            stat["costs"][stat["formats"].index(no_quant)]
-            for stat in search_state["candidate_stats"].values()
-        )
-        # The per-op no-quant costs must sum to the cost denominator AutoQuantize uses,
-        # which is the full quantizable weight size aggregated across EP ranks.
-        assert summed_cost == pytest.approx(search_state["cost_denominator"], rel=1e-6)
-        assert search_state["best"]["is_satisfied"]
+    no_quant = QuantRecipe(quant_cfg=None)
+    summed_cost = sum(
+        stat["costs"][stat["formats"].index(no_quant)]
+        for stat in search_state["candidate_stats"].values()
+    )
+    # The per-op no-quant costs must sum to the cost denominator AutoQuantize uses,
+    # which is the full quantizable weight size aggregated across EP ranks.
+    assert summed_cost == pytest.approx(search_state["cost_denominator"], rel=1e-6)
+    assert search_state["best"]["is_satisfied"]
 
-        if expert_model_parallel_size == 1:
-            # With EP=1, every rank has the full expert set. DP de-duplication should make the
-            # summed no-quant cost match the local quantizable weight size on each rank.
-            local_total = _AutoQuantizeBaseSearcher._get_total_weight_size(list(model.modules()))
-            assert summed_cost == pytest.approx(local_total, rel=1e-6)
+    if expert_model_parallel_size == 1:
+        # With EP=1, every rank has the full expert set. DP de-duplication should make the
+        # summed no-quant cost match the local quantizable weight size on each rank.
+        local_total = _AutoQuantizeBaseSearcher._get_total_weight_size(list(model.modules()))
+        assert summed_cost == pytest.approx(local_total, rel=1e-6)
 
-        if rank == 0:
-            Path(result_path).write_text(repr(summed_cost))
+    if rank == 0:
+        Path(result_path).write_text(repr(summed_cost))
 
 
 @pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")

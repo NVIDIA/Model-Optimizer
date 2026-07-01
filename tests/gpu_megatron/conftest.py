@@ -26,6 +26,36 @@ with contextlib.suppress(ImportError):
     from apex.transformer.parallel_state import destroy_model_parallel as apex_destroy
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _prebuild_quant_cuda_extensions():
+    """Build ModelOpt's quant CUDA extensions once, before any test runs.
+
+    The first fake-quant op JIT-compiles these via ``torch.utils.cpp_extension.load()``
+    (~110-145s of ninja build *each* on the CI CUDA/container toolchain). Without this,
+    that compile lands inside the first test's timed ``call`` and trips the per-test
+    timeout -- which is why ``test_homogeneous_sharded_state_dict`` params intermittently
+    time out (FP8 -> ``_fp8``, INT8 -> base ext, FP8-2D/NVFP4 -> ``_mx``; ~110-145s each,
+    all other params ~1-5s once the .so is cached).
+
+    Doing it here in session setup (``pyproject`` sets ``timeout_func_only``) keeps the
+    build off the per-test clock and, unlike the ``_extensions/test_torch_extensions.py``
+    prebuild tests, runs regardless of test selection/ordering (e.g. ``-k`` filters) and
+    is not itself capped by a per-test timeout. Worker subprocesses then load the cached
+    .so from the shared ``TORCH_EXTENSIONS_DIR``.
+
+    All three (``get_cuda_ext``/``_fp8``/``_mx``) must be built: the ``_mx`` extension
+    (NVFP4/FP8-2D block quantization) is the slowest and was the one still tripping the
+    timeout when an earlier version of this fixture built only the first two.
+    """
+    if torch.cuda.is_available():
+        with contextlib.suppress(Exception):  # best-effort; tests fall back to on-demand JIT
+            from modelopt.torch.quantization import extensions as quant_ext
+
+            quant_ext.get_cuda_ext(raise_if_failed=False)
+            quant_ext.get_cuda_ext_fp8(raise_if_failed=False)
+            quant_ext.get_cuda_ext_mx(raise_if_failed=False)
+
+
 def megatron_worker_teardown(rank, world_size):
     """Clean up model-parallel state between tests in persistent workers."""
     if dist.is_initialized():

@@ -128,10 +128,7 @@ def gpu_megatron(session):
     # Pre-installed nvidia-modelopt shadows the editable install
     session.run("pip", "uninstall", "-y", "nvidia-modelopt")
     session.run("python", "-m", "pip", "install", "-e", ".[hf,dev-test]")
-    # Run in a separate pytest invocation so JIT extension warmup happens before
-    # collecting/importing worker-backed Megatron tests that can hit call timeouts.
-    session.run("python", "-m", "pytest", "tests/gpu_megatron/_extensions")
-    session.run("python", "-m", "pytest", "tests/gpu_megatron/torch", *_cov_args())
+    session.run("python", "-m", "pytest", "tests/gpu_megatron", *_cov_args())
 
 
 # Container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 or later
