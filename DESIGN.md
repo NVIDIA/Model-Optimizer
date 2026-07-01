@@ -37,7 +37,7 @@ decides where each operand is quantized.
 |---------|-----|-----------|-----------------|----------------------|
 | Q | 1 | head_dim | pre-step (`_QuantVLLMAttention.forward`, `q_bmm_quantizer`) | n/a (current query) |
 | K | 1 | head_dim | pre-step → written to cache (`k_bmm_quantizer`) | yes (quantize-once) |
-| V | 2 | keys | **on-write bake (decode) / on-read (prefill)** (`v_bmm_quantizer` → `_v_qdq_nvfp4`) | no |
+| V | 2 | keys | **on-write bake (both phases)** (`v_bmm_quantizer` → `_v_qdq_nvfp4`) | no |
 | P | 2 | keys | **in-kernel** (`p_bmm_quantizer` → `_p_qdq_nvfp4`) | no (P is transient) |
 | skip | – | – | in-kernel tile selection on the quantized scores | – |
 
@@ -49,7 +49,16 @@ write as that axis allows; the operands whose axis a per-token write cannot form
   token, so the pre-step is quantize-once-at-write for free and reuses standard
   ModelOpt machinery with stock vLLM cache writes.
 - **P** is fake-quantized **in-kernel** by `_p_qdq_nvfp4` (plain max, P ≥ 0;
-  16-blocks along keys). It is transient, so in-kernel is its only home.
+  16-blocks along keys). It is transient, so in-kernel is its only home. It quantizes
+  the *tile-local unnormalized* numerator `exp2(scores − m_new)` (vs the running max,
+  before the `/l` normalization), so the autotuned prefill `BLOCK_N` and the
+  auto-selected decode split count perturb the quantized P — E4M3 scale rounding is
+  not scale-equivariant across the online-softmax max-shift. This is inherent to
+  flash-attention P fake-quant (the mni reference and real FP4-attention hardware
+  quantize tile-local P too), ~cos 0.9998 on the output (inside the NVFP4 quant
+  floor), **not a bug**. For bitwise reproducibility across runs/hardware, pin the
+  tiling (`PYTEST_VERSION` → fixed `BLOCK_M/BLOCK_N`; `num_kv_splits` → fixed decode
+  splits) — a determinism knob, not an accuracy fix.
 - **V** is fake-quantized along the keys axis by `_v_qdq_nvfp4` (`abs` for signed
   V; 16-blocks along axis 0 of the loaded tile `[BLOCK_N keys, BLOCK_D head_dim]`;
   masked-to-0 loads keep a partial tail from poisoning a block amax). *Where* it
@@ -142,6 +151,20 @@ the amax). For V the per-tensor global barely matters — the block amax carries
 the range and V does not saturate E4M3 — so `v_qdq_amax=None` uses the constant
 `1.0` global. A frozen first-chunk global is the only scheme that diverges (it
 saturates E4M3 on long context) and is intentionally not used.
+
+The per-block scale is clamped to `[2**-9, 448]` in `fp8_quantize_scale`, matching
+the canonical NVFP4 path (`qtensor/nvfp4_tensor.py`): the upper bound caps at the
+E4M3 max, and the `2**-9` lower bound floors an underflowed block at the smallest
+subnormal instead of letting the scale round to 0 (which would zero the block). A
+block below the floor still rounds to 0 on the E2M1 grid; one in the `[~1.8e-7,
+2.2e-6]` band reconstructs nonzero (e.g. amax `2e-6` → `2.179827e-6`). This keeps the
+in-kernel fake-quant bit-consistent with the exported NVFP4 checkpoint in the
+underflow regime, and lets the P/V and Q/K (`fp4_kernel_hopper.py`) paths share one
+scale contract without the ad-hoc `<1e-5 → 1.0` guard. On the output it is a no-op:
+underflowed P/V blocks carry weights `< ~2.2e-6` (keys many log2-units below the row
+max), a B200 A/B (current-vs-clamped, up to 98% of P underflowing) is bit-identical,
+and Q/K never underflow on real data — it is a fidelity/consistency guarantee, not an
+accuracy change.
 
 ## Code layout
 

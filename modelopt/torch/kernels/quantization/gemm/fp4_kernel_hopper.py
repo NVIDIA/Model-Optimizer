@@ -80,8 +80,10 @@ def fp4_fake_quant_kernel(
 
     block_max = tl.max(x_abs, axis=2, keep_dims=True)
 
+    # fp8_quantize_scale clamps the scale to [2**-9, 448] (matches qtensor/nvfp4_tensor.py),
+    # so it is bounded away from 0 and the old ``>= 1e-5 -> 1.0`` underflow guard (which would
+    # otherwise override the clamp for small global scales) is redundant.
     block_max_quant = fp8_quantize_scale(block_max, global_scale_safe)
-    block_max_quant = tl.where(block_max_quant >= 1e-5, block_max_quant, 1.0)
 
     block_max_quant_broadcast = tl.broadcast_to(
         block_max_quant, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE)

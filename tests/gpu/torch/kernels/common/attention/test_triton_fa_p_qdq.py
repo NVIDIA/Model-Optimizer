@@ -348,17 +348,20 @@ class TestSoftmaxQdqBackward:
 
 @pytest.mark.skipif(not _HAS_SM89, reason="NVFP4 E4M3 block scale (tl.float8e4nv) requires SM89+")
 class TestNvfp4ScaleUnderflow:
-    """Boundary behavior of the NVFP4 block-scale underflow guard (P/V path).
+    """Boundary behavior of the NVFP4 block-scale clamp (P/V path).
 
-    A block whose amax is small enough that the E4M3 block scale underflows to
-    zero must not yield NaN/inf: ``nvfp4_scalar_quant``'s ``scale_safe`` maps a
-    ``0``/NaN/inf scale to ``1.0``, and the tiny entries then round to 0 on the E2M1
-    grid. Tiny softmax-P blocks occur naturally in long context (keys many
-    log2-units below the row max), so this guard is hit in real workloads.
+    ``fp8_quantize_scale`` clamps the per-block scale to the E4M3 range
+    ``[2**-9, 448]`` (matching ``qtensor/nvfp4_tensor.py``) before the cast, so an
+    underflowed block is floored at the min subnormal instead of letting the scale
+    round to a 0 (which would zero the whole block). Two regimes result, both finite:
+    a block far below the floor still rounds to 0 on the E2M1 grid (its entries over
+    the floored scale fall under 0.25), while a block in the reconstruction band
+    ``[~1.8e-7, 2.2e-6]`` comes back nonzero. Tiny softmax-P blocks occur naturally in
+    long context (keys many log2-units below the row max).
 
     With P's fixed global scale ``1/(6*448)``, ``fp8_quantize_scale`` forms the
-    in-range value ``block_amax * 448``; it underflows E4M3 (rounds to 0) once
-    ``block_amax`` drops below ~2.2e-6.
+    in-range value ``block_amax * 448``; below ``block_amax ~= 2.2e-6`` it clamps to
+    the ``2**-9`` floor (dequant scale ``2**-9 / 2688 ~= 7.27e-7``).
     """
 
     P_GLOBAL_SCALE = 1.0 / (6.0 * 448.0)
@@ -370,22 +373,35 @@ class TestNvfp4ScaleUnderflow:
         return out
 
     def test_tiny_block_underflow_is_finite_and_zeroed(self):
-        # amax * 448 far below the E4M3 min subnormal (2^-9) -> scale rounds to 0
-        # -> scale_safe guard -> 1.0 -> tiny values (< 0.25) round to 0. No NaN/inf.
+        # Far below the reconstruction band: the scale clamps to 2^-9, but the entries
+        # (1e-7 / 7.27e-7 = 0.14 < 0.25) still round to 0 on the E2M1 grid. No NaN/inf.
         x = torch.full((16,), 1e-7, device="cuda", dtype=torch.float32)
         out = self._run(x)
         assert torch.isfinite(out).all()
         assert torch.all(out == 0.0)
 
+    def test_underflow_band_reconstructs_nonzero(self):
+        # In the reconstruction band (amax 2e-6, below the E4M3 min but above the E2M1
+        # round-to-0 threshold): the scale clamps to the 2^-9 floor and the block comes
+        # back nonzero instead of zeroing, matching canonical NVFP4 (nvfp4_tensor.py).
+        x = torch.full((16,), 2e-6, device="cuda", dtype=torch.float32)
+        out = self._run(x)
+        assert torch.isfinite(out).all()
+        assert torch.all(out != 0.0)
+        expected = 3.0 * (2**-9) * self.P_GLOBAL_SCALE  # E2M1 value 3 * floored dequant scale
+        assert torch.allclose(out, torch.full_like(out, expected), rtol=1e-3, atol=1e-9), (
+            f"{out[0].item():.6e} vs {expected:.6e}"
+        )
+
     def test_zero_block_is_finite(self):
-        # An all-zero block (amax 0 -> scale 0) must stay finite via the guard.
+        # An all-zero block (amax 0) clamps the scale to 2^-9 (> 0), so 0/scale = 0, finite.
         x = torch.zeros(16, device="cuda", dtype=torch.float32)
         out = self._run(x)
         assert torch.isfinite(out).all()
         assert torch.all(out == 0.0)
 
     def test_in_range_block_is_finite_and_nonzero(self):
-        # A normal block (amax 0.5) keeps its scale inside E4M3 range -> no guard,
+        # A normal block (amax 0.5) keeps its scale inside E4M3 range -> no clamp,
         # round-trips to a nonzero, finite result.
         x = torch.full((16,), 0.5, device="cuda", dtype=torch.float32)
         out = self._run(x)
