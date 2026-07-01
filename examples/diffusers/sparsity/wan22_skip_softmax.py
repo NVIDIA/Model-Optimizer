@@ -211,12 +211,13 @@ def parse_args() -> argparse.Namespace:
         "is written into each component's config.json.",
     )
     parser.add_argument(
-        "--initial-disabled-steps",
-        type=int,
-        default=0,
-        help="User-specified initial-disabled-steps value carried into the exported "
-        "sparse attention config (config.json). Only emitted when > 0; not interpreted "
-        "at sparsify/calibration time.",
+        "--disabled-until-timestep",
+        type=float,
+        default=None,
+        help="Normalized [0, 1] denoising-timestep cutoff carried into the exported "
+        "sparse attention config (config.json). Skip-softmax stays disabled while the "
+        "timestep is >= this value and is enabled once it drops below. Only emitted "
+        "when set; not interpreted at sparsify/calibration time.",
     )
     return parser.parse_args()
 
@@ -252,9 +253,9 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
     if args.skip_softmax_threshold is not None:
         attn_cfg["skip_softmax_threshold"] = args.skip_softmax_threshold
 
-    # Opt-in initial-disabled-steps metadata — carried through to the exported config when > 0.
-    if args.initial_disabled_steps > 0:
-        attn_cfg["initial_disabled_steps"] = args.initial_disabled_steps
+    # Opt-in disabled-until-timestep metadata — carried through to the exported config when set.
+    if args.disabled_until_timestep is not None:
+        attn_cfg["disabled_until_timestep"] = args.disabled_until_timestep
 
     sparse_cfg: dict = {
         "*.attn1*": attn_cfg,  # Self-attention only

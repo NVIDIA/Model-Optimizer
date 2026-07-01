@@ -1250,7 +1250,7 @@ def _export_diffusers_checkpoint(
 
         # Step 9: Update config.json with sparse attention info (both quantized and non-quantized)
         if export_sparse_attention_config is not None:
-            sparse_attn_config = export_sparse_attention_config(component)
+            sparse_attn_config = export_sparse_attention_config(component, for_diffusion=True)
             if sparse_attn_config is not None:
                 config_path = component_export_dir / "config.json"
                 if config_path.exists():

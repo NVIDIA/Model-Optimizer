@@ -155,13 +155,15 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
-    initial_disabled_steps: int = ModeloptField(
-        default=0,
-        title="Initial disabled steps.",
+    disabled_until_timestep: float | None = ModeloptField(
+        default=None,
+        title="Disabled-until timestep.",
         description=(
-            "User-specified number of initial disabled steps recorded in the exported "
-            "sparse attention config. Passed straight through; not interpreted by "
-            "sparsify or calibration; only written to the checkpoint when > 0."
+            "Normalized [0, 1] denoising-timestep cutoff recorded in the exported "
+            "sparse attention config for diffusion/VisualGen checkpoints. Skip-softmax "
+            "stays disabled while the timestep is >= this value and is enabled once it "
+            "drops below. Passed straight through; not interpreted by sparsify or "
+            "calibration; only written to the checkpoint when set."
         ),
     )
 
@@ -171,6 +173,14 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         """Validate method is a string."""
         if not isinstance(v, str):
             raise ValueError("method must be a string")
+        return v
+
+    @field_validator("disabled_until_timestep")
+    @classmethod
+    def validate_disabled_until_timestep(cls, v):
+        """Validate the normalized denoising-timestep cutoff is in [0, 1]."""
+        if v is not None and not (0.0 <= v <= 1.0):
+            raise ValueError("disabled_until_timestep must be in [0, 1].")
         return v
 
     @field_validator("backend")
