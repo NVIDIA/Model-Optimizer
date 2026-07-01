@@ -27,6 +27,8 @@ import pytest
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
+    AutoQuantizeConfig,
+    AutoQuantizeConstraints,
     ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
@@ -35,7 +37,11 @@ from modelopt.recipe.config import (
 )
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
 from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
-from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
+from modelopt.torch.quantization.config import (
+    QuantizeConfig,
+    QuantizerAttributeConfig,
+    normalize_quant_cfg_list,
+)
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -1720,11 +1726,13 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     aq = recipe.auto_quantize
     assert aq.auto_quantize_method == "gradient"
+    assert aq.score_boundary is None
     assert aq.score_size == 128
     assert aq.kv_cache is None
     assert aq.constraints.effective_bits == 4.8
     assert aq.constraints.cost_model == "weight"
     assert aq.constraints.cost is None
+    assert aq.constraints.score_model == "raw"
     assert len(aq.candidate_formats) == 2
 
 
@@ -1753,6 +1761,7 @@ def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
         "effective_bits": 6.0,
         "cost_model": "active_moe",
         "cost": {"active_moe_expert_ratio": 0.03125},
+        "score_model": "raw",
     }
 
 
@@ -1796,6 +1805,57 @@ def test_load_recipe_autoquantize_effective_bits_out_of_range_raises(tmp_path):
     bad.write_text(_AQ_MINIMAL_BODY.replace("effective_bits: 4.8", "effective_bits: 20"))
     with pytest.raises(ValueError, match="effective_bits"):
         load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_group_scoring(tmp_path):
+    recipe_file = tmp_path / "group.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace(
+            "    effective_bits: 4.8\n",
+            "    effective_bits: 4.8\n    score_model: per_element\n",
+        )
+        + "  auto_quantize_method: group_recon\n"
+        + "  score_boundary: group\n"
+    )
+    aq = load_recipe(recipe_file).auto_quantize
+    assert aq.constraints.score_model == "per_element"
+    assert aq.auto_quantize_method == "group_recon"
+    assert aq.score_boundary == "group"
+
+
+@pytest.mark.parametrize(
+    ("method", "score_model", "boundary", "message"),
+    [
+        ("group_recon", "raw", "local", "requires score_boundary='group'"),
+        ("kl_div", "per_element", "local", "requires constraints.score_model='raw'"),
+        ("kl_div", "raw", "group", "requires constraints.score_model='raw'"),
+    ],
+)
+def test_load_recipe_autoquantize_rejects_invalid_scoring_combinations(
+    method, score_model, boundary, message
+):
+    with pytest.raises(ValueError, match=message):
+        AutoQuantizeConfig(
+            constraints=AutoQuantizeConstraints(
+                effective_bits=5.4,
+                score_model=score_model,
+            ),
+            candidate_formats=[QuantizeConfig(quant_cfg=[])],
+            auto_quantize_method=method,
+            score_boundary=boundary,
+        )
+
+
+def test_load_recipe_autoquantize_builtin_group_scoring():
+    recipe = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_5p5bits-active_moe-group_recon"
+    )
+    aq = recipe.auto_quantize
+    assert aq.constraints.effective_bits == 5.5
+    assert aq.constraints.cost_model == "active_moe"
+    assert aq.constraints.score_model == "per_element"
+    assert aq.auto_quantize_method == "group_recon"
+    assert aq.score_boundary == "group"
 
 
 def test_load_recipe_autoquantize_builtin_active_moe():

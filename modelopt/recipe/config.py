@@ -182,6 +182,12 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         title="Cost-model parameters",
         description="Extra cost-model parameters; omit for the 'weight' cost model.",
     )
+    score_model: Literal["raw", "per_element"] = ModeloptField(
+        default="raw",
+        title="Selector score model",
+        description="'raw' uses sensitivity scores directly; 'per_element' normalizes each "
+        "score by the represented weight-element cost before budgeted selection.",
+    )
 
     @field_validator("effective_bits")
     @classmethod
@@ -206,10 +212,18 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         "(e.g. [fp8]) yields a {fp8, bf16} per-layer search.",
         validate_default=True,
     )
-    auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
+    auto_quantize_method: Literal["gradient", "group_recon", "kl_div"] = ModeloptField(
         default="gradient",
         title="Sensitivity scoring method",
-        description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
+        description="'gradient' (Taylor + Fisher, needs labels), 'group_recon' (normalized "
+        "group-output reconstruction, no labels), or 'kl_div' (no labels).",
+    )
+    score_boundary: Literal["local", "group"] | None = ModeloptField(
+        default=None,
+        title="Sensitivity score boundary",
+        description="'local' scores each quantized module output; 'group' scores attention and "
+        "MoE projection perturbations at their shared attention/MLP output. Defaults to 'group' "
+        "for group_recon and 'local' otherwise.",
     )
     score_size: int = ModeloptField(
         default=128,
@@ -247,6 +261,22 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 "implicit additional choice). For uniform quantization, use a PTQ recipe instead."
             )
         return v
+
+    @model_validator(mode="after")
+    def _validate_scoring_configuration(self):
+        boundary = self.score_boundary or (
+            "group" if self.auto_quantize_method == "group_recon" else "local"
+        )
+        if self.auto_quantize_method == "group_recon" and boundary != "group":
+            raise ValueError("auto_quantize_method='group_recon' requires score_boundary='group'.")
+        if self.auto_quantize_method == "kl_div" and (
+            self.constraints.score_model != "raw" or boundary != "local"
+        ):
+            raise ValueError(
+                "auto_quantize_method='kl_div' requires constraints.score_model='raw' and "
+                "score_boundary='local'."
+            )
+        return self
 
 
 class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):

@@ -53,9 +53,14 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
-    assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "weight"}
+    assert inputs["constraints"] == {
+        "effective_bits": 5.4,
+        "cost_model": "weight",
+        "score_model": "raw",
+    }
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
+    assert inputs["score_boundary"] is None
     assert inputs["score_size"] == 128
     # disabled_layers come straight from the recipe (no model introspection).
     assert inputs["disabled_layers"] == aq.disabled_layers
@@ -148,6 +153,12 @@ def test_autoquant_config_from_deprecated_cli_flags(monkeypatch):
         "active_moe",
         "--auto_quantize_active_moe_expert_ratio",
         "0.03125",
+        "--auto_quantize_method",
+        "group_recon",
+        "--auto_quantize_score_model",
+        "per_element",
+        "--auto_quantize_score_boundary",
+        "group",
         "--kv_cache_qformat",
         "none",
     )
@@ -156,7 +167,9 @@ def test_autoquant_config_from_deprecated_cli_flags(monkeypatch):
     assert aq.constraints.effective_bits == 5.4
     assert aq.constraints.cost_model == "active_moe"
     assert aq.constraints.cost.active_moe_expert_ratio == 0.03125
-    assert aq.auto_quantize_method == "gradient"
+    assert aq.constraints.score_model == "per_element"
+    assert aq.auto_quantize_method == "group_recon"
+    assert aq.score_boundary == "group"
     assert aq.score_size == 128
     # candidates come from --qformat and resolve to their shipped presets.
     assert [hf_ptq._match_candidate_to_preset(f)[0] for f in aq.candidate_formats] == [
@@ -166,3 +179,36 @@ def test_autoquant_config_from_deprecated_cli_flags(monkeypatch):
     # base disabled + base cost-excluded appended from the shared units (no introspection).
     assert "*output_layer*" in aq.disabled_layers
     assert aq.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+
+
+def test_autoquant_group_scoring_recipe_matches_deprecated_cli(monkeypatch):
+    """The deprecated CLI shim and the shipped group-scoring recipe map to identical mtq inputs."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "dummy",
+        "--qformat",
+        "fp8,w4a16_nvfp4",
+        "--auto_quantize_bits",
+        "5.5",
+        "--auto_quantize_method",
+        "group_recon",
+        "--auto_quantize_score_model",
+        "per_element",
+        "--auto_quantize_score_boundary",
+        "group",
+        "--auto_quantize_cost_model",
+        "active_moe",
+        "--auto_quantize_active_moe_expert_ratio",
+        "0.03125",
+        "--kv_cache_qformat",
+        "none",
+    )
+    recipe_config = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_5p5bits-active_moe-group_recon"
+    ).auto_quantize
+    cli_config = hf_ptq._auto_quantize_config_from_cli(args)
+
+    assert hf_ptq._mtq_inputs_from_auto_quantize_config(
+        recipe_config, args
+    ) == hf_ptq._mtq_inputs_from_auto_quantize_config(cli_config, args)
