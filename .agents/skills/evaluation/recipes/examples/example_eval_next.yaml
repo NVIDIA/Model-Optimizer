@@ -25,9 +25,9 @@ services:
     startup_timeout: 3600.0
     extra_args:                      # raw vllm flags (cross-check model card + recipes.vllm.ai)
       - "--trust-remote-code"
-      - "--enable-auto-tool-choice"  # agentic = tool-calling; pick the parser per the chat template
-      # - "--tool-call-parser=<parser>"
-      # - "--reasoning-parser=<parser>"
+      - "--enable-auto-tool-choice"  # agentic = tool-calling
+      - "--tool-call-parser=???"     # REQUIRED — model-specific (e.g. minimax_m2, glm47); pick per the chat template
+      # - "--reasoning-parser=???"   # reasoning models only (e.g. minimax_m2_append_think, glm45)
       - "--enable-expert-parallel"   # MoE only
       - "--enable-prefix-caching"
       - "--gpu-memory-utilization=0.9"
