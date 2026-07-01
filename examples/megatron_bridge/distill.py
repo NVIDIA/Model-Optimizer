@@ -159,7 +159,178 @@ def _distill_provide_with_megatron_student(
 DistillationProvider.provide = _distill_provide_with_megatron_student
 
 
-def get_args():
+# ---------------------------------------------------------------------------
+# Extension hooks
+# ---------------------------------------------------------------------------
+
+
+class DistillHooks:
+    """No-op extension hooks for distill.py main().
+
+    Subclass and pass to ``main()`` to inject additional behavior at defined
+    points in the training pipeline (e.g. heterogeneous / Puzzletron support).
+    """
+
+    def before_load_models(self, args: argparse.Namespace) -> None:
+        """Called before any model is loaded. Use to apply class-level patches."""
+
+    def load_bridge(self, path: str, trust_remote_code: bool) -> AutoBridge:
+        """Load an HF checkpoint into a Megatron Bridge object."""
+        return AutoBridge.from_hf_pretrained(path, trust_remote_code=trust_remote_code)
+
+    def after_providers_created(self, student_provider, teacher_provider) -> None:
+        """Called after both providers are built and parallelism is configured.
+
+        Use to set extra provider flags (e.g. ``hetereogenous_dist_checkpoint``)
+        or to synchronise teacher parallelism from the student.
+        """
+
+    def after_distill_provider_created(self, distill_provider) -> None:
+        """Called after ``convert_to_distillation_provider()``.
+
+        Use to attach per-layer ``block_configs`` to the student and teacher.
+        """
+
+    def build_config(
+        self,
+        distill_provider,
+        args: argparse.Namespace,
+        checkpoint_dir: str | None,
+        tensorboard_dir: str | None,
+    ) -> ConfigContainer:
+        """Build and return a ``ConfigContainer``.
+
+        Override to replace the default explicit-args config with
+        ``_pretrain_common()`` + YAML / Hydra overrides.
+        """
+        return _build_default_config(distill_provider, args, checkpoint_dir, tensorboard_dir)
+
+    def after_config_built(self, config: ConfigContainer) -> None:
+        """Called after ``build_config()``.
+
+        Use to install monkey-patches such as the hybrid MoE tracker size fix.
+        """
+
+    def before_distill(self, config: ConfigContainer) -> None:
+        """Called immediately before ``distill()``.
+
+        Use to finalise the teacher provider or perform last-minute setup.
+        """
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _configure_provider(provider, args: argparse.Namespace):
+    """Apply parallelism and training settings to a model provider."""
+    provider.tensor_model_parallel_size = args.tp_size
+    provider.sequence_parallel = args.tp_size > 1
+    provider.pipeline_model_parallel_size = args.pp_size
+    provider.pipeline_dtype = torch.bfloat16
+    provider.context_parallel_size = args.cp_size
+    provider.expert_model_parallel_size = args.ep_size
+    provider.expert_tensor_parallel_size = getattr(args, "expert_tensor_parallel_size", 1)
+    if getattr(args, "seq_length", None) is not None:
+        provider.seq_length = args.seq_length
+    recompute = getattr(args, "recompute_granularity", None)
+    if recompute is not None:
+        provider.recompute_granularity = recompute
+        provider.recompute_method = args.recompute_method
+        provider.recompute_num_layers = args.recompute_num_layers
+        if getattr(args, "recompute_modules", None) is not None:
+            provider.recompute_modules = args.recompute_modules
+    return provider
+
+
+def _build_default_config(
+    distill_provider,
+    args: argparse.Namespace,
+    checkpoint_dir: str | None,
+    tensorboard_dir: str | None,
+) -> ConfigContainer:
+    """Build a ``ConfigContainer`` from explicit mbridge-style args."""
+    optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
+        lr_warmup_iters=args.lr_warmup_iters,
+        max_lr=args.lr,
+        min_lr=args.min_lr,
+        adam_beta2=0.95,
+    )
+
+    dataset_kwargs = {
+        "seq_length": args.seq_length,
+        "path_to_cache": args.data_path_to_cache,
+        "random_seed": args.seed,
+        "reset_attention_mask": False,
+        "reset_position_ids": False,
+        "eod_mask_loss": False,
+        "num_dataset_builder_threads": 1,
+        "data_sharding": True,
+        "dataloader_type": "single",
+        "skip_getting_attention_mask_from_dataset": True,
+    }
+    if args.use_mock_data:
+        dataset_config = MockGPTDatasetConfig(**dataset_kwargs)
+    else:
+        blend = get_blend_from_list(args.data_paths)
+        dataset_config = GPTDatasetConfig(blend=blend, split="99,1,0", **dataset_kwargs)
+
+    return ConfigContainer(
+        model=distill_provider,
+        train=TrainingConfig(
+            train_iters=args.train_iters,
+            eval_interval=args.eval_interval,
+            eval_iters=args.eval_iters,
+            global_batch_size=args.gbs,
+            micro_batch_size=args.mbs,
+            manual_gc=True,
+            manual_gc_interval=100,
+        ),
+        # TODO: Replace validation args in train with validation config once we drop nemo:26.02 container support
+        # validation=ValidationConfig(eval_interval=args.eval_interval, eval_iters=args.eval_iters),
+        optimizer=optimizer_config,
+        scheduler=scheduler_config,
+        ddp=DistributedDataParallelConfig(
+            check_for_nan_in_grad=True,
+            grad_reduce_in_fp32=True,
+            overlap_grad_reduce=True,
+            overlap_param_gather=True,
+            average_in_collective=True,
+            use_distributed_optimizer=True,
+        ),
+        dataset=dataset_config,
+        logger=LoggerConfig(
+            log_interval=args.log_interval,
+            tensorboard_dir=tensorboard_dir,
+            log_timers_to_tensorboard=True,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            wandb_exp_name=args.wandb_exp_name,
+        ),
+        tokenizer=TokenizerConfig(
+            tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+        ),
+        checkpoint=CheckpointConfig(
+            save_interval=args.eval_interval,
+            save=checkpoint_dir,
+            load=checkpoint_dir,
+            most_recent_k=5,
+            ckpt_format="torch_dist",
+            async_save=True,
+            fully_parallel_save=True,
+        ),
+        rng=RNGConfig(seed=args.seed),
+        mixed_precision="bf16_mixed",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+
+def get_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Distillation for Megatron-Bridge.")
     # Model arguments (HF teacher, HF or Megatron student)
@@ -306,142 +477,69 @@ def get_args():
     return args
 
 
-def main(args: argparse.Namespace):
-    checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
-    tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    # Build student and teacher model providers
-    def _build_model_provider(hf_path, load_weights=True):
-        bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
-        provider = bridge.to_megatron_provider(load_weights=load_weights)
 
-        # Override parallelism / training settings
-        provider.tensor_model_parallel_size = args.tp_size
-        provider.sequence_parallel = args.tp_size > 1
-        provider.pipeline_model_parallel_size = args.pp_size
-        provider.pipeline_dtype = torch.bfloat16
-        provider.context_parallel_size = args.cp_size
-        provider.expert_model_parallel_size = args.ep_size
-        provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
-        provider.seq_length = args.seq_length
-        if args.recompute_granularity is not None:
-            provider.recompute_granularity = args.recompute_granularity
-            provider.recompute_method = args.recompute_method
-            provider.recompute_num_layers = args.recompute_num_layers
-            if args.recompute_modules is not None:
-                provider.recompute_modules = args.recompute_modules
-        return provider
+def main(args: argparse.Namespace, hooks: DistillHooks | None = None) -> None:
+    if hooks is None:
+        hooks = DistillHooks()
 
-    # The student structure is always built from --student_hf_path. When --student_megatron_path is
-    # given, the HF weights are skipped (they are overwritten by the Megatron checkpoint, loaded into
-    # the built student inside the patched provide() below).
-    student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
-        args.student_megatron_path
+    output_dir = getattr(args, "output_dir", None)
+    checkpoint_dir = os.path.join(output_dir, "checkpoints") if output_dir else None
+    tensorboard_dir = os.path.join(output_dir, "tb_logs") if output_dir else None
+
+    hooks.before_load_models(args)
+
+    # Build student provider
+    student_megatron_path = getattr(args, "student_megatron_path", None)
+    student_has_modelopt_state = student_megatron_path is not None and has_modelopt_state(
+        student_megatron_path
     )
-    student_provider = _build_model_provider(
-        args.student_hf_path, load_weights=args.student_megatron_path is None
+    student_bridge = hooks.load_bridge(args.student_hf_path, args.trust_remote_code)
+    student_provider = _configure_provider(
+        student_bridge.to_megatron_provider(load_weights=student_megatron_path is None),
+        args,
     )
     if student_has_modelopt_state:
         # Gradient accumulation fusion is not supported with ModelOpt quantized models. Disable it
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
-    teacher_provider = _build_model_provider(args.teacher_hf_path)
+
+    # Build teacher provider
+    teacher_bridge = hooks.load_bridge(args.teacher_hf_path, args.trust_remote_code)
+    teacher_provider = _configure_provider(
+        teacher_bridge.to_megatron_provider(load_weights=True), args
+    )
+
+    hooks.after_providers_created(student_provider, teacher_provider)
 
     # Wrap into DistillationProvider
     kd_config = ModelOptDistillConfig(
-        skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
+        skip_lm_loss=not getattr(args, "no_skip_lm_loss", False),
+        kd_loss_scale=getattr(args, "kd_loss_scale", 1.0),
     )
     distill_provider = convert_to_distillation_provider(
         student_provider, teacher_provider, kd_config
     )
 
-    if args.student_megatron_path:
+    if student_megatron_path:
         if student_has_modelopt_state:
             print_rank_0(
-                f"Detected ModelOpt state in {args.student_megatron_path}; "
+                f"Detected ModelOpt state in {student_megatron_path}; "
                 "restoring quantizers for Quantization Aware Distillation (QAD)."
             )
         # Register so the patched DistillationProvider.provide initializes this provider's student
         # from the Megatron checkpoint (see _distill_provide_with_megatron_student).
-        _MEGATRON_STUDENT_CKPT_PATHS[id(distill_provider)] = args.student_megatron_path
+        _MEGATRON_STUDENT_CKPT_PATHS[id(distill_provider)] = student_megatron_path
 
-    # Build optimizer and scheduler
-    optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
-        lr_warmup_iters=args.lr_warmup_iters,
-        max_lr=args.lr,
-        min_lr=args.min_lr,
-        adam_beta2=0.95,
-    )
+    hooks.after_distill_provider_created(distill_provider)
 
-    # Build dataset config
-    dataset_kwargs = {
-        "seq_length": args.seq_length,
-        "path_to_cache": args.data_path_to_cache,
-        "random_seed": args.seed,
-        "reset_attention_mask": False,
-        "reset_position_ids": False,
-        "eod_mask_loss": False,
-        "num_dataset_builder_threads": 1,
-        "data_sharding": True,
-        "dataloader_type": "single",
-        "skip_getting_attention_mask_from_dataset": True,
-    }
-    if args.use_mock_data:
-        dataset_config = MockGPTDatasetConfig(**dataset_kwargs)
-    else:
-        # Convert flat CLI list (e.g. ["1.0", "/path/data"]) to Megatron blend format
-        blend = get_blend_from_list(args.data_paths)
-        dataset_config = GPTDatasetConfig(blend=blend, split="99,1,0", **dataset_kwargs)
+    config = hooks.build_config(distill_provider, args, checkpoint_dir, tensorboard_dir)
 
-    # Assemble ConfigContainer and run distillation
-    config = ConfigContainer(
-        model=distill_provider,
-        train=TrainingConfig(
-            train_iters=args.train_iters,
-            eval_interval=args.eval_interval,
-            eval_iters=args.eval_iters,
-            global_batch_size=args.gbs,
-            micro_batch_size=args.mbs,
-            manual_gc=True,
-            manual_gc_interval=100,
-        ),
-        # TODO: Replace validation args in train with validation config once we drop nemo:26.02 container support
-        # validation=ValidationConfig(eval_interval=args.eval_interval, eval_iters=args.eval_iters),
-        optimizer=optimizer_config,
-        scheduler=scheduler_config,
-        ddp=DistributedDataParallelConfig(
-            check_for_nan_in_grad=True,
-            grad_reduce_in_fp32=True,
-            overlap_grad_reduce=True,
-            overlap_param_gather=True,
-            average_in_collective=True,
-            use_distributed_optimizer=True,
-        ),
-        dataset=dataset_config,
-        logger=LoggerConfig(
-            log_interval=args.log_interval,
-            tensorboard_dir=tensorboard_dir,
-            log_timers_to_tensorboard=True,
-            # Weights & Biases logging
-            wandb_project=args.wandb_project,
-            wandb_entity=args.wandb_entity,  # optional
-            wandb_exp_name=args.wandb_exp_name,
-        ),
-        tokenizer=TokenizerConfig(
-            tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
-        ),
-        checkpoint=CheckpointConfig(
-            save_interval=args.eval_interval,
-            save=checkpoint_dir,
-            load=checkpoint_dir,  # Resume from this directory (if exists)
-            most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
-            ckpt_format="torch_dist",
-            async_save=True,
-            fully_parallel_save=True,
-        ),
-        rng=RNGConfig(seed=args.seed),
-        mixed_precision="bf16_mixed",
-    )
+    hooks.after_config_built(config)
+    hooks.before_distill(config)
 
     print_rank_0("\nStarting distillation...")
     distill(config)
@@ -450,8 +548,9 @@ def main(args: argparse.Namespace):
         " in megatron distributed checkpoint format.\n"
     )
 
-    if args.hf_export_path:
-        print_rank_0(f"Exporting final distilled ckpt to HF format to {args.hf_export_path}")
+    hf_export_path = getattr(args, "hf_export_path", None)
+    if hf_export_path:
+        print_rank_0(f"Exporting final distilled ckpt to HF format to {hf_export_path}")
         # Save rank before destroying process group (dist.rank() won't work after destruction)
         is_rank_0 = dist.rank() == 0
 
@@ -466,14 +565,14 @@ def main(args: argparse.Namespace):
             # Copy weights and remote code
             export_bridge.export_ckpt(
                 megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
-                hf_path=args.hf_export_path,
+                hf_path=hf_export_path,
                 show_progress=True,
                 strict=True,
             )
             # Copy config.json from student_hf_path (handles both local paths and HF model IDs)
             AutoConfig.from_pretrained(
                 args.student_hf_path, trust_remote_code=args.trust_remote_code
-            ).save_pretrained(args.hf_export_path)
+            ).save_pretrained(hf_export_path)
 
 
 if __name__ == "__main__":

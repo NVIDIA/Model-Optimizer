@@ -209,6 +209,7 @@ extend-ignore = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]
 "examples/*" = ["D"]
+"examples/puzzletron/distillation/*" = ["N806", "PERF203", "TC002", "TC003"]
 "noxfile.py" = ["D", "E501"]
 "tests/*" = ["B017", "D", "E402", "PT012"]
 ".agents/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
