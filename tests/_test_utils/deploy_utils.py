@@ -149,25 +149,57 @@ def _run_deploy_via_subprocess(
     eagle3_one_model: bool,
 ) -> None:
     """Run deploy in a subprocess and print its stdout/stderr so pytest capture=tee-sys captures to DB."""
+    import tempfile
     tests_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     project_root = os.path.dirname(tests_dir)
     env = {
         **os.environ,
         "PYTHONPATH": project_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
     }
-    code = f"""from _test_utils.deploy_utils import _run_{backend}_deploy
-_run_{backend}_deploy(
-    {model_id!r}, {tensor_parallel_size}, {mini_sm}, {attn_backend!r}, {base_model!r}, {eagle3_one_model}
-)
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=tests_dir,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+    code = f"""import sys
+sys.path.insert(0, {tests_dir!r})
+if __name__ == '__main__':
+    from _test_utils.deploy_utils import _run_{backend}_deploy
+    _run_{backend}_deploy(
+        {model_id!r}, {tensor_parallel_size}, {mini_sm}, {attn_backend!r}, {base_model!r}, {eagle3_one_model}
     )
+"""
+    if backend == "trtllm":
+        mpirun = os.environ.get("MPIRUN", "mpirun")
+        cmd = [
+            mpirun,
+            "--allow-run-as-root",
+            "--oversubscribe",
+            "-n", "1",
+            sys.executable,
+        ]
+    else:
+        cmd = [sys.executable, "-c", code]
+
+    if backend == "trtllm":
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(code)
+            tmp_path = f.name
+        try:
+            result = subprocess.run(
+                cmd + [tmp_path],
+                cwd=tests_dir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        finally:
+            os.unlink(tmp_path)
+    else:
+        result = subprocess.run(
+            cmd,
+            cwd=tests_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
     if result.stdout:
         print(result.stdout, end="", flush=True)
     result.check_returncode()
@@ -288,16 +320,39 @@ class ModelDeployer:
         else:
             llm = LLM(
                 model=self.model_id,
+                backend="pytorch",
                 kv_cache_config=kv_cache_config,
                 **base_kw,
             )
 
-        outputs = llm.generate(COMMON_PROMPTS, sampling_params)
-        # Print outputs
-        for output in outputs:
-            prompt = output.prompt
+        from transformers import AutoTokenizer
+
+        tokenizer_model = self.base_model if "eagle" in self.model_id.lower() else self.model_id
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, trust_remote_code=True)
+        prompts = COMMON_PROMPTS
+        if tokenizer.chat_template is not None:
+            prompts = [
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                for prompt in COMMON_PROMPTS
+            ]
+
+        outputs = llm.generate(prompts, sampling_params)
+        assert len(outputs) == len(COMMON_PROMPTS), (
+            f"Expected {len(COMMON_PROMPTS)} outputs, got {len(outputs)}"
+        )
+        for i, output in enumerate(outputs):
             generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+            assert isinstance(generated_text, str), f"Output {i} text is not a string"
+            assert generated_text.strip(), f"Output {i} generated empty text"
+            print(f"Model: {self.model_id}")
+            print(f"Input prompt: {COMMON_PROMPTS[i]!r}")
+            print(f"Rendered prompt: {output.prompt!r}")
+            print(f"Generated text: {generated_text!r}")
+            print("-" * 50)
         del llm
 
     def _deploy_vllm_impl(self):
@@ -314,6 +369,7 @@ class ModelDeployer:
                 },
                 tensor_parallel_size=self.tensor_parallel_size,
                 trust_remote_code=True,
+                max_model_len=4096,
             )
         else:
             quantization_method = "modelopt"
@@ -324,25 +380,28 @@ class ModelDeployer:
                 quantization=quantization_method,
                 tensor_parallel_size=self.tensor_parallel_size,
                 trust_remote_code=True,
+                max_model_len=4096,
             )
         sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
-        outputs = llm.generate(COMMON_PROMPTS, sampling_params)
+        conversations = [[{"role": "user", "content": p}] for p in COMMON_PROMPTS]
+        outputs = llm.chat(conversations, sampling_params)
 
-        # Assertions and output
         assert len(outputs) == len(COMMON_PROMPTS), (
             f"Expected {len(COMMON_PROMPTS)} outputs, got {len(outputs)}"
         )
 
         for i, output in enumerate(outputs):
-            assert output.prompt == COMMON_PROMPTS[i], f"Prompt mismatch at index {i}"
             assert hasattr(output, "outputs"), f"Output {i} missing 'outputs' attribute"
             assert len(output.outputs) > 0, f"Output {i} has no generated text"
             assert hasattr(output.outputs[0], "text"), f"Output {i} missing 'text' attribute"
             assert isinstance(output.outputs[0].text, str), f"Output {i} text is not a string"
-            assert len(output.outputs[0].text) > 0, f"Output {i} generated empty text"
+            generated_text = output.outputs[0].text
+            assert generated_text.strip(), f"Output {i} generated empty text"
 
             print(f"Model: {self.model_id}")
-            print(f"Prompt: {output.prompt!r}, Generated text: {output.outputs[0].text!r}")
+            print(f"Input prompt: {COMMON_PROMPTS[i]!r}")
+            print(f"Rendered prompt: {getattr(output, 'prompt', None)!r}")
+            print(f"Generated text: {generated_text!r}")
             print("-" * 50)
         del llm
 
@@ -376,6 +435,8 @@ class ModelDeployer:
         elif self.model_id in (
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
             "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
         ):
             llm = sgl.Engine(
                 model_path=self.model_id,
@@ -390,8 +451,37 @@ class ModelDeployer:
                 quantization=quantization_method,
                 tp_size=self.tensor_parallel_size,
                 trust_remote_code=True,
+                context_length=4096,
             )
-        print(llm.generate(["What's the age of the earth? "]))
+        from transformers import AutoTokenizer
+
+        tokenizer_model = self.base_model if "eagle" in self.model_id.lower() else self.model_id
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, trust_remote_code=True)
+        if tokenizer.chat_template is not None:
+            prompts = [
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": p}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                for p in COMMON_PROMPTS
+            ]
+        else:
+            prompts = COMMON_PROMPTS
+
+        outputs = llm.generate(prompts)
+        assert len(outputs) == len(COMMON_PROMPTS), (
+            f"Expected {len(COMMON_PROMPTS)} outputs, got {len(outputs)}"
+        )
+        for i, output in enumerate(outputs):
+            generated_text = output["text"] if isinstance(output, dict) else str(output)
+            assert isinstance(generated_text, str), f"Output {i} text is not a string"
+            assert generated_text.strip(), f"Output {i} generated empty text"
+            print(f"Model: {self.model_id}")
+            print(f"Input prompt: {COMMON_PROMPTS[i]!r}")
+            print(f"Rendered prompt: {prompts[i]!r}")
+            print(f"Generated text: {generated_text!r}")
+            print("-" * 50)
         llm.shutdown()
         del llm
 

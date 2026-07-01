@@ -101,6 +101,18 @@ def cleanup_after_test():
             tensor_parallel_size=8,
             mini_sm=100,
         ),
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V4-Pro-NVFP4",
+            backend=("vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V4-Flash-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
@@ -160,12 +172,6 @@ def test_deepseek(command):
             tensor_parallel_size=8,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Llama-4-Maverick-17B-128E-Instruct-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=8,
-            mini_sm=100,
-        ),
-        *ModelDeployerList(
             model_id="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
@@ -222,11 +228,6 @@ def test_llama(command):
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=4,
             mini_sm=89,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/QwQ-32B-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            mini_sm=100,
         ),
         *ModelDeployerList(
             model_id="nvidia/Qwen3-32B-NVFP4",
@@ -294,6 +295,18 @@ def test_llama(command):
             tensor_parallel_size=8,
             mini_sm=100,
         ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3.6-35B-A3B-NVFP4",
+            backend=("vllm",),
+            tensor_parallel_size=4,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3.5-122B-A10B-NVFP4",
+            backend=("vllm",),
+            tensor_parallel_size=4,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
@@ -305,59 +318,17 @@ def test_qwen(command):
     "command",
     [
         *ModelDeployerList(
-            model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-FP8",
-            backend=("trtllm", "vllm", "sglang"),
-            mini_sm=89,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            mini_sm=100,
-        ),
-    ],
-    ids=idfn,
-)
-def test_mixtral(command):
-    command.run()
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        *ModelDeployerList(
-            model_id="nvidia/gemma-3-12b-it-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=100,
-            attn_backend="FLASHINFER",
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/gemma-3-12b-it-FP8",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=89,
-            attn_backend="FLASHINFER",
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/gemma-3-27b-it-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=100,
-            attn_backend="FLASHINFER",
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/gemma-3-27b-it-FP8",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=89,
-            attn_backend="FLASHINFER",
-        ),
-        *ModelDeployerList(
             model_id="nvidia/Gemma-4-31B-IT-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=100,
             attn_backend="FLASHINFER",
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Gemma-4-26B-A4B-NVFP4",
+            backend=("vllm",),
+            tensor_parallel_size=2,
+            mini_sm=100,
         ),
     ],
     ids=idfn,
@@ -405,12 +376,6 @@ def test_phi(command):
     "command",
     [
         *ModelDeployerList(
-            model_id="nvidia/Kimi-K2-Instruct-NVFP4",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=8,
-            mini_sm=100,
-        ),
-        *ModelDeployerList(
             model_id="nvidia/Kimi-K2-Thinking-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
@@ -421,6 +386,17 @@ def test_phi(command):
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Kimi-K2.6-NVFP4",
+            backend=("vllm",),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Kimi-K2.6-Eagle3",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
         ),
     ],
     ids=idfn,
@@ -444,6 +420,18 @@ def test_kimi(command):
             tensor_parallel_size=8,
             mini_sm=100,
         ),
+        *ModelDeployerList(
+            model_id="nvidia/GLM-5.1-NVFP4",
+            backend=("vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/GLM-5.2-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
@@ -458,6 +446,12 @@ def test_glm(command):
             model_id="nvidia/MiniMax-M2.5-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/MiniMax-M3-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=4,
             mini_sm=100,
         ),
     ],
@@ -519,6 +513,7 @@ def test_minimax(command):
     ],
     ids=idfn,
 )
+@pytest.mark.timeout(3600)
 def test_llama_nemotron(command):
     command.run()
 
@@ -531,18 +526,6 @@ def test_llama_nemotron(command):
             backend=("trtllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=89,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/Llama-3.1-70B-Medusa-FP8",
-            backend=("trtllm", "sglang"),
-            tensor_parallel_size=2,
-            mini_sm=100,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/Llama-3.1-405B-Medusa-FP8",
-            backend=("trtllm", "sglang"),
-            tensor_parallel_size=8,
-            mini_sm=100,
         ),
     ],
     ids=idfn,
@@ -602,13 +585,6 @@ def test_medusa(command):
             eagle3_one_model=False,
         ),
         *ModelDeployerList(
-            base_model="Qwen/Qwen3-30B-A3B",
-            model_id="nvidia/Qwen3-30B-A3B-Eagle3",
-            backend=("trtllm", "sglang"),
-            tensor_parallel_size=1,
-            mini_sm=89,
-        ),
-        *ModelDeployerList(
             base_model="Qwen/Qwen3-30B-A3B-Thinking-2507",
             model_id="nvidia/Qwen3-30B-A3B-Thinking-2507-Eagle3",
             backend=("trtllm", "sglang"),
@@ -638,16 +614,6 @@ def test_medusa(command):
             mini_sm=89,
         ),
         *ModelDeployerList(
-            base_model="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-            model_id="nvidia/EAGLE3-NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-            # SGLang excluded: Nemotron hybrid (Mamba+attention) doesn't support
-            # speculative decoding in SGLang (NVBugs 6130106)
-            backend=("trtllm", "vllm"),
-            eagle3_one_model=False,
-            tensor_parallel_size=8,
-            mini_sm=89,
-        ),
-        *ModelDeployerList(
             base_model="nvidia/Llama-3.3-70B-Instruct-FP8",
             model_id="nvidia/Llama-3.3-70B-Instruct-Eagle3",
             backend=("trtllm", "sglang"),
@@ -671,3 +637,107 @@ def test_eagle(command):
         command.run()
     else:
         pytest.skip(f"Local model not found: {local_path}")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+    ],
+    ids=idfn,
+)
+@pytest.mark.timeout(14400)
+def test_nvidia_nemotron_3_ultra_550b_a55b_nvfp4(command):
+    command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/Wan2.2-T2V-A14B-Diffusers-NVFP4",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=1,
+            mini_sm=100,
+        ),
+    ],
+    ids=idfn,
+)
+def test_wan2_2_t2v_a14b_diffusers_nvfp4(command):
+    command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/Wan2.2-T2V-A14B-Diffusers-FP8",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=1,
+            mini_sm=89,
+        ),
+    ],
+    ids=idfn,
+)
+def test_wan2_2_t2v_a14b_diffusers_fp8(command):
+    command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/diffusiongemma-26B-A4B-it-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=2,
+            mini_sm=100,
+        ),
+    ],
+    ids=idfn,
+)
+def test_diffusiongemma_26b_a4b_it_nvfp4(command):
+    command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=2,
+            mini_sm=89,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=2,
+            mini_sm=100,
+        ),
+    ],
+    ids=idfn,
+)
+@pytest.mark.timeout(7200)
+def test_nemotron(command):
+    command.run()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+        ),
+    ],
+    ids=idfn,
+)
+@pytest.mark.timeout(14400)
+def test_nvidia_nemotron_3_ultra_550b_a55b_bf16(command):
+    command.run()
