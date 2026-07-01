@@ -94,6 +94,7 @@ from .modeling_fakebase import (
     _FINAL_NORM_PATHS,
     _LM_HEAD_PATHS,
 )
+from .modeling_final_norm import _maybe_apply_base_final_norm
 
 logger = logging.getLogger(__name__)
 
@@ -598,12 +599,13 @@ class HFDFlashModel(DFlashModel):
                 # with KeyError rather than lm_head(None).
                 bmo = kwargs["base_model_outputs"]
                 out_hiddens = bmo["base_model_hidden_states"]
-                # Re-apply the base model's final norm before lm_head ONLY when the producer
-                # captured a pre-(final-)norm hidden (vLLM does; HF/TRT-LLM capture post-norm
-                # and declare base_hidden_prenorm False). Honoring the producer's declaration
-                # keeps this consumer backend-agnostic. No-op if no final norm was located.
-                if bmo.get("base_hidden_prenorm", False) and self._base_model_norm is not None:
-                    out_hiddens = self._base_model_norm(out_hiddens)
+                # Re-apply the base model's final norm before lm_head when the producer captured
+                # a pre-(final-)norm hidden (vLLM does; HF/TRT-LLM capture post-norm and declare
+                # base_hidden_prenorm False). Honoring the producer's declaration keeps this
+                # consumer backend-agnostic. If the producer says pre-norm but no final norm was
+                # located, we CANNOT reconstruct correct logits — fail loud rather than silently
+                # feeding an un-normed hidden into lm_head (a corrupt distillation target).
+                out_hiddens = _maybe_apply_base_final_norm(out_hiddens, bmo, self._base_model_norm)
                 base_outputs.logits = self._base_model_lm_head(out_hiddens)
             target_hidden = base_outputs.target_hidden
         else:

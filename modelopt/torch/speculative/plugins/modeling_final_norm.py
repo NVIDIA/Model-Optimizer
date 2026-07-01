@@ -64,7 +64,12 @@ _FINAL_NORM_TYPE_BY_MODEL_TYPE: dict[str, str] = {
     "qwen3_moe": "rmsnorm",
     "deepseek_v3": "rmsnorm",
     "kimi_k25": "rmsnorm",  # Kimi-K2.5 / K2.6 / K2.7 all report model_type "kimi_k25"
-    "gpt_oss": "rmsnorm",
+    # NOTE: gpt_oss is intentionally DISABLED for now. Its GptOssRMSNorm keeps the weight in
+    # float32 and computes ``(weight * hidden).to(input_dtype)`` (fp32 multiply, then cast),
+    # whereas ``_FinalRMSNorm`` (LlamaRMSNorm) uses a bf16 weight and ``weight * hidden.to(
+    # input_dtype)``. Reusing the Llama variant would silently bias the reconstructed gpt_oss
+    # logits (the exact corruption this file warns about). Re-enable once a gpt_oss-style class
+    # (fp32 weight, multiply-then-cast) is added to _FINAL_NORM_CLASSES.
 }
 
 
@@ -74,3 +79,31 @@ def _select_final_norm_type(model_type: str | None) -> str | None:
     ``None`` means we don't know the model's final norm, so FakeBaseModel builds no norm.
     """
     return _FINAL_NORM_TYPE_BY_MODEL_TYPE.get(model_type or "")
+
+
+def _maybe_apply_base_final_norm(hidden, base_model_outputs, base_model_norm):
+    """Re-apply the base model's final norm to ``hidden`` before lm_head, per the producer.
+
+    When the offline/streaming producer captured a *pre-final-norm* hidden it sets
+    ``base_hidden_prenorm=True`` in ``base_model_outputs``; the consumer must re-apply the base
+    final norm to reconstruct correct logits. Shared by the DFlash and EAGLE offline forwards.
+
+    - ``base_hidden_prenorm`` falsy (post-norm capture, e.g. HF/TRT-LLM): return ``hidden`` as-is.
+    - ``base_hidden_prenorm`` true and a norm is available: return the normed hidden.
+    - ``base_hidden_prenorm`` true but ``base_model_norm is None``: raise — we cannot reconstruct
+      correct logits, and silently feeding an un-normed hidden into lm_head would corrupt the
+      distillation target. The base ``model_type`` is not enabled in
+      ``_FINAL_NORM_TYPE_BY_MODEL_TYPE``.
+    """
+    if not base_model_outputs.get("base_hidden_prenorm", False):
+        return hidden
+    if base_model_norm is None:
+        raise RuntimeError(
+            "base_model_outputs declares base_hidden_prenorm=True (the producer captured a "
+            "pre-final-norm hidden) but no base final norm was located for this model. "
+            "Reconstructing logits without re-applying the final norm would corrupt the "
+            "distillation target. This base model_type is not enabled in "
+            "_FINAL_NORM_TYPE_BY_MODEL_TYPE (see modeling_final_norm.py) — add it, and a "
+            "matching norm class in _FINAL_NORM_CLASSES if it needs a new norm flavor."
+        )
+    return base_model_norm(hidden)
