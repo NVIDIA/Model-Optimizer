@@ -32,7 +32,13 @@ from config import (
     set_quant_config_attr,
 )
 from diffusers import DiffusionPipeline
-from models_utils import MODEL_DEFAULTS, ModelType, get_model_filter_func, parse_extra_params
+from models_utils import (
+    MODEL_DEFAULTS,
+    ModelType,
+    build_block_range_quant_cfg,
+    get_model_filter_func,
+    parse_extra_params,
+)
 from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from pipeline_manager import PipelineManager
 from quantize_config import (
@@ -162,6 +168,28 @@ class Quantizer:
                     "cfg": {"num_bits": (4, 3), "axis": None},
                 }
             )
+
+        # Apply the transformer-block-range recipe (e.g. Qwen-Image) BEFORE
+        # calibration. This restricts quantization to `transformer_blocks` and
+        # excludes the first/last N blocks. It must run before calibration so that
+        # SVDQuant does not mutate the weights of the excluded blocks. The recipe
+        # is format-agnostic (applies to FP8/NVFP4/SVDQuant alike).
+        block_range = MODEL_DEFAULTS.get(self.model_config.model_type, {}).get("block_range")
+        if block_range is not None:
+            recipe_rules = build_block_range_quant_cfg(
+                backbone,
+                exclude_first_n=block_range.get("exclude_first_n", 2),
+                exclude_last_n=block_range.get("exclude_last_n", 2),
+                block_module=block_range.get("block_module", "transformer_blocks"),
+            )
+            self.logger.info(
+                f"Applying block-range recipe ({len(recipe_rules)} rules) for "
+                f"{self.model_config.model_type.value}: quantize only "
+                f"'{block_range.get('block_module', 'transformer_blocks')}' excluding "
+                f"first {block_range.get('exclude_first_n', 2)} / last "
+                f"{block_range.get('exclude_last_n', 2)} blocks."
+            )
+            quant_cfg_list.extend(recipe_rules)
 
         quant_config = {**base_cfg, "quant_cfg": quant_cfg_list}
         set_quant_config_attr(

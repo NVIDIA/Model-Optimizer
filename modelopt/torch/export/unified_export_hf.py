@@ -1080,7 +1080,9 @@ def _export_transformers_checkpoint(
 
 
 def _fuse_qkv_linears_diffusion(
-    model: nn.Module, dummy_forward_fn: Callable[[], None] | None = None
+    model: nn.Module,
+    dummy_forward_fn: Callable[[], None] | None = None,
+    strict: bool = False,
 ) -> None:
     """Fuse QKV linear layers that share the same input for diffusion models.
 
@@ -1091,7 +1093,8 @@ def _fuse_qkv_linears_diffusion(
     Note: This is a simplified version for diffusion models that:
     - Handles QKV fusion (shared input detection)
     - Filters to only fuse actual QKV projection layers (not AdaLN, FFN, etc.)
-    - Skips pre_quant_scale handling (TODO for future)
+    - Skips pre_quant_scale *fusion* (the export path promotes pre_quant_scale to
+      module-level keys separately; see _promote_quantizer_tensors_to_module)
     - Skips FFN fusion with layernorm (TODO for future)
 
     Args:
@@ -1114,6 +1117,11 @@ def _fuse_qkv_linears_diffusion(
             model, dummy_forward_fn, collect_layernorms=False
         )
     except Exception as e:
+        if strict:
+            raise RuntimeError(
+                f"QKV fusion dummy forward failed for {type(model).__name__}; a working "
+                f"dummy forward is required to export this model correctly. Original error: {e}"
+            ) from e
         print(f"Warning: Failed to run dummy forward for QKV fusion: {e}")
         print("Skipping QKV fusion. Quantization may still work but amax values won't be unified.")
         return
@@ -1131,6 +1139,81 @@ def _fuse_qkv_linears_diffusion(
         fuse_layernorms=False,
         quantization_format=quantization_format,
     )
+
+
+def _detect_svdquant_rank(component: nn.Module) -> int | None:
+    """Return the single SVDQuant low-rank dimension shared by the SVDQuant linears.
+
+    ``svdquant_lora_a`` has shape ``(rank, in_features)``, so its first dimension is
+    the low-rank size. A single global ``lora_rank`` is written to the checkpoint
+    config, so all SVDQuant linears are expected to share one rank; an inconsistency
+    is raised rather than silently recording one module's rank for all. Returns
+    ``None`` when no SVDQuant LoRA factors are present.
+    """
+    ranks: set[int] = set()
+    for _, sub_module in component.named_modules():
+        weight_quantizer = getattr(sub_module, "weight_quantizer", None)
+        lora_a = getattr(weight_quantizer, "svdquant_lora_a", None)
+        if lora_a is not None:
+            ranks.add(int(lora_a.shape[0]))
+    if not ranks:
+        return None
+    if len(ranks) > 1:
+        raise ValueError(f"Inconsistent SVDQuant ranks across modules: {sorted(ranks)}")
+    return next(iter(ranks))
+
+
+def _promote_quantizer_tensors_to_module(component: nn.Module) -> None:
+    """Promote quantizer-owned export tensors onto their parent linear module.
+
+    The diffusers export path saves via ``save_pretrained`` inside
+    :func:`hide_quantizers_from_state_dict` (which deletes the ``weight_quantizer``
+    / ``input_quantizer`` submodules) and -- unlike the transformers path -- does
+    NOT run :func:`postprocess_state_dict`. Without this step the AWQ smoothing
+    scale and the SVDQuant low-rank factors would be dropped from the exported
+    checkpoint. We register them as module buffers under clean, AWQ-aligned keys
+    so they are embedded in the component's main safetensors:
+
+    - ``input_quantizer._pre_quant_scale`` -> ``<module>.pre_quant_scale``
+      (the same key the transformers/AWQ path produces via postprocess_state_dict)
+    - ``weight_quantizer.svdquant_lora_a`` -> ``<module>.svdquant_lora_a``
+    - ``weight_quantizer.svdquant_lora_b`` -> ``<module>.svdquant_lora_b``
+
+    This runs after :func:`_process_quantized_modules` (which leaves these
+    quantizer buffers in place) and before ``save_pretrained``.
+    """
+    for _, sub_module in component.named_modules():
+        if not is_quantlinear(sub_module):
+            continue
+
+        # register_buffer overwrites an existing buffer of the same name, so a
+        # repeated export refreshes (rather than keeps stale) promoted tensors.
+        input_quantizer = getattr(sub_module, "input_quantizer", None)
+        pre_quant_scale = getattr(input_quantizer, "_pre_quant_scale", None)
+        if pre_quant_scale is not None:
+            sub_module.register_buffer("pre_quant_scale", pre_quant_scale.detach().clone())
+
+        weight_quantizer = getattr(sub_module, "weight_quantizer", None)
+        lora_a = getattr(weight_quantizer, "svdquant_lora_a", None)
+        lora_b = getattr(weight_quantizer, "svdquant_lora_b", None)
+        if lora_a is not None and lora_b is not None:
+            sub_module.register_buffer("svdquant_lora_a", lora_a.detach().clone())
+            sub_module.register_buffer("svdquant_lora_b", lora_b.detach().clone())
+
+
+def _remove_promoted_quantizer_tensors(component: nn.Module) -> None:
+    """Undo :func:`_promote_quantizer_tensors_to_module`.
+
+    Removes the temporary module-level export buffers (``svdquant_lora_a/b`` and
+    ``pre_quant_scale``) so the live module is unchanged after export, keeping
+    repeated export / post-export module reuse correct. The quantizer-owned tensors
+    (``weight_quantizer.svdquant_lora_a/b``, ``input_quantizer._pre_quant_scale``)
+    are left untouched.
+    """
+    for _, sub_module in component.named_modules():
+        for buffer_name in ("svdquant_lora_a", "svdquant_lora_b", "pre_quant_scale"):
+            if buffer_name in getattr(sub_module, "_buffers", {}):
+                del sub_module._buffers[buffer_name]
 
 
 def _export_diffusers_checkpoint(
@@ -1161,7 +1244,7 @@ def _export_diffusers_checkpoint(
     """
     export_dir = Path(export_dir)
 
-    # Step 1: Get all pipeline components (nn.Module, tokenizers, schedulers, etc.)
+    # Get all pipeline components (nn.Module, tokenizers, schedulers, etc.)
     all_components = get_diffusion_components(pipe, components)
 
     if not all_components:
@@ -1183,7 +1266,7 @@ def _export_diffusers_checkpoint(
         except Exception:
             is_diffusers_pipe = False
 
-    # Step 3: Export each nn.Module component with quantization handling
+    # Export each nn.Module component with quantization handling
     for component_name, component in module_components.items():
         is_quantized = has_quantized_modules(component)
         status = "quantized" if is_quantized else "non-quantized"
@@ -1202,53 +1285,82 @@ def _export_diffusers_checkpoint(
         component_dtype = dtype if dtype is not None else infer_dtype_from_model(component)
 
         if is_quantized:
-            # Step 3.5: Fuse QKV linears that share the same input (unify amax values)
+            # Fuse QKV linears that share the same input (unify amax values)
             # This is similar to requantize_resmooth_fused_llm_layers but simplified for diffusion
-            # TODO: Add pre_quant_scale handling and FFN fusion for AWQ-style quantization
+            # TODO: Add FFN fusion for AWQ-style quantization (pre_quant_scale is
+            # promoted to module keys at export by _promote_quantizer_tensors_to_module below)
             print(f"  Running QKV fusion for {component_name}...")
-            _fuse_qkv_linears_diffusion(component)
+            # Qwen-Image's packed-latent forward signature is non-standard; if the
+            # dummy forward fails for it, fail loudly rather than silently skipping
+            # fusion (which would export un-unified amax values).
+            is_qwen_component = "qwen" in type(component).__name__.lower()
+            _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
 
-            # Step 4: Process quantized modules (convert weights, register scales)
+            # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
 
-            # Step 5: Build quantization config
-            quant_config = get_quant_config(component, is_modelopt_qlora=False)
-            hf_quant_config = convert_hf_quant_config_format(quant_config) if quant_config else None
+            # Promote quantizer-owned tensors (AWQ pre_quant_scale and SVDQuant
+            # LoRA factors) onto the module so they survive
+            # hide_quantizers_from_state_dict and are embedded in the component's
+            # main safetensors under clean, AWQ-aligned keys.
+            _promote_quantizer_tensors_to_module(component)
 
-            # Step 6: Save the component
-            # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
-            # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
-            if hasattr(component, "save_pretrained"):
-                with hide_quantizers_from_state_dict(component):
-                    component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
-            else:
-                with hide_quantizers_from_state_dict(component):
-                    _save_component_state_dict_safetensors(component, component_export_dir)
+            # Build the quantization config + save inside try/finally so the temporary
+            # promoted buffers are always removed, even if save / post-process / config
+            # update raises (keeps the live module reusable for a repeated export).
+            try:
+                quant_config = get_quant_config(component, is_modelopt_qlora=False)
+                if quant_config:
+                    quantization_details = quant_config.get("quantization", {})
+                    # Record the SVDQuant low-rank size so consumers know the LoRA shape.
+                    if quantization_details.get("quant_algo") == "NVFP4_SVD":
+                        svdquant_rank = _detect_svdquant_rank(component)
+                        if svdquant_rank is not None:
+                            quantization_details["lora_rank"] = svdquant_rank
+                hf_quant_config = (
+                    convert_hf_quant_config_format(quant_config) if quant_config else None
+                )
 
-            # Step 7: Post-process — merge, metadata, padding, swizzle
-            _postprocess_safetensors(
-                component_export_dir,
-                pipe,
-                hf_quant_config=hf_quant_config,
-                **kwargs,
-            )
+                # Save the component
+                # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
+                # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
+                if hasattr(component, "save_pretrained"):
+                    with hide_quantizers_from_state_dict(component):
+                        component.save_pretrained(
+                            component_export_dir, max_shard_size=max_shard_size
+                        )
+                else:
+                    with hide_quantizers_from_state_dict(component):
+                        _save_component_state_dict_safetensors(component, component_export_dir)
 
-            # Step 8: Update config.json with quantization info
-            if hf_quant_config is not None:
-                config_path = component_export_dir / "config.json"
-                if config_path.exists():
-                    with open(config_path) as file:
-                        config_data = json.load(file)
-                    config_data["quantization_config"] = hf_quant_config
-                    with open(config_path, "w") as file:
-                        json.dump(config_data, file, indent=4)
+                # Post-process — merge, metadata, padding, swizzle
+                _postprocess_safetensors(
+                    component_export_dir,
+                    pipe,
+                    hf_quant_config=hf_quant_config,
+                    **kwargs,
+                )
+
+                # Update config.json with quantization info
+                if hf_quant_config is not None:
+                    config_path = component_export_dir / "config.json"
+                    if config_path.exists():
+                        with open(config_path) as file:
+                            config_data = json.load(file)
+                        config_data["quantization_config"] = hf_quant_config
+                        with open(config_path, "w") as file:
+                            json.dump(config_data, file, indent=4)
+            finally:
+                # Drop the temporary promoted export buffers so the live module is
+                # unchanged after export (supports repeated export / module reuse).
+                _remove_promoted_quantizer_tensors(component)
         # Non-quantized component: just save as-is
         elif hasattr(component, "save_pretrained"):
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
         else:
             _save_component_state_dict_safetensors(component, component_export_dir)
 
-        # Step 9: Update config.json with sparse attention info (both quantized and non-quantized)
+        # Update config.json with sparse attention info (both quantized and non-quantized)
         if export_sparse_attention_config is not None:
             sparse_attn_config = export_sparse_attention_config(component)
             if sparse_attn_config is not None:
@@ -1263,7 +1375,7 @@ def _export_diffusers_checkpoint(
 
         print(f"  Saved to: {component_export_dir}")
 
-    # Step 4: Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)
+    # Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)
     if is_diffusers_pipe:
         for component_name, component in all_components.items():
             # Skip nn.Module components (already handled above)
@@ -1291,7 +1403,7 @@ def _export_diffusers_checkpoint(
 
             print(f"  Saved to: {component_export_dir}")
 
-    # Step 5: For pipelines, also save model_index.json
+    # For pipelines, also save model_index.json
     if is_diffusers_pipe:
         model_index_path = export_dir / "model_index.json"
         is_partial_export = components is not None
