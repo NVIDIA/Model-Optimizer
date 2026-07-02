@@ -1766,16 +1766,28 @@ def test_load_recipe_autoquantize_missing_section_raises(tmp_path):
         load_recipe(bad)
 
 
-def test_load_recipe_autoquantize_too_few_candidates_raises(tmp_path):
-    """candidate_formats with fewer than 2 entries is rejected."""
+def test_load_recipe_autoquantize_empty_candidates_raises(tmp_path):
+    """Empty candidate_formats is rejected (a single format is valid — bf16 is implicit)."""
     bad = tmp_path / "bad.yml"
     bad.write_text(
         "metadata:\n  recipe_type: auto_quantize\n"
         "auto_quantize:\n  constraints:\n    effective_bits: 4.8\n"
+        "  candidate_formats: []\n"
+    )
+    with pytest.raises(ValueError, match="at least 1"):
+        load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_single_candidate_ok(tmp_path):
+    """A single candidate format is valid: the {format, bf16} per-layer search (bf16 implicit)."""
+    recipe_file = tmp_path / "single.yml"
+    recipe_file.write_text(
+        "metadata:\n  recipe_type: auto_quantize\n"
+        "auto_quantize:\n  constraints:\n    effective_bits: 6.0\n"
         "  candidate_formats:\n    - algorithm: max\n      quant_cfg: []\n"
     )
-    with pytest.raises(ValueError, match="at least 2"):
-        load_recipe(bad)
+    aq = load_recipe(recipe_file).auto_quantize
+    assert len(aq.candidate_formats) == 1
 
 
 def test_load_recipe_autoquantize_effective_bits_out_of_range_raises(tmp_path):

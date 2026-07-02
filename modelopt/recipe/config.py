@@ -201,7 +201,9 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
     candidate_formats: list[QuantizeConfig] = ModeloptField(
         default=[],
         title="Candidate quantization formats",
-        description="Per-layer search space; each entry is a full QuantizeConfig. At least 2 required.",
+        description="Per-layer search space; each entry is a full QuantizeConfig. At least 1 "
+        "required — bf16/no-quant is always an implicit additional choice, so a single format "
+        "(e.g. [fp8]) yields a {fp8, bf16} per-layer search.",
         validate_default=True,
     )
     auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
@@ -236,11 +238,13 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
 
     @field_validator("candidate_formats")
     @classmethod
-    def _at_least_two_candidates(cls, v: list[QuantizeConfig]) -> list[QuantizeConfig]:
-        if len(v) < 2:
+    def _at_least_one_candidate(cls, v: list[QuantizeConfig]) -> list[QuantizeConfig]:
+        # mtq.auto_quantize always adds an implicit bf16/no-quant choice per layer, so a single
+        # explicit format already gives a real {format, bf16} search; only an empty list is invalid.
+        if not v:
             raise ValueError(
-                "auto_quantize requires at least 2 candidate_formats. "
-                "For uniform quantization, use a PTQ recipe instead."
+                "auto_quantize requires at least 1 candidate_format (bf16/no-quant is always an "
+                "implicit additional choice). For uniform quantization, use a PTQ recipe instead."
             )
         return v
 

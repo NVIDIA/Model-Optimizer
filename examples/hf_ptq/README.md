@@ -386,6 +386,9 @@ keeps the more sensitive ones at higher precision (or unquantized), so the model
 accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via
 `$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
+bf16 (no quantization) is always an implicit per-layer choice, so `candidate_formats` need only list
+the quantized options — a single format (e.g. `[fp8]`) gives a `{fp8, bf16}` per-layer search.
+
 For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
 `general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
 
