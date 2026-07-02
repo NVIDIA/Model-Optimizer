@@ -345,5 +345,78 @@ class TestDecodeAttention:
         assert cos > 0.95, float(cos)
 
 
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)),
+    reason="NVFP4 qdq uses tl.float8e4nv (sm_89+)",
+)
+class TestOnwriteVBakeLifecycle:
+    """The in-place 128-token V bake is schedule-independent and only ever touches new tiles.
+
+    ``fake_quant_v_onwrite`` bakes complete ``_ONWRITE_BLOCK_N`` (128) tiles in ``[v_lo, v_hi)``.
+    Correctness requires each tile be baked exactly once from the pristine V: NVFP4 block QDQ is not
+    generally idempotent (a re-bake recomputes the E4M3 block scale from the already-quantized amax,
+    which can shift), so a double-bake would drift. These tests prove the incremental (chunked-write)
+    schedule produces the same cache as one one-shot bake, and that baking a later tile never rewrites
+    an earlier (already-baked) or trailing (still-partial) tile.
+    """
+
+    _BN = 128  # _ONWRITE_BLOCK_N: the on-write bake tile size
+
+    def _v_cache(self, batch, seq_k, head_dim, page_size, seed, dtype):
+        torch.manual_seed(seed)
+        k = torch.randn(batch, 1, seq_k, head_dim, device="cuda", dtype=dtype)
+        v = torch.randn(batch, 1, seq_k, head_dim, device="cuda", dtype=dtype)
+        seq_lens = torch.full((batch,), seq_k, device="cuda", dtype=torch.int32)
+        _, v_cache, block_table = _paged_cache(k, v, seq_lens, page_size)
+        return v_cache, block_table
+
+    def _bake(self, v_cache, block_table, lo, hi, page_size, batch):
+        v_lo = torch.full((batch,), lo, device="cuda", dtype=torch.int32)
+        v_hi = torch.full((batch,), hi, device="cuda", dtype=torch.int32)
+        fake_quant_v_onwrite(v_cache, block_table, v_lo, v_hi, page_size=page_size)
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("page_size", [16, 32, 64])
+    def test_incremental_bake_equals_one_shot(self, dtype, page_size):
+        """Baking [0,128) then [128,256) as the sequence grows equals a single [0,256) bake."""
+        batch, seq_k, head_dim = 2, 300, 128  # two complete 128-tiles + a 44-token trailing tile
+        v_inc, block_table = self._v_cache(batch, seq_k, head_dim, page_size, seed=3, dtype=dtype)
+        raw = v_inc.clone()
+        v_one = v_inc.clone()
+
+        # Incremental: bake each 128-tile as it completes.
+        self._bake(v_inc, block_table, 0, self._BN, page_size, batch)
+        self._bake(v_inc, block_table, self._BN, 2 * self._BN, page_size, batch)
+        # One-shot: bake both complete tiles at once.
+        self._bake(v_one, block_table, 0, 2 * self._BN, page_size, batch)
+
+        torch.testing.assert_close(v_inc, v_one, rtol=0, atol=0)
+        # Non-vacuous: the bake actually quantized the completed tiles.
+        assert not torch.equal(v_inc, raw)
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_bake_leaves_earlier_and_trailing_tiles_untouched(self, dtype):
+        """Baking a later tile must not rewrite an already-baked tile or a still-partial trailing one.
+
+        With page_size == 128 each 128-token tile is exactly one page, so the invariant reduces to a
+        bit-for-bit page comparison (no double-bake of tile 0; the 44-token trailing tile stays raw).
+        """
+        batch, seq_k, head_dim, page_size = 2, 300, 128, 128
+        v_cache, block_table = self._v_cache(batch, seq_k, head_dim, page_size, seed=5, dtype=dtype)
+        raw = v_cache.clone()
+
+        self._bake(v_cache, block_table, 0, self._BN, page_size, batch)  # bake tile 0 (page g0)
+        after_first = v_cache.clone()
+        self._bake(v_cache, block_table, self._BN, 2 * self._BN, page_size, batch)  # bake tile 1
+
+        for b in range(batch):
+            g0, g2 = int(block_table[b, 0]), int(block_table[b, 2])
+            # Tile 0's page is unchanged by the second bake (baked once, never re-baked).
+            torch.testing.assert_close(v_cache[g0], after_first[g0], rtol=0, atol=0)
+            # The trailing partial tile ([256,300), < 128 tokens) is never a complete tile: stays raw.
+            torch.testing.assert_close(v_cache[g2], raw[g2], rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
