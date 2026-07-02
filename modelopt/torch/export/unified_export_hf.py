@@ -91,6 +91,10 @@ from .model_config import (
 from .model_utils import _reorder_canonical_first, get_language_model_from_vl, is_multimodal_model
 from .moe_utils import _export_fused_experts
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
+from .quant_aware_conversion import (
+    QuantConversionUnsupportedError,
+    revert_weight_conversion_quant_aware,
+)
 from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
@@ -1476,11 +1480,28 @@ def export_hf_checkpoint(
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
 
+        export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
+
+        # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
+        # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
+        # differ from the original hub checkpoint. Reverse it quantization-aware so exported
+        # tensor names stay aligned with the hub checkpoint (the unified-checkpoint contract).
+        # transformers' own revert_weight_conversion errors on 0-d scalar scale tensors, so we
+        # do the reverse here; for any op we cannot reverse yet (e.g. stacked-expert fusion)
+        # we fall back to the in-memory names.
+        try:
+            export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+        except QuantConversionUnsupportedError as exc:
+            warnings.warn(
+                f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
+                "names may not match the original HF hub checkpoint."
+            )
+
         # Save model
-        # Temporarily disable revert_weight_conversion if available — it doesn't handle
-        # quantized state dicts (scalar scale tensors have 0 dimensions, causing IndexError).
-        # We must patch both the source module and the importing module since
-        # modeling_utils does `from core_model_loading import revert_weight_conversion`.
+        # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
+        # above replaces it): it doesn't handle quantized state dicts (0-d scalar scale
+        # tensors cause IndexError). Patch both the source module and the importing module
+        # since modeling_utils does `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
 
         _sanitize_generation_config_for_save(model)
@@ -1488,7 +1509,7 @@ def export_hf_checkpoint(
         try:
             model.save_pretrained(
                 export_dir,
-                state_dict={**post_state_dict, **(extra_state_dict or {})},
+                state_dict=export_state_dict,
                 save_modelopt_state=save_modelopt_state,
                 max_shard_size=max_shard_size,
             )
