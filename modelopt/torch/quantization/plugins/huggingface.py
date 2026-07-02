@@ -194,6 +194,29 @@ class _QuantAttention(QuantModule):
             p_qdq_amax=p_qdq_amax,
         )
 
+    def _eager_p_qdq_attention(
+        self, original_attention_interface, query_states, key_states, value_states, **kwargs
+    ):
+        """Apply ``p_bmm_quantizer`` to the softmax output via an eager wrapper.
+
+        For attention outside the causal-only Triton kernel's envelope (e.g. ViT's
+        non-causal attention). Swapping ``F.softmax`` for a quantized version keeps
+        the quantizer in the traced graph so ONNX / Torch-TRT export emits Q/DQ
+        around the softmax probabilities. Requires an eager attention
+        implementation; SDPA-fused softmax (computed inside the C++ kernel) is
+        unaffected.
+        """
+        _pq = self.p_bmm_quantizer
+        _orig_softmax = torch.nn.functional.softmax
+
+        def _quantized_softmax(*s_args, **s_kwargs):
+            return _pq(_orig_softmax(*s_args, **s_kwargs))
+
+        with replace_function(torch.nn.functional, "softmax", _quantized_softmax):
+            return original_attention_interface(
+                self, query_states, key_states, value_states, **kwargs
+            )
+
     @staticmethod
     def _quantized_attention(
         original_attention_interface,
@@ -216,6 +239,13 @@ class _QuantAttention(QuantModule):
             # positional argument after q/k/v; everything else is a kwarg.
             if args:
                 kwargs["attention_mask"] = args[0]
+            # The built-in Triton P kernel is causal-only. Non-causal attention
+            # (e.g. ViT) applies p_bmm_quantizer through an eager softmax wrapper
+            # that stays export-traceable for ONNX / Torch-TRT instead.
+            if kwargs.get("is_causal") is False or getattr(self, "is_causal", True) is False:
+                return self._eager_p_qdq_attention(
+                    original_attention_interface, query_states, key_states, value_states, **kwargs
+                )
             return self._triton_qdq_attention(
                 p_qdq, query_states, key_states, value_states, **kwargs
             )
