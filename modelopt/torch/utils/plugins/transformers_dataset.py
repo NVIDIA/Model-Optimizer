@@ -17,6 +17,7 @@
 
 import copy
 import itertools
+import json
 import os
 
 import torch
@@ -82,15 +83,52 @@ class ShardedDataset(torch.utils.data.Dataset):
             data_dir = data_files
             data_files = None
 
-        dataset = load_dataset(
-            self.name,
-            self.subset,
-            data_files=data_files,
-            data_dir=data_dir,
-            split=self.split,
-            # num_proc=4,  # TODO: Make this configurable
-            streaming=self.num_streaming_samples is not None,
-        )
+        try:
+            dataset = load_dataset(
+                self.name,
+                self.subset,
+                data_files=data_files,
+                data_dir=data_dir,
+                split=self.split,
+                # num_proc=4,  # TODO: Make this configurable
+                streaming=self.num_streaming_samples is not None,
+            )
+        except Exception as exc:
+            # A merged JSONL may contain valid records with incompatible Arrow
+            # schemas.  Preserve those records as Python dicts rather than
+            # silently coercing multimodal content to ``None``.  This path is
+            # deliberately limited to local, non-streaming JSONL inputs so an
+            # unrelated dataset-loading failure remains visible to the caller.
+            if (
+                self.name != "json"
+                or self.num_streaming_samples is not None
+                or data_dir is not None
+                or data_files is None
+            ):
+                raise
+
+            files = data_files if isinstance(data_files, list) else [data_files]
+            if not all(isinstance(path, str) and os.path.isfile(path) for path in files):
+                raise
+
+            print_rank_0(
+                f"load_dataset raised {type(exc).__name__}: {exc}\n"
+                "Falling back to line-by-line JSONL loading to preserve heterogeneous records."
+            )
+            rows = []
+            for path in files:
+                with open(path, encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if line:
+                            rows.append(json.loads(line))
+
+            self._raw_samples = rows[self.shard_index :: self.num_shards]
+            print_rank_0(
+                f"Loaded {len(rows)} JSONL records; {len(self._raw_samples)} assigned to "
+                f"shard {self.shard_index}/{self.num_shards}."
+            )
+            return
 
         shard = dataset.shard(num_shards=self.num_shards, index=self.shard_index)
 
@@ -316,7 +354,7 @@ class LanguageDataCollator:
 
 
 class VisionLanguageDataCollator(LanguageDataCollator):
-    """VisionLanguageDataCollator is a subclass of LanguageDataCollator that is used to collate vision-language data."""
+    """Collate multimodal conversations for online speculative-decoding training."""
 
     def __init__(
         self,
@@ -325,11 +363,31 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         chat_template: str | None = None,
         add_generation_prompt: bool = False,
         answer_only_loss: bool = False,
+        shift_labels: bool = True,
         local_image_path: str = "",
         return_labels: bool = False,
     ):
-        """Initialize the VisionLanguageDataset."""
-        self.processor = transformers.AutoProcessor.from_pretrained(processor)
+        """Initialize the collator and its Hugging Face processor.
+
+        ``VLM_MIN_PIXELS`` and ``VLM_MAX_PIXELS`` allow launchers to bound
+        Qwen-VL image token expansion without baking environment-specific
+        limits into a recipe.
+        """
+        processor_kwargs = {}
+        for env_name, kwarg_name in (
+            ("VLM_MIN_PIXELS", "min_pixels"),
+            ("VLM_MAX_PIXELS", "max_pixels"),
+        ):
+            value = os.environ.get(env_name)
+            if value is not None:
+                try:
+                    processor_kwargs[kwarg_name] = int(value)
+                except ValueError as exc:
+                    raise ValueError(f"{env_name} must be an integer, got {value!r}") from exc
+
+        self.processor = transformers.AutoProcessor.from_pretrained(processor, **processor_kwargs)
+        if processor_kwargs:
+            print_rank_0(f"Loaded VLM processor with {processor_kwargs}")
         self.chat_template = chat_template
         self.local_image_path = local_image_path
         self._conversations_warned = False
@@ -340,21 +398,204 @@ class VisionLanguageDataCollator(LanguageDataCollator):
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt,
             answer_only_loss=answer_only_loss,
+            shift_labels=shift_labels,
             return_labels=return_labels,
         )
+        # Processor.apply_chat_template() consults the processor-level template,
+        # while the base collator applies an optional training override to its
+        # tokenizer. Keep the two views in sync.
+        self.processor.chat_template = self.tokenizer.chat_template
+
+    def _verify_generation_tags(self):
+        """Accept VLM templates whose assistant spans we derive from chat markers.
+
+        Some Qwen-VL processor versions fail while deriving Hugging Face
+        generation masks at a truncation boundary.  The VLM path below builds
+        the same answer-only mask from the tokenized ChatML/Llama markers, so
+        generation tags are not required for those templates.
+        """
+        if self._assistant_marker_specs():
+            return
+        super()._verify_generation_tags()
+
+    def _encode_chat_marker(self, marker: str) -> list[int]:
+        return list(self.tokenizer(marker, add_special_tokens=False)["input_ids"])
+
+    def _assistant_marker_specs(self) -> list[tuple[list[int], list[list[int]]]]:
+        if hasattr(self, "_cached_assistant_marker_specs"):
+            return self._cached_assistant_marker_specs
+
+        template = self.tokenizer.chat_template or ""
+        specs = []
+        if "<|im_start|>" in template and "<|im_end|>" in template:
+            specs.append(
+                (
+                    self._encode_chat_marker("<|im_start|>assistant\n"),
+                    [
+                        self._encode_chat_marker("<|im_end|>\n"),
+                        self._encode_chat_marker("<|im_end|>"),
+                    ],
+                )
+            )
+        if "<|start_header_id|>" in template and "<|eot_id|>" in template:
+            specs.append(
+                (
+                    self._encode_chat_marker(
+                        "<|start_header_id|>assistant<|end_header_id|>\n\n"
+                    ),
+                    [self._encode_chat_marker("<|eot_id|>")],
+                )
+            )
+
+        self._cached_assistant_marker_specs = [
+            (start, [end for end in end_markers if end])
+            for start, end_markers in specs
+            if start and any(end_markers)
+        ]
+        return self._cached_assistant_marker_specs
+
+    @staticmethod
+    def _find_subsequence(
+        values: list[int], pattern: list[int], start: int = 0, stop: int | None = None
+    ) -> int:
+        stop = len(values) if stop is None else stop
+        if not pattern or start >= stop:
+            return -1
+        for index in range(start, stop - len(pattern) + 1):
+            if values[index : index + len(pattern)] == pattern:
+                return index
+        return -1
+
+    def _build_assistant_masks(self, tokenized_messages):
+        """Return an assistant-content mask from stable chat boundary tokens."""
+        input_ids = tokenized_messages["input_ids"]
+        attention_mask = tokenized_messages.get("attention_mask")
+        assistant_masks = torch.zeros_like(input_ids)
+
+        for row_index, row in enumerate(input_ids):
+            tokens = row.tolist()
+            if isinstance(attention_mask, torch.Tensor):
+                active = attention_mask[row_index].nonzero(as_tuple=False).flatten()
+                if active.numel() == 0:
+                    continue
+                sequence_start = int(active[0])
+                sequence_end = int(active[-1]) + 1
+            else:
+                sequence_start, sequence_end = 0, len(tokens)
+
+            for start_marker, end_markers in self._assistant_marker_specs():
+                search_from = sequence_start
+                while search_from < sequence_end:
+                    start = self._find_subsequence(
+                        tokens, start_marker, search_from, sequence_end
+                    )
+                    if start == -1:
+                        break
+                    content_start = start + len(start_marker)
+                    end_positions = [
+                        position
+                        for marker in end_markers
+                        if (
+                            position := self._find_subsequence(
+                                tokens, marker, content_start, sequence_end
+                            )
+                        )
+                        != -1
+                    ]
+                    content_end = min(end_positions) if end_positions else sequence_end
+                    if content_start < content_end:
+                        assistant_masks[row_index, content_start:content_end] = 1
+                    search_from = max(content_start + 1, content_end + 1)
+
+        return assistant_masks
+
+    def _pad_sequence_tensors(self, tokenized_messages):
+        """Pad processor outputs to DFlash's fixed training sequence length.
+
+        Some Transformers 5 VLM processors ignore ``padding='max_length'`` in
+        ``apply_chat_template``. DFlash operates on fixed-size blocks, so pad
+        the text-side tensors here after processor tokenization. The processor
+        remains responsible for truncation, which keeps image-token and pixel
+        feature alignment intact.
+        """
+        if self.train_len is None:
+            return tokenized_messages
+
+        input_ids = tokenized_messages.get("input_ids")
+        if not isinstance(input_ids, torch.Tensor) or input_ids.ndim != 2:
+            raise ValueError("VLM processor did not return rank-2 input_ids.")
+        if input_ids.shape[1] > self.train_len:
+            raise ValueError(
+                f"VLM processor returned seq_len {input_ids.shape[1]} above "
+                f"training_seq_len {self.train_len}; ensure processor truncation is enabled."
+            )
+
+        pad_width = self.train_len - input_ids.shape[1]
+        if pad_width == 0:
+            return tokenized_messages
+
+        for key, pad_value in (
+            ("input_ids", self.tokenizer.pad_token_id),
+            ("attention_mask", 0),
+        ):
+            value = tokenized_messages.get(key)
+            if not isinstance(value, torch.Tensor):
+                continue
+            pad = value.new_full((value.shape[0], pad_width), pad_value)
+            tokenized_messages[key] = torch.cat((value, pad), dim=1)
+
+        return tokenized_messages
+
+    def _apply_chat_template(self, examples):
+        """Tokenize VLM messages and derive answer-only spans after truncation."""
+        processor_kwargs = {
+            "padding": "max_length",
+            "truncation": True,
+            "max_length": self.train_len,
+        }
+        derive_masks_from_markers = bool(self._assistant_marker_specs())
+        common_kwargs = {
+            "tokenize": True,
+            "return_tensors": "pt",
+            "return_dict": True,
+            "add_generation_prompt": self.add_generation_prompt,
+            "return_assistant_tokens_mask": (
+                self.answer_only_loss and not derive_masks_from_markers
+            ),
+        }
+        # Transformers 5 Qwen-VL processors consume text-tokenization options
+        # directly. Passing them under ``processor_kwargs`` is silently ignored,
+        # leaving long samples untruncated.
+        tokenized_messages = self.processor.apply_chat_template(
+            examples, **processor_kwargs, **common_kwargs
+        )
+        tokenized_messages = self._pad_sequence_tensors(tokenized_messages)
+        if self.answer_only_loss and derive_masks_from_markers:
+            tokenized_messages["assistant_masks"] = self._build_assistant_masks(
+                tokenized_messages
+            )
+        return tokenized_messages
 
     def _process_multimodal_sample(self, examples):
-        tokenized_messages = self.processor.apply_chat_template(
-            examples,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-            padding="max_length",
-            truncation=True,
-            max_length=self.train_len,
-            add_generation_prompt=self.add_generation_prompt,
-            return_assistant_tokens_mask=self.answer_only_loss,
-        )
+        tokenized_messages = self._apply_chat_template(examples)
+
+        if self.return_labels:
+            input_ids = tokenized_messages["input_ids"]
+            labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
+            if self.shift_labels:
+                labels[..., :-1] = input_ids[..., 1:]
+            else:
+                labels[:] = input_ids
+
+            if self.answer_only_loss:
+                assistant_mask = tokenized_messages["assistant_masks"]
+                if not assistant_mask.any():
+                    labels[:] = IGNORE_TOKEN_ID
+                elif self.shift_labels:
+                    labels[..., :-1][assistant_mask[..., 1:] == 0] = IGNORE_TOKEN_ID
+                else:
+                    labels[assistant_mask == 0] = IGNORE_TOKEN_ID
+            tokenized_messages["labels"] = labels
 
         return tokenized_messages
 
