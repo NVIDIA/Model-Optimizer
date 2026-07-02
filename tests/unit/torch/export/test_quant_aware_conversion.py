@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for quant-aware reverse weight conversion (CPU, no model needed).
+"""Unit tests for quant-aware reverse weight conversion (CPU, no GPU needed).
 
-Tensor shapes/dtypes mirror a real NVFP4 linear from the MiniMax-M3 checkpoint:
-``weight`` uint8 ``[out, in//2]``, ``weight_scale`` float8_e4m3 ``[out, in//16]``,
-``weight_scale_2``/``input_scale`` 0-d float32 scalars.
+Tensor shapes mirror a real NVFP4 linear from the MiniMax-M3 checkpoint: ``weight``
+uint8 ``[out, in//2]``, ``weight_scale`` ``[out, in//16]``, ``weight_scale_2`` /
+``input_scale`` 0-d scalars. The reverse logic is dtype-agnostic, so ``weight_scale``
+uses float32 here (real checkpoints use float8_e4m3, whose CPU ops are not portable
+across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
 import pytest
@@ -37,7 +39,7 @@ def _nvfp4_linear(module: str, out: int, in_features: int) -> dict[str, torch.Te
     """Synthetic NVFP4 quantized-linear tensor group keyed under ``module``."""
     return {
         f"{module}.weight": torch.randint(0, 255, (out, in_features // 2), dtype=torch.uint8),
-        f"{module}.weight_scale": torch.randn(out, in_features // BLOCK).to(torch.float8_e4m3fn),
+        f"{module}.weight_scale": torch.randn(out, in_features // BLOCK),
         f"{module}.weight_scale_2": torch.tensor(0.037, dtype=torch.float32),  # 0-d
         f"{module}.input_scale": torch.tensor(1.0, dtype=torch.float32),  # 0-d
     }
@@ -76,8 +78,14 @@ def test_split_unfuses_dense_gate_up_with_scales():
 
     g, u = "m.layers.0.mlp.gate_proj", "m.layers.0.mlp.up_proj"
     assert set(out) == {
-        f"{g}.weight", f"{g}.weight_scale", f"{g}.weight_scale_2", f"{g}.input_scale",
-        f"{u}.weight", f"{u}.weight_scale", f"{u}.weight_scale_2", f"{u}.input_scale",
+        f"{g}.weight",
+        f"{g}.weight_scale",
+        f"{g}.weight_scale_2",
+        f"{g}.input_scale",
+        f"{u}.weight",
+        f"{u}.weight_scale",
+        f"{u}.weight_scale_2",
+        f"{u}.input_scale",
     }
     # weight/scale halved on dim 0; concatenating the parts reconstructs the original
     assert out[f"{g}.weight"].shape == (out_dim // 2, in_dim // 2)
@@ -153,3 +161,56 @@ def test_end_to_end_minimax_m3_like_reversal():
     # no leftover in-memory names
     assert not any(k.startswith("model.language_model") for k in out)
     assert not any(".gate_up_proj" in k for k in out)
+
+
+def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
+    """Derive rules from a real transformers conversion mapping (CPU, no quantize).
+
+    Exercises ``revert_weight_conversion_quant_aware`` / ``_build_reverse_rules``:
+    a ModelOpt-expanded per-expert state dict (in-memory ``mlp.experts.<i>.*`` names)
+    must revert to the hub layout (``block_sparse_moe.experts.<i>.w{1,2,3}``).
+    """
+    pytest.importorskip("transformers")
+    from transformers import MixtralConfig, MixtralForCausalLM
+
+    try:
+        from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+    except ImportError:
+        pytest.skip("transformers build has no conversion_mapping API")
+    if not get_checkpoint_conversion_mapping("mixtral"):
+        pytest.skip("transformers build has no mixtral conversion_mapping")
+
+    from modelopt.torch.export.quant_aware_conversion import revert_weight_conversion_quant_aware
+
+    cfg = MixtralConfig(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=2,
+        num_experts_per_tok=2,
+        vocab_size=64,
+        max_position_embeddings=64,
+    )
+    model = MixtralForCausalLM(cfg)
+
+    p = "model.layers.0"
+    sd = {f"{p}.mlp.gate.weight": torch.randn(2, 32)}
+    for e in range(2):
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.gate_proj", 64, 32))
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.up_proj", 64, 32))
+        sd.update(_nvfp4_linear(f"{p}.mlp.experts.{e}.down_proj", 32, 64))
+
+    out = revert_weight_conversion_quant_aware(model, sd)
+
+    # experts mapped to hub layout, with scale siblings carried along
+    for e in range(2):
+        base = f"{p}.block_sparse_moe.experts.{e}"
+        assert f"{base}.w1.weight" in out  # gate_proj -> w1
+        assert f"{base}.w3.weight" in out  # up_proj   -> w3
+        assert f"{base}.w2.weight" in out  # down_proj -> w2
+        assert f"{base}.w1.weight_scale" in out
+        assert f"{base}.w1.weight_scale_2" in out
+    assert f"{p}.block_sparse_moe.gate.weight" in out
+    assert not any(".mlp.experts." in k for k in out)
