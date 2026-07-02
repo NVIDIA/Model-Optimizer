@@ -11,7 +11,7 @@ compose in one Triton kernel launch.
 
 This is a **fake-quantization accuracy study**: operands are rounded to the
 NVFP4/FP8 grid and dequantized back to a float type for the matmul. Real KV-cache
-*memory* savings are a downstream deployment concern (see "On-write V, deferred").
+*memory* savings (packed FP4) are a deferred deployment concern (see "Build status").
 The matmul precision is **phase-specific** — bf16 tensor-core in prefill, fp32 in
 decode — see "Matmul precision by phase" below.
 
@@ -119,12 +119,13 @@ the original on-read decode design timed out, which is why PR #1635 switched to
 **on-write** (≈8–18× decode-kernel speedup). So for the long-context campaign,
 decode V **must** be on-write:
 
-- **Bake** complete 16-key V blocks once, in place in the paged cache
-  (`fake_quant_kv_onwrite` V-path, driven by `v_bmm_quantizer`). Prefill bakes the
-  prompt so decode inherits a pre-quantized cache; decode bakes each newly-complete
-  block.
-- The decode kernel reads complete blocks **as-is** (`V_CACHE_QUANTIZED`) and
-  re-FQ's only the trailing `s mod 16` tile via `_v_qdq_nvfp4` → `O(S)` total.
+- **Bake** complete 128-token V tiles once, in place in the paged cache
+  (`fake_quant_v_onwrite`, tile size `_ONWRITE_BLOCK_N = 128`, driven by
+  `v_bmm_quantizer`); each 128-token tile is internally 8 × 16-key NVFP4 blocks.
+  Prefill bakes the prompt so decode inherits a pre-quantized cache; decode bakes
+  each newly-complete tile.
+- The decode kernel reads complete tiles **as-is** (`V_CACHE_QUANTIZED`) and
+  re-FQ's only the trailing `s mod 128` partial tile via `_v_qdq_nvfp4` → `O(S)` total.
 - Needs the graph-safe `(batch, n_kv, 1)` decode-grid repair so the bake kernel
   composes with the captured decode step.
 
@@ -166,36 +167,72 @@ max), a B200 A/B (current-vs-clamped, up to 98% of P underflowing) is bit-identi
 and Q/K never underflow on real data — it is a fidelity/consistency guarantee, not an
 accuracy change.
 
+## Supported configuration (fail-loud)
+
+The served checkpoint runs the ModelOpt attention kernel only when **every** requested layer
+satisfies all of these; anything else fails at startup with a single layer-qualified error (no
+requested quant or sparsity transform is ever silently dropped):
+
+- Decoder self-attention (`AttentionType.DECODER`) on the FlashAttention or FlashInfer backend.
+- Q/K/P/V use the supported fake-quant recipe: dynamic block-16 NVFP4 (P/V BMM2 may also be
+  per-tensor FP8), Q per-step dynamic, K/V calibrated-or-default global scale.
+- FP16/BF16 KV cache (every `fp8*` cache dtype is rejected); cache page size a multiple of 16.
+- `decode_context_parallel_size == 1`; no sliding window, ALiBi, logits soft-cap, or sinks.
+- No prefix caching, cross-layer KV sharing, KV connector, speculative decoding, or cascade.
+
+Launch with `--enforce-eager` and prefix caching disabled until the retained code has CUDA-graph
+evidence. Cascade is disabled automatically when quant is active — but disabling cascade does **not**
+make prefix-cache storage reuse safe (V is baked in place; a shared prefix would read another
+request's quantized V), which is why prefix caching is rejected outright.
+
 ## Code layout
 
 ```text
-quantization/attention/p_qdq.py     _p_qdq_nvfp4 (P), _v_qdq_nvfp4 (V) — BMM2 helpers
-quantization/common/nvfp4_quant.py  nvfp4_scalar_qdq (elementwise primitive)
-common/attention/triton_fa.py       prefill kernel: P_QDQ + V_QDQ constexprs
-common/attention/decode_attention.py paged decode kernel: P_QDQ + V_QDQ + skip
+kernels/quantization/attention/p_qdq.py   _p_qdq_nvfp4 (P BMM2 helper)
+kernels/quantization/attention/v_qdq.py   _v_qdq_nvfp4 (V BMM2 helper)
+kernels/quantization/common/nvfp4_quant.py  nvfp4_scalar_qdq + fp8_quantize_scale ([2^-9,448] clamp)
+kernels/common/attention/triton_fa.py     prefill kernel: P_QDQ + V_QDQ constexprs
+kernels/common/attention/decode_attention.py paged decode kernel + fake_quant_v_onwrite (128-token V bake)
+quantization/plugins/vllm.py
+    _import_attention_module   select the vLLM Attention class by exported symbol
+    _QuantVLLMAttention        Q/K head_dim pre-step; holds q/k/v/p_bmm_quantizer
 sparsity/attention_sparsity/plugins/vllm.py
-    _p_qdq_from_layer / _v_qdq_from_layer  read p/v_bmm_quantizer -> (mode, amax)
-    ModelOptSparseAttentionImpl.forward     threads p_qdq + v_qdq + skip into both kernels
+    _p_qdq_from_layer / _v_qdq_from_layer  read p/v_bmm_quantizer -> (mode, amax); fail-loud on unmapped
+    ModelOptSparseAttentionImpl / ModelOptSparseFlashInferImpl  P/V + skip in both kernels
+    select_sparse_impl_cls / _clone_sparse_impl / patch_flashinfer_metadata_builder  backend routing
+examples/vllm_serve/quant_sparse_attn_worker.py
+    _preflight_quant_sparse_attn            pure support-matrix validation (fail-loud, no mutation)
+    _prepare_ / _commit_quant_sparse_attn   two-pass atomic install (build all, then assign + flip V gate)
 ```
 
 ## Build status
 
-Implemented: paged decode kernel + skip-softmax; in-kernel `P_QDQ` and `V_QDQ`
-helpers in both prefill and decode; plugin wiring that drives P/V quant from the
-exported `p/v_bmm_quantizer` and engages the kernel for quant-only launches.
-**Decode V on-write** (`fake_quant_v_onwrite` + `V_CACHE_QUANTIZED` gating + graph-safe
-`(batch, n_kv, 1)` grid): prefill bakes the prompt's complete tiles after its on-read
-attention; decode bakes each newly-complete tile and reads complete tiles as-is,
-re-FQ'ing only the trailing tile → `O(S)`. **Validated on B200** as exactly Option 3
-(bake == on-read FQ bit-for-bit; incremental == single-shot cache; output diff ≤~1e-5
-is fp32-reduction scheduling, not a value change).
+Implemented and validated: paged decode kernel + skip-softmax; in-kernel `P_QDQ`/`V_QDQ` in
+prefill and decode; **decode V on-write** (`fake_quant_v_onwrite` 128-token tiles +
+`V_CACHE_QUANTIZED` gating + graph-safe `(batch, n_kv, 1)` grid), reproducing on-read FQ
+bit-for-bit (incremental == single-shot; output diff ≤~1e-5 is fp32-reduction scheduling, not a
+value change); plugin wiring that drives P/V from the exported `p/v_bmm_quantizer`; a unified serve
+worker that attaches attention quant (impl-swap default, composes with a realquant checkpoint; a
+legacy `mtq` mode) then installs the sparse impl; FlashAttention **and** FlashInfer backends.
 
-Remaining:
+Gate A safety: a pure capability **preflight** validates the support matrix above and fails at
+startup with one layer-qualified error; installation is a two-pass **prepare/commit** transaction,
+so a failure leaves every original impl and V-ownership gate unchanged.
 
-- Un-skip `p_bmm_quantizer` / `v_bmm_quantizer` in the vLLM reload + add their
-  slots to `_QuantVLLMAttention`, so the exported config reaches the served layer.
-- Unified serve worker: quant restore (gives `_QuantVLLMAttention` with Q/K
-  pre-step quant) then swap in `ModelOptSparseAttentionImpl`.
-- Calibrate skip-softmax on the **quantized** model (the skip decision sees
-  quantized `Q·K` scores).
-- GPU validation of the full quant + skip path on B200; README / CHANGELOG.
+Validated on **B200** (on-write V numerics) and **GB300 / sm_100** (aws-cmh, vLLM 0.22): the NVFP4
+attention kernel suite (68 tests, incl. the V-bake lifecycle) and the install/logic suite (32 tests)
+pass, with no sm_100 kernel fault.
+
+End-to-end serve evidence (GB300 / sm_100, Qwen3-8B bf16, vLLM 0.22 / Triton 3.6 / CUDA 13,
+`ATTN_QUANT_MODE=impl_swap --enforce-eager --no-enable-prefix-caching --enable-chunked-prefill`):
+the impl-swap installs NVFP4 on all 36 attention layers and prefill / decode / chunked-prefill
+produce coherent output on **both** the FlashAttention and FlashInfer backends ("The capital of
+France is" → " Paris"; correct counting continuation). FlashInfer (the deployed path) runs
+prefill/decode/chunked ≈ 0.11 / 1.8 / 0.5 s; the FlashAttention path is slower, dominated by
+first-request Triton autotune under eager. Output equivalence to bf16 is covered separately by the
+eval numbers (AA-LCR, HLE), not a per-token tolerance here.
+
+Remaining (Gate B/C follow-ups): CUDA-graph capture validation for the retained path (the E2E above
+ran under `--enforce-eager`); a framework-neutral numerical spec + immutable per-layer plan consumed
+at runtime (so serving reads plans, not mutable quant modules); calibrate skip-softmax on the
+**quantized** model; real packed-FP4 KV-cache memory savings.

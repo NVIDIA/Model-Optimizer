@@ -132,22 +132,36 @@ A layer gets the ModelOpt impl when it has **either** active attention quant (an
 
 NVFP4 scale convention: K and V default to a **constant global scale of 1.0** (their per-16 E4M3 block scales carry the range), while Q uses a per-step dynamic scale. A calibrated per-tensor `_amax` on any of these quantizers overrides the default.
 
+Attention-quant attach is selected by `ATTN_QUANT_MODE`:
+
+- `impl_swap` (default) configures the fixed dynamic block-16 NVFP4 recipe directly on each decoder attention module. It touches only attention (never Linear/MoE), so it **composes with an already-realquant checkpoint** and needs no exported attention-quant state.
+- `mtq` runs the legacy whole-model fakequant restore prolog (same env knobs as `vllm_serve_fakequant.py`, e.g. `MODELOPT_STATE_PATH`).
+
 Workflow:
 
-1. Export a checkpoint that carries **both** attention quantization (the attention BMM quantizers, e.g. via `examples/hf_ptq/hf_ptq.py --vllm_fakequant_export` with an attention-quant recipe) **and** a `sparse_attention_config` block (via `examples/llm_sparsity/attention_sparsity/hf_sa.py`).
-2. Serve it with `--enforce-eager`, passing the quant state through the same env knobs as the fakequant launcher:
+1. Provide a checkpoint with a `sparse_attention_config` block (via `examples/llm_sparsity/attention_sparsity/hf_sa.py`). For the default `impl_swap` path the base weights may be bf16 or already realquant-NVFP4; for `mtq` also export the fakequant state (`examples/hf_ptq/hf_ptq.py --vllm_fakequant_export` with an attention-quant recipe).
+2. Serve with `--enforce-eager` and prefix caching disabled (see Limitations):
 
    ```bash
-   MODELOPT_STATE_PATH=<EXPORT_DIR>/vllm_fq_modelopt_state.pth \
-       python vllm_serve_quant_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
+   # impl_swap (default): NVFP4 attention configured on the fly; composes with a realquant ckpt
+   python vllm_serve_quant_sparse_attn.py <EXPORT_DIR> \
+       --enforce-eager --no-enable-prefix-caching -tp 8 --host 0.0.0.0 --port 8000
+
+   # legacy mtq: restore exported fakequant state
+   ATTN_QUANT_MODE=mtq MODELOPT_STATE_PATH=<EXPORT_DIR>/vllm_fq_modelopt_state.pth \
+       python vllm_serve_quant_sparse_attn.py <EXPORT_DIR> \
+       --enforce-eager --no-enable-prefix-caching -tp 8 --host 0.0.0.0 --port 8000
    ```
 
 Test the server with the same `curl` / `lm_eval` commands shown above.
 
+Supported configuration (validated at startup — anything else fails with one layer-qualified error, never a silent drop): decoder self-attention on the FlashAttention or FlashInfer backend; FP16/BF16 KV cache; cache page size a multiple of 16; `decode_context_parallel_size == 1`; no sliding window, ALiBi, logits soft-cap, sinks, prefix caching, cross-layer KV sharing, KV connector, or speculative decoding.
+
 Limitations:
 
-- Use `--enforce-eager` — CUDA graph capture is not validated with the ModelOpt attention kernel.
-- vLLM cascade (prefix-cache) attention is disabled automatically when any layer has active attention quant: it would route shared-prefix batches through native attention and silently drop the in-kernel P/V quant.
+- Use `--enforce-eager` — CUDA graph capture is not yet validated for the retained code path.
+- Disable prefix caching (`--no-enable-prefix-caching`). V is baked in place, so a shared prefix would read another request's quantized V; disabling cascade alone does **not** make prefix-cache reuse safe, which is why prefix caching is rejected at startup.
+- vLLM cascade attention is disabled automatically when any layer has active attention quant (it would route shared-prefix batches through native attention and silently drop the in-kernel P/V quant).
 
 ## Known Problems
 
