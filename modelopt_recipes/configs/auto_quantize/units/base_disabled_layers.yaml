@@ -32,3 +32,6 @@
   - "*embed_vision*"
   - "*vision_tower*"
   - "*visual*"
+  # Qwen3.6 MoE (e.g. Qwen/Qwen3.6-35B-A3B): must be disabled or export fails at linear fusion.
+  # Kept in the base set because the deprecated --auto_quantize_* CLI can't inject arch patterns.
+  - "*shared_expert_gate*"
