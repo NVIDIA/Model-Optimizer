@@ -95,5 +95,5 @@ def test_prepare_data_blend_with_split_and_files_sources(
     for _, prefix in blend:
         assert Path(prefix + ".bin").exists()
         assert Path(prefix + ".idx").exists()
-        assert ("_tokens" in prefix) is (target_tokens is not None)
+    assert ("_tokens" in blend[0][1]) is (target_tokens is not None)
     assert (output_dir / "config.yaml").read_bytes() == config_path.read_bytes()
