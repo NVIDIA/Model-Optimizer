@@ -187,17 +187,17 @@ def test_verify_slurm_ssh_success(monkeypatch):
         return subprocess.CompletedProcess(
             args=argv,
             returncode=0,
-            stdout="chenhany\ncluster-login-01\n",
+            stdout="alice\ncluster-login-01\n",
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = bridge.verify_slurm_setup_impl(
-        cluster_host="cw-dfw-cs-001-login-01.nvidia.com",
-        cluster_user="chenhany",
+        cluster_host="login.example.com",
+        cluster_user="alice",
     )
     assert result["ok"] is True
-    assert result["whoami"] == "chenhany"
+    assert result["whoami"] == "alice"
     assert result["remote_hostname"] == "cluster-login-01"
 
 
@@ -209,26 +209,26 @@ def test_verify_slurm_controlmaster_success(monkeypatch):
         calls.append(argv)
         if argv[:3] == ["ssh", "-O", "check"]:
             return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
-        assert "ControlPath=/tmp/ptyche.sock" in argv
+        assert "ControlPath=/tmp/mfa.sock" in argv
         assert "ControlMaster=no" in argv
         return subprocess.CompletedProcess(
             args=argv,
             returncode=0,
-            stdout="chenhany\nlogin-ptyche\n",
+            stdout="alice-mfa\nmfa-login\n",
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = bridge.verify_slurm_setup_impl(
-        cluster_host="login-ptyche.nvidia.com",
-        cluster_user="chenhany-mfa",
-        control_socket="/tmp/ptyche.sock",
-        reconnect_command="ssh ptyche",
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        control_socket="/tmp/mfa.sock",
+        reconnect_command="ssh mfa-cluster",
     )
 
     assert result["ok"] is True
-    assert result["control_socket"] == "/tmp/ptyche.sock"
+    assert result["control_socket"] == "/tmp/mfa.sock"
     assert len(calls) == 2
 
 
@@ -247,15 +247,15 @@ def test_verify_slurm_controlmaster_missing(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = bridge.verify_slurm_setup_impl(
-        cluster_host="login-ptyche.nvidia.com",
-        cluster_user="chenhany-mfa",
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
         control_socket="/tmp/missing.sock",
-        reconnect_command="ssh ptyche",
+        reconnect_command="ssh mfa-cluster",
     )
 
     assert result["ok"] is False
     assert result["reason"] == "mfa_reauth_required"
-    assert result["reconnect_command"] == "ssh ptyche"
+    assert result["reconnect_command"] == "ssh mfa-cluster"
 
 
 def test_verify_slurm_controlmaster_timeout(monkeypatch):
@@ -268,9 +268,9 @@ def test_verify_slurm_controlmaster_timeout(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = bridge.verify_slurm_setup_impl(
-        cluster_host="login-ptyche.nvidia.com",
-        cluster_user="chenhany-mfa",
-        control_socket="/tmp/ptyche.sock",
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        control_socket="/tmp/mfa.sock",
     )
 
     assert result["ok"] is False
@@ -290,7 +290,7 @@ def test_verify_slurm_auth_failed(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = bridge.verify_slurm_setup_impl(
-        cluster_host="ghost-cluster.nvidia.com",
+        cluster_host="ghost-cluster.example.com",
     )
     assert result["ok"] is False
     assert result["reason"] == "ssh_auth_failed"
@@ -323,7 +323,7 @@ def test_submit_job_rejects_both_executors():
     result = bridge.submit_job_impl(
         yaml_path="examples/test.yaml",
         hf_local="/tmp/hf",
-        cluster_host="cluster.nvidia.com",
+        cluster_host="cluster.example.com",
         cluster_user=None,
         identity=None,
         job_dir=None,
@@ -357,15 +357,15 @@ def test_submit_job_mfa_requires_control_socket():
     """MFA Slurm submissions require a reusable ControlMaster socket."""
     result = bridge.submit_job_impl(
         yaml_path="examples/test.yaml",
-        cluster_host="login-ptyche.nvidia.com",
+        cluster_host="mfa-login.example.com",
         mfa=True,
-        ssh_alias="ptyche",
+        ssh_alias="mfa-cluster",
         skip_verify=True,
     )
 
     assert result["ok"] is False
     assert result["reason"] == "mfa_control_socket_required"
-    assert result["ssh_alias"] == "ptyche"
+    assert result["ssh_alias"] == "mfa-cluster"
 
 
 def test_ensure_source_checkout_defaults_to_main(monkeypatch, tmp_path):
@@ -734,28 +734,28 @@ def test_submit_job_slurm_accepts_nmm_cluster_fields(monkeypatch, tmp_path):
 
     result = bridge.submit_job_impl(
         yaml_path="config.yaml",
-        cluster_host="login-ptyche.nvidia.com",
-        cluster_user="chenhany-mfa",
-        account="coreai_dlalgo_cw",
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        account="project_account",
         partition="batch",
         container="ubuntu:24.04",
         ntasks_per_node=1,
-        control_socket="~/.ssh/ptyche.sock",
-        reconnect_command="ssh ptyche",
+        control_socket="~/.ssh/mfa.sock",
+        reconnect_command="ssh mfa-cluster",
         skip_verify=False,
     )
 
     assert result["ok"] is True
-    assert verify_seen["control_socket"] == "~/.ssh/ptyche.sock"
-    assert verify_seen["reconnect_command"] == "ssh ptyche"
-    assert "pipeline.task_0.slurm_config.account=coreai_dlalgo_cw" in captured["argv"]
+    assert verify_seen["control_socket"] == "~/.ssh/mfa.sock"
+    assert verify_seen["reconnect_command"] == "ssh mfa-cluster"
+    assert "pipeline.task_0.slurm_config.account=project_account" in captured["argv"]
     assert "pipeline.task_0.slurm_config.partition=batch" in captured["argv"]
     assert "pipeline.task_0.slurm_config.container=ubuntu:24.04" in captured["argv"]
     assert "pipeline.task_0.slurm_config.ntasks_per_node=1" in captured["argv"]
-    assert captured["env"]["SLURM_ACCOUNT"] == "coreai_dlalgo_cw"
+    assert captured["env"]["SLURM_ACCOUNT"] == "project_account"
     assert captured["env"]["SLURM_PARTITION"] == "batch"
-    assert captured["env"]["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"].endswith(".ssh/ptyche.sock")
-    assert captured["env"]["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] == "ssh ptyche"
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"].endswith(".ssh/mfa.sock")
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] == "ssh mfa-cluster"
 
 
 def test_submit_job_slurm_job_id_without_experiment_id_is_failure(monkeypatch, tmp_path):
@@ -905,28 +905,28 @@ def test_submit_job_dry_run_uses_slurm_inventory_fields(monkeypatch, tmp_path):
 
     result = bridge.submit_job_impl(
         yaml_path="config.yaml",
-        cluster_host="login-ptyche.nvidia.com",
-        cluster_user="chenhany-mfa",
-        account="coreai_dlalgo_modelopt",
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        account="project_account",
         partition="batch",
         container="ubuntu:24.04",
         ntasks_per_node=1,
-        control_socket="~/.ssh/ptyche.sock",
-        ssh_alias="ptyche",
+        control_socket="~/.ssh/mfa.sock",
+        ssh_alias="mfa-cluster",
         skip_verify=True,
         dry_run=True,
     )
 
     assert result["ok"] is True
-    assert "pipeline.task_0.slurm_config.account=coreai_dlalgo_modelopt" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.account=project_account" in captured["argv"]
     assert "pipeline.task_0.slurm_config.partition=batch" in captured["argv"]
     assert "pipeline.task_0.slurm_config.container=ubuntu:24.04" in captured["argv"]
     assert "pipeline.task_0.slurm_config.ntasks_per_node=1" in captured["argv"]
-    assert captured["env"]["SLURM_HOST"] == "login-ptyche.nvidia.com"
-    assert captured["env"]["SLURM_ACCOUNT"] == "coreai_dlalgo_modelopt"
+    assert captured["env"]["SLURM_HOST"] == "mfa-login.example.com"
+    assert captured["env"]["SLURM_ACCOUNT"] == "project_account"
     assert captured["env"]["SLURM_PARTITION"] == "batch"
-    assert captured["env"]["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"].endswith(".ssh/ptyche.sock")
-    assert captured["env"]["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] == "ssh ptyche"
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"].endswith(".ssh/mfa.sock")
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] == "ssh mfa-cluster"
 
 
 def test_submit_job_dry_run_yaml_invalid(monkeypatch, tmp_path):

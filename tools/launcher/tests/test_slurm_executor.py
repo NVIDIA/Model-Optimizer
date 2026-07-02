@@ -36,12 +36,12 @@ class TestBuildSlurmExecutor:
         self, mock_tunnel, mock_executor, monkeypatch
     ):
         """MFA clusters reuse OpenSSH ControlMaster instead of Paramiko SSHTunnel."""
-        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", "/tmp/ptyche.sock")
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", "/tmp/mfa.sock")
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
             requeue=False,
-            host="login-ptyche.nvidia.com",
+            host="mfa-login.example.com",
             port=22,
             account="test_account",
             partition="batch",
@@ -56,7 +56,7 @@ class TestBuildSlurmExecutor:
         )
 
         build_slurm_executor(
-            user="chenhany-mfa",
+            user="alice-mfa",
             identity=None,
             slurm_config=slurm_config,
             experiment_id="exp_001",
@@ -66,8 +66,8 @@ class TestBuildSlurmExecutor:
         )
 
         mock_tunnel.assert_called_once()
-        assert mock_tunnel.call_args.kwargs["host"] == "login-ptyche.nvidia.com"
-        assert mock_tunnel.call_args.kwargs["user"] == "chenhany-mfa"
+        assert mock_tunnel.call_args.kwargs["host"] == "mfa-login.example.com"
+        assert mock_tunnel.call_args.kwargs["user"] == "alice-mfa"
         mock_executor.assert_called_once()
 
 
@@ -87,22 +87,22 @@ class TestControlMasterSSHTunnel:
         monkeypatch.setattr("core.subprocess.run", fake_run)
 
         tunnel = ControlMasterSSHTunnel(
-            host="login-ptyche.nvidia.com",
-            user="chenhany-mfa",
+            host="mfa-login.example.com",
+            user="alice-mfa",
             job_dir="/tmp/job",
         )
         tunnel.connect()
 
         assert tunnel.session.is_connected is True
-        assert tunnel.session.host == "login-ptyche.nvidia.com"
+        assert tunnel.session.host == "mfa-login.example.com"
 
     def test_connect_requires_reauth_when_controlmaster_missing(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", str(tmp_path / "missing.sock"))
-        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND", "ssh ptyche")
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND", "ssh mfa-cluster")
 
         tunnel = ControlMasterSSHTunnel(
-            host="login-ptyche.nvidia.com",
-            user="chenhany-mfa",
+            host="mfa-login.example.com",
+            user="alice-mfa",
             job_dir="/tmp/job",
         )
 
@@ -116,7 +116,7 @@ class TestControlMasterSSHTunnel:
         sock = tmp_path / "cm.sock"
         sock.touch()
         monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", str(sock))
-        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND", "ssh ptyche")
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND", "ssh mfa-cluster")
 
         def fake_run(argv, **kwargs):
             raise subprocess.TimeoutExpired(argv, timeout=15)
@@ -124,15 +124,15 @@ class TestControlMasterSSHTunnel:
         monkeypatch.setattr("core.subprocess.run", fake_run)
 
         tunnel = ControlMasterSSHTunnel(
-            host="login-ptyche.nvidia.com",
-            user="chenhany-mfa",
+            host="mfa-login.example.com",
+            user="alice-mfa",
             job_dir="/tmp/job",
         )
 
         with pytest.raises(RuntimeError) as exc_info:
             tunnel.connect()
         assert "mfa_reauth_required" in str(exc_info.value)
-        assert "ssh ptyche" in str(exc_info.value)
+        assert "ssh mfa-cluster" in str(exc_info.value)
 
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")

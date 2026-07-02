@@ -225,9 +225,7 @@ def _build_server() -> FastMCP:
         ] = None,
         control_socket: Annotated[
             str | None,
-            Field(
-                description=("OpenSSH ControlMaster socket path for MFA clusters such as ptyche.")
-            ),
+            Field(description=("OpenSSH ControlMaster socket path for MFA-backed clusters.")),
         ] = None,
         reconnect_command: Annotated[
             str | None,

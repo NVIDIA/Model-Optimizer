@@ -181,6 +181,8 @@ def _explicit_slurm_fields_from_yaml(yaml_path: str | None, task_name: str) -> s
     except (OSError, yaml.YAMLError):
         return None
 
+    if not isinstance(config, dict):
+        return None
     pipeline = config.get("pipeline", config)
     if not isinstance(pipeline, dict):
         return None
