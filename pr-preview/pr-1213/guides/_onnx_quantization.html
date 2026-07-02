@@ -1,0 +1,502 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ONNX Quantization - Linux (Beta) &mdash; Model Optimizer 0.0.1.dev1+ga38e667b1</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="ONNX Quantization - Windows" href="windows_guides/_ONNX_PTQ_guide.html" />
+    <link rel="prev" title="Compress quantized models" href="_compress_quantized_models.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="1_quantization.html">Quantization</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">ONNX Quantization - Linux (Beta)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#requirements">Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#apply-post-training-quantization-ptq">Apply Post Training Quantization (PTQ)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#prepare-calibration-dataset">Prepare calibration dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#call-ptq-function">Call PTQ function</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#deploy-quantized-onnx-model">Deploy Quantized ONNX Model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#compare-the-performance">Compare the performance</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="1_quantization.html">Quantization</a></li>
+      <li class="breadcrumb-item active">ONNX Quantization - Linux (Beta)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/_onnx_quantization.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="onnx-quantization-linux-beta">
+<h1>ONNX Quantization - Linux (Beta)<a class="headerlink" href="#onnx-quantization-linux-beta" title="Link to this heading"></a></h1>
+<p>ModelOpt provides ONNX quantization that works together with <a class="reference external" href="https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#explicit-implicit-quantization" rel="noopener noreferrer" target="_blank">TensorRT Explicit Quantization (EQ)</a>. The key advantages offered by ModelOpt’s ONNX quantization:</p>
+<ol class="arabic simple">
+<li><p>Easy to use for non-expert users.</p></li>
+<li><p>White-box design allowing expert users to customize the quantization process.</p></li>
+<li><p>Better support for vision transformers.</p></li>
+</ol>
+<p>Currently ONNX quantization supports FP8, INT4 and INT8 quantization.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>ModelOpt ONNX quantization generates new ONNX models with QDQ nodes following TensorRT rules.
+For real speedup, the generated ONNX should be compiled into TensorRT engine.</p>
+</div>
+<section id="requirements">
+<span id="ort-ep-requirements"></span><h2>Requirements<a class="headerlink" href="#requirements" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 33.3%" />
+<col style="width: 66.7%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Execution Provider</p></th>
+<th class="head"><p>Requirements</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>CPU</p></td>
+<td><ul class="simple">
+<li><p>Default</p></li>
+</ul>
+</td>
+</tr>
+<tr class="row-odd"><td><p>CUDA</p></td>
+<td><ul class="simple">
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">libcudnn*.so*</span></code> path to <code class="docutils literal notranslate"><span class="pre">LD_LIBRARY_PATH</span></code> (check required cuDNN version <a class="reference external" href="https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements" rel="noopener noreferrer" target="_blank">here</a>)</p></li>
+</ul>
+</td>
+</tr>
+<tr class="row-even"><td><p>TensorRT</p></td>
+<td><ul class="simple">
+<li><p>Same requirement as CUDA EP</p></li>
+<li><p>TensorRT &gt;= 10.0 (add TensorRT <code class="docutils literal notranslate"><span class="pre">lib/</span></code> path to <code class="docutils literal notranslate"><span class="pre">LD_LIBRARY_PATH</span></code> and  install python wheel). Please refer to <a class="reference external" href="https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.0.1/tars/TensorRT-10.0.1.6.Linux.x86_64-gnu.cuda-12.4.tar.gz" rel="noopener noreferrer" target="_blank">TensorRT 10.0 download link</a>.</p></li>
+</ul>
+</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="apply-post-training-quantization-ptq">
+<h2>Apply Post Training Quantization (PTQ)<a class="headerlink" href="#apply-post-training-quantization-ptq" title="Link to this heading"></a></h2>
+<p>PTQ should be done with a calibration dataset. If calibration dataset is not provided, ModelOpt will use random scales for the QDQ nodes.</p>
+<section id="prepare-calibration-dataset">
+<h3>Prepare calibration dataset<a class="headerlink" href="#prepare-calibration-dataset" title="Link to this heading"></a></h3>
+<p>ModelOpt supports npz/npy file as calibration data format and that numpy file should be a dictionary with keys as model input names and values as numpy arrays.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Example numpy file for single-input ONNX</span>
+<span class="n">calib_data</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">channels</span><span class="p">,</span> <span class="n">h</span><span class="p">,</span> <span class="n">w</span><span class="p">)</span>
+<span class="n">np</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;calib_data.npy&quot;</span><span class="p">,</span> <span class="n">calib_data</span><span class="p">)</span>
+
+<span class="c1"># Example numpy file for single/multi-input ONNX</span>
+<span class="c1"># Dict key should match the input names of ONNX</span>
+<span class="n">calib_data</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;input_name&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="o">*</span><span class="n">shape</span><span class="p">),</span>
+    <span class="s2">&quot;input_name2&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="o">*</span><span class="n">shape2</span><span class="p">),</span>
+<span class="p">}</span>
+<span class="n">np</span><span class="o">.</span><span class="n">savez</span><span class="p">(</span><span class="s2">&quot;calib_data.npz&quot;</span><span class="p">,</span> <span class="n">calib_data</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="call-ptq-function">
+<h3>Call PTQ function<a class="headerlink" href="#call-ptq-function" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">moq</span>
+
+<span class="n">calibration_data</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">calibration_data_path</span><span class="p">)</span>
+
+<span class="n">moq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span>
+    <span class="n">onnx_path</span><span class="o">=</span><span class="n">onnx_path</span><span class="p">,</span>
+    <span class="n">calibration_data</span><span class="o">=</span><span class="n">calibration_data</span><span class="p">,</span>
+    <span class="n">output_path</span><span class="o">=</span><span class="s2">&quot;quant.onnx&quot;</span><span class="p">,</span>
+    <span class="n">quantize_mode</span><span class="o">=</span><span class="s2">&quot;int8&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Alternatively, you can call PTQ function in command line:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">usage</span><span class="p">:</span> <span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">modelopt</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">quantization</span> <span class="p">[</span><span class="o">-</span><span class="n">h</span><span class="p">]</span> <span class="o">--</span><span class="n">onnx_path</span> <span class="n">ONNX_PATH</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">quantize_mode</span> <span class="p">{</span><span class="n">fp8</span><span class="p">,</span><span class="n">int8</span><span class="p">,</span><span class="n">int4</span><span class="p">}]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">calibration_method</span> <span class="p">{</span><span class="nb">max</span><span class="p">,</span><span class="n">entropy</span><span class="p">,</span><span class="n">awq_clip</span><span class="p">,</span><span class="n">rtn_dq</span><span class="p">}]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">calibration_data_path</span> <span class="n">CALIBRATION_DATA_PATH</span> <span class="o">|</span> <span class="o">--</span><span class="n">trust_calibration_data</span> <span class="o">|</span> <span class="o">--</span><span class="n">calibration_cache_path</span> <span class="n">CALIBRATION_CACHE_PATH</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">calibration_shapes</span> <span class="n">CALIBRATION_SHAPES</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">calibration_eps</span> <span class="n">CALIBRATION_EPS</span> <span class="p">[</span><span class="n">CALIBRATION_EPS</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">override_shapes</span> <span class="n">OVERRIDE_SHAPES</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">op_types_to_quantize</span> <span class="n">OP_TYPES_TO_QUANTIZE</span> <span class="p">[</span><span class="n">OP_TYPES_TO_QUANTIZE</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">op_types_to_exclude</span> <span class="n">OP_TYPES_TO_EXCLUDE</span> <span class="p">[</span><span class="n">OP_TYPES_TO_EXCLUDE</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">op_types_to_exclude_fp16</span> <span class="n">OP_TYPES_TO_EXCLUDE_FP16</span> <span class="p">[</span><span class="n">OP_TYPES_TO_EXCLUDE_FP16</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">nodes_to_quantize</span> <span class="n">NODES_TO_QUANTIZE</span> <span class="p">[</span><span class="n">NODES_TO_QUANTIZE</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">nodes_to_exclude</span> <span class="n">NODES_TO_EXCLUDE</span> <span class="p">[</span><span class="n">NODES_TO_EXCLUDE</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">use_external_data_format</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">keep_intermediate_files</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">output_path</span> <span class="n">OUTPUT_PATH</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">log_level</span> <span class="p">{</span><span class="n">DEBUG</span><span class="p">,</span><span class="n">INFO</span><span class="p">,</span><span class="n">WARNING</span><span class="p">,</span><span class="n">ERROR</span><span class="p">,</span><span class="n">debug</span><span class="p">,</span><span class="n">info</span><span class="p">,</span><span class="n">warning</span><span class="p">,</span><span class="n">error</span><span class="p">}]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">log_file</span> <span class="n">LOG_FILE</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">trt_plugins</span> <span class="n">TRT_PLUGINS</span> <span class="p">[</span><span class="n">TRT_PLUGINS</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">trt_plugins_precision</span> <span class="n">TRT_PLUGINS_PRECISION</span> <span class="p">[</span><span class="n">TRT_PLUGINS_PRECISION</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">high_precision_dtype</span> <span class="p">{</span><span class="n">fp32</span><span class="p">,</span><span class="n">fp16</span><span class="p">,</span><span class="n">bf16</span><span class="p">}]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">mha_accumulation_dtype</span> <span class="n">MHA_ACCUMULATION_DTYPE</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">disable_mha_qdq</span><span class="p">]</span> <span class="p">[</span><span class="o">--</span><span class="n">dq_only</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">use_zero_point</span> <span class="n">USE_ZERO_POINT</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">passes</span> <span class="p">{</span><span class="n">concat_elimination</span><span class="p">}</span> <span class="p">[{</span><span class="n">concat_elimination</span><span class="p">}</span> <span class="o">...</span><span class="p">]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">simplify</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">calibrate_per_node</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">direct_io_types</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">opset</span> <span class="n">OPSET</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune</span> <span class="p">[{</span><span class="n">quick</span><span class="p">,</span><span class="n">default</span><span class="p">,</span><span class="n">extensive</span><span class="p">}]]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_output_dir</span> <span class="n">AUTOTUNE_OUTPUT_DIR</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_schemes_per_region</span> <span class="n">AUTOTUNE_SCHEMES_PER_REGION</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_pattern_cache</span> <span class="n">AUTOTUNE_PATTERN_CACHE_FILE</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_qdq_baseline</span> <span class="n">AUTOTUNE_QDQ_BASELINE</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_state_file</span> <span class="n">AUTOTUNE_STATE_FILE</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_node_filter_list</span> <span class="n">AUTOTUNE_NODE_FILTER_LIST</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_verbose</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_use_trtexec</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_timing_cache</span> <span class="n">AUTOTUNE_TIMING_CACHE</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_warmup_runs</span> <span class="n">AUTOTUNE_WARMUP_RUNS</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_timing_runs</span> <span class="n">AUTOTUNE_TIMING_RUNS</span><span class="p">]</span>
+                                            <span class="p">[</span><span class="o">--</span><span class="n">autotune_trtexec_args</span> <span class="n">AUTOTUNE_TRTEXEC_ARGS</span><span class="p">]</span>
+</pre></div>
+</div>
+<section id="modelopt.onnx.quantization.__main__-get_parser-named-arguments">
+<h4>Named Arguments<a class="headerlink" href="#modelopt.onnx.quantization.__main__-get_parser-named-arguments" title="Link to this heading"></a></h4>
+<dl class="option-list">
+<dt><kbd>--onnx_path</kbd></dt>
+<dd><p>Input onnx model without Q/DQ nodes.</p>
+</dd>
+<dt><kbd>--quantize_mode</kbd></dt>
+<dd><p>Possible choices: fp8, int8, int4</p>
+<p>Quantization mode for the given ONNX model.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'int8'</span></code></p>
+</dd>
+<dt><kbd>--calibration_method</kbd></dt>
+<dd><p>Possible choices: max, entropy, awq_clip, rtn_dq</p>
+<p>Calibration method choices for int8/fp8: {entropy (default), max}, int4: {awq_clip (default), rtn_dq}.</p>
+</dd>
+<dt><kbd>--calibration_data_path</kbd></dt>
+<dd><p>Calibration data in npz/npy format. If None, random data for calibration will be used.</p>
+</dd>
+<dt><kbd>--trust_calibration_data</kbd></dt>
+<dd><p>If True, trust the calibration data and allow pickle deserialization.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--calibration_cache_path</kbd></dt>
+<dd><p>Pre-calculated activation tensor scaling factors aka calibration cache path.</p>
+</dd>
+<dt><kbd>--calibration_shapes</kbd></dt>
+<dd><p>Optional model input shapes for calibration.Users should provide the shapes specifically if the model has non-batch dynamic dimensions.Example input shapes spec: input0:1x3x256x256,input1:1x3x128x128</p>
+</dd>
+<dt><kbd>--calibration_eps</kbd></dt>
+<dd><p>Priority order for the execution providers (EP) to calibrate the model. Any subset of [‘trt’, ‘cuda:x’, dml:x, ‘cpu’], where ‘x’ is the device id.If a custom op is detected in the model, ‘trt’ will automatically be added to the EP list.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">['cpu',</span> <span class="pre">'cuda:0',</span> <span class="pre">'trt']</span></code></p>
+</dd>
+<dt><kbd>--override_shapes</kbd></dt>
+<dd><p>Override model input shapes with static shapes.Example input shapes spec: input0:1x3x256x256,input1:1x3x128x128</p>
+</dd>
+<dt><kbd>--op_types_to_quantize</kbd></dt>
+<dd><p>A space-separated list of node types to quantize.</p>
+</dd>
+<dt><kbd>--op_types_to_exclude</kbd></dt>
+<dd><p>A space-separated list of node types to exclude from quantization.</p>
+</dd>
+<dt><kbd>--op_types_to_exclude_fp16</kbd></dt>
+<dd><p>A space-separated list of node types to exclude from FP16/BF16 conversion. Relevant when –high_precision_dtype is ‘fp16’ or ‘bf16’.</p>
+</dd>
+<dt><kbd>--nodes_to_quantize</kbd></dt>
+<dd><p>A space-separated list of node names to quantize. Regular expressions are supported.</p>
+</dd>
+<dt><kbd>--nodes_to_exclude</kbd></dt>
+<dd><p>A space-separated list of node names to exclude from quantization. Regular expressions are supported.</p>
+</dd>
+<dt><kbd>--use_external_data_format</kbd></dt>
+<dd><p>If True or model size is larger than 2GB, &lt;MODEL_NAME&gt;.onnx_data will be used to write weights and constants.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--keep_intermediate_files</kbd></dt>
+<dd><p>If True, keep the files generated during the ONNX models’ conversion/calibration. Otherwise, only the converted ONNX file is kept for the user.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--output_path</kbd></dt>
+<dd><p>Output filename to save the converted ONNX model. If None, save it in the same dir as the original ONNX model with an appropriate suffix.</p>
+</dd>
+<dt><kbd>--log_level</kbd></dt>
+<dd><p>Possible choices: DEBUG, INFO, WARNING, ERROR, debug, info, warning, error</p>
+<p>Set the logging level for the quantization process.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'INFO'</span></code></p>
+</dd>
+<dt><kbd>--log_file</kbd></dt>
+<dd><p>Path to the log file for the quantization process.</p>
+</dd>
+<dt><kbd>--trt_plugins</kbd></dt>
+<dd><p>A space-separated list with the custom TensorRT plugin library paths in .so format (compiled shared library). If this is not None, the TensorrtExecutionProvider is invoked, so make sure that the TensorRT libraries are in the PATH or LD_LIBRARY_PATH variables.</p>
+</dd>
+<dt><kbd>--trt_plugins_precision</kbd></dt>
+<dd><p>A space-separated list indicating the precision for each custom op. Each item should have the format &lt;op_type&gt;:&lt;precision&gt; (all inputs and outputs have the same precision) or &lt;op_type&gt;:[&lt;inp1_precision&gt;,&lt;inp2_precision&gt;,…]:[&lt;out1_precision&gt;,&lt;out2_precision&gt;,…] (inputs and outputs can have different precisions), where precision can be fp32 (default), fp16, int8, or fp8. Note that int8/fp8 should be the same as the quantization mode. For example: op_type_1:fp16 op_type_2:[int8,fp32]:[int8].</p>
+</dd>
+<dt><kbd>--high_precision_dtype</kbd></dt>
+<dd><p>Possible choices: fp32, fp16, bf16</p>
+<p>High precision data type of the output model. If the input model is of dtype fp32, it will be converted to fp16 dtype by default.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'fp16'</span></code></p>
+</dd>
+<dt><kbd>--mha_accumulation_dtype</kbd></dt>
+<dd><p>Accumulation dtype of MHA. This flag will only take effect when mha_accumulation_dtype == ‘fp32’ and quantize_mode == ‘fp8’. One of [‘fp32’, ‘fp16’]</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'fp16'</span></code></p>
+</dd>
+<dt><kbd>--disable_mha_qdq</kbd></dt>
+<dd><p>If True, Q/DQ will not be added to MatMuls in MHA pattern.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--dq_only</kbd></dt>
+<dd><p>If True, FP32/FP16 weights will be converted to INT8/FP8 weights. Q nodes will get removed from the weights and have only DQ nodes with those converted INT8/FP8 weights in the output model.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--use_zero_point</kbd></dt>
+<dd><p>If True, zero-point based quantization will be used - currently, applicable for awq_lite algorithm.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--passes</kbd></dt>
+<dd><p>Possible choices: concat_elimination</p>
+<p>A space-separated list of optimization passes name, if set, appropriate pre/post-processing passes will be invoked.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">['concat_elimination']</span></code></p>
+</dd>
+<dt><kbd>--simplify</kbd></dt>
+<dd><p>If True, the given ONNX model will be simplified before quantization is performed.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--calibrate_per_node</kbd></dt>
+<dd><p>If set, performs calibration per node instead of running inference over the entire network. Useful for reducing memory consumption during large model inference.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--direct_io_types</kbd></dt>
+<dd><p>If True, the I/O types in the quantized ONNX model will be modified to be lower precision whenever possible. Else, they will match the I/O types in the given ONNX model. The currently supported precisions are {fp16, int8, fp8}.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--opset</kbd></dt>
+<dd><p>Target ONNX opset version for the quantized model. If not specified, uses default minimum opset (19 for fp16 scales support, 21 for int4, 23 for nvfp4). The opset may be automatically increased if certain operations require a higher version.</p>
+</dd>
+<dt><kbd>--autotune</kbd></dt>
+<dd><p>Possible choices: quick, default, extensive</p>
+<p>If set, enable Autotune to detect optimal Q/DQ node placements according to TensorRT runtimes. Available modes (presets ‘schemes_per_region’, ‘warmup_runs’, and ‘timing_runs’ values):   - ‘quick’: fewer schemes and benchmark runs for quick exploration;   - ‘default’: balanced, recommended for most cases;   - ‘extensive’: more schemes and runs for extensive search and thorough tuning. Explicit –autotune_schemes_per_region/warmup_runs/timing_runs override the preset.</p>
+</dd>
+</dl>
+</section>
+<section id="modelopt.onnx.quantization.__main__-get_parser-autotune-(only-applicable-when---autotune-is-set)">
+<h4>Autotune (only applicable when –autotune is set)<a class="headerlink" href="#modelopt.onnx.quantization.__main__-get_parser-autotune-(only-applicable-when---autotune-is-set)" title="Link to this heading"></a></h4>
+<dl class="option-list">
+<dt><kbd>--autotune_output_dir</kbd></dt>
+<dd><p>Output directory for autotune results (state file, logs). Default: temp directory.</p>
+</dd>
+<dt><kbd>--autotune_schemes_per_region</kbd></dt>
+<dd><p>Number of Q/DQ schemes to test per region.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">50</span></code></p>
+</dd>
+<dt><kbd>--autotune_pattern_cache</kbd></dt>
+<dd><p>Path to pattern cache YAML for warm-start.</p>
+</dd>
+<dt><kbd>--autotune_qdq_baseline</kbd></dt>
+<dd><p>Path to a pre-quantized ONNX model to import Q/DQ patterns as warm-start.</p>
+</dd>
+<dt><kbd>--autotune_state_file</kbd></dt>
+<dd><p>State file path for crash recovery and resume capability (default: &lt;output_dir&gt;/autotuner_state.yaml).</p>
+</dd>
+<dt><kbd>--autotune_node_filter_list</kbd></dt>
+<dd><p>Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line). Regions without any matching nodes are skipped during autotuning.</p>
+</dd>
+<dt><kbd>--autotune_verbose</kbd></dt>
+<dd><p>Enable verbose logging in the autotuner.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--autotune_use_trtexec</kbd></dt>
+<dd><p>Use trtexec for benchmarking instead of the TensorRT Python API.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--autotune_timing_cache</kbd></dt>
+<dd><p>TensorRT timing cache file for faster engine builds.</p>
+</dd>
+<dt><kbd>--autotune_warmup_runs</kbd></dt>
+<dd><p>Number of warmup runs before timing.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">50</span></code></p>
+</dd>
+<dt><kbd>--autotune_timing_runs</kbd></dt>
+<dd><p>Number of timed runs for latency measurement.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">100</span></code></p>
+</dd>
+<dt><kbd>--autotune_trtexec_args</kbd></dt>
+<dd><p>Additional trtexec arguments as a single quoted string. Example: –autotune_trtexec_args ‘–fp16 –workspace=4096’</p>
+</dd>
+</dl>
+</section>
+<p>If the model contains custom ops, enable calibration with the TensorRT Execution Provider backend with CUDA and CPU fallback (<code class="docutils literal notranslate"><span class="pre">--calibration_eps</span> <span class="pre">trt</span> <span class="pre">cuda:0</span> <span class="pre">cpu</span></code>) and, if relevant, provide the location of the TensorRT plugin in <code class="docutils literal notranslate"><span class="pre">.so</span></code> format via the <code class="docutils literal notranslate"><span class="pre">--trt_plugins</span></code> flag.</p>
+<p>By default, after running the calibration, the quantization tool will insert the QDQ nodes by following TensorRT friendly QDQ insertion algorithm. Users can change the default quantization behavior by tweaking the API params like op_types_to_quantize, op_types_to_exclude etc. See the <a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quantize.html#modelopt.onnx.quantization.quantize" title="modelopt.onnx.quantization.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.quantize()</span></code></a> for details.</p>
+</section>
+</section>
+<section id="deploy-quantized-onnx-model">
+<h2>Deploy Quantized ONNX Model<a class="headerlink" href="#deploy-quantized-onnx-model" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">trtexec</span></code> is a command-line tool provided by TensorRT. Typically, it’s within the <code class="docutils literal notranslate"><span class="pre">/usr/src/tensorrt/bin/</span></code> directory. Below is a simple command to compile the quantized onnx model generated by the previous step into a TensorRT engine file.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>trtexec<span class="w"> </span>--onnx<span class="o">=</span>quant.onnx<span class="w"> </span>--saveEngine<span class="o">=</span>quant.engine<span class="w"> </span>--best
+</pre></div>
+</div>
+</section>
+<section id="compare-the-performance">
+<h2>Compare the performance<a class="headerlink" href="#compare-the-performance" title="Link to this heading"></a></h2>
+<p>The following command will build the engine using fp16 precision. After building, check the reported “Latency” and “Throughput” fields and compare.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>trtexec<span class="w"> </span>--onnx<span class="o">=</span>original.onnx<span class="w"> </span>--saveEngine<span class="o">=</span>fp16.engine<span class="w"> </span>--fp16
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>If you replace <code class="docutils literal notranslate"><span class="pre">--fp16</span></code> flag with <code class="docutils literal notranslate"><span class="pre">--best</span></code> flag, this command will create an int8 engine with TensorRT’s implicit quantization.</p>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="_compress_quantized_models.html" class="btn btn-neutral float-left" title="Compress quantized models" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="windows_guides/_ONNX_PTQ_guide.html" class="btn btn-neutral float-right" title="ONNX Quantization - Windows" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

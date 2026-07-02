@@ -1,0 +1,1153 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>config &mdash; Model Optimizer 0.0.1.dev1+gf128bfaa6</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="conversion" href="modelopt.torch.quantization.conversion.html" />
+    <link rel="prev" title="modelopt.torch.quantization.compress" href="modelopt.torch.quantization.compress.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.quantization.html">quantization</a></li>
+      <li class="breadcrumb-item active">config</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.quantization.config.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="config">
+<h1>config<a class="headerlink" href="#config" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.quantization.config">This document lists the quantization formats supported by Model Optimizer and example quantization configs.</p>
+<section id="quantization-formats">
+<span id="id1"></span><h2>Quantization Formats<a class="headerlink" href="#quantization-formats" title="Link to this heading"></a></h2>
+<p>The following table lists the quantization formats supported by Model Optimizer and the corresponding quantization
+config. See <a class="reference internal" href="#example-quantization-configs"><span class="std std-ref">Quantization Configs</span></a> for the
+specific quantization config definitions.</p>
+<p>Please see <a class="reference internal" href="../../guides/_choosing_quant_methods.html"><span class="doc">choosing the right quantization formats</span></a> to
+learn more about the formats and their use-cases.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The recommended configs given below are for LLM models. For CNN models, only INT8 quantization
+is supported. Please use quantization config <code class="docutils literal notranslate"><span class="pre">INT8_DEFAULT_CFG</span></code> for CNN models.</p>
+</div>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Quantization  Format</p></th>
+<th class="head"><p>Model Optimizer config</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>INT8</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">INT8_SMOOTHQUANT_CFG</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>FP8</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">FP8_DEFAULT_CFG</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>INT4 Weights only AWQ (W4A16)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">INT4_AWQ_CFG</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>INT4-FP8 AWQ (W4A8)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">W4A8_AWQ_BETA_CFG</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="quantization-configs">
+<span id="id2"></span><h2>Quantization Configs<a class="headerlink" href="#quantization-configs" title="Link to this heading"></a></h2>
+<p>Quantization config is a dictionary with two top-level keys:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;quant_cfg&quot;</span></code>: an ordered list of <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> dicts that specify which
+quantizers to configure and how.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;algorithm&quot;</span></code>: the calibration algorithm passed to
+<code class="xref py py-meth docutils literal notranslate"><span class="pre">calibrate</span></code>.</p></li>
+</ul>
+<p>Please see <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeConfig" title="modelopt.torch.quantization.config.QuantizeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeConfig</span></code></a> for the full config schema.</p>
+<section id="quant-cfg-entry-format">
+<h3><code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> — Entry Format<a class="headerlink" href="#quant-cfg-entry-format" title="Link to this heading"></a></h3>
+<p>Each entry in the <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> list is a <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> with the following fields:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> <em>(required)</em>: a wildcard string matched against quantizer module names.
+Quantizer modules are instances of
+<a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a>
+and have names ending with <code class="docutils literal notranslate"><span class="pre">weight_quantizer</span></code>, <code class="docutils literal notranslate"><span class="pre">input_quantizer</span></code>, etc.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">parent_class</span></code> <em>(optional)</em>: restricts matching to quantizers whose immediate parent module is
+of this PyTorch class (e.g. <code class="docutils literal notranslate"><span class="pre">&quot;nn.Linear&quot;</span></code>). If omitted, all matching quantizers are targeted
+regardless of their parent class.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">cfg</span></code> <em>(optional)</em>: a dict of quantizer attributes as defined by
+<a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a>, or a list of such dicts. When a list is given, the matched
+<a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a>
+is replaced with a
+<a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code></a>
+that applies each format in sequence. This is used for example in W4A8 quantization where weights
+are quantized first in INT4 and then in FP8.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">enable</span></code> <em>(optional)</em>: toggles matched quantizers on (<code class="docutils literal notranslate"><span class="pre">True</span></code>) or off (<code class="docutils literal notranslate"><span class="pre">False</span></code>),
+independently of <code class="docutils literal notranslate"><span class="pre">cfg</span></code>. When <code class="docutils literal notranslate"><span class="pre">cfg</span></code> is present and <code class="docutils literal notranslate"><span class="pre">enable</span></code> is absent, the quantizer is
+implicitly enabled. When <code class="docutils literal notranslate"><span class="pre">enable</span></code> is the only field (no <code class="docutils literal notranslate"><span class="pre">cfg</span></code>), it only flips the on/off
+state — all other attributes remain unchanged.</p></li>
+</ul>
+</section>
+<section id="quant-cfg-ordering-and-precedence">
+<h3><code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> — Ordering and Precedence<a class="headerlink" href="#quant-cfg-ordering-and-precedence" title="Link to this heading"></a></h3>
+<p>Entries are applied <strong>in list order</strong>; later entries override earlier ones for any quantizer they
+match. The recommended pattern is:</p>
+<ol class="arabic simple">
+<li><p>Start with a deny-all entry <code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">&quot;*&quot;,</span> <span class="pre">&quot;enable&quot;:</span> <span class="pre">False}</span></code> (provided as
+<code class="xref py py-data docutils literal notranslate"><span class="pre">_base_disable_all</span></code>) to disable every quantizer by default.</p></li>
+<li><p>Follow with format-specific entries that selectively enable and configure the desired quantizers.</p></li>
+<li><p>Append <code class="xref py py-data docutils literal notranslate"><span class="pre">_default_disabled_quantizer_cfg</span></code> to enforce standard exclusions (e.g. BatchNorm
+layers, LM head, MoE routers).</p></li>
+</ol>
+<p>To get the string representation of a module class for use in <code class="docutils literal notranslate"><span class="pre">parent_class</span></code>, do:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="kn">import</span> <span class="n">QuantModuleRegistry</span>
+
+<span class="c1"># Get the class name for nn.Conv2d</span>
+<span class="n">class_name</span> <span class="o">=</span> <span class="n">QuantModuleRegistry</span><span class="o">.</span><span class="n">get_key</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Conv2d</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Here is an example of a quantization config:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">MY_QUANT_CFG</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;quant_cfg&quot;</span><span class="p">:</span> <span class="p">[</span>
+        <span class="c1"># Deny all quantizers by default</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*&quot;</span><span class="p">,</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+
+        <span class="c1"># Enable and configure weight and input quantizers</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*weight_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">}},</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;cfg&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;num_bits&quot;</span><span class="p">:</span> <span class="mi">8</span><span class="p">,</span> <span class="s2">&quot;axis&quot;</span><span class="p">:</span> <span class="kc">None</span><span class="p">}},</span>
+
+        <span class="c1"># Disable input quantizers specifically for LeakyReLU layers</span>
+        <span class="p">{</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*input_quantizer&quot;</span><span class="p">,</span> <span class="s2">&quot;parent_class&quot;</span><span class="p">:</span> <span class="s2">&quot;nn.LeakyReLU&quot;</span><span class="p">,</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">},</span>
+    <span class="p">]</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="example-quantization-configurations">
+<span id="example-quantization-configs"></span><h2>Example Quantization Configurations<a class="headerlink" href="#example-quantization-configurations" title="Link to this heading"></a></h2>
+<p>These example configs can be accessed as attributes of <code class="docutils literal notranslate"><span class="pre">modelopt.torch.quantization</span></code> and can be given as
+input to <a class="reference internal" href="modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize" title="modelopt.torch.quantization.model_quant.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtq.quantize()</span></code></a>. For example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">mtq</span><span class="o">.</span><span class="n">INT8_DEFAULT_CFG</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>You can also create your own config by following these examples.
+For instance, if you want to quantize a model with int4 AWQ algorithm, but need to skip quantizing
+the layer named <code class="docutils literal notranslate"><span class="pre">lm_head</span></code>,  you can create a custom config and quantize your model as following:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="c1"># Create custom config</span>
+<span class="n">CUSTOM_INT4_AWQ_CFG</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="n">mtq</span><span class="o">.</span><span class="n">INT4_AWQ_CFG</span><span class="p">)</span>
+<span class="n">CUSTOM_INT4_AWQ_CFG</span><span class="p">[</span><span class="s2">&quot;quant_cfg&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">({</span><span class="s2">&quot;quantizer_name&quot;</span><span class="p">:</span> <span class="s2">&quot;*lm_head*&quot;</span><span class="p">,</span> <span class="s2">&quot;enable&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">})</span>
+
+<span class="c1"># quantize model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">quantize</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">CUSTOM_INT4_AWQ_CFG</span><span class="p">,</span> <span class="n">forward_loop</span><span class="p">)</span>
+</pre></div>
+</div>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.AWQClipCalibConfig" title="modelopt.torch.quantization.config.AWQClipCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AWQClipCalibConfig</span></code></a></p></td>
+<td><p>The config for <code class="docutils literal notranslate"><span class="pre">awq_clip</span></code> (AWQ clip) algorithm.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.AWQFullCalibConfig" title="modelopt.torch.quantization.config.AWQFullCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AWQFullCalibConfig</span></code></a></p></td>
+<td><p>The config for <code class="docutils literal notranslate"><span class="pre">awq</span></code> or <code class="docutils literal notranslate"><span class="pre">awq_full</span></code> algorithm (AWQ full).</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.AWQLiteCalibConfig" title="modelopt.torch.quantization.config.AWQLiteCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AWQLiteCalibConfig</span></code></a></p></td>
+<td><p>The config for <code class="docutils literal notranslate"><span class="pre">awq_lite</span></code> (AWQ lite) algorithm.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.CompressConfig" title="modelopt.torch.quantization.config.CompressConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CompressConfig</span></code></a></p></td>
+<td><p>Default configuration for <code class="docutils literal notranslate"><span class="pre">compress</span></code> mode.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.GPTQCalibConfig" title="modelopt.torch.quantization.config.GPTQCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">GPTQCalibConfig</span></code></a></p></td>
+<td><p>The config for GPTQ quantization.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.LayerwiseConfig" title="modelopt.torch.quantization.config.LayerwiseConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LayerwiseConfig</span></code></a></p></td>
+<td><p>Nested config for layer-by-layer calibration behavior.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig" title="modelopt.torch.quantization.config.LocalHessianCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LocalHessianCalibConfig</span></code></a></p></td>
+<td><p>Configuration for local Hessian-weighted MSE calibration.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.MaxCalibConfig" title="modelopt.torch.quantization.config.MaxCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MaxCalibConfig</span></code></a></p></td>
+<td><p>The config for max calibration algorithm.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.MseCalibConfig" title="modelopt.torch.quantization.config.MseCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MseCalibConfig</span></code></a></p></td>
+<td><p>Configuration for per-tensor MSE calibration.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p></td>
+<td><p>Calibration algorithm config base.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeConfig" title="modelopt.torch.quantization.config.QuantizeConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizeConfig</span></code></a></p></td>
+<td><p>Default configuration for <code class="docutils literal notranslate"><span class="pre">quantize</span></code> mode.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizerAttributeConfig</span></code></a></p></td>
+<td><p>Quantizer attribute type.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-obj docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a></p></td>
+<td><p>A single entry in a <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> list.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.RotateConfig" title="modelopt.torch.quantization.config.RotateConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RotateConfig</span></code></a></p></td>
+<td><p>Configuration for rotating quantizer input via Hadamard transform (RHT/QuaRot/SpinQuant).</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.SVDQuantConfig" title="modelopt.torch.quantization.config.SVDQuantConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SVDQuantConfig</span></code></a></p></td>
+<td><p>The config for SVDQuant.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.SmoothQuantCalibConfig" title="modelopt.torch.quantization.config.SmoothQuantCalibConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SmoothQuantCalibConfig</span></code></a></p></td>
+<td><p>The config for <code class="docutils literal notranslate"><span class="pre">smoothquant</span></code> algorithm (SmoothQuant).</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.find_quant_cfg_entry_by_path" title="modelopt.torch.quantization.config.find_quant_cfg_entry_by_path"><code class="xref py py-obj docutils literal notranslate"><span class="pre">find_quant_cfg_entry_by_path</span></code></a></p></td>
+<td><p>Find the last entry in a <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> list whose <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> key equals the query.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.need_calibration" title="modelopt.torch.quantization.config.need_calibration"><code class="xref py py-obj docutils literal notranslate"><span class="pre">need_calibration</span></code></a></p></td>
+<td><p>Check if calibration is needed for the given config.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.config.normalize_quant_cfg_list" title="modelopt.torch.quantization.config.normalize_quant_cfg_list"><code class="xref py py-obj docutils literal notranslate"><span class="pre">normalize_quant_cfg_list</span></code></a></p></td>
+<td><p>Normalize a raw quant_cfg into a list of <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> instances.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQClipCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">AWQClipCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQClipCalibConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>The config for <code class="docutils literal notranslate"><span class="pre">awq_clip</span></code> (AWQ clip) algorithm.</p>
+<p>AWQ clip searches clipped amax for per-group quantization, This search requires much more compute
+compared to AWQ lite. To avoid any OOM, the linear layer weights are batched along the <code class="docutils literal notranslate"><span class="pre">out_features</span></code>
+dimension of batch size <code class="docutils literal notranslate"><span class="pre">max_co_batch_size</span></code>. AWQ clip calibration also takes longer than AWQ lite.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQClipCalibConfig.debug">
+<span class="sig-name descname"><span class="pre">debug</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQClipCalibConfig.debug" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQClipCalibConfig.max_co_batch_size">
+<span class="sig-name descname"><span class="pre">max_co_batch_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQClipCalibConfig.max_co_batch_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQClipCalibConfig.max_tokens_per_batch">
+<span class="sig-name descname"><span class="pre">max_tokens_per_batch</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQClipCalibConfig.max_tokens_per_batch" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQClipCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'awq_clip'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQClipCalibConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQClipCalibConfig.min_clip_ratio">
+<span class="sig-name descname"><span class="pre">min_clip_ratio</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQClipCalibConfig.min_clip_ratio" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQClipCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQClipCalibConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQClipCalibConfig.shrink_step">
+<span class="sig-name descname"><span class="pre">shrink_step</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQClipCalibConfig.shrink_step" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQFullCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">AWQFullCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQFullCalibConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.config.AWQLiteCalibConfig" title="modelopt.torch.quantization.config.AWQLiteCalibConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">AWQLiteCalibConfig</span></code></a>, <a class="reference internal" href="#modelopt.torch.quantization.config.AWQClipCalibConfig" title="modelopt.torch.quantization.config.AWQClipCalibConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">AWQClipCalibConfig</span></code></a></p>
+<p>The config for <code class="docutils literal notranslate"><span class="pre">awq</span></code> or <code class="docutils literal notranslate"><span class="pre">awq_full</span></code> algorithm (AWQ full).</p>
+<p>AWQ full performs <code class="docutils literal notranslate"><span class="pre">awq_lite</span></code> followed by <code class="docutils literal notranslate"><span class="pre">awq_clip</span></code>.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQFullCalibConfig.debug">
+<span class="sig-name descname"><span class="pre">debug</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQFullCalibConfig.debug" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQFullCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'awq_full'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQFullCalibConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQFullCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQFullCalibConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQLiteCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">AWQLiteCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQLiteCalibConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>The config for <code class="docutils literal notranslate"><span class="pre">awq_lite</span></code> (AWQ lite) algorithm.</p>
+<p>AWQ lite applies a channel-wise scaling factor which minimizes the output difference after quantization.
+See <a class="reference external" href="https://arxiv.org/pdf/2306.00978" rel="noopener noreferrer" target="_blank">AWQ paper</a> for more details.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQLiteCalibConfig.alpha_step">
+<span class="sig-name descname"><span class="pre">alpha_step</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQLiteCalibConfig.alpha_step" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQLiteCalibConfig.debug">
+<span class="sig-name descname"><span class="pre">debug</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQLiteCalibConfig.debug" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQLiteCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'awq_lite'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQLiteCalibConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.AWQLiteCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.AWQLiteCalibConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.CompressConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">CompressConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.CompressConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Default configuration for <code class="docutils literal notranslate"><span class="pre">compress</span></code> mode.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.CompressConfig.compress">
+<span class="sig-name descname"><span class="pre">compress</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">bool</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.CompressConfig.compress" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.CompressConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.CompressConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.CompressConfig.quant_gemm">
+<span class="sig-name descname"><span class="pre">quant_gemm</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.CompressConfig.quant_gemm" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.GPTQCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">GPTQCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.GPTQCalibConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>The config for GPTQ quantization.</p>
+<p>GPTQ minimizes the layer-wise quantization error by using second-order (Hessian) information
+to perform blockwise weight updates that compensate for rounding loss. Layers are quantized
+sequentially so that each layer’s Hessian is computed from activations that already reflect
+the quantization of preceding layers.</p>
+<p>The default values are taken from the official GPTQ implementation:
+<a class="reference external" href="https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35" rel="noopener noreferrer" target="_blank">https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35</a></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.GPTQCalibConfig.block_size">
+<span class="sig-name descname"><span class="pre">block_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.GPTQCalibConfig.block_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.GPTQCalibConfig.fused">
+<span class="sig-name descname"><span class="pre">fused</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.GPTQCalibConfig.fused" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.GPTQCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'gptq'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.GPTQCalibConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.GPTQCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.GPTQCalibConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.GPTQCalibConfig.perc_damp">
+<span class="sig-name descname"><span class="pre">perc_damp</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.GPTQCalibConfig.perc_damp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LayerwiseConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">LayerwiseConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LayerwiseConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Nested config for layer-by-layer calibration behavior.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LayerwiseConfig.checkpoint_dir">
+<span class="sig-name descname"><span class="pre">checkpoint_dir</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LayerwiseConfig.checkpoint_dir" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LayerwiseConfig.enable">
+<span class="sig-name descname"><span class="pre">enable</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LayerwiseConfig.enable" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LayerwiseConfig.get_qdq_activations_from_prev_layer">
+<span class="sig-name descname"><span class="pre">get_qdq_activations_from_prev_layer</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LayerwiseConfig.get_qdq_activations_from_prev_layer" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LayerwiseConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LayerwiseConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LayerwiseConfig.save_every">
+<span class="sig-name descname"><span class="pre">save_every</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LayerwiseConfig.save_every" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">LocalHessianCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">_SharedStatesConfig</span></code>, <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>Configuration for local Hessian-weighted MSE calibration.</p>
+<p>This algorithm uses activation information to optimize per-block scales for weight
+quantization. It minimizes the output reconstruction error by weighting the loss
+with the local Hessian matrix computed from input activations.</p>
+<p>The local Hessian loss for each block is: <code class="docutils literal notranslate"><span class="pre">(dw</span> <span class="pre">&#64;</span> <span class="pre">H</span> <span class="pre">&#64;</span> <span class="pre">dw.T)</span></code> where:
+- <code class="docutils literal notranslate"><span class="pre">dw</span> <span class="pre">=</span> <span class="pre">weight</span> <span class="pre">-</span> <span class="pre">quantized_weight</span></code> (weight reconstruction error per block)
+- <code class="docutils literal notranslate"><span class="pre">H</span> <span class="pre">=</span> <span class="pre">X</span> <span class="pre">&#64;</span> <span class="pre">X.T</span></code> is the local Hessian computed from input activations X</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.block_size">
+<span class="sig-name descname"><span class="pre">block_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.block_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.debug">
+<span class="sig-name descname"><span class="pre">debug</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.debug" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.distributed_sync">
+<span class="sig-name descname"><span class="pre">distributed_sync</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.distributed_sync" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.fp8_scale_sweep">
+<span class="sig-name descname"><span class="pre">fp8_scale_sweep</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.fp8_scale_sweep" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'local_hessian'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.start_multiplier">
+<span class="sig-name descname"><span class="pre">start_multiplier</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.start_multiplier" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.step_size">
+<span class="sig-name descname"><span class="pre">step_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.step_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.LocalHessianCalibConfig.stop_multiplier">
+<span class="sig-name descname"><span class="pre">stop_multiplier</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.LocalHessianCalibConfig.stop_multiplier" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MaxCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">MaxCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MaxCalibConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">_SharedStatesConfig</span></code>, <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>The config for max calibration algorithm.</p>
+<p>Max calibration estimates max values of activations or weights and use this max values
+to set the quantization scaling factor.
+See <a class="reference external" href="https://arxiv.org/pdf/2004.09602" rel="noopener noreferrer" target="_blank">Integer Quantization</a> for the concepts.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MaxCalibConfig.distributed_sync">
+<span class="sig-name descname"><span class="pre">distributed_sync</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MaxCalibConfig.distributed_sync" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MaxCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'max'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MaxCalibConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MaxCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MaxCalibConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MaxCalibConfig.sync_expert_weight_amax">
+<span class="sig-name descname"><span class="pre">sync_expert_weight_amax</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MaxCalibConfig.sync_expert_weight_amax" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MseCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">MseCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MseCalibConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">_SharedStatesConfig</span></code>, <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>Configuration for per-tensor MSE calibration.</p>
+<p>Finds a scale s (via amax a, with s = a / q_max) that minimizes the
+reconstruction error of a tensor after uniform Q→DQ:</p>
+<blockquote>
+<div><p>s* = argmin_s  E[(W - DQ(Q(W; s)))^2],   W ∈ weights</p>
+</div></blockquote>
+<p>When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MseCalibConfig.distributed_sync">
+<span class="sig-name descname"><span class="pre">distributed_sync</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MseCalibConfig.distributed_sync" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MseCalibConfig.fp8_scale_sweep">
+<span class="sig-name descname"><span class="pre">fp8_scale_sweep</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MseCalibConfig.fp8_scale_sweep" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MseCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'mse'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MseCalibConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MseCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MseCalibConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MseCalibConfig.start_multiplier">
+<span class="sig-name descname"><span class="pre">start_multiplier</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MseCalibConfig.start_multiplier" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MseCalibConfig.step_size">
+<span class="sig-name descname"><span class="pre">step_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MseCalibConfig.step_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.MseCalibConfig.stop_multiplier">
+<span class="sig-name descname"><span class="pre">stop_multiplier</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.MseCalibConfig.stop_multiplier" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeAlgorithmConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">QuantizeAlgorithmConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Calibration algorithm config base.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeAlgorithmConfig.layerwise">
+<span class="sig-name descname"><span class="pre">layerwise</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.quantization.config.LayerwiseConfig" title="modelopt.torch.quantization.config.LayerwiseConfig"><span class="pre">LayerwiseConfig</span></a></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig.layerwise" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeAlgorithmConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="pre">None</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeAlgorithmConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeAlgorithmConfig.moe_calib_experts_ratio">
+<span class="sig-name descname"><span class="pre">moe_calib_experts_ratio</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig.moe_calib_experts_ratio" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeAlgorithmConfig.validate_layerwise_checkpoint_dir">
+<span class="sig-name descname"><span class="pre">validate_layerwise_checkpoint_dir</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig.validate_layerwise_checkpoint_dir" title="Link to this definition"></a></dt>
+<dd><p>Raise if layerwise.checkpoint_dir is set but layerwise.enable is False.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">QuantizeConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Default configuration for <code class="docutils literal notranslate"><span class="pre">quantize</span></code> mode.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeConfig.algorithm">
+<span class="sig-name descname"><span class="pre">algorithm</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">dict</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><span class="pre">QuantizeAlgorithmConfig</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">dict</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><span class="pre">QuantizeAlgorithmConfig</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeConfig.algorithm" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeConfig.normalize_quant_cfg">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">normalize_quant_cfg</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">v</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeConfig.normalize_quant_cfg" title="Link to this definition"></a></dt>
+<dd><p>Normalize raw quant_cfg input into a <code class="docutils literal notranslate"><span class="pre">list[QuantizerCfgEntry]</span></code>.</p>
+<p>Delegates to <a class="reference internal" href="#modelopt.torch.quantization.config.normalize_quant_cfg_list" title="modelopt.torch.quantization.config.normalize_quant_cfg_list"><code class="xref py py-func docutils literal notranslate"><span class="pre">normalize_quant_cfg_list()</span></code></a>, which accepts every supported input
+shape (new-format list, legacy single-key-dict list, legacy flat dict, and lists
+containing already-validated <code class="docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code> instances) and rejects anything
+else with a clear <code class="docutils literal notranslate"><span class="pre">ValueError</span></code> before pydantic’s field-type check would see it.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>v</strong> (<em>Sequence</em><em>[</em><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><em>QuantizerCfgEntry</em></a><em>] </em><em>| </em><em>Sequence</em><em>[</em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>] </em><em>| </em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><em>QuantizerCfgEntry</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizeConfig.quant_cfg">
+<span class="sig-name descname"><span class="pre">quant_cfg</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><span class="pre">QuantizerCfgEntry</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizeConfig.quant_cfg" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">QuantizerAttributeConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Quantizer attribute type.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.axis">
+<span class="sig-name descname"><span class="pre">axis</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.axis" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.backend">
+<span class="sig-name descname"><span class="pre">backend</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.backend" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.backend_extra_args">
+<span class="sig-name descname"><span class="pre">backend_extra_args</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.backend_extra_args" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.bias">
+<span class="sig-name descname"><span class="pre">bias</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'static'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'dynamic'</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'mean'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'max_min'</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.bias" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.block_sizes">
+<span class="sig-name descname"><span class="pre">block_sizes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.block_sizes" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.calibrator">
+<span class="sig-name descname"><span class="pre">calibrator</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">Callable</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">tuple</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.calibrator" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.enable">
+<span class="sig-name descname"><span class="pre">enable</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.enable" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.fake_quant">
+<span class="sig-name descname"><span class="pre">fake_quant</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.fake_quant" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.learn_amax">
+<span class="sig-name descname"><span class="pre">learn_amax</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.learn_amax" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.narrow_range">
+<span class="sig-name descname"><span class="pre">narrow_range</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.narrow_range" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.num_bits">
+<span class="sig-name descname"><span class="pre">num_bits</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.num_bits" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.pass_through_bwd">
+<span class="sig-name descname"><span class="pre">pass_through_bwd</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.pass_through_bwd" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.rotate">
+<span class="sig-name descname"><span class="pre">rotate</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.quantization.config.RotateConfig" title="modelopt.torch.quantization.config.RotateConfig"><span class="pre">RotateConfig</span></a></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.rotate" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.trt_high_precision_dtype">
+<span class="sig-name descname"><span class="pre">trt_high_precision_dtype</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.trt_high_precision_dtype" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.type">
+<span class="sig-name descname"><span class="pre">type</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.type" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.unsigned">
+<span class="sig-name descname"><span class="pre">unsigned</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.unsigned" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.use_constant_amax">
+<span class="sig-name descname"><span class="pre">use_constant_amax</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.use_constant_amax" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_bias">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_bias</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">v</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_bias" title="Link to this definition"></a></dt>
+<dd><p>Validate bias.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_block_sizes">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_block_sizes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">info</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_block_sizes" title="Link to this definition"></a></dt>
+<dd><p>Validate block sizes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>info</strong> (<em>ValidationInfo</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_calibrator">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_calibrator</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">info</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_calibrator" title="Link to this definition"></a></dt>
+<dd><p>Validate calibrator.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>info</strong> (<em>ValidationInfo</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_config">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">values</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_config" title="Link to this definition"></a></dt>
+<dd><p>Validate quantizer config.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_learn_amax">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_learn_amax</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">v</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_learn_amax" title="Link to this definition"></a></dt>
+<dd><p>Validate learn_amax.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_num_bits">
+<span class="sig-name descname"><span class="pre">validate_num_bits</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig.validate_num_bits" title="Link to this definition"></a></dt>
+<dd><p>Validate <cite>num_bits</cite>.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerCfgEntry">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">QuantizerCfgEntry</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>A single entry in a <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> list.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerCfgEntry.cfg">
+<span class="sig-name descname"><span class="pre">cfg</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><span class="pre">QuantizerAttributeConfig</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerAttributeConfig" title="modelopt.torch.quantization.config.QuantizerAttributeConfig"><span class="pre">QuantizerAttributeConfig</span></a><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerCfgEntry.cfg" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerCfgEntry.enable">
+<span class="sig-name descname"><span class="pre">enable</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerCfgEntry.enable" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerCfgEntry.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerCfgEntry.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerCfgEntry.parent_class">
+<span class="sig-name descname"><span class="pre">parent_class</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerCfgEntry.parent_class" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.QuantizerCfgEntry.quantizer_name">
+<span class="sig-name descname"><span class="pre">quantizer_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.QuantizerCfgEntry.quantizer_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.RotateConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">RotateConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.RotateConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Configuration for rotating quantizer input via Hadamard transform (RHT/QuaRot/SpinQuant).</p>
+<p>See <a class="reference internal" href="modelopt.torch.quantization.nn.functional.html#modelopt.torch.quantization.nn.functional.normalized_hadamard_transform" title="modelopt.torch.quantization.nn.functional.normalized_hadamard_transform"><code class="xref py py-func docutils literal notranslate"><span class="pre">normalized_hadamard_transform</span></code></a>
+for transform details.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.RotateConfig.block_size">
+<span class="sig-name descname"><span class="pre">block_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.RotateConfig.block_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.RotateConfig.enable">
+<span class="sig-name descname"><span class="pre">enable</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.RotateConfig.enable" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.RotateConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.RotateConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.RotateConfig.rotate_fp32">
+<span class="sig-name descname"><span class="pre">rotate_fp32</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.RotateConfig.rotate_fp32" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.RotateConfig.validate_block_size">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_block_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">v</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.RotateConfig.validate_block_size" title="Link to this definition"></a></dt>
+<dd><p>Validate block_size is a positive int (mode=before to catch bool before int coercion).</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.SVDQuantConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SVDQuantConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.SVDQuantConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>The config for SVDQuant.</p>
+<p>Refer to the <a class="reference external" href="https://arxiv.org/pdf/2411.05007" rel="noopener noreferrer" target="_blank">SVDQuant paper</a> for more details.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.SVDQuantConfig.lowrank">
+<span class="sig-name descname"><span class="pre">lowrank</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.SVDQuantConfig.lowrank" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.SVDQuantConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'svdquant'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.SVDQuantConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.SVDQuantConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.SVDQuantConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.SmoothQuantCalibConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SmoothQuantCalibConfig</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.SmoothQuantCalibConfig" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeAlgorithmConfig" title="modelopt.torch.quantization.config.QuantizeAlgorithmConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizeAlgorithmConfig</span></code></a></p>
+<p>The config for <code class="docutils literal notranslate"><span class="pre">smoothquant</span></code> algorithm (SmoothQuant).</p>
+<p>SmoothQuant applies a smoothing factor which balances the scale of outliers in weights and activations.
+See <a class="reference external" href="https://arxiv.org/pdf/2211.10438" rel="noopener noreferrer" target="_blank">SmoothQuant paper</a> for more details.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.SmoothQuantCalibConfig.alpha">
+<span class="sig-name descname"><span class="pre">alpha</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.SmoothQuantCalibConfig.alpha" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.SmoothQuantCalibConfig.method">
+<span class="sig-name descname"><span class="pre">method</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'smoothquant'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.config.SmoothQuantCalibConfig.method" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.SmoothQuantCalibConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.quantization.config.SmoothQuantCalibConfig.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.find_quant_cfg_entry_by_path">
+<span class="sig-name descname"><span class="pre">find_quant_cfg_entry_by_path</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">quant_cfg_list</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantizer_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.find_quant_cfg_entry_by_path" title="Link to this definition"></a></dt>
+<dd><p>Find the last entry in a <code class="docutils literal notranslate"><span class="pre">quant_cfg</span></code> list whose <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> key equals the query.</p>
+<p>This performs an <strong>exact string comparison</strong> against the <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> field of each
+entry — it does <em>not</em> apply <code class="docutils literal notranslate"><span class="pre">fnmatch</span></code> pattern matching.  For example, passing
+<code class="docutils literal notranslate"><span class="pre">&quot;*input_quantizer&quot;</span></code> will only match entries whose <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> is literally
+<code class="docutils literal notranslate"><span class="pre">&quot;*input_quantizer&quot;</span></code>, not entries with a different wildcard that would match the same
+module names at apply time.</p>
+<p>Returns the <em>last</em> match because entries are applied in list order and later entries
+override earlier ones, so the last match represents the effective configuration.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>quant_cfg_list</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><em>QuantizerCfgEntry</em></a><em>]</em>) – A list of <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> dicts.</p></li>
+<li><p><strong>quantizer_name</strong> (<em>str</em>) – The exact <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> string to search for.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The last entry whose <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> equals <em>quantizer_name</em>.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>KeyError</strong> – If no entry with the given <code class="docutils literal notranslate"><span class="pre">quantizer_name</span></code> is found.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><em>QuantizerCfgEntry</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.need_calibration">
+<span class="sig-name descname"><span class="pre">need_calibration</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.need_calibration" title="Link to this definition"></a></dt>
+<dd><p>Check if calibration is needed for the given config.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config</strong> (<a class="reference internal" href="#modelopt.torch.quantization.config.QuantizeConfig" title="modelopt.torch.quantization.config.QuantizeConfig"><em>QuantizeConfig</em></a><em> | </em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.config.normalize_quant_cfg_list">
+<span class="sig-name descname"><span class="pre">normalize_quant_cfg_list</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">v</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.config.normalize_quant_cfg_list" title="Link to this definition"></a></dt>
+<dd><p>Normalize a raw quant_cfg into a list of <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> instances.</p>
+<p>Supports the following input forms:</p>
+<ul class="simple">
+<li><p>A <code class="docutils literal notranslate"><span class="pre">list</span></code> of entries in any of the per-entry forms below.</p></li>
+<li><p>A legacy flat <code class="docutils literal notranslate"><span class="pre">dict</span></code> (<code class="docutils literal notranslate"><span class="pre">{&quot;*&quot;:</span> <span class="pre">...,</span> <span class="pre">&quot;*weight_quantizer&quot;:</span> <span class="pre">...}</span></code>) — each key/value pair is
+converted to a single-key dict entry and then normalized.</p></li>
+</ul>
+<p>Per-entry forms (when input is a list):</p>
+<ul class="simple">
+<li><p>New format: <code class="docutils literal notranslate"><span class="pre">{&quot;quantizer_name&quot;:</span> <span class="pre">...,</span> <span class="pre">&quot;enable&quot;:</span> <span class="pre">...,</span> <span class="pre">&quot;cfg&quot;:</span> <span class="pre">...}</span></code> — passed through.</p></li>
+<li><p>Legacy single-key format: <code class="docutils literal notranslate"><span class="pre">{&quot;&lt;quantizer_name&gt;&quot;:</span> <span class="pre">&lt;cfg_or_dict&gt;}</span></code> — converted to new format.</p></li>
+<li><p>Legacy <code class="docutils literal notranslate"><span class="pre">nn.*</span></code>-scoped format: <code class="docutils literal notranslate"><span class="pre">{&quot;nn.&lt;Class&gt;&quot;:</span> <span class="pre">{&quot;&lt;quantizer_name&gt;&quot;:</span> <span class="pre">&lt;cfg&gt;}}</span></code> — converted
+to a new-format entry with <code class="docutils literal notranslate"><span class="pre">parent_class</span></code> set.</p></li>
+</ul>
+<p>Each normalized dict is then constructed into a <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a>, whose own
+validator enforces that every entry specifies <code class="docutils literal notranslate"><span class="pre">cfg</span></code>, <code class="docutils literal notranslate"><span class="pre">enable</span></code>, or both, and that any
+<code class="docutils literal notranslate"><span class="pre">cfg</span></code> for an enabled quantizer is a non-empty dict or non-empty list of non-empty dicts.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>v</strong> (<em>Sequence</em><em>[</em><a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><em>QuantizerCfgEntry</em></a><em>] </em><em>| </em><em>Sequence</em><em>[</em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>] </em><em>| </em><em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>) – A list of raw quant_cfg entries in any supported format, or a legacy flat dict.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A list of validated <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> instances.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>ValueError</strong> – If any entry’s shape is not recognized, or if it fails
+    <a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantizerCfgEntry</span></code></a> validation (missing instruction or invalid <code class="docutils literal notranslate"><span class="pre">cfg</span></code>).</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="#modelopt.torch.quantization.config.QuantizerCfgEntry" title="modelopt.torch.quantization.config.QuantizerCfgEntry"><em>QuantizerCfgEntry</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.quantization.compress.html" class="btn btn-neutral float-left" title="modelopt.torch.quantization.compress" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.quantization.conversion.html" class="btn btn-neutral float-right" title="conversion" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

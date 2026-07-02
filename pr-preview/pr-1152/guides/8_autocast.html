@@ -1,0 +1,486 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoCast (ONNX) &mdash; Model Optimizer 0.0.1.dev1+ga066fd775</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Autotune (ONNX)" href="9_autotune.html" />
+    <link rel="prev" title="NAS" href="7_nas.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">AutoCast (ONNX)</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#basic-commandline-usage">Basic Commandline Usage</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#modelopt.onnx.autocast.__main__-get_parser-named-arguments">Named Arguments</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#python-api-usage">Python API Usage</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#how-it-works">How It Works</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#best-practices">Best Practices</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#limitations-and-restrictions">Limitations and Restrictions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#example-usage">Example Usage</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">AutoCast (ONNX)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/8_autocast.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="autocast-onnx">
+<h1>AutoCast (ONNX)<a class="headerlink" href="#autocast-onnx" title="Link to this heading"></a></h1>
+<p>AutoCast is a tool for converting FP32 ONNX models to mixed precision FP32-FP16 or FP32-BF16 models.
+While casting FP32 to FP16/BF16, some nodes might be more sensitive to affecting accuracy.
+AutoCast intelligently selects nodes to keep in FP32 precision to maintain model accuracy while benefiting from
+reduced precision on the rest of the nodes. AutoCast automatically injects cast operations around the selected
+nodes.</p>
+<section id="basic-commandline-usage">
+<h2>Basic Commandline Usage<a class="headerlink" href="#basic-commandline-usage" title="Link to this heading"></a></h2>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">usage</span><span class="p">:</span> <span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">modelopt</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">autocast</span> <span class="p">[</span><span class="o">-</span><span class="n">h</span><span class="p">]</span> <span class="o">--</span><span class="n">onnx_path</span> <span class="n">ONNX_PATH</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">output_path</span> <span class="n">OUTPUT_PATH</span><span class="p">]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">low_precision_type</span> <span class="p">{</span><span class="n">fp16</span><span class="p">,</span><span class="n">bf16</span><span class="p">}]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">calibration_data</span> <span class="n">CALIBRATION_DATA</span><span class="p">]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">nodes_to_exclude</span> <span class="p">[</span><span class="n">NODES_TO_EXCLUDE</span> <span class="o">...</span><span class="p">]]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">op_types_to_exclude</span> <span class="p">[</span><span class="n">OP_TYPES_TO_EXCLUDE</span> <span class="o">...</span><span class="p">]]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">nodes_to_include</span> <span class="p">[</span><span class="n">NODES_TO_INCLUDE</span> <span class="o">...</span><span class="p">]]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">op_types_to_include</span> <span class="p">[</span><span class="n">OP_TYPES_TO_INCLUDE</span> <span class="o">...</span><span class="p">]]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">data_max</span> <span class="n">DATA_MAX</span><span class="p">]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">init_max</span> <span class="n">INIT_MAX</span><span class="p">]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">init_conversion_max_bytes</span> <span class="n">INIT_CONVERSION_MAX_BYTES</span><span class="p">]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">max_depth_of_reduction</span> <span class="n">MAX_DEPTH_OF_REDUCTION</span><span class="p">]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">keep_io_types</span><span class="p">]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">log_level</span> <span class="p">{</span><span class="n">DEBUG</span><span class="p">,</span><span class="n">INFO</span><span class="p">,</span><span class="n">WARNING</span><span class="p">,</span><span class="n">ERROR</span><span class="p">,</span><span class="n">CRITICAL</span><span class="p">}]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">providers</span> <span class="n">PROVIDERS</span> <span class="p">[</span><span class="n">PROVIDERS</span> <span class="o">...</span><span class="p">]]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">trt_plugins</span> <span class="n">TRT_PLUGINS</span> <span class="p">[</span><span class="n">TRT_PLUGINS</span> <span class="o">...</span><span class="p">]]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">trt_plugins_precision</span> <span class="n">TRT_PLUGINS_PRECISION</span> <span class="p">[</span><span class="n">TRT_PLUGINS_PRECISION</span> <span class="o">...</span><span class="p">]]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">opset</span> <span class="n">OPSET</span><span class="p">]</span>
+                                        <span class="p">[</span><span class="o">--</span><span class="n">use_standalone_type_inference</span><span class="p">]</span>
+</pre></div>
+</div>
+<section id="modelopt.onnx.autocast.__main__-get_parser-named-arguments">
+<h3>Named Arguments<a class="headerlink" href="#modelopt.onnx.autocast.__main__-get_parser-named-arguments" title="Link to this heading"></a></h3>
+<dl class="option-list">
+<dt><kbd>--onnx_path</kbd></dt>
+<dd><p>Path to the ONNX model</p>
+</dd>
+<dt><kbd>--output_path</kbd></dt>
+<dd><p>Output filename to save the converted ONNX model. If None, save it in the same dir as the original ONNX model with an appropriate suffix.</p>
+</dd>
+<dt><kbd>--low_precision_type, -t</kbd></dt>
+<dd><p>Possible choices: fp16, bf16</p>
+<p>Precision to reduce to</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'fp16'</span></code></p>
+</dd>
+<dt><kbd>--calibration_data, -d</kbd></dt>
+<dd><p>File path to inputs for reference runner. Supports: (1) NPZ file for single batch, (2) Directory containing multiple NPZ files for multi-batch calibration, (3) Polygraphy JSON file (supports multiple batches). Multi-batch calibration aggregates statistics across all batches for more robust precision conversion decisions. If not provided, random inputs will be used.</p>
+</dd>
+<dt><kbd>--nodes_to_exclude, -ne</kbd></dt>
+<dd><p>List of regex patterns to match node names that should remain in FP32</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">[]</span></code></p>
+</dd>
+<dt><kbd>--op_types_to_exclude, -ope</kbd></dt>
+<dd><p>List of op types that should remain in FP32</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">[]</span></code></p>
+</dd>
+<dt><kbd>--nodes_to_include, -ni</kbd></dt>
+<dd><p>List of regex patterns to match node names that should be force-included in low precision, even if they would otherwise be excluded</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">[]</span></code></p>
+</dd>
+<dt><kbd>--op_types_to_include, -opi</kbd></dt>
+<dd><p>List of op types that should be force-included in low precision, even if they would otherwise be excluded</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">[]</span></code></p>
+</dd>
+<dt><kbd>--data_max</kbd></dt>
+<dd><p>Maximum absolute value for node outputs, nodes with outputs greater than this value will remain in FP32</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">512</span></code></p>
+</dd>
+<dt><kbd>--init_max</kbd></dt>
+<dd><p>Maximum absolute value for initializers, nodes with initializers greater than this value will remain in FP32</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">6.55e+04</span></code></p>
+</dd>
+<dt><kbd>--init_conversion_max_bytes</kbd></dt>
+<dd><p>Maximum size in bytes for initializer conversion. Larger initializers will be cast at runtime.</p>
+</dd>
+<dt><kbd>--max_depth_of_reduction</kbd></dt>
+<dd><p>Maximum depth of reduction allowed in low precision. Nodes with higher reduction depths will remain in FP32. If not provided, infinity will be used.</p>
+</dd>
+<dt><kbd>--keep_io_types</kbd></dt>
+<dd><p>Keep the input and output types of the model; otherwise they will be converted to reduced precision (FP16/BF16)</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+<dt><kbd>--log_level</kbd></dt>
+<dd><p>Possible choices: DEBUG, INFO, WARNING, ERROR, CRITICAL</p>
+<p>Log level</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">'INFO'</span></code></p>
+</dd>
+<dt><kbd>--providers</kbd></dt>
+<dd><p>List of Execution Providers (EPs) for ONNX-Runtime backend. Any subset of [‘trt’, ‘cuda:x’, ‘cpu’], where ‘x’ is the device id. If a custom op is detected in the model, ‘trt’ will automatically be added to the EP list.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">['cpu']</span></code></p>
+</dd>
+<dt><kbd>--trt_plugins</kbd></dt>
+<dd><p>List of custom TensorRT plugin library paths in .so format (compiled shared library). If this a non-empty list, the TensorrtExecutionProvider is invoked, so make sure that the TensorRT libraries are in the PATH or LD_LIBRARY_PATH variables.</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">[]</span></code></p>
+</dd>
+<dt><kbd>--trt_plugins_precision</kbd></dt>
+<dd><p>A space-separated list indicating the precision for each custom op. Each item should have the format &lt;op_type&gt;:&lt;precision&gt; (all inputs and outputs have the same precision) or &lt;op_type&gt;:[&lt;inp1_precision&gt;,&lt;inp2_precision&gt;,…]:[&lt;out1_precision&gt;,&lt;out2_precision&gt;,…] (inputs and outputs can have different precisions), where precision can be fp32 (default) or fp16.For example: op_type_1:fp16 op_type_2:[fp16,fp32]:[fp16].</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">[]</span></code></p>
+</dd>
+<dt><kbd>--opset</kbd></dt>
+<dd><p>Target ONNX opset version for the converted model. If not specified, uses default minimum opset based on precision type (22 for bf16, 13 for fp16). Note: BF16 requires opset &gt;= 22 for full support. The opset may be automatically increased if certain operations (e.g., quantization nodes) require a higher version.</p>
+</dd>
+<dt><kbd>--use_standalone_type_inference</kbd></dt>
+<dd><p>Use local type inference implementation instead of ONNX’s infer_shapes (experimental).This is a workaround for cases where shape inference fails for any reason.Default: False (uses ONNX’s infer_shapes which does both shape and type inference).</p>
+<p>Default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p>
+</dd>
+</dl>
+</section>
+</section>
+<section id="python-api-usage">
+<h2>Python API Usage<a class="headerlink" href="#python-api-usage" title="Link to this heading"></a></h2>
+<p>AutoCast can also be used programmatically through its Python API:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">onnx</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.autocast</span><span class="w"> </span><span class="kn">import</span> <span class="n">convert_to_mixed_precision</span>
+
+<span class="c1"># Convert model to mixed precision</span>
+<span class="n">converted_model</span> <span class="o">=</span> <span class="n">convert_to_mixed_precision</span><span class="p">(</span>
+   <span class="n">onnx_path</span><span class="o">=</span><span class="s2">&quot;model.onnx&quot;</span><span class="p">,</span>
+   <span class="n">low_precision_type</span><span class="o">=</span><span class="s2">&quot;fp16&quot;</span><span class="p">,</span>            <span class="c1"># or &quot;bf16&quot;</span>
+   <span class="n">nodes_to_exclude</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>                <span class="c1"># optional list of node name patterns to keep in FP32</span>
+   <span class="n">op_types_to_exclude</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>             <span class="c1"># optional list of op types to keep in FP32</span>
+   <span class="n">nodes_to_include</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>                <span class="c1"># optional list of node name patterns to force-include in low precision</span>
+   <span class="n">op_types_to_include</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>             <span class="c1"># optional list of op types to force-include in low precision</span>
+   <span class="n">data_max</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>                         <span class="c1"># threshold for node outputs</span>
+   <span class="n">init_max</span><span class="o">=</span><span class="mi">65504</span><span class="p">,</span>                       <span class="c1"># threshold for initializers</span>
+   <span class="n">keep_io_types</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>                  <span class="c1"># whether to preserve input/output types</span>
+   <span class="n">calibration_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>                <span class="c1"># optional path to input data file</span>
+   <span class="n">init_conversion_max_bytes</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>       <span class="c1"># maximum size in bytes for initializer conversion</span>
+   <span class="n">providers</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;cpu&quot;</span><span class="p">],</span>                    <span class="c1"># list of Execution Providers for ONNX-Runtime backend</span>
+   <span class="n">trt_plugins</span><span class="o">=</span><span class="p">[],</span>                       <span class="c1"># list of TensorRT plugin library paths in .so format</span>
+   <span class="n">max_depth_of_reduction</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>          <span class="c1"># maximum depth of reduction allowed in low precision</span>
+   <span class="n">opset</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>                           <span class="c1"># optional target ONNX opset version (default: 13 for fp16, 22 for bf16)</span>
+   <span class="n">use_standalone_type_inference</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>  <span class="c1"># use standalone type inference instead of ONNX&#39;s infer_shapes (WAR)</span>
+<span class="p">)</span>
+
+<span class="c1"># Save the converted model</span>
+<span class="n">onnx</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">converted_model</span><span class="p">,</span> <span class="s2">&quot;converted_model.onnx&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="how-it-works">
+<h2>How It Works<a class="headerlink" href="#how-it-works" title="Link to this heading"></a></h2>
+<p>AutoCast follows these steps to convert a model:</p>
+<ol class="arabic">
+<li><p><strong>Model Loading and Sanitization</strong>:</p>
+<ul class="simple">
+<li><p>Loads the ONNX model</p></li>
+<li><p>Performs graph sanitization and optimizations</p></li>
+<li><p>Ensures minimum opset version requirements (22 for BF16, 13 for FP16 by default, or user-specified via <code class="docutils literal notranslate"><span class="pre">--opset</span></code>)</p></li>
+</ul>
+</li>
+<li><p><strong>Node Classification</strong>:</p>
+<ul class="simple">
+<li><p>Analyzes each node in the graph</p></li>
+<li><p>Determines which nodes should remain in FP32 based on input and output tensors magnitudes, operation types and node name patterns</p></li>
+<li><p>If a calibration dataset is provided, it will be used to generate intermediate tensor magnitudes for more accurate node classification, otherwise random data will be used.</p></li>
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">nodes_to_include</span></code> and <code class="docutils literal notranslate"><span class="pre">op_types_to_include</span></code> to force-include nodes in low precision, even if they would otherwise be excluded.</p></li>
+<li><p>Default classification rules. Nodes that meet any of these rules will be kept in high precision:
+- Node I/O magnitudes are higher than <code class="docutils literal notranslate"><span class="pre">data_max</span></code> (default: 512). Due to precision limitations, compute of high magnitude tensors in low precision might not be accurate. The unit in last place (ULP) for 512 is 0.5, for 1024 it is 1.0, etc.
+- Initializers magnitudes are higher than <code class="docutils literal notranslate"><span class="pre">init_max</span></code> (default: 65504). Initializers are often used for non-compute intensive operations and are more likely to be controlled by the user. However, values above <code class="docutils literal notranslate"><span class="pre">init_max</span></code> will cause overflow, therefore they are kept in high precision.</p></li>
+</ul>
+<dl class="simple">
+<dt>Additional classification rules (disabled by default):</dt><dd><ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">max_depth_of_reduction</span></code>: Require nodes with a high depth of reduction (e.g., large matrix multiplications, convolutions with large kernels) to be kept in high precision.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nodes_to_exclude</span></code>: List of regex patterns for node names to keep in high precision.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">op_types_to_exclude</span></code>: List of operation types to keep in high precision.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nodes_to_include</span></code>: List of regex patterns for node names to force-include in low precision.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">op_types_to_include</span></code>: List of operation types to force-include in low precision.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">custom_rule</span></code>: Optional custom rule for node classification (inherits from NodeRuleBase).</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p><strong>Precision Conversion</strong>:</p>
+<ul class="simple">
+<li><p>Converts eligible nodes to lower precision</p></li>
+<li><p>Automatically inserts necessary cast operations</p></li>
+<li><p>Automatically replaces initializers with lower precision values</p></li>
+<li><p>Performs type inference to propagate types through the graph
+- By default, uses ONNX’s <code class="docutils literal notranslate"><span class="pre">infer_shapes</span></code> which performs both shape and type inference using the ONNX infer_shapes API.
+- Use <code class="docutils literal notranslate"><span class="pre">use_standalone_type_inference=True</span></code> to use a standalone type-only inference implementation (experimental).</p></li>
+</ul>
+</li>
+<li><p><strong>Validation and Export</strong>:</p>
+<ul class="simple">
+<li><p>Verifying that the model is a valid ONNX model (using onnx.checker)</p></li>
+<li><p>Checking that the output tensors are not disconnected</p></li>
+<li><p>Verifying that the original and current network inputs/outputs names match</p></li>
+<li><p>Ensuring that the input and output types are handled according to keep_io_types</p></li>
+<li><p>Saves the converted model</p></li>
+</ul>
+</li>
+</ol>
+</section>
+<section id="best-practices">
+<h2>Best Practices<a class="headerlink" href="#best-practices" title="Link to this heading"></a></h2>
+<ol class="arabic simple">
+<li><p><strong>Start with Default Settings</strong>:</p>
+<ul class="simple">
+<li><p>Begin with default thresholds and gradually adjust based on accuracy requirements.</p></li>
+</ul>
+</li>
+<li><p><strong>Monitor Node Conversion</strong>:</p>
+<ul class="simple">
+<li><p>Use INFO level logging to see what percentage of nodes were converted to lower precision.</p></li>
+<li><p>Use DEBUG level logging to see more detailed information about the node classification process.</p></li>
+</ul>
+</li>
+<li><p><strong>Preserve Critical Operations</strong>:</p>
+<ul class="simple">
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">op_types_to_exclude</span></code> for operations known to be sensitive to precision reduction.</p></li>
+</ul>
+</li>
+<li><p><strong>Validate with Real Data</strong>:</p>
+<ul class="simple">
+<li><p>Provide representative input data using the <code class="docutils literal notranslate"><span class="pre">calibration_data</span></code> option for more accurate node classification.</p></li>
+<li><p>The input names and shapes in <code class="docutils literal notranslate"><span class="pre">calibration_data</span></code> should match the ones in the given ONNX model.</p></li>
+</ul>
+</li>
+<li><p><strong>Control Reduction Depth</strong>:
+- Use <code class="docutils literal notranslate"><span class="pre">max_depth_of_reduction</span></code> to limit the depth of reduction operations that can be converted to low precision.
+Operations with higher reduction depths (e.g., large matrix multiplications, convolutions with large kernels) may be more sensitive to precision loss.</p></li>
+<li><p><strong>BF16 Conversion</strong>:</p>
+<ul class="simple">
+<li><p>BF16 conversion is not supported for all operations.</p></li>
+<li><p>AutoCast will automatically convert the model to opset 22 to enable more BF16 operations.</p></li>
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">--op_types_to_exclude</span></code> to exclude operations that are not supported in BF16.</p></li>
+<li><p>BF16 accuracy may require additional tuning of the <code class="docutils literal notranslate"><span class="pre">data_max</span></code> and <code class="docutils literal notranslate"><span class="pre">init_max</span></code> thresholds.</p></li>
+<li><p>TensorRT might not be able to support all BF16 converted models.</p></li>
+</ul>
+</li>
+<li><p><strong>Large Initializers</strong></p>
+<ul class="simple">
+<li><p>Attempting to convert very large initializers, might cause host memory issues.</p></li>
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">--init_conversion_max_bytes</span></code> to limit the size of initializers that will be converted at compile time.</p></li>
+<li><p>Initializers larger than <code class="docutils literal notranslate"><span class="pre">--init_conversion_max_bytes</span></code> will be converted at runtime (using a cast operation).</p></li>
+</ul>
+</li>
+<li><p><strong>TensorRT custom op support</strong></p>
+<ul class="simple">
+<li><p>Refer to <a class="reference internal" href="_onnx_quantization.html#ort-ep-requirements"><span class="std std-ref">TensorRT Execution Provider requirements</span></a>.</p></li>
+<li><p>When a custom op is detected, the TensorRT Execution Provider is automatically enabled.</p></li>
+<li><p>To also enable the CUDA execution provider, use <code class="docutils literal notranslate"><span class="pre">--providers</span> <span class="pre">cpu</span> <span class="pre">cuda:x</span></code>, where <code class="docutils literal notranslate"><span class="pre">x</span></code> is your device ID (<code class="docutils literal notranslate"><span class="pre">x=0</span></code> if your system only has 1 GPU).</p></li>
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">--trt_plugins</span></code> to provide the paths to the necessary TensorRT plugin libraries (in <code class="docutils literal notranslate"><span class="pre">.so</span></code> format).</p></li>
+</ul>
+</li>
+<li><p><strong>Opset Version Control</strong></p>
+<ul class="simple">
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">--opset</span></code> to specify a target ONNX opset version for the converted model.</p></li>
+<li><p>If not specified, AutoCast keeps the existing model’s opset, subject to a minimum opset based on precision type (13 for FP16, 22 for BF16).</p></li>
+<li><p>A warning will be issued if you specify an opset lower than recommended minimum.</p></li>
+<li><p>A warning will be issued if you specify an opset lower than the original model’s opset, as downgrading opset versions may cause compatibility issues.</p></li>
+<li><p>The opset may be automatically increased beyond your specified value if certain operations require it (e.g., quantization nodes require opset &gt;= 19).</p></li>
+</ul>
+</li>
+<li><p><strong>Type Inference Control</strong></p>
+<ul class="simple">
+<li><p>By default, AutoCast uses ONNX’s <code class="docutils literal notranslate"><span class="pre">infer_shapes</span></code> which performs both shape and type inference.</p></li>
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">--use_standalone_type_inference</span></code> to enable a standalone type-only inference implementation.</p></li>
+<li><p>This is a workaround for cases where shape inference fails for any reason, which allows us to bypass the dependency in ONNX’s shape inference logic.</p></li>
+<li><p>The standalone implementation uses graphsurgeon for topological sorting and handles special operators like Cast, QuantizeLinear, DequantizeLinear, Constant and ConstantOfShape.</p></li>
+<li><p>Note: The standalone type inference may be less robust than ONNX’s implementation for edge cases, but avoids unnecessary shape inference overhead and possible failures.</p></li>
+</ul>
+</li>
+</ol>
+</section>
+<section id="limitations-and-restrictions">
+<h2>Limitations and Restrictions<a class="headerlink" href="#limitations-and-restrictions" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>AutoCast does not yet support quantized models.</p></li>
+<li><p>BF16 conversion is not supported for all operations</p></li>
+<li><p>Large models (e.g. over 2GB) might cause memory issues.</p></li>
+</ul>
+</section>
+<section id="example-usage">
+<h2>Example Usage<a class="headerlink" href="#example-usage" title="Link to this heading"></a></h2>
+<p>Basic conversion to FP16:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.autocast<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx
+</pre></div>
+</div>
+<p>Basic conversion with verbose logging and custom output path:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.autocast<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span>--output_path<span class="w"> </span>custom_path.onnx<span class="w"> </span>--log_level<span class="w"> </span>DEBUG
+</pre></div>
+</div>
+<p>Convert to BF16 with custom data magnitude threshold and custom disabled op types:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.autocast<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span><span class="se">\</span>
+<span class="w">     </span>--low_precision_type<span class="w"> </span>bf16<span class="w"> </span><span class="se">\</span>
+<span class="w">     </span>--data_max<span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="se">\</span>
+<span class="w">     </span>--op_types_to_exclude<span class="w"> </span>Resize
+</pre></div>
+</div>
+<p>Bypass data magnitude check and keep specific node names in FP32:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.autocast<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span>--data_max<span class="w"> </span>inf<span class="w"> </span>--nodes_to_exclude<span class="w"> </span><span class="s2">&quot;.*attn.*&quot;</span>
+</pre></div>
+</div>
+<p>Limit depth of reduction for precision-sensitive operations:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.autocast<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span>--max_depth_of_reduction<span class="w"> </span><span class="m">1024</span>
+</pre></div>
+</div>
+<p>Specify a target opset version:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.autocast<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span>--opset<span class="w"> </span><span class="m">19</span>
+</pre></div>
+</div>
+<p>Convert to BF16 with a specific opset:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.autocast<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span>--low_precision_type<span class="w"> </span>bf16<span class="w"> </span>--opset<span class="w"> </span><span class="m">22</span>
+</pre></div>
+</div>
+<p>Use standalone type inference instead of ONNX’s infer_shapes:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.autocast<span class="w"> </span>--onnx_path<span class="w"> </span>model.onnx<span class="w"> </span>--use_standalone_type_inference
+</pre></div>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="7_nas.html" class="btn btn-neutral float-left" title="NAS" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="9_autotune.html" class="btn btn-neutral float-right" title="Autotune (ONNX)" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
