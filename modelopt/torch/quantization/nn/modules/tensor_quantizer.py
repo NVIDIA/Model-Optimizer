@@ -1106,6 +1106,9 @@ class TensorQuantizer(nn.Module):
         if self.pre_quant_scale is not None:
             inputs = inputs * self.pre_quant_scale
 
+        if self.rotate_back_is_enabled and self._if_quant and not self.fake_quant:
+            raise ValueError("rotate_back mode is only supported with fake_quant=True.")
+
         # Rotating the input
         if self.rotate_is_enabled:
             inputs = self._rotate_inputs(inputs)
@@ -1161,8 +1164,6 @@ class TensorQuantizer(nn.Module):
                 with same_device_as(inputs):
                     outputs = self._fake_quantize(inputs)
             elif not self._dequantize:
-                if self.rotate_back_is_enabled:
-                    raise ValueError("rotate_back mode is only supported with fake_quant=True.")
                 outputs = self._real_quantize(inputs)
             else:
                 raise ValueError(

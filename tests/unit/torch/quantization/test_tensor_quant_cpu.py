@@ -151,10 +151,13 @@ def test_tensor_quantizer_rotate_mode_can_rotate_back(monkeypatch):
 
 
 def test_tensor_quantizer_rotate_back_rejects_real_quant(monkeypatch):
+    def fail_if_rotated(inputs, rotate_fp32=False, block_size=None):
+        raise AssertionError("rotate_back with fake_quant=False should fail before rotation")
+
     monkeypatch.setattr(
         tensor_quantizer_module,
         "normalized_hadamard_transform",
-        lambda inputs, rotate_fp32=False, block_size=None: inputs,
+        fail_if_rotated,
     )
     quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
