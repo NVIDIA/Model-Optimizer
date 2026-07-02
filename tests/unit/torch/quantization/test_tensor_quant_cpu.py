@@ -29,6 +29,7 @@ from modelopt.torch.quantization.nn import (
     register_quant_backend,
     unregister_quant_backend,
 )
+from modelopt.torch.quantization.nn.functional import _random_signs
 
 
 class TestFakeTensorQuantCPU(FakeTensorQuantTester):
@@ -187,6 +188,26 @@ def test_tensor_quantizer_rotate_back_rejects_real_quant(monkeypatch):
 
     with pytest.raises(ValueError, match="rotate_back mode is only supported with fake_quant=True"):
         quantizer(torch.tensor([[1.0, 2.0]]))
+
+
+def test_random_signs_are_cached_by_seed_dim_device_and_dtype():
+    _random_signs.cache_clear()
+
+    try:
+        signs = _random_signs(123, 8, torch.device("cpu"), torch.float32)
+        cached_signs = _random_signs(123, 8, torch.device("cpu"), torch.float32)
+        fp16_signs = _random_signs(123, 8, torch.device("cpu"), torch.float16)
+        different_seed_signs = _random_signs(124, 8, torch.device("cpu"), torch.float32)
+        different_dim_signs = _random_signs(123, 16, torch.device("cpu"), torch.float32)
+
+        assert cached_signs.data_ptr() == signs.data_ptr()
+        assert torch.equal(cached_signs, signs)
+        assert fp16_signs.dtype == torch.float16
+        assert fp16_signs.data_ptr() != signs.data_ptr()
+        assert different_seed_signs.data_ptr() != signs.data_ptr()
+        assert different_dim_signs.data_ptr() != signs.data_ptr()
+    finally:
+        _random_signs.cache_clear()
 
 
 WINT4INT8_CFG = {

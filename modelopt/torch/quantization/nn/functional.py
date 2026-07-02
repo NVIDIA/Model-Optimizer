@@ -16,6 +16,7 @@
 """Some supportive functions."""
 
 import warnings
+from functools import lru_cache
 
 import torch
 from torch.autograd import Function
@@ -98,6 +99,7 @@ def _largest_pow2_divisor(n: int) -> int:
     return n & (-n)
 
 
+@lru_cache(maxsize=16)
 def _random_signs(seed: int, dim: int, device: torch.device, dtype: torch.dtype):
     generator = torch.Generator(device=device).manual_seed(seed)
     signs = torch.randint(0, 2, (dim,), generator=generator, device=device, dtype=torch.int8)
