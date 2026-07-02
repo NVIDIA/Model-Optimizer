@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prepare a token-sized Megatron data blend from a YAML configuration."""
+"""Prepare a weighted Megatron data blend from a YAML configuration."""
 
 import argparse
 import os
@@ -34,7 +34,7 @@ def load_config(path: Path) -> dict[str, Any]:
 
         tokenizer: /models/Qwen3-8B
         output_dir: /datasets/qwen3-blend
-        target_tokens: 1000000
+        target_tokens: 1000000  # Optional; omit to prepare every source in full.
         sources:
           - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
             config: Nemotron-SFT-General
@@ -47,9 +47,10 @@ def load_config(path: Path) -> dict[str, Any]:
             content_field: messages
             weight: 40
 
-    returns a dictionary with ``tokenizer``, ``output_dir``, ``target_tokens``, and
-    ``sources`` keys. Each source has ``hf_dataset``, ``content_field``, and ``weight``;
-    it uses ``split`` with an optional ``config``, or selects repository ``files``.
+    returns a dictionary with ``tokenizer``, ``output_dir``, and ``sources`` keys, plus
+    optional ``target_tokens``. Each source has ``hf_dataset``, ``content_field``, and
+    ``weight``; it uses ``split`` with optional ``config`` and ``max_samples``, or
+    selects repository ``files``.
     """
     with path.open(encoding="utf-8") as stream:
         return cast("dict[str, Any]", yaml.safe_load(stream))
@@ -77,7 +78,7 @@ def _prepare_sources(
     sources: list[dict[str, Any]],
     output_dir: Path,
     tokenizer: str,
-    total_tokens: int,
+    total_tokens: int | None,
 ) -> list[tuple[float, str]]:
     """Tokenize all sources and return their weighted output paths."""
     workers = min(32, os.cpu_count() or 1)
@@ -86,7 +87,9 @@ def _prepare_sources(
 
     for index, source in enumerate(sources):
         weight = float(source["weight"])
-        if index == len(sources) - 1:
+        if total_tokens is None:
+            source_tokens = None
+        elif index == len(sources) - 1:
             source_tokens = total_tokens - allocated_tokens
         else:
             source_tokens = round(total_tokens * weight / 100)
@@ -113,6 +116,7 @@ def _prepare_sources(
                 "hf_dataset": dataset,
                 "hf_name": source.get("config"),
                 "hf_split": source["split"],
+                "hf_max_samples_per_split": source.get("max_samples"),
                 "hf_streaming": True,
             }
 
@@ -143,7 +147,8 @@ def prepare_data_blend(config_path: Path) -> list[tuple[float, str]]:
     config = load_config(config_path)
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    total_tokens = int(config["target_tokens"])
+    target_tokens = config.get("target_tokens")
+    total_tokens = None if target_tokens is None else int(target_tokens)
     tokenizer = str(config["tokenizer"])
 
     blend = _prepare_sources(config["sources"], output_dir, tokenizer, total_tokens)
