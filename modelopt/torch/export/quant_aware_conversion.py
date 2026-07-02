@@ -230,18 +230,22 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
     )
 
     split_rules: list[SplitRule] = []
-    rename_rules: list[RenameRule] = []
+    # WeightRenamings and expert-leaf (converter-derived) renames are collected
+    # separately so they can be ordered correctly on the save path -- see the
+    # ``rename_rules`` assembly below.
+    weight_renamings: list[RenameRule] = []
+    leaf_renamings: list[RenameRule] = []
     for conv in conversions:
         rev = conv.reverse_transform()  # hub<-in-memory; reversed name patterns + ops
         if isinstance(rev, WeightRenaming):
             for pattern, repl in zip(_as_list(rev.source_patterns), _as_list(rev.target_patterns)):
-                rename_rules.append(RenameRule(pattern=pattern, repl=repl))
+                weight_renamings.append(RenameRule(pattern=pattern, repl=repl))
         elif isinstance(rev, WeightConverter):
             ops = list(rev.operations)
             if any(isinstance(op, SplitModulelist) for op in ops):
                 # Expert converter: ModelOpt already un-stacked/un-fused experts to
                 # per-expert 2-D linears, so only per-expert leaf names remain to map.
-                rename_rules.extend(_expert_leaf_renames(rev))
+                leaf_renamings.extend(_expert_leaf_renames(rev))
             elif ops and all(isinstance(op, Chunk) for op in ops):
                 # Dense fused linear survives in the state dict -> un-fuse (split).
                 split_rules.append(_dense_split_rule(rev, ops))
@@ -251,6 +255,18 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
                 )
         else:
             raise QuantConversionUnsupportedError(f"unsupported conversion: {type(rev).__name__}")
+
+    # Save-path order mirrors transformers' ``rename_source_key``: converters act
+    # first, then WeightRenamings. Crucially, transformers *loads* by chaining the
+    # renamings in list order -- a component-reordering rename (e.g.
+    # ``language_model.model`` -> ``model.language_model``) fires before a rename that
+    # anchors on the resulting adjacency (e.g.
+    # ``.language_model.layers.N.mlp.experts.`` -> ``.block_sparse_moe.experts.``).
+    # The reverse must therefore apply WeightRenamings in *reverse* list order so the
+    # reorder rename runs last and does not destroy the anchor the MoE container/gate
+    # renames rely on. Expert leaf renames act on disjoint ``.experts.<i>.<leaf>``
+    # substrings and are applied first.
+    rename_rules = leaf_renamings + list(reversed(weight_renamings))
     return split_rules, rename_rules
 
 

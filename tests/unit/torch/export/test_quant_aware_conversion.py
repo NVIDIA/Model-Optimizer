@@ -22,6 +22,8 @@ uses float32 here (real checkpoints use float8_e4m3, whose CPU ops are not porta
 across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
+import types
+
 import pytest
 import torch
 
@@ -213,4 +215,50 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
         assert f"{base}.w1.weight_scale" in out
         assert f"{base}.w1.weight_scale_2" in out
     assert f"{p}.block_sparse_moe.gate.weight" in out
+    assert not any(".mlp.experts." in k for k in out)
+
+
+def test_build_reverse_rules_orders_prefix_reorder_after_container():
+    """WeightRenamings must reverse in reverse list order (M3 prefix-reorder bug).
+
+    transformers *loads* by chaining renamings in list order: a component-reordering
+    rename (``language_model.model`` -> ``model.language_model``) fires first, making
+    ``language_model`` adjacent to ``layers`` so a later container rename anchored on
+    that adjacency (``.language_model.layers.N.mlp.experts.`` ->
+    ``.block_sparse_moe.experts.``) can match. On the save path the reorder must run
+    *last*, else it moves ``language_model`` away from ``layers`` and the container
+    rename silently no-ops -- exporting MiniMax-M3 experts as ``mlp.experts.*`` instead
+    of the hub ``block_sparse_moe.experts.*``. Mixtral does not exercise this (no
+    prefix reorder), so this reproduces it with a minimal two-renaming mapping.
+    """
+    pytest.importorskip("transformers")
+    from transformers.core_model_loading import WeightRenaming
+
+    from modelopt.torch.export.quant_aware_conversion import revert_weight_conversion_quant_aware
+
+    # Forward (hub -> in-memory) renamings; ``reverse_transform`` flips them on save.
+    # Order matters: reorder is listed BEFORE the adjacency-anchored container rename,
+    # exactly as a real M3 conversion mapping lists them.
+    conversions = [
+        WeightRenaming("^language_model.model.", "model.language_model."),
+        WeightRenaming(
+            ".language_model.layers.(\\d+).block_sparse_moe.experts.",
+            ".language_model.layers.\\1.mlp.experts.",
+        ),
+    ]
+    model = types.SimpleNamespace(_weight_conversions=conversions)
+
+    # In-memory expert key (leaf already at ``w1``; isolates the container/prefix order).
+    sd = _nvfp4_linear("model.language_model.layers.10.mlp.experts.0.w1", 8, 16)
+    out = revert_weight_conversion_quant_aware(model, sd)
+
+    base = "language_model.model.layers.10.block_sparse_moe.experts.0.w1"
+    assert set(out) == {
+        f"{base}.weight",
+        f"{base}.weight_scale",
+        f"{base}.weight_scale_2",
+        f"{base}.input_scale",
+    }
+    # Regression guard: the buggy reorder-first order leaves these in-memory fragments.
+    assert not any(k.startswith("model.language_model") for k in out)
     assert not any(".mlp.experts." in k for k in out)
