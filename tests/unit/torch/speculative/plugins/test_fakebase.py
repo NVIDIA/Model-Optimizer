@@ -65,6 +65,39 @@ def test_fakebase_local_happy_path(fake_checkpoint):
     assert model.embed_tokens.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
 
 
+def test_fakebase_vlm_dtype_from_top_level_config(tmp_path, monkeypatch):
+    """Regression (OMNIML-4747): for a VLM the language-model sub-config often carries no
+    torch_dtype — only the top-level config sets it (e.g. MiniMax-M3: top-level
+    torch_dtype=bfloat16, text_config none). FakeBaseModel must resolve the base dtype from the
+    top-level config rather than falling back to fp32; an fp32 head mismatches the bf16 offline
+    hidden states in the draft forward ('mat1 and mat2 must have the same dtype')."""
+    text_cfg = transformers.PretrainedConfig()
+    text_cfg.hidden_size = _HIDDEN_SIZE
+    text_cfg.vocab_size = _VOCAB_SIZE
+    text_cfg.num_hidden_layers = 2
+    text_cfg.max_position_embeddings = 128
+    text_cfg.tie_word_embeddings = False
+    text_cfg.torch_dtype = None  # the nested config carries no dtype (the M3 case)
+
+    cfg = transformers.PretrainedConfig()
+    cfg.model_type = "minimax_m3_vl"
+    cfg.text_config = text_cfg  # marks this as a VLM -> base_cfg becomes text_cfg
+    cfg.torch_dtype = "bfloat16"  # only the top-level config sets the dtype
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: cfg)
+
+    safetensors.torch.save_file(
+        {
+            "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+            "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        },
+        tmp_path / "model.safetensors",
+    )
+
+    model = FakeBaseModel.from_source(str(tmp_path))
+    assert model.lm_head.weight.dtype == torch.bfloat16
+    assert model.embed_tokens.weight.dtype == torch.bfloat16
+
+
 def test_fakebase_missing_index_raises(tmp_path, fake_config):
     with pytest.raises(FileNotFoundError, match="safetensors"):
         FakeBaseModel.from_source(str(tmp_path))

@@ -28,6 +28,8 @@ import argparse
 import atexit
 import os
 import shutil
+import tempfile
+import textwrap
 from pathlib import Path
 
 import torch
@@ -45,6 +47,50 @@ from transformers import AutoConfig, AutoTokenizer
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
 )
+
+# Source for both the in-process patch and the worker sitecustomize: pin every
+# @triton.autotune to a single (last/most-conservative) config so the kernel never runs the
+# per-shape benchmark. On MiniMax-M3 that benchmark (~150s for the MoE _topk kernel) runs
+# unsynchronized across TP ranks and deadlocks the engine<->worker shared-memory collective.
+_NO_AUTOTUNE_SRC = textwrap.dedent(
+    """
+    try:
+        import triton
+        _orig_autotune = triton.autotune
+        def _single_config_autotune(*a, **k):
+            if k.get("configs"):
+                k["configs"] = [k["configs"][-1]]
+            elif a and isinstance(a[0], (list, tuple)) and a[0]:
+                a = ([a[0][-1]], *a[1:])
+            return _orig_autotune(*a, **k)
+        triton.autotune = _single_config_autotune
+        try:
+            import triton.runtime.autotuner as _ta
+            _ta.autotune = _single_config_autotune
+        except Exception:
+            pass
+    except Exception as _e:
+        import sys
+        print(f"[no-autotune] patch failed: {_e}", file=sys.stderr)
+    """
+)
+
+
+def _disable_triton_autotune() -> None:
+    """Pin @triton.autotune to a single config in this process AND in vLLM's workers.
+
+    Must run before any vLLM/Triton model module is imported (kernels are decorated at import
+    time). In-process exec covers forked workers (they inherit patched triton from memory); a
+    sitecustomize on PYTHONPATH covers spawned workers (imported at interpreter startup, before
+    vLLM). Keeping the last config (smallest BLOCK_SIZE) is always functionally correct —
+    autotune configs differ only in performance.
+    """
+    exec(_NO_AUTOTUNE_SRC, {})
+    d = Path(tempfile.mkdtemp(prefix="no_autotune_"))
+    (d / "sitecustomize.py").write_text(_NO_AUTOTUNE_SRC)
+    os.environ["PYTHONPATH"] = f"{d}{os.pathsep}{os.environ.get('PYTHONPATH', '')}"
+    atexit.register(shutil.rmtree, d, ignore_errors=True)
+    print(f"[no-autotune] triton.autotune pinned to a single config (sitecustomize at {d})")
 
 
 def _resolve_aux_layers_standalone(
@@ -111,6 +157,72 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--tp", type=int, default=None, help="Tensor parallel size.")
     parser.add_argument(
+        "--block-size",
+        type=int,
+        default=None,
+        help="KV cache block size. Some models require a specific value — e.g. MiniMax-M3's "
+        "MSA sparse attention mandates 128. Default (None) lets vLLM choose.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Skip the vision encoder for text-only dumps (multimodal models, e.g. MiniMax-M3).",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph / torch.compile. Needed for MiniMax-M3: its MSA sparse "
+        "kernel JIT-recompiles per shape and a recompile can exceed the executor RPC "
+        "timeout under cudagraph capture, hanging the engine.",
+    )
+    parser.add_argument(
+        "--length-buckets",
+        type=str,
+        default="",
+        help="Comma-separated token-length buckets (e.g. '1024,2048,4096,8192'). When set, each "
+        "prompt is right-padded to the smallest bucket >= its length, so the model sees only a "
+        "handful of distinct prefill shapes. This bounds per-shape kernel JIT recompiles for "
+        "attention that compiles per sequence length (e.g. MiniMax-M3's MSA sparse attention), "
+        "which otherwise recompiles for hundreds of lengths — each recompile can exceed "
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS and kill the engine. Pad positions are dropped on "
+        "save; causal attention leaves the real prefix's hidden states unchanged. Empty "
+        "(default) disables bucketing.",
+    )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=None,
+        help="vLLM max concurrent sequences. Set 1 for MiniMax-M3: with bucketing the only "
+        "varying kernel-shape dimension is then sequence length (a handful of buckets), so a "
+        "batch=1 warm-up covers every shape the real loop hits and NO kernel compiles during "
+        "the timed dump. Per-shape compilation otherwise desyncs the TP ranks and deadlocks "
+        "the engine<->worker collective. Default (None) uses vLLM's default.",
+    )
+    parser.add_argument(
+        "--disable-triton-autotune",
+        action="store_true",
+        help="Pin every @triton.autotune to a single config (no per-shape benchmark). Required "
+        "for MiniMax-M3: the MoE _topk_index_kernel autotune (~150s) runs unsynchronized across "
+        "TP ranks and deadlocks the engine<->worker collective. Applied in-process + via a "
+        "sitecustomize on PYTHONPATH so vLLM's worker subprocesses inherit it.",
+    )
+    parser.add_argument(
+        "--save-chunk-size",
+        type=int,
+        default=256,
+        help="Generate + save + free staging in chunks of this many conversations. The KV "
+        "connector stages each conv's hidden states (~hundreds of MB) under DFLASH_HS_STAGING_DIR "
+        "(default /dev/shm, RAM); generating the whole dataset before saving would accumulate it "
+        "all and fill /dev/shm. Chunking bounds staging to one chunk at a time.",
+    )
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Before the real dump, run one throwaway prefill per length bucket to JIT-compile "
+        "the per-shape kernels up front (populating a persistent TRITON_CACHE_DIR shared across "
+        "tasks), so the timed dump runs on cached kernels. Only meaningful with --length-buckets.",
+    )
+    parser.add_argument(
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
     )
     add_aux_layers_args(parser)
@@ -127,6 +239,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
+    # Must happen before importing vLLM (kernels are @triton.autotune-decorated at import).
+    if args.disable_triton_autotune:
+        _disable_triton_autotune()
+
     # Import lazily so --help and arg parsing work without vLLM installed.
     from vllm import LLM, SamplingParams
     from vllm.config.kv_transfer import KVTransferConfig
@@ -159,7 +275,13 @@ def main(args: argparse.Namespace) -> None:
         return not (output_dir / f"{conversation_id}.pt").exists()
 
     original_num = len(dataset)
-    dataset = dataset.filter(keep_conversation)
+    # load_from_cache_file=False is REQUIRED for resume correctness: keep_conversation depends
+    # on on-disk .pt state, which is NOT part of datasets' cache fingerprint (only the function
+    # + dataset are). With a persistent HF cache (e.g. HF_HOME on shared storage across
+    # requeues), a cached result from an earlier run — when fewer/no .pt existed — is reused,
+    # so the filter reports "Removed 0" and every resume re-dumps + overwrites already-done
+    # conversations instead of skipping them. Forcing re-evaluation re-checks the disk each run.
+    dataset = dataset.filter(keep_conversation, load_from_cache_file=False)
     print(f"Removed {original_num - len(dataset)} conversations due to existing output files")
 
     if args.debug_max_num_conversations is not None:
@@ -168,7 +290,12 @@ def main(args: argparse.Namespace) -> None:
     # Resolve the aux-layer indices and append the final-layer output. vLLM saves the
     # final (un-normed) hidden state when ``num_hidden_layers`` is passed as a layer id.
     config = AutoConfig.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
-    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    # Vision-language / wrapped configs (e.g. MiniMax-M3's MiniMaxM3VLConfig) nest the
+    # text model's layer count under text_config / llm_config rather than at the top level.
+    text_config = getattr(config, "text_config", None) or getattr(config, "llm_config", None)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None) or getattr(
+        text_config, "num_hidden_layers", None
+    )
     if num_hidden_layers is None:
         raise ValueError(f"model config has no 'num_hidden_layers' attribute: {config}")
     aux_layer_ids = _resolve_aux_layers_standalone(
@@ -190,10 +317,18 @@ def main(args: argparse.Namespace) -> None:
     if args.answer_only_loss:
         verify_generation_tags(tokenizer.chat_template)
 
+    # Length buckets (optional): bound the number of distinct prefill shapes the model sees.
+    buckets = sorted({int(b) for b in args.length_buckets.split(",") if b.strip()})
+    buckets = [b for b in buckets if b <= args.max_seq_len]
+    pad_token_id = tokenizer.pad_token_id
+    if buckets:
+        print(f"Length bucketing enabled: buckets={buckets}, pad_token_id={pad_token_id}")
+
     # Prepare prompts for vLLM
     prompts = []
     conversation_ids = []
     loss_masks = []
+    real_lens = []
     num_skipped_too_long = 0
     num_invalid = 0
 
@@ -219,9 +354,19 @@ def main(args: argparse.Namespace) -> None:
             num_skipped_too_long += 1
             continue
 
-        prompts.append(TokensPrompt(prompt_token_ids=input_ids.tolist()))
+        token_ids_list = input_ids.tolist()
+        # Right-pad to the smallest bucket >= length. Causal attention means the real prefix's
+        # hidden states are identical to the unpadded forward; pad positions are sliced off on
+        # save (using real_len). Bounds distinct prefill shapes -> bounded kernel recompiles.
+        if buckets:
+            bucket = next((b for b in buckets if b >= num_tokens), buckets[-1])
+            if bucket > num_tokens:
+                token_ids_list = token_ids_list + [pad_token_id] * (bucket - num_tokens)
+
+        prompts.append(TokensPrompt(prompt_token_ids=token_ids_list))
         conversation_ids.append(conversation_id)
         loss_masks.append(loss_mask)
+        real_lens.append(num_tokens)
 
     print(
         f"Prepared {len(prompts)} prompts ({num_skipped_too_long} skipped too long, {num_invalid} invalid)"
@@ -244,12 +389,28 @@ def main(args: argparse.Namespace) -> None:
     storage_path.mkdir(parents=True, exist_ok=True)
     atexit.register(shutil.rmtree, storage_path, ignore_errors=True)
 
+    # Model-specific extras (e.g. MiniMax-M3 mandates block_size=128 for MSA sparse
+    # attention; --language-model-only skips the vision encoder for text-only dumps).
+    extra_llm_kwargs = {}
+    if args.block_size is not None:
+        extra_llm_kwargs["block_size"] = args.block_size
+    if args.language_model_only:
+        extra_llm_kwargs["language_model_only"] = True
+    if args.enforce_eager:
+        extra_llm_kwargs["enforce_eager"] = True
+    if args.max_num_seqs is not None:
+        extra_llm_kwargs["max_num_seqs"] = args.max_num_seqs
+
     llm = LLM(
         model=args.model,
         tensor_parallel_size=tp,
-        max_model_len=args.max_seq_len,
+        # +1 for the dummy max_tokens=1 generation: the dump only needs the prefill, but vLLM
+        # validates prompt_len + output_tokens <= max_model_len, and a prompt (or a length
+        # bucket) can be exactly max_seq_len. Without the +1, max-length prompts are rejected.
+        max_model_len=args.max_seq_len + 1,
         trust_remote_code=args.trust_remote_code,
         enable_chunked_prefill=False,  # required by extract_hidden_states
+        **extra_llm_kwargs,
         # With prefix caching on, vLLM serves shared prefixes from cache in block-sized
         # chunks and the hidden-state connector only emits the freshly-computed suffix, so
         # the dumped hidden_states come out short by N*block_size vs the full input_ids /
@@ -275,57 +436,81 @@ def main(args: argparse.Namespace) -> None:
         ),
     )
 
-    # max_tokens=1: we only need a single forward pass over the prompt tokens.
-    outputs = llm.generate(prompts, SamplingParams(max_tokens=1))
+    # Warm up the per-shape kernel JIT (e.g. MiniMax-M3 MSA) once per bucket so the timed dump
+    # runs on cached kernels and no single step exceeds VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS. With a
+    # persistent TRITON_CACHE_DIR this also primes the cache for every other parallel task.
+    if args.warmup and buckets:
+        print(f"Warming up {len(buckets)} bucket shapes: {buckets}")
+        warmup_prompts = [TokensPrompt(prompt_token_ids=[pad_token_id] * b) for b in buckets]
+        llm.generate(warmup_prompts, SamplingParams(max_tokens=1))
+        print("Warm-up complete.")
 
-    # Save in the same format as compute_hidden_states_hf.py, including loss_mask.
+    # max_tokens=1: single forward pass per prompt. Process in chunks of --save-chunk-size:
+    # generate the chunk, then save + cleanup each output before the next chunk. The connector
+    # stages each conv's hidden states (~hundreds of MB) under DFLASH_HS_STAGING_DIR (default
+    # /dev/shm, RAM); generating the entire dataset before saving would accumulate it all and
+    # fill /dev/shm (only ~1 TB on a node). Chunking bounds staging to one chunk at a time.
+    sampling = SamplingParams(max_tokens=1)
+    chunk = max(1, args.save_chunk_size)
     num_success = 0
-    for conv_id, loss_mask, output in tqdm(
-        zip(conversation_ids, loss_masks, outputs), total=len(outputs), desc="Saving"
-    ):
-        hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
-        if hidden_states_path is None:
-            print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
-            continue
+    pbar = tqdm(total=len(prompts), desc="Dumping")
+    for start in range(0, len(prompts), chunk):
+        sl = slice(start, start + chunk)
+        outputs = llm.generate(prompts[sl], sampling)
+        for conv_id, loss_mask, real_len, output in zip(
+            conversation_ids[sl], loss_masks[sl], real_lens[sl], outputs
+        ):
+            pbar.update(1)
+            hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
+            if hidden_states_path is None:
+                print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
+                continue
 
-        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
-        token_ids = obj["token_ids"]
-        # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
-        # extract_layer_ids. Last layer = final output; the rest = aux layers.
-        hidden_states = obj["hidden_states"]
+            obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+            token_ids = obj["token_ids"]
+            # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
+            # extract_layer_ids. Last layer = final output; the rest = aux layers.
+            hidden_states = obj["hidden_states"]
 
-        output_hidden_states = hidden_states[:, -1, :].cpu()
-        if hidden_states.shape[1] > 1:
-            # Concatenate aux layers along the hidden dim, matching the HF dump format.
-            aux = hidden_states[:, :-1, :].cpu()
-            aux_hidden_states = aux.reshape(aux.shape[0], -1)
-        else:
-            aux_hidden_states = torch.empty(0)
+            # Drop any right-padding from length-bucketing: keep only the real prefix. Causal
+            # attention means these positions' states match the unpadded forward. No-op when
+            # bucketing is disabled (real_len == sequence length).
+            token_ids = token_ids[:real_len]
+            hidden_states = hidden_states[:real_len]
 
-        # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
-        # to itself and silently misalign with the hidden states, so guard explicitly.
-        n_hs = output_hidden_states.shape[0]
-        if loss_mask.shape[0] < n_hs:
-            print(
-                f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
-                f"states ({n_hs}); skipping to avoid misalignment"
-            )
-            continue
+            output_hidden_states = hidden_states[:, -1, :].cpu()
+            if hidden_states.shape[1] > 1:
+                # Concatenate aux layers along the hidden dim, matching the HF dump format.
+                aux = hidden_states[:, :-1, :].cpu()
+                aux_hidden_states = aux.reshape(aux.shape[0], -1)
+            else:
+                aux_hidden_states = torch.empty(0)
 
-        output_file = output_dir / f"{conv_id}.pt"
-        with open(output_file, "wb") as f:
-            torch.save(
-                {
-                    "input_ids": token_ids.cpu(),
-                    "hidden_states": output_hidden_states,
-                    "aux_hidden_states": aux_hidden_states,
-                    "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
-                    "conversation_id": conv_id,
-                },
-                f,
-            )
-        example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
-        num_success += 1
+            # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
+            # to itself and silently misalign with the hidden states, so guard explicitly.
+            n_hs = output_hidden_states.shape[0]
+            if loss_mask.shape[0] < n_hs:
+                print(
+                    f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
+                    f"states ({n_hs}); skipping to avoid misalignment"
+                )
+                continue
+
+            output_file = output_dir / f"{conv_id}.pt"
+            with open(output_file, "wb") as f:
+                torch.save(
+                    {
+                        "input_ids": token_ids.cpu(),
+                        "hidden_states": output_hidden_states,
+                        "aux_hidden_states": aux_hidden_states,
+                        "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
+                        "conversation_id": conv_id,
+                    },
+                    f,
+                )
+            example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
+            num_success += 1
+    pbar.close()
 
     print(f"Successfully processed {num_success} out of {len(prompts)} conversations.")
 
