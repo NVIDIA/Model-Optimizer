@@ -884,6 +884,12 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
             with torch.no_grad():
                 module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
 
+        hidden_dim = getattr(self, "hidden_dim", None)
+        if hidden_dim is None:
+            hidden_dim = getattr(self, "hidden_size", None)
+        if hidden_dim is None:
+            hidden_dim = self.gate_up_proj.shape[-1]
+
         # The attribute name was changed from `intermediate_size` to `intermediate_dim` in
         # https://github.com/huggingface/transformers/commit/0642963ba13f2dae0596fe489415569e1d91fbda
         if hasattr(self, "intermediate_size"):
@@ -891,32 +897,22 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         elif hasattr(self, "intermediate_dim"):
             expert_dim = self.intermediate_dim
         else:
-            raise AttributeError("Could not find intermediate dimension size in model")
+            expert_dim = self.gate_up_proj.shape[1] // 2
 
         with init_empty_weights():
             gate_proj = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_size, expert_dim, bias=False)
-                    for _ in range(self.num_experts)
-                ]
+                [nn.Linear(hidden_dim, expert_dim, bias=False) for _ in range(self.num_experts)]
             )
             up_proj = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_size, expert_dim, bias=False)
-                    for _ in range(self.num_experts)
-                ]
+                [nn.Linear(hidden_dim, expert_dim, bias=False) for _ in range(self.num_experts)]
             )
             down_proj = nn.ModuleList(
-                [
-                    nn.Linear(expert_dim, self.hidden_size, bias=False)
-                    for _ in range(self.num_experts)
-                ]
+                [nn.Linear(expert_dim, hidden_dim, bias=False) for _ in range(self.num_experts)]
             )
-
         for idx in range(self.num_experts):
-            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, :expert_dim].T)
-            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, expert_dim:].T)
-            _copy_weight(down_proj[idx], self.down_proj[idx, :].T)
+            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :expert_dim, :])
+            _copy_weight(up_proj[idx], self.gate_up_proj[idx, expert_dim:, :])
+            _copy_weight(down_proj[idx], self.down_proj[idx])
 
         delattr(self, "gate_up_proj")
         delattr(self, "down_proj")
@@ -930,26 +926,26 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         routing_weights: torch.Tensor,
         router_indices: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size = hidden_states.shape[0]
-        hidden_states = hidden_states.reshape(-1, self.hidden_size)
+        orig_shape = hidden_states.shape
+        hidden_dim = getattr(self, "hidden_dim", getattr(self, "hidden_size", None))
+        hidden_states = hidden_states.reshape(-1, hidden_dim)
         next_states = torch.zeros_like(hidden_states)
         with torch.no_grad():
             expert_mask = torch.nn.functional.one_hot(router_indices, num_classes=self.num_experts)
             expert_mask = expert_mask.permute(2, 1, 0)
             expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
         for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
             with torch.no_grad():
-                _, token_idx = torch.where(expert_mask[expert_idx[0]])
+                top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current_state = hidden_states[token_idx]
             gate = self.gate_proj[expert_idx](current_state)
             up = self.up_proj[expert_idx](current_state)
             gated_output = up * self.act_fn(gate)
             out = self.down_proj[expert_idx](gated_output)
-            weighted_output = out * routing_weights[token_idx, expert_idx, None]
+            weighted_output = out * routing_weights[token_idx, top_k_pos, None]
             next_states.index_add_(0, token_idx, weighted_output.to(hidden_states.dtype))
-        next_states = next_states.view(batch_size, -1, self.hidden_size)
-
-        return next_states
+        return next_states.view(orig_shape)
 
 
 def _get_fused_expert_intermediate_dim(module):
