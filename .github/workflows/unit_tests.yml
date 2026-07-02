@@ -38,7 +38,11 @@ jobs:
       any_changed: ${{ steps.changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
     steps:
       - id: non-pr
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        # push is included: the workflow-level push paths filter already guarantees
+        # a relevant file changed, but this step never ran for push events, so
+        # any_changed stayed empty and every gated lane (windows, multi-version,
+        # partial-install, launcher, mcp, skills) was silently skipped on pushes.
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         run: echo "any_changed=true" >> $GITHUB_OUTPUT
       - if: github.event_name == 'pull_request'
         uses: actions/checkout@v6
