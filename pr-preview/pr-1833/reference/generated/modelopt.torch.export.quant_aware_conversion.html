@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>quant_aware_conversion &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>quant_aware_conversion &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -197,23 +196,25 @@ operations.</p>
 </section>
 <section id="scope">
 <h2>Scope<a class="headerlink" href="#scope" title="Link to this heading"></a></h2>
-<p>Two reverse primitives cover the common conversion_mapping cases:</p>
+<p>Two reverse primitives cover the conversion_mapping cases:</p>
 <ul class="simple">
 <li><p><strong>Rename</strong> — a key-level string substitution. Because a quantized linear stores
 every tensor under <code class="docutils literal notranslate"><span class="pre">&lt;module&gt;.&lt;leaf&gt;</span></code>, renaming the module substring rewrites the
 weight and all its scale siblings together with no tensor manipulation.</p></li>
-<li><p><strong>Split</strong> — un-fuse an output-dim concatenation (e.g. <code class="docutils literal notranslate"><span class="pre">gate_up_proj</span></code> -&gt;
+<li><p><strong>Split</strong> — un-fuse an output-dim concatenation (e.g. dense <code class="docutils literal notranslate"><span class="pre">gate_up_proj</span></code> -&gt;
 <code class="docutils literal notranslate"><span class="pre">gate_proj</span></code> + <code class="docutils literal notranslate"><span class="pre">up_proj</span></code>). <code class="docutils literal notranslate"><span class="pre">weight</span></code>/<code class="docutils literal notranslate"><span class="pre">weight_scale</span></code>/<code class="docutils literal notranslate"><span class="pre">weight_scale_inv</span></code>/
 <code class="docutils literal notranslate"><span class="pre">bias</span></code> are chunked along the fused (output) dim; 0-d scalar <code class="docutils literal notranslate"><span class="pre">weight_scale_2</span></code>/
 <code class="docutils literal notranslate"><span class="pre">input_scale</span></code> are duplicated to each part (they are per-tensor and shared).</p></li>
 </ul>
-<p>The 3-D stacked-expert case (<code class="docutils literal notranslate"><span class="pre">MergeModulelist</span></code>, where per-expert weights are
-stacked into <code class="docutils literal notranslate"><span class="pre">experts.gate_up_proj</span></code> with leading expert dim) is intentionally
-<em>not</em> handled here: the stacked-scalar-scale layout cannot be validated against a
-published checkpoint yet. Encountering it raises <a class="reference internal" href="#modelopt.torch.export.quant_aware_conversion.QuantConversionUnsupportedError" title="modelopt.torch.export.quant_aware_conversion.QuantConversionUnsupportedError"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantConversionUnsupportedError</span></code></a>
-so the caller can fall back to the legacy (in-memory-name) behavior rather than
-emit a silently-wrong checkpoint. See the module TODO.</p>
-</section>
+<p>MoE experts need only <strong>Rename</strong>: ModelOpt’s export already expands the fused,
+stacked in-memory experts (<code class="docutils literal notranslate"><span class="pre">experts.gate_up_proj</span></code> of shape <code class="docutils literal notranslate"><span class="pre">[E,</span> <span class="pre">2F,</span> <span class="pre">H]</span></code>) into
+per-expert 2-D linears (<code class="docutils literal notranslate"><span class="pre">experts.&lt;i&gt;.gate_proj</span></code> / <code class="docutils literal notranslate"><span class="pre">up_proj</span></code> / <code class="docutils literal notranslate"><span class="pre">down_proj</span></code>)
+before save, so the reverse just maps those per-expert leaf names back to the hub
+leaves (e.g. <code class="docutils literal notranslate"><span class="pre">gate_proj</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">w1</span></code>, <code class="docutils literal notranslate"><span class="pre">up_proj</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">w3</span></code>, <code class="docutils literal notranslate"><span class="pre">down_proj</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">w2</span></code>).</p>
+<p>Reverse rules are derived from the model’s conversion mapping via transformers’
+<code class="docutils literal notranslate"><span class="pre">reverse_transform()</span></code>. Any op shape not covered raises
+<a class="reference internal" href="#modelopt.torch.export.quant_aware_conversion.QuantConversionUnsupportedError" title="modelopt.torch.export.quant_aware_conversion.QuantConversionUnsupportedError"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantConversionUnsupportedError</span></code></a> so the caller falls back to the legacy
+(in-memory-name) behavior rather than emit a silently-wrong checkpoint.</p>
 <p class="rubric">Classes</p>
 <table class="autosummary longtable docutils align-default">
 <tbody>
@@ -236,16 +237,17 @@ emit a silently-wrong checkpoint. See the module TODO.</p>
 </tr>
 </tbody>
 </table>
+</section>
 <dl class="py exception">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.QuantConversionUnsupportedError">
-<em class="property"><span class="pre">exception</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">QuantConversionUnsupportedError</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.QuantConversionUnsupportedError" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">exception</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">QuantConversionUnsupportedError</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.QuantConversionUnsupportedError" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Exception</span></code></p>
 <p>Raised when a conversion op cannot be reversed quant-aware (caller falls back).</p>
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.RenameRule">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">RenameRule</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.RenameRule" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">RenameRule</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.RenameRule" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
 <p>Reverse of a <code class="docutils literal notranslate"><span class="pre">WeightRenaming</span></code>: <code class="docutils literal notranslate"><span class="pre">re.sub(pattern,</span> <span class="pre">repl,</span> <span class="pre">key)</span></code> on every key.</p>
 <dl class="py method">
@@ -266,19 +268,19 @@ emit a silently-wrong checkpoint. See the module TODO.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.RenameRule.pattern">
-<span class="sig-name descname"><span class="pre">pattern</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.RenameRule.pattern" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">pattern</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.RenameRule.pattern" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.RenameRule.repl">
-<span class="sig-name descname"><span class="pre">repl</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.RenameRule.repl" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">repl</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.RenameRule.repl" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.SplitRule">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">SplitRule</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.SplitRule" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SplitRule</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.SplitRule" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
 <p>Reverse of an output-dim <code class="docutils literal notranslate"><span class="pre">Concatenate</span></code>: un-fuse one module into <code class="docutils literal notranslate"><span class="pre">parts</span></code>.</p>
 <dl class="field-list simple">
@@ -311,17 +313,17 @@ are chunked. NVFP4 <code class="docutils literal notranslate"><span class="pre">
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.SplitRule.dim">
-<span class="sig-name descname"><span class="pre">dim</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></em><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.SplitRule.dim" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">dim</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.SplitRule.dim" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.SplitRule.fused_suffix">
-<span class="sig-name descname"><span class="pre">fused_suffix</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.SplitRule.fused_suffix" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">fused_suffix</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.SplitRule.fused_suffix" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.export.quant_aware_conversion.SplitRule.part_suffixes">
-<span class="sig-name descname"><span class="pre">part_suffixes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.SplitRule.part_suffixes" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">part_suffixes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.export.quant_aware_conversion.SplitRule.part_suffixes" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>

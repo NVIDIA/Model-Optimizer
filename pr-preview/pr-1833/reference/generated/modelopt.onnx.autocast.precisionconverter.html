@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>precisionconverter &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>precisionconverter &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -184,12 +183,12 @@ through type checking and cleanup of redundant operations.</p>
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">InitializerConsumerTracker</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">InitializerConsumerTracker</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
 <p>A class that tracks the nodes that consume an initializer.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">low_precision_nodes=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">high_precision_nodes=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.__init__" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">low_precision_nodes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">high_precision_nodes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.__init__" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -205,19 +204,19 @@ through type checking and cleanup of redundant operations.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.high_precision_nodes">
-<span class="sig-name descname"><span class="pre">high_precision_nodes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker" title="modelopt.onnx.autocast.precisionconverter.InputIndexTracker"><span class="pre">InputIndexTracker</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.high_precision_nodes" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">high_precision_nodes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker" title="modelopt.onnx.autocast.precisionconverter.InputIndexTracker"><span class="pre">InputIndexTracker</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.high_precision_nodes" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.low_precision_nodes">
-<span class="sig-name descname"><span class="pre">low_precision_nodes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker" title="modelopt.onnx.autocast.precisionconverter.InputIndexTracker"><span class="pre">InputIndexTracker</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.low_precision_nodes" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">low_precision_nodes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker" title="modelopt.onnx.autocast.precisionconverter.InputIndexTracker"><span class="pre">InputIndexTracker</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InitializerConsumerTracker.low_precision_nodes" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.InputIndexTracker">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">InputIndexTracker</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">InputIndexTracker</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
 <p>A class that tracks the index of an input to a node.</p>
 <dl class="py method">
@@ -238,19 +237,19 @@ through type checking and cleanup of redundant operations.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.InputIndexTracker.node">
-<span class="sig-name descname"><span class="pre">node</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">NodeProto</span></em><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker.node" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">node</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">NodeProto</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker.node" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.InputIndexTracker.node_index">
-<span class="sig-name descname"><span class="pre">node_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker.node_index" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">node_index</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.InputIndexTracker.node_index" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.PrecisionConverter">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">PrecisionConverter</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.PrecisionConverter" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PrecisionConverter</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.PrecisionConverter" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
 <p>Precision conversion module for ONNX models.</p>
 <p>This module provides functionality for converting ONNX models between different floating point
@@ -313,12 +312,12 @@ cast at runtime.</p></li>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.PrecisionTypes">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">PrecisionTypes</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.PrecisionTypes" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PrecisionTypes</span></span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.PrecisionTypes" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></p>
 <p>PrecisionTypes(onnx_type, numpy_type, str_short, str_full)</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.autocast.precisionconverter.PrecisionTypes.__new__">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">_cls</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">onnx_type</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">numpy_type</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">str_short</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">str_full</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.PrecisionTypes.__new__" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">_cls</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">onnx_type</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">numpy_type</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">str_short</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">str_full</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.autocast.precisionconverter.PrecisionTypes.__new__" title="Link to this definition"></a></dt>
 <dd><p>Create new instance of PrecisionTypes(onnx_type, numpy_type, str_short, str_full)</p>
 </dd></dl>
 

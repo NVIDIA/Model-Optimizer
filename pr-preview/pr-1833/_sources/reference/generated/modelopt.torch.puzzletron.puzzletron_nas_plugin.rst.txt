@@ -32,6 +32,7 @@ puzzletron\_nas\_plugin
       :nosignatures:
    
       PuzzletronModel
+      PuzzletronConfig
       PuzzletronDescriptor
       PuzzletronSearcher
    

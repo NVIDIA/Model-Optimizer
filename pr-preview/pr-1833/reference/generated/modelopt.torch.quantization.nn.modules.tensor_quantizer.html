@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>tensor_quantizer &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>tensor_quantizer &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -213,7 +212,7 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.HardDisabledTensorQuantizer">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">HardDisabledTensorQuantizer</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.HardDisabledTensorQuantizer" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">HardDisabledTensorQuantizer</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.HardDisabledTensorQuantizer" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a></p>
 <p>TensorQuantizer slot that is structurally never enabled.</p>
 <p>Used where a quantizer attribute must exist for introspection / wildcard-config absorption
@@ -256,14 +255,14 @@ doesn’t silently mislead the user.</p>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">NVFP4StaticQuantizer</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">NVFP4StaticQuantizer</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a></p>
 <p>TensorQuantizer for NVFP4 static block quantization with two-level scaling.</p>
 <p>Uses _global_amax and inherited _amax for per-block amax values.
 Preserves both amax states in fp32.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer.from_tensor_quantizer">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_tensor_quantizer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tq</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_amax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer.from_tensor_quantizer" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_tensor_quantizer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tq</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_amax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer.from_tensor_quantizer" title="Link to this definition"></a></dt>
 <dd><p>Convert a TensorQuantizer to NVFP4StaticQuantizer in-place.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -280,7 +279,7 @@ Preserves both amax states in fp32.</p>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer.global_amax">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">global_amax</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer.global_amax" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">global_amax</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.NVFP4StaticQuantizer.global_amax" title="Link to this definition"></a></dt>
 <dd><p>Return global_amax for quantization.</p>
 </dd></dl>
 
@@ -288,7 +287,7 @@ Preserves both amax states in fp32.</p>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">SequentialQuantizer</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SequentialQuantizer</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Sequential</span></code></p>
 <p>A sequential container for  <a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">TensorQuantizer</span></code></a> modules.</p>
 <p>This modules is used to quantize a tensor in multiple formats sequentially. It takes as input
@@ -316,7 +315,7 @@ same as the gemm quantization. It allows for applying multiple quantization form
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer.convert_to_single_quantizer">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">convert_to_single_quantizer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">indx</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer.convert_to_single_quantizer" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">convert_to_single_quantizer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">indx</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer.convert_to_single_quantizer" title="Link to this definition"></a></dt>
 <dd><p>Replace instances of <a class="reference internal" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer"><code class="xref py py-class docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code></a> in the model with single <cite>TensorQuantizer</cite> quantizer.</p>
 <p>The quantizer indexed by <code class="docutils literal notranslate"><span class="pre">indx</span></code> from the sequential quantizer is used to replace it.
 This method is useful for individually calibrating the quantizers in a sequential quantizer.</p>
@@ -353,7 +352,7 @@ This method is useful for individually calibrating the quantizers in a sequentia
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">TensorQuantizer</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">TensorQuantizer</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Module</span></code></p>
 <p>Tensor quantizer module.</p>
 <p>This module manages quantization and calibration of input tensor. It can perform fake (simulated quantization)
@@ -386,55 +385,55 @@ which can be used to construct amax tensor.</p></li>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.amax">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">amax</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.amax" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">amax</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.amax" title="Link to this definition"></a></dt>
 <dd><p>Return amax for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.axis">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">axis</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.axis" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">axis</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.axis" title="Link to this definition"></a></dt>
 <dd><p>Return axis for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">bias</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">bias</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias" title="Link to this definition"></a></dt>
 <dd><p>Return bias for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_axis">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">bias_axis</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_axis" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">bias_axis</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_axis" title="Link to this definition"></a></dt>
 <dd><p>Return bias_axis for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_calibrator">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">bias_calibrator</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_calibrator" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">bias_calibrator</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_calibrator" title="Link to this definition"></a></dt>
 <dd><p>Return bias_calibrator for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_method">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">bias_method</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_method" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">bias_method</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_method" title="Link to this definition"></a></dt>
 <dd><p>Return bias_method for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_type">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">bias_type</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_type" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">bias_type</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_type" title="Link to this definition"></a></dt>
 <dd><p>Return bias_type for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_value">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">bias_value</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_value" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">bias_value</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.bias_value" title="Link to this definition"></a></dt>
 <dd><p>Return bias for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.block_sizes">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">block_sizes</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.block_sizes" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">block_sizes</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.block_sizes" title="Link to this definition"></a></dt>
 <dd><p>Return block_sizes for quantization.</p>
 </dd></dl>
 
@@ -522,7 +521,7 @@ which can be used to construct amax tensor.</p></li>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.fake_quant">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">fake_quant</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.fake_quant" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">fake_quant</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.fake_quant" title="Link to this definition"></a></dt>
 <dd><p>Return True if fake quantization is used.</p>
 </dd></dl>
 
@@ -538,7 +537,7 @@ which can be used to construct amax tensor.</p></li>
 <dd class="field-even"><p>A Tensor of type output_dtype</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p>outputs</p>
+<dd class="field-odd"><p><a class="reference internal" href="modelopt.onnx.quantization.autotune.html#modelopt.onnx.quantization.autotune.Region.outputs" title="modelopt.onnx.quantization.autotune.Region.outputs"><em>outputs</em></a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -561,19 +560,19 @@ For restoring the quantizer fully including the parameters and buffers, use <cit
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_enabled">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_enabled</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_enabled" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">is_enabled</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_enabled" title="Link to this definition"></a></dt>
 <dd><p>Return true if the modules is not disabled.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_fp8">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_fp8</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_fp8" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">is_fp8</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_fp8" title="Link to this definition"></a></dt>
 <dd><p>Check if is per-tensor FP8 E4M3 (no block scales, no per-channel axis).</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_mx_format">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_mx_format</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_mx_format" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">is_mx_format</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_mx_format" title="Link to this definition"></a></dt>
 <dd><p>Check if is MX formats.</p>
 </dd></dl>
 
@@ -585,7 +584,7 @@ For restoring the quantizer fully including the parameters and buffers, use <cit
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_nvfp4_dynamic">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_nvfp4_dynamic</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_nvfp4_dynamic" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">is_nvfp4_dynamic</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_nvfp4_dynamic" title="Link to this definition"></a></dt>
 <dd><p>E2M1 with E4M3 per-block scales computed dynamically.</p>
 <p>Mirror of <code class="docutils literal notranslate"><span class="pre">is_nvfp4_static</span></code> for the dynamic-scale layout; like it, this does
 not constrain the block size. Consumers that require a specific block size
@@ -599,13 +598,13 @@ not constrain the block size. Consumers that require a specific block size
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_nvfp4_static">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_nvfp4_static</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_nvfp4_static" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">is_nvfp4_static</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_nvfp4_static" title="Link to this definition"></a></dt>
 <dd><p>True for E2M1 weights + E4M3 per-block scales in static layout (format-only check).</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_static_block_quant">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">is_static_block_quant</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_static_block_quant" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">is_static_block_quant</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.is_static_block_quant" title="Link to this definition"></a></dt>
 <dd><p>Check if is static block quantization.</p>
 </dd></dl>
 
@@ -626,25 +625,25 @@ not constrain the block size. Consumers that require a specific block size
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.maxbound">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">maxbound</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.maxbound" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">maxbound</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.maxbound" title="Link to this definition"></a></dt>
 <dd><p>Return maxbound for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.narrow_range">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">narrow_range</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.narrow_range" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">narrow_range</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.narrow_range" title="Link to this definition"></a></dt>
 <dd><p>Return True if symmetric integer range for signed quantization is used.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.num_bits">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">num_bits</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.num_bits" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">num_bits</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.num_bits" title="Link to this definition"></a></dt>
 <dd><p>Return num_bits for quantization.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.pre_quant_scale">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pre_quant_scale</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.pre_quant_scale" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pre_quant_scale</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.pre_quant_scale" title="Link to this definition"></a></dt>
 <dd><p>Return pre_quant_scale used for smoothquant.</p>
 </dd></dl>
 
@@ -662,19 +661,19 @@ not constrain the block size. Consumers that require a specific block size
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_block_size">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">rotate_block_size</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_block_size" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">rotate_block_size</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_block_size" title="Link to this definition"></a></dt>
 <dd><p>Block size for block-granular RHT, or None for full/auto.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_is_enabled">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">rotate_is_enabled</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_is_enabled" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">rotate_is_enabled</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_is_enabled" title="Link to this definition"></a></dt>
 <dd><p>Check if rotate is enabled in quant config.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_is_fp32">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">rotate_is_fp32</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_is_fp32" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">rotate_is_fp32</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.rotate_is_fp32" title="Link to this definition"></a></dt>
 <dd><p>Check if rotation needs to be computed in float32.</p>
 </dd></dl>
 
@@ -706,7 +705,7 @@ For restoring the quantizer fully including the parameters and buffers, use <cit
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.step_size">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">step_size</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.step_size" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">step_size</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.step_size" title="Link to this definition"></a></dt>
 <dd><p>Return step size for integer quantization.</p>
 </dd></dl>
 
@@ -723,13 +722,13 @@ For restoring the quantizer fully including the parameters and buffers, use <cit
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.trt_high_precision_dtype">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">trt_high_precision_dtype</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.trt_high_precision_dtype" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">trt_high_precision_dtype</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.trt_high_precision_dtype" title="Link to this definition"></a></dt>
 <dd><p>Return True if FP16 AMAX is used when exporting the model.</p>
 </dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.unsigned">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">unsigned</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.unsigned" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">unsigned</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer.unsigned" title="Link to this definition"></a></dt>
 <dd><p>Return True if unsigned quantization is used.</p>
 </dd></dl>
 
@@ -743,7 +742,7 @@ For restoring the quantizer fully including the parameters and buffers, use <cit
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizerCache">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">TensorQuantizerCache</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizerCache" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">TensorQuantizerCache</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizerCache" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Protocol</span></code></p>
 <p>A protocol for a cache interface for TensorQuantizer.</p>
 <dl class="py method">

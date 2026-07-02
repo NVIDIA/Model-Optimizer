@@ -26,6 +26,16 @@ config
    .. Overview table of available classes in the module
    
    
+   .. rubric:: Classes
+
+   .. autosummary::
+      :nosignatures:
+   
+      DMDConfig
+      DistillationConfig
+      EMAConfig
+      SampleTimestepConfig
+   
    
 
 

@@ -26,6 +26,18 @@ config
    .. Overview table of available classes in the module
    
    
+   .. rubric:: Classes
+
+   .. autosummary::
+      :nosignatures:
+   
+      CalibrationConfig
+      FlashSkipSoftmaxConfig
+      SparseAttentionAttributeConfig
+      SparseAttentionConfig
+      VSAAttributeConfig
+      VSAConfig
+   
    
 
 

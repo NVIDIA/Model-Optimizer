@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AutoCast (ONNX) &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>AutoCast (ONNX) &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../_static/jquery.js?v=5d32c60e"></script>
       <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../_static/copybutton.js?v=20d3d275"></script>
       <script src="../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -84,7 +83,7 @@
 <li class="toctree-l1"><a class="reference internal" href="7_nas.html">NAS</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">AutoCast (ONNX)</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#basic-commandline-usage">Basic Commandline Usage</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#modelopt.onnx.autocast.__main__-get_parser-named-arguments">Named Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#python-m-modelopt.onnx.autocast-named-arguments">Named Arguments</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#python-api-usage">Python API Usage</a></li>
@@ -150,7 +149,7 @@ reduced precision on the rest of the nodes. AutoCast automatically injects cast 
 nodes.</p>
 <section id="basic-commandline-usage">
 <h2>Basic Commandline Usage<a class="headerlink" href="#basic-commandline-usage" title="Link to this heading"></a></h2>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">usage</span><span class="p">:</span> <span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">modelopt</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">autocast</span> <span class="p">[</span><span class="o">-</span><span class="n">h</span><span class="p">]</span> <span class="o">--</span><span class="n">onnx_path</span> <span class="n">ONNX_PATH</span>
+<div class="highlight-default notranslate" id="python-m-modelopt.onnx.autocast"><div class="highlight"><pre><span></span><span class="n">usage</span><span class="p">:</span> <span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">modelopt</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">autocast</span> <span class="p">[</span><span class="o">-</span><span class="n">h</span><span class="p">]</span> <span class="o">--</span><span class="n">onnx_path</span> <span class="n">ONNX_PATH</span>
                                         <span class="p">[</span><span class="o">--</span><span class="n">output_path</span> <span class="n">OUTPUT_PATH</span><span class="p">]</span>
                                         <span class="p">[</span><span class="o">--</span><span class="n">low_precision_type</span> <span class="p">{</span><span class="n">fp16</span><span class="p">,</span><span class="n">bf16</span><span class="p">}]</span>
                                         <span class="p">[</span><span class="o">--</span><span class="n">calibration_data</span> <span class="n">CALIBRATION_DATA</span><span class="p">]</span>
@@ -171,8 +170,8 @@ nodes.</p>
                                         <span class="p">[</span><span class="o">--</span><span class="n">use_standalone_type_inference</span><span class="p">]</span>
 </pre></div>
 </div>
-<section id="modelopt.onnx.autocast.__main__-get_parser-named-arguments">
-<h3>Named Arguments<a class="headerlink" href="#modelopt.onnx.autocast.__main__-get_parser-named-arguments" title="Link to this heading"></a></h3>
+<section id="python-m-modelopt.onnx.autocast-named-arguments">
+<span id="modelopt.onnx.autocast.__main__-get_parser-named-arguments"></span><h3>Named Arguments<a class="headerlink" href="#python-m-modelopt.onnx.autocast-named-arguments" title="Link to this heading"></a></h3>
 <dl class="option-list">
 <dt><kbd>--onnx_path</kbd></dt>
 <dd><p>Path to the ONNX model</p>

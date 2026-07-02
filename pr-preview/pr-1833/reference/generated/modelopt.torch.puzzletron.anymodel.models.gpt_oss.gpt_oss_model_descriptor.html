@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>gpt_oss_model_descriptor &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>gpt_oss_model_descriptor &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -195,7 +194,7 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">GptOssExpertRemovalLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">GptOssExpertRemovalLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.html#modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.ExpertRemovalLayerDescriptor" title="modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.ExpertRemovalLayerDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ExpertRemovalLayerDescriptor</span></code></a></p>
 <p>GPT-OSS MoE layer descriptor for expert removal.</p>
 <p>Note: This only works for unquantized models (e.g., test models).
@@ -206,7 +205,7 @@ Production GPT-OSS models use MXFP4 quantization with fused experts
 - Experts: mlp.experts.{idx}.{gate_up_proj,down_proj} with .weight and .bias</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target_name='mlp'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">moe_prefix_name='model.layers.{layer_idx}.mlp'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_prefix_name='experts'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_weights=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_biases=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_weights=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_biases=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_fused_experts=True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fused_expert_weights=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.__init__" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'mlp'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">moe_prefix_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'model.layers.{layer_idx}.mlp'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_prefix_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'experts'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_weights</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_biases</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_weights</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_biases</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_fused_experts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fused_expert_weights</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.__init__" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -229,26 +228,26 @@ Production GPT-OSS models use MXFP4 quantization with fused experts
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_biases">
-<span class="sig-name descname"><span class="pre">expert_biases</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_biases" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">expert_biases</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_biases" title="Link to this definition"></a></dt>
 <dd><p>Per-expert bias names relative to <em>expert_prefix</em> (per-expert format).</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_prefix_name">
-<span class="sig-name descname"><span class="pre">expert_prefix_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'experts'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_prefix_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">expert_prefix_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'experts'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_prefix_name" title="Link to this definition"></a></dt>
 <dd><p>Expert prefix relative to <em>moe_prefix</em> with <code class="docutils literal notranslate"><span class="pre">{expert_idx}</span></code> placeholder,
 e.g. <code class="docutils literal notranslate"><span class="pre">experts.{expert_idx}</span></code>.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_weights">
-<span class="sig-name descname"><span class="pre">expert_weights</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_weights" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">expert_weights</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.expert_weights" title="Link to this definition"></a></dt>
 <dd><p>Per-expert weight names relative to <em>expert_prefix</em> (per-expert format).</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.fused_expert_weights">
-<span class="sig-name descname"><span class="pre">fused_expert_weights</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.fused_expert_weights" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">fused_expert_weights</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.fused_expert_weights" title="Link to this definition"></a></dt>
 <dd><p>Fused expert weight names relative to <em>moe_prefix</em>,
 e.g. <code class="docutils literal notranslate"><span class="pre">[&quot;experts.gate_up_proj&quot;,</span> <span class="pre">&quot;experts.down_proj&quot;]</span></code>.</p>
 </dd></dl>
@@ -265,32 +264,32 @@ e.g. <code class="docutils literal notranslate"><span class="pre">[&quot;experts
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.is_fused_experts">
-<span class="sig-name descname"><span class="pre">is_fused_experts</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.is_fused_experts" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">is_fused_experts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.is_fused_experts" title="Link to this definition"></a></dt>
 <dd><p>If <code class="docutils literal notranslate"><span class="pre">True</span></code>, experts are stored as single fused tensors (shape <code class="docutils literal notranslate"><span class="pre">[num_experts,</span> <span class="pre">...]</span></code>).</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.moe_prefix_name">
-<span class="sig-name descname"><span class="pre">moe_prefix_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'model.layers.{layer_idx}.mlp'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.moe_prefix_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">moe_prefix_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'model.layers.{layer_idx}.mlp'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.moe_prefix_name" title="Link to this definition"></a></dt>
 <dd><p>MoE prefix layer name with <code class="docutils literal notranslate"><span class="pre">{layer_idx}</span></code> placeholder,
 e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{layer_idx}.moe</span></code>.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.router_biases">
-<span class="sig-name descname"><span class="pre">router_biases</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.router_biases" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">router_biases</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.router_biases" title="Link to this definition"></a></dt>
 <dd><p>Router bias names relative to <em>moe_prefix</em>.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.router_weights">
-<span class="sig-name descname"><span class="pre">router_weights</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.router_weights" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">router_weights</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.router_weights" title="Link to this definition"></a></dt>
 <dd><p>Router weight names relative to <em>moe_prefix</em>.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.target_name">
-<span class="sig-name descname"><span class="pre">target_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mlp'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.target_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">target_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mlp'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor.target_name" title="Link to this definition"></a></dt>
 <dd><p>Module name for hook registration; supports <code class="docutils literal notranslate"><span class="pre">regex:</span></code> prefix.</p>
 </dd></dl>
 
@@ -298,12 +297,12 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">GptOssKVHeadsLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">GptOssKVHeadsLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.html#modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsLayerDescriptor" title="modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsLayerDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">KVHeadsLayerDescriptor</span></code></a></p>
 <p>GptOssKVHeadsLayerDescriptor(o_proj_name: str = ‘self_attn.o_proj’, attn_prefix_name: str = ‘model.layers.{layer_idx}.self_attn’, qkvo_weight_names: List[str] = &lt;factory&gt;)</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">o_proj_name='self_attn.o_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn_prefix_name='model.layers.{layer_idx}.self_attn'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qkvo_weight_names=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.__init__" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">o_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'self_attn.o_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn_prefix_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'model.layers.{layer_idx}.self_attn'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qkvo_weight_names</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.__init__" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -320,35 +319,35 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.attn_prefix_name">
-<span class="sig-name descname"><span class="pre">attn_prefix_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'model.layers.{layer_idx}.self_attn'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.attn_prefix_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">attn_prefix_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'model.layers.{layer_idx}.self_attn'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.attn_prefix_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.o_proj_name">
-<span class="sig-name descname"><span class="pre">o_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'self_attn.o_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.o_proj_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">o_proj_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'self_attn.o_proj'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.o_proj_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.qkvo_weight_names">
-<span class="sig-name descname"><span class="pre">qkvo_weight_names</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.qkvo_weight_names" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">qkvo_weight_names</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssKVHeadsLayerDescriptor.qkvo_weight_names" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">GptOssModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">GptOssModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.anymodel.model_descriptor.base.html#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor" title="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModelDescriptor</span></code></a></p>
 <p>Model descriptor for GPT-OSS (pure MoE model).</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.attn_no_op_post_init">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
 <dd><p>Replace attention sublayers with no-op modules.</p>
 </dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.block_config_to_layer_overrides">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
 <dd><p>Map BlockConfig to layer constructor overrides.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -359,7 +358,7 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.create_dummy_block">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">create_dummy_block</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.create_dummy_block" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">create_dummy_block</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.create_dummy_block" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -375,7 +374,7 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.decoder_layer_cls">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
 <dd><p>Get the decoder layer class for GPT-OSS models.</p>
 <p>GPT-OSS is a standard transformers model in recent versions.
 Import directly from transformers.models.gpt_oss.modeling_gpt_oss.</p>
@@ -383,23 +382,23 @@ Import directly from transformers.models.gpt_oss.modeling_gpt_oss.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.final_norm_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.init_rotary_embedding">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
 <dd><p>Initialize rotary embeddings on the correct device.</p>
 </dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.input_embedding_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.layer_block_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>index</strong> (<em>int</em>)</p>
@@ -409,7 +408,7 @@ Import directly from transformers.models.gpt_oss.modeling_gpt_oss.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.layer_name_predicates">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
 <dd><p>Define regex patterns for grouping weights into subblocks.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -423,7 +422,7 @@ Import directly from transformers.models.gpt_oss.modeling_gpt_oss.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.mlp_no_op_post_init">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
 <dd><p>Replace MLP sublayers with no-op modules.</p>
 <p>Note: GPT-OSS MoE layers return (hidden_states, router_scores), so we need
 to return a tuple of 2 values.</p>
@@ -431,12 +430,12 @@ to return a tuple of 2 values.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.output_embedding_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.pruning_mixins">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pruning_mixins</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.pruning_mixins" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pruning_mixins</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssModelDescriptor.pruning_mixins" title="Link to this definition"></a></dt>
 <dd><p>Return available pruning mixins for GPT-OSS.</p>
 <p>Note: Expert removal works for unquantized models (test models).
 Production models use MXFP4 quantization which is not yet supported.</p>

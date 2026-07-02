@@ -26,25 +26,10 @@ post\_init\_sparse
    .. Overview table of available classes in the module
    
    
-   .. rubric:: Classes
-
-   .. autosummary::
-      :nosignatures:
-   
-      SparsityMethod
-      SparsityMethod2o4
-   
    
 
 
    .. Overview table of available functions in the module
    
-   
-   .. rubric:: Functions
-
-   .. autosummary::
-      :nosignatures:
-   
-      custom_from_mask
    
    

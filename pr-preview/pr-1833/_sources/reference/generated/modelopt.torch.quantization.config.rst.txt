@@ -26,6 +26,28 @@ config
    .. Overview table of available classes in the module
    
    
+   .. rubric:: Classes
+
+   .. autosummary::
+      :nosignatures:
+   
+      AWQClipCalibConfig
+      AWQFullCalibConfig
+      AWQLiteCalibConfig
+      CompressConfig
+      GPTQCalibConfig
+      LayerwiseConfig
+      LocalHessianCalibConfig
+      MaxCalibConfig
+      MseCalibConfig
+      QuantizeAlgorithmConfig
+      QuantizeConfig
+      QuantizerAttributeConfig
+      QuantizerCfgEntry
+      RotateConfig
+      SVDQuantConfig
+      SmoothQuantCalibConfig
+   
    
 
 

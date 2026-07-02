@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>mistral_small_model_descriptor &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>mistral_small_model_descriptor &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -194,12 +193,12 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">MistralFFNIntermediateLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">MistralFFNIntermediateLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.html#modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediateLayerDescriptor" title="modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediateLayerDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">FFNIntermediateLayerDescriptor</span></code></a></p>
 <p>MistralFFNIntermediateLayerDescriptor(down_proj_name: str = ‘mlp.down_proj’, ffn_prefix_name: str = ‘model.layers.{layer_idx}.mlp’, linear_weight_names: List[str] = &lt;factory&gt;)</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">down_proj_name='mlp.down_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ffn_prefix_name='model.layers.{layer_idx}.mlp'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">linear_weight_names=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.__init__" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">down_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'mlp.down_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ffn_prefix_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'model.layers.{layer_idx}.mlp'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">linear_weight_names</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.__init__" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -216,29 +215,29 @@
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.down_proj_name">
-<span class="sig-name descname"><span class="pre">down_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mlp.down_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.down_proj_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">down_proj_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mlp.down_proj'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.down_proj_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.ffn_prefix_name">
-<span class="sig-name descname"><span class="pre">ffn_prefix_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'model.layers.{layer_idx}.mlp'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.ffn_prefix_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">ffn_prefix_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'model.layers.{layer_idx}.mlp'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.ffn_prefix_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.linear_weight_names">
-<span class="sig-name descname"><span class="pre">linear_weight_names</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.linear_weight_names" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">linear_weight_names</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor.linear_weight_names" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">MistralKVHeadsLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">MistralKVHeadsLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.html#modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsLayerDescriptor" title="modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsLayerDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">KVHeadsLayerDescriptor</span></code></a></p>
 <p>MistralKVHeadsLayerDescriptor(o_proj_name: str = ‘self_attn.o_proj’, attn_prefix_name: str = ‘model.layers.{layer_idx}.self_attn’, qkvo_weight_names: List[str] = &lt;factory&gt;)</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">o_proj_name='self_attn.o_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn_prefix_name='model.layers.{layer_idx}.self_attn'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qkvo_weight_names=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.__init__" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">o_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'self_attn.o_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn_prefix_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'model.layers.{layer_idx}.self_attn'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qkvo_weight_names</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.__init__" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -255,28 +254,28 @@
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.attn_prefix_name">
-<span class="sig-name descname"><span class="pre">attn_prefix_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'model.layers.{layer_idx}.self_attn'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.attn_prefix_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">attn_prefix_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'model.layers.{layer_idx}.self_attn'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.attn_prefix_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.o_proj_name">
-<span class="sig-name descname"><span class="pre">o_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'self_attn.o_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.o_proj_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">o_proj_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'self_attn.o_proj'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.o_proj_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.qkvo_weight_names">
-<span class="sig-name descname"><span class="pre">qkvo_weight_names</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.qkvo_weight_names" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">qkvo_weight_names</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor.qkvo_weight_names" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">MistralSmallModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">MistralSmallModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.anymodel.model_descriptor.base.html#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor" title="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModelDescriptor</span></code></a></p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.attn_no_op_post_init">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>decoder_layer</strong> (<em>MistralDecoderLayer</em>)</p>
@@ -286,7 +285,7 @@
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.block_config_to_layer_overrides">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>block_config</strong> (<a class="reference internal" href="modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.BlockConfig" title="modelopt.torch.puzzletron.block_config.BlockConfig"><em>BlockConfig</em></a>)</p>
@@ -296,17 +295,17 @@
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.decoder_layer_cls">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.final_norm_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.init_rotary_embedding">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>model</strong> (<em>MistralForCausalLM</em>)</p>
@@ -316,12 +315,12 @@
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.input_embedding_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.layer_block_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>index</strong> (<em>int</em>)</p>
@@ -331,7 +330,7 @@
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.layer_name_predicates">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>num_layers</strong> (<em>int</em>)</p>
@@ -344,7 +343,7 @@
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.mlp_no_op_post_init">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>decoder_layer</strong> (<em>MistralDecoderLayer</em>)</p>
@@ -354,7 +353,7 @@
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.output_embedding_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralSmallModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>

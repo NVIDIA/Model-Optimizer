@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>pruning_utils &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>pruning_utils &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -203,124 +202,124 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">GQAInitMode</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">GQAInitMode</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.AverageKV">
-<span class="sig-name descname"><span class="pre">AverageKV</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'AverageKV'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.AverageKV" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">AverageKV</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'AverageKV'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.AverageKV" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.CopyAsIs">
-<span class="sig-name descname"><span class="pre">CopyAsIs</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'CopyAsIs'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.CopyAsIs" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">CopyAsIs</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'CopyAsIs'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.CopyAsIs" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.Degrouping">
-<span class="sig-name descname"><span class="pre">Degrouping</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Degrouping'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.Degrouping" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">Degrouping</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Degrouping'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.Degrouping" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.FirstKV">
-<span class="sig-name descname"><span class="pre">FirstKV</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'FirstKV'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.FirstKV" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">FirstKV</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'FirstKV'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.FirstKV" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.PruneKVHeads">
-<span class="sig-name descname"><span class="pre">PruneKVHeads</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'PruneKVHeads'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.PruneKVHeads" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">PruneKVHeads</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'PruneKVHeads'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.PruneKVHeads" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.RandomBlock">
-<span class="sig-name descname"><span class="pre">RandomBlock</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'RandomBlock'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.RandomBlock" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">RandomBlock</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'RandomBlock'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.RandomBlock" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.RandomKV">
-<span class="sig-name descname"><span class="pre">RandomKV</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'RandomKV'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.RandomKV" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">RandomKV</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'RandomKV'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.GQAInitMode.RandomKV" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">HiddenSizeInitMode</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">HiddenSizeInitMode</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.CopyAsIs">
-<span class="sig-name descname"><span class="pre">CopyAsIs</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'CopyAsIs'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.CopyAsIs" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">CopyAsIs</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'CopyAsIs'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.CopyAsIs" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.PruneByChannelRanking">
-<span class="sig-name descname"><span class="pre">PruneByChannelRanking</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'PruneByChannelRanking'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.PruneByChannelRanking" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">PruneByChannelRanking</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'PruneByChannelRanking'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.PruneByChannelRanking" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.Random">
-<span class="sig-name descname"><span class="pre">Random</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Random'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.Random" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">Random</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Random'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.Random" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.Truncate">
-<span class="sig-name descname"><span class="pre">Truncate</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Truncate'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.Truncate" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">Truncate</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Truncate'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.HiddenSizeInitMode.Truncate" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">LinearInitMode</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">LinearInitMode</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode.FromTeacher">
-<span class="sig-name descname"><span class="pre">FromTeacher</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'FromTeacher'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode.FromTeacher" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">FromTeacher</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'FromTeacher'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode.FromTeacher" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode.Random">
-<span class="sig-name descname"><span class="pre">Random</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Random'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode.Random" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">Random</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Random'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.LinearInitMode.Random" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">MlpInitMode</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">MlpInitMode</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.ConcatExpertsIntoDenseFFN">
-<span class="sig-name descname"><span class="pre">ConcatExpertsIntoDenseFFN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'ConcatExpertsIntoDenseFFN'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.ConcatExpertsIntoDenseFFN" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">ConcatExpertsIntoDenseFFN</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'ConcatExpertsIntoDenseFFN'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.ConcatExpertsIntoDenseFFN" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.CopyAsIs">
-<span class="sig-name descname"><span class="pre">CopyAsIs</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'CopyAsIs'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.CopyAsIs" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">CopyAsIs</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'CopyAsIs'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.CopyAsIs" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.ExpertRemoval">
-<span class="sig-name descname"><span class="pre">ExpertRemoval</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'ExpertRemoval'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.ExpertRemoval" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">ExpertRemoval</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'ExpertRemoval'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.ExpertRemoval" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.MoEChannelPruning">
-<span class="sig-name descname"><span class="pre">MoEChannelPruning</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'MoEChannelPruning'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.MoEChannelPruning" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">MoEChannelPruning</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'MoEChannelPruning'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.MoEChannelPruning" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.PruneByActivationsLog">
-<span class="sig-name descname"><span class="pre">PruneByActivationsLog</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'PruneByActivationsLog'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.PruneByActivationsLog" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">PruneByActivationsLog</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'PruneByActivationsLog'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.PruneByActivationsLog" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.Random">
-<span class="sig-name descname"><span class="pre">Random</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Random'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.Random" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">Random</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Random'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.Random" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.Truncate">
-<span class="sig-name descname"><span class="pre">Truncate</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Truncate'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.Truncate" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">Truncate</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Truncate'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.pruning_utils.MlpInitMode.Truncate" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>

@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>utils &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>utils &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -235,7 +234,7 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">SharedQuantState</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SharedQuantState</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Module</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></p>
 <p>Base class for shared quantization state owned by a group parent.</p>
 <p>Subclasses define when and how their canonical state is initialized. Runtime states
@@ -254,7 +253,7 @@ instead of doing the same work in every member.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.attach">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">attach</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">patterns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.attach" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">attach</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">patterns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.attach" title="Link to this definition"></a></dt>
 <dd><p>Create this state on each discovered group’s parent.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -271,7 +270,7 @@ instead of doing the same work in every member.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.default_patterns">
-<span class="sig-name descname"><span class="pre">default_patterns</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.default_patterns" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">default_patterns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.default_patterns" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
@@ -303,18 +302,18 @@ meta / forward never ran).</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.managed_attrs">
-<span class="sig-name descname"><span class="pre">managed_attrs</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.managed_attrs" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">managed_attrs</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.managed_attrs" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.members">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">members</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.members" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">members</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.members" title="Link to this definition"></a></dt>
 <dd><p>Return linked member modules.</p>
 </dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.metadata">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">metadata</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.metadata" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">metadata</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.metadata" title="Link to this definition"></a></dt>
 <dd><p>Return restore metadata for this state when present in <code class="docutils literal notranslate"><span class="pre">model</span></code>.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -328,12 +327,12 @@ meta / forward never ran).</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.name">
-<span class="sig-name descname"><span class="pre">name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.populate">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">populate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.populate" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">populate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.populate" title="Link to this definition"></a></dt>
 <dd><p>Finalize and sync every state of this type in <code class="docutils literal notranslate"><span class="pre">model</span></code>; return the count populated.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -358,7 +357,7 @@ meta / forward never ran).</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.resolve_patterns">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">resolve_patterns</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">shared_states</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.resolve_patterns" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">resolve_patterns</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">shared_states</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.resolve_patterns" title="Link to this definition"></a></dt>
 <dd><p>Resolve the max-calibration config into grouping patterns for this state.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -372,7 +371,7 @@ meta / forward never ran).</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.restore">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">restore</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">patterns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.restore" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">restore</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">patterns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.restore" title="Link to this definition"></a></dt>
 <dd><p>Re-attach states and rebuild member aliases from members’ restored buffers.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -419,7 +418,7 @@ rebuilt here from the members’ (persistent, just-loaded) buffers.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.sync">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">sync</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parallel_state</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.sync" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">sync</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parallel_state</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.sync" title="Link to this definition"></a></dt>
 <dd><p>Synchronize canonical state across distributed process groups.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -433,7 +432,7 @@ rebuilt here from the members’ (persistent, just-loaded) buffers.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedQuantState.target_quantizer_kind">
-<span class="sig-name descname"><span class="pre">target_quantizer_kind</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'weight'</span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.target_quantizer_kind" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">target_quantizer_kind</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'weight'</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedQuantState.target_quantizer_kind" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
@@ -470,7 +469,7 @@ Returns whether anything was tied.</p>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">SharedWeightGlobalAmaxState</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SharedWeightGlobalAmaxState</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.utils.SharedQuantState" title="modelopt.torch.quantization.utils.shared_input.SharedQuantState"><code class="xref py py-class docutils literal notranslate"><span class="pre">SharedQuantState</span></code></a></p>
 <p>Canonical shared weight <code class="docutils literal notranslate"><span class="pre">global_amax</span></code> for one fusible sibling group.</p>
 <dl class="py method">
@@ -486,7 +485,7 @@ Returns whether anything was tied.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.default_patterns">
-<span class="sig-name descname"><span class="pre">default_patterns</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('(?:(.*)\\.)?(?:q_proj|k_proj|v_proj)',</span> <span class="pre">'(?:(.*)\\.)?(?:gate_proj|up_proj)',</span> <span class="pre">'(?:(.*)\\.)?(?:w1|w3)')</span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.default_patterns" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">default_patterns</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('(?:(.*)\\.)?(?:q_proj|k_proj|v_proj)',</span> <span class="pre">'(?:(.*)\\.)?(?:gate_proj|up_proj)',</span> <span class="pre">'(?:(.*)\\.)?(?:w1|w3)')</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.default_patterns" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
@@ -502,18 +501,18 @@ Returns whether anything was tied.</p>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.global_amax">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">global_amax</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.global_amax" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">global_amax</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.global_amax" title="Link to this definition"></a></dt>
 <dd><p>Return the canonical shared global amax.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.managed_attrs">
-<span class="sig-name descname"><span class="pre">managed_attrs</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('_global_amax',)</span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.managed_attrs" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">managed_attrs</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('_global_amax',)</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.managed_attrs" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.name">
-<span class="sig-name descname"><span class="pre">name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'weight_global_amax'</span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'weight_global_amax'</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
@@ -532,7 +531,7 @@ Returns whether anything was tied.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.target_quantizer_kind">
-<span class="sig-name descname"><span class="pre">target_quantizer_kind</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'weight'</span></em><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.target_quantizer_kind" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">target_quantizer_kind</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'weight'</span></span><a class="headerlink" href="#modelopt.torch.quantization.utils.SharedWeightGlobalAmaxState.target_quantizer_kind" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
@@ -636,13 +635,13 @@ apply to. Returns <code class="docutils literal notranslate"><span class="pre">(
 
 <dl class="py function">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.utils.iter_shared_quant_states">
-<span class="sig-name descname"><span class="pre">iter_shared_quant_states</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state_cls=&lt;class</span> <span class="pre">'modelopt.torch.quantization.utils.shared_input.SharedQuantState'&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.iter_shared_quant_states" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">iter_shared_quant_states</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state_cls</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;class</span> <span class="pre">'modelopt.torch.quantization.utils.shared_input.SharedQuantState'&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.utils.iter_shared_quant_states" title="Link to this definition"></a></dt>
 <dd><p>Yield shared quant states owned within <code class="docutils literal notranslate"><span class="pre">model</span></code>.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>model</strong> (<em>Module</em>)</p></li>
-<li><p><strong>state_cls</strong> (<em>type</em><em>[</em><a class="reference internal" href="#modelopt.torch.quantization.utils.SharedQuantState" title="modelopt.torch.quantization.utils.shared_input.SharedQuantState"><em>SharedQuantState</em></a><em>]</em>)</p></li>
+<li><p><strong>state_cls</strong> (<a class="reference internal" href="modelopt.torch.fastgen.config.html#modelopt.torch.fastgen.config.EMAConfig.type" title="modelopt.torch.fastgen.config.EMAConfig.type"><em>type</em></a><em>[</em><a class="reference internal" href="#modelopt.torch.quantization.utils.SharedQuantState" title="modelopt.torch.quantization.utils.shared_input.SharedQuantState"><em>SharedQuantState</em></a><em>]</em>)</p></li>
 </ul>
 </dd>
 </dl>

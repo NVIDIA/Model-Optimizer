@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>quant_rnn &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>quant_rnn &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -216,23 +215,23 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">QuantRNNBase</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">QuantRNNBase</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.quantization.nn.modules.quant_module.html#modelopt.torch.quantization.nn.modules.quant_module.QuantModule" title="modelopt.torch.quantization.nn.modules.quant_module.QuantModule"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantModule</span></code></a></p>
 <p>Base class for quantized RNN modules.</p>
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.all_input_quantizers_disabled">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">all_input_quantizers_disabled</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.all_input_quantizers_disabled" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">all_input_quantizers_disabled</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.all_input_quantizers_disabled" title="Link to this definition"></a></dt>
 <dd><p>Check if all input quantizer are disabled.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_input">
-<span class="sig-name descname"><span class="pre">default_quant_desc_input</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">QuantizerAttributeConfig(enable=True,</span> <span class="pre">num_bits=8,</span> <span class="pre">axis=None,</span> <span class="pre">fake_quant=True,</span> <span class="pre">unsigned=False,</span> <span class="pre">narrow_range=False,</span> <span class="pre">learn_amax=False,</span> <span class="pre">type='static',</span> <span class="pre">block_sizes=None,</span> <span class="pre">bias=None,</span> <span class="pre">trt_high_precision_dtype='Float',</span> <span class="pre">calibrator='max',</span> <span class="pre">rotate=False,</span> <span class="pre">pass_through_bwd=True,</span> <span class="pre">backend=None,</span> <span class="pre">backend_extra_args=None,</span> <span class="pre">use_constant_amax=False)</span></em><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_input" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">default_quant_desc_input</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">QuantizerAttributeConfig(enable=True,</span> <span class="pre">num_bits=8,</span> <span class="pre">axis=None,</span> <span class="pre">fake_quant=True,</span> <span class="pre">unsigned=False,</span> <span class="pre">narrow_range=False,</span> <span class="pre">learn_amax=False,</span> <span class="pre">type='static',</span> <span class="pre">block_sizes=None,</span> <span class="pre">bias=None,</span> <span class="pre">trt_high_precision_dtype='Float',</span> <span class="pre">calibrator='max',</span> <span class="pre">rotate=False,</span> <span class="pre">pass_through_bwd=True,</span> <span class="pre">backend=None,</span> <span class="pre">backend_extra_args=None,</span> <span class="pre">use_constant_amax=False)</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_input" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_weight">
-<span class="sig-name descname"><span class="pre">default_quant_desc_weight</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">QuantizerAttributeConfig(enable=True,</span> <span class="pre">num_bits=8,</span> <span class="pre">axis=None,</span> <span class="pre">fake_quant=True,</span> <span class="pre">unsigned=False,</span> <span class="pre">narrow_range=False,</span> <span class="pre">learn_amax=False,</span> <span class="pre">type='static',</span> <span class="pre">block_sizes=None,</span> <span class="pre">bias=None,</span> <span class="pre">trt_high_precision_dtype='Float',</span> <span class="pre">calibrator='max',</span> <span class="pre">rotate=False,</span> <span class="pre">pass_through_bwd=True,</span> <span class="pre">backend=None,</span> <span class="pre">backend_extra_args=None,</span> <span class="pre">use_constant_amax=False)</span></em><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_weight" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">default_quant_desc_weight</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">QuantizerAttributeConfig(enable=True,</span> <span class="pre">num_bits=8,</span> <span class="pre">axis=None,</span> <span class="pre">fake_quant=True,</span> <span class="pre">unsigned=False,</span> <span class="pre">narrow_range=False,</span> <span class="pre">learn_amax=False,</span> <span class="pre">type='static',</span> <span class="pre">block_sizes=None,</span> <span class="pre">bias=None,</span> <span class="pre">trt_high_precision_dtype='Float',</span> <span class="pre">calibrator='max',</span> <span class="pre">rotate=False,</span> <span class="pre">pass_through_bwd=True,</span> <span class="pre">backend=None,</span> <span class="pre">backend_extra_args=None,</span> <span class="pre">use_constant_amax=False)</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.default_quant_desc_weight" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
@@ -243,7 +242,7 @@
 
 <dl class="py property">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.functionals_to_replace">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">functionals_to_replace</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Iterator</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">ModuleType</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.functionals_to_replace" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">functionals_to_replace</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Iterator</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">ModuleType</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.functionals_to_replace" title="Link to this definition"></a></dt>
 <dd><p>Replace functions of packages on the fly.</p>
 </dd></dl>
 
@@ -255,21 +254,21 @@
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.weight_quantizer">
-<span class="sig-name descname"><span class="pre">weight_quantizer</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><span class="pre">TensorQuantizer</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer"><span class="pre">SequentialQuantizer</span></a></em><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.weight_quantizer" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">weight_quantizer</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><span class="pre">TensorQuantizer</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer"><span class="pre">SequentialQuantizer</span></a></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase.weight_quantizer" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNFullBase">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">QuantRNNFullBase</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNFullBase" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">QuantRNNFullBase</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNFullBase" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase" title="modelopt.torch.quantization.nn.modules.quant_rnn.QuantRNNBase"><code class="xref py py-class docutils literal notranslate"><span class="pre">QuantRNNBase</span></code></a></p>
 <p>Quantized RNN with input quantizer.</p>
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">RNNLayerForward</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">RNNLayerForward</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.RNNLayerForward" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
 <p>A single layer of rnn modules.</p>
 <dl class="py method">
@@ -282,7 +281,7 @@
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">VFRNNForward</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">VFRNNForward</span></span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_rnn.VFRNNForward" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
 <p>Reimplement the _VF rnn calls with python to enable input quantizers.</p>
 <p>It’s less efficient compared to original calls.</p>

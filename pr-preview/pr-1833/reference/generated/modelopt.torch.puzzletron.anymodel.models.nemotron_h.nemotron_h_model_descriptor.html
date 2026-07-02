@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>nemotron_h_model_descriptor &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>nemotron_h_model_descriptor &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -194,12 +193,12 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">NemotronHExpertRemovalLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">NemotronHExpertRemovalLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.html#modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.ExpertRemovalLayerDescriptor" title="modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.ExpertRemovalLayerDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ExpertRemovalLayerDescriptor</span></code></a></p>
 <p>NemotronHExpertRemovalLayerDescriptor(target_name: str = ‘mixer.gate’, moe_prefix_name: str = ‘backbone.layers.{layer_idx}.mixer’, expert_prefix_name: str = ‘experts.{expert_idx}’, router_weights: List[str] = &lt;factory&gt;, router_biases: List[str] = &lt;factory&gt;, expert_weights: List[str] = &lt;factory&gt;, expert_biases: List[str] = &lt;factory&gt;, is_fused_experts: bool = False, fused_expert_weights: List[str] = &lt;factory&gt;)</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target_name='mixer.gate'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">moe_prefix_name='backbone.layers.{layer_idx}.mixer'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_prefix_name='experts.{expert_idx}'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_weights=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_biases=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_weights=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_biases=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_fused_experts=False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fused_expert_weights=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.__init__" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'mixer.gate'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">moe_prefix_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'backbone.layers.{layer_idx}.mixer'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_prefix_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'experts.{expert_idx}'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_weights</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_biases</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_weights</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_biases</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_fused_experts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fused_expert_weights</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.__init__" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -222,14 +221,14 @@
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.expert_prefix_name">
-<span class="sig-name descname"><span class="pre">expert_prefix_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'experts.{expert_idx}'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.expert_prefix_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">expert_prefix_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'experts.{expert_idx}'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.expert_prefix_name" title="Link to this definition"></a></dt>
 <dd><p>Expert prefix relative to <em>moe_prefix</em> with <code class="docutils literal notranslate"><span class="pre">{expert_idx}</span></code> placeholder,
 e.g. <code class="docutils literal notranslate"><span class="pre">experts.{expert_idx}</span></code>.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.expert_weights">
-<span class="sig-name descname"><span class="pre">expert_weights</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.expert_weights" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">expert_weights</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.expert_weights" title="Link to this definition"></a></dt>
 <dd><p>Per-expert weight names relative to <em>expert_prefix</em> (per-expert format).</p>
 </dd></dl>
 
@@ -245,26 +244,26 @@ e.g. <code class="docutils literal notranslate"><span class="pre">experts.{exper
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.moe_prefix_name">
-<span class="sig-name descname"><span class="pre">moe_prefix_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'backbone.layers.{layer_idx}.mixer'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.moe_prefix_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">moe_prefix_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'backbone.layers.{layer_idx}.mixer'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.moe_prefix_name" title="Link to this definition"></a></dt>
 <dd><p>MoE prefix layer name with <code class="docutils literal notranslate"><span class="pre">{layer_idx}</span></code> placeholder,
 e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{layer_idx}.moe</span></code>.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.router_biases">
-<span class="sig-name descname"><span class="pre">router_biases</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.router_biases" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">router_biases</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.router_biases" title="Link to this definition"></a></dt>
 <dd><p>Router bias names relative to <em>moe_prefix</em>.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.router_weights">
-<span class="sig-name descname"><span class="pre">router_weights</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.router_weights" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">router_weights</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.router_weights" title="Link to this definition"></a></dt>
 <dd><p>Router weight names relative to <em>moe_prefix</em>.</p>
 </dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.target_name">
-<span class="sig-name descname"><span class="pre">target_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mixer.gate'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.target_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">target_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mixer.gate'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor.target_name" title="Link to this definition"></a></dt>
 <dd><p>Module name for hook registration; supports <code class="docutils literal notranslate"><span class="pre">regex:</span></code> prefix.</p>
 </dd></dl>
 
@@ -272,12 +271,12 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">NemotronHKVHeadsLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">NemotronHKVHeadsLayerDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.html#modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsLayerDescriptor" title="modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsLayerDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">KVHeadsLayerDescriptor</span></code></a></p>
 <p>NemotronHKVHeadsLayerDescriptor(o_proj_name: str = ‘mixer.o_proj’, attn_prefix_name: str = ‘backbone.layers.{layer_idx}.mixer’, qkvo_weight_names: List[str] = &lt;factory&gt;)</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">o_proj_name='mixer.o_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn_prefix_name='backbone.layers.{layer_idx}.mixer'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qkvo_weight_names=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.__init__" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">o_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'mixer.o_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn_prefix_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'backbone.layers.{layer_idx}.mixer'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qkvo_weight_names</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.__init__" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -294,33 +293,33 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.attn_prefix_name">
-<span class="sig-name descname"><span class="pre">attn_prefix_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'backbone.layers.{layer_idx}.mixer'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.attn_prefix_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">attn_prefix_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'backbone.layers.{layer_idx}.mixer'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.attn_prefix_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.o_proj_name">
-<span class="sig-name descname"><span class="pre">o_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mixer.o_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.o_proj_name" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">o_proj_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mixer.o_proj'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.o_proj_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.qkvo_weight_names">
-<span class="sig-name descname"><span class="pre">qkvo_weight_names</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.qkvo_weight_names" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">qkvo_weight_names</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor.qkvo_weight_names" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">NemotronHModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">NemotronHModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.anymodel.model_descriptor.base.html#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor" title="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModelDescriptor</span></code></a></p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.attn_no_op_post_init">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.block_config_to_layer_overrides">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>block_config</strong> (<a class="reference internal" href="modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.BlockConfig" title="modelopt.torch.puzzletron.block_config.BlockConfig"><em>BlockConfig</em></a>)</p>
@@ -330,7 +329,7 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.create_dummy_block">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">create_dummy_block</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.create_dummy_block" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">create_dummy_block</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.create_dummy_block" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -346,17 +345,17 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.decoder_layer_cls">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.final_norm_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.get_weight_groups">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_weight_groups</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_hidden_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.get_weight_groups" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">get_weight_groups</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_hidden_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.get_weight_groups" title="Link to this definition"></a></dt>
 <dd><p>Problem with NemotronH is that <cite>norm.weight</cite> can be in both block_{i}_ffn and block_{i}_attention. duplicate groups with <cite>norm.weight</cite> should be removed.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -373,18 +372,18 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.init_rotary_embedding">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
 <dd><p>NemotronH has no positional embeddings</p>
 </dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.input_embedding_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.layer_block_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>index</strong> (<em>int</em>)</p>
@@ -394,7 +393,7 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.layer_name_predicates">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>num_layers</strong> (<em>int</em>)</p>
@@ -407,17 +406,17 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.mlp_no_op_post_init">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.output_embedding_name">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.pruning_mixins">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pruning_mixins</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.pruning_mixins" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pruning_mixins</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.pruning_mixins" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
 <dd class="field-odd"><p><em>Dict</em>[<em>str</em>, <a class="reference internal" href="modelopt.torch.puzzletron.pruning.pruning_mixin.html#modelopt.torch.puzzletron.pruning.pruning_mixin.PruningMixIn" title="modelopt.torch.puzzletron.pruning.pruning_mixin.PruningMixIn"><em>PruningMixIn</em></a>]</p>
@@ -427,7 +426,7 @@ e.g. <code class="docutils literal notranslate"><span class="pre">model.layers.{
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.requires_trust_remote_code">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">requires_trust_remote_code</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.requires_trust_remote_code" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">requires_trust_remote_code</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHModelDescriptor.requires_trust_remote_code" title="Link to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
 <dd class="field-odd"><p><em>bool</em></p>

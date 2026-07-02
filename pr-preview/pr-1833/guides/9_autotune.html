@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Autotune (ONNX) &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>Autotune (ONNX) &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../_static/jquery.js?v=5d32c60e"></script>
       <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../_static/copybutton.js?v=20d3d275"></script>
       <script src="../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -109,11 +108,11 @@
 <li class="toctree-l2"><a class="reference internal" href="#configuration-options">Configuration Options</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#config-class">Config Class</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#command-line-arguments">Command-Line Arguments</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-named-arguments">Named Arguments</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-model-and-output">Model and Output</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-autotuning-strategy">Autotuning Strategy</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-quantization">Quantization</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-tensorrt-benchmark">TensorRT Benchmark</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-named-arguments">Named Arguments</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-model-and-output">Model and Output</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-autotuning-strategy">Autotuning Strategy</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-quantization">Quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#python-m-modelopt.onnx.quantization.autotune-tensorrt-benchmark">TensorRT Benchmark</a></li>
 </ul>
 </li>
 </ul>
@@ -662,7 +661,7 @@ python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantizati
 <section id="command-line-arguments">
 <h3><a class="toc-backref" href="#id20" role="doc-backlink">Command-Line Arguments</a><a class="headerlink" href="#command-line-arguments" title="Link to this heading"></a></h3>
 <p>Arguments use underscores. Short options: <code class="docutils literal notranslate"><span class="pre">-m</span></code> (onnx_path), <code class="docutils literal notranslate"><span class="pre">-o</span></code> (output_dir), <code class="docutils literal notranslate"><span class="pre">-s</span></code> (schemes_per_region), <code class="docutils literal notranslate"><span class="pre">-v</span></code> (verbose). Run <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">modelopt.onnx.quantization.autotune</span> <span class="pre">--help</span></code> for full help.</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">usage</span><span class="p">:</span> <span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">modelopt</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">quantization</span><span class="o">.</span><span class="n">autotune</span> <span class="p">[</span><span class="o">-</span><span class="n">h</span><span class="p">]</span> <span class="o">--</span><span class="n">onnx_path</span>
+<div class="highlight-default notranslate" id="python-m-modelopt.onnx.quantization.autotune"><div class="highlight"><pre><span></span><span class="n">usage</span><span class="p">:</span> <span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">modelopt</span><span class="o">.</span><span class="n">onnx</span><span class="o">.</span><span class="n">quantization</span><span class="o">.</span><span class="n">autotune</span> <span class="p">[</span><span class="o">-</span><span class="n">h</span><span class="p">]</span> <span class="o">--</span><span class="n">onnx_path</span>
                                                      <span class="n">ONNX_PATH</span>
                                                      <span class="p">[</span><span class="o">--</span><span class="n">output_dir</span> <span class="n">OUTPUT_DIR</span><span class="p">]</span>
                                                      <span class="p">[</span><span class="o">--</span><span class="n">mode</span> <span class="p">{</span><span class="n">quick</span><span class="p">,</span><span class="n">default</span><span class="p">,</span><span class="n">extensive</span><span class="p">}]</span>
@@ -682,8 +681,8 @@ python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantizati
                                                      <span class="p">[</span><span class="o">--</span><span class="n">verbose</span><span class="p">]</span>
 </pre></div>
 </div>
-<section id="modelopt.onnx.quantization.autotune.__main__-get_parser-named-arguments">
-<h4>Named Arguments<a class="headerlink" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-named-arguments" title="Link to this heading"></a></h4>
+<section id="python-m-modelopt.onnx.quantization.autotune-named-arguments">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-named-arguments"></span><h4>Named Arguments<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-named-arguments" title="Link to this heading"></a></h4>
 <dl class="option-list">
 <dt><kbd>--verbose, -v</kbd></dt>
 <dd><p>Enable verbose DEBUG logging</p>
@@ -691,8 +690,8 @@ python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantizati
 </dd>
 </dl>
 </section>
-<section id="modelopt.onnx.quantization.autotune.__main__-get_parser-model-and-output">
-<h4>Model and Output<a class="headerlink" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-model-and-output" title="Link to this heading"></a></h4>
+<section id="python-m-modelopt.onnx.quantization.autotune-model-and-output">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-model-and-output"></span><h4>Model and Output<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-model-and-output" title="Link to this heading"></a></h4>
 <dl class="option-list">
 <dt><kbd>--onnx_path, -m</kbd></dt>
 <dd><p>Path to ONNX model file</p>
@@ -703,8 +702,8 @@ python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantizati
 </dd>
 </dl>
 </section>
-<section id="modelopt.onnx.quantization.autotune.__main__-get_parser-autotuning-strategy">
-<h4>Autotuning Strategy<a class="headerlink" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-autotuning-strategy" title="Link to this heading"></a></h4>
+<section id="python-m-modelopt.onnx.quantization.autotune-autotuning-strategy">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-autotuning-strategy"></span><h4>Autotuning Strategy<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-autotuning-strategy" title="Link to this heading"></a></h4>
 <dl class="option-list">
 <dt><kbd>--mode</kbd></dt>
 <dd><p>Possible choices: quick, default, extensive</p>
@@ -729,8 +728,8 @@ python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantizati
 </dd>
 </dl>
 </section>
-<section id="modelopt.onnx.quantization.autotune.__main__-get_parser-quantization">
-<h4>Quantization<a class="headerlink" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-quantization" title="Link to this heading"></a></h4>
+<section id="python-m-modelopt.onnx.quantization.autotune-quantization">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-quantization"></span><h4>Quantization<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-quantization" title="Link to this heading"></a></h4>
 <dl class="option-list">
 <dt><kbd>--quant_type</kbd></dt>
 <dd><p>Possible choices: int8, fp8</p>
@@ -744,8 +743,8 @@ python<span class="w"> </span>-m<span class="w"> </span>modelopt.onnx.quantizati
 </dd>
 </dl>
 </section>
-<section id="modelopt.onnx.quantization.autotune.__main__-get_parser-tensorrt-benchmark">
-<h4>TensorRT Benchmark<a class="headerlink" href="#modelopt.onnx.quantization.autotune.__main__-get_parser-tensorrt-benchmark" title="Link to this heading"></a></h4>
+<section id="python-m-modelopt.onnx.quantization.autotune-tensorrt-benchmark">
+<span id="modelopt.onnx.quantization.autotune.__main__-get_parser-tensorrt-benchmark"></span><h4>TensorRT Benchmark<a class="headerlink" href="#python-m-modelopt.onnx.quantization.autotune-tensorrt-benchmark" title="Link to this heading"></a></h4>
 <dl class="option-list">
 <dt><kbd>--use_trtexec</kbd></dt>
 <dd><p>Use trtexec for benchmarking (default: False)</p>

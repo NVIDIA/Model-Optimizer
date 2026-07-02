@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>export &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>export &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -184,12 +183,12 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.export.FP8QuantExporter">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">FP8QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">FP8QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.onnx.export.ONNXQuantExporter" title="modelopt.onnx.export.base_exporter.ONNXQuantExporter"><code class="xref py py-class docutils literal notranslate"><span class="pre">ONNXQuantExporter</span></code></a></p>
 <p>Exporter for FP8 quantization.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.FP8QuantExporter.compress_weights">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter.compress_weights" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter.compress_weights" title="Link to this definition"></a></dt>
 <dd><p>Compresses FP32/FP16 weights to FP8 by folding QDQ nodes to DQ only.</p>
 <p>Even though modelopt supports FP8 onnx export, the weights are represented in fp32 + QDQ.
 The storage is therefore very bad. In this function,
@@ -210,7 +209,7 @@ weights in the output model. TRT custom ops are converted to native ONNX Dequant
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.FP8QuantExporter.compute_scales">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter.compute_scales" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter.compute_scales" title="Link to this definition"></a></dt>
 <dd><p>Computes the scales for the weights in the ONNX model for FP8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -224,7 +223,7 @@ weights in the output model. TRT custom ops are converted to native ONNX Dequant
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.FP8QuantExporter.post_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter.post_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter.post_process" title="Link to this definition"></a></dt>
 <dd><p>Post-processes the ONNX model for FP8 quantization.</p>
 <p>Converts TRT_FP8 QDQ ops to native ONNX QuantizeLinear/DequantizeLinear,
 adds FP8 weight DQ for Conv layers whose weight quantizers were disabled during
@@ -245,7 +244,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.FP8QuantExporter.pre_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter.pre_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.FP8QuantExporter.pre_process" title="Link to this definition"></a></dt>
 <dd><p>Pre-processes the ONNX model for FP8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -261,12 +260,12 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT4QuantExporter">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">INT4QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">INT4QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.onnx.export.ONNXQuantExporter" title="modelopt.onnx.export.base_exporter.ONNXQuantExporter"><code class="xref py py-class docutils literal notranslate"><span class="pre">ONNXQuantExporter</span></code></a></p>
 <p>Exporter for INT4 quantization.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT4QuantExporter.compress_weights">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter.compress_weights" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter.compress_weights" title="Link to this definition"></a></dt>
 <dd><p>Compresses the weights in the ONNX model for INT4 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -280,7 +279,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT4QuantExporter.compute_scales">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter.compute_scales" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter.compute_scales" title="Link to this definition"></a></dt>
 <dd><p>Computes the scales for the weights in the ONNX model for INT4 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -294,7 +293,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT4QuantExporter.post_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter.post_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter.post_process" title="Link to this definition"></a></dt>
 <dd><p>Post-processes the ONNX model for INT4 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -308,7 +307,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT4QuantExporter.pre_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter.pre_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT4QuantExporter.pre_process" title="Link to this definition"></a></dt>
 <dd><p>Pre-processes the ONNX model for INT4 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -324,12 +323,12 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT8QuantExporter">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">INT8QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">INT8QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.onnx.export.ONNXQuantExporter" title="modelopt.onnx.export.base_exporter.ONNXQuantExporter"><code class="xref py py-class docutils literal notranslate"><span class="pre">ONNXQuantExporter</span></code></a></p>
 <p>Exporter for INT8 quantization.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT8QuantExporter.compress_weights">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter.compress_weights" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter.compress_weights" title="Link to this definition"></a></dt>
 <dd><p>Compresses the weights in the ONNX model for INT8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -343,7 +342,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT8QuantExporter.compute_scales">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter.compute_scales" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter.compute_scales" title="Link to this definition"></a></dt>
 <dd><p>Computes the scales for the weights in the ONNX model for INT8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -357,7 +356,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT8QuantExporter.post_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter.post_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter.post_process" title="Link to this definition"></a></dt>
 <dd><p>Post-processes the ONNX model for INT8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -371,7 +370,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.INT8QuantExporter.pre_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter.pre_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.INT8QuantExporter.pre_process" title="Link to this definition"></a></dt>
 <dd><p>Pre-processes the ONNX model for INT8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -387,12 +386,12 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.export.MXFP8QuantExporter">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">MXFP8QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">MXFP8QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.onnx.export.ONNXQuantExporter" title="modelopt.onnx.export.base_exporter.ONNXQuantExporter"><code class="xref py py-class docutils literal notranslate"><span class="pre">ONNXQuantExporter</span></code></a></p>
 <p>Exporter for MXFP8 quantization.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.MXFP8QuantExporter.compress_weights">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter.compress_weights" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter.compress_weights" title="Link to this definition"></a></dt>
 <dd><p>Compresses the weights in the ONNX model to FP8 format for MXFP8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -406,7 +405,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.MXFP8QuantExporter.compute_scales">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter.compute_scales" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter.compute_scales" title="Link to this definition"></a></dt>
 <dd><p>Computes the e8m0 scales for weights in the ONNX model for MXFP8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -420,7 +419,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.MXFP8QuantExporter.post_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter.post_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter.post_process" title="Link to this definition"></a></dt>
 <dd><p>Post-processes the ONNX model for MXFP8 quantization.</p>
 <p>Sets DQ output type to FP16 and updates GELU nodes to use tanh approximation.</p>
 <dl class="field-list simple">
@@ -435,7 +434,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.MXFP8QuantExporter.pre_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter.pre_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.MXFP8QuantExporter.pre_process" title="Link to this definition"></a></dt>
 <dd><p>Pre-processes the ONNX model for MXFP8 quantization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -451,7 +450,7 @@ patterns so TRT can fuse DQ into the attention MatMul kernels.</p>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.export.NVFP4QuantExporter">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">NVFP4QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">NVFP4QuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#modelopt.onnx.export.ONNXQuantExporter" title="modelopt.onnx.export.base_exporter.ONNXQuantExporter"><code class="xref py py-class docutils literal notranslate"><span class="pre">ONNXQuantExporter</span></code></a></p>
 <p>Exporter for NVFP4 quantization.</p>
 <p>Converts FP32/FP16 weights of an ONNX model to FP4 weights and scaling factors.
@@ -459,7 +458,7 @@ TRT_FP4QDQ nodes will get removed from the weights and replaced with two DQ node
 with converted FP4 weights and scaling factors.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.NVFP4QuantExporter.compress_weights">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter.compress_weights" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter.compress_weights" title="Link to this definition"></a></dt>
 <dd><p>Compresses the weights in the ONNX model for NVFP4 quantization.</p>
 <p>Converts weights to FP4 format and scales to FP8 format.</p>
 <dl class="field-list simple">
@@ -474,7 +473,7 @@ with converted FP4 weights and scaling factors.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.NVFP4QuantExporter.compute_scales">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter.compute_scales" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter.compute_scales" title="Link to this definition"></a></dt>
 <dd><p>Computes the scales for the weights in the ONNX model for NVFP4 quantization.</p>
 <p>Stores computed scales as node attributes for use in compress_weights.</p>
 <dl class="field-list simple">
@@ -489,7 +488,7 @@ with converted FP4 weights and scaling factors.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.NVFP4QuantExporter.post_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter.post_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter.post_process" title="Link to this definition"></a></dt>
 <dd><p>Post-processes the ONNX model for NVFP4 quantization.</p>
 <p>Replaces TRT_FP4QDQ nodes with two DequantizeLinear nodes and handles
 precision casting for inputs.</p>
@@ -505,7 +504,7 @@ precision casting for inputs.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.NVFP4QuantExporter.pre_process">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter.pre_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.NVFP4QuantExporter.pre_process" title="Link to this definition"></a></dt>
 <dd><p>Pre-processes the ONNX model for NVFP4 quantization.</p>
 <p>This is a no-op for NVFP4 quantization as no pre-processing is needed.</p>
 <dl class="field-list simple">
@@ -522,12 +521,12 @@ precision casting for inputs.</p>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.onnx.export.ONNXQuantExporter">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ONNXQuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ONNXQuantExporter</span></span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></p>
 <p>Base class for ONNX quantizer exporters.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.ONNXQuantExporter.compress_weights">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.compress_weights" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compress_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.compress_weights" title="Link to this definition"></a></dt>
 <dd><p>Compresses the weights in the ONNX model.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -541,7 +540,7 @@ precision casting for inputs.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.ONNXQuantExporter.compute_scales">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.compute_scales" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">compute_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.compute_scales" title="Link to this definition"></a></dt>
 <dd><p>Computes the scales for the weights in the ONNX model.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -555,7 +554,7 @@ precision casting for inputs.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.ONNXQuantExporter.post_process">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.post_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">post_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.post_process" title="Link to this definition"></a></dt>
 <dd><p>Post-processes the ONNX model.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -569,7 +568,7 @@ precision casting for inputs.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.ONNXQuantExporter.pre_process">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.pre_process" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pre_process</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.pre_process" title="Link to this definition"></a></dt>
 <dd><p>Pre-processes the ONNX model. Converts all DQ -&gt; * -&gt; op patterns to DQ -&gt; op.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -583,7 +582,7 @@ precision casting for inputs.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.onnx.export.ONNXQuantExporter.process_model">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">process_model</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.process_model" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">process_model</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.export.ONNXQuantExporter.process_model" title="Link to this definition"></a></dt>
 <dd><p>Processes the ONNX model.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>

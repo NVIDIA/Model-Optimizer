@@ -6,9 +6,9 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>base &mdash; Model Optimizer 0.0.1.dev1+g1f427acbe</title>
+  <title>base &mdash; Model Optimizer 0.0.1.dev1+g9aaa2bb88</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
       <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
       <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
@@ -19,8 +19,8 @@
       <script src="../../_static/jquery.js?v=5d32c60e"></script>
       <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
-      <script src="../../_static/doctools.js?v=9bcbadda"></script>
-      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
       <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
       <script src="../../_static/copybutton.js?v=20d3d275"></script>
       <script src="../../_static/tabs.js?v=3ee01567"></script>
@@ -28,7 +28,6 @@
       <script>let toggleHintHide = 'Click to hide';</script>
       <script>let toggleOpenOnPrint = 'true';</script>
       <script src="../../_static/togglebutton.js?v=b8b12719"></script>
-      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
       <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
@@ -60,7 +59,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
-<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
@@ -187,11 +186,11 @@
 </table>
 <dl class="py class">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor" title="Link to this definition"></a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></p>
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.attn_no_op_post_init">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
 <dd><p>Post-init callback to alter a decoder layer so that Attention subblock performs as no-op.</p>
 <p>It is recommended to use the utils modules from <cite>no_op.py</cite> to replace layers to dummy
 counterparts.</p>
@@ -217,13 +216,13 @@ use the util method <cite>return_tuple_of_size</cite> to return trailing None va
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.attn_no_op_supported">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">attn_no_op_supported</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.attn_no_op_supported" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">attn_no_op_supported</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.attn_no_op_supported" title="Link to this definition"></a></dt>
 <dd><p>Check whether <cite>attn_no_op_post_init</cite> is overridden for attention no-op support.</p>
 </dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.block_config_to_layer_overrides">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
 <dd><p>Map between BlockConfig and layer config overrides.</p>
 <p>These overrides are consumed by a specific decoder layer and by the whole model.
 Usage can be seen in <cite>deci_x_patcher</cite> under the method <cite>_patched_decoder_layer_init</cite>.</p>
@@ -246,7 +245,7 @@ Usage can be seen in <cite>deci_x_patcher</cite> under the method <cite>_patched
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.create_dummy_block">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">create_dummy_block</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.create_dummy_block" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">create_dummy_block</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">original_layer</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.create_dummy_block" title="Link to this definition"></a></dt>
 <dd><p>Create a dummy block to replace a layer for sharded model initialization.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -263,7 +262,7 @@ Usage can be seen in <cite>deci_x_patcher</cite> under the method <cite>_patched
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.decoder_layer_cls">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
 <dd><p>Decoder layer class types to patch for heterogeneous config support.</p>
 <p>In most cases this class will hold as attributes both FFN &amp; attention layers.</p>
 <dl class="field-list simple">
@@ -278,13 +277,13 @@ Usage can be seen in <cite>deci_x_patcher</cite> under the method <cite>_patched
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.final_norm_name">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
 <dd><p>Return the name of the final normalization layer.</p>
 </dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.get_language_model_config">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_language_model_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.get_language_model_config" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">get_language_model_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.get_language_model_config" title="Link to this definition"></a></dt>
 <dd><p>Get the language model config from a PretrainedConfig.</p>
 <p>For regular LM models, returns the config itself.
 For VL/multimodal models with nested configs, override to return the
@@ -293,7 +292,7 @@ language model portion (e.g., config.text_config for Qwen-VL).</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.get_weight_groups">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_weight_groups</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_hidden_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.get_weight_groups" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">get_weight_groups</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_hidden_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.get_weight_groups" title="Link to this definition"></a></dt>
 <dd><p>Group model weights to support the puzzle subblock checkpointing format.</p>
 <p>This method uses the abstract method <cite>layer_name_predicates</cite> by default.</p>
 <dl class="field-list simple">
@@ -322,7 +321,7 @@ language model portion (e.g., config.text_config for Qwen-VL).</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.init_rotary_embedding">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
 <dd><p>Re-initiate the rotary embeddings based on an existing model.</p>
 <p>In puzzletron we initiate a sharded model by first creating a meta model then replacing
 to the actual device by loading the state_dict with the real weights.</p>
@@ -333,13 +332,13 @@ initialization.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.input_embedding_name">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
 <dd><p>Return the name of the input embedding layer.</p>
 </dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.layer_block_name">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
 <dd><p>Return the name of the decoder layer at the given index.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -350,7 +349,7 @@ initialization.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.layer_name_predicates">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
 <dd><p>Return predicates for grouping model weights to support subblock checkpointing.</p>
 <p>For every group name return a regex predicate whether a layer name is part of the group.</p>
 <dl class="field-list simple">
@@ -368,7 +367,7 @@ initialization.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.mlp_no_op_post_init">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
 <dd><p>Post-init callback to alter a decoder layer so that FFN/mlp subblock performs as no-op.</p>
 <p>It is recommended to use the utils modules from <cite>no_op.py</cite> to replace layers to dummy
 counterparts.</p>
@@ -395,7 +394,7 @@ use the util method <cite>return_tuple_of_size</cite> to return trailing None va
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.mlp_no_op_supported">
-<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">mlp_no_op_supported</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.mlp_no_op_supported" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">mlp_no_op_supported</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.mlp_no_op_supported" title="Link to this definition"></a></dt>
 <dd><p>Check whether <cite>mlp_no_op_post_init</cite> is overridden for mlp no-op support.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
@@ -406,13 +405,13 @@ use the util method <cite>return_tuple_of_size</cite> to return trailing None va
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.output_embedding_name">
-<em class="property"><span class="pre">abstract</span><span class="w"> </span><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
 <dd><p>Return the name of the output embedding layer.</p>
 </dd></dl>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.pruning_mixins">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pruning_mixins</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.pruning_mixins" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">pruning_mixins</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.pruning_mixins" title="Link to this definition"></a></dt>
 <dd><p>Return available pruning mixins for bypass distillation.</p>
 <p>Override in subclasses to provide model-specific pruning mixins, e.g.
 <code class="docutils literal notranslate"><span class="pre">{&quot;kv_heads&quot;:</span> <span class="pre">KVHeadsPruningMixIn(...),</span> <span class="pre">&quot;experts_removal&quot;:</span> <span class="pre">ExpertRemovalPruningMixIn(...)}</span></code>.</p>
@@ -428,7 +427,7 @@ can rely on the generic <code class="docutils literal notranslate"><span class="
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.requires_trust_remote_code">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">requires_trust_remote_code</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.requires_trust_remote_code" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">requires_trust_remote_code</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.requires_trust_remote_code" title="Link to this definition"></a></dt>
 <dd><p>Whether this model descriptor requires trust_remote_code=True for loading.</p>
 <p>Models that use custom code (e.g., via auto_map in config) should override
 this to return True.</p>
@@ -444,7 +443,7 @@ this to return True.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.truncate_pattern_for_subblock">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">truncate_pattern_for_subblock</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">lm_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent_layer_index</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.truncate_pattern_for_subblock" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">truncate_pattern_for_subblock</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">lm_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent_layer_index</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.truncate_pattern_for_subblock" title="Link to this definition"></a></dt>
 <dd><p>Adjust per-layer config fields so a single-layer model represents the correct layer type.</p>
 <p>The default implementation handles <code class="docutils literal notranslate"><span class="pre">hybrid_override_pattern</span></code> for
 hybrid architectures.  It is a no-op when the field is absent.
@@ -464,7 +463,7 @@ Override if a model uses a different pattern alphabet.</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.uses_autocast">
-<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">uses_autocast</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.uses_autocast" title="Link to this definition"></a></dt>
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">uses_autocast</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor.uses_autocast" title="Link to this definition"></a></dt>
 <dd><p>Whether this model supports torch.autocast.</p>
 <p>Some models (e.g., Qwen3-VL MoE) have dtype bugs under autocast.
 Override and return False for models that do not support autocast.</p>
