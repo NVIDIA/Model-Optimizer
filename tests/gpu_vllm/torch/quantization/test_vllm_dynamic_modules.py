@@ -29,6 +29,7 @@ TinyDeepseekV3 (+ MLAAttention).
 from __future__ import annotations
 
 import gc
+import types
 
 import pytest
 from _test_utils.torch.transformers_models import (
@@ -41,13 +42,68 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
     VllmMLAAttention,
+    _import_attention_module,
     _QuantFusedMoEBase,
     _VLLMParallelLinear,
     disable_compilation,
 )
+
+# --- Attention import-path selection (no engine boot) ------------------------------------------
+# Some installed layouts expose ``vllm.attention`` as a namespace package that ``find_spec``
+# locates but that does not define ``Attention``. Selecting a module by namespace existence alone
+# then fails at ``vllm_attention.Attention``. ``_import_attention_module`` must instead accept a
+# module only when it actually exports ``Attention``.
+
+
+def test_import_attention_module_registers_concrete_attention():
+    """The plugin's resolved module must export a concrete ``Attention`` class (regression:
+    on layouts where only ``vllm.model_executor.layers.attention`` has it, importing the plugin
+    used to raise ``AttributeError`` on the namespace ``vllm.attention``)."""
+    module = _import_attention_module()
+    assert isinstance(getattr(module, "Attention", None), type)
+    # The module-level ``vllm_attention`` bound at import time is the same resolved module.
+    assert vllm_plugin.vllm_attention.Attention is module.Attention
+    assert vllm_plugin.vllm_attention.Attention in _ATTENTION_TYPES
+
+
+def test_import_attention_module_skips_namespace_without_attention(monkeypatch):
+    """A module that imports but lacks ``Attention`` is skipped in favor of one that has it."""
+
+    class _Attention:
+        pass
+
+    namespace = types.ModuleType("vllm.attention")  # imports fine, but no ``Attention``
+    concrete = types.ModuleType("vllm.model_executor.layers.attention")
+    concrete.Attention = _Attention
+    available = {"vllm.attention": namespace, "vllm.model_executor.layers.attention": concrete}
+
+    def fake_import(name):
+        if name in available:
+            return available[name]
+        raise ImportError(name)
+
+    monkeypatch.setattr(vllm_plugin.importlib, "import_module", fake_import)
+    selected = _import_attention_module()
+    assert selected is concrete
+    assert selected is not namespace
+
+
+def test_import_attention_module_raises_when_no_module_exports_attention(monkeypatch):
+    """Refuse to select a namespace solely because ``find_spec``/import succeeds."""
+    namespace = types.ModuleType("vllm.attention")  # imports, but never exports ``Attention``
+
+    def fake_import(name):
+        if name == "vllm.attention":
+            return namespace
+        raise ImportError(name)
+
+    monkeypatch.setattr(vllm_plugin.importlib, "import_module", fake_import)
+    with pytest.raises(ImportError):
+        _import_attention_module()
 
 
 def _quantize_and_summarize(self):

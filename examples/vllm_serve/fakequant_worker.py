@@ -32,6 +32,7 @@ from vllm_reload_utils import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.plugins.vllm_fakequant_hf import is_weight_quantizer_state_key
+from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
     post_restore_vllm_attentions,
@@ -114,13 +115,15 @@ def _fakequant_run_prolog_worker(self) -> None:
             print("Will load quant, so only do a single sample calibration")
             quant_config["calib_size"] = 1
 
-        if os.environ.get("QUANT_SKIP_CALIB", "0") == "1":
-            # Dynamic-only recipes (e.g. NVFP4 attention BMM: dynamic per-block scales +
-            # runtime-default global scale) need no calibration, so skip the dataset
-            # dataloader (avoids the HF `datasets` stack) and apply the config directly.
-            print("QUANT_SKIP_CALIB=1: applying quant config without calibration (dynamic quant).")
-            calibrate_loop = None
-        else:
+        quant_cfg = get_quant_config(quant_config, model)
+
+        # Config-driven calibration (replaces the removed QUANT_SKIP_CALIB env flag): build the
+        # calibration dataset only when the recipe needs it. ``need_calibration`` returns True for
+        # any enabled quantizer not marked ``type: "dynamic"``, so a static/calibrated recipe can
+        # never silently skip its required calibration; a fully dynamic recipe skips the dataset
+        # (and the HF ``datasets`` stack). Attention-only NVFP4 is served via the impl-swap worker,
+        # which never enters this calibration path.
+        if need_calibration(quant_cfg):
             calib_dataloader = get_dataset_dataloader(
                 dataset_name=quant_config["dataset"],
                 tokenizer=tokenizer,
@@ -129,8 +132,9 @@ def _fakequant_run_prolog_worker(self) -> None:
                 device=self.device,
             )
             calibrate_loop = calibrate_fun(calib_dataloader, self)
-
-        quant_cfg = get_quant_config(quant_config, model)
+        else:
+            print("Dynamic-only recipe: no calibration needed, skipping calibration dataset.")
+            calibrate_loop = None
 
         with disable_compilation(model):
             print("Quantizing model...")

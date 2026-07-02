@@ -23,13 +23,6 @@ from functools import partial
 from itertools import chain
 
 import torch
-
-# Try multiple import paths for vLLM compatibility across versions
-if importlib.util.find_spec("vllm.attention"):
-    import vllm.attention as vllm_attention  # vllm < 0.16.0
-else:
-    import vllm.model_executor.layers.attention as vllm_attention  # vllm >= 0.16.0
-
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
@@ -37,6 +30,28 @@ from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_g
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from .custom import CUSTOM_MODEL_PLUGINS
+
+
+# Try multiple import paths for vLLM compatibility across versions. Select a module only if it
+# actually exports ``Attention``: some installed layouts expose ``vllm.attention`` as a namespace
+# package that ``find_spec`` locates but that does not define ``Attention`` (selecting it by
+# namespace existence alone fails later at ``vllm_attention.Attention``).
+def _import_attention_module():
+    for module_name in (
+        "vllm.attention.layer",  # concrete Attention lives here on modern vLLM
+        "vllm.model_executor.layers.attention",  # relocation on some versions
+        "vllm.attention",  # older layouts that export Attention at the package root
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if hasattr(module, "Attention"):
+            return module
+    raise ImportError("No supported vLLM Attention module was found")
+
+
+vllm_attention = _import_attention_module()
 
 # Try multiple import paths for vLLM compatibility across versions
 vllm_shared_fused_moe_layer = None
@@ -67,14 +82,6 @@ else:
         from vllm.model_executor.layers.attention.encoder_only_attention import EncoderOnlyAttention
     except ImportError:
         EncoderOnlyAttention = None
-
-try:
-    _has_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_attention_layer = False
-
-if _has_attention_layer:
-    import vllm.attention.layer as vllm_attention
 
 try:
     VllmMLAAttention = vllm_attention.MLAAttention
