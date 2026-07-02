@@ -275,7 +275,13 @@ def main(args: argparse.Namespace) -> None:
         return not (output_dir / f"{conversation_id}.pt").exists()
 
     original_num = len(dataset)
-    dataset = dataset.filter(keep_conversation)
+    # load_from_cache_file=False is REQUIRED for resume correctness: keep_conversation depends
+    # on on-disk .pt state, which is NOT part of datasets' cache fingerprint (only the function
+    # + dataset are). With a persistent HF cache (e.g. HF_HOME on shared storage across
+    # requeues), a cached result from an earlier run — when fewer/no .pt existed — is reused,
+    # so the filter reports "Removed 0" and every resume re-dumps + overwrites already-done
+    # conversations instead of skipping them. Forcing re-evaluation re-checks the disk each run.
+    dataset = dataset.filter(keep_conversation, load_from_cache_file=False)
     print(f"Removed {original_num - len(dataset)} conversations due to existing output files")
 
     if args.debug_max_num_conversations is not None:
