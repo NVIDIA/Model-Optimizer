@@ -67,7 +67,7 @@ if __name__ == "__main__":
         "--config",
         type=str,
         default="all",
-        choices=[*list(get_args(config_type)), "all"],
+        choices=[*get_args(config_type), "all"],
         help='SPEED-Bench configuration to prepare. Use "all" to prepare all configs. (default: %(default)s)',
     )
     parser.add_argument(

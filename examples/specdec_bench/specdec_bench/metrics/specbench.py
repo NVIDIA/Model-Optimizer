@@ -16,9 +16,11 @@
 import json
 import os
 from collections import defaultdict
+from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
 from statistics import mean
+from typing import Any
 
 try:
     import matplotlib.pyplot as plt
@@ -33,6 +35,15 @@ except ImportError:
 from .acceptance_rate import AcceptanceRate
 
 
+@dataclass(frozen=True)
+class RequestMetric:
+    request_id: int
+    request: Any
+    turns: list[list[int]]
+    acceptance_lengths: list[int]
+    request_al: float
+
+
 class SpecBench(AcceptanceRate):
     def __init__(self, requests):
         super().__init__()
@@ -42,45 +53,106 @@ class SpecBench(AcceptanceRate):
             )
         self.requests = requests
 
-    def process_final(self, text_outputs):
+    def process_final(self, text_outputs, request_records, failed_request_ids=None):
+        failed_request_ids = set(failed_request_ids or ())
         lengths = {}
+        self.out = {}
         self.out["Request_AL"] = {}
-        for request_id, request in enumerate(self.requests):
-            turns = self.prompt_ar[request_id].values()
-            assert len(turns) == len(request.turns), (
-                f"Number of turns {len(turns)} does not match number of turns in request {len(request.turns)}"
-            )
-            self.out["Request_AL"][request.question_id] = mean(list(chain(*turns)))
-            for turn in turns:
-                self._get_lengths(turn, lengths)
-            print(request.category, self.out["Request_AL"][request.question_id])
-        per_category = defaultdict(list)
-        for request in self.requests:
-            per_category[request.category].append(self.out["Request_AL"][request.question_id])
-        self.out["Category_AL"] = {}
-        for category_name, category_ar in per_category.items():
-            if len(category_ar) > 0:
-                category_ar = mean(category_ar)
-                self.out["Category_AL"][category_name] = category_ar
-        average_ar = mean(self.out["Request_AL"].values())
-        self.out["Average_AL"] = average_ar
+        if not request_records:
+            print("SpecBench: no successful request records, skipping metric computation")
+            self._format_write_output(text_outputs)
+            return
+        prompt_ar = self.build_prompt_ar(request_records)
+        self._set_request_acceptance_lengths(prompt_ar)
+        request_metrics = self._collect_request_metrics(prompt_ar, lengths, failed_request_ids)
+        self._aggregate_request_metrics(request_metrics, failed_request_ids)
         self._process_lengths(lengths)
+        self._process_binned_lengths(request_records)
         self.write()
         self._format_write_output(text_outputs)
         self._pretty_print_results()
         self._dump_results()
         self._create_visualizations(text_outputs)
 
+    def _collect_request_metrics(
+        self, prompt_ar, lengths, failed_request_ids
+    ) -> list[RequestMetric]:
+        request_metrics = []
+        for request_id, request in enumerate(self.requests):
+            if request_id in failed_request_ids:
+                continue
+            turns = list(prompt_ar[request_id].values())
+            expected_turns = len(request.turns) if request.turns else len(turns)
+            assert len(turns) == expected_turns, (
+                f"Number of turns {len(turns)} does not match number of turns in request {expected_turns}"
+            )
+            acceptance_lengths = list(chain(*turns))
+            request_metrics.append(
+                RequestMetric(
+                    request_id=request_id,
+                    request=request,
+                    turns=turns,
+                    acceptance_lengths=acceptance_lengths,
+                    request_al=mean(acceptance_lengths),
+                )
+            )
+            for turn in turns:
+                self._get_lengths(turn, lengths)
+        return request_metrics
+
+    def _aggregate_request_metrics(self, request_metrics: list[RequestMetric], failed_request_ids):
+        self.out["Request_AL"] = self._request_al_by_sample(request_metrics)
+
+        per_category = defaultdict(list)
+        for request_id, request in enumerate(self.requests):
+            if request_id in failed_request_ids:
+                continue
+            per_category[request.category].append(self.out["Request_AL"][request.question_id])
+        self.out["Category_AL"] = {}
+        for category_name, category_ar in per_category.items():
+            if len(category_ar) > 0:
+                category_ar = mean(category_ar)
+                self.out["Category_AL"][category_name] = category_ar
+        self.out["Category_AL"] = dict(sorted(self.out["Category_AL"].items()))
+        self.out["Average_AL"] = mean(self.out["Request_AL"].values())
+
+    @staticmethod
+    def _request_al_by_sample(request_metrics: list[RequestMetric]):
+        per_sample_acceptance_lengths = defaultdict(list)
+        for request_metric in request_metrics:
+            per_sample_acceptance_lengths[request_metric.request.question_id].extend(
+                request_metric.acceptance_lengths
+            )
+        return {
+            sample_id: mean(acceptance_lengths)
+            for sample_id, acceptance_lengths in per_sample_acceptance_lengths.items()
+        }
+
     def _format_write_output(self, outputs):
         with open(os.path.join(self.directory, "specbench_responses.jsonl"), "w") as outfile:
             for i, messages in enumerate(outputs):
+                if self.is_error_entry(messages):
+                    err_line = {
+                        "question_id": self.requests[i].question_id,
+                        "category": self.requests[i].category,
+                        "error": True,
+                        "error_message": messages[0].get("content"),
+                    }
+                    json.dump(err_line, outfile)
+                    outfile.write("\n")
+                    continue
                 out_line = {}
                 out_line["question_id"] = self.requests[i].question_id
                 out_line["category"] = self.requests[i].category
                 q_turns = [c["content"] for c in messages if c["role"] == "user"]
                 a_turns = [c["content"] for c in messages if c["role"] == "assistant"]
+                raw_a_turns = [
+                    c.get("raw_content", c["content"]) for c in messages if c["role"] == "assistant"
+                ]
                 out_line["turns"] = q_turns
+                out_line["acceptance_lengths"] = self.request_acceptance_lengths.get(i, [])
                 out_line["choices"] = [{"index": 0, "turns": a_turns}]
+                out_line["raw_choices"] = [{"index": 0, "turns": raw_a_turns}]
                 json.dump(out_line, outfile)
                 outfile.write("\n")
 
@@ -122,14 +194,22 @@ class SpecBench(AcceptanceRate):
         # Set style
         plt.style.use("seaborn-v0_8")
 
+        included_indices = [
+            i
+            for i, request in enumerate(self.requests)
+            if request.question_id in self.out["Request_AL"]
+            and not self.is_error_entry(text_outputs[i])
+        ]
         df_clean = pd.DataFrame.from_dict(
             {
-                "question_id": list(self.out["Request_AL"].keys()),
-                "acceptance_rate": list(self.out["Request_AL"].values()),
-                "category": [request.category for request in self.requests],
+                "question_id": [self.requests[i].question_id for i in included_indices],
+                "acceptance_rate": [
+                    self.out["Request_AL"][self.requests[i].question_id] for i in included_indices
+                ],
+                "category": [self.requests[i].category for i in included_indices],
                 "response_length": [
-                    mean([len(c["content"]) for c in messages if c["role"] == "assistant"])
-                    for messages in text_outputs
+                    mean([len(c["content"]) for c in text_outputs[i] if c["role"] == "assistant"])
+                    for i in included_indices
                 ],
             }
         )
@@ -235,3 +315,16 @@ class SpecBench(AcceptanceRate):
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
         plt.close()
         print(f"Plots saved to {plot_path}")
+
+    def _build_visualization_dataframe(self, text_outputs):
+        return pd.DataFrame.from_dict(
+            {
+                "question_id": list(self.out["Request_AL"].keys()),
+                "acceptance_rate": list(self.out["Request_AL"].values()),
+                "category": [request.category for request in self.requests],
+                "response_length": [
+                    mean([len(c["content"]) for c in messages if c["role"] == "assistant"])
+                    for messages in text_outputs
+                ],
+            }
+        )

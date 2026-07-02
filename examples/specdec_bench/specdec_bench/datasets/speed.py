@@ -42,6 +42,7 @@ config_type = Literal[
     "throughput_8k",
     "throughput_16k",
     "throughput_32k",
+    "agentic",
 ]
 TURNS_PLACEHOLDER = "FULL BENCHMARK DATA SHOULD BE FETCHED FROM THE SOURCE USING SPECDEC_BENCH"
 
@@ -78,11 +79,15 @@ DATASETS_AND_LOADERS_FUNCTIONS = {
     ),
     BenchmarkDataset.HLE.value: lambda dataset_name, config_name: (
         load_dataset(
-            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
+            dataset_name,
+            split="test",
+            revision="021a3d71f516a7ac28ceb8d284969902edf1edeb",
         )
         if config_name != "train_test_split"
         else load_dataset(
-            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
+            dataset_name,
+            split="test",
+            revision="021a3d71f516a7ac28ceb8d284969902edf1edeb",
         ).train_test_split(test_size=0.5, shuffle=True, seed=42)
     ),
     BenchmarkDataset.LIVECODEBENCH.value: lambda dataset_name, config_name: load_dataset(
@@ -90,13 +95,22 @@ DATASETS_AND_LOADERS_FUNCTIONS = {
         data_files={
             "test": [
                 f"https://huggingface.co/datasets/livecodebench/code_generation_lite/resolve/0fe84c3912ea0c4d4a78037083943e8f0c4dd505/{file_name}.jsonl"
-                for file_name in ["test", "test2", "test3", "test4", "test5", "test6"]
+                for file_name in [
+                    "test",
+                    "test2",
+                    "test3",
+                    "test4",
+                    "test5",
+                    "test6",
+                ]
             ]
         },
         split="test",
     ),
     BenchmarkDataset.CODE_CONTESTS.value: lambda dataset_name, config_name: load_dataset(
-        dataset_name, split="test", revision="802411c3010cb00d1b05bad57ca77365a3c699d6"
+        dataset_name,
+        split="test",
+        revision="802411c3010cb00d1b05bad57ca77365a3c699d6",
     ),
     BenchmarkDataset.MTBENCH_101.value: lambda dataset_name, config_name: load_dataset(
         "json", data_files={"test": config_name}, split="test"
@@ -146,6 +160,7 @@ class SPEEDBench(Dataset):
         self,
         config_name: config_type = "qualitative",
         num_samples: int | None = None,
+        category: str | None = None,
         _prepare_mode: bool = False,
         **kwargs,
     ):
@@ -155,10 +170,10 @@ class SPEEDBench(Dataset):
             )
         self.data: list[Request] = []
         self.num_samples = num_samples
-        self.external_datasets: dict[str, Any] = {}
+        self.external_datasets = {}
         self._config_name = config_name
         self._resolved_dataset = None
-        self._preprocess(config_name, _prepare_mode=_prepare_mode)
+        self._preprocess(config_name, category=category, _prepare_mode=_prepare_mode)
 
     def _get_external_dataset(self, dataset_name: str, config_name: str | list[str] = "default"):
         full_name = f"{dataset_name}_{config_name}"
@@ -689,7 +704,11 @@ her fear and anger)."""
 
         return example
 
-    def _load_dataset(self, config_name_or_dataset_path: config_type | str) -> "Dataset":
+    def _load_dataset(
+        self,
+        config_name_or_dataset_path: config_type | str,
+        category: str | None = None,
+    ) -> "Dataset":
         """Load the raw HuggingFace dataset from a config name or local path.
 
         Args:
@@ -704,39 +723,25 @@ her fear and anger)."""
         if config_name_or_dataset_path in get_args(config_type):
             dataset = load_dataset("nvidia/SPEED-Bench", config_name_or_dataset_path, split="test")
         else:
-            config_name_or_dataset_path_path = Path(config_name_or_dataset_path)
-            if not config_name_or_dataset_path_path.exists():
+            dataset_path = Path(config_name_or_dataset_path)
+            if not dataset_path.exists():
                 msg = ", ".join(get_args(config_type))
                 raise ValueError(
-                    f"Dataset path {config_name_or_dataset_path_path} does not exist or not one of the supported configs {msg}"
+                    f"Dataset path {dataset_path} does not exist or not one of the supported configs {msg}"
                 )
-            if config_name_or_dataset_path_path.is_dir():
-                data_files = {
-                    "test": [
-                        str(path) for path in config_name_or_dataset_path_path.rglob("*.parquet")
-                    ]
-                }
+            data_files: dict[str, str | list[str]]
+            if dataset_path.is_dir():
+                data_files = {"test": [str(path) for path in dataset_path.rglob("*.parquet")]}
             else:
-                data_files = {"test": [str(config_name_or_dataset_path_path)]}
-            try:
-                dataset = load_dataset("parquet", data_files=data_files, split="test")
-            except (TypeError, ValueError):
-                # Fallback: parquet metadata may be incompatible with the installed
-                # ``datasets`` version.  Read via PyArrow and convert directly.
-                import pyarrow
-                import pyarrow.parquet as pq
-                from datasets import Dataset as HFDataset
-
-                tables = [pq.read_table(f) for f in data_files["test"]]
-                table = pyarrow.concat_tables(tables) if len(tables) > 1 else tables[0]
-                # Strip HF metadata from the schema to avoid Feature parsing errors
-                schema = table.schema
-                if schema.metadata and b"huggingface" in schema.metadata:
-                    new_meta = {k: v for k, v in schema.metadata.items() if k != b"huggingface"}
-                    table = table.replace_schema_metadata(new_meta or None)
-                dataset = HFDataset(table)
-        if self.num_samples is not None and self.num_samples < len(dataset):
-            dataset = self._stratified_select(dataset, self.num_samples)
+                data_files = {"test": str(dataset_path)}
+            dataset = load_dataset("parquet", data_files=data_files, split="test")
+        if category is not None:
+            dataset = dataset.filter(
+                lambda example: example["category"] == category,
+                desc=f"Filtering for category {category}",
+            )
+        if self.num_samples is not None:
+            dataset = dataset.select(range(min(self.num_samples, len(dataset))))
         return dataset
 
     @staticmethod
@@ -791,9 +796,10 @@ her fear and anger)."""
         self,
         config_name_or_dataset_path: config_type | str,
         *,
+        category: str | None = None,
         _prepare_mode: bool = False,
     ):
-        dataset = self._load_dataset(config_name_or_dataset_path)
+        dataset = self._load_dataset(config_name_or_dataset_path, category=category)
 
         if _prepare_mode:
             # Resolve all external data references (only allowed during prepare)
@@ -801,7 +807,13 @@ her fear and anger)."""
         else:
             # Validate that all turns are fully resolved (no placeholders remaining)
             for example in dataset:
-                for turn in example["turns"]:
+                turns = example.get("turns")
+                if turns is None:
+                    prompt = example.get("prompt")
+                    turns = [prompt] if isinstance(prompt, str) else prompt
+                if turns is None:
+                    continue
+                for turn in turns:
                     if turn.startswith(TURNS_PLACEHOLDER):
                         raise ValueError(
                             f"Unresolved data placeholder found in question_id={example['question_id']} "
@@ -811,15 +823,21 @@ her fear and anger)."""
                         )
 
         self._resolved_dataset = dataset
-        self.data = [
-            Request(
-                system_prompt=None,
-                turns=example["turns"],
-                category=example["category"],
-                question_id=example["question_id"],
+        self.data = []
+        for example in dataset:
+            turns = example.get("turns")
+            if turns is None:
+                prompt = example.get("prompt")
+                turns = [prompt] if isinstance(prompt, str) else (prompt or [])
+            self.data.append(
+                Request(
+                    system_prompt=None,
+                    turns=turns,
+                    category=example["category"],
+                    question_id=example["question_id"],
+                    source=example.get("source"),
+                )
             )
-            for example in dataset
-        ]
         assert len(self.data) == len(dataset), (  # type: ignore[arg-type]
             f"Number of requests {len(self.data)} does not match number of requests in the dataset {len(dataset)}"  # type: ignore[arg-type]
         )
@@ -853,3 +871,35 @@ her fear and anger)."""
         output_path = output_dir / "test.parquet"
         instance._resolved_dataset.to_parquet(output_path)
         return output_path
+
+    def encode_chat(
+        self,
+        tokenizer,
+        messages,
+        chat_template_args=None,
+        completions=False,
+        request=None,
+    ):
+        if not completions:
+            return super().encode_chat(
+                tokenizer,
+                messages,
+                chat_template_args=chat_template_args,
+                completions=False,
+                request=request,
+            )
+
+        source = request.source or "" if request else ""
+        if "humanevalpack" in source:
+            prompt = messages[-1]["content"]
+            return tokenizer.encode(prompt, add_special_tokens=False)
+
+        output_str = ""
+        for message in messages:
+            if message["role"] == "system":
+                output_str += f"{message['content']}\n\n"
+            elif message["role"] == "user":
+                output_str += f"Question:\n\n{message['content']}\n\nResponse:\n\n"
+            else:
+                output_str += f"{message['content']}\n"
+        return tokenizer.encode(output_str, add_special_tokens=False)

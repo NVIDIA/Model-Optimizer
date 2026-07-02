@@ -14,9 +14,10 @@
 # limitations under the License.
 
 import asyncio
+import pprint
 import time
 
-from .base import Model
+from .base import CumulativeTokenCollector, Model, build_model_output
 
 try:
     from vllm import SamplingParams
@@ -35,169 +36,113 @@ class VLLMModel(Model):
 
     def __init__(self, model_dir, max_concurrent_requests, sampling_kwargs, **kwargs):
         specdec = None
-        if kwargs.get("speculative_algorithm") == "EAGLE3":
+        speculative_algorithm = kwargs.pop("speculative_algorithm", None)
+        num_speculative_tokens = kwargs.pop("speculative_num_steps", 3)
+        draft_model_dir = kwargs.pop("draft_model_dir", None)
+        draft_sample_method = kwargs.pop("draft_sample_method", None)
+        draft_attention_backend = kwargs.pop("draft_attention_backend", None)
+        if speculative_algorithm == "EAGLE3":
             specdec = {
                 "method": "eagle3",
-                "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
+                "model": draft_model_dir,
+                "num_speculative_tokens": num_speculative_tokens,
             }
-        elif kwargs.get("speculative_algorithm") == "EAGLE":
+        elif speculative_algorithm == "EAGLE":
             specdec = {
                 "method": "eagle",
-                "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
+                "model": draft_model_dir,
+                "num_speculative_tokens": num_speculative_tokens,
             }
-        elif kwargs.get("speculative_algorithm") == "NGRAM":
+        elif speculative_algorithm == "NGRAM":
             specdec = {
                 "method": "ngram",
-                "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
-                "prompt_lookup_max": kwargs.get("max_matching_ngram_size", 3),  # No idea here
+                "num_speculative_tokens": num_speculative_tokens,
+                "prompt_lookup_max": kwargs.pop("max_matching_ngram_size", 3),
             }
-        elif kwargs.get("speculative_algorithm") == "DRAFT_TARGET":
+        elif speculative_algorithm == "DRAFT_TARGET":
             specdec = {
                 "method": "draft_model",
-                "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
+                "model": draft_model_dir,
+                "num_speculative_tokens": num_speculative_tokens,
             }
-            if kwargs.get("parallel_draft_block_sizes") is not None:
+            parallel_draft_block_sizes = kwargs.pop("parallel_draft_block_sizes", None)
+            if parallel_draft_block_sizes is not None:
                 specdec["disable_padded_drafter_batch"] = True
-                specdec["parallel_draft_block_sizes"] = kwargs.get("parallel_draft_block_sizes")
-        elif kwargs.get("speculative_algorithm") == "MTP":
-            # vLLM's ``SpeculativeConfig.__post_init__`` (vllm/config/
-            # speculative.py:529-602) does method auto-detection ONLY
-            # when ``method`` is unset — when ``model`` is provided and
-            # ``method`` is None, the default branch sets
-            # ``method = "draft_model"`` (the generic same-architecture
-            # draft path), NOT MTP. That path enforces equal num_heads
-            # between target and draft and raises
-            # ``AssertionError: All layers in one attention group must
-            # share num_heads`` on heterogeneous-head models like
-            # Gemma 4 (target=8 heads, assistant=4).
-            #
-            # The canonical config for ALL MTP variants is to ALWAYS
-            # pass ``method="mtp"`` AND ADD ``model=<assistant>`` only
-            # when the family uses a separate assistant model. vLLM's
-            # own test at ``tests/v1/e2e/spec_decode/test_spec_decode.py``
-            # (lines 818-823) does exactly this for the gemma4-e4b
-            # parametrization:
-            #
-            #     speculative_config = {
-            #         "method": "mtp",
-            #         "num_speculative_tokens": ...,
-            #     }
-            #     if draft_model is not None:        # Gemma 4 case
-            #         speculative_config["model"] = draft_model
-            #
-            # Surfaced on OMNIML-5024 pipeline #54356795: dropping the
-            # ``method`` key when ``draft_model_dir`` was provided sent
-            # the call into the generic draft_model path, hitting the
-            # num_heads assertion. Restored both keys.
+                specdec["parallel_draft_block_sizes"] = parallel_draft_block_sizes
+        elif speculative_algorithm == "MTP":
             specdec = {
                 "method": "mtp",
-                "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
+                "num_speculative_tokens": num_speculative_tokens,
             }
-            draft_model_dir = kwargs.get("draft_model_dir")
-            if draft_model_dir:
-                # Gemma 4 family (E2B / E4B / 26B-A4B / 31B) uses a
-                # separate assistant checkpoint as the MTP draft.
-                # vLLM auto-detects Gemma4 MTP from the assistant
-                # ``model_type=gemma4_assistant`` and rewrites it to
-                # ``gemma4_mtp`` (speculative.py:511-522). For
-                # families where the MTP layer ships inside the
-                # target (Qwen 3.5 etc.), omit ``--draft_model_dir``
-                # and let vLLM use the target model as its own draft
-                # (handled in speculative.py:562-573).
-                specdec["model"] = draft_model_dir
-        elif kwargs.get("speculative_algorithm") == "DFLASH":
+        elif speculative_algorithm == "DFLASH":
             specdec = {
                 "method": "dflash",
-                "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
+                "model": draft_model_dir,
+                "num_speculative_tokens": num_speculative_tokens,
             }
-        elif kwargs.get("speculative_algorithm") == "NONE":
+        elif speculative_algorithm == "NONE":
             specdec = None
 
-        if specdec is None:
-            num_speculative_tokens = 1
-        else:
-            num_speculative_tokens = specdec.get("num_speculative_tokens", 3)
+        if kwargs.pop("parallel_drafting", False) and specdec is not None:
+            specdec["parallel_drafting"] = True
+        if draft_attention_backend is not None and specdec is not None:
+            specdec["attention_backend"] = draft_attention_backend
+        if draft_sample_method is not None and specdec is not None:
+            specdec["draft_sample_method"] = draft_sample_method
 
         engine_args = AsyncEngineArgs(
             model=model_dir,
-            tokenizer=kwargs.get("tokenizer_path"),
-            trust_remote_code=kwargs.get("trust_remote_code", False),
-            tensor_parallel_size=kwargs.get("tensor_parallel_size", 1),
-            enable_expert_parallel=kwargs.get("moe_expert_parallel_size", 1) > 1,
-            enable_prefix_caching=kwargs.get("prefix_cache", False),
+            trust_remote_code=kwargs.pop("trust_remote_code", False),
+            tensor_parallel_size=kwargs.pop("tensor_parallel_size", 1),
+            enable_expert_parallel=kwargs.pop("moe_expert_parallel_size", 1) > 1,
+            enable_prefix_caching=kwargs.pop("prefix_cache", False),
             speculative_config=specdec,
-            max_num_seqs=max_concurrent_requests * num_speculative_tokens,
+            max_num_seqs=kwargs.pop("max_num_seqs", max_concurrent_requests),
             skip_tokenizer_init=False,
-            async_scheduling=kwargs.get("async_scheduling", True),
-            enforce_eager=False,
-            max_model_len=kwargs.get("max_model_len"),
+            async_scheduling=kwargs.pop("async_scheduling", True),
+            enforce_eager=kwargs.pop("enforce_eager", False),
+            **kwargs,
         )
-        self.engine_args = engine_args
+        print("VLLM Engine configuration:")
+        pprint.pprint(engine_args, sort_dicts=False)
         self.model = AsyncLLM.from_engine_args(engine_args)
-        self.sampling_kwargs = sampling_kwargs
-        # https://github.com/vllm-project/vllm/blob/main/vllm/sampling_params.py
-        self.sampling_config = SamplingParams(
+        self.sampling_kwargs = dict(sampling_kwargs)
+
+    def _build_sampling_config(self, max_length, end_id):
+        sampling_config = SamplingParams(
             detokenize=False,
-            temperature=sampling_kwargs.get("temperature", 1.0),
-            top_p=sampling_kwargs.get("top_p", 1.0),
-            top_k=sampling_kwargs.get("top_k", 0),
+            temperature=self.sampling_kwargs.get("temperature", 1.0),
+            top_p=self.sampling_kwargs.get("top_p", 1.0),
+            top_k=self.sampling_kwargs.get("top_k", 0),
+            max_tokens=max_length,
         )
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-
-    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):  # pragma: no cover
-        output_dict = {}
-        self.sampling_config.max_tokens = max_length
-        self.sampling_config.stop_token_ids = [end_id]
         if end_id == -1:
-            self.sampling_config.ignore_eos = True
+            sampling_config.ignore_eos = True
+        else:
+            sampling_config.stop_token_ids = [end_id]
+        return sampling_config
 
-        outputs, timing, full_tokens = await self.generate(prompt_ids, request_id, turn_id)
-
-        reformatted_output_ids = [[] for _ in range(self.sampling_kwargs.get("beam_width", 1))]
-        start = 0
-        timing_to_strip = []
-        for i in range(len(outputs)):
-            if outputs[i] == start:
-                timing_to_strip.append(i)
-                continue
-            if i == len(outputs) - 1:
-                if full_tokens[-1] == end_id:
-                    if outputs[i] - start == 1:
-                        timing_to_strip.append(i)
-                    else:
-                        reformatted_output_ids[0].append(full_tokens[start : outputs[i] - 1])
-                    break
-            reformatted_output_ids[0].append(full_tokens[start : outputs[i]])
-            start = outputs[i]
-        output_dict["output_ids"] = reformatted_output_ids
-        output_dict["output_logits"] = None
-        output_dict["token_times"] = [
-            timing[i] for i in range(len(timing)) if i not in timing_to_strip
-        ]
-        return output_dict
-
-    async def generate(self, prompt_ids, request_id, turn_id):  # pragma: no cover
-        timing = []
-        timing.append(time.perf_counter())
-        outputs = []
-        full_tokens = []
+    async def run(self, prompt_ids, max_length, end_id, request_id=None, turn_id=None):
+        sampling_config = self._build_sampling_config(max_length, end_id)
+        collector = CumulativeTokenCollector()
+        request_key = (
+            f"{request_id}.{turn_id}"
+            if request_id is not None and turn_id is not None
+            else str(id(prompt_ids))
+        )
         async for output in self.model.generate(
-            request_id=f"{request_id}.{turn_id}",
+            request_id=request_key,
             prompt=TokensPrompt(prompt_token_ids=prompt_ids),
-            sampling_params=self.sampling_config,
+            sampling_params=sampling_config,
         ):
+            chunk_time = time.perf_counter()
             for completion in output.outputs:
-                outputs.append(len(completion.token_ids))
-                timing.append(time.perf_counter())
-                full_tokens = completion.token_ids
+                collector.add_update(completion.index, completion.token_ids, chunk_time)
             if output.finished:
                 break
-        return outputs, timing, full_tokens
+        return build_model_output(
+            collector.output_ids(), collector.token_times, collector.chunk_lengths()
+        )
 
     def get_serving_config(self):  # pragma: no cover
         """Dump the AsyncEngineArgs dataclass plus the runtime vllm_config when available."""
@@ -218,9 +163,8 @@ class VLLMModel(Model):
             pass
         return cfg
 
-    def stop(self):  # pragma: no cover
-        try:
-            self.loop.run_until_complete(self.model.shutdown())
-            self.loop.close()
-        except Exception:
-            pass
+    def stop(self):
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            asyncio.run(self.model.shutdown())

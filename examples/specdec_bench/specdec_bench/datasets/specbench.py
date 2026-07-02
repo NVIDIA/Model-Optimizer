@@ -19,15 +19,17 @@ from .base import Dataset, Request
 
 
 class SpecBench(Dataset):
-    def __init__(self, path, num_samples=480, **kwargs):
+    def __init__(self, path, num_samples=480, category: str | None = None, **kwargs):
         self.data: list[Request] = []  # list of list of questions.
         self.num_samples = num_samples
-        self._preprocess(path)
+        self._preprocess(path, category)
 
-    def _preprocess(self, path):
+    def _preprocess(self, path, category: str | None = None):
         with open(path) as f:
-            for json_line in f:
-                line = json.loads(json_line)
+            for raw in f:
+                line = json.loads(raw)
+                if category is not None and line["category"] != category:
+                    continue
                 self.data.append(
                     Request(
                         question_id=line["question_id"],
