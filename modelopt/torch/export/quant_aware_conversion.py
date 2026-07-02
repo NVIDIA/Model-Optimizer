@@ -35,22 +35,26 @@ operations.
 
 Scope
 -----
-Two reverse primitives cover the common conversion_mapping cases:
+Two reverse primitives cover the conversion_mapping cases:
 
 * **Rename** — a key-level string substitution. Because a quantized linear stores
   every tensor under ``<module>.<leaf>``, renaming the module substring rewrites the
   weight and all its scale siblings together with no tensor manipulation.
-* **Split** — un-fuse an output-dim concatenation (e.g. ``gate_up_proj`` ->
+* **Split** — un-fuse an output-dim concatenation (e.g. dense ``gate_up_proj`` ->
   ``gate_proj`` + ``up_proj``). ``weight``/``weight_scale``/``weight_scale_inv``/
   ``bias`` are chunked along the fused (output) dim; 0-d scalar ``weight_scale_2``/
   ``input_scale`` are duplicated to each part (they are per-tensor and shared).
 
-The 3-D stacked-expert case (``MergeModulelist``, where per-expert weights are
-stacked into ``experts.gate_up_proj`` with leading expert dim) is intentionally
-*not* handled here: the stacked-scalar-scale layout cannot be validated against a
-published checkpoint yet. Encountering it raises :class:`QuantConversionUnsupportedError`
-so the caller can fall back to the legacy (in-memory-name) behavior rather than
-emit a silently-wrong checkpoint. See the module TODO.
+MoE experts need only **Rename**: ModelOpt's export already expands the fused,
+stacked in-memory experts (``experts.gate_up_proj`` of shape ``[E, 2F, H]``) into
+per-expert 2-D linears (``experts.<i>.gate_proj`` / ``up_proj`` / ``down_proj``)
+before save, so the reverse just maps those per-expert leaf names back to the hub
+leaves (e.g. ``gate_proj`` -> ``w1``, ``up_proj`` -> ``w3``, ``down_proj`` -> ``w2``).
+
+Reverse rules are derived from the model's conversion mapping via transformers'
+``reverse_transform()``. Any op shape not covered raises
+:class:`QuantConversionUnsupportedError` so the caller falls back to the legacy
+(in-memory-name) behavior rather than emit a silently-wrong checkpoint.
 """
 
 import re
@@ -189,11 +193,22 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
 
 
 def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
-    """Best-effort: derive reverse rules from the model's transformers conversion mapping.
+    """Derive reverse rules from the model's transformers conversion mapping.
 
-    Returns empty rule lists when no mapping applies (then the export is unchanged).
-    Raises :class:`QuantConversionUnsupportedError` for ops not yet handled quant-aware
-    (e.g. stacked-expert ``MergeModulelist``), so the caller falls back safely.
+    Returns empty rule lists when no mapping applies (export unchanged). Uses
+    transformers' own ``reverse_transform()`` to get correctly-reversed name patterns
+    (so anchored regex renamings reverse properly), then translates them:
+
+    * ``WeightRenaming`` -> :class:`RenameRule` (carries scale siblings for free).
+    * Expert ``WeightConverter`` (reverse contains ``SplitModulelist``): ModelOpt's
+      export already expands fused experts into per-expert 2-D linears, so only the
+      per-expert leaf names need mapping back (e.g. ``gate_proj`` -> ``w1``). Emitted
+      as rename rules -- no tensor manipulation.
+    * Dense fusing ``WeightConverter`` (reverse is ``Chunk`` only): the fused tensor
+      survives in the state dict, so it is un-fused via a :class:`SplitRule`.
+
+    Raises :class:`QuantConversionUnsupportedError` for any op shape not covered, so
+    the caller falls back to the legacy (in-memory-name) behavior.
     """
     try:
         conversions = getattr(model, "_weight_conversions", None)
@@ -208,8 +223,8 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
         return [], []
 
     from transformers.core_model_loading import (
-        Concatenate,
-        MergeModulelist,
+        Chunk,
+        SplitModulelist,
         WeightConverter,
         WeightRenaming,
     )
@@ -217,41 +232,76 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
     split_rules: list[SplitRule] = []
     rename_rules: list[RenameRule] = []
     for conv in conversions:
-        if isinstance(conv, WeightRenaming):
-            # source -> target on load; reverse maps target -> source on save.
-            rename_rules.append(
-                RenameRule(pattern=re.escape(conv.target_patterns), repl=conv.source_patterns)
-            )
-        elif isinstance(conv, WeightConverter):
-            ops = list(conv.operations)
-            if any(isinstance(op, MergeModulelist) for op in ops):
-                raise QuantConversionUnsupportedError(
-                    "stacked-expert MergeModulelist conversion is not yet reversible quant-aware"
-                )
-            if len(ops) == 1 and isinstance(ops[0], Concatenate):
-                split_rules.append(_concat_to_split_rule(conv, ops[0]))
+        rev = conv.reverse_transform()  # hub<-in-memory; reversed name patterns + ops
+        if isinstance(rev, WeightRenaming):
+            for pattern, repl in zip(_as_list(rev.source_patterns), _as_list(rev.target_patterns)):
+                rename_rules.append(RenameRule(pattern=pattern, repl=repl))
+        elif isinstance(rev, WeightConverter):
+            ops = list(rev.operations)
+            if any(isinstance(op, SplitModulelist) for op in ops):
+                # Expert converter: ModelOpt already un-stacked/un-fused experts to
+                # per-expert 2-D linears, so only per-expert leaf names remain to map.
+                rename_rules.extend(_expert_leaf_renames(rev))
+            elif ops and all(isinstance(op, Chunk) for op in ops):
+                # Dense fused linear survives in the state dict -> un-fuse (split).
+                split_rules.append(_dense_split_rule(rev, ops))
             else:
                 raise QuantConversionUnsupportedError(
-                    f"unsupported converter operations: {[type(o).__name__ for o in ops]}"
+                    f"unsupported reverse ops: {[type(o).__name__ for o in ops]}"
                 )
         else:
-            raise QuantConversionUnsupportedError(f"unsupported conversion entry: {type(conv).__name__}")
+            raise QuantConversionUnsupportedError(f"unsupported conversion: {type(rev).__name__}")
     return split_rules, rename_rules
 
 
-def _concat_to_split_rule(conv, concat) -> SplitRule:
-    """Translate a fusing ``Concatenate`` converter into a :class:`SplitRule`."""
-    fused = _suffix(conv.target_patterns)
-    parts = tuple(_suffix(p) for p in conv.source_patterns)
-    return SplitRule(fused_suffix=fused, part_suffixes=parts, dim=concat.dim)
+# ModelOpt's export splits a fused ``gate_up_proj`` into these per-expert linears,
+# in this order (see modelopt.torch.export.layer_utils.get_expert_linear_names).
+_FUSED_EXPERT_PART_NAMES = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
 
-def _suffix(pattern: str) -> str:
-    """Module suffix from a conversion pattern, e.g. ``.experts.*.w1.weight`` -> ``.w1``."""
+def _expert_leaf_renames(rev) -> list[RenameRule]:
+    """Per-expert leaf renames for an expert converter (ModelOpt pre-expands experts).
+
+    ``rev`` reverses hub<-in-memory, so ``rev.source_patterns`` is the fused in-memory
+    leaf (e.g. ``.experts.gate_up_proj``) and ``rev.target_patterns`` the hub leaves
+    (e.g. ``.experts.*.w1.weight``, ``.experts.*.w3.weight``). ModelOpt exports the
+    fused leaf as per-expert parts, mapped back to the hub leaves positionally.
+    """
+    src_leaf = _leaf(_as_list(rev.source_patterns)[0])
+    hub_leaves = [_leaf(t) for t in _as_list(rev.target_patterns)]
+    part_leaves = _FUSED_EXPERT_PART_NAMES.get(src_leaf, [src_leaf])
+    if len(part_leaves) != len(hub_leaves):
+        raise QuantConversionUnsupportedError(
+            f"expert converter arity mismatch: {part_leaves} vs {hub_leaves}"
+        )
+    return [
+        RenameRule(rf"(\.experts\.\d+\.){re.escape(part)}\b", rf"\g<1>{hub}")
+        for part, hub in zip(part_leaves, hub_leaves)
+    ]
+
+
+def _dense_split_rule(rev, ops) -> SplitRule:
+    """Un-fuse a dense (non-expert) fused linear that survives in the state dict."""
+    fused = _leaf_suffix(_as_list(rev.source_patterns)[0])
+    parts = tuple(_leaf_suffix(t) for t in _as_list(rev.target_patterns))
+    dim = next((op.dim for op in ops if hasattr(op, "dim")), 0)
+    return SplitRule(fused_suffix=fused, part_suffixes=parts, dim=dim)
+
+
+def _as_list(x) -> list:
+    return list(x) if isinstance(x, (list, tuple)) else [x]
+
+
+def _leaf(pattern: str) -> str:
+    """Bare leaf name from a conversion pattern, e.g. ``.experts.*.w1.weight`` -> ``w1``."""
     p = pattern
-    for leaf in _LEAF_SUFFIXES:
-        if p.endswith(leaf):
-            p = p[: -len(leaf)]
+    for suffix in _LEAF_SUFFIXES:
+        if p.endswith(suffix):
+            p = p[: -len(suffix)]
             break
-    leaf = p.rsplit(".", 1)[-1]
-    return "." + leaf
+    return p.rstrip(".*").rsplit(".", 1)[-1]
+
+
+def _leaf_suffix(pattern: str) -> str:
+    """Leaf name as a module suffix, e.g. ``.gate_proj``."""
+    return "." + _leaf(pattern)
