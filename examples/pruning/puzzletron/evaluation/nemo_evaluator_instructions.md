@@ -41,7 +41,7 @@ Alternatively you can manually update the file
 # Install the AnyModel-patched deployable (first time only: backs up the original)
 # /opt/Export-Deploy is the default path in NeMo containers — adjust if needed
 cp /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py.bak
-cp examples/pruning/puzzletron/evaluation/hf_deployable_anymodel.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py
+cp /opt/Model-Optimizer/examples/pruning/puzzletron/evaluation/hf_deployable_anymodel.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py
 ```
 
 Now start ray server and deploy the model
