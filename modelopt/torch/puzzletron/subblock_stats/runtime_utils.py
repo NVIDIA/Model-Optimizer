@@ -104,7 +104,7 @@ def convert_config_to_vllm_anymodel(input_dir: Path, output_dir: Path):
 
     config = SimpleNamespace(**config_data)
     config.architectures = ["AnyModel"]
-    config.base_architecture = "LlamaForCausalLM"
+    config.base_architecture = "LlamaForCausalLM" # TODO: extend support to other models
 
     if convert_block_configs_to_per_layer_config(config):
         mprint("Converted block configs to per-layer config")
