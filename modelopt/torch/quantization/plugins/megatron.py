@@ -16,6 +16,7 @@
 """Support quantization for megatron linear layers."""
 
 import types
+from contextlib import contextmanager
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -39,6 +40,7 @@ from modelopt.torch.opt.plugins.megatron import (
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.distributed import ParallelState
 
+from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
 from ..nn import (
     GroupedQuantizer,
@@ -50,6 +52,7 @@ from ..nn import (
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
+from ..utils.layerwise_calib import LayerActivationCollector
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 
 try:
@@ -618,10 +621,11 @@ class _MegatronSequentialMLP(DynamicModule):
                 expert_model_parallel_group=mcore_parallel.get_expert_model_parallel_group(),
             )
 
-        # Initialize parallel state for submodules local_experts.*.linear_fc1 and local_experts.*.linear_fc2
+        # These child linears are still native MCore modules here. Seed `_parallel_state`
+        # directly so the later QuantModule conversion sees the intended parallel state.
         for expert in self.local_experts:
-            expert.linear_fc1.parallel_state = self.parallel_state
-            expert.linear_fc2.parallel_state = self.parallel_state
+            expert.linear_fc1._parallel_state = self.parallel_state
+            expert.linear_fc2._parallel_state = self.parallel_state
 
     def layer_sync_moe_local_experts_amax(self, sync_weight_amax=False):
         """Sync quantizer amax across local experts in a SequentialMLP.
@@ -727,9 +731,10 @@ if HAS_TE:
                     tensor_parallel_group=mcore_parallel.get_expert_tensor_parallel_group(),
                     expert_model_parallel_group=mcore_parallel.get_expert_model_parallel_group(),
                 )
-            # initialize parallel state for submodules linear_fc1 and linear_fc2
-            self.linear_fc1.parallel_state = self.parallel_state
-            self.linear_fc2.parallel_state = self.parallel_state
+            # These child linears are still native MCore modules here. Seed `_parallel_state`
+            # directly so the later QuantModule conversion sees the intended parallel state.
+            self.linear_fc1._parallel_state = self.parallel_state
+            self.linear_fc2._parallel_state = self.parallel_state
 
     @QuantModuleRegistry.register({TEDotProductAttention: "TEDotProductAttention"})
     class _QuantTEDotProductAttention(QuantModule):
@@ -785,3 +790,43 @@ if HAS_TE:
             # Affine KVCache Quant bias vector.
             state_dict = self.state_dict(prefix="", keep_vars=True)
             return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
+
+
+def _is_supported_megatron_model(model: torch.nn.Module) -> bool:
+    return isinstance(model, MegatronModule)
+
+
+@contextmanager
+def _megatron_grad_ckpt_context(model: torch.nn.Module):
+    # Megatron configures activation recompute at model build time via TransformerConfig,
+    # so there is no runtime flag to flip here.
+    yield
+
+
+def _is_param_grad_enabled_for_megatron(pname: str, model: torch.nn.Module) -> bool:
+    return "weight" in pname
+
+
+AutoQuantizeGradientSearcher.register_custom_support(
+    _is_supported_megatron_model,
+    _megatron_grad_ckpt_context,
+    _is_param_grad_enabled_for_megatron,
+)
+
+
+def get_mcore_layerwise_calibration_layers(
+    model: torch.nn.Module,
+) -> list[torch.nn.Module] | torch.nn.ModuleList | None:
+    if not hasattr(model, "decoder") or not hasattr(model.decoder, "layers"):
+        return None
+    decoder_layers = model.decoder.layers
+    if getattr(model, "output_layer", None) is None:
+        return decoder_layers
+    layers = list(decoder_layers)
+    layers.append(model.output_layer)
+    return layers
+
+
+LayerActivationCollector.register_decoder_layer_support(
+    _is_supported_megatron_model, get_mcore_layerwise_calibration_layers
+)

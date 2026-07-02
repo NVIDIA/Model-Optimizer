@@ -67,6 +67,9 @@ execution:
   auto_export:          # REQUIRED trigger for auto-export. Without this, the
     destinations:       # export.mlflow block below is ignored and the run is
       - mlflow          # NOT uploaded — you'd have to `nel export` it by hand.
+  # Auto-export is a separate CPU-only sbatch; GPU-only partitions reject it ("Cannot
+  # find GPU specification") → export silently fails. Set a CPU partition (gcp-nrt: cpu).
+  cpu_partition: ???
 deployment:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
@@ -176,7 +179,7 @@ export:
   # With auto_export enabled (above), NEL resolves this block at SUBMIT time in a
   # scope that does NOT include `deployment` / `evaluation`, so cross-references
   # fail hard: "Interpolation key 'deployment.served_model_name' not found".
-  # `${oc.env:USER}` (an env-var interpolation) is fine.
+  # `${oc.env:USER}` / `${oc.env:MLFLOW_TRACKING_URI}` (env-var interpolations) are fine.
   #
   # CAUTION — these literals can drift. temperature / top_p / max_new_tokens are the
   # ONLY queryable record of the sampling config in MLflow (NEL does not log them as
@@ -185,7 +188,7 @@ export:
   # change the sampling params (or served_model_name), update these literals in the
   # SAME edit, or MLflow will misreport the run.
   mlflow:
-    tracking_uri: ???
+    tracking_uri: ${oc.env:MLFLOW_TRACKING_URI}   # from modelopttools:eval-config (canonical frontier-evals host; NOT the -nemo-evaluator alias)
     experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
     description: 'CHANGEME-served-model-name | T=1.0, top_p=0.95, max_new_tokens=65536'
     log_logs: true

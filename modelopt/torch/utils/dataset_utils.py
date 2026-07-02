@@ -294,7 +294,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "preprocess": lambda sample: sample["text"],
     },
     "wikitext": {
-        "config": {"path": "wikitext", "name": "wikitext-103-v1", "split": ["train"]},
+        "config": {"path": "Salesforce/wikitext", "name": "wikitext-103-v1", "split": ["train"]},
         "preprocess": lambda sample: sample["text"],
     },
 }

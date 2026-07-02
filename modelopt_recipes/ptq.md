@@ -78,7 +78,7 @@ activations are quantized too** (W4A4/W8A8 vs weight-only W4A16).
 #### Scoped schemes (quantize part of the model)
 
 - **`nvfp4_experts_only`** — NVFP4 W4A4 on **MoE routed experts only**
-  (`*mlp.experts*`, `*block_sparse_moe*`). Dense layers, shared experts, and
+  (`*.experts.*`, `*block_sparse_moe*`). Dense layers, shared experts, and
   attention stay BF16. **The most recommended NVFP4 recipe for MoE models**: it's
   the narrowest, most accuracy-preserving NVFP4 scope, so it recovers the most
   accuracy — while still compressing well, because the routed experts are usually

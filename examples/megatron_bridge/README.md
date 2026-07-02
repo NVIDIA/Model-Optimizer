@@ -96,7 +96,15 @@ torchrun --nproc_per_node 2 export.py \
 
 To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export.py --help`).
 
-For VLM (vision-language model) quantization, see the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
+### Vision-Language Models (VLMs)
+
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automatically quantizes only the **language model** and leaves the vision tower and vision-language projector in full precision, then saves the full VLM back as a Megatron checkpoint. The calibration modality is inferred from `--calib_dataset_name`:
+
+- An **image-text** dataset (the default for VLMs, `nemotron_vlm_dataset_v2`) drives the full VLM forward, so the language model is calibrated on vision-conditioned activations.
+- A **text** dataset runs text-only calibration of the language model (vision tower idle).
+
+> [!NOTE]
+> HuggingFace unified export (`export.py`) of a quantized VLM is not yet supported; the quantized VLM is saved in Megatron checkpoint format only.
 
 ## Sanity-Check Generation
 
@@ -308,7 +316,25 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 > NAS-based pruning requires ~2x the GPU memory of Manual pruning because it needs to simultaneously hold original model while evaluating each pruned candidate.
 
 > [!NOTE]
+> Multi-token-prediction (MTP) heads (e.g. Qwen3.5) are not pruned yet — they are dropped for the prune run and the saved checkpoint has no MTP. Autoregressive inference is unaffected; for speculative decoding, run a short MTP SFT on the pruned model.
+
+> [!NOTE]
 > If pruning a Nemotron model and you want to save the pruned model back in HF format, please downgrade to `transformers<5` via `python -m pip install "transformers<5"` before pruning.
+
+### Vision-Language Models (VLMs)
+
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `prune_minitron.py` automatically prunes only the **language model** and leaves the vision tower intact, then saves the full VLM back. All the pruning modes above (parameter count, active parameter count, memory footprint, and manual `export_config`) work unchanged, with two VLM-specific caveats:
+
+- The `--prune_target_params` / `--prune_target_active_params` / `--prune_target_memory_mb` targets (and `export_config` dimensions) apply to the **language model only** — the (unpruned) vision tower's parameters are *not* counted, so the full saved VLM will be larger than the target.
+- `hidden_size` is never pruned for VLMs (it is shared with the vision projector).
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path Qwen/Qwen3.5-4B \
+    --prune_target_params 3e9 \
+    --output_hf_path /tmp/Qwen3.5-4B-Pruned-3B
+```
 
 ## Resources
 

@@ -225,6 +225,10 @@ def megatron_prefill(
     else:
         output = model(tokens, position_ids, attention_mask, runtime_gather_output=True)
 
+    # Some VLM wrappers (e.g. Gemma3VLModel) return ``(logits, loss_mask)`` rather than a bare tensor.
+    if isinstance(output, (tuple, list)):
+        output = output[0]
+
     # For PP non-last stages, forward activations to the next stage and return early.
     if is_pp and not pp_last:
         pp_dtype = model.config.pipeline_dtype or (
@@ -244,8 +248,13 @@ def megatron_prefill(
         logits_dtype = torch.float32
 
     # All PP ranks must participate in the broadcast to stay in sync.
+    # VLM wrappers (e.g. Qwen3VLModel) hold the output layer on the inner language_model, so the
+    # vocab size lives there rather than on the wrapper itself.
+    vocab_size = getattr(model, "vocab_size", None)
+    if vocab_size is None:
+        vocab_size = getattr(model, "language_model", model).vocab_size
     result = broadcast_from_last_pipeline_stage(
-        [batch_size, seq_length, model.vocab_size], logits_dtype, logits
+        [batch_size, seq_length, vocab_size], logits_dtype, logits
     )
     return None if skip_return_logits else result
 
