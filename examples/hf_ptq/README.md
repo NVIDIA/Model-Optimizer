@@ -358,15 +358,16 @@ cost-excluded layers — see [`AutoQuantizeConfig`](../../modelopt/recipe/config
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/huggingface/<model>/auto_quantize/`.
 
-> *Migration: AutoQuantize is now recipe-only. The former `--auto_quantize_bits`, `--auto_quantize_method`,
+> *Migration: prefer an AutoQuantize `--recipe`. The `--auto_quantize_bits`, `--auto_quantize_method`,
 > `--auto_quantize_score_size`, `--auto_quantize_cost_model`, and `--auto_quantize_active_moe_expert_ratio`
-> CLI flags are removed and map to recipe fields: `--auto_quantize_bits` → `constraints.effective_bits`,
-> `--auto_quantize_method` → `auto_quantize_method`, `--auto_quantize_score_size` → `score_size`,
-> `--auto_quantize_cost_model` → `constraints.cost_model`, `--auto_quantize_active_moe_expert_ratio` →
-> `constraints.cost.active_moe_expert_ratio`, and the `--qformat fp8,nvfp4` candidate list →
-> `candidate_formats`. `--auto_quantize_checkpoint` is unchanged. Start from a shipped recipe under
-> `modelopt_recipes/general/auto_quantize/` and adjust as needed. The removed AutoQuantize CLI
-> remains available on the 0.45 release branch for anyone who needs the old flags.*
+> CLI flags are **deprecated but still work** — they are converted into an `AutoQuantizeConfig` on the fly
+> (with a `DeprecationWarning`) and will be removed in a future release. They map to recipe fields:
+> `--auto_quantize_bits` → `constraints.effective_bits`, `--auto_quantize_method` → `auto_quantize_method`,
+> `--auto_quantize_score_size` → `score_size`, `--auto_quantize_cost_model` → `constraints.cost_model`,
+> `--auto_quantize_active_moe_expert_ratio` → `constraints.cost.active_moe_expert_ratio`, and the
+> `--qformat fp8,nvfp4` candidate list → `candidate_formats`. When converted, the shared base
+> `disabled_layers` and `cost_excluded_layers` patterns are appended automatically. `--auto_quantize_checkpoint`
+> is unchanged. Start from a shipped recipe under `modelopt_recipes/general/auto_quantize/`.*
 
 [Script](./scripts/huggingface_example.sh)
 
