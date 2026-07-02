@@ -20,23 +20,32 @@
 checkpoint runs attention quant (Q/K quantized by the ``_QuantVLLMAttention``
 pre-step, P/V quantized in-kernel) together with skip-softmax sparsity.
 
-Ordering matters: the attention-quant attach runs first so the attention layers
-become ``_QuantVLLMAttention`` carrying the ``q/k/v/p_bmm_quantizer`` config; the
-sparse impl is then installed and the ``_value_quant_in_kernel`` gate is flipped
-so V is fake-quantized along the *keys* axis in-kernel by the sparse impl rather
-than along head_dim by the (now-skipped) pre-step.
+Install is a fail-loud, two-pass transaction:
+
+1. **Preflight** (:func:`_preflight_quant_sparse_attn`) is a pure resolver: it validates
+   the engine-wide and per-layer support matrix and returns one install record per
+   decoder self-attention layer to transform. It never converts a module or assigns an
+   impl. Any unsupported configuration aggregates into a single ``NotImplementedError``
+   raised at startup with layer-qualified reasons — no requested quant or sparsity
+   transform is ever silently dropped.
+2. **Attach quant** makes the attention layers carry ``q/k/v/p_bmm_quantizer`` config.
+3. **Prepare then commit** (:func:`_prepare_quant_sparse_attn` / :func:`_commit_quant_sparse_attn`)
+   constructs every replacement impl first and only assigns them once the whole model
+   prepared successfully, so a failure leaves every original ``module.impl`` and
+   ``_value_quant_in_kernel`` gate unchanged.
 
 Attention-quant attach is selected by ``ATTN_QUANT_MODE``:
-- ``"impl_swap"`` (default): attention-ONLY conversion (``_attach_attention_quant_impl_swap``).
-  It converts just the vLLM ``Attention`` modules and never touches Linear/MoE, so it composes
-  with an already-realquant checkpoint (whose Linears would otherwise trip the
-  ``_VLLMParallelLinear`` ``quant_method`` assert under ``mtq.quantize``).
-- ``"mtq"``: the legacy ``fakequant_worker`` restore prolog (whole-model ``replace_quant_module``).
+- ``"impl_swap"`` (default): attention-ONLY conversion (:func:`_attach_attention_quant_impl_swap`).
+  It converts just the preflight-approved decoder ``Attention`` modules and never touches
+  Linear/MoE, so it composes with an already-realquant checkpoint (whose Linears would
+  otherwise trip the ``_VLLMParallelLinear`` ``quant_method`` assert under ``mtq.quantize``).
+- ``"mtq"``: the legacy ``fakequant_worker`` restore prolog (whole-model ``replace_quant_module``);
+  preflight then runs against the restored quantizers.
 
-Configuration:
-- Quantization: ``ATTN_QUANT_MODE`` (see above); in ``"mtq"`` mode the same env knobs as
-  ``fakequant_worker`` (``MODELOPT_STATE_PATH``, ``QUANT_CFG``, ``KV_QUANT_CFG``, ...).
-- Sparsity: the checkpoint's ``sparse_attention_config`` block (as in ``sparse_attn_worker``).
+Supported configuration (everything else fails at startup): decoder self-attention on the
+FlashAttention or FlashInfer backend, fp16/bf16 KV cache, ``dcp_world_size == 1``, page size a
+multiple of 16, and no sliding window / ALiBi / logits soft-cap / sinks / prefix caching /
+cross-layer KV sharing / KV connector / speculative decoding / cascade.
 
 Usage:
     python vllm_serve_quant_sparse_attn.py <path/to/modelopt-exported-ckpt>
@@ -44,25 +53,19 @@ Usage:
 
 import importlib
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 
-try:
-    _has_legacy_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_legacy_attention_layer = False
-
-if _has_legacy_attention_layer:
-    from vllm.attention.layer import Attention as VLLMAttention
-else:
-    from vllm.model_executor.layers.attention import Attention as VLLMAttention
-
-# Reuse the env-driven quant config + restore prolog from the fakequant worker (sibling module;
-# the launcher puts examples/vllm_serve on sys.path so this import resolves in each worker).
 from fakequant_worker import FakeQuantWorker, _fakequant_run_prolog_worker, quant_config
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import QuantModuleRegistry
-from modelopt.torch.quantization.plugins.vllm import _ATTENTION_TYPES, post_restore_vllm_attentions
+from modelopt.torch.quantization.plugins.vllm import (
+    _ATTENTION_TYPES,
+    post_restore_vllm_attentions,
+    vllm_attention,
+)
 from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config import (
     load_from_checkpoint_metadata,
     match_sparse_config,
@@ -76,9 +79,226 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     select_sparse_impl_cls,
 )
 
+# Reuse the concrete vLLM ``Attention`` class the quantization plugin resolved (via its
+# ``_import_attention_module`` symbol-based selection) so isinstance/registry checks here match
+# the class the plugin registered and the served model instantiates.
+VLLMAttention = vllm_attention.Attention
 
-def _attach_attention_quant_impl_swap(model) -> None:
-    """Attach NVFP4 attention quant by converting ONLY the attention modules (no ``mtq.quantize``).
+
+def _import_attention_type():
+    """Return vLLM's ``AttentionType`` enum from whichever path this version exposes."""
+    for path in (
+        "vllm.v1.attention.backend",
+        "vllm.attention",
+        "vllm.attention.backends.abstract",
+    ):
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        if hasattr(module, "AttentionType"):
+            return module.AttentionType
+    raise ImportError("Could not import vLLM AttentionType from any supported path")
+
+
+AttentionType = _import_attention_type()
+
+# The NVFP4 group size; the paged-cache page size must be a whole multiple of it.
+_NVFP4_GROUP_SIZE = 16
+# vLLM attention-backend impl class names whose layout the ModelOpt sparse kernel supports.
+_SUPPORTED_BACKEND_IMPLS = ("FlashAttentionImpl", "FlashInferImpl")
+
+# Dynamic block-16 NVFP4 (num_bits (2,1), dynamic scale (4,3)); matches the KV-default test cfg.
+_NVFP4_ATTN_CFG = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+}
+
+
+# ---------------------------------------------------------------------------
+# Capability preflight (pure: no module conversion, no impl assignment)
+# ---------------------------------------------------------------------------
+
+
+def _validate_global_runtime(worker) -> list[str]:
+    """Return engine-wide reasons the ModelOpt attention plan cannot be served."""
+    config = worker.model_runner.vllm_config
+    parallel = config.parallel_config
+    cache = config.cache_config
+    reasons: list[str] = []
+
+    dcp = getattr(parallel, "decode_context_parallel_size", 1)
+    if dcp != 1:
+        reasons.append(f"decode_context_parallel_size={dcp} (only 1 is supported)")
+    if getattr(cache, "enable_prefix_caching", False):
+        reasons.append(
+            "prefix caching is enabled (V is baked in place, so cross-request prefix reuse "
+            "would read another request's quantized V)"
+        )
+    if getattr(config, "kv_transfer_config", None) is not None:
+        reasons.append(
+            "a KV transfer/connector config is set (external KV movement is unsupported)"
+        )
+    if getattr(config, "speculative_config", None) is not None:
+        reasons.append("speculative decoding is enabled (V is baked in place)")
+    block_size = getattr(cache, "block_size", None)
+    if not isinstance(block_size, int) or block_size <= 0 or block_size % _NVFP4_GROUP_SIZE:
+        reasons.append(
+            f"cache page size {block_size} is not a positive multiple of the NVFP4 group size "
+            f"{_NVFP4_GROUP_SIZE}"
+        )
+    return reasons
+
+
+def _unsupported_attention_reasons(module) -> list[str]:
+    """Return per-layer reasons this attention module cannot run the ModelOpt kernel.
+
+    Pure: inspects the module and its backend impl by name/attribute only. Backend support is
+    checked by impl class name so this does not trigger the FlashInfer metadata-builder patch
+    (that side effect is deferred to :func:`_prepare_quant_sparse_attn`).
+    """
+    reasons: list[str] = []
+
+    attn_type = getattr(module, "attn_type", AttentionType.DECODER)
+    if attn_type != AttentionType.DECODER:
+        reasons.append(f"attn_type={attn_type} (only DECODER self-attention is supported)")
+
+    impl = getattr(module, "impl", None)
+    impl_name = type(impl).__name__ if impl is not None else "None"
+    if impl_name not in _SUPPORTED_BACKEND_IMPLS:
+        reasons.append(
+            f"attention backend {impl_name} is not supported "
+            f"(need one of {', '.join(_SUPPORTED_BACKEND_IMPLS)})"
+        )
+    if getattr(module, "sliding_window", None) is not None:
+        reasons.append("sliding_window is set")
+    if getattr(module, "kv_sharing_target_layer_name", None) is not None:
+        reasons.append("kv_sharing_target_layer_name is set (cross-layer KV sharing)")
+    kv_cache_dtype = str(getattr(module, "kv_cache_dtype", "") or "")
+    if kv_cache_dtype.startswith("fp8"):
+        reasons.append(f"kv_cache_dtype={kv_cache_dtype!r} (only fp16/bf16 KV cache is supported)")
+    if getattr(impl, "alibi_slopes", None) is not None:
+        reasons.append("alibi_slopes are set")
+    logits_soft_cap = getattr(impl, "logits_soft_cap", None)
+    if logits_soft_cap:  # None or 0 == disabled
+        reasons.append(f"logits_soft_cap={logits_soft_cap} is set")
+    if getattr(impl, "sinks", None) is not None or getattr(impl, "has_sinks", False):
+        reasons.append("attention sinks are set")
+
+    # An enabled P/V BMM2 quantizer whose format the kernel cannot map must fail loud: the
+    # kernel would skip it and (for V) ``_value_quant_in_kernel`` would skip the pre-step too,
+    # leaving the operand silently un-quantized. (No-op pre-conversion under impl_swap, where the
+    # quantizers do not exist yet; re-checked with layer context in prepare.)
+    if getattr(getattr(module, "p_bmm_quantizer", None), "is_enabled", False) and (
+        _p_qdq_from_layer(module)[0] is None
+    ):
+        reasons.append(
+            "p_bmm_quantizer is enabled but its quant format is unsupported "
+            "(supported: per-tensor FP8, block-16 dynamic NVFP4)"
+        )
+    if getattr(getattr(module, "v_bmm_quantizer", None), "is_enabled", False) and (
+        _v_qdq_from_layer(module)[0] is None
+    ):
+        reasons.append(
+            "v_bmm_quantizer is enabled but its quant format is unsupported "
+            "(supported: per-tensor FP8, block-16 dynamic NVFP4)"
+        )
+    return reasons
+
+
+def _attention_quant_requested(module, quant_will_be_configured: bool) -> bool:
+    """Whether attention quant is (or will be) active on this layer.
+
+    ``quant_will_be_configured`` is True for the impl-swap attach (which configures the fixed
+    NVFP4 recipe on every decoder self-attention layer) and False for the legacy mtq path (quant
+    is active where a P/V BMM2 quantizer is enabled after restore — mappable or not; an unmappable
+    one is reported as a support error rather than skipped).
+    """
+    if quant_will_be_configured:
+        return getattr(module, "attn_type", AttentionType.DECODER) == AttentionType.DECODER
+    return any(
+        getattr(getattr(module, attr, None), "is_enabled", False)
+        for attr in ("p_bmm_quantizer", "v_bmm_quantizer")
+    )
+
+
+@dataclass(frozen=True)
+class _AttentionInstallRecord:
+    """One decoder attention layer the ModelOpt plan will transform (resolved, immutable)."""
+
+    name: str
+    sparse_kw: Mapping[str, object]
+
+
+def _load_sparse_config(worker):
+    hf_config = getattr(worker.model_runner.model_config, "hf_config", None)
+    detected = load_from_checkpoint_metadata(hf_config)
+    return detected if detected is not None else (None, None)
+
+
+def _sparse_kw_for_layer(name: str, cfg) -> dict:
+    if cfg is None:
+        return {}
+    layer_cfg = match_sparse_config(name, cfg)
+    if layer_cfg is not None and layer_cfg.get("enable", True):
+        return _build_sparse_kw(layer_cfg)
+    return {}
+
+
+def _unwrapped_model(worker):
+    model = worker.model_runner.model
+    return model.unwrap() if hasattr(model, "unwrap") else model
+
+
+def _named_vllm_attentions(model):
+    for name, module in model.named_modules():
+        if isinstance(module, VLLMAttention):
+            yield name, module
+
+
+def _preflight_quant_sparse_attn(worker, quant_will_be_configured: bool):
+    """Resolve the per-layer install plan and validate the full support matrix.
+
+    Pure resolver: inspects model/engine state but does not convert modules, assign
+    ``module.impl``, or flip ``_value_quant_in_kernel``. Aggregates every global and per-layer
+    problem and raises a single ``NotImplementedError`` before returning any records, so an
+    unsupported configuration fails at startup with layer-qualified diagnostics rather than
+    silently dropping a requested transform.
+    """
+    model = _unwrapped_model(worker)
+
+    cfg, preset = _load_sparse_config(worker)
+    if preset is not None:
+        print(f"[ModelOpt] Sparse attention config: algo -> {preset}")
+
+    errors: list[str] = list(_validate_global_runtime(worker))
+    records: list[_AttentionInstallRecord] = []
+    for name, module in _named_vllm_attentions(model):
+        sparse_kw = _sparse_kw_for_layer(name, cfg)
+        quant_requested = _attention_quant_requested(module, quant_will_be_configured)
+        if not sparse_kw and not quant_requested:
+            continue  # neither sparse nor quant active -> keep vLLM's native impl
+        reasons = _unsupported_attention_reasons(module)
+        if reasons:
+            errors.extend(f"{name}: {reason}" for reason in reasons)
+            continue
+        records.append(_AttentionInstallRecord(name=name, sparse_kw=sparse_kw))
+
+    if errors:
+        raise NotImplementedError(
+            "Unsupported ModelOpt attention plan (no transform will be silently dropped):\n  - "
+            + "\n  - ".join(errors)
+        )
+    return tuple(records)
+
+
+# ---------------------------------------------------------------------------
+# Attach attention quant (impl-swap): convert only preflight-approved layers
+# ---------------------------------------------------------------------------
+
+
+def _attach_attention_quant_impl_swap(model, allowed_names) -> None:
+    """Attach NVFP4 attention quant by converting ONLY the preflight-approved decoder layers.
 
     Why not ``mtq.quantize`` / ``_fakequant_run_prolog_worker``: that path calls
     ``replace_quant_module``, which walks the whole model and wraps every registered module type,
@@ -87,38 +307,45 @@ def _attach_attention_quant_impl_swap(model) -> None:
     ``ModelOptFp8LinearMethod``), and ``_VLLMParallelLinear._setup`` asserts
     ``type(self.quant_method) is UnquantizedLinearMethod`` -> ``AssertionError`` at serve time.
 
-    This attach is attention-ONLY: it converts each vLLM ``Attention`` in place to
+    This attach is attention-ONLY: it converts each approved vLLM ``Attention`` in place to
     ``_QuantVLLMAttention`` (adding the ``q/k/v/p_bmm_quantizer`` sub-quantizers) and never touches
-    any Linear/MoE module, so it composes cleanly with a realquant checkpoint. It then configures the
-    four BMM quantizers to dynamic block-16 NVFP4 via ``set_quantizer_by_cfg`` (deny-all first, then
-    enable+configure the targets) and applies the K/V global-scale-1.0 default via
+    any Linear/MoE module, so it composes cleanly with a realquant checkpoint. It then configures
+    the four BMM quantizers to dynamic block-16 NVFP4 via ``set_quantizer_by_cfg`` (deny-all first,
+    then enable+configure the targets) and applies the K/V global-scale-1.0 default via
     ``post_restore_vllm_attentions``. ``_install_quant_sparse_attn`` must run AFTER this to read the
     quantizers and install ``ModelOptSparseAttentionImpl``.
+
+    ``allowed_names`` is the set of ``model.named_modules`` names preflight approved for
+    conversion; every other module (including any non-decoder attention) is left untouched.
     """
     if hasattr(model, "unwrap"):
         model = model.unwrap()
+    allowed = set(allowed_names)
 
-    def _convert_attention_only(parent) -> None:
+    def _convert_approved(parent, prefix) -> None:
         for name, child in parent.named_children():
-            if isinstance(child, _ATTENTION_TYPES) and type(child) in QuantModuleRegistry:
+            full = f"{prefix}.{name}" if prefix else name
+            if (
+                isinstance(child, _ATTENTION_TYPES)
+                and type(child) in QuantModuleRegistry
+                and full in allowed
+            ):
                 # Convert on the parent (mirrors conversion.py:_replace_quant_module). Do NOT
                 # convert any non-attention module -- that is what avoids the Linear/MoE assert.
                 setattr(parent, name, QuantModuleRegistry.convert(child))
             # Recurse into whichever module now lives at parent.name so nested modules are covered.
-            _convert_attention_only(getattr(parent, name))
+            _convert_approved(getattr(parent, name), full)
 
-    _convert_attention_only(model)
+    _convert_approved(model, "")
 
-    # Dynamic block-16 NVFP4 (num_bits (2,1), dynamic scale (4,3)); matches the KV-default test cfg.
-    nvfp4 = {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}}
     set_quantizer_by_cfg(
         model,
         [
             {"quantizer_name": "*", "enable": False},
-            {"quantizer_name": "*q_bmm_quantizer", "cfg": nvfp4, "enable": True},
-            {"quantizer_name": "*k_bmm_quantizer", "cfg": nvfp4, "enable": True},
-            {"quantizer_name": "*v_bmm_quantizer", "cfg": nvfp4, "enable": True},
-            {"quantizer_name": "*p_bmm_quantizer", "cfg": nvfp4, "enable": True},
+            {"quantizer_name": "*q_bmm_quantizer", "cfg": _NVFP4_ATTN_CFG, "enable": True},
+            {"quantizer_name": "*k_bmm_quantizer", "cfg": _NVFP4_ATTN_CFG, "enable": True},
+            {"quantizer_name": "*v_bmm_quantizer", "cfg": _NVFP4_ATTN_CFG, "enable": True},
+            {"quantizer_name": "*p_bmm_quantizer", "cfg": _NVFP4_ATTN_CFG, "enable": True},
         ],
     )
 
@@ -126,94 +353,93 @@ def _attach_attention_quant_impl_swap(model) -> None:
     post_restore_vllm_attentions(model)
 
 
-def _install_quant_sparse_attn(worker) -> None:
-    """Install ``ModelOptSparseAttentionImpl`` on attention layers (quant + sparse together).
+# ---------------------------------------------------------------------------
+# Two-pass install: prepare all replacements, then commit atomically
+# ---------------------------------------------------------------------------
 
-    Runs AFTER the quant-restore prolog. A layer gets the sparse impl when it has *either* a
-    sparse feature (skip-softmax / N:M from ``sparse_attention_config``) *or* active attention
-    quant (an enabled ``p/v_bmm_quantizer``) — the sparse impl is also what applies in-kernel
-    P/V quant, so a quant-only layer still needs it. For quant-active layers the
-    ``_value_quant_in_kernel`` gate is set so the head_dim V pre-step is skipped and V is
-    fake-quantized along the keys axis in-kernel instead (avoiding a double-quant of V).
+
+@dataclass
+class _PreparedInstall:
+    """A constructed-but-not-yet-assigned sparse impl for one attention layer."""
+
+    module: object
+    new_impl: object
+    quant_active: bool
+    value_in_kernel: bool
+
+
+def _prepare_quant_sparse_attn(worker, records) -> list[_PreparedInstall]:
+    """Construct every replacement impl WITHOUT assigning it (all-or-nothing).
+
+    Reads the live (converted/restored) module for each record, validates its BMM2 quant format
+    with layer context, resolves the backend sparse impl (patching the FlashInfer metadata builder
+    here, not in the pure preflight), and clones it. A failure — unsupported format, unclonable
+    impl (e.g. FlashAttention sinks) — raises before any assignment, leaving every original
+    ``module.impl`` and ``_value_quant_in_kernel`` gate unchanged.
     """
-    hf_config = getattr(worker.model_runner.model_config, "hf_config", None)
-    detected = load_from_checkpoint_metadata(hf_config)
-    cfg, preset = detected if detected is not None else (None, None)
-    if preset is not None:
-        print(f"[ModelOpt] Sparse attention config: algo -> {preset}")
+    modules = dict(_unwrapped_model(worker).named_modules())
 
-    model = worker.model_runner.model
-    if hasattr(model, "unwrap"):
-        model = model.unwrap()
-
-    patched = sparse_only = quant_layers = 0
-    skipped_backends: set[str] = set()
-    for name, module in model.named_modules():
-        if not isinstance(module, VLLMAttention):
-            continue
-
-        # Sparse features for this layer (empty dict if no/disabled sparse config).
-        sparse_kw: dict = {}
-        if cfg is not None:
-            layer_cfg = match_sparse_config(name, cfg)
-            if layer_cfg is not None and layer_cfg.get("enable", True):
-                sparse_kw = _build_sparse_kw(layer_cfg)
-
-        # Active attention quant on this (restored) layer.
+    prepared: list[_PreparedInstall] = []
+    for record in records:
+        module = modules[record.name]
+        # Fail loud on an enabled BMM2 quantizer the kernel cannot map (layer-qualified). Not
+        # caught here -- an unsupported quant format is a startup error, never a silent drop.
+        _assert_bmm_quant_supported(module, record.name)
         p_qdq, _ = _p_qdq_from_layer(module)
         v_qdq, _ = _v_qdq_from_layer(module)
-        # Fail loud on an enabled BMM2 quantizer the kernel cannot map (else it is
-        # dropped silently -- the kernel skips it and, for V, _value_quant_in_kernel
-        # below would skip the pre-step too). Before the `continue` so an unmapped-only
-        # layer cannot slip past.
-        _assert_bmm_quant_supported(module, name)
-        quant_active = p_qdq is not None or v_qdq is not None
 
-        if not sparse_kw and not quant_active:
-            continue  # neither sparse nor quant active -> keep vLLM's native impl
-
-        # Select the sparse impl for this layer's attention backend (FlashAttention
-        # vs FlashInfer). For FlashInfer this also installs the metadata-builder patch
-        # that exposes the dense paged metadata the Triton kernel needs; None means an
-        # unsupported backend, which we leave on vLLM's native impl.
         new_cls = select_sparse_impl_cls(module.impl)
         if new_cls is None:
-            skipped_backends.add(type(module.impl).__name__)
-            continue
-        try:
-            new_impl = _clone_sparse_impl(module.impl, new_cls)
-        except NotImplementedError:
-            skipped_backends.add(type(module.impl).__name__)
-            continue
-        new_impl.sparse_kw = sparse_kw
-        module.impl = new_impl
-        # Only let the kernel own V quant when V maps to a supported in-kernel format.
-        # _value_quant_in_kernel tells _QuantVLLMAttention.forward to skip its own
-        # v_bmm_quantizer pre-step (V's keys-axis NVFP4 blocks can't be formed per token);
-        # gating on quant_active instead would skip that pre-step even when V is unquantized.
-        if v_qdq is not None and hasattr(module, "_value_quant_in_kernel"):
-            module._value_quant_in_kernel = True
-        if quant_active:
-            quant_layers += 1
-        else:
-            sparse_only += 1
-        patched += 1
+            raise NotImplementedError(
+                f"{record.name}: attention backend {type(module.impl).__name__} has no supported "
+                "ModelOpt sparse impl (preflight should have rejected this)."
+            )
+        new_impl = _clone_sparse_impl(module.impl, new_cls)
+        new_impl.sparse_kw = dict(record.sparse_kw)
+        prepared.append(
+            _PreparedInstall(
+                module=module,
+                new_impl=new_impl,
+                quant_active=p_qdq is not None or v_qdq is not None,
+                # Let the kernel own V quant only when V maps to a supported in-kernel format;
+                # gating on quant_active would skip the head_dim pre-step even for unquantized V.
+                value_in_kernel=v_qdq is not None and hasattr(module, "_value_quant_in_kernel"),
+            )
+        )
+    return prepared
 
+
+def _commit_quant_sparse_attn(prepared) -> None:
+    """Assign every prepared impl, then transfer in-kernel V ownership.
+
+    Pure assignment (cannot fail): after prepare succeeds for the whole model, install all impls,
+    then flip ``_value_quant_in_kernel`` only on V-quantized layers so the head_dim V pre-step is
+    skipped in favor of keys-axis in-kernel V quant (avoiding a double-quant of V).
+    """
+    for item in prepared:
+        item.module.impl = item.new_impl
+    for item in prepared:
+        if item.value_in_kernel:
+            item.module._value_quant_in_kernel = True
+
+
+def _install_quant_sparse_attn(worker, records) -> None:
+    """Two-pass, fail-loud install of ``ModelOptSparseAttentionImpl`` on the plan's layers."""
+    prepared = _prepare_quant_sparse_attn(worker, records)
+    _commit_quant_sparse_attn(prepared)
+
+    quant_layers = sum(1 for item in prepared if item.quant_active)
+    sparse_only = len(prepared) - quant_layers
     print(
-        f"[ModelOpt] Quant+sparse attention: installed sparse impl on {patched} layers "
+        f"[ModelOpt] Quant+sparse attention: installed sparse impl on {len(prepared)} layers "
         f"({quant_layers} quant-active, {sparse_only} sparse-only)"
     )
-    if skipped_backends:
-        print(
-            f"[ModelOpt] Quant+sparse attention: left {sorted(skipped_backends)} layers unchanged "
-            "(unsupported backend — serve under FLASH_ATTN or FLASHINFER)."
-        )
 
     if quant_layers:
-        # vLLM cascade attention routes shared-prefix batches through native attention,
-        # silently dropping the NVFP4 P/V quant. Disable it so every request goes through
-        # the quantized ModelOpt kernel. No-op where cascade is already off (e.g. vLLM
-        # 0.22 FlashInfer hardcodes it off); pairs with the fail-loud guard in the impl.
+        # vLLM cascade attention routes shared-prefix batches through native attention, silently
+        # dropping the NVFP4 P/V quant. Disable it so every request goes through the quantized
+        # ModelOpt kernel. No-op where cascade is already off (e.g. vLLM 0.22 FlashInfer hardcodes
+        # it off); pairs with the fail-loud guard in the impl.
         runner = worker.model_runner
         if getattr(runner, "cascade_attn_enabled", False):
             runner.cascade_attn_enabled = False
@@ -224,28 +450,36 @@ class QuantSparseAttnWorker(FakeQuantWorker):
     """vLLM worker that restores quantization and installs the sparse attention impl.
 
     Inherits ``determine_available_memory`` (compilation disabled during profiling) from
-    ``FakeQuantWorker`` and runs both the quant restore and the sparse-impl install in
-    ``compile_or_warm_up_model`` (after memory profiling, before the warm-up forward).
+    ``FakeQuantWorker`` and runs the preflight, the quant attach, and the atomic sparse-impl
+    install in ``compile_or_warm_up_model`` (after memory profiling, before the warm-up forward).
     """
 
     def compile_or_warm_up_model(self) -> float:
-        # 1) Attach attention quant -> attention layers become _QuantVLLMAttention with quantizers.
-        #    ATTN_QUANT_MODE selects how:
-        #    - "impl_swap" (default): attention-ONLY convert (composes with a realquant checkpoint;
-        #      never touches Linear/MoE, so it avoids the _VLLMParallelLinear quant_method assert).
-        #    - "mtq": legacy mtq.quantize restore prolog (whole-model replace_quant_module).
+        # ATTN_QUANT_MODE selects how attention quant is attached:
+        # - "impl_swap" (default): attention-ONLY convert (composes with a realquant checkpoint;
+        #   never touches Linear/MoE, so it avoids the _VLLMParallelLinear quant_method assert).
+        #   Preflight runs on the raw decoder attention layers, then only approved layers convert.
+        # - "mtq": legacy mtq.quantize restore prolog (whole-model replace_quant_module); preflight
+        #   then runs against the restored quantizers.
         attn_quant_mode = os.environ.get("ATTN_QUANT_MODE", "impl_swap")
         if attn_quant_mode == "impl_swap":
-            _attach_attention_quant_impl_swap(self.model_runner.model)
-        elif (
-            quant_config["quant_cfg"]
-            or quant_config["kv_quant_cfg"]
-            or quant_config["modelopt_state_path"]
-            or quant_config["recipe_path"]
-        ):
-            _fakequant_run_prolog_worker(self)
-        # 2) Install the sparse impl + flip the in-kernel-V gate (needs the restored quantizers).
-        _install_quant_sparse_attn(self)
-        # 3) Base worker warm-up (skip FakeQuantWorker's prolog — already run above). Must return
-        # the compilation time (seconds): vLLM V1 takes max() across TP workers.
+            records = _preflight_quant_sparse_attn(self, quant_will_be_configured=True)
+            _attach_attention_quant_impl_swap(
+                self.model_runner.model, {record.name for record in records}
+            )
+        else:
+            if (
+                quant_config["quant_cfg"]
+                or quant_config["kv_quant_cfg"]
+                or quant_config["modelopt_state_path"]
+                or quant_config["recipe_path"]
+            ):
+                _fakequant_run_prolog_worker(self)
+            records = _preflight_quant_sparse_attn(self, quant_will_be_configured=False)
+
+        # Install the sparse impl + flip the in-kernel-V gate (needs the restored quantizers).
+        _install_quant_sparse_attn(self, records)
+
+        # Base worker warm-up (skip FakeQuantWorker's prolog — already run above). Must return the
+        # compilation time (seconds): vLLM V1 takes max() across TP workers.
         return BaseWorker.compile_or_warm_up_model(self)
