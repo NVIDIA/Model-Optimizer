@@ -21,16 +21,14 @@ repos:
       - id: requirements-txt-fixer
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.11
+    rev: v0.15.20
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
-        exclude: ^examples/specdec_bench/specdec_bench/datasets/speed\.py$
       - id: ruff-format
-        exclude: ^examples/specdec_bench/specdec_bench/datasets/speed\.py$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.17.1
+    rev: v2.1.0
     hooks:
       - id: mypy
 
@@ -114,6 +112,10 @@ repos:
               modelopt/torch/quantization/plugins/attention.py|
               modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
               modelopt/torch/speculative/eagle/utils.py|
+              modelopt/torch/speculative/plugins/hf_domino.py|
+              modelopt/torch/speculative/plugins/modeling_domino.py|
+              modelopt/torch/speculative/plugins/hf_dflash.py|
+              modelopt/torch/speculative/plugins/modeling_dflash.py|
               modelopt/torch/speculative/plugins/hf_medusa.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
               examples/deepseek/deepseek_v3/quantize_to_nvfp4.py|

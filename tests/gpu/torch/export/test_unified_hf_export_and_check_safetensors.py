@@ -108,7 +108,7 @@ def test_unified_hf_export_and_check_safetensors(
     env = os.environ.copy()
     if expected_suffix.startswith("t5_tiny"):
         env["CUDA_VISIBLE_DEVICES"] = "0"
-    run_example_command(cmd_parts, "llm_ptq", env=env)
+    run_example_command(cmd_parts, "hf_ptq", env=env)
 
     # Now we expect a file named model.safetensors in output_dir
     generated_file = output_dir / "model.safetensors"

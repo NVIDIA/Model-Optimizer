@@ -596,7 +596,7 @@ def build_non_residual_input_map(
     non_residual_inputs = {}
     no_quantize_inputs = []
     for node in graph.nodes:
-        if node.op in ["Add"]:
+        if node.op == "Add":
             # Add nodes with constant or graph input does not have non-residual input
             # Here, A = node.inputs[0], B = node.inputs[1] and A.inputs means producer nodes of A
             # TODO: make this check a util?

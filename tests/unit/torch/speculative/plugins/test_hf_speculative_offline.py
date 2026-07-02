@@ -119,7 +119,7 @@ def test_sample_size_no_pt_files_raises(tmp_path):
         sample_size=-1,
     )
     tokenizer = MagicMock()
-    with pytest.raises(ValueError, match="No .pt files found"):
+    with pytest.raises(ValueError, match=r"No .pt files found"):
         make_speculative_data_module(tokenizer, data_args, train_len=8)
 
 

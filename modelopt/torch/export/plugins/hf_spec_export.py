@@ -445,3 +445,35 @@ class DFlashExporter(SpeculativeDecodingExporter):
             f"Exported DFlash draft model: {len(drafter_sd)} tensors, "
             f"config keys: {list(drafter_config.keys())[:5]}..."
         )
+
+
+class DominoExporter(DFlashExporter):
+    """Draft model exporter for Domino (DFlash backbone + causal correction head).
+
+    Same z-lab-compatible format as DFlash, plus the Domino head weights
+    (``prefix_gru.*`` / ``embed_proj.*``, already captured by the inherited
+    ``dflash_module.`` stripping) and the extra config fields the loader needs to
+    rebuild the head (``projector_type``, ``emb_dim``, ``gru_hidden_dim``,
+    ``pure_draft_prefix_len``, ``shift_label``).
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the Domino head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+
+        # Present because HFDominoModel.modify validates them at convert time.
+        emb_dim = draft_config.emb_dim
+        gru_hidden_dim = draft_config.gru_hidden_dim
+        # Mirror the reference checkpoint: emb_dim also appears at the top level.
+        config["emb_dim"] = emb_dim
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "domino"),
+                "shift_label": getattr(draft_config, "shift_label", True),
+                "pure_draft_prefix_len": getattr(draft_config, "pure_draft_prefix_len", 1),
+                "gru_hidden_dim": gru_hidden_dim,
+                "emb_dim": emb_dim,
+            }
+        )
+        return config

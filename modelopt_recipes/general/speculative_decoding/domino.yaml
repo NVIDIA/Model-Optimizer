@@ -1,0 +1,90 @@
+# Domino speculative-decoding training recipe.
+#
+# Domino reuses the DFlash mode/pipeline and adds a causal correction head
+# (GRU + projection), selected via dflash_architecture_config.projector_type=domino.
+# Online training is the default path (data.mode=online). Override fields via an
+# OmegaConf dotlist on the CLI.
+
+metadata:
+  recipe_type: speculative_dflash
+  description: Domino training recipe (DFlash backbone + causal correction head).
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path:
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  mode: online
+  data_path:
+  offline_data_path:
+  # Jinja chat template with {% generation %} tags for answer_only_loss.
+  chat_template:
+
+# maps to TrainingArguments (main.py)
+training:
+  # --- commonly modified ---
+  output_dir:
+  num_train_epochs: 6
+  per_device_train_batch_size: 1
+  learning_rate: 6.0e-4
+  warmup_ratio: 0.04
+  training_seq_len: 3072
+  logging_steps: 50
+  save_steps: 2000
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  # Keep off: eval runs the DFlash backbone only (correction head not applied
+  # yet), so AR would reflect the backbone alone, not the trained model.
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+
+  # --- rarely modified ---
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  # Required: while lambda_base == 1 the head params are unused in the backward
+  # graph, so DDP needs unused params allowed.
+  ddp_find_unused_parameters: true
+  ddp_timeout: 1800
+  report_to: tensorboard
+
+# maps to DFlashConfig (modelopt/torch/speculative/config.py).
+dflash:
+  dflash_block_size: 16
+  dflash_num_anchors: 256
+  dflash_use_torch_compile: false
+  # Domino does not use target-logit KD; it trains its own base/final CE losses.
+  dflash_self_logit_distillation: false
+  # gamma for exponential loss decay (block_size=16 -> 7).
+  dflash_loss_decay_factor: 7.0
+  # Qwen3 has no native mask token; 151669 is an unused id used by the reference.
+  dflash_mask_token_id: 151669
+  # lambda_base curriculum: start fully on base loss, decay to final over all steps.
+  dflash_lambda_base_start: 1.0
+  dflash_lambda_base_decay_ratio: 1.0
+  dflash_architecture_config:
+    num_hidden_layers: 5
+    # Draft attention/MLP dims. DFlash's draft is an independent model and does
+    # NOT auto-inherit these from the base (a fresh Qwen3Config already carries
+    # defaults, so modify()'s inherit-if-missing guard is a no-op). Set them
+    # explicitly to match the Qwen3-8B reference drafter (GQA: 8 KV heads).
+    num_attention_heads: 32
+    num_key_value_heads: 8
+    head_dim: 128
+    intermediate_size: 12288
+    projector_type: domino
+    emb_dim: 256
+    gru_hidden_dim: 1024
+    pure_draft_prefix_len: 1
+    shift_label: true

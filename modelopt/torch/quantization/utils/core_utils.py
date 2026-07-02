@@ -33,6 +33,10 @@ from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+# FP8 dtypes do not implement reduction kernels (e.g. ``max_all_cuda``), ``abs``, or
+# elementwise ``maximum``, so tensors of these dtypes must be upcast before amax reduction.
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+
 
 def reduce_block_amax(input_tensor: torch.Tensor, block_sizes: dict):
     """Computes the amax of the input tensor using block-based reduction for each dimension.
@@ -157,6 +161,10 @@ def reduce_amax(input, axis=None, keepdims=True, squeeze_scalar=True):
     Returns:
         The reduced tensor.
     """
+    # FP8 dtypes lack reduction/abs kernels (e.g. ``max_all_cuda``); upcast to the default
+    # float dtype, which represents every FP8 value exactly so the amax is computed losslessly.
+    if input.dtype in _FP8_DTYPES:
+        input = input.to(torch.get_default_dtype())
     # A memory-efficient implementation that avoids copying input tensor
     if axis is None:
         max_val = torch.max(input)
@@ -238,7 +246,7 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     - custom per-weight quantizer (e.g. ``Llama4TextExperts`` with ``gate_up_proj`` +
       ``gate_up_proj_weight_quantizer``).
     - fused-experts ``nn.ModuleList`` quantizers (``_QuantFusedExperts`` with
-      ``gate_up_proj`` + ``gate_up_proj_weight_quantizers`` plural list).
+      ``<first_proj>`` + ``<first_proj>_weight_quantizers`` plural list).
     """
     # standard: "weight" + "weight_quantizer" (singular) or "weight_quantizers" (plural)
     if getattr(module, "weight", None) is not None:
@@ -250,10 +258,17 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
         if name == "weight":
             continue
         weight = getattr(module, name, None)
-        if (
-            isinstance(weight, nn.Parameter)
-            and representative_weight_quantizer(module, name) is not None
+        if not isinstance(weight, nn.Parameter):
+            continue
+        if representative_weight_quantizer(module, name) is not None:
+            yield name
+        elif (
+            name == getattr(module, "_first_proj_attr", None)
+            and name != "gate_up_proj"
+            and isinstance(getattr(module, "gate_up_proj_weight_quantizers", None), nn.ModuleList)
         ):
+            # Backward compatibility for older non-gated fused-experts wrappers that
+            # kept first-projection quantizers under the gate_up_proj sentinel name.
             yield name
 
 

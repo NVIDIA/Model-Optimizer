@@ -203,7 +203,7 @@ One can also use [examples/specdec_bench](../specdec_bench) to validate the trai
 
 ### Deploying Quantized model
 
-See more details on deployment of quantized model to TRTLLM [here](../llm_ptq/README.md).
+See more details on deployment of quantized model to TRTLLM [here](../hf_ptq/README.md).
 
 ## Advanced Usage
 
@@ -347,7 +347,7 @@ More models coming soon!
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)

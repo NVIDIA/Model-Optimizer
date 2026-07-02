@@ -129,6 +129,12 @@ class TestGitInfo:
         assert branch != "unknown"
         assert len(commit) >= 7  # short hash
 
+    def test_valid_git_repo_from_nested_directory(self):
+        commit, branch = _git_info(os.path.join(os.getcwd(), "tests"))
+        assert commit != "unknown"
+        assert branch != "unknown"
+        assert len(commit) >= 7  # short hash
+
     def test_nonexistent_directory(self):
         commit, branch = _git_info("/tmp/nonexistent_xyz_12345")
         assert commit == "unknown"

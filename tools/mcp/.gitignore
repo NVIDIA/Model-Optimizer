@@ -1,0 +1,5 @@
+# Virtual environment
+.venv/
+
+# uv lock (generated, not portable)
+uv.lock

@@ -38,6 +38,7 @@ from ..traced_hp import TracedHp
 from .megatron import (
     NumAttentionHeadsHp,
     _DynamicLanguageModelEmbedding,
+    _DynamicMCoreLanguageModel,
     _DynamicSelfAttention,
     _DynamicTEProjRowParallelLinear,
     _DynamicTERowParallelLinear,
@@ -128,3 +129,28 @@ class _DynamicGemma3SelfAttention(_DynamicSelfAttention):
             num_attention_heads=num_attention_heads,
             hidden_size=hidden_size,
         )
+
+
+# Qwen3-VL / Qwen3.5-VL ###########################################################################
+# The VLM wraps the language model as ``Qwen3VLModel.language_model`` (a ``Qwen3VLGPTModel``); prune
+# the language model by passing ``model.language_model`` to ``mtp.prune``. Both the LM class and its
+# full-attention class override ``forward`` (absolute mRoPE), so they need explicit registration.
+# GatedDeltaNet (Qwen3.5) and gated attention are already handled in ``megatron.py``.
+# Guarded import — these classes exist only in newer Megatron-Bridge builds with the Qwen3-VL bridge.
+try:
+    from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.attention import Qwen3VLSelfAttention
+    from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.text_model import Qwen3VLGPTModel
+
+    _QWEN3VL_PREFIX = "megatron.bridge.models.qwen_vl.modelling_qwen3_vl"
+
+    # Both subclasses only override forward; their dynamic setup is identical to the megatron-core
+    # base classes, so reuse the existing dynamic classes directly (no behavioral subclass needed).
+    DMRegistry.register({Qwen3VLGPTModel: f"{_QWEN3VL_PREFIX}.text_model.Qwen3VLGPTModel"})(
+        _DynamicMCoreLanguageModel
+    )
+    DMRegistry.register(
+        {Qwen3VLSelfAttention: f"{_QWEN3VL_PREFIX}.attention.Qwen3VLSelfAttention"}
+    )(_DynamicSelfAttention)
+
+except ImportError:
+    pass

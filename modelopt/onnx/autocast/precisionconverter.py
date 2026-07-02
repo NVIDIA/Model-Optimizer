@@ -255,7 +255,9 @@ class PrecisionConverter:
             self.model = self._propagate_types_shapes_custom_ops(self.model)
         else:
             # Clear type/shape information for intermediates and outputs (including subgraphs)
-            self._clear_types_and_shapes_recursive(self.model.graph)
+            utils.clear_types_and_shapes_recursive(
+                self.model.graph, clear_shapes=not self.use_standalone_type_inference
+            )
             # Populate type information with inferred types
             self.model = onnx_utils.infer_types(
                 self.model, self.use_standalone_type_inference, strict_mode=True, check_type=False
@@ -283,66 +285,6 @@ class PrecisionConverter:
         for vi in self.model.graph.value_info:
             if vi.type.tensor_type.elem_type == onnx.TensorProto.UNDEFINED:
                 vi.type.tensor_type.elem_type = self.low_precision_type.onnx_type
-
-    def _clear_types_and_shapes_recursive(
-        self, graph: onnx.GraphProto, is_subgraph: bool = False
-    ) -> None:
-        """Recursively clear type/shape information for a graph and all its subgraphs.
-
-        If use_standalone_type_inference is True, we clear only types, not shapes.
-        For subgraphs, input types/shapes are cleared, so that the input types/shapes are propagated
-        from the main graph.
-
-        Args:
-            graph: The ONNX graph to clear types and shapes for.
-            is_subgraph: Whether this is a subgraph (True) or the main graph (False).
-        """
-
-        def _clear_callback(g: onnx.GraphProto, parent: onnx.NodeProto, is_sub: bool) -> None:
-            logger.debug(
-                f"Clearing types/shapes in {'subgraph' if is_sub else 'main graph'}: {g.name}"
-            )
-
-            # Clear type/shape information for inputs (only for subgraphs, not main graph inputs)
-            if is_sub:
-                for inp in g.input:
-                    if inp.type.HasField("tensor_type"):
-                        inp.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        if not self.use_standalone_type_inference:
-                            for idx, d in enumerate(inp.type.tensor_type.shape.dim):
-                                if d.dim_value:
-                                    inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
-
-            if is_sub:
-                # Identify which tensors are produced by nodes in this subgraph
-                subgraph_outputs = set()
-                for node in g.node:
-                    subgraph_outputs.update(node.output)
-
-                # Clear value_info only for intermediates produced by nodes in this subgraph
-                for vi in g.value_info:
-                    if vi.name in subgraph_outputs:
-                        vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        if not self.use_standalone_type_inference:
-                            for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                                if d.dim_value:
-                                    vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
-            else:
-                for vi in g.value_info:
-                    vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                    for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                        if d.dim_value:
-                            vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
-
-            # Clear outputs for both main graph and subgraphs
-            for out in g.output:
-                out.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                if not self.use_standalone_type_inference:
-                    for idx, d in enumerate(out.type.tensor_type.shape.dim):
-                        if d.dim_value:
-                            out.type.tensor_type.shape.dim[idx].dim_param = "unk"
-
-        utils.walk_subgraphs_recursive(graph, _clear_callback, is_subgraph=is_subgraph)
 
     def _propagate_types_shapes_custom_ops(self, model):
         """Propagate types and shapes after insertion of 'Cast' nodes or other graph modifications."""

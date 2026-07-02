@@ -23,8 +23,8 @@ import torch
 import triton
 import triton.language as tl
 
+from ..common.nvfp4_quant import fp4_round_magnitude, fp8_quantize_scale
 from .fp4_kernel import _torch_dtype_to_tl
-from .nvfp4_quant import fp4_round_magnitude, fp8_quantize_scale
 
 __all__ = ["fp4_fake_quant_block"]
 

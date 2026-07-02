@@ -1257,9 +1257,10 @@ def fuse_prequant_layernorm(
         fused_bias = bias * avg_pre_quant_scale
         layernorm_output_scaled = (normalization(input) * fused_weight) + fused_bias
     """
-    pre_quant_scale = getattr(modules[0].input_quantizer, "_pre_quant_scale").to(
-        layernorm_module.weight.device
-    )
+    if not hasattr(modules[0].input_quantizer, "_pre_quant_scale"):
+        return
+
+    pre_quant_scale = modules[0].input_quantizer._pre_quant_scale.to(layernorm_module.weight.device)
     if _layernorm_uses_weight_plus_one(layernorm_module):
         # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
         fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
@@ -1347,6 +1348,39 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
             )
             for module in modules:
                 module.weight_quantizer.amax = weight_amax
+
+
+def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
+    """Return the names of MoE router/gate submodules left in original precision.
+
+    A module is added to ``exclude_modules`` during unified HF export only if it carries a
+    quantizer (even a disabled one) -- see :func:`get_quant_config`. MoE routers are kept
+    unquantized on purpose, but on ``transformers>=5.0`` they are no longer ``nn.Linear``
+    modules (e.g. ``TopKRouter``), so ``mtq.quantize`` never attaches a quantizer to them.
+    Without this, the BF16 router weight is written to the checkpoint but omitted from
+    ``exclude_modules``, and deployment frameworks (vLLM / SGLang) then try to load it as a
+    quantized weight -- e.g. ``AssertionError: Tried to load weights of size [E, H] to a
+    parameter of size [E, H/2]`` for Qwen3-MoE.
+
+    Routers are detected structurally: an MoE block exposes an ``experts`` container plus a
+    ``gate`` / ``router`` (or ``shared_expert_gate``) submodule that owns a weight tensor.
+    Routers that the user opted to quantize (a non-NONE format) are skipped.
+    """
+    router_attrs = ("gate", "router", "shared_expert_gate")
+    router_names = []
+    for name, module in model.named_modules():
+        if not hasattr(module, "experts"):
+            continue
+        for attr in router_attrs:
+            router = getattr(module, attr, None)
+            if not isinstance(router, nn.Module):
+                continue
+            if not isinstance(getattr(router, "weight", None), torch.Tensor):
+                continue
+            if get_quantization_format(router) != QUANTIZATION_NONE:
+                continue
+            router_names.append(f"{name + '.' if name else ''}{attr}")
+    return router_names
 
 
 def get_quant_config(
@@ -1457,6 +1491,14 @@ def get_quant_config(
                     "Do not support mixed precision kv cache quantization"
                 )
 
+    # MoE routers/gates are intentionally kept in original precision. On transformers>=5.0 they
+    # are not nn.Linear modules (e.g. TopKRouter), never receive a quantizer, and would otherwise
+    # be missing from exclude_modules even though their BF16 weight is exported -- causing
+    # deployment frameworks to load them as quantized weights. Record them explicitly as
+    # unquantized so they land in exclude_modules.
+    for router_name in _get_unquantized_moe_router_names(model):
+        layer_config_dict.setdefault(router_name + ".quantization", QUANTIZATION_NONE)
+
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
 
@@ -1495,7 +1537,7 @@ def sync_tied_input_amax(model: nn.Module) -> int:
     YOCO-style models). Must run BEFORE per-module export so the merged
     amax flows into ``input_scale`` derivation. Handles both dense
     Linears (keyed by ``weight.data_ptr()``) and fused MoE (keyed by
-    ``(gate_up_proj, down_proj)`` data_ptr tuple). Returns the number of
+    ``(<first_proj>, down_proj)`` data_ptr tuple). Returns the number of
     tied groups merged.
     """
     from collections import defaultdict
@@ -1503,13 +1545,16 @@ def sync_tied_input_amax(model: nn.Module) -> int:
     by_dp: dict = defaultdict(list)
     for _, m in model.named_modules():
         # Fused MoE: 3-D source tensors with shared input quantizers
+        first_proj_attr = getattr(m, "_first_proj_attr", "gate_up_proj")
+        first_proj = getattr(m, first_proj_attr, None)
+        first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
         if (
-            hasattr(m, "gate_up_proj_input_quantizer")
-            and hasattr(m, "gate_up_proj")
+            hasattr(m, first_proj_input_quantizer_attr)
+            and first_proj is not None
             and hasattr(m, "down_proj")
-            and m.gate_up_proj.dim() == 3
+            and first_proj.dim() == 3
         ):
-            key = ("moe", m.gate_up_proj.data_ptr(), m.down_proj.data_ptr())
+            key = ("moe", first_proj.data_ptr(), m.down_proj.data_ptr())
             by_dp[key].append(m)
         # Dense quantized Linear with an input_quantizer
         elif (
@@ -1549,7 +1594,8 @@ def sync_tied_input_amax(model: nn.Module) -> int:
         if len(modules) < 2:
             continue
         if key[0] == "moe":
-            for q_name in ("gate_up_proj_input_quantizer", "down_proj_input_quantizer"):
+            first_proj_attr = getattr(modules[0], "_first_proj_attr", "gate_up_proj")
+            for q_name in (f"{first_proj_attr}_input_quantizer", "down_proj_input_quantizer"):
                 if _merge([getattr(m, q_name, None) for m in modules]):
                     synced += 1
         elif _merge([m.input_quantizer for m in modules]):

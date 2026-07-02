@@ -1490,7 +1490,7 @@ def quantize_weights_to_mxfp8(
 
     # set output type of DQ to FP16
     for node in graph.node:
-        if node.op_type in ["TRT_MXFP8DequantizeLinear"]:
+        if node.op_type == "TRT_MXFP8DequantizeLinear":
             for attr in node.attribute:
                 if attr.name == "output_dtype":
                     attr.i = onnx_dtype_map["Half"]
@@ -1568,7 +1568,7 @@ def fp4qdq_to_2dq(onnx_model: onnx.ModelProto, verbose: bool = False) -> onnx.Mo
     logger.debug(f"Found {len(fp4_qdq_nodes)} FP4QDQ nodes to convert")
 
     for node in fp4_qdq_nodes:
-        idx1 = initializer_indices.get(node.input[0], None)
+        idx1 = initializer_indices.get(node.input[0])
         assert idx1 is not None, f"Initializer for weight '{node.input[0]}' not found."
         block_size_attr = next((attr for attr in node.attribute if attr.name == "block_size"), None)
         assert block_size_attr is not None, f"block_size attribute not found for {node.name}"

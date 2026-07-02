@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       example:
-        description: "Example name to test (e.g. 'llm_ptq')"
+        description: "Example name to test (e.g. 'hf_ptq')"
         required: true
         type: string
       timeout_minutes:

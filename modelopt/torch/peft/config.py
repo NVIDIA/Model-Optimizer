@@ -204,7 +204,7 @@ class PEFTConfig(ModeloptBaseConfig):
     @classmethod
     def validate_adapter_type(cls, v):
         """Validate adapter type."""
-        if v not in ["lora"]:
+        if v != "lora":
             raise ValueError(f"Unsupported adapter type: {v}. Only 'lora' is currently supported.")
         return v
 

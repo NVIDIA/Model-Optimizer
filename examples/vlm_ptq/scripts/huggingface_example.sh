@@ -14,21 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DEPRECATED: examples/vlm_ptq has been consolidated into examples/llm_ptq.
-# This shim forwards all arguments to the llm_ptq script with the --vlm flag so existing
+# DEPRECATED: examples/vlm_ptq has been consolidated into examples/hf_ptq.
+# This shim forwards all arguments to the hf_ptq script with the --vlm flag so existing
 # commands keep working. Please migrate to:
 #
-#   cd examples/llm_ptq
+#   cd examples/hf_ptq
 #   scripts/huggingface_example.sh --model <model> --quant <qformat> --vlm
 #
-# See examples/llm_ptq/README.md#vlm-quantization for details.
+# See examples/hf_ptq/README.md#vlm-quantization for details.
 
 set -e
 
 echo "WARNING: examples/vlm_ptq is deprecated and will be removed in a future release." >&2
-echo "         Forwarding to examples/llm_ptq/scripts/huggingface_example.sh --vlm" >&2
-echo "         See examples/llm_ptq/README.md#vlm-quantization" >&2
+echo "         Forwarding to examples/hf_ptq/scripts/huggingface_example.sh --vlm" >&2
+echo "         See examples/hf_ptq/README.md#vlm-quantization" >&2
 
 script_dir="$(dirname "$(readlink -f "$0")")"
 
-exec "$script_dir/../../llm_ptq/scripts/huggingface_example.sh" --vlm "$@"
+exec "$script_dir/../../hf_ptq/scripts/huggingface_example.sh" --vlm "$@"

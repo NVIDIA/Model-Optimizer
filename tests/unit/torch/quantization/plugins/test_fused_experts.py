@@ -26,14 +26,16 @@ from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_par
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.moe_utils import _export_fused_experts
-from modelopt.torch.export.quant_utils import get_quant_config
+from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
-from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
+    _fused_experts_wrapper_class,
     _is_fused_experts_module,
     _is_sparse_sequaential_moe_block,
     _QuantFusedExperts,
+    _QuantNonGatedFusedExperts,
     force_eager_experts_impl_on_the_fly,
     register_fused_experts_on_the_fly,
     register_sparse_moe_on_the_fly,
@@ -86,6 +88,45 @@ class _SyntheticFusedExperts(nn.Module):
         return final_hidden_states
 
 
+class _SyntheticNonGatedFusedExperts(nn.Module):
+    """Mimics NemotronHExperts (transformers 5.5+): non-gated fused experts.
+
+    A single ``up_proj`` (no gate half) + ``down_proj``, both 3-D ``nn.Parameter`` s,
+    with the forward calling ``F.linear`` exactly twice per expert (up then down).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.num_experts = NUM_EXPERTS
+        self.hidden_dim = HIDDEN_DIM
+        self.intermediate_dim = INTERMEDIATE_DIM
+        self.up_proj = nn.Parameter(torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02)
+        self.down_proj = nn.Parameter(torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02)
+        self.act_fn = nn.SiLU()
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        final_hidden_states = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            expert_mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
+            if expert_idx == self.num_experts:
+                continue
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current_state = hidden_states[token_idx]
+            current_hidden_states = F.linear(current_state, self.up_proj[expert_idx])
+            current_hidden_states = self.act_fn(current_hidden_states)
+            current_hidden_states = F.linear(current_hidden_states, self.down_proj[expert_idx])
+            current_hidden_states = (
+                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            )
+            final_hidden_states.index_add_(
+                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
+            )
+        return final_hidden_states
+
+
 class _SyntheticTopKRouter(nn.Module):
     def __init__(self):
         super().__init__()
@@ -128,6 +169,43 @@ class _TinyMoEModel(nn.Module):
         return self.moe(x)
 
 
+class _SyntheticNonGatedSparseMoeBlock(nn.Module):
+    """Mimics NemotronHMoE: a router + non-gated fused experts."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = _SyntheticTopKRouter()
+        self.experts = _SyntheticNonGatedFusedExperts()
+
+    def forward(self, hidden_states):
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        _, top_k_weights, top_k_index = self.gate(hidden_states)
+        hidden_states = self.experts(hidden_states, top_k_index, top_k_weights)
+        return hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+
+
+class _TinyNonGatedMoEModel(nn.Module):
+    """Minimal model containing a single non-gated MoE block."""
+
+    def __init__(self):
+        super().__init__()
+        self.moe = _SyntheticNonGatedSparseMoeBlock()
+
+    def forward(self, x):
+        return self.moe(x)
+
+
+def _route_once_to_each_expert(model):
+    """Call fused experts directly with deterministic routing that covers every expert."""
+    assert NUM_EXPERTS % TOP_K == 0
+    seq_len = NUM_EXPERTS // TOP_K
+    hidden_states = torch.randn(seq_len, HIDDEN_DIM)
+    top_k_index = torch.arange(NUM_EXPERTS, dtype=torch.long).reshape(seq_len, TOP_K)
+    top_k_weights = torch.ones(seq_len, TOP_K) / TOP_K
+    model.moe.experts(hidden_states, top_k_index, top_k_weights)
+
+
 # ---------------------------------------------------------------------------
 # Tests for _is_fused_experts_module
 # ---------------------------------------------------------------------------
@@ -147,12 +225,12 @@ class TestIsFusedExpertsModule:
         module.act_fn = nn.SiLU()
         assert _is_fused_experts_module(module) is False
 
-    def test_module_missing_act_fn_not_detected(self):
+    def test_module_missing_act_fn_still_detected(self):
         module = nn.Module()
         module.gate_up_proj = nn.Parameter(torch.randn(4, 16, 8))
         module.down_proj = nn.Parameter(torch.randn(4, 8, 16))
         module.num_experts = 4
-        assert _is_fused_experts_module(module) is False
+        assert _is_fused_experts_module(module) is True
 
     def test_sparse_moe_block_not_detected_as_fused(self):
         block = _SyntheticSparseMoeBlock()
@@ -254,7 +332,7 @@ class TestQuantFusedExperts:
 
         for idx in range(NUM_EXPERTS):
             weight_slice = converted.gate_up_proj[idx]
-            recovered_idx = converted._get_expert_idx_from_gate_up(weight_slice)
+            recovered_idx = converted._get_expert_idx_from_first_proj(weight_slice)
             assert recovered_idx == idx, f"Expected {idx}, got {recovered_idx}"
         self._cleanup_registry(expert_type)
 
@@ -299,9 +377,7 @@ class TestExportFusedExperts:
 
         def forward_loop(m):
             torch.manual_seed(0)
-            for _ in range(2):
-                x = torch.randn(1, 4, HIDDEN_DIM)
-                m(x)
+            _route_once_to_each_expert(m)
 
         mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
         converted = model.moe.experts
@@ -755,9 +831,7 @@ class TestFusedExpertsCalibration:
 
         def forward_loop(m):
             torch.manual_seed(0)
-            for _ in range(2):
-                x = torch.randn(1, 4, HIDDEN_DIM)
-                m(x)
+            _route_once_to_each_expert(m)
 
         mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
 
@@ -1077,3 +1151,222 @@ class TestNormalizeFusedExpertsQuantizerName:
             _normalize_fused_experts_quantizer_name("moe.layers.3.gate.weight")
             == "moe.layers.3.gate.weight"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for the non-gated fused-experts path (NemotronH NemotronHExperts):
+# single up_proj (no gate half) + down_proj. Quantizers are named after the
+# backing weights: up_proj_* and down_proj_*.
+# ---------------------------------------------------------------------------
+class TestNonGatedFusedExperts:
+    @staticmethod
+    def _cleanup_registry(mod_type):
+        if QuantModuleRegistry.get(mod_type) is not None:
+            QuantModuleRegistry.unregister(mod_type)
+
+    def test_detected_and_picks_nongated_wrapper(self):
+        module = _SyntheticNonGatedFusedExperts()
+        assert _is_fused_experts_module(module) is True
+        assert _fused_experts_wrapper_class(module) is _QuantNonGatedFusedExperts
+
+    def test_gated_still_picks_base_wrapper(self):
+        assert _fused_experts_wrapper_class(_SyntheticFusedExperts()) is _QuantFusedExperts
+
+    def test_register_uses_nongated_wrapper(self):
+        model = _TinyNonGatedMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+        try:
+            converted = QuantModuleRegistry.convert(model.moe.experts)
+            assert isinstance(converted, _QuantNonGatedFusedExperts)
+            assert converted._first_proj_attr == "up_proj"
+            assert converted._is_gated is False
+            assert hasattr(converted, "up_proj_input_quantizer")
+            assert hasattr(converted, "up_proj_weight_quantizers")
+            assert not hasattr(converted, "gate_up_proj_input_quantizer")
+            assert not hasattr(converted, "gate_up_proj_weight_quantizers")
+            assert len(converted.up_proj_weight_quantizers) == NUM_EXPERTS
+            assert len(converted.down_proj_weight_quantizers) == NUM_EXPERTS
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def test_forward_passthrough_matches(self):
+        model = _TinyNonGatedMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        ref_experts = _SyntheticNonGatedFusedExperts()
+        ref_experts.load_state_dict(model.moe.experts.state_dict())
+
+        register_fused_experts_on_the_fly(model)
+        try:
+            converted = QuantModuleRegistry.convert(model.moe.experts)
+            # Disable quantizers to isolate the wrapper's structural forward
+            # (the F.linear interception / per-expert index routing) from
+            # dynamic-quant noise — this is a passthrough equivalence check.
+            for q in converted.modules():
+                if isinstance(q, TensorQuantizer):
+                    q.disable()
+            seq_len = 8
+            hidden_states = torch.randn(seq_len, HIDDEN_DIM)
+            top_k_index = torch.randint(0, NUM_EXPERTS, (seq_len, TOP_K))
+            top_k_weights = torch.softmax(torch.randn(seq_len, TOP_K), dim=-1)
+            with torch.no_grad():
+                out_ref = ref_experts(hidden_states, top_k_index, top_k_weights)
+                out_test = converted(hidden_states, top_k_index, top_k_weights)
+            assert torch.allclose(out_ref, out_test, atol=1e-5), (
+                f"Max diff: {(out_ref - out_test).abs().max().item()}"
+            )
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def test_expert_index_recovery(self):
+        experts = _SyntheticNonGatedFusedExperts()
+        expert_type = type(experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(_TinyNonGatedMoEModel())
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+            for idx in range(NUM_EXPERTS):
+                weight_slice = converted.up_proj[idx]
+                assert converted._get_expert_idx_from_first_proj(weight_slice) == idx
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def _nongated_fp8_cfg(self):
+        return {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*up_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*down_proj_input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
+                {
+                    "quantizer_name": "*up_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+                {
+                    "quantizer_name": "*down_proj_weight_quantizer",
+                    "cfg": {"num_bits": 8, "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        }
+
+    def test_calibration_populates_all_expert_quantizers(self):
+        model = _TinyNonGatedMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            _route_once_to_each_expert(m)
+
+        try:
+            mtq.quantize(model, self._nongated_fp8_cfg(), forward_loop=forward_loop)
+            experts = model.moe.experts
+            assert experts.up_proj_input_quantizer.amax is not None
+            assert experts.down_proj_input_quantizer.amax is not None
+            for idx in range(NUM_EXPERTS):
+                assert experts.up_proj_weight_quantizers[idx].amax is not None
+                assert experts.down_proj_weight_quantizers[idx].amax is not None
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def test_export_creates_per_expert_up_down_only(self):
+        model = _TinyNonGatedMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                m(torch.randn(1, 4, HIDDEN_DIM))
+
+        try:
+            mtq.quantize(model, self._nongated_fp8_cfg(), forward_loop=forward_loop)
+            converted = model.moe.experts
+            _export_fused_experts(converted, torch.float16)
+
+            for idx in range(NUM_EXPERTS):
+                expert_mod = getattr(converted, str(idx), None)
+                assert expert_mod is not None, f"Missing expert submodule {idx}"
+                # Non-gated: up_proj + down_proj, but NO gate_proj.
+                assert hasattr(expert_mod, "up_proj"), f"Expert {idx} missing up_proj"
+                assert hasattr(expert_mod, "down_proj"), f"Expert {idx} missing down_proj"
+                assert not hasattr(expert_mod, "gate_proj"), (
+                    f"Expert {idx} should NOT have gate_proj (non-gated MLP)"
+                )
+                assert expert_mod.up_proj.weight.shape == (INTERMEDIATE_DIM, HIDDEN_DIM)
+                assert expert_mod.down_proj.weight.shape == (HIDDEN_DIM, INTERMEDIATE_DIM)
+
+            # Fused params and per-expert quantizer lists are removed.
+            assert not hasattr(converted, "up_proj")
+            assert not hasattr(converted, "down_proj")
+            assert not hasattr(converted, "up_proj_weight_quantizers")
+            assert not hasattr(converted, "down_proj_weight_quantizers")
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def test_enumeration_yields_up_and_down_proj(self):
+        """weight_attr_names must yield up_proj and down_proj for non-gated experts."""
+        model = _TinyNonGatedMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+        try:
+            converted = QuantModuleRegistry.convert(model.moe.experts)
+            assert set(weight_attr_names(converted)) == {"up_proj", "down_proj"}
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def test_split_gated_layout_not_claimed_as_nongated(self):
+        """A fused container with a separate 3-D gate_proj (split-gated: three
+        F.linear calls per expert) must NOT be claimed by the non-gated wrapper,
+        whose two-call toggle and up_proj-storage index recovery assume exactly
+        two projections. It is left unsupported (None) rather than mis-quantized."""
+
+        class _SplitGatedExperts(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.num_experts = NUM_EXPERTS
+                self.gate_proj = nn.Parameter(
+                    torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+                )
+                self.up_proj = nn.Parameter(
+                    torch.randn(NUM_EXPERTS, INTERMEDIATE_DIM, HIDDEN_DIM) * 0.02
+                )
+                self.down_proj = nn.Parameter(
+                    torch.randn(NUM_EXPERTS, HIDDEN_DIM, INTERMEDIATE_DIM) * 0.02
+                )
+                self.act_fn = nn.SiLU()
+
+        module = _SplitGatedExperts()
+        assert _fused_experts_wrapper_class(module) is None
+        assert _is_fused_experts_module(module) is False
+
+    def test_get_quant_config_resolves_nongated_experts(self):
+        """get_quant_config must detect the non-gated experts as quantized."""
+        model = _TinyNonGatedMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+
+        def forward_loop(m):
+            torch.manual_seed(0)
+            for _ in range(2):
+                m(torch.randn(1, 4, HIDDEN_DIM))
+
+        try:
+            mtq.quantize(model, self._nongated_fp8_cfg(), forward_loop=forward_loop)
+            # Format resolves (via down_proj) instead of QUANTIZATION_NONE (None).
+            assert get_quantization_format(model.moe.experts) is not None
+            # The non-gated experts are reflected in the produced quant config.
+            quant = get_quant_config(model)["quantization"]
+            assert quant.get("quant_algo") is not None
+        finally:
+            self._cleanup_registry(expert_type)

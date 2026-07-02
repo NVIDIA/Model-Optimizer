@@ -24,10 +24,13 @@ from torch import __version__ as _torch_version
 
 # Pre-initialize torch._dynamo to prevent double-registration with peft's torch.compile() call
 importlib.import_module("torch._dynamo")
+# isort: off
+# opt must precede distill/nas/etc.: they import modelopt.torch.opt at module load,
+# so importing opt first avoids a circular import when opt is the entry subpackage.
 from . import (  # noqa: E402
+    opt,
     distill,
     nas,
-    opt,
     peft,
     prune,
     quantization,
@@ -35,6 +38,7 @@ from . import (  # noqa: E402
     speculative,
     utils,
 )
+# isort: on
 
 if _Version(_torch_version) < _Version("2.9"):
     _warnings.warn(
@@ -47,7 +51,7 @@ try:
 
     if _Version(_transformers_version) < _Version("4.56") or _Version(
         _transformers_version
-    ) >= _Version("5.10"):
+    ) >= _Version("5.13"):
         _warnings.warn(
             f"transformers {_transformers_version} is not tested with current version of modelopt and may cause issues."
             " Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.",

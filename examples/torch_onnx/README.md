@@ -122,8 +122,8 @@ source venv/bin/activate
 pip3 install .
 
 # Verify installation
-tensorrt-edgellm-quantize-llm --help
-tensorrt-edgellm-export-llm --help
+tensorrt-edgellm-quantize --help
+tensorrt-edgellm-export --help
 ```
 
 **System requirements:**
@@ -137,11 +137,8 @@ tensorrt-edgellm-export-llm --help
 
 | Tool | Purpose |
 | :--- | :--- |
-| `tensorrt-edgellm-quantize-llm` | Quantize LLM models using ModelOpt (FP8, INT4 AWQ, NVFP4) |
-| `tensorrt-edgellm-export-llm` | Export LLM to ONNX with precision-specific optimizations |
-| `tensorrt-edgellm-export-visual` | Export visual encoders for multimodal VLM models |
-| `tensorrt-edgellm-quantize-draft` | Quantize EAGLE draft models for speculative decoding |
-| `tensorrt-edgellm-export-draft` | Export EAGLE draft models to ONNX |
+| `tensorrt-edgellm-quantize` | Quantize models using ModelOpt (FP8, INT4 AWQ, NVFP4); subcommands: `llm`, `draft` |
+| `tensorrt-edgellm-export` | Export quantized or FP16/BF16 checkpoint to ONNX; auto-detects VLM and audio components |
 | `tensorrt-edgellm-insert-lora` | Insert LoRA patterns into existing ONNX models |
 | `tensorrt-edgellm-process-lora` | Process LoRA adapter weights for runtime loading |
 
@@ -149,64 +146,58 @@ tensorrt-edgellm-export-llm --help
 
 ```bash
 # Step 1: Quantize with ModelOpt
-tensorrt-edgellm-quantize-llm \
+tensorrt-edgellm-quantize llm \
     --model_dir Qwen/Qwen2.5-3B-Instruct \
     --quantization fp8 \
     --output_dir quantized/qwen2.5-3b-fp8
 
 # Step 2: Export to ONNX
-tensorrt-edgellm-export-llm \
-    --model_dir quantized/qwen2.5-3b-fp8 \
-    --output_dir onnx_models/qwen2.5-3b
+tensorrt-edgellm-export \
+    quantized/qwen2.5-3b-fp8 \
+    onnx_models/qwen2.5-3b
 ```
 
 ### Example: Quantize and Export a VLM
 
 ```bash
-# Quantize the language model component
-tensorrt-edgellm-quantize-llm \
+# Quantize with ModelOpt (handles both LLM and visual components)
+tensorrt-edgellm-quantize llm \
     --model_dir Qwen/Qwen2.5-VL-3B-Instruct \
     --quantization fp8 \
     --output_dir quantized/qwen2.5-vl-3b
 
-# Export the language model
-tensorrt-edgellm-export-llm \
-    --model_dir quantized/qwen2.5-vl-3b \
-    --output_dir onnx_models/qwen2.5-vl-3b/llm
-
-# Export the visual encoder
-tensorrt-edgellm-export-visual \
-    --model_dir Qwen/Qwen2.5-VL-3B-Instruct \
-    --output_dir onnx_models/qwen2.5-vl-3b/visual
+# Export to ONNX (auto-detects VLM and exports LLM + visual encoder to separate subdirs)
+tensorrt-edgellm-export \
+    quantized/qwen2.5-vl-3b \
+    onnx_models/qwen2.5-vl-3b
 ```
 
 ### Example: EAGLE Speculative Decoding
 
 ```bash
 # Quantize base model
-tensorrt-edgellm-quantize-llm \
+tensorrt-edgellm-quantize llm \
     --model_dir meta-llama/Llama-3.1-8B-Instruct \
     --quantization fp8 \
     --output_dir quantized/llama3.1-8b-base
 
 # Export base model with EAGLE flag
-tensorrt-edgellm-export-llm \
-    --model_dir quantized/llama3.1-8b-base \
-    --output_dir onnx_models/llama3.1-8b/base \
-    --is_eagle_base
+tensorrt-edgellm-export \
+    quantized/llama3.1-8b-base \
+    onnx_models/llama3.1-8b/base \
+    --eagle-base
 
 # Quantize EAGLE draft model
-tensorrt-edgellm-quantize-draft \
+tensorrt-edgellm-quantize draft \
     --base_model_dir meta-llama/Llama-3.1-8B-Instruct \
     --draft_model_dir EAGLE3-LLaMA3.1-Instruct-8B \
     --quantization fp8 \
     --output_dir quantized/llama3.1-8b-draft
 
 # Export draft model
-tensorrt-edgellm-export-draft \
-    --draft_model_dir quantized/llama3.1-8b-draft \
-    --base_model_dir meta-llama/Llama-3.1-8B-Instruct \
-    --output_dir onnx_models/llama3.1-8b/draft
+tensorrt-edgellm-export \
+    quantized/llama3.1-8b-draft \
+    onnx_models/llama3.1-8b/draft
 ```
 
 ### Quantization Methods
@@ -311,7 +302,7 @@ python torch_quant_to_onnx.py \
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
