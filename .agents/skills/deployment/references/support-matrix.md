@@ -60,6 +60,8 @@ This matrix covers officially validated combinations. For unlisted models:
 
 ## Notes
 
-- **NVFP4 inference requires Blackwell GPUs** (B100, B200, GB200). Hopper can run FP4 calibration but not inference.
+- **NVFP4 inference requires Blackwell GPUs** (B100, B200, B300, GB200, GB300). Hopper can run FP4 calibration but not inference.
+  - **B300/GB300 are `sm_103`** and need a CUDA-13 (`cu130`) serving image — now the vLLM default, but older `cu12` images lack the `sm_103` FP4 kernel and serve NVFP4 as gibberish or error out. See the deployment `SKILL.md` `-cu130` note.
+  - **Verify the GPU with `nvidia-smi`** before choosing the image — cluster GPU labels can be stale.
 - INT4_AWQ and W4A8_AWQ are only supported by TRT-LLM (not vLLM or SGLang).
 - Source: `examples/hf_ptq/README.md` and `docs/source/deployment/3_unified_hf.rst`
