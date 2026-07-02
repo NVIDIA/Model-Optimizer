@@ -19,14 +19,18 @@ Registers a custom vLLM attention backend that uses the ModelOpt Triton kernel
 with paged KV cache support. Integration approach:
 
 - No module replacement — the Attention module stays intact with all its state
-- Only ``impl`` is swapped from FlashAttentionImpl to ModelOptSparseAttentionImpl
+- Only ``impl`` is swapped to the ModelOpt sparse impl for the layer's backend
+  (``ModelOptSparseAttentionImpl`` for FlashAttention,
+  ``ModelOptSparseFlashInferImpl`` for FlashInfer)
 - KV cache update is handled by vLLM (inherited ``do_kv_cache_update``)
-- ``forward()`` calls ModelOpt Triton only when a validated sparse path is active
+- ``forward()`` calls ModelOpt Triton only when a validated sparse/quant path is active
 
 Vllm-free config helpers (``match_sparse_config`` / ``load_from_checkpoint_metadata``)
 live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 """
 
+import functools
+import inspect
 import math
 import warnings
 
@@ -208,13 +212,235 @@ def _bake_v_onwrite(value_cache, block_table, seq_lens, query_lens, page_size, v
     )
 
 
-class ModelOptSparseAttentionImpl(FlashAttentionImpl):
-    """Attention implementation that uses the ModelOpt Triton kernel.
+class _SparseAttentionMixin:
+    """Backend-agnostic sparse + attention-quant forward shared by the sparse impls.
+
+    A backend-specific impl (``ModelOptSparseAttentionImpl`` for FlashAttention,
+    ``ModelOptSparseFlashInferImpl`` for FlashInfer) extracts the dense paged
+    metadata (per-request query offsets/lengths, KV lengths, block table) and the
+    K/V caches from its own attention-metadata and cache layout, then calls
+    :meth:`_forward_common`. The decode/prefill dispatch, the config-driven P/V
+    BMM2 quant (from the layer's ``p/v_bmm_quantizer``), the on-write V bake, and
+    the skip-softmax handling are identical across backends, so only the
+    metadata/cache extraction differs. ``select_sparse_impl_cls`` recognizes any
+    impl that mixes this in.
+
+    Runtime attributes (``scale``, ``num_kv_heads``, ``head_size``) come from the
+    vLLM AttentionImpl base class; ``sparse_kw`` is set by the worker.
+    """
+
+    # Provided at runtime by the vLLM AttentionImpl base class.
+    scale: float
+    num_kv_heads: int
+    head_size: int
+    # Per-layer sparse kwargs set by the worker (empty when quant-only).
+    sparse_kw: dict
+
+    def _forward_common(
+        self,
+        *,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        page_size: int,
+        block_table: torch.Tensor,
+        b_start_loc: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        seq_lens: torch.Tensor,
+        num_actual_tokens: int,
+        max_query_len: int,
+        max_seq_len: int,
+        is_decode_only: bool,
+        is_causal: bool,
+        output: torch.Tensor,
+        dense_fallback,
+    ) -> torch.Tensor:
+        """Run the ModelOpt sparse/quant Triton kernel over the paged cache, or delegate.
+
+        Shared inference path across backends. The backend impl extracts the
+        per-request query offsets/lengths, KV lengths, and block table from its
+        own metadata and the K/V caches from its own layout, then calls this.
+        ``dense_fallback`` is a zero-arg callable that runs the backend's native
+        (dense) attention; it is used when no sparse feature and no BMM2 quant
+        applies to the launch (decode-only skip-softmax, or a launch where dynamic
+        calibration disabled sparsity).
+        """
+        # BMM2-operand quant from the layer's p/v_bmm_quantizer (config-driven, exported);
+        # None when no/disabled/unsupported quantizer. P or V quant alone (no sparsity)
+        # still engages the kernel below. K/Q quant is applied upstream by the
+        # _QuantVLLMAttention pre-step (head_dim axis); only the keys-axis BMM2 operands
+        # (P, V) are quantized in-kernel here.
+        p_qdq, p_qdq_amax = _p_qdq_from_layer(layer)
+        v_qdq, v_qdq_amax = _v_qdq_from_layer(layer)
+
+        # Per-layer sparse kwargs (set by the worker install step).
+        sparse_kw = dict(getattr(self, "sparse_kw", {}))
+        _resolve_skip_softmax_calibration(
+            sparse_kw,
+            is_prefill=not is_decode_only,
+            max_seq_len=max_seq_len,
+        )
+        if is_decode_only:
+            # N:M sparse softmax is prefill-only.
+            for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
+                sparse_kw.pop(name, None)
+            threshold = sparse_kw.get("skip_softmax_threshold")
+            if threshold is None and p_qdq is None and v_qdq is None:
+                # No decode sparsity and no BMM quant for this launch; native fallback.
+                return dense_fallback()
+            # NVFP4 V: bake the newly-complete tiles on write so the decode kernel reads them
+            # as-is (O(S)) instead of re-fake-quantizing the whole cache every step (O(S²)).
+            # FP8 V stays on-read. Bake BEFORE the attention so it reads the baked cache.
+            v_cache_quantized = v_qdq == "nvfp4"
+            if v_cache_quantized:
+                _bake_v_onwrite(
+                    value_cache,
+                    block_table,
+                    seq_lens,
+                    b_seq_len,
+                    page_size,
+                    v_qdq_amax,
+                    decode=True,
+                )
+            # Decode runs on the dedicated paged decode kernel (one query vector per
+            # request, split-K): skip-softmax and/or P quant, not the prefill kernel.
+            return self._forward_sparse_decode(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                page_size=page_size,
+                seq_lens=seq_lens,
+                block_table=block_table,
+                num_actual_tokens=num_actual_tokens,
+                skip_softmax_threshold=threshold,
+                p_qdq=p_qdq,
+                p_qdq_amax=p_qdq_amax,
+                v_qdq=v_qdq,
+                v_qdq_amax=v_qdq_amax,
+                v_cache_quantized=v_cache_quantized,
+                output=output,
+            )
+        if not sparse_kw and p_qdq is None and v_qdq is None:
+            # No sparse feature and no BMM2 quant active (e.g. dynamic calibration
+            # disabled the threshold); avoid swapping in the ModelOpt kernel.
+            return dense_fallback()
+
+        # Prepare metadata for our kernel
+        q = query[:num_actual_tokens].contiguous()
+        # Dummy K/V for paged mode: not used by the kernel (KV are read from
+        # k_cache/v_cache via block_table), but shape[1] must be num_kv_heads
+        # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).
+        k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
+
+        # NVFP4 V: bake the prompt's complete tiles on write BEFORE the kernel, so the kernel
+        # reads them as-is (V_CACHE_QUANTIZED) and re-fake-quantizes only the trailing partial.
+        # This quantizes each V tile exactly once — no double-quant of tiles a prior chunked-
+        # prefill step already baked — and still leaves decode a pre-quantized cache. FP8 V and
+        # no-quant stay fully on-read (v_cache_quantized False).
+        v_cache_quantized = v_qdq == "nvfp4"
+        if v_cache_quantized:
+            _bake_v_onwrite(
+                value_cache,
+                block_table,
+                seq_lens,
+                b_seq_len,
+                page_size,
+                v_qdq_amax,
+                decode=False,
+            )
+
+        # Call ModelOpt Triton kernel with paged KV.
+        # b_seq_len is the query length (e.g., 6 for prefill, 1 for decode).
+        # b_seq_len_k is the total KV length including cache (e.g., 6 for first
+        # prefill, 7/8/... for subsequent decode steps).
+        triton_out = triton_attention(
+            q,
+            k=k_dummy,
+            v=k_dummy,
+            # Query metadata
+            b_start_loc=b_start_loc,
+            b_seq_len=b_seq_len,
+            max_input_len=max_query_len,
+            is_causal=is_causal,
+            softmax_scale=self.scale,
+            # KV metadata
+            b_start_loc_k=None,  # paged mode: KV offsets not needed
+            b_seq_len_k=seq_lens,  # total KV length per sequence
+            max_input_len_k=max_seq_len,
+            # Paged KV cache
+            k_cache=key_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+            v_cache=value_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+            block_table=block_table,  # [batch, max_blocks]
+            page_size=page_size,  # tokens per page in the KV cache
+            p_qdq=p_qdq,
+            p_qdq_amax=p_qdq_amax,
+            v_qdq=v_qdq,
+            v_qdq_amax=v_qdq_amax,
+            v_cache_quantized=v_cache_quantized,
+            **sparse_kw,
+        )
+
+        output[:num_actual_tokens] = triton_out
+        return output
+
+    def _forward_sparse_decode(
+        self,
+        *,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        page_size: int,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        num_actual_tokens: int,
+        skip_softmax_threshold: float | None = None,
+        p_qdq: str | None = None,
+        p_qdq_amax: float = 1.0,
+        v_qdq: str | None = None,
+        v_qdq_amax: float | None = None,
+        v_cache_quantized: bool = False,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode via the dedicated paged decode kernel (skip-softmax and/or P/V quant).
+
+        Standard decode schedules exactly one query token per request, so the
+        ``num_actual_tokens`` query rows are the per-request decode queries. The
+        decode kernel computes one query vector per ``(request, head)`` over the
+        paged cache (split-K over the KV sequence) and applies the same prefix-max
+        skip criterion as the prefill kernel, so realized decode sparsity matches
+        the calibrated ``(a, b)``. The prefill kernel would tile this single query
+        token into ``BLOCK_M`` rows, wasting ~127/128 of the work.
+        """
+        q = query[:num_actual_tokens].contiguous()  # [batch, num_q_heads, head_dim]
+        decode_out = attention_decode(
+            q,
+            key_cache,
+            value_cache,
+            block_table[:num_actual_tokens],
+            seq_lens[:num_actual_tokens],
+            softmax_scale=self.scale,
+            skip_softmax_threshold=skip_softmax_threshold,
+            page_size=page_size,
+            p_qdq=p_qdq,
+            p_qdq_amax=p_qdq_amax,
+            v_qdq=v_qdq,
+            v_qdq_amax=v_qdq_amax,
+            v_cache_quantized=v_cache_quantized,
+        )
+        output[:num_actual_tokens] = decode_out
+        return output
+
+
+class ModelOptSparseAttentionImpl(_SparseAttentionMixin, FlashAttentionImpl):
+    """FlashAttention-backed attention impl that uses the ModelOpt Triton kernel.
 
     Inherits from FlashAttentionImpl to reuse:
     - __init__ (all configuration)
     - do_kv_cache_update (KV cache writing)
-    Only overrides forward() to replace sparse prefill attention computation.
+    Only overrides forward() to replace sparse prefill attention computation. The
+    sparse + attention-quant logic itself lives on ``_SparseAttentionMixin`` so
+    the FlashInfer variant can reuse it.
     """
 
     def _forward_vllm_flash_attn(
@@ -230,7 +456,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         output_block_scale: torch.Tensor | None,
     ) -> torch.Tensor:
         """Delegate a launch back to vLLM's native FlashAttention impl."""
-        return super().forward(
+        return FlashAttentionImpl.forward(
+            self,
             layer,
             query,
             key,
@@ -304,75 +531,23 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         page_size = key_cache.shape[1]
 
-        # BMM2-operand quant from the layer's p/v_bmm_quantizer (config-driven, exported);
-        # None when no/disabled/unsupported quantizer. P or V quant alone (no sparsity)
-        # still engages the kernel below. K/Q quant is applied upstream by the
-        # _QuantVLLMAttention pre-step (head_dim axis); only the keys-axis BMM2 operands
-        # (P, V) are quantized in-kernel here.
-        p_qdq, p_qdq_amax = _p_qdq_from_layer(layer)
-        v_qdq, v_qdq_amax = _v_qdq_from_layer(layer)
-
-        # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
-        sparse_kw = dict(getattr(self, "sparse_kw", {}))
-        _resolve_skip_softmax_calibration(
-            sparse_kw,
-            is_prefill=not is_decode_only,
+        return self._forward_common(
+            layer=layer,
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            page_size=page_size,
+            block_table=attn_metadata.block_table,
+            b_start_loc=b_start_loc,
+            b_seq_len=b_seq_len,
+            seq_lens=seq_lens,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=attn_metadata.max_query_len,
             max_seq_len=attn_metadata.max_seq_len,
-        )
-        if is_decode_only:
-            # N:M sparse softmax is prefill-only.
-            for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
-                sparse_kw.pop(name, None)
-            threshold = sparse_kw.get("skip_softmax_threshold")
-            if threshold is None and p_qdq is None and v_qdq is None:
-                # No decode sparsity and no BMM quant for this launch; use vLLM FlashAttention.
-                return self._forward_vllm_flash_attn(
-                    layer,
-                    query,
-                    key,
-                    value,
-                    kv_cache,
-                    attn_metadata,
-                    output,
-                    output_scale,
-                    output_block_scale,
-                )
-            # NVFP4 V: bake the newly-complete tiles on write so the decode kernel reads them
-            # as-is (O(S)) instead of re-fake-quantizing the whole cache every step (O(S²)).
-            # FP8 V stays on-read. Bake BEFORE the attention so it reads the baked cache.
-            v_cache_quantized = v_qdq == "nvfp4"
-            if v_cache_quantized:
-                _bake_v_onwrite(
-                    value_cache,
-                    attn_metadata.block_table,
-                    seq_lens,
-                    b_seq_len,
-                    page_size,
-                    v_qdq_amax,
-                    decode=True,
-                )
-            # Decode runs on the dedicated paged decode kernel (one query vector per
-            # request, split-K): skip-softmax and/or P quant, not the prefill kernel.
-            return self._forward_sparse_decode(
-                query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                page_size=page_size,
-                seq_lens=seq_lens,
-                block_table=attn_metadata.block_table,
-                num_actual_tokens=num_actual_tokens,
-                skip_softmax_threshold=threshold,
-                p_qdq=p_qdq,
-                p_qdq_amax=p_qdq_amax,
-                v_qdq=v_qdq,
-                v_qdq_amax=v_qdq_amax,
-                v_cache_quantized=v_cache_quantized,
-                output=output,
-            )
-        if not sparse_kw and p_qdq is None and v_qdq is None:
-            # No sparse feature and no BMM2 quant active (e.g. dynamic calibration
-            # disabled the threshold); avoid swapping in the ModelOpt kernel.
-            return self._forward_vllm_flash_attn(
+            is_decode_only=is_decode_only,
+            is_causal=is_causal,
+            output=output,
+            dense_fallback=lambda: self._forward_vllm_flash_attn(
                 layer,
                 query,
                 key,
@@ -382,112 +557,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 output,
                 output_scale,
                 output_block_scale,
-            )
-
-        # Prepare metadata for our kernel
-        q = query[:num_actual_tokens].contiguous()
-        # Dummy K/V for paged mode: not used by the kernel (KV are read from
-        # k_cache/v_cache via block_table), but shape[1] must be num_kv_heads
-        # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).
-        k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
-
-        # NVFP4 V: bake the prompt's complete tiles on write BEFORE the kernel, so the kernel
-        # reads them as-is (V_CACHE_QUANTIZED) and re-fake-quantizes only the trailing partial.
-        # This quantizes each V tile exactly once — no double-quant of tiles a prior chunked-
-        # prefill step already baked — and still leaves decode a pre-quantized cache. FP8 V and
-        # no-quant stay fully on-read (v_cache_quantized False).
-        v_cache_quantized = v_qdq == "nvfp4"
-        if v_cache_quantized:
-            _bake_v_onwrite(
-                value_cache,
-                attn_metadata.block_table,
-                seq_lens,
-                b_seq_len,
-                page_size,
-                v_qdq_amax,
-                decode=False,
-            )
-
-        # Call ModelOpt Triton kernel with paged KV.
-        # b_seq_len is the query length (e.g., 6 for prefill, 1 for decode).
-        # b_seq_len_k is the total KV length including cache (e.g., 6 for first
-        # prefill, 7/8/... for subsequent decode steps).
-        triton_out = triton_attention(
-            q,
-            k=k_dummy,
-            v=k_dummy,
-            # Query metadata
-            b_start_loc=b_start_loc,
-            b_seq_len=b_seq_len,
-            max_input_len=attn_metadata.max_query_len,
-            is_causal=is_causal,
-            softmax_scale=self.scale,
-            # KV metadata
-            b_start_loc_k=None,  # paged mode: KV offsets not needed
-            b_seq_len_k=seq_lens,  # total KV length per sequence
-            max_input_len_k=attn_metadata.max_seq_len,
-            # Paged KV cache
-            k_cache=key_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
-            v_cache=value_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
-            block_table=attn_metadata.block_table,  # [batch, max_blocks]
-            page_size=page_size,  # tokens per page in the KV cache
-            p_qdq=p_qdq,
-            p_qdq_amax=p_qdq_amax,
-            v_qdq=v_qdq,
-            v_qdq_amax=v_qdq_amax,
-            v_cache_quantized=v_cache_quantized,
-            **sparse_kw,
+            ),
         )
-
-        output[:num_actual_tokens] = triton_out
-        return output
-
-    def _forward_sparse_decode(
-        self,
-        *,
-        query: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        page_size: int,
-        seq_lens: torch.Tensor,
-        block_table: torch.Tensor,
-        num_actual_tokens: int,
-        skip_softmax_threshold: float | None = None,
-        p_qdq: str | None = None,
-        p_qdq_amax: float = 1.0,
-        v_qdq: str | None = None,
-        v_qdq_amax: float | None = None,
-        v_cache_quantized: bool = False,
-        output: torch.Tensor,
-    ) -> torch.Tensor:
-        """Decode via the dedicated paged decode kernel (skip-softmax and/or P/V quant).
-
-        Standard decode schedules exactly one query token per request, so the
-        ``num_actual_tokens`` query rows are the per-request decode queries. The
-        decode kernel computes one query vector per ``(request, head)`` over the
-        paged cache (split-K over the KV sequence) and applies the same prefix-max
-        skip criterion as the prefill kernel, so realized decode sparsity matches
-        the calibrated ``(a, b)``. The prefill kernel would tile this single query
-        token into ``BLOCK_M`` rows, wasting ~127/128 of the work.
-        """
-        q = query[:num_actual_tokens].contiguous()  # [batch, num_q_heads, head_dim]
-        decode_out = attention_decode(
-            q,
-            key_cache,
-            value_cache,
-            block_table[:num_actual_tokens],
-            seq_lens[:num_actual_tokens],
-            softmax_scale=self.scale,
-            skip_softmax_threshold=skip_softmax_threshold,
-            page_size=page_size,
-            p_qdq=p_qdq,
-            p_qdq_amax=p_qdq_amax,
-            v_qdq=v_qdq,
-            v_qdq_amax=v_qdq_amax,
-            v_cache_quantized=v_cache_quantized,
-        )
-        output[:num_actual_tokens] = decode_out
-        return output
 
 
 class ModelOptSparseAttentionBackend(FlashAttentionBackend):
@@ -507,12 +578,18 @@ class ModelOptSparseAttentionBackend(FlashAttentionBackend):
         return ModelOptSparseAttentionImpl
 
 
-def _clone_sparse_impl(old_impl):
-    """Create a sparse impl while preserving vLLM's initialized runtime state."""
+def _clone_sparse_impl(old_impl, new_cls: type = ModelOptSparseAttentionImpl):
+    """Re-class a vLLM attention impl into ``new_cls``, preserving its state.
+
+    The new impl shares the backend impl's initialized runtime state (config,
+    scales, kv-cache dtype) so ``do_kv_cache_update`` and the dense-fallback
+    ``super().forward()`` keep working. ``new_cls`` selects the backend-specific
+    sparse impl (FlashAttention vs FlashInfer).
+    """
     if getattr(old_impl, "sinks", None) is not None:
         # vLLM passes sinks to FlashAttention as s_aux; our Triton path does not support sinks yet.
         raise NotImplementedError(
-            "ModelOptSparseAttentionImpl does not support vLLM FlashAttention sinks yet."
+            f"{new_cls.__name__} does not support vLLM FlashAttention sinks yet."
         )
 
     try:
@@ -522,6 +599,188 @@ def _clone_sparse_impl(old_impl):
             "Cannot clone vLLM attention impl state: old impl does not expose __dict__."
         ) from err
 
-    new_impl = ModelOptSparseAttentionImpl.__new__(ModelOptSparseAttentionImpl)
+    new_impl = object.__new__(new_cls)
     new_impl.__dict__.update(old_state)
     return new_impl
+
+
+# ---------------------------------------------------------------------------
+# FlashInfer backend support
+# ---------------------------------------------------------------------------
+# FlashInfer's per-step metadata only retains planned wrappers, not the dense
+# block_table / seq_lens / query_start_loc the ModelOpt paged kernel needs. Those
+# live on the CommonAttentionMetadata the builder consumes, so we stash them onto
+# the produced FlashInferMetadata (``_modelopt_*``) and read them back in forward.
+# The KV cache is ``[num_blocks, 2, page_size, num_kv_heads, head_dim]``
+# (``[:, 0]`` = K, ``[:, 1]`` = V); strides are passed through, so this is correct
+# for both NHD and HND physical layouts.
+
+_FLASHINFER_PATCHED = False
+_FLASHINFER_IMPL_CLS: type | None = None
+
+
+def patch_flashinfer_metadata_builder() -> bool:
+    """Stash the dense common metadata onto ``FlashInferMetadata`` at build time.
+
+    Idempotent. Returns ``True`` if the FlashInfer builder is now patched,
+    ``False`` if the FlashInfer backend is unavailable.
+    """
+    global _FLASHINFER_PATCHED
+    if _FLASHINFER_PATCHED:
+        return True
+    try:
+        from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+    except ImportError:
+        return False
+
+    orig_build = FlashInferMetadataBuilder.build
+    # Locate ``common_attn_metadata`` by parameter name so the wrapper is robust
+    # to the builder's positional signature (this vLLM build is
+    # ``build(self, common_prefix_len, common_attn_metadata, fast_build=False)``).
+    # Pass ``*args``/``**kwargs`` straight through to avoid re-binding positional
+    # args (re-passing common_attn_metadata first collided with common_prefix_len).
+    build_sig = inspect.signature(orig_build)
+
+    @functools.wraps(orig_build)
+    def build(*args, **kwargs):
+        metadata = orig_build(*args, **kwargs)
+        common = build_sig.bind(*args, **kwargs).arguments["common_attn_metadata"]
+        metadata._modelopt_block_table = common.block_table_tensor
+        metadata._modelopt_seq_lens = common.seq_lens
+        metadata._modelopt_query_start_loc = common.query_start_loc
+        metadata._modelopt_num_actual_tokens = common.num_actual_tokens
+        metadata._modelopt_max_query_len = common.max_query_len
+        metadata._modelopt_max_seq_len = common.max_seq_len
+        return metadata
+
+    FlashInferMetadataBuilder.build = build
+    _FLASHINFER_PATCHED = True
+    return True
+
+
+def get_flashinfer_sparse_impl_cls() -> type:
+    """Build (once) and return ``ModelOptSparseFlashInferImpl``.
+
+    Defined lazily so importing this module does not require the FlashInfer
+    backend (and its ``flashinfer`` dependency) to be installed.
+    """
+    global _FLASHINFER_IMPL_CLS
+    if _FLASHINFER_IMPL_CLS is not None:
+        return _FLASHINFER_IMPL_CLS
+
+    from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+
+    class ModelOptSparseFlashInferImpl(_SparseAttentionMixin, FlashInferImpl):
+        """FlashInfer-backed attention impl with ModelOpt sparse + attention quant.
+
+        With the dense paged metadata stashed by
+        ``patch_flashinfer_metadata_builder`` available, it runs the ModelOpt
+        sparse/quant Triton kernel for sparse-or-quant launches, reading
+        FlashInfer's ``[num_blocks, 2, page, ...]`` cache (``[:, 0]`` = K,
+        ``[:, 1]`` = V). ``do_kv_cache_update`` and the dense fallback come from
+        ``FlashInferImpl`` so they match the FlashInfer KV cache.
+
+        Profiling (``attn_metadata is None``), cascade, an unpatched builder, or a
+        launch with no active sparse/quant feature fall back to native FlashInfer
+        (``FlashInferImpl.forward``) — mirroring ``ModelOptSparseAttentionImpl``.
+        """
+
+        def forward(
+            self,
+            layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=None,
+            output_scale=None,
+            output_block_scale=None,
+        ):
+            """Sparse/quant-serve via the Triton kernel; delegate otherwise."""
+
+            def dense():
+                return FlashInferImpl.forward(
+                    self,
+                    layer,
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    output,
+                    output_scale,
+                    output_block_scale,
+                )
+
+            # Native FlashInfer for profiling, cascade, or an unpatched builder
+            # (the dense paged metadata the Triton kernel needs is unavailable).
+            # Cascade + active attention quant would silently serve P/V un-quantized;
+            # fail loud instead (the quant worker also disables cascade up front).
+            if attn_metadata is not None and getattr(attn_metadata, "use_cascade", False):
+                p_qdq, _ = _p_qdq_from_layer(layer)
+                v_qdq, _ = _v_qdq_from_layer(layer)
+                if p_qdq is not None or v_qdq is not None:
+                    raise NotImplementedError(
+                        "vLLM cascade attention is incompatible with ModelOpt attention "
+                        "quant (the native fallback would serve P/V un-quantized). Disable "
+                        "cascade (model_config.disable_cascade_attn=True) or the quantizers."
+                    )
+            if (
+                attn_metadata is None
+                or getattr(attn_metadata, "use_cascade", False)
+                or not hasattr(attn_metadata, "_modelopt_block_table")
+            ):
+                return dense()
+
+            assert output is not None, "Output tensor must be provided."
+            key_cache = kv_cache[:, 0]
+            value_cache = kv_cache[:, 1]
+            page_size = key_cache.shape[1]
+            seq_lens = attn_metadata._modelopt_seq_lens
+            cu_seqlens_q = attn_metadata._modelopt_query_start_loc
+            batch = seq_lens.shape[0]
+            b_start_loc = cu_seqlens_q[:batch]
+            b_seq_len = cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]
+            max_query_len = attn_metadata._modelopt_max_query_len
+            is_decode_only = max_query_len <= 1
+
+            return self._forward_common(
+                layer=layer,
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                page_size=page_size,
+                block_table=attn_metadata._modelopt_block_table,
+                b_start_loc=b_start_loc,
+                b_seq_len=b_seq_len,
+                seq_lens=seq_lens,
+                num_actual_tokens=attn_metadata._modelopt_num_actual_tokens,
+                max_query_len=max_query_len,
+                max_seq_len=attn_metadata._modelopt_max_seq_len,
+                is_decode_only=is_decode_only,
+                is_causal=not is_decode_only,
+                output=output,
+                dense_fallback=dense,
+            )
+
+    _FLASHINFER_IMPL_CLS = ModelOptSparseFlashInferImpl
+    return _FLASHINFER_IMPL_CLS
+
+
+def select_sparse_impl_cls(impl) -> type | None:
+    """Return the ModelOpt sparse impl class for a vLLM attention impl's backend.
+
+    ``None`` if ``impl`` is already a ModelOpt sparse impl or its backend is
+    unsupported. For FlashInfer it also installs the metadata-builder patch that
+    exposes the dense paged metadata the Triton kernel needs. Used by the worker
+    install step to swap the right impl per attention layer.
+    """
+    if isinstance(impl, _SparseAttentionMixin):
+        return None  # already swapped (idempotent across reloads)
+    name = type(impl).__name__
+    if name == "FlashAttentionImpl":
+        return ModelOptSparseAttentionImpl
+    if name == "FlashInferImpl":
+        return get_flashinfer_sparse_impl_cls() if patch_flashinfer_metadata_builder() else None
+    return None

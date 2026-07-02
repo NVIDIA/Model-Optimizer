@@ -114,15 +114,21 @@ def _fakequant_run_prolog_worker(self) -> None:
             print("Will load quant, so only do a single sample calibration")
             quant_config["calib_size"] = 1
 
-        calib_dataloader = get_dataset_dataloader(
-            dataset_name=quant_config["dataset"],
-            tokenizer=tokenizer,
-            batch_size=quant_config["calib_batch_size"],
-            num_samples=quant_config["calib_size"],
-            device=self.device,
-        )
-
-        calibrate_loop = calibrate_fun(calib_dataloader, self)
+        if os.environ.get("QUANT_SKIP_CALIB", "0") == "1":
+            # Dynamic-only recipes (e.g. NVFP4 attention BMM: dynamic per-block scales +
+            # runtime-default global scale) need no calibration, so skip the dataset
+            # dataloader (avoids the HF `datasets` stack) and apply the config directly.
+            print("QUANT_SKIP_CALIB=1: applying quant config without calibration (dynamic quant).")
+            calibrate_loop = None
+        else:
+            calib_dataloader = get_dataset_dataloader(
+                dataset_name=quant_config["dataset"],
+                tokenizer=tokenizer,
+                batch_size=quant_config["calib_batch_size"],
+                num_samples=quant_config["calib_size"],
+                device=self.device,
+            )
+            calibrate_loop = calibrate_fun(calib_dataloader, self)
 
         quant_cfg = get_quant_config(quant_config, model)
 
