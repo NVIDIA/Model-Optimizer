@@ -56,12 +56,12 @@ Hugging Face dataset repository.
 
 Define the tokenizer, output directory, and source weights in YAML. Set the optional `target_tokens` field to
 prepare a weighted subset, or omit it to prepare every source in full. This example scales the
-[Nemotron Nano 9B v2 distillation blend](../pruning/minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md#1-data-preparation)
+[Nemotron 3 Nano distillation blend](../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md#1-data-preparation)
 down to one billion tokens while preserving its source weights:
 
 ```yaml
-tokenizer: nvidia/NVIDIA-Nemotron-Nano-9B-v2
-output_dir: /datasets/tokenized_nemotron_v2_1b
+tokenizer: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+output_dir: /path/to/nemotron_3_nano_30b_distillation_blend_1b
 # Optional; omit this field to prepare every source in full.
 target_tokens: 1000000000
 sources:
@@ -86,11 +86,12 @@ sources:
   - hf_dataset: nvidia/Nemotron-Math-v2
     split: high_part00
     content_field: messages
-    weight: 15
-  - hf_dataset: nvidia/Nemotron-Math-v2
-    split: high_part01
+    weight: 10
+  - hf_dataset: nvidia/Nemotron-SFT-Math-v3
+    files:
+      - data/train.jsonl
     content_field: messages
-    weight: 15
+    weight: 17
   - hf_dataset: nvidia/Nemotron-SFT-Competitive-Programming-v2
     files:
       - data/competitive_programming_python_00.jsonl
@@ -106,7 +107,7 @@ sources:
     split: stem
     max_samples: 5000000
     content_field: messages
-    weight: 10
+    weight: 8
   - hf_dataset: nvidia/Nemotron-Science-v1
     files:
       - data/MCQ.jsonl
@@ -127,6 +128,11 @@ sources:
       - data/reasoning_off.jsonl
     content_field: messages
     weight: 2
+  - hf_dataset: nvidia/Nemotron-Agentic-v1
+    files:
+      - data/tool_calling.jsonl
+    content_field: messages
+    weight: 5
 ```
 
 Run from the repository root:
