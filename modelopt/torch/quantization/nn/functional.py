@@ -16,6 +16,7 @@
 """Some supportive functions."""
 
 import warnings
+from functools import lru_cache
 
 import torch
 from torch.autograd import Function
@@ -98,7 +99,16 @@ def _largest_pow2_divisor(n: int) -> int:
     return n & (-n)
 
 
-def normalized_hadamard_transform(inputs, rotate_fp32=False, block_size=None):
+@lru_cache(maxsize=16)
+def _random_signs(seed: int, dim: int, device: torch.device, dtype: torch.dtype):
+    generator = torch.Generator(device=device).manual_seed(seed)
+    signs = torch.randint(0, 2, (dim,), generator=generator, device=device, dtype=torch.int8)
+    return signs.to(dtype=dtype).mul_(2).sub_(1)
+
+
+def normalized_hadamard_transform(
+    inputs, rotate_fp32=False, block_size=None, random_sign_seed=None, inverse=False
+):
     """Normalized fast hadamard transform.
 
     Supports block-granular RHT for dimensions that are not a power of 2.
@@ -112,6 +122,9 @@ def normalized_hadamard_transform(inputs, rotate_fp32=False, block_size=None):
         block_size: Block size for block-granular RHT. Must be power of 2 and divide
             inputs.shape[-1]. If None: use full-dimension FHT when dim is power of 2;
             otherwise auto-select the largest power-of-2 divisor of the dimension.
+        random_sign_seed: If set, apply a deterministic random sign diagonal before
+            Hadamard. The same seed is used for the inverse transform.
+        inverse: If True, apply inverse RHT order for seeded transforms.
 
     Returns:
         Rotated tensor with same shape as inputs.
@@ -129,6 +142,13 @@ def normalized_hadamard_transform(inputs, rotate_fp32=False, block_size=None):
     dtype = inputs.dtype
     if rotate_fp32:
         inputs = inputs.to(torch.float32)
+    signs = (
+        _random_signs(random_sign_seed, dim, inputs.device, inputs.dtype)
+        if random_sign_seed is not None
+        else None
+    )
+    if signs is not None and not inverse:
+        inputs = inputs * signs
 
     if block_size is None and utils.is_pow2(dim):
         # Full-dimension FHT (original behavior)
@@ -160,5 +180,8 @@ def normalized_hadamard_transform(inputs, rotate_fp32=False, block_size=None):
             torch.tensor(block_size, dtype=torch.float32)
         )
         outputs = rotated.reshape(inputs.shape)
+
+    if signs is not None and inverse:
+        outputs = outputs * signs
 
     return outputs.to(dtype) if rotate_fp32 else outputs

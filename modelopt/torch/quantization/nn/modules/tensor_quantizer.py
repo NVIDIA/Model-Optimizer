@@ -620,6 +620,15 @@ class TensorQuantizer(nn.Module):
         return None
 
     @property
+    def rotate_seed(self):
+        """Seed for deterministic RHT signs, or None for normalized HT."""
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.seed if self._rotate.enable else None
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("seed", None)
+        return None
+
+    @property
     def rotate_back_is_enabled(self):
         """Check if inverse rotation should be applied after quantization."""
         if isinstance(self._rotate, RotateConfig):
@@ -628,11 +637,13 @@ class TensorQuantizer(nn.Module):
             return self._rotate.get("mode", "rotate") == "rotate_back"
         return False
 
-    def _rotate_inputs(self, inputs):
+    def _rotate_inputs(self, inputs, inverse=False):
         return normalized_hadamard_transform(
             inputs,
             rotate_fp32=self.rotate_is_fp32,
             block_size=self.rotate_block_size,
+            random_sign_seed=self.rotate_seed,
+            inverse=inverse,
         )
 
     def disable_calib(self):
@@ -1175,7 +1186,7 @@ class TensorQuantizer(nn.Module):
             outputs = self._reset_to_original_shape(outputs)
 
         if self.rotate_back_is_enabled and isinstance(outputs, torch.Tensor):
-            outputs = self._rotate_inputs(outputs)
+            outputs = self._rotate_inputs(outputs, inverse=True)
 
         return outputs
 
@@ -1231,6 +1242,8 @@ class TensorQuantizer(nn.Module):
         s += " (fp32)" if self.rotate_is_fp32 else ""
         if self.rotate_block_size is not None:
             s += f" (block={self.rotate_block_size})"
+        if self.rotate_seed is not None:
+            s += f" (seed={self.rotate_seed})"
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)

@@ -29,6 +29,7 @@ from modelopt.torch.quantization.nn import (
     register_quant_backend,
     unregister_quant_backend,
 )
+from modelopt.torch.quantization.nn.functional import _random_signs
 
 
 class TestFakeTensorQuantCPU(FakeTensorQuantTester):
@@ -63,7 +64,13 @@ class TestQuantizerAttributeConfig:
 
     def test_rotate_mode_serialization(self):
         quant_attr_cfg = QuantizerAttributeConfig(
-            rotate={"enable": True, "mode": "rotate_back", "rotate_fp32": True, "block_size": 8}
+            rotate={
+                "enable": True,
+                "mode": "rotate_back",
+                "rotate_fp32": True,
+                "block_size": 8,
+                "seed": 123,
+            }
         )
 
         assert quant_attr_cfg.model_dump(exclude_unset=True)["rotate"] == {
@@ -71,7 +78,11 @@ class TestQuantizerAttributeConfig:
             "mode": "rotate_back",
             "rotate_fp32": True,
             "block_size": 8,
+            "seed": 123,
         }
+
+        with pytest.raises(ValueError, match="seed must be a non-negative int"):
+            QuantizerAttributeConfig(rotate={"enable": True, "seed": -1})
 
     def test_num_bits(self):
         """Test num_bits for both integer and tuple cases."""
@@ -112,8 +123,8 @@ class TestQuantizerAttributeConfig:
 def _run_rotated_backend(monkeypatch, rotate):
     calls = []
 
-    def rotate_fn(inputs, rotate_fp32=False, block_size=None):
-        calls.append((rotate_fp32, block_size))
+    def rotate_fn(inputs, rotate_fp32=False, block_size=None, random_sign_seed=None, inverse=False):
+        calls.append((rotate_fp32, block_size, random_sign_seed, inverse))
         return inputs + 10
 
     def backend(inputs, _tq):
@@ -136,22 +147,30 @@ def test_tensor_quantizer_rotate_mode_preserves_default_path(monkeypatch):
 
     assert not quantizer.rotate_back_is_enabled
     assert torch.equal(outputs, (inputs + 10) * 2)
-    assert calls == [(False, None)]
+    assert calls == [(False, None, None, False)]
 
 
 def test_tensor_quantizer_rotate_mode_can_rotate_back(monkeypatch):
     outputs, inputs, calls, quantizer = _run_rotated_backend(
         monkeypatch,
-        rotate={"enable": True, "mode": "rotate_back", "rotate_fp32": True, "block_size": 8},
+        rotate={
+            "enable": True,
+            "mode": "rotate_back",
+            "rotate_fp32": True,
+            "block_size": 8,
+            "seed": 123,
+        },
     )
 
     assert quantizer.rotate_back_is_enabled
     assert torch.equal(outputs, ((inputs + 10) * 2) + 10)
-    assert calls == [(True, 8), (True, 8)]
+    assert calls == [(True, 8, 123, False), (True, 8, 123, True)]
 
 
 def test_tensor_quantizer_rotate_back_rejects_real_quant(monkeypatch):
-    def fail_if_rotated(inputs, rotate_fp32=False, block_size=None):
+    def fail_if_rotated(
+        inputs, rotate_fp32=False, block_size=None, random_sign_seed=None, inverse=False
+    ):
         raise AssertionError("rotate_back with fake_quant=False should fail before rotation")
 
     monkeypatch.setattr(
@@ -169,6 +188,26 @@ def test_tensor_quantizer_rotate_back_rejects_real_quant(monkeypatch):
 
     with pytest.raises(ValueError, match="rotate_back mode is only supported with fake_quant=True"):
         quantizer(torch.tensor([[1.0, 2.0]]))
+
+
+def test_random_signs_are_cached_by_seed_dim_device_and_dtype():
+    _random_signs.cache_clear()
+
+    try:
+        signs = _random_signs(123, 8, torch.device("cpu"), torch.float32)
+        cached_signs = _random_signs(123, 8, torch.device("cpu"), torch.float32)
+        fp16_signs = _random_signs(123, 8, torch.device("cpu"), torch.float16)
+        different_seed_signs = _random_signs(124, 8, torch.device("cpu"), torch.float32)
+        different_dim_signs = _random_signs(123, 16, torch.device("cpu"), torch.float32)
+
+        assert cached_signs.data_ptr() == signs.data_ptr()
+        assert torch.equal(cached_signs, signs)
+        assert fp16_signs.dtype == torch.float16
+        assert fp16_signs.data_ptr() != signs.data_ptr()
+        assert different_seed_signs.data_ptr() != signs.data_ptr()
+        assert different_dim_signs.data_ptr() != signs.data_ptr()
+    finally:
+        _random_signs.cache_clear()
 
 
 WINT4INT8_CFG = {

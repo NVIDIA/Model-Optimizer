@@ -290,6 +290,7 @@ class RotateConfig(ModeloptBaseConfig):
     mode: Literal["rotate", "rotate_back"] = "rotate"
     rotate_fp32: bool = False
     block_size: int | None = None
+    seed: int | None = None
 
     @field_validator("block_size", mode="before")
     @classmethod
@@ -297,6 +298,14 @@ class RotateConfig(ModeloptBaseConfig):
         """Validate block_size is a positive int (mode=before to catch bool before int coercion)."""
         if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v <= 0):
             raise ValueError(f"block_size must be a positive int, got {v!r}")
+        return v
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def validate_seed(cls, v):
+        """Validate seed is a non-negative int (mode=before to catch bool before int coercion)."""
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            raise ValueError(f"seed must be a non-negative int, got {v!r}")
         return v
 
 
