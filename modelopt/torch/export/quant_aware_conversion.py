@@ -149,7 +149,10 @@ def _apply_split_rule(state_dict: dict[str, torch.Tensor], rule: SplitRule) -> N
                 "un-stacking experts + their scales is a follow-up"
             )
         for idx, part in enumerate(rule.part_suffixes):
-            state_dict[module + part + leaf] = _split_leaf_tensor(leaf, tensor, n, idx, rule.dim)
+            target_key = module + part + leaf
+            if target_key in state_dict:
+                raise QuantConversionUnsupportedError(f"split collision on '{target_key}'")
+            state_dict[target_key] = _split_leaf_tensor(leaf, tensor, n, idx, rule.dim)
 
 
 def apply_reverse_rules(
@@ -186,16 +189,44 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
     when the mapping uses an op that cannot be reversed quant-aware yet, so the
     caller can fall back to the legacy behavior.
     """
-    split_rules, rename_rules = _build_reverse_rules(model)
+    split_rules, rename_rules, expert_fused_leaves = _build_reverse_rules(model)
     if not split_rules and not rename_rules:
         return state_dict
+    _assert_experts_pre_expanded(state_dict, expert_fused_leaves)
     return apply_reverse_rules(state_dict, split_rules, rename_rules)
 
 
-def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
+def _assert_experts_pre_expanded(
+    state_dict: dict[str, torch.Tensor], expert_fused_leaves: list[str]
+) -> None:
+    """Guard the expert rename path against experts that were not pre-expanded.
+
+    The expert reverse is emitted as key renames anchored on the per-expert index
+    (``.experts.<i>.<leaf>``). If ModelOpt did not expand the fused/stacked experts,
+    a key like ``.experts.gate_up_proj`` (a 3-D ``[E, ...]`` tensor) survives: no
+    per-expert rename matches it, so it would ship unrenamed under the wrong name.
+    Mirror the split path's 3-D guard and raise so the caller falls back to legacy
+    (in-memory-name) export instead of emitting a silently mis-named checkpoint.
+    """
+    if not expert_fused_leaves:
+        return
+    fused = re.compile(
+        r"\.experts\.(?:" + "|".join(re.escape(leaf) for leaf in expert_fused_leaves) + r")(?:\.|$)"
+    )
+    for key, tensor in state_dict.items():
+        if fused.search(key) or (".experts." in key and getattr(tensor, "ndim", 0) >= 3):
+            raise QuantConversionUnsupportedError(
+                f"experts not pre-expanded (stacked/fused expert tensor '{key}'); "
+                "quant-aware reverse conversion cannot rename it"
+            )
+
+
+def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list[str]]:
     """Derive reverse rules from the model's transformers conversion mapping.
 
-    Returns empty rule lists when no mapping applies (export unchanged). Uses
+    Returns ``(split_rules, rename_rules, expert_fused_leaves)``; the last is the set
+    of in-memory fused expert leaf names, used to guard against experts that were not
+    pre-expanded. Returns empty lists when no mapping applies (export unchanged). Uses
     transformers' own ``reverse_transform()`` to get correctly-reversed name patterns
     (so anchored regex renamings reverse properly), then translates them:
 
@@ -220,14 +251,19 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
         raise QuantConversionUnsupportedError(f"could not read conversion mapping: {exc}") from exc
 
     if not conversions:
-        return [], []
+        return [], [], []
 
-    from transformers.core_model_loading import (
-        Chunk,
-        SplitModulelist,
-        WeightConverter,
-        WeightRenaming,
-    )
+    try:
+        from transformers.core_model_loading import (
+            Chunk,
+            SplitModulelist,
+            WeightConverter,
+            WeightRenaming,
+        )
+    except Exception as exc:  # transformers too old / API drift -> fall back to legacy names
+        raise QuantConversionUnsupportedError(
+            f"transformers.core_model_loading unavailable: {exc}"
+        ) from exc
 
     split_rules: list[SplitRule] = []
     # WeightRenamings and expert-leaf (converter-derived) renames are collected
@@ -235,6 +271,10 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
     # ``rename_rules`` assembly below.
     weight_renamings: list[RenameRule] = []
     leaf_renamings: list[RenameRule] = []
+    # In-memory fused expert leaf names (e.g. ``gate_up_proj``, ``down_proj``). Used by
+    # the caller to detect experts that were NOT pre-expanded (stacked 3-D tensors),
+    # which the per-expert-index leaf renames cannot rewrite.
+    expert_fused_leaves: list[str] = []
     for conv in conversions:
         rev = conv.reverse_transform()  # hub<-in-memory; reversed name patterns + ops
         if isinstance(rev, WeightRenaming):
@@ -246,6 +286,7 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
                 # Expert converter: ModelOpt already un-stacked/un-fused experts to
                 # per-expert 2-D linears, so only per-expert leaf names remain to map.
                 leaf_renamings.extend(_expert_leaf_renames(rev))
+                expert_fused_leaves.append(_leaf(_as_list(rev.source_patterns)[0]))
             elif ops and all(isinstance(op, Chunk) for op in ops):
                 # Dense fused linear survives in the state dict -> un-fuse (split).
                 split_rules.append(_dense_split_rule(rev, ops))
@@ -267,7 +308,7 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule]]:
     # renames rely on. Expert leaf renames act on disjoint ``.experts.<i>.<leaf>``
     # substrings and are applied first.
     rename_rules = leaf_renamings + list(reversed(weight_renamings))
-    return split_rules, rename_rules
+    return split_rules, rename_rules, expert_fused_leaves
 
 
 # ModelOpt's export splits a fused ``gate_up_proj`` into these per-expert linears,

@@ -91,10 +91,7 @@ from .model_config import (
 from .model_utils import _reorder_canonical_first, get_language_model_from_vl, is_multimodal_model
 from .moe_utils import _export_fused_experts
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
-from .quant_aware_conversion import (
-    QuantConversionUnsupportedError,
-    revert_weight_conversion_quant_aware,
-)
+from .quant_aware_conversion import revert_weight_conversion_quant_aware
 from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
@@ -1489,9 +1486,13 @@ def export_hf_checkpoint(
         # transformers' own revert_weight_conversion errors on 0-d scalar scale tensors, so we
         # do the reverse here; for any op we cannot reverse yet (e.g. stacked-expert fusion)
         # we fall back to the in-memory names.
+        # QuantConversionUnsupportedError flags a mapping op we explicitly do not
+        # reverse yet; catching Exception additionally guards against unanticipated
+        # failures (transformers API drift, unexpected tensor shapes) so a naming
+        # best-effort never aborts the export -- we fall back to in-memory names.
         try:
             export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
-        except QuantConversionUnsupportedError as exc:
+        except Exception as exc:
             warnings.warn(
                 f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
                 "names may not match the original HF hub checkpoint."

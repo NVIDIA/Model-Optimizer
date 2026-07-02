@@ -31,7 +31,9 @@ from modelopt.torch.export.quant_aware_conversion import (
     QuantConversionUnsupportedError,
     RenameRule,
     SplitRule,
+    _assert_experts_pre_expanded,
     apply_reverse_rules,
+    revert_weight_conversion_quant_aware,
 )
 
 BLOCK = 16
@@ -182,8 +184,6 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     if not get_checkpoint_conversion_mapping("mixtral"):
         pytest.skip("transformers build has no mixtral conversion_mapping")
 
-    from modelopt.torch.export.quant_aware_conversion import revert_weight_conversion_quant_aware
-
     cfg = MixtralConfig(
         hidden_size=32,
         intermediate_size=64,
@@ -234,8 +234,6 @@ def test_build_reverse_rules_orders_prefix_reorder_after_container():
     pytest.importorskip("transformers")
     from transformers.core_model_loading import WeightRenaming
 
-    from modelopt.torch.export.quant_aware_conversion import revert_weight_conversion_quant_aware
-
     # Forward (hub -> in-memory) renamings; ``reverse_transform`` flips them on save.
     # Order matters: reorder is listed BEFORE the adjacency-anchored container rename,
     # exactly as a real M3 conversion mapping lists them.
@@ -262,3 +260,33 @@ def test_build_reverse_rules_orders_prefix_reorder_after_container():
     # Regression guard: the buggy reorder-first order leaves these in-memory fragments.
     assert not any(k.startswith("model.language_model") for k in out)
     assert not any(".mlp.experts." in k for k in out)
+
+
+def test_split_collision_raises():
+    """A split whose target key already exists must fail instead of overwriting."""
+    sd = _nvfp4_linear("m.gate_up_proj", 8, 16)
+    sd["m.gate_proj.weight"] = torch.zeros(4, 16)  # pre-existing split target
+    rule = SplitRule(".gate_up_proj", (".gate_proj", ".up_proj"), dim=0)
+    with pytest.raises(QuantConversionUnsupportedError, match="split collision"):
+        apply_reverse_rules(sd, [rule], [])
+
+
+def test_stacked_experts_guard():
+    """Experts not pre-expanded (stacked/fused 3-D leaf) must trigger the fallback.
+
+    The per-expert-index leaf renames cannot rewrite a still-fused
+    ``.experts.gate_up_proj`` tensor, so it would ship mis-named; guard by raising.
+    """
+    fused_leaves = ["gate_up_proj", "down_proj"]
+
+    # Pre-expanded 2-D experts: no fused leaf present -> no raise.
+    ok = _nvfp4_linear("model.language_model.layers.10.mlp.experts.0.gate_proj", 8, 16)
+    _assert_experts_pre_expanded(ok, fused_leaves)
+
+    # Still-fused stacked expert leaf (3-D) -> raise.
+    bad = {"model.language_model.layers.10.mlp.experts.gate_up_proj.weight": torch.zeros(2, 8, 16)}
+    with pytest.raises(QuantConversionUnsupportedError, match="not pre-expanded"):
+        _assert_experts_pre_expanded(bad, fused_leaves)
+
+    # No expert converters in the mapping -> guard is a no-op even for 3-D tensors.
+    _assert_experts_pre_expanded(bad, [])
