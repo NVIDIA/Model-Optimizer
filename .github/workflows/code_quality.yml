@@ -11,7 +11,7 @@ on:
 
 concurrency:
   # Cancel previous runs if new commit is pushed to the same PR
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
