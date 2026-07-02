@@ -6,7 +6,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pruning &mdash; Model Optimizer 0.0.1.dev1+ge278fa34c</title>
+  <title>Pruning &mdash; Model Optimizer 0.0.1.dev1+ge5a928607</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
@@ -163,9 +163,10 @@ These pruning methods support pruning the convolutional and linear layers, and
 attention heads of the model. More details on these pruning modes is as follows:</p>
 <ol class="arabic simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">mcore_minitron</span></code>: A pruning method developed by NVIDIA Research for pruning GPT, Mamba and Hybrid
-Transformer Mamba models in NVIDIA Megatron-Bridge or Megatron-LM framework. It uses the activation magnitudes to prune
+Transformer Mamba models (including MoE, and the language model of vision-language models) in NVIDIA
+Megatron-Bridge or Megatron-LM framework. It uses the activation magnitudes to prune
 the embedding hidden size, mlp ffn hidden size, transformer attention heads, GQA query groups,
-mamba heads and head dimension, and number of layers of the model.
+mamba heads and head dimension, MoE experts, and number of layers of the model.
 Checkout more details of the algorithm in the <a class="reference external" href="https://arxiv.org/abs/2408.11796" rel="noopener noreferrer" target="_blank">paper</a>.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">puzzletron</span></code>: An advanced LLM/VLM pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">fastnas</span></code>: A pruning method recommended for Computer Vision models. Given a pretrained model,
