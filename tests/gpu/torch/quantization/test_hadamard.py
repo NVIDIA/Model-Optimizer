@@ -73,6 +73,20 @@ def test_hadamard_transform_block(dim, block_size):
     assert torch.allclose(x_roundtrip, x, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("block_size", [None, 4])
+def test_hadamard_transform_seeded_inverse(block_size):
+    x = torch.rand(4, 8, device="cuda")
+    x_h = normalized_hadamard_transform(x, block_size=block_size, random_sign_seed=123)
+    x_roundtrip = normalized_hadamard_transform(
+        x_h, block_size=block_size, random_sign_seed=123, inverse=True
+    )
+
+    assert torch.allclose(x_roundtrip, x, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(
+        x_h, normalized_hadamard_transform(x, block_size=block_size, random_sign_seed=123)
+    )
+
+
 @pytest.mark.parametrize(
     "rotate_fp32",
     [True, False],

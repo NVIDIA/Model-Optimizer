@@ -63,7 +63,13 @@ class TestQuantizerAttributeConfig:
 
     def test_rotate_mode_serialization(self):
         quant_attr_cfg = QuantizerAttributeConfig(
-            rotate={"enable": True, "mode": "rotate_back", "rotate_fp32": True, "block_size": 8}
+            rotate={
+                "enable": True,
+                "mode": "rotate_back",
+                "rotate_fp32": True,
+                "block_size": 8,
+                "seed": 123,
+            }
         )
 
         assert quant_attr_cfg.model_dump(exclude_unset=True)["rotate"] == {
@@ -71,7 +77,11 @@ class TestQuantizerAttributeConfig:
             "mode": "rotate_back",
             "rotate_fp32": True,
             "block_size": 8,
+            "seed": 123,
         }
+
+        with pytest.raises(ValueError, match="seed must be a non-negative int"):
+            QuantizerAttributeConfig(rotate={"enable": True, "seed": -1})
 
     def test_num_bits(self):
         """Test num_bits for both integer and tuple cases."""
@@ -112,8 +122,8 @@ class TestQuantizerAttributeConfig:
 def _run_rotated_backend(monkeypatch, rotate):
     calls = []
 
-    def rotate_fn(inputs, rotate_fp32=False, block_size=None):
-        calls.append((rotate_fp32, block_size))
+    def rotate_fn(inputs, rotate_fp32=False, block_size=None, random_sign_seed=None, inverse=False):
+        calls.append((rotate_fp32, block_size, random_sign_seed, inverse))
         return inputs + 10
 
     def backend(inputs, _tq):
@@ -136,22 +146,30 @@ def test_tensor_quantizer_rotate_mode_preserves_default_path(monkeypatch):
 
     assert not quantizer.rotate_back_is_enabled
     assert torch.equal(outputs, (inputs + 10) * 2)
-    assert calls == [(False, None)]
+    assert calls == [(False, None, None, False)]
 
 
 def test_tensor_quantizer_rotate_mode_can_rotate_back(monkeypatch):
     outputs, inputs, calls, quantizer = _run_rotated_backend(
         monkeypatch,
-        rotate={"enable": True, "mode": "rotate_back", "rotate_fp32": True, "block_size": 8},
+        rotate={
+            "enable": True,
+            "mode": "rotate_back",
+            "rotate_fp32": True,
+            "block_size": 8,
+            "seed": 123,
+        },
     )
 
     assert quantizer.rotate_back_is_enabled
     assert torch.equal(outputs, ((inputs + 10) * 2) + 10)
-    assert calls == [(True, 8), (True, 8)]
+    assert calls == [(True, 8, 123, False), (True, 8, 123, True)]
 
 
 def test_tensor_quantizer_rotate_back_rejects_real_quant(monkeypatch):
-    def fail_if_rotated(inputs, rotate_fp32=False, block_size=None):
+    def fail_if_rotated(
+        inputs, rotate_fp32=False, block_size=None, random_sign_seed=None, inverse=False
+    ):
         raise AssertionError("rotate_back with fake_quant=False should fail before rotation")
 
     monkeypatch.setattr(
