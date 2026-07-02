@@ -15,16 +15,22 @@
 
 """Launch vLLM with combined attention quantization + sparse attention.
 
-Restores ModelOpt fakequant (env knobs: ``MODELOPT_STATE_PATH`` / ``QUANT_CFG`` /
-``KV_QUANT_CFG`` / ...) **and** installs the sparse attention impl driven by the
-checkpoint's ``sparse_attention_config`` block. A single served checkpoint then
-runs attention quant (Q/K pre-step, P/V in-kernel) together with skip-softmax
-sparsity. Layers with neither active quant nor a sparse feature fall back to
-vLLM's native attention.
+Attaches NVFP4 attention quant (``ATTN_QUANT_MODE=impl_swap`` default, or the legacy ``mtq``
+restore prolog with env knobs ``MODELOPT_STATE_PATH`` / ``QUANT_CFG`` / ...) **and** installs the
+sparse attention impl driven by the checkpoint's ``sparse_attention_config`` block. A single served
+checkpoint then runs attention quant (Q/K pre-step, P/V in-kernel) together with skip-softmax
+sparsity. Layers with neither active quant nor a sparse feature fall back to vLLM's native attention.
+
+Launch with ``--enforce-eager`` and prefix caching disabled (both enforced at startup; see the
+support contract in ``examples/vllm_serve/README.md``).
 
 Usage:
-    MODELOPT_STATE_PATH=<ckpt>/modelopt_state.pth \\
-        python vllm_serve_quant_sparse_attn.py <path/to/modelopt-exported-ckpt>
+    # impl_swap (default): NVFP4 attention configured on the fly; composes with a realquant ckpt
+    python vllm_serve_quant_sparse_attn.py <ckpt> --enforce-eager --no-enable-prefix-caching
+
+    # legacy mtq: restore exported fakequant state (requires ATTN_QUANT_MODE=mtq + a quant source)
+    ATTN_QUANT_MODE=mtq MODELOPT_STATE_PATH=<ckpt>/modelopt_state.pth \\
+        python vllm_serve_quant_sparse_attn.py <ckpt> --enforce-eager --no-enable-prefix-caching
 """
 
 import os

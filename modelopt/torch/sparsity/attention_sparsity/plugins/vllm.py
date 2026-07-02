@@ -236,6 +236,19 @@ class _SparseAttentionMixin:
     # Per-layer sparse kwargs set by the worker (empty when quant-only).
     sparse_kw: dict
 
+    def _modelopt_transform_active(self, layer) -> bool:
+        """True if this layer has a requested ModelOpt transform (P/V quant or sparsity).
+
+        A cascade launch or a launch missing the stashed paged metadata cannot run the ModelOpt
+        kernel; if a transform is active it must fail loud rather than silently serve native and
+        drop the requested quant/sparsity.
+        """
+        return (
+            _p_qdq_from_layer(layer)[0] is not None
+            or _v_qdq_from_layer(layer)[0] is not None
+            or bool(getattr(self, "sparse_kw", None))
+        )
+
     def _forward_common(
         self,
         *,
@@ -489,19 +502,16 @@ class ModelOptSparseAttentionImpl(_SparseAttentionMixin, FlashAttentionImpl):
             return output.fill_(0)
 
         if getattr(attn_metadata, "use_cascade", False):
-            # Cascade metadata splits a shared-prefix batch into prefix + suffix; the
-            # ModelOpt paged kernel consumes plain per-request KV lengths and cannot.
-            # For a sparse-only layer the native fallback is harmless (dense output, no
-            # skip-softmax). But when attention QUANT is active, native attention serves
-            # the model UN-quantized (wrong numerics, silently), so fail loud instead.
-            # The quant worker also disables cascade up front, so this should not be hit.
-            p_qdq, _ = _p_qdq_from_layer(layer)
-            v_qdq, _ = _v_qdq_from_layer(layer)
-            if p_qdq is not None or v_qdq is not None:
+            # Cascade metadata splits a shared-prefix batch into prefix + suffix; the ModelOpt paged
+            # kernel consumes plain per-request KV lengths and cannot. Serving native would silently
+            # drop the requested transform — for QUANT that is wrong numerics, and for SPARSITY the
+            # skip-softmax is lost — so fail loud whenever any transform is active (the worker also
+            # disables cascade up front). Nothing requested -> native is correct.
+            if self._modelopt_transform_active(layer):
                 raise NotImplementedError(
-                    "vLLM cascade attention is incompatible with ModelOpt attention "
-                    "quant (the native fallback would serve P/V un-quantized). Disable "
-                    "cascade (model_config.disable_cascade_attn=True) or the quantizers."
+                    "vLLM cascade attention is incompatible with an active ModelOpt attention plan "
+                    "(quant and/or sparsity) — the native fallback would silently drop it. Disable "
+                    "cascade (model_config.disable_cascade_attn=True)."
                 )
             return self._forward_vllm_flash_attn(
                 layer,
@@ -713,24 +723,27 @@ def get_flashinfer_sparse_impl_cls() -> type:
                     output_block_scale,
                 )
 
-            # Native FlashInfer for profiling, cascade, or an unpatched builder
-            # (the dense paged metadata the Triton kernel needs is unavailable).
-            # Cascade + active attention quant would silently serve P/V un-quantized;
-            # fail loud instead (the quant worker also disables cascade up front).
-            if attn_metadata is not None and getattr(attn_metadata, "use_cascade", False):
-                p_qdq, _ = _p_qdq_from_layer(layer)
-                v_qdq, _ = _v_qdq_from_layer(layer)
-                if p_qdq is not None or v_qdq is not None:
+            # Native FlashInfer only when nothing is requested. Profiling (no metadata) always
+            # delegates; but cascade or a missing metadata-builder patch would silently drop an
+            # active transform, so fail loud when one is active (the worker also disables cascade).
+            if attn_metadata is None:
+                return dense()  # profiling run
+            active = self._modelopt_transform_active(layer)
+            if getattr(attn_metadata, "use_cascade", False):
+                if active:
                     raise NotImplementedError(
-                        "vLLM cascade attention is incompatible with ModelOpt attention "
-                        "quant (the native fallback would serve P/V un-quantized). Disable "
-                        "cascade (model_config.disable_cascade_attn=True) or the quantizers."
+                        "vLLM cascade attention is incompatible with an active ModelOpt attention "
+                        "plan (quant and/or sparsity) — the native fallback would silently drop it. "
+                        "Disable cascade (model_config.disable_cascade_attn=True)."
                     )
-            if (
-                attn_metadata is None
-                or getattr(attn_metadata, "use_cascade", False)
-                or not hasattr(attn_metadata, "_modelopt_block_table")
-            ):
+                return dense()
+            if not hasattr(attn_metadata, "_modelopt_block_table"):
+                if active:
+                    raise NotImplementedError(
+                        "FlashInfer attn_metadata lacks the stashed ModelOpt paged fields (the "
+                        "metadata-builder patch did not apply); refusing to silently serve native "
+                        "and drop the requested attention quant/sparsity."
+                    )
                 return dense()
 
             assert output is not None, "Output tensor must be provided."

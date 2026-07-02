@@ -111,6 +111,7 @@ class _FakeAttention(vllm_plugin.vllm_attention.Attention):
         sliding_window=None,
         kv_sharing_target_layer_name=None,
         kv_cache_dtype="auto",
+        head_size=128,
     ):
         nn.Module.__init__(self)
         # A trivial param so post-restore device/dtype detection succeeds.
@@ -120,6 +121,7 @@ class _FakeAttention(vllm_plugin.vllm_attention.Attention):
         self.sliding_window = sliding_window
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.kv_cache_dtype = kv_cache_dtype
+        self.head_size = head_size
 
 
 def _make_worker(
@@ -131,17 +133,21 @@ def _make_worker(
     speculative=None,
     block_size=16,
     hf_config=None,
+    enforce_eager=True,
 ):
+    # In real vLLM ``vllm_config.model_config`` and ``model_runner.model_config`` are the same object.
+    model_config = SimpleNamespace(hf_config=hf_config, enforce_eager=enforce_eager)
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
         cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching, block_size=block_size),
         kv_transfer_config=kv_transfer,
         speculative_config=speculative,
+        model_config=model_config,
     )
     model_runner = SimpleNamespace(
         model=model,
         vllm_config=vllm_config,
-        model_config=SimpleNamespace(hf_config=hf_config),
+        model_config=model_config,
         cascade_attn_enabled=False,
     )
     return SimpleNamespace(model_runner=model_runner)
@@ -236,11 +242,34 @@ def test_unsupported_reasons_empty_for_supported_decoder():
         ({"kv_sharing_target_layer_name": "model.layers.0.self_attn"}, "kv_sharing"),
         ({"kv_cache_dtype": "fp8"}, "kv_cache_dtype"),
         ({"kv_cache_dtype": "fp8_e4m3"}, "kv_cache_dtype"),
+        ({"head_size": 72}, "head_size"),  # not a multiple of 16 -> blocks span heads
+        ({"head_size": 40}, "head_size"),
     ],
 )
 def test_unsupported_reasons_for_module_attrs(kwargs, needle):
     reasons = _unsupported_attention_reasons(_FakeAttention(**kwargs))
     assert any(needle in reason for reason in reasons), reasons
+
+
+def test_unsupported_reasons_accepts_head_size_multiple_of_16():
+    assert _unsupported_attention_reasons(_FakeAttention(head_size=128)) == []
+
+
+@pytest.mark.skipif(vllm_plugin.VllmMLAAttention is None, reason="MLA attention not available")
+def test_unsupported_reasons_rejects_mla_layout():
+    """MLA is a distinct class (attn_type==DECODER) — must be rejected by layout, not silently run."""
+
+    class _FakeMLA(vllm_plugin.VllmMLAAttention):
+        def __init__(self):
+            nn.Module.__init__(self)
+            self.attn_type = AttentionType.DECODER
+            self.impl = _make_flash_impl()
+            self.head_size = 128
+
+    module = _FakeMLA()
+    assert not isinstance(module, vllm_plugin.vllm_attention.Attention)
+    reasons = _unsupported_attention_reasons(module)
+    assert any("MLA" in reason or "layout" in reason for reason in reasons), reasons
 
 
 @pytest.mark.parametrize(
@@ -274,6 +303,7 @@ def test_unsupported_reasons_for_unrecognized_backend():
         ({"speculative": object()}, "speculative"),
         ({"block_size": 24}, "multiple"),
         ({"block_size": 0}, "multiple"),
+        ({"enforce_eager": False}, "enforce_eager"),
     ],
 )
 def test_validate_global_runtime_flags_unsupported(kwargs, needle):
@@ -285,6 +315,34 @@ def test_validate_global_runtime_flags_unsupported(kwargs, needle):
 def test_validate_global_runtime_ok():
     worker_obj = _make_worker(nn.ModuleDict({"attn": _FakeAttention()}))
     assert _validate_global_runtime(worker_obj) == []
+
+
+# --- ATTN_QUANT_MODE validation (no silent fall-through to un-quantized) ------------------------
+
+
+def test_resolve_attn_quant_mode_default_is_impl_swap(monkeypatch):
+    monkeypatch.delenv("ATTN_QUANT_MODE", raising=False)
+    assert worker._resolve_attn_quant_mode() == "impl_swap"
+
+
+def test_resolve_attn_quant_mode_rejects_typo(monkeypatch):
+    monkeypatch.setenv("ATTN_QUANT_MODE", "impl_swp")
+    with pytest.raises(ValueError, match="invalid"):
+        worker._resolve_attn_quant_mode()
+
+
+def test_resolve_attn_quant_mode_mtq_requires_source(monkeypatch):
+    monkeypatch.setenv("ATTN_QUANT_MODE", "mtq")
+    for key in ("quant_cfg", "kv_quant_cfg", "modelopt_state_path", "recipe_path"):
+        monkeypatch.setitem(worker.quant_config, key, None)
+    with pytest.raises(ValueError, match="requires a quant source"):
+        worker._resolve_attn_quant_mode()
+
+
+def test_resolve_attn_quant_mode_mtq_with_source(monkeypatch):
+    monkeypatch.setenv("ATTN_QUANT_MODE", "mtq")
+    monkeypatch.setitem(worker.quant_config, "quant_cfg", "NVFP4_DEFAULT_CFG")
+    assert worker._resolve_attn_quant_mode() == "mtq"
 
 
 @pytest.mark.usefixtures("_no_sparse_config")

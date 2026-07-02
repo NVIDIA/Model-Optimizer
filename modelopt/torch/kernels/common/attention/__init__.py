@@ -23,6 +23,7 @@ from modelopt.torch.utils import import_plugin
 
 IS_AVAILABLE = False
 attention: Callable | None = None
+attention_decode: Callable | None = None
 register_triton_attention: Callable | None = None
 triton_attention_forward: Callable | None = None
 validate_triton_attention_envelope: Callable | None = None

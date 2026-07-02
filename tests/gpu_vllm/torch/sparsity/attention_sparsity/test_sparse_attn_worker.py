@@ -117,7 +117,10 @@ def test_forward_delegates_cascade_metadata_to_vllm(monkeypatch):
 @pytest.mark.parametrize(
     ("sparse_kw", "max_query_len", "max_seq_len"),
     [
-        ({"skip_softmax_threshold": 0.001}, 1, 128),
+        # A prefill launch whose calibrated threshold resolves out of the valid lambda range → the
+        # skip is disabled → no effective sparse work → delegate. (A *decode* launch with a direct
+        # skip_softmax_threshold is effective work and routes to the kernel; see the decode-route
+        # test below.)
         (
             {
                 "threshold_scale_factor": {
@@ -197,6 +200,72 @@ def test_forward_delegates_launches_without_effective_sparse_work(
     assert called["attn_metadata"] is attn_metadata
     assert result is output
     assert torch.all(result == 5)
+
+
+def test_forward_decode_skip_softmax_routes_to_kernel(monkeypatch):
+    """A decode launch with a direct skip_softmax_threshold IS effective work: it must route to the
+    paged decode kernel (``attention_decode``), not delegate to native FlashAttention."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.sparse_kw = {"skip_softmax_threshold": 0.001}
+    seq_len, head_dim = 128, impl.head_size
+    q = torch.zeros(1, impl.num_heads, head_dim, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 1, seq_len, impl.num_kv_heads, head_dim, dtype=torch.float16)
+    output = torch.empty_like(q)
+    attn_metadata = type(
+        "AttnMetadata",
+        (),
+        {
+            "num_actual_tokens": 1,
+            "max_query_len": 1,  # decode
+            "max_seq_len": seq_len,
+            "query_start_loc": torch.tensor([0, 1], dtype=torch.int32),
+            "seq_lens": torch.tensor([seq_len], dtype=torch.int32),
+            "block_table": torch.zeros(1, 1, dtype=torch.int32),
+        },
+    )()
+    called = {}
+
+    def fake_decode(*args, **kwargs):
+        called["decode"] = True
+        return output.fill_(7)
+
+    def fake_flash_forward(self, *args, **kwargs):
+        raise AssertionError("decode skip-softmax must route to attention_decode, not delegate")
+
+    monkeypatch.setattr(vllm_plugin, "attention_decode", fake_decode)
+    monkeypatch.setattr(FlashAttentionImpl, "forward", fake_flash_forward)
+
+    impl.forward(
+        layer=None,
+        query=q,
+        key=q,
+        value=q,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        output=output,
+    )
+    assert called.get("decode") is True
+
+
+def test_forward_cascade_with_active_plan_raises():
+    """Cascade + an active ModelOpt plan (here sparse-only) must fail loud, not silently delegate to
+    native attention (which would drop the requested skip-softmax / quant)."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.sparse_kw = {"skip_softmax_threshold": 0.001}  # active transform, no P/V quant
+    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    output = torch.empty_like(q)
+    attn_metadata = type("AttnMetadata", (), {"use_cascade": True})()
+    with pytest.raises(NotImplementedError, match="cascade"):
+        impl.forward(
+            layer=None,
+            query=q,
+            key=q,
+            value=q,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=output,
+        )
 
 
 def test_forward_resolves_calibrated_skip_softmax_threshold(monkeypatch):

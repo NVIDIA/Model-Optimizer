@@ -147,6 +147,12 @@ def _validate_global_runtime(worker) -> list[str]:
             f"cache page size {block_size} is not a positive multiple of the NVFP4 group size "
             f"{_NVFP4_GROUP_SIZE}"
         )
+    model_config = getattr(config, "model_config", None)
+    if model_config is not None and not getattr(model_config, "enforce_eager", False):
+        reasons.append(
+            "enforce_eager is not set (CUDA-graph capture is not yet validated for the ModelOpt "
+            "attention path; launch with --enforce-eager)"
+        )
     return reasons
 
 
@@ -159,9 +165,25 @@ def _unsupported_attention_reasons(module) -> list[str]:
     """
     reasons: list[str] = []
 
+    # Regular Q/K/V paged attention only. MLA is a distinct class (not an ``Attention`` subclass);
+    # cross/encoder-only subclass ``Attention`` but are caught by the attn_type check below. MLA has
+    # ``attn_type == DECODER``, so it would slip past that check -- reject it by layout here.
+    if not isinstance(module, VLLMAttention):
+        reasons.append(
+            f"attention layout {type(module).__name__} is unsupported "
+            "(needs regular decoder self-attention with a Q/K/V paged cache; MLA is not supported)"
+        )
+
     attn_type = getattr(module, "attn_type", AttentionType.DECODER)
     if attn_type != AttentionType.DECODER:
         reasons.append(f"attn_type={attn_type} (only DECODER self-attention is supported)")
+
+    head_size = getattr(module, "head_size", None)
+    if isinstance(head_size, int) and head_size % _NVFP4_GROUP_SIZE != 0:
+        reasons.append(
+            f"head_size={head_size} is not a multiple of the NVFP4 block size {_NVFP4_GROUP_SIZE} "
+            "(Q/K are block-quantized on the flattened head axis, so a block would span two heads)"
+        )
 
     impl = getattr(module, "impl", None)
     impl_name = type(impl).__name__ if impl is not None else "None"
@@ -251,8 +273,11 @@ def _unwrapped_model(worker):
 
 
 def _named_vllm_attentions(model):
+    # Enumerate ALL attention layouts (regular + MLA/cross/encoder), not just regular ``Attention``,
+    # so an unsupported layout (e.g. an all-MLA model) is surfaced and rejected by preflight rather
+    # than yielding an empty plan that serves with no requested transform.
     for name, module in model.named_modules():
-        if isinstance(module, VLLMAttention):
+        if isinstance(module, _ATTENTION_TYPES):
             yield name, module
 
 
@@ -435,15 +460,44 @@ def _install_quant_sparse_attn(worker, records) -> None:
         f"({quant_layers} quant-active, {sparse_only} sparse-only)"
     )
 
-    if quant_layers:
+    if prepared:
         # vLLM cascade attention routes shared-prefix batches through native attention, silently
-        # dropping the NVFP4 P/V quant. Disable it so every request goes through the quantized
-        # ModelOpt kernel. No-op where cascade is already off (e.g. vLLM 0.22 FlashInfer hardcodes
-        # it off); pairs with the fail-loud guard in the impl.
+        # dropping the ModelOpt transform — the NVFP4 P/V quant AND the skip-softmax sparsity. Disable
+        # it for ANY installed plan (quant- or sparse-only) so every request goes through the ModelOpt
+        # kernel. No-op where cascade is already off (e.g. vLLM 0.22 FlashInfer hardcodes it off);
+        # pairs with the fail-loud guard in the impl.
         runner = worker.model_runner
         if getattr(runner, "cascade_attn_enabled", False):
             runner.cascade_attn_enabled = False
-            print("[ModelOpt] Disabled vLLM cascade attention (incompatible with attention quant)")
+            print(
+                "[ModelOpt] Disabled vLLM cascade attention (incompatible with the ModelOpt plan)"
+            )
+
+
+def _resolve_attn_quant_mode() -> str:
+    """Return the validated ``ATTN_QUANT_MODE`` or raise (no silent fall-through to un-quantized).
+
+    A typo must not silently enter the legacy ``mtq`` branch, and ``mtq`` with no quant source would
+    serve un-quantized -- both raise here rather than serving the wrong thing.
+    """
+    mode = os.environ.get("ATTN_QUANT_MODE", "impl_swap")
+    if mode not in ("impl_swap", "mtq"):
+        raise ValueError(
+            f"ATTN_QUANT_MODE={mode!r} is invalid (expected 'impl_swap' or 'mtq'). "
+            "A typo must not silently fall through to an un-quantized serve."
+        )
+    if mode == "mtq" and not (
+        quant_config["quant_cfg"]
+        or quant_config["kv_quant_cfg"]
+        or quant_config["modelopt_state_path"]
+        or quant_config["recipe_path"]
+    ):
+        raise ValueError(
+            "ATTN_QUANT_MODE=mtq requires a quant source (QUANT_CFG / KV_QUANT_CFG / "
+            "MODELOPT_STATE_PATH / RECIPE_PATH); none set, which would serve un-quantized. "
+            "Use ATTN_QUANT_MODE=impl_swap to configure NVFP4 attention without a checkpoint."
+        )
+    return mode
 
 
 class QuantSparseAttnWorker(FakeQuantWorker):
@@ -461,20 +515,14 @@ class QuantSparseAttnWorker(FakeQuantWorker):
         #   Preflight runs on the raw decoder attention layers, then only approved layers convert.
         # - "mtq": legacy mtq.quantize restore prolog (whole-model replace_quant_module); preflight
         #   then runs against the restored quantizers.
-        attn_quant_mode = os.environ.get("ATTN_QUANT_MODE", "impl_swap")
+        attn_quant_mode = _resolve_attn_quant_mode()
         if attn_quant_mode == "impl_swap":
             records = _preflight_quant_sparse_attn(self, quant_will_be_configured=True)
             _attach_attention_quant_impl_swap(
                 self.model_runner.model, {record.name for record in records}
             )
-        else:
-            if (
-                quant_config["quant_cfg"]
-                or quant_config["kv_quant_cfg"]
-                or quant_config["modelopt_state_path"]
-                or quant_config["recipe_path"]
-            ):
-                _fakequant_run_prolog_worker(self)
+        else:  # "mtq": legacy whole-model restore prolog (quant source verified above).
+            _fakequant_run_prolog_worker(self)
             records = _preflight_quant_sparse_attn(self, quant_will_be_configured=False)
 
         # Install the sparse impl + flip the in-kernel-V gate (needs the restored quantizers).
