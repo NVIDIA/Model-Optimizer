@@ -28,6 +28,7 @@ from _test_utils.torch.megatron.models import (
 from _test_utils.torch.megatron.utils import (
     compare_amax_sync_across_expert_parallel,
     copy_weights_from_grouped_to_non_grouped,
+    get_batch,
     get_forward,
     initialize_for_megatron,
     run_mcore_inference,
@@ -878,6 +879,131 @@ def test_te_grouped_n_modules_sharded_state_dict(dist_workers, need_4_gpus, tmp_
             moe_config,
         ),
     )
+
+
+def _test_te_grouped_nvfp4_ptq_qat_qad_helper(rank, size):
+    """Exercise fused NVFP4 dispatch after calibration and through QAT/QAD backward."""
+    import modelopt.torch.distill as mtd
+    import modelopt.torch.quantization.plugins.transformer_engine as te_quant
+    from modelopt.torch.distill.plugins.megatron import (
+        adjust_distillation_model_for_mcore,
+        setup_distillation_config,
+    )
+
+    os.environ["MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER"] = "1"
+    original_grouped_nvfp4 = te_quant._triton_kernels.grouped_nvfp4_fakequant
+    grouped_nvfp4_calls = 0
+
+    def counted_grouped_nvfp4(*args, **kwargs):
+        nonlocal grouped_nvfp4_calls
+        grouped_nvfp4_calls += 1
+        return original_grouped_nvfp4(*args, **kwargs)
+
+    te_quant._triton_kernels.grouped_nvfp4_fakequant = counted_grouped_nvfp4
+    try:
+        initialize_for_megatron(
+            tensor_model_parallel_size=2,
+            expert_model_parallel_size=2,
+            expert_tensor_parallel_size=1,
+            seed=SEED,
+        )
+        model_kwargs = {
+            "tp_size": 2,
+            "ep_size": 2,
+            "etp_size": 1,
+            "hidden_size": 32,
+            "vocab_size": 64,
+            "num_moe_experts": 4,
+            "moe_grouped_gemm": True,
+            "transformer_impl": "transformer_engine",
+        }
+        teacher = _gpt_model_provider(**model_kwargs)
+        student = _gpt_model_provider(**model_kwargs)
+
+        # Route to every expert so all per-expert quantizers and gradients are exercised.
+        for module in teacher.modules():
+            if isinstance(module, TopKRouter):
+                module.topk = module.num_experts
+        for module in student.modules():
+            if isinstance(module, TopKRouter):
+                module.topk = module.num_experts
+
+        forward = get_forward(student, batch_size=2)
+        mtq.quantize(student, copy.deepcopy(mtq.NVFP4_DEFAULT_CFG), forward)
+        assert grouped_nvfp4_calls == 0, "Calibration must not execute grouped fake quantization"
+
+        # Post-calibration PTQ/QAT: a real TEGroupedMLP forward must dispatch to
+        # the fused kernel, and its STE backward must produce finite gradients.
+        student.train()
+        qat_loss = forward(student).mean()
+        assert torch.isfinite(qat_loss)
+        qat_loss.backward()
+        assert grouped_nvfp4_calls > 0, "Post-calibration forward did not use grouped NVFP4"
+        expert_grads = [
+            param.grad
+            for name, param in student.named_parameters()
+            if "experts.linear_fc" in name and param.requires_grad
+        ]
+        assert expert_grads and all(grad is not None for grad in expert_grads)
+        assert all(torch.isfinite(grad).all() for grad in expert_grads)
+        student.zero_grad(set_to_none=True)
+
+        # QAD: attach a BF16 teacher through ModelOpt distillation, then verify
+        # the quantized student still uses the fused path during KD backward.
+        distill_cfg = setup_distillation_config(
+            config_or_path=None,
+            student_cfg=student.config,
+            teacher_cfg=teacher.config,
+        )
+        distillation_model = mtd.convert(
+            student,
+            mode=[
+                (
+                    "kd_loss",
+                    {
+                        "teacher_model": teacher,
+                        "criterion": distill_cfg.criterion,
+                        "loss_balancer": distill_cfg.loss_balancer,
+                    },
+                )
+            ],
+        )
+        adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+        distillation_model.train()
+
+        input_ids, labels, position_ids, attention_mask, loss_mask = get_batch(
+            distillation_model, batch_size=2
+        )
+        calls_before_qad = grouped_nvfp4_calls
+        student_loss = distillation_model(
+            input_ids,
+            position_ids,
+            attention_mask,
+            labels=labels,
+            loss_mask=loss_mask,
+        )
+        losses = distillation_model.compute_kd_loss(
+            student_loss=student_loss,
+            loss_reduction_fn=lambda loss: loss[0].mean(),
+        )
+        assert "kd_loss" in losses and torch.isfinite(losses["kd_loss"]).all()
+        losses["kd_loss"].backward()
+        assert grouped_nvfp4_calls > calls_before_qad, "QAD student did not use grouped NVFP4"
+        expert_grads = [
+            param.grad
+            for name, param in distillation_model.named_parameters()
+            if "experts.linear_fc" in name and param.requires_grad
+        ]
+        assert expert_grads and all(grad is not None for grad in expert_grads)
+        assert all(torch.isfinite(grad).all() for grad in expert_grads)
+    finally:
+        te_quant._triton_kernels.grouped_nvfp4_fakequant = original_grouped_nvfp4
+        os.environ.pop("MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER", None)
+
+
+def test_te_grouped_nvfp4_ptq_qat_qad(dist_workers, need_4_gpus):
+    """Post-calibration PTQ, QAT, and QAD execute fused NVFP4 with finite gradients."""
+    dist_workers.run(_test_te_grouped_nvfp4_ptq_qat_qad_helper)
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
