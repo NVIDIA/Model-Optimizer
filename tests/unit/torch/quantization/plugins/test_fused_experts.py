@@ -251,7 +251,7 @@ class TestQuantFusedExperts:
 
         for idx in range(NUM_EXPERTS):
             weight_slice = converted.gate_up_proj[idx]
-            recovered_idx = converted._get_expert_idx_from_gate_up(weight_slice)
+            recovered_idx = converted._get_expert_idx_from_first_proj(weight_slice)
             assert recovered_idx == idx, f"Expected {idx}, got {recovered_idx}"
         self._cleanup_registry(expert_type)
 
