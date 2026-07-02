@@ -4,12 +4,16 @@
 | :---: | :---: | :---: |
 | From JSONL files | Tokenize local JSONL files | \[[Link](#from-jsonl-files)\] |
 | From Hugging Face Hub | Stream or download HF datasets and tokenize | \[[Link](#from-hugging-face-hub)\] |
+| Token-budgeted data blends | Prepare weighted subsets for fast experiments | \[[Link](../researcher_guide/README.md#prepare-token-budgeted-data-blends)\] |
 | `reasoning_content` for Post-Training v3 | Control how chain-of-thought traces are handled | \[[Link](#reasoning_content-for-post-training-v3-datasets)\] |
 | Nemotron Pre/Post-Training Datasets | Ready-to-run commands for all Nemotron datasets | \[[Link](#ready-to-run-tokenization-commands)\] |
 
 The distillation and pre-training scripts in Megatron-Bridge or Megatron-LM expect data pre-tokenized in Megatron's binary indexed format (`.bin` / `.idx`).
 Use the `megatron_preprocess_data` utility to tokenize any JSONL or Hugging Face dataset.
 The tokenization scripts below print the list of output prefixes (e.g. `tokenized_qwen3/data1_text`) that you can use for the `data_paths` argument (with relative weights on different files) in Megatron training scripts.
+
+For iterative research, use the [token-budgeted data blend workflow](../researcher_guide/README.md#prepare-token-budgeted-data-blends)
+to prepare smaller weighted datasets before scaling to a full distillation run.
 
 **Important Notes:**
 
