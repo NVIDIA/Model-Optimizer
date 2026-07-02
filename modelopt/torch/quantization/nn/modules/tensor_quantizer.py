@@ -57,6 +57,8 @@ from ...qtensor import (
 from ...tensor_quant import (
     dynamic_block_quant,
     fake_tensor_quant,
+    fp4_cast_ste,
+    int_cast_ste,
     scaled_e4m3,
     static_blockwise_fp4_fake_quant,
 )
@@ -64,10 +66,15 @@ from ...utils import is_torch_export_mode
 from ...utils.numeric_utils import fp8_max_for_normalization
 from ..functional import normalized_hadamard_transform
 
+# torch.finfo(...).tiny gives the smallest normal E4M3 value; scale clamping needs
+# the smallest positive subnormal value representable by the 3-bit mantissa.
+_FP8_E4M3_MIN_POSITIVE = torch.finfo(torch.float8_e4m3fn).smallest_normal / (2**3)
+
 __all__ = [
     "HardDisabledTensorQuantizer",
     "NVFP4StaticQuantizer",
     "SequentialQuantizer",
+    "StaticBlockScaleQuantizer",
     "TensorQuantizer",
     "TensorQuantizerCache",
     "is_registered_quant_backend",
@@ -1390,12 +1397,45 @@ class HardDisabledTensorQuantizer(TensorQuantizer):
         self._disabled = True
 
 
-class NVFP4StaticQuantizer(TensorQuantizer):
-    """TensorQuantizer for NVFP4 static block quantization with two-level scaling.
+def _clamp_scale(scale: torch.Tensor, min_value: float | torch.Tensor = 1e-8) -> torch.Tensor:
+    """Clamp per-block scale to guard against small/zero values."""
+    return torch.where(scale <= min_value, min_value, scale)
 
-    Uses _global_amax and inherited _amax for per-block amax values.
-    Preserves both amax states in fp32.
+
+def _amax_to_scale(
+    amax: torch.Tensor, max_bound: float, min_value: float | torch.Tensor = 1e-8
+) -> torch.Tensor:
+    """Convert amax to per-block scale, guarding against small/zero values."""
+    return _clamp_scale(amax.float() / max_bound, min_value)
+
+
+def _to_local(t: torch.Tensor) -> torch.Tensor:
+    """Convert DTensor to local tensor (no-op for regular tensors).
+
+    Under FSDP2, learnable parameters are DTensors but the quantizer forward
+    operates on local tensors (see TensorQuantizer.forward DTensor handling).
+    to_local() preserves autograd so gradients flow back to the DTensor parameter.
     """
+    if DTensor is not None and isinstance(t, DTensor):
+        return t.to_local()
+    return t
+
+
+class StaticBlockScaleQuantizer(TensorQuantizer):
+    """TensorQuantizer for static block quantization with two-level scaling.
+
+    Supports both FP4 (E2M1) and INT block quantization formats with configurable
+    block_size and optional FP8 scale quantization.
+    Uses _global_amax and inherited _amax for per-block amax values.
+    Preserves static amax states in fp32.
+    """
+
+    _laq: bool = False
+    _learnable_amax: list = []
+    _tied_amax: bool = False
+    _quant_max_bound: float = 6.0
+    _quantize_scales: bool = True
+    _quantize_pre_scale: bool = False
 
     def _preserve_amax_in_fp32(self):
         amax = getattr(self, "_amax", None)
@@ -1415,8 +1455,8 @@ class NVFP4StaticQuantizer(TensorQuantizer):
     @classmethod
     def from_tensor_quantizer(
         cls, tq: TensorQuantizer, global_amax: torch.Tensor | None = None
-    ) -> "NVFP4StaticQuantizer":
-        """Convert a TensorQuantizer to NVFP4StaticQuantizer in-place.
+    ) -> "StaticBlockScaleQuantizer":
+        """Convert a TensorQuantizer to StaticBlockScaleQuantizer in-place.
 
         Args:
             tq: The TensorQuantizer to convert.
@@ -1431,10 +1471,47 @@ class NVFP4StaticQuantizer(TensorQuantizer):
         if isinstance(tq, cls):
             _preserve_and_set_global_amax(tq)
             return tq
+        is_nvfp4_static = getattr(tq, "is_nvfp4_static", False)
         tq.__class__ = cls
-        tq._is_nvfp4_static_quantizer = True
+        tq._is_static_block_scale_quantizer = True
+        if is_nvfp4_static:
+            tq._is_nvfp4_static_quantizer = True
+        tq._quant_max_bound = float(tq.maxbound)
         _preserve_and_set_global_amax(tq)
         return tq
+
+    @property
+    def amax_pre(self):
+        """Pre (quantization) amax. Returns _amax_post when tied."""
+        if self._tied_amax:
+            return self._amax_post
+        return self._amax_pre
+
+    @property
+    def amax_post(self):
+        """Post (dequantization) amax."""
+        return self._amax_post
+
+    @property
+    def amax(self):
+        """Return amax, derived from learnable amax parameters if in LAQ mode."""
+        if self._laq and not self._tied_amax:
+            raise RuntimeError(
+                "LAQ with untied amaxes has separate pre and post parameters. "
+                "Access them via amax_pre / amax_post."
+            )
+        if self._laq:
+            return self._amax_post
+        if not hasattr(self, "_amax"):
+            return None
+        return self._amax
+
+    @amax.setter
+    def amax(self, value):
+        assert value is not None, "amax cannot be set to None."
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value)
+        self._amax_setter_helper(value)
 
     @property
     def global_amax(self):
@@ -1473,19 +1550,130 @@ class NVFP4StaticQuantizer(TensorQuantizer):
             self.global_amax = global_amax
         return module
 
+    def _short_amax(self, fmt=".4f"):
+        """Short description of amax, accounting for LAQ mode."""
+        if not self._laq:
+            return super()._short_amax(fmt)
+        learn = self._learnable_amax
+        learn_str = "frozen" if not learn else f"learn=[{','.join(learn)}]"
+        if self._tied_amax:
+            return f"LAQ(tied={self._short_tensor(self._amax_post.data, fmt)}, {learn_str})"
+        return (
+            f"LAQ(pre={self._short_tensor(self._amax_pre.data, fmt)}, "
+            f"post={self._short_tensor(self._amax_post.data, fmt)}, {learn_str})"
+        )
+
+    def enable_laq(
+        self,
+        amax: torch.Tensor,
+        per_tensor_scale: torch.Tensor = None,
+        quantize_scales: bool = True,
+        learnable_amax: list | str = ("post",),
+        tied_amax: bool = False,
+        quantize_pre_scale: bool = False,
+    ):
+        """LAQ mode with configurable learnable/frozen amax tensors.
+
+        Args:
+            amax: Initial amax values (per-block).
+            per_tensor_scale: Optional per-tensor scale (frozen buffer).
+            quantize_scales: Whether to FP8-quantize per-block scales.
+            learnable_amax: Which amax params are learnable: 'pre', 'post',
+                ['pre', 'post'], or [].
+            tied_amax: If True, pre and post share a single tensor.
+            quantize_pre_scale: Whether to FP8-quantize the LAQ pre scale.
+        """
+        if hasattr(self, "_amax"):
+            delattr(self, "_amax")
+        amax = amax.detach()
+        if not amax.is_floating_point():
+            amax = amax.float()
+        # TODO: Support fp32 learnable amax values once a stable PyTorch release
+        # includes FSDP2 mixed-precision parameter dtype support.
+        amax_param = amax.clone()
+        amax_buffer = amax.clone()
+        learn = {learnable_amax} if isinstance(learnable_amax, str) else set(learnable_amax)
+
+        if "post" in learn:
+            self._amax_post = nn.Parameter(amax_param.clone(), requires_grad=True)
+        else:
+            self.register_buffer("_amax_post", amax_buffer.clone())
+
+        if not tied_amax:
+            if "pre" in learn:
+                self._amax_pre = nn.Parameter(amax_param.clone(), requires_grad=True)
+            else:
+                self.register_buffer("_amax_pre", amax_buffer.clone())
+
+        if per_tensor_scale is not None:
+            self.register_buffer("_per_tensor_scale", per_tensor_scale.clone().detach())
+        self._quantize_scales = quantize_scales
+        self._quantize_pre_scale = quantize_pre_scale
+        self._laq = True
+        self._learnable_amax = sorted(learn)
+        self._tied_amax = tied_amax
+
+    def _cast_ste(self, inputs):
+        """Cast inputs to quantized representable values (no scaling)."""
+        if isinstance(self._num_bits, tuple):
+            return fp4_cast_ste(inputs)
+        return int_cast_ste(inputs, self._num_bits, self._unsigned, self._narrow_range)
+
+    def _maybe_quantize_scale(self, scale_raw):
+        """FP8-quantize a per-block scale if ``_quantize_scales`` is enabled, else pass through."""
+        if self._quantize_scales:
+            return scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
+        return scale_raw
+
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
-        if self.amax is not None:
-            return static_blockwise_fp4_fake_quant(
-                inputs,
-                self.amax,
-                self.global_amax,  # Can be None, will be computed internally
-                True,  # quantize_block_scales
-                fp8_max_for_normalization(self),
-                inputs.dtype,
-                self._pass_through_bwd,
+        if self._laq:
+            scale_min_post = (
+                _FP8_E4M3_MIN_POSITIVE * self._per_tensor_scale.view(-1)
+                if self._quantize_scales
+                else 1e-8
             )
+            scale_min_pre = (
+                _FP8_E4M3_MIN_POSITIVE * self._per_tensor_scale.view(-1)
+                if self._quantize_scales and self._quantize_pre_scale
+                else 1e-8
+            )
+
+            scale_post = self._maybe_quantize_scale(
+                _amax_to_scale(
+                    _to_local(self.amax_post),
+                    self._quant_max_bound,
+                    min_value=scale_min_post,
+                )
+            )
+            scale_pre = _amax_to_scale(
+                _to_local(self.amax_pre),
+                self._quant_max_bound,
+                min_value=scale_min_pre,
+            )
+            if self._quantize_pre_scale:
+                scale_pre = self._maybe_quantize_scale(scale_pre)
+            quant_input = inputs.float() / scale_pre.float().view(-1, 1)
+            w_cast = self._cast_ste(quant_input)
+            return (w_cast * scale_post.view(-1, 1).to(w_cast.dtype)).to(inputs.dtype)
+
+        if self.amax is not None:
+            if isinstance(self._num_bits, tuple):
+                return static_blockwise_fp4_fake_quant(
+                    inputs,
+                    self.amax,
+                    self.global_amax,
+                    True,
+                    fp8_max_for_normalization(self),
+                    inputs.dtype,
+                    self._pass_through_bwd,
+                )
+            else:
+                return super()._fake_quantize(inputs)
         return super()._fake_quantize(inputs)
+
+
+NVFP4StaticQuantizer = StaticBlockScaleQuantizer
 
 
 class SequentialQuantizer(nn.Sequential):
