@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 18 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 19 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -39,6 +39,7 @@ supported combinations.
 | `nvfp4_default-kv_nvfp4_cast` | NVFP4 W4A4, all linears | NVFP4 (constant amax) | max |
 | `nvfp4_default-kv_none-gptq` | NVFP4 W4A4 (static W), all linears | none | GPTQ (layerwise) |
 | `nvfp4_mlp_only-kv_fp8` | NVFP4 W4A4, MLP + MoE experts | FP8 (calibrated) | max |
+| `nvfp4_mlp_only-novit-kv_fp8` | NVFP4 W4A4, MLP + MoE experts (VL vision tower excluded) | FP8 (calibrated) | max |
 | `nvfp4_mlp_only-kv_fp8_cast` | NVFP4 W4A4, MLP + MoE experts | FP8 (constant amax) | max |
 | `nvfp4_mlp_only_mse-kv_fp8_cast` | NVFP4 W4A4, MLP + MoE experts | FP8 (constant amax) | MSE + FP8 sweep |
 | `nvfp4_experts_only-kv_fp8` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max |

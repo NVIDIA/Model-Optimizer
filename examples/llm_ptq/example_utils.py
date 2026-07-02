@@ -552,6 +552,44 @@ def get_original_hf_quant_method(config) -> str | None:
     return None
 
 
+def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs):
+    """Re-derive a built-in config when a remote-code config is used with a built-in model
+    class, so it matches the model definition's version; fall back to hf_config otherwise.
+    """
+    if auto_model_module in [AutoModelForCausalLM, AutoModel]:
+        return hf_config
+    if not type(hf_config).__module__.startswith("transformers_modules"):
+        return hf_config
+    builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    try:
+        return AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
+    except Exception as e:
+        warnings.warn(
+            f"Could not re-derive a built-in config for {ckpt_path} ({e}); using the "
+            "remote-code config for device-map inference."
+        )
+        return hf_config
+
+
+def _get_config_dtype(config):
+    config_dtype = (
+        getattr(config, "dtype", None) or getattr(config, "torch_dtype", None) or torch.bfloat16
+    )
+    if isinstance(config_dtype, str):
+        config_dtype = getattr(torch, config_dtype)
+    return config_dtype
+
+
+def _apply_dtype_to_config(model_kwargs, config_dtype, architecture, apply_config_dtype=False):
+    model_kwargs = model_kwargs.copy()
+    if "DeciLM" in architecture:
+        model_kwargs["torch_dtype"] = config_dtype
+        model_kwargs.pop("dtype", None)
+    elif apply_config_dtype:
+        model_kwargs["dtype"] = config_dtype
+    return model_kwargs
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -701,16 +739,21 @@ def get_model(
                 auto_model_module = getattr(transformers, architecture)
                 from_config = auto_model_module._from_config
 
+            config_for_init = _resolve_init_config(
+                hf_config, auto_model_module, ckpt_path, config_kwargs
+            )
+
             with init_empty_weights(include_buffers=True):
                 # When computing the device_map, assuming bfloat16 precision by default,
                 # unless specified by the hf_config.
-                torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
-                model_kwargs2 = model_kwargs.copy()
+                config_dtype = _get_config_dtype(config_for_init)
+                model_kwargs2 = _apply_dtype_to_config(
+                    model_kwargs, config_dtype, architecture, apply_config_dtype=True
+                )
                 if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                     model_kwargs2.pop("trust_remote_code", None)
-                model_kwargs2["dtype"] = torch_dtype
                 model_kwargs2.pop("max_memory", None)
-                model = from_config(hf_config, **model_kwargs2)
+                model = from_config(config_for_init, **model_kwargs2)
 
             max_memory = get_max_memory()
             inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
@@ -730,10 +773,11 @@ def get_model(
                 )
                 model_kwargs["max_memory"] = max_memory
 
+            model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
             model = auto_model_module.from_pretrained(
                 ckpt_path,
                 device_map=device_map,
-                **model_kwargs,
+                **model_kwargs2,
             )
     model.eval()
     if has_pack_quantized_config(hf_config):
