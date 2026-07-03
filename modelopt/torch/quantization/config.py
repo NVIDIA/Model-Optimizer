@@ -286,10 +286,29 @@ class RotateConfig(ModeloptBaseConfig):
     for transform details.
     """
 
-    enable: bool = False
-    mode: Literal["rotate", "rotate_back"] = "rotate"
-    rotate_fp32: bool = False
-    block_size: int | None = None
+    enable: bool = ModeloptField(
+        default=False,
+        title="Enable input rotation.",
+        description="If True, applies a normalized Hadamard transform before quantization.",
+    )
+    mode: Literal["rotate", "rotate_back"] = ModeloptField(
+        default="rotate",
+        title="Rotation mode.",
+        description=(
+            "Use 'rotate' for input rotation only, or 'rotate_back' to apply the transform "
+            "again after fake quantization."
+        ),
+    )
+    rotate_fp32: bool = ModeloptField(
+        default=False,
+        title="Run rotation in float32.",
+        description="If True, computes the rotation in float32 before casting back to the input dtype.",
+    )
+    block_size: int | None = ModeloptField(
+        default=None,
+        title="Rotation block size.",
+        description="Positive block size for block-wise rotation, or None to rotate the full input.",
+    )
 
     @field_validator("block_size", mode="before")
     @classmethod

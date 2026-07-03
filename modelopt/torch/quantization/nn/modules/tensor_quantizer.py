@@ -1220,6 +1220,14 @@ class TensorQuantizer(nn.Module):
             return f"{tensor.item():{fmt}}"
         return f"[{tensor.min().item():{fmt}}, {tensor.max().item():{fmt}}]({tensor.numel()})"
 
+    def _rotation_extra_repr(self):
+        s = " rotated" if self.rotate_is_enabled else ""
+        s += " (rotate_back)" if self.rotate_back_is_enabled else ""
+        s += " (fp32)" if self.rotate_is_fp32 else ""
+        if self.rotate_block_size is not None:
+            s += f" (block={self.rotate_block_size})"
+        return s
+
     def extra_repr(self):
         """Set the extra information about this module."""
         if self._disabled:
@@ -1229,7 +1237,8 @@ class TensorQuantizer(nn.Module):
                 if self.pre_quant_scale is not None
                 else ""
             )
-            return "disabled"
+            s += self._rotation_extra_repr()
+            return s
         s = f"{'unsigned ' if self._unsigned else ''}{self._num_bits} bit"
         s += " narrow" if (self._narrow_range) else ""
         s += " fake" if (self._fake_quant) else ""
@@ -1243,11 +1252,7 @@ class TensorQuantizer(nn.Module):
             if self.pre_quant_scale is not None
             else ""
         )
-        s += " rotated" if self.rotate_is_enabled else ""
-        s += " (rotate_back)" if self.rotate_back_is_enabled else ""
-        s += " (fp32)" if self.rotate_is_fp32 else ""
-        if self.rotate_block_size is not None:
-            s += f" (block={self.rotate_block_size})"
+        s += self._rotation_extra_repr()
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)

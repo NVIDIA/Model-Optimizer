@@ -153,10 +153,10 @@ class QuantModule(DynamicModule):
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
 
-        Every fake-quant weight quantizer is folded regardless of its enabled state. Both its
-        quantization and its input rotation are baked into the stored weight and then disabled,
-        so subsequent forwards neither re-quantize nor re-rotate. Calibration buffers
-        (``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``.
+        Every fake-quant weight quantizer is folded regardless of its enabled state. The folded
+        transform is baked into the stored weight and then disabled, so subsequent forwards use
+        the stored weight directly. Calibration buffers (``_pre_quant_scale``, ``_amax``) are
+        dropped unless ``keep_attrs``.
         """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):
