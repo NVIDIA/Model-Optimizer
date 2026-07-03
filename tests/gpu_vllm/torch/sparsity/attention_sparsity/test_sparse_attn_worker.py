@@ -272,8 +272,8 @@ def test_nvfp4_bmm_mapping_and_unsupported_format_failure():
         vllm_plugin._v_qdq_from_layer(layer)
 
 
-def test_quantized_decode_finalizes_v_then_calls_shared_paged_kernel(monkeypatch):
-    """Pure decode uses exact aligned V ranges and the shared Triton FA path."""
+def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
+    """Pure decode finalizes V before dispatching the valid query rows to split-K."""
     impl = _clone_sparse_impl(_make_old_impl())
 
     class UnreadableAmax:
@@ -323,13 +323,18 @@ def test_quantized_decode_finalizes_v_then_calls_shared_paged_kernel(monkeypatch
     def fake_finalize(value_cache, block_table, v_lo, v_hi, **kwargs):
         calls["finalize"] = (v_lo.clone(), v_hi.clone(), kwargs)
 
-    def fake_attention(query, **kwargs):
+    def fake_decode(query, key_cache, value_cache, block_table, seq_lens, **kwargs):
         calls["query"] = query.clone()
-        calls["attention"] = kwargs
+        calls["decode"] = (key_cache, value_cache, block_table, seq_lens, kwargs)
         return torch.ones_like(query)
 
     monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", fake_finalize)
-    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+    monkeypatch.setattr(vllm_plugin, "triton_decode_attention", fake_decode)
+    monkeypatch.setattr(
+        vllm_plugin,
+        "triton_attention",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("shared kernel")),
+    )
     monkeypatch.setattr(
         FlashAttentionImpl,
         "forward",
@@ -342,12 +347,59 @@ def test_quantized_decode_finalizes_v_then_calls_shared_paged_kernel(monkeypatch
     torch.testing.assert_close(v_lo, torch.tensor([0, 32], dtype=torch.int32))
     torch.testing.assert_close(v_hi, torch.tensor([16, 32], dtype=torch.int32))
     assert finalizer_kw == {"page_size": 16, "v_qdq_scale": 1.0, "decode": True}
-    assert calls["attention"]["p_qdq"] == "nvfp4"
-    assert calls["attention"]["v_qdq"] == "nvfp4"
-    assert calls["attention"]["v_cache_quantized"] is True
+    key_cache, value_cache, block_table, seq_lens, decode_kw = calls["decode"]
+    assert key_cache.data_ptr() == kv_cache[0].data_ptr()
+    assert value_cache.data_ptr() == kv_cache[1].data_ptr()
+    assert block_table is metadata.block_table
+    assert seq_lens is metadata.seq_lens
+    assert calls["query"].shape[0] == metadata.seq_lens.shape[0]
+    assert decode_kw["p_qdq"] == "nvfp4"
+    assert decode_kw["v_qdq"] == "nvfp4"
+    assert decode_kw["v_cache_quantized"] is True
     assert len(q_inputs) == 1 and q_inputs[0].shape[0] == q.shape[0]
     torch.testing.assert_close(q_inputs[0][:2], q[:2])
     assert torch.all(q_inputs[0][2:] == 0)
+
+
+def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
+    """Split-local maxima must not change calibrated skip-softmax semantics."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.quant_kw = {
+        "p_qdq": "nvfp4",
+        "p_qdq_amax": 1.0,
+        "v_qdq": "nvfp4",
+        "v_qdq_amax": 6.0 * 448.0,
+    }
+    impl.sparse_kw = {"skip_softmax_threshold": 0.001}
+    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        max_query_len=1,
+        max_seq_len=16,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([16], dtype=torch.int32),
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+    )
+    captured = {}
+
+    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        vllm_plugin,
+        "triton_decode_attention",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("split-K kernel")),
+    )
+
+    def fake_attention(query, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+    output = torch.empty_like(q)
+    assert impl.forward(None, q, q, q, kv_cache, metadata, output=output) is output
+    assert captured["skip_softmax_threshold"] == pytest.approx(0.001)
+    assert captured["p_qdq"] == "nvfp4"
+    assert captured["v_qdq"] == "nvfp4"
 
 
 def test_active_cascade_fails_loud():

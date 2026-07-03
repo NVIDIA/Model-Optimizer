@@ -37,6 +37,9 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
 )
 
+from modelopt.torch.kernels.common.attention.decode_attention import (
+    attention_decode as triton_decode_attention,
+)
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
 from modelopt.torch.kernels.quantization.attention.v_qdq import fake_quant_v_onwrite
 
@@ -289,6 +292,29 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             valid_q = torch.arange(q.shape[0], device=q.device) < cu_seqlens_q[-1]
             q = q.masked_fill(~valid_q[:, None, None], 0)
             q = layer.q_bmm_quantizer(q)
+        use_split_k_decode = (
+            is_decode_only
+            and "skip_softmax_threshold" not in sparse_kw
+            and (p_qdq == "nvfp4" or v_qdq == "nvfp4")
+        )
+        if use_split_k_decode:
+            triton_out = triton_decode_attention(
+                q[:batch],
+                key_cache,
+                value_cache,
+                attn_metadata.block_table,
+                seq_lens,
+                softmax_scale=self.scale,
+                page_size=page_size,
+                p_qdq=p_qdq,
+                p_qdq_amax=p_qdq_amax,
+                v_qdq=v_qdq,
+                v_qdq_amax=v_qdq_amax,
+                v_cache_quantized=v_cache_quantized,
+            )
+            output[:batch] = triton_out
+            return output
+
         # Dummy K/V for paged mode: not used by the kernel (KV are read from
         # k_cache/v_cache via block_table), but shape[1] must be num_kv_heads
         # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).
