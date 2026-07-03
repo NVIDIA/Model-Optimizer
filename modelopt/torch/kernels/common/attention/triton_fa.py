@@ -260,6 +260,7 @@ def _attn_fwd(
     IS_CAUSAL: tl.constexpr,  # Whether to apply causal mask
     HEAD_DIM: tl.constexpr,  # Actual head dimension (for d_mask)
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
+    Q_IS_FP32: tl.constexpr,  # Dynamic NVFP4 QDQ carrier uses FP32
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
     DENSE_SINK_TOKENS: tl.constexpr = 0,  # Leading KV tokens kept dense (attention sinks)
@@ -366,7 +367,10 @@ def _attn_fwd(
             )
 
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
-        scores = tl.dot(q, k) * qk_scale
+        if Q_IS_FP32:
+            scores = tl.dot(q, k.to(tl.float32), input_precision="ieee") * qk_scale
+        else:
+            scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
         # --- Optional N:M sparse softmax ---
@@ -415,6 +419,12 @@ def _attn_fwd(
             if P_QDQ == 1:
                 p = _qdq_fp8(p, p_qdq_scale)
             elif P_QDQ == 2:
+                # Native packing consumes the model dtype, but its QDQ value
+                # remains FP32 for the scaled MMA accumulation.
+                if IS_PAGED:
+                    p = p.to(V_cache.dtype.element_ty).to(tl.float32)
+                else:
+                    p = p.to(V.dtype.element_ty).to(tl.float32)
                 p = _p_qdq_nvfp4(p, p_qdq_scale, BLOCK_M, BLOCK_N)
 
             # Load V and accumulate
@@ -457,7 +467,10 @@ def _attn_fwd(
                     v = tl.where(use_qdq[:, None], v_qdq, v)
                 else:
                     v = v_qdq
-            acc = tl.dot(p.to(v.dtype), v, acc)
+            if P_QDQ == 2:
+                acc = tl.dot(p, v.to(tl.float32), acc, input_precision="ieee")
+            else:
+                acc = tl.dot(p.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
 
@@ -949,6 +962,7 @@ class _Attention(torch.autograd.Function):
             "IS_CAUSAL": is_causal,
             "HEAD_DIM": HEAD_DIM,
             "STORE_LSE": True,
+            "Q_IS_FP32": q.dtype == torch.float32 and (p_qdq_mode == 2 or v_qdq_mode == 2),
             "SPARSITY_N": sparsity_n,
             "SPARSITY_M": sparsity_m,
             "DENSE_SINK_TOKENS": dense_sink_tokens,

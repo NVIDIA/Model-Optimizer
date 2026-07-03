@@ -292,6 +292,7 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     q_inputs = []
 
     def quantize_q(query):
+        assert query.dtype == torch.float32
         q_inputs.append(query.clone())
         return query + 1
 
@@ -357,8 +358,9 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     assert decode_kw["v_qdq"] == "nvfp4"
     assert decode_kw["v_cache_quantized"] is True
     assert len(q_inputs) == 1 and q_inputs[0].shape[0] == q.shape[0]
-    torch.testing.assert_close(q_inputs[0][:2], q[:2])
+    torch.testing.assert_close(q_inputs[0][:2], q[:2].float())
     assert torch.all(q_inputs[0][2:] == 0)
+    assert calls["query"].dtype == torch.float32
 
 
 def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):

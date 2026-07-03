@@ -86,6 +86,7 @@ def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch
         quantizer = getattr(converted, name)
         assert quantizer.is_enabled and quantizer.is_nvfp4_dynamic
         assert quantizer.block_sizes[-1] == 16
+    assert not hasattr(converted.q_bmm_quantizer, "_amax")
     assert converted.k_bmm_quantizer._amax == 6.0 * 448.0
     assert converted.v_bmm_quantizer._amax == 6.0 * 448.0
     assert converted._query_quant_in_kernel is True

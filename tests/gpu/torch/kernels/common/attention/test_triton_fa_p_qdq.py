@@ -15,6 +15,7 @@
 
 """GPU tests for the softmax quant-dequant (P_QDQ) feature of the Triton FA kernel."""
 
+import math
 from unittest.mock import Mock
 
 import pytest
@@ -87,9 +88,11 @@ def _qdq_nvfp4(p, global_scale=1.0):
     shape = p.shape
     g = p.reshape(*shape[:-1], shape[-1] // 16, 16)
     block_amax = g.amax(dim=-1, keepdim=True)  # p >= 0, so max == amax
-    raw_scale = (block_amax / 6.0).clamp(2**-9 * global_scale, FP8_E4M3_MAX * global_scale)
-    scale = fp8_eager(raw_scale, torch.tensor(FP8_E4M3_MAX * global_scale, device=p.device))
-    q = _fp4_round(g / scale) * scale
+    scale_in_fp8_range = (block_amax / (6.0 * global_scale)).clamp(max=FP8_E4M3_MAX)
+    scale = scale_in_fp8_range.to(torch.float8_e4m3fn).float() * global_scale
+    scale_safe = torch.where(scale == 0, 1.0, scale)
+    q = _fp4_round(g / scale_safe) * scale_safe
+    q = torch.where(scale == 0, 0.0, q)
     return q.reshape(shape)
 
 
@@ -106,7 +109,9 @@ def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0):
     Single sequence: q [s, h, d], k/v [s_kv, h_kv, d] (fp16). Walks KV tiles
     of BLOCK_N exactly like the kernel, keeps the softmax denominator
     unquantized, applies qdq to the unnormalized p of each tile, and mirrors
-    the kernel's ``p.to(v.dtype)`` cast before the P @ V dot.
+    the kernel's operand carrier before the P @ V dot. Native NVFP4 rounds P
+    to the model dtype before packing, then keeps the QDQ result in FP32. FP8
+    retains the legacy post-QDQ cast to V's dtype.
     Returns [s, h, d] float32.
 
     ``amax`` mirrors the kernel's ``p_qdq_amax`` and is converted to the same
@@ -141,9 +146,11 @@ def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0):
         corr = torch.exp2(row_max - m_new)
         row_sum = row_sum * corr + l_new
         acc = acc * corr[..., None]
+        if mode == "nvfp4":
+            p = p.to(v.dtype).float()
         p = _apply_qdq(p, mode, qdq_scale)
-        # Kernel casts p to v.dtype for the BMM2 dot
-        p = p.to(v.dtype).float()
+        if mode == "fp8":
+            p = p.to(v.dtype).float()
         acc = acc + torch.einsum("hqk,khd->hqd", p, vv[start : start + BLOCK_N].float())
         row_max = m_new
     out = acc / row_sum[..., None]
@@ -173,6 +180,50 @@ class TestSoftmaxQdqForward:
         o_dense = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale)
         assert not torch.equal(o, o_dense)
 
+    @requires_native_e4m3
+    def test_nvfp4_uses_native_p_input_and_fp32_carriers(self):
+        """Dynamic-Q and P QDQ stay FP32 until their native MMA boundaries."""
+        num_heads = num_kv_heads = 1
+        head_dim = 16
+        seq_len_kv = BLOCK_N
+        scale = 1.0 / math.sqrt(head_dim)
+
+        q = torch.zeros(1, num_heads, head_dim, device="cuda", dtype=torch.float32)
+        boundary_p = 0.1248
+        q[..., 0] = -math.log2(boundary_p) / (scale * LOG2E)
+        k = torch.zeros(seq_len_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+        # The first block contains the tile max and P at the 1/24 decision
+        # boundary. Rounding P to BF16 before packing moves it to the adjacent
+        # E2M1 value; rounding the QDQ result afterward does not model this.
+        k[1:, 0, 0] = -1.0
+        v = torch.zeros_like(k)
+        v[1:16, 0, 0] = 1.0
+        q_locs = torch.zeros(1, device="cuda", dtype=torch.int32)
+        q_lens = torch.ones(1, device="cuda", dtype=torch.int32)
+        kv_locs = torch.zeros(1, device="cuda", dtype=torch.int32)
+        kv_lens = torch.full((1,), seq_len_kv, device="cuda", dtype=torch.int32)
+
+        out = attention(
+            q,
+            k,
+            v,
+            q_locs,
+            q_lens,
+            1,
+            is_causal=False,
+            softmax_scale=scale,
+            b_start_loc_k=kv_locs,
+            b_seq_len_k=kv_lens,
+            max_input_len_k=seq_len_kv,
+            p_qdq="nvfp4",
+        )
+        reference = qdq_attention_reference(q, k, v, scale, "nvfp4", is_causal=False)
+
+        # The Triton exp2 approximation shifts the unquantized denominator
+        # slightly at this decision-boundary case; the old FP32 pack input is
+        # still separated by more than two orders of magnitude.
+        torch.testing.assert_close(out, reference, rtol=2e-3, atol=5e-4)
+
     @pytest.mark.parametrize("mode", ["fp8", "nvfp4"])
     @requires_native_e4m3
     def test_varlen_partial_tiles(self, mode):
@@ -190,7 +241,10 @@ class TestSoftmaxQdqForward:
         for b, n in enumerate(seq_lens):
             s = int(locs[b].item())
             ref = qdq_attention_reference(q[s : s + n], k[s : s + n], v[s : s + n], scale, mode)
-            torch.testing.assert_close(o[s : s + n].float(), ref, rtol=5e-3, atol=5e-3)
+            # BF16/FP16 pre-pack rounding makes NVFP4 code selection more
+            # sensitive to Triton-vs-PyTorch exp2 differences near thresholds.
+            atol = 2e-2 if mode == "nvfp4" else 5e-3
+            torch.testing.assert_close(o[s : s + n].float(), ref, rtol=5e-3, atol=atol)
 
     @pytest.mark.parametrize(("mode", "tol"), [("fp8", 5e-2), ("nvfp4", 0.25)])
     @requires_native_e4m3

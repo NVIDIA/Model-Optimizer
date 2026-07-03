@@ -16,6 +16,7 @@
 """GPU tests for paged KV cache mode of the Triton flash attention kernel."""
 
 import inspect
+import math
 
 import pytest
 import torch
@@ -566,7 +567,8 @@ class TestPagedKV:
             torch.tensor([16], device="cuda", dtype=torch.int32),
             v_qdq_scale=1.0 / (6.0 * 448.0),
         )
-        assert torch.isfinite(tiny).all() and torch.all(tiny != 0)
+        # Native E4M3 block scales below half the minimum subnormal round to zero.
+        assert torch.isfinite(tiny).all() and torch.count_nonzero(tiny) == 0
 
     @requires_native_e4m3
     def test_v_cache_matches_independent_signed_key_axis_oracle(self):
@@ -616,7 +618,7 @@ class TestPagedKV:
     def test_baked_prefix_and_raw_tail_match_full_onread(self, q_len):
         """The same paged Triton path handles pure decode and chunked prefill."""
         seq_len, num_heads, head_dim, page_size = 17, 2, 32, 16
-        q = torch.zeros(q_len, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        q = torch.zeros(q_len, num_heads, head_dim, device="cuda", dtype=torch.float32)
         k = torch.zeros(seq_len, 1, head_dim, device="cuda", dtype=torch.float16)
         v = torch.full_like(k, 0.017578125)
         q_locs, q_lens = make_varlen_meta([q_len])
@@ -631,6 +633,7 @@ class TestPagedKV:
             "k_cache": k_cache,
             "block_table": block_table,
             "page_size": page_size,
+            "p_qdq": "nvfp4",
             "v_qdq": "nvfp4",
         }
         out_onread = attention(q, k, v, q_locs, q_lens, q_len, v_cache=raw, **common)
@@ -650,3 +653,45 @@ class TestPagedKV:
             **common,
         )
         torch.testing.assert_close(out_baked, out_onread, rtol=1e-4, atol=1e-5)
+
+    @requires_native_e4m3
+    def test_p_qdq_uses_cache_dtype_with_fp32_dummy_tensors(self):
+        seq_len, head_dim, page_size = 128, 16, 16
+        scale = head_dim**-0.5
+        boundary_p = 0.1248
+        q = torch.zeros(1, 1, head_dim, device="cuda", dtype=torch.float32)
+        q[..., 0] = -math.log2(boundary_p) / (scale * triton_fa.LOG2E)
+        k = torch.zeros(seq_len, 1, head_dim, device="cuda", dtype=torch.bfloat16)
+        k[1:, 0, 0] = -1.0
+        v = torch.zeros_like(k)
+        v[1:16, 0, 0] = 1.0
+        q_locs, q_lens = make_varlen_meta([1])
+        kv_locs, kv_lens = make_varlen_meta([seq_len])
+        k_cache, v_cache, block_table = _scatter_to_paged_cache(
+            k, v, kv_locs, kv_lens, 1, head_dim, page_size
+        )
+        common = {
+            "is_causal": False,
+            "softmax_scale": scale,
+            "b_start_loc_k": kv_locs,
+            "b_seq_len_k": kv_lens,
+            "max_input_len_k": seq_len,
+            "p_qdq": "nvfp4",
+        }
+        contiguous = attention(q, k, v, q_locs, q_lens, 1, **common)
+        dummy = torch.empty(0, 1, head_dim, device="cuda", dtype=torch.float32)
+        paged = attention(
+            q,
+            dummy,
+            dummy,
+            q_locs,
+            q_lens,
+            1,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            block_table=block_table,
+            page_size=page_size,
+            **common,
+        )
+
+        torch.testing.assert_close(paged, contiguous, rtol=2e-3, atol=5e-4)
