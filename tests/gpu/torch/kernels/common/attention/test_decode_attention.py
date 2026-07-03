@@ -256,18 +256,13 @@ class TestDecodeAttention:
         reason="NVFP4 qdq uses tl.float8e4nv (sm_89+)",
     )
     def test_onwrite_v_matches_onread(self):
-        """On-write V baking is exactly Option 3 (validated on B200).
-
-        (A) The bake reproduces the on-read fake-quant of every complete tile **bit-for-bit**:
-            FQ-all on the baked cache equals FQ-all on the raw cache (quantize-once == re-quant-
-            every-read; re-fake-quantizing already-baked tiles is idempotent).
-        (B) The read-as-is path (``v_cache_quantized=True``) matches on-read within an fp32-reduction
-            tolerance: the V values are identical per (A), but reading baked tiles as-is vs fake-
-            quantizing on read compiles to a slightly different fp32 reduction order (~1e-5).
-        """
-        batch, seq_k, head_dim, page_size = 2, 1000, 128, 16  # 7 complete 128-tiles + 104 trailing
+        """Block-16 baking plus tail QDQ matches pristine on-read QDQ in decode."""
+        batch, seq_k, head_dim, page_size = 2, 17, 128, 16
         scale = 1.0 / (head_dim**0.5)
         q, k, v, seq_lens = self._inputs(batch, 16, 16, seq_k, head_dim, seed=11)
+        q.zero_()
+        k.zero_()
+        v.fill_(0.017578125)  # QDQ once -> 0.015625; twice -> 0.01171875
         k_cache, v_cache, block_table = _paged_cache(k, v, seq_lens, page_size)
         kw = {"softmax_scale": scale, "page_size": page_size, "num_kv_splits": 1, "v_qdq": "nvfp4"}
 
@@ -275,18 +270,12 @@ class TestDecodeAttention:
 
         v_baked = v_cache.clone()
         v_lo = torch.zeros(batch, device=q.device, dtype=torch.int32)
-        v_hi = ((seq_lens // 128) * 128).to(torch.int32)
-        fake_quant_v_onwrite(v_baked, block_table, v_lo, v_hi, page_size=page_size)
-
-        # (A) bit-identical V values: FQ-all on the baked cache == FQ-all on the raw cache.
-        out_onread_baked = attention_decode(q, k_cache, v_baked, block_table, seq_lens, **kw)
-        torch.testing.assert_close(out_onread_baked, out_onread, rtol=0, atol=0)
-
-        # (B) read-as-is matches within the fp32-reduction ordering of the two compiled paths.
+        v_hi = ((seq_lens // 16) * 16).to(torch.int32)
+        fake_quant_v_onwrite(v_baked, block_table, v_lo, v_hi, page_size=page_size, decode=True)
         out_onwrite = attention_decode(
             q, k_cache, v_baked, block_table, seq_lens, v_cache_quantized=True, **kw
         )
-        torch.testing.assert_close(out_onwrite, out_onread, rtol=2e-3, atol=2e-3)
+        torch.testing.assert_close(out_onwrite, out_onread, rtol=1e-4, atol=1e-5)
 
     @pytest.mark.skipif(
         not (torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)),
@@ -351,9 +340,9 @@ class TestDecodeAttention:
     reason="NVFP4 qdq uses tl.float8e4nv (sm_89+)",
 )
 class TestOnwriteVBakeLifecycle:
-    """The in-place 128-token V bake is schedule-independent and only ever touches new tiles.
+    """Complete block-16 groups are finalized once while the partial group stays pristine.
 
-    ``fake_quant_v_onwrite`` bakes complete ``_ONWRITE_BLOCK_N`` (128) tiles in ``[v_lo, v_hi)``.
+    ``fake_quant_v_onwrite`` bakes complete block-16 groups in ``[v_lo, v_hi)``.
     Correctness requires each tile be baked exactly once from the pristine V: NVFP4 block QDQ is not
     generally idempotent (a re-bake recomputes the E4M3 block scale from the already-quantized amax,
     which can shift), so a double-bake would drift. These tests prove the incremental (chunked-write)
@@ -361,7 +350,7 @@ class TestOnwriteVBakeLifecycle:
     an earlier (already-baked) or trailing (still-partial) tile.
     """
 
-    _BN = 128  # _ONWRITE_BLOCK_N: the on-write bake tile size
+    _BN = 16
 
     def _v_cache(self, batch, seq_k, head_dim, page_size, seed, dtype):
         torch.manual_seed(seed)
@@ -379,16 +368,14 @@ class TestOnwriteVBakeLifecycle:
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     @pytest.mark.parametrize("page_size", [16, 32, 64])
     def test_incremental_bake_equals_one_shot(self, dtype, page_size):
-        """Baking [0,128) then [128,256) as the sequence grows equals a single [0,256) bake."""
-        batch, seq_k, head_dim = 2, 300, 128  # two complete 128-tiles + a 44-token trailing tile
+        """Baking two completed groups incrementally equals baking both in one launch."""
+        batch, seq_k, head_dim = 2, 44, 128
         v_inc, block_table = self._v_cache(batch, seq_k, head_dim, page_size, seed=3, dtype=dtype)
         raw = v_inc.clone()
         v_one = v_inc.clone()
 
-        # Incremental: bake each 128-tile as it completes.
         self._bake(v_inc, block_table, 0, self._BN, page_size, batch)
         self._bake(v_inc, block_table, self._BN, 2 * self._BN, page_size, batch)
-        # One-shot: bake both complete tiles at once.
         self._bake(v_one, block_table, 0, 2 * self._BN, page_size, batch)
 
         torch.testing.assert_close(v_inc, v_one, rtol=0, atol=0)
@@ -397,25 +384,19 @@ class TestOnwriteVBakeLifecycle:
 
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_bake_leaves_earlier_and_trailing_tiles_untouched(self, dtype):
-        """Baking a later tile must not rewrite an already-baked tile or a still-partial trailing one.
-
-        With page_size == 128 each 128-token tile is exactly one page, so the invariant reduces to a
-        bit-for-bit page comparison (no double-bake of tile 0; the 44-token trailing tile stays raw).
-        """
-        batch, seq_k, head_dim, page_size = 2, 300, 128, 128
+        """Baking a later group leaves the prior group and partial tail untouched."""
+        batch, seq_k, head_dim, page_size = 2, 44, 128, 64
         v_cache, block_table = self._v_cache(batch, seq_k, head_dim, page_size, seed=5, dtype=dtype)
         raw = v_cache.clone()
 
-        self._bake(v_cache, block_table, 0, self._BN, page_size, batch)  # bake tile 0 (page g0)
+        self._bake(v_cache, block_table, 0, self._BN, page_size, batch)
         after_first = v_cache.clone()
-        self._bake(v_cache, block_table, self._BN, 2 * self._BN, page_size, batch)  # bake tile 1
+        self._bake(v_cache, block_table, self._BN, 2 * self._BN, page_size, batch)
 
         for b in range(batch):
-            g0, g2 = int(block_table[b, 0]), int(block_table[b, 2])
-            # Tile 0's page is unchanged by the second bake (baked once, never re-baked).
-            torch.testing.assert_close(v_cache[g0], after_first[g0], rtol=0, atol=0)
-            # The trailing partial tile ([256,300), < 128 tokens) is never a complete tile: stays raw.
-            torch.testing.assert_close(v_cache[g2], raw[g2], rtol=0, atol=0)
+            page = int(block_table[b, 0])
+            torch.testing.assert_close(v_cache[page, :16], after_first[page, :16], rtol=0, atol=0)
+            torch.testing.assert_close(v_cache[page, 32:44], raw[page, 32:44], rtol=0, atol=0)
 
 
 if __name__ == "__main__":

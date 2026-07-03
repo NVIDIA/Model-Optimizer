@@ -125,7 +125,7 @@ Limitations:
 
 Run **attention quantization and sparse attention together** on a single served checkpoint. `vllm_serve_quant_sparse_attn.py` restores ModelOpt fakequant (same env knobs as `vllm_serve_fakequant.py`) **and** installs `ModelOptSparseAttentionImpl` on each attention layer, so one launch does both:
 
-- **Quantized attention** — the Triton kernel fake-quantizes the attention BMMs. Q and K are quantized in a pre-step along `head_dim` (by the restored `q/k_bmm_quantizer`); P (softmax probabilities) and V are quantized in-kernel along the keys axis (V's keys-axis blocks cannot be formed per token, so its `head_dim` pre-step is skipped). Supported BMM2 formats are per-tensor **FP8** and block-16 dynamic **NVFP4**; an enabled quantizer in any other format raises rather than serving silently unquantized.
+- **Quantized attention** — Q and K are quantized in a pre-step along `head_dim` (by the restored `q/k_bmm_quantizer`), and P (softmax probabilities) is quantized in the attention kernel. NVFP4 V uses block-16 cache preparation along the keys axis: complete groups remain QDQ in the paged cache, while the pristine partial group is QDQ on read. Supported BMM2 formats are per-tensor **FP8** and block-16 dynamic **NVFP4**; an enabled quantizer in any other format raises rather than serving silently unquantized.
 - **Sparse attention** — skip-softmax and N:M sparse-softmax, read from the checkpoint's `sparse_attention_config` (as in the sparse-only launcher above).
 
 A layer gets the ModelOpt impl when it has **either** active attention quant (an enabled `p/v_bmm_quantizer`) **or** a sparse feature; layers with neither fall back to vLLM's native attention.
@@ -155,13 +155,13 @@ Workflow:
 
 Test the server with the same `curl` / `lm_eval` commands shown above.
 
-Supported configuration (validated at startup — anything else fails with one layer-qualified error, never a silent drop): decoder self-attention on the FlashAttention or FlashInfer backend; FP16/BF16 KV cache; cache page size a multiple of 16; `decode_context_parallel_size == 1`; no sliding window, ALiBi, logits soft-cap, sinks, prefix caching, cross-layer KV sharing, KV connector, or speculative decoding.
+Supported configuration (validated at startup — anything else fails with one layer-qualified error, never a silent drop): decoder self-attention on the FlashAttention or FlashInfer backend; FP16/BF16 KV cache; cache page size a multiple of 16; `decode_context_parallel_size == 1`; no dual batch overlap, sliding window, ALiBi, logits soft-cap, sinks, prefix caching, cross-layer KV sharing, KV connector, or speculative decoding.
 
 Limitations:
 
 - Use `--enforce-eager` — CUDA graph capture is not yet validated for the retained code path.
-- Disable prefix caching (`--no-enable-prefix-caching`). V is baked in place, so a shared prefix would read another request's quantized V; disabling cascade alone does **not** make prefix-cache reuse safe, which is why prefix caching is rejected at startup.
-- vLLM cascade attention is disabled automatically when any layer has active attention quant (it would route shared-prefix batches through native attention and silently drop the in-kernel P/V quant).
+- Disable prefix caching (`--no-enable-prefix-caching`). Sharing permanently finalized V-cache groups has not been validated for this path; disabling cascade alone does **not** establish prefix-cache compatibility.
+- vLLM cascade attention is disabled automatically when any layer has active attention quant (it would route shared-prefix batches through native attention and silently drop the requested P/V quantization).
 
 ## Known Problems
 

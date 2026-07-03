@@ -51,7 +51,7 @@ from modelopt.torch.kernels.common.attention.triton_fa import attention as trito
 
 def _target_sparse_ratio_for_phase(target_sparse_ratio, phase: str) -> float:
     """Return target sparsity for a phase, defaulting old checkpoint metadata."""
-    if isinstance(target_sparse_ratio, (float, int)):
+    if isinstance(target_sparse_ratio, float | int):
         return float(target_sparse_ratio)
     if isinstance(target_sparse_ratio, dict):
         return float(target_sparse_ratio.get(phase, 0.5))
@@ -188,13 +188,13 @@ def _assert_bmm_quant_supported(layer, name: str = "") -> None:
 
 
 def _bake_v_onwrite(value_cache, block_table, seq_lens, query_lens, page_size, v_qdq_amax, decode):
-    """Quantize-on-write the newly-complete BLOCK_N V tiles so decode reads them as-is.
+    """Finalize newly completed block-16 V groups from pristine cache values.
 
-    Bakes the tiles that completed since the previous step (``[prev, seq)`` clipped to whole
-    ``_ONWRITE_BLOCK_N`` tiles) into the paged cache, NVFP4, with the same scale the kernel applies
-    on read — turning decode V quant from ``O(S²)`` on-read into ``O(S)`` quantize-once. NVFP4-only;
-    the caller skips it for FP8 V.
+    Complete groups remain QDQ in the paged cache. The partial group stays pristine and is QDQ
+    on read by the attention kernel. NVFP4-only; FP8 V remains fully on-read.
     """
+    if v_qdq_amax is not None and not (math.isfinite(v_qdq_amax) and v_qdq_amax > 0):
+        raise ValueError(f"v_qdq_amax must be finite and positive, got {v_qdq_amax}")
     bn = _ONWRITE_BLOCK_N
     prev = (seq_lens - query_lens).to(torch.int32)
     seqk = seq_lens.to(torch.int32)
@@ -302,9 +302,8 @@ class _SparseAttentionMixin:
             if threshold is None and p_qdq is None and v_qdq is None:
                 # No decode sparsity and no BMM quant for this launch; native fallback.
                 return dense_fallback()
-            # NVFP4 V: bake the newly-complete tiles on write so the decode kernel reads them
-            # as-is (O(S)) instead of re-fake-quantizing the whole cache every step (O(S²)).
-            # FP8 V stays on-read. Bake BEFORE the attention so it reads the baked cache.
+            # NVFP4 V: finalize newly complete block-16 groups. The kernel QDQs the
+            # pristine partial group on read; FP8 V remains fully on-read.
             v_cache_quantized = v_qdq == "nvfp4"
             if v_cache_quantized:
                 _bake_v_onwrite(
@@ -346,11 +345,8 @@ class _SparseAttentionMixin:
         # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).
         k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
 
-        # NVFP4 V: bake the prompt's complete tiles on write BEFORE the kernel, so the kernel
-        # reads them as-is (V_CACHE_QUANTIZED) and re-fake-quantizes only the trailing partial.
-        # This quantizes each V tile exactly once — no double-quant of tiles a prior chunked-
-        # prefill step already baked — and still leaves decode a pre-quantized cache. FP8 V and
-        # no-quant stay fully on-read (v_cache_quantized False).
+        # Complete block-16 groups remain QDQ; the kernel QDQs the pristine partial group
+        # on read so P @ V still receives uniform QDQ values.
         v_cache_quantized = v_qdq == "nvfp4"
         if v_cache_quantized:
             _bake_v_onwrite(

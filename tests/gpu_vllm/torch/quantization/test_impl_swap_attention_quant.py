@@ -128,6 +128,8 @@ def _make_worker(
     model,
     *,
     dcp=1,
+    dbo=False,
+    ubatching=False,
     prefix_caching=False,
     kv_transfer=None,
     speculative=None,
@@ -139,7 +141,9 @@ def _make_worker(
     # In real vLLM ``vllm_config.model_config`` and ``model_runner.model_config`` are the same object.
     model_config = SimpleNamespace(hf_config=hf_config, enforce_eager=enforce_eager, dtype=dtype)
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp, enable_dbo=dbo, use_ubatching=ubatching
+        ),
         cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching, block_size=block_size),
         kv_transfer_config=kv_transfer,
         speculative_config=speculative,
@@ -299,6 +303,8 @@ def test_unsupported_reasons_for_unrecognized_backend():
     ("kwargs", "needle"),
     [
         ({"dcp": 2}, "decode_context_parallel_size"),
+        ({"dbo": True}, "dual batch overlap"),
+        ({"ubatching": True}, "dual batch overlap"),
         ({"prefix_caching": True}, "prefix caching"),
         ({"kv_transfer": object()}, "connector"),
         ({"speculative": object()}, "speculative"),

@@ -105,7 +105,7 @@ def _attn_decode_split_fwd(
     p_qdq_scale=1.0,  # per-tensor P-qdq scale (runtime scalar; amax/448 or amax/(6*448))
     V_QDQ: tl.constexpr = 0,  # value quant-dequant: 0=off, 1=FP8 E4M3, 2=NVFP4 (block-16 along keys)
     v_qdq_scale=1.0,  # per-tensor V-qdq scale (runtime scalar; amax/448 or amax/(6*448))
-    V_CACHE_QUANTIZED: tl.constexpr = False,  # V baked on write -> read complete tiles as-is, FQ only the tail
+    V_CACHE_QUANTIZED: tl.constexpr = False,  # complete block-16 groups are already QDQ
 ):
     """One (request, head, KV split): partial GEMV attention with skip."""
     batch_idx = tl.program_id(0)
@@ -114,10 +114,7 @@ def _attn_decode_split_fwd(
     kv_head_idx = head_idx // kv_group_num
 
     seq_len_kv = tl.load(B_seq_len_k + batch_idx)
-    # Last complete BLOCK_N tile boundary: with V baked on write, tiles below this are on the NVFP4
-    # grid (read as-is); the trailing partial tile is still raw and re-fake-quantized on read.
-    v_dense_boundary = (seq_len_kv // BLOCK_N) * BLOCK_N
-
+    v_dense_boundary = (seq_len_kv // 16) * 16
     # Partition whole BLOCK_N tiles (calibration-aligned) evenly across splits.
     num_tiles = (seq_len_kv + BLOCK_N - 1) // BLOCK_N
     tiles_per_split = (num_tiles + NUM_KV_SPLITS - 1) // NUM_KV_SPLITS
@@ -211,20 +208,22 @@ def _attn_decode_split_fwd(
                 max_blocks_per_seq,
             )
             vt = vt.to(tl.float32)
-            # V is the B-side of BMM2; its NVFP4 blocks of 16 run along the key axis
-            # (axis 0 of [BLOCK_N, BLOCK_D]). _load_paged_v_tile masks out-of-range keys
-            # to 0, so a partial trailing tile cannot poison a block amax. When V is baked
-            # on write (V_CACHE_QUANTIZED), complete tiles are already on the grid -> skip
-            # the redundant re-quant and FQ only the trailing partial tile.
+            # Quantize from pristine cache values. With block-16 on-write baking, completed
+            # groups are already QDQ; select the fresh QDQ result only for the raw partial group.
             if V_QDQ != 0 and ((not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_dense_boundary)):
                 if V_QDQ == 1:
-                    vt = _qdq_fp8(vt, v_qdq_scale)
+                    vq = _qdq_fp8(vt, v_qdq_scale)
                 else:  # V_QDQ == 2 (NVFP4)
-                    vt = _v_qdq_nvfp4(vt, v_qdq_scale, BLOCK_N, BLOCK_D)
+                    vq = _v_qdq_nvfp4(vt, v_qdq_scale, BLOCK_N, BLOCK_D)
                 # Round the dequantized V to the cache (bf16) dtype so an on-read tile matches a
                 # baked-on-write tile bit-for-bit: on-write stores bf16(FQ) in the cache, so the
                 # on-read path must dequant at the same bf16 precision. Makes on-read == on-write.
-                vt = vt.to(V_cache.dtype.element_ty).to(tl.float32)
+                vq = vq.to(V_cache.dtype.element_ty).to(tl.float32)
+                if V_CACHE_QUANTIZED:
+                    tail = (kv_start + kv_pos) >= v_dense_boundary
+                    vt = tl.where(tail[:, None], vq, vt)
+                else:
+                    vt = vq
             acc += tl.sum(p[:, None] * vt, axis=0)  # [BLOCK_D], fp32 accum
             m_i = m_new
 
@@ -289,9 +288,9 @@ def _auto_num_kv_splits(device: torch.device, num_programs: int) -> int:
     return max(1, min(MAX_KV_SPLITS, -(-num_sms // max(num_programs, 1))))
 
 
-# BLOCK_N tile size for the V cache bake — matches the decode/prefill kernels' tile so a baked
-# tile and the kernels' read tile coincide (each tile is fake-quantized exactly once).
-_ONWRITE_BLOCK_N = 128
+# NVFP4 V uses block-16 scaling along the key axis. Complete groups stay QDQ in the cache;
+# the attention kernel QDQs the incomplete pristine group on read.
+_ONWRITE_BLOCK_N = 16
 
 
 @triton.jit
@@ -445,15 +444,12 @@ def attention_decode(
             unnormalized P). Converted to amax/448 (FP8) or amax/(6*448) (NVFP4).
         v_qdq: fake quant-dequant of the value operand V before P @ V — ``"fp8"`` or
             ``"nvfp4"`` (E2M1, block-16 along keys, the BMM2 contraction axis), or
-            ``None``. V is quantized on read here because its keys-axis blocks cannot
-            be formed by a per-token cache write.
+            ``None``. Unless ``v_cache_quantized`` is set, V is quantized on read.
         v_qdq_amax: per-tensor amax for the V qdq. ``None`` uses the constant 1.0
             global scale (V's dynamic per-16 block amax carries the range and does not
             saturate E4M3); a calibrated amax is converted as for ``p_qdq_amax``.
-        v_cache_quantized: when True, V was already NVFP4-baked on write
-            (``fake_quant_v_onwrite``), so complete BLOCK_N tiles are on the grid — the
-            kernel reads them as-is and re-fake-quantizes only the trailing partial tile,
-            avoiding the O(S²) on-read re-quant during decode.
+        v_cache_quantized: when True, complete block-16 groups are already NVFP4 QDQ in
+            the paged cache. The kernel QDQs only the pristine partial group on read.
 
     Returns:
         ``[batch, num_q_heads, head_dim]`` attention output.

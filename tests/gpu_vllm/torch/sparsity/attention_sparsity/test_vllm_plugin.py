@@ -33,6 +33,7 @@ import torch
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as vllm_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     ModelOptSparseAttentionImpl,
     _assert_bmm_quant_supported,
@@ -49,6 +50,93 @@ _ACTIVE_PREFILL_SPARSE_KW = {
     "dense_sink_tokens": 0,
     "dense_recent_tokens": 0,
 }
+
+
+def test_bake_v_onwrite_finalizes_completed_blocks_only(monkeypatch):
+    """The V-cache preparation leaves the raw partial block for in-kernel QDQ."""
+    calls = {}
+
+    def _fake_bake(value_cache, block_table, v_lo, v_hi, **kwargs):
+        calls["bake"] = (v_lo.clone(), v_hi.clone(), kwargs)
+
+    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", _fake_bake)
+
+    seq_lens = torch.tensor([15, 16, 17], dtype=torch.int32)
+    query_lens = torch.ones(3, dtype=torch.int32)
+    result = vllm_plugin._bake_v_onwrite(
+        object(),
+        object(),
+        seq_lens,
+        query_lens,
+        page_size=16,
+        v_qdq_amax=None,
+        decode=True,
+    )
+
+    v_lo, v_hi, bake_kwargs = calls["bake"]
+    torch.testing.assert_close(v_lo, torch.tensor([0, 0, 16], dtype=torch.int32))
+    torch.testing.assert_close(v_hi, torch.tensor([0, 16, 16], dtype=torch.int32))
+    assert bake_kwargs["decode"] is True
+    assert bake_kwargs["v_qdq_scale"] == 1.0
+    assert result is None
+
+
+@pytest.mark.parametrize("amax", [0.0, -1.0, float("nan"), float("inf")])
+def test_bake_v_onwrite_rejects_invalid_scale_before_mutation(monkeypatch, amax):
+    """An invalid calibrated scale must fail before any permanent cache write."""
+
+    def _unexpected_mutation(*args, **kwargs):
+        raise AssertionError("V cache mutated before scale validation")
+
+    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", _unexpected_mutation)
+    with pytest.raises(ValueError, match="finite and positive"):
+        vllm_plugin._bake_v_onwrite(
+            object(),
+            object(),
+            torch.tensor([16], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            page_size=16,
+            v_qdq_amax=amax,
+            decode=True,
+        )
+
+
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)),
+    reason="NVFP4 V cache preparation uses tl.float8e4nv (sm_89+)",
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_v_cache_chunk_lifecycle_never_requantizes_completed_groups(dtype):
+    """The plugin range logic finalizes each block once across chunked writes."""
+    value = 0.017578125  # QDQ once -> 0.015625; twice -> 0.01171875
+    value_cache = torch.full((3, 16, 1, 128), value, device="cuda", dtype=dtype)
+    block_table = torch.arange(3, device="cuda", dtype=torch.int32).view(1, 3)
+
+    def _step(seq_len, query_len):
+        seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
+        query_lens = torch.tensor([query_len], device="cuda", dtype=torch.int32)
+        vllm_plugin._bake_v_onwrite(
+            value_cache,
+            block_table,
+            seq_lens,
+            query_lens,
+            page_size=16,
+            v_qdq_amax=None,
+            decode=False,
+        )
+
+    _step(15, 15)
+    torch.testing.assert_close(value_cache[0, :15], torch.full_like(value_cache[0, :15], value))
+
+    _step(17, 2)
+    first_group = value_cache[0].clone()
+    torch.testing.assert_close(first_group, torch.full_like(first_group, 0.015625))
+    assert value_cache[1, 0, 0, 0] == value
+
+    _step(33, 16)
+    torch.testing.assert_close(value_cache[0], first_group, rtol=0, atol=0)
+    torch.testing.assert_close(value_cache[1], torch.full_like(value_cache[1], 0.015625))
+    assert value_cache[2, 0, 0, 0] == value
 
 
 def test_p_qdq_from_layer():
@@ -270,6 +358,58 @@ class TestModelOptSparseAttentionImpl:
         )
 
         torch.testing.assert_close(out_paged, out_ref, rtol=1e-2, atol=1e-2)
+
+    @pytest.mark.skipif(
+        not (torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)),
+        reason="NVFP4 V cache preparation uses tl.float8e4nv (sm_89+)",
+    )
+    def test_prefill_baked_v_plus_tail_matches_pristine_onread(self):
+        """Completed V groups plus raw-tail QDQ match full on-read QDQ in prefill."""
+        seq_len = 17
+        num_heads, num_kv_heads, head_dim = 2, 1, 64
+        page_size = 16
+        dtype = torch.float16
+        q = torch.zeros(seq_len, num_heads, head_dim, device="cuda", dtype=dtype)
+        k = torch.zeros(seq_len, num_kv_heads, head_dim, device="cuda", dtype=dtype)
+        v = torch.full_like(k, 0.017578125)  # QDQ once -> 0.015625; twice -> 0.01171875
+        starts = torch.zeros(1, device="cuda", dtype=torch.int32)
+        seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
+        kv_cache, block_table = _make_paged_cache(
+            k, v, starts, seq_lens, num_kv_heads, head_dim, page_size
+        )
+        k_cache, raw_v_cache = kv_cache.unbind(0)
+        common = {
+            "b_seq_len_k": seq_lens,
+            "max_input_len_k": seq_len,
+            "k_cache": k_cache,
+            "block_table": block_table,
+            "page_size": page_size,
+            "v_qdq": "nvfp4",
+        }
+        out_onread = triton_attention(
+            q, k, v, starts, seq_lens, seq_len, v_cache=raw_v_cache, **common
+        )
+
+        baked_v_cache = raw_v_cache.clone()
+        vllm_plugin.fake_quant_v_onwrite(
+            baked_v_cache,
+            block_table,
+            starts,
+            torch.tensor([16], device="cuda", dtype=torch.int32),
+            page_size=page_size,
+        )
+        out_baked = triton_attention(
+            q,
+            k,
+            v,
+            starts,
+            seq_lens,
+            seq_len,
+            v_cache=baked_v_cache,
+            v_cache_quantized=True,
+            **common,
+        )
+        torch.testing.assert_close(out_baked, out_onread, rtol=1e-4, atol=1e-5)
 
     def test_chunked_prefill_is_forwarded_to_kernel(self):
         """Chunked prefill metadata is handled by the suffix-aware causal mask."""

@@ -131,10 +131,14 @@ def _validate_global_runtime(worker) -> list[str]:
     dcp = getattr(parallel, "decode_context_parallel_size", 1)
     if dcp != 1:
         reasons.append(f"decode_context_parallel_size={dcp} (only 1 is supported)")
+    if getattr(parallel, "enable_dbo", False) or getattr(parallel, "use_ubatching", False):
+        reasons.append(
+            "dual batch overlap is enabled (concurrent microbatches can race while finalizing "
+            "shared V-cache groups)"
+        )
     if getattr(cache, "enable_prefix_caching", False):
         reasons.append(
-            "prefix caching is enabled (V is baked in place, so cross-request prefix reuse "
-            "would read another request's quantized V)"
+            "prefix caching is enabled (sharing in-place-finalized V-cache blocks is not validated)"
         )
     if getattr(config, "kv_transfer_config", None) is not None:
         reasons.append(
