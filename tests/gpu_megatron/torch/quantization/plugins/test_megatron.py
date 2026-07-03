@@ -907,17 +907,30 @@ def test_te_grouped_vs_sequential_default_loss(dist_workers_size_4, quant_cfg):
     )
 
 
-@pytest.mark.parametrize("config", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
-def test_te_grouped_n_modules_sharded_state_dict(dist_workers, need_4_gpus, tmp_path, config):
+@pytest.mark.parametrize(
+    "config",
+    [
+        mtq.FP8_DEFAULT_CFG,
+        mtq.NVFP4_DEFAULT_CFG,
+        mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
+    ],
+    ids=["fp8", "nvfp4-dynamic", "nvfp4-static"],
+)
+@pytest.mark.parametrize(("tp_size", "ep_size"), [(2, 2), (1, 4)], ids=["tp2-ep2", "tp1-ep4"])
+def test_te_grouped_n_modules_sharded_state_dict(
+    dist_workers, need_4_gpus, tmp_path, config, tp_size, ep_size
+):
     """Per-expert GroupedQuantizer amax round-trips through dist-checkpoint on TEGroupedMLP.
 
-    OMNIML-5072 AC4. Each rank's per-expert amax scalars are gathered
-    across the EP group at save time, persisted as an `[N_global]` vector, and
-    narrowed back to per-submodule scalars on load.
+    OMNIML-5072 AC4. Each local quantizer amax is saved under its stable
+    global-expert key, without an EP all-gather or replicated payload.
     """
+    if config == mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG and tp_size > 1:
+        pytest.skip("Static-block NVFP4 calibration is not supported with TP > 1")
+
     moe_config = {
-        "tp_size": 2,
-        "ep_size": 2,
+        "tp_size": tp_size,
+        "ep_size": ep_size,
         "etp_size": 1,
         "num_moe_experts": 4,
         "moe_grouped_gemm": True,
