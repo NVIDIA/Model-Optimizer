@@ -136,7 +136,12 @@ def _decode_split_kernel(
 
         if P_QDQ:
             p = tl.reshape(
-                _p_qdq_nvfp4(tl.reshape(p, (1, BLOCK_N)), p_qdq_scale, 1, BLOCK_N),
+                _p_qdq_nvfp4(
+                    tl.reshape(p.to(V_cache.dtype.element_ty).to(tl.float32), (1, BLOCK_N)),
+                    p_qdq_scale,
+                    1,
+                    BLOCK_N,
+                ),
                 (BLOCK_N,),
             )
 
@@ -258,9 +263,11 @@ def attention_decode(
 ) -> torch.Tensor:
     """Decode one query token per request over a paged KV cache.
 
-    Q and K are expected to be fake-quantized before this call. P is quantized
-    per split, while complete block-16 V groups may be finalized in the cache;
-    only the pristine partial group is then quantized on read.
+    Q and K are expected to be fake-quantized before this call. Dynamic NVFP4
+    Q should use an FP32 QDQ carrier; K may remain BF16 when its global scale is
+    one. P is rounded to the model/cache dtype before native-style quantization,
+    then its QDQ result remains FP32. Complete block-16 V groups may be finalized
+    in the cache; only the pristine partial group is then quantized on read.
     """
     if q.ndim != 3:
         raise ValueError(f"q must have shape [batch, heads, head_dim], got {tuple(q.shape)}")

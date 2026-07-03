@@ -15,6 +15,8 @@
 
 """GPU tests for the minimal paged split-K decode kernel."""
 
+import math
+
 import pytest
 import torch
 
@@ -66,6 +68,19 @@ def _dense_decode(q, k, v, seq_lens, scale):
     return output
 
 
+def _nvfp4_qdq_reference(x, global_scale=1.0 / (6.0 * 448.0)):
+    blocks = x.reshape(-1, 16)
+    block_amax = blocks.abs().amax(dim=-1, keepdim=True)
+    scales = (block_amax / (6.0 * global_scale)).clamp(max=448.0)
+    scales = scales.to(torch.float8_e4m3fn).float() * global_scale
+    scale_safe = torch.where(scales == 0, 1.0, scales)
+    levels = x.new_tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+    scaled = blocks.abs() / scale_safe
+    quantized = levels[(scaled[..., None] - levels).abs().argmin(dim=-1)] * scale_safe
+    quantized = torch.copysign(quantized, blocks)
+    return torch.where(scales == 0, 0.0, quantized).reshape_as(x)
+
+
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
 @pytest.mark.parametrize("num_kv_splits", [1, 8, 32])
 def test_split_k_varlen_gqa_matches_dense(num_kv_splits):
@@ -98,7 +113,7 @@ def test_split_k_varlen_gqa_matches_dense(num_kv_splits):
 @requires_native_e4m3
 def test_baked_v_prefix_and_pristine_tail_match_full_onread():
     seq_len, num_q_heads, num_kv_heads, head_dim = 17, 4, 1, 64
-    q = torch.zeros(1, num_q_heads, head_dim, device="cuda", dtype=torch.float16)
+    q = torch.zeros(1, num_q_heads, head_dim, device="cuda", dtype=torch.float32)
     k = torch.zeros(1, num_kv_heads, seq_len, head_dim, device="cuda", dtype=torch.float16)
     v = torch.full_like(k, 0.017578125)
     seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
@@ -130,3 +145,36 @@ def test_baked_v_prefix_and_pristine_tail_match_full_onread():
 
     torch.testing.assert_close(baked, onread, rtol=0, atol=0)
     torch.testing.assert_close(baked_v_cache, baked_v_before, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
+@requires_native_e4m3
+def test_p_quantizes_model_dtype_input_but_accumulates_fp32():
+    seq_len, head_dim = 128, 16
+    scale = head_dim**-0.5
+    q = torch.zeros(1, 1, head_dim, device="cuda", dtype=torch.float32)
+    boundary_p = 0.04163
+    q[..., 0] = -math.log2(boundary_p) / (scale * 1.4426950408889634)
+    k = torch.zeros(1, 1, seq_len, head_dim, device="cuda", dtype=torch.bfloat16)
+    k[:, :, 1:, 0] = -1.0
+    v = torch.zeros_like(k)
+    v[:, :, 1:16, 0] = 1.0
+    k_cache, v_cache, block_table = _paged_cache(k, v, (seq_len,))
+    seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
+
+    output = attention_decode(
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        seq_lens,
+        softmax_scale=scale,
+        num_kv_splits=1,
+        p_qdq="nvfp4",
+    )
+    scores = torch.matmul(k[0, 0].float(), q[0, 0]) * (scale * 1.4426950408889634)
+    p = torch.exp2(scores - scores.max())
+    p_qdq = _nvfp4_qdq_reference(p.to(torch.bfloat16).float())
+    reference = (p_qdq[:, None] * v[0, 0].float()).sum(0) / p.sum()
+
+    torch.testing.assert_close(output[0, 0], reference, rtol=5e-5, atol=5e-5)

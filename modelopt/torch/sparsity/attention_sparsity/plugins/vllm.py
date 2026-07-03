@@ -291,7 +291,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         if getattr(layer, "_query_quant_in_kernel", False):
             valid_q = torch.arange(q.shape[0], device=q.device) < cu_seqlens_q[-1]
             q = q.masked_fill(~valid_q[:, None, None], 0)
-            q = layer.q_bmm_quantizer(q)
+            q = layer.q_bmm_quantizer(q.float())
         use_split_k_decode = (
             is_decode_only
             and "skip_softmax_threshold" not in sparse_kw
