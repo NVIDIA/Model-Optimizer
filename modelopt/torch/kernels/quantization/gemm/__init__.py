@@ -41,6 +41,6 @@ if torch.cuda.is_available():
 
         # OMNIML-5072 — per-expert axis-0 fake-quant via tensor-of-pointers.
         # Generic Triton + CUDA; no special hardware. See VALIDATION_TODO.md.
-        from .grouped_axis0_fakequant import *
+        from .grouped_int4_fakequant import *
 
         IS_AVAILABLE = True

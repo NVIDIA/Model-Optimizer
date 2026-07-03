@@ -118,7 +118,7 @@ class _GroupedAxis0INTFakeQuantFn(torch.autograd.Function):
     no stack memcopy). Backward honors modelopt's default `pass_through_bwd=True`
     — gradient flows back unchanged with zero kernel work. When False, the
     clip-aware Triton STE backward kernel runs. See
-    `modelopt/torch/kernels/quantization/gemm/grouped_axis0_fakequant.py`.
+    `modelopt/torch/kernels/quantization/gemm/grouped_int4_fakequant.py`.
     """
 
     @staticmethod
