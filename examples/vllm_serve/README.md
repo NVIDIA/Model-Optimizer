@@ -114,12 +114,30 @@ Workflow:
    python vllm_serve_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
    ```
 
-If the checkpoint has no `sparse_attention_config`, the worker logs a message and passes through — vLLM runs unchanged. Quant-only flows are handled by `vllm_serve_fakequant.py`; combined sparse + quant will land in a follow-up PR.
+If the checkpoint has no `sparse_attention_config`, the worker logs a message and passes through — vLLM runs unchanged. Whole-model fakequant flows remain handled by `vllm_serve_fakequant.py`; the compact attention-only path is below.
 
 Limitations:
 
 - vLLM V1 chunked prefill and prefix-cache suffix attention are supported by offsetting query positions into the longer KV span.
-- CUDA graph capture is not validated yet — use `--enforce-eager`.
+- `SparseAttnWorker` CUDA graph capture is not validated yet — use `--enforce-eager`.
+
+### Compact NVFP4 attention worker
+
+Use the same launcher with the compact worker and FlashAttention selected explicitly:
+
+```bash
+python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
+  --attention-backend FLASH_ATTN \
+  --worker-cls quant_sparse_attn_worker.QuantSparseAttnWorker
+```
+
+This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant recipe to Q/K/P/V. Q is dynamic; uncalibrated K/V use global scale 1.0, P uses amax 1.0, and scalar calibrated K/V amax values are preserved. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
+
+K is QDQ before its cache write, while V is written pristine. Complete 16-token V groups are finalized once in cache; an incomplete tail remains pristine and is QDQ on read. P@V therefore sees uniform fakequant values without re-quantizing the tail.
+
+Supported configurations are regular decoder self-attention with FlashAttention, fp16/bf16 model and KV cache, equal Q/K/V head dimensions that are multiples of 16, and DCP 1. The default `FULL_AND_PIECEWISE` CUDA graph mode and full decode graphs are supported.
+
+Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cross/encoder/MLA attention, KV sharing or transfer, prefix caching, speculative decoding, DBO/ubatching, and `FULL` mixed/prefill CUDA graphs.
 
 ## Known Problems
 
