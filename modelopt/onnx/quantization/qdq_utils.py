@@ -734,6 +734,8 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     q_indices = []
 
     for node_idx, node in q_nodes:
+        if not node.input:
+            raise ValueError(f"QuantizeLinear node {node.name} has no inputs")
         weight_name = node.input[0]
         logger.debug(f"Processing QDQ node for weight {weight_name}")
 
