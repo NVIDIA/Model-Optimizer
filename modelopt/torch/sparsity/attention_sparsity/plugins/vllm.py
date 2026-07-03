@@ -38,11 +38,12 @@ from vllm.v1.attention.backends.flash_attn import (
 )
 
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
+from modelopt.torch.kernels.quantization.attention.v_qdq import fake_quant_v_onwrite
 
 
 def _target_sparse_ratio_for_phase(target_sparse_ratio, phase: str) -> float:
     """Return target sparsity for a phase, defaulting old checkpoint metadata."""
-    if isinstance(target_sparse_ratio, (float, int)):
+    if isinstance(target_sparse_ratio, float | int):
         return float(target_sparse_ratio)
     if isinstance(target_sparse_ratio, dict):
         return float(target_sparse_ratio.get(phase, 0.5))
@@ -113,6 +114,34 @@ def _build_sparse_kw(layer_cfg: dict) -> dict:
     return sparse_kw
 
 
+def _bmm_qdq_from_layer(layer, attr: str, default_amax: float | None):
+    """Map an enabled BMM2 quantizer to the kernel's NVFP4 mode and scalar amax."""
+    quantizer = getattr(layer, attr, None)
+    if quantizer is None or not getattr(quantizer, "is_enabled", False):
+        return None, default_amax
+    if (
+        not getattr(quantizer, "is_nvfp4_dynamic", False)
+        or (quantizer.block_sizes or {}).get(-1) != 16
+    ):
+        raise NotImplementedError(
+            f"{attr} is enabled with an unsupported format; only dynamic block-16 NVFP4 is supported"
+        )
+    amax = getattr(quantizer, "_amax", None)
+    if amax is None:
+        return "nvfp4", default_amax
+    if getattr(amax, "numel", lambda: 1)() != 1:
+        raise NotImplementedError(f"{attr} requires a scalar amax, got shape {tuple(amax.shape)}")
+    return "nvfp4", float(amax)
+
+
+def _p_qdq_from_layer(layer) -> tuple[str | None, float]:
+    return _bmm_qdq_from_layer(layer, "p_bmm_quantizer", 1.0)
+
+
+def _v_qdq_from_layer(layer) -> tuple[str | None, float | None]:
+    return _bmm_qdq_from_layer(layer, "v_bmm_quantizer", None)
+
+
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
     """Attention implementation that uses the ModelOpt Triton kernel.
 
@@ -166,10 +195,21 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             # Profiling run
             return output.fill_(0)
 
+        quant_kw = getattr(self, "quant_kw", None)
+        if quant_kw is None:
+            p_qdq, p_qdq_amax = _p_qdq_from_layer(layer)
+            v_qdq, v_qdq_amax = _v_qdq_from_layer(layer)
+        else:
+            p_qdq, p_qdq_amax = quant_kw["p_qdq"], quant_kw["p_qdq_amax"]
+            v_qdq, v_qdq_amax = quant_kw["v_qdq"], quant_kw["v_qdq_amax"]
         if getattr(attn_metadata, "use_cascade", False):
             # vLLM cascade metadata splits the request into shared-prefix and
             # suffix pieces. The ModelOpt paged kernel consumes plain per-request
             # KV lengths, so delegate cascade launches back to vLLM's impl.
+            if p_qdq or v_qdq or getattr(self, "sparse_kw", None):
+                raise NotImplementedError(
+                    "vLLM cascade attention is incompatible with an active ModelOpt attention transform"
+                )
             return self._forward_vllm_flash_attn(
                 layer,
                 query,
@@ -209,23 +249,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             # N:M sparse softmax is prefill-only.
             for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
                 sparse_kw.pop(name, None)
-            if set(sparse_kw) <= {"skip_softmax_threshold"}:
-                # The current ModelOpt paged kernel is only validated for
-                # sparse prefill in vLLM. Decode-only skip-softmax would route
-                # through the dense Triton path for every non-skipped tile, so
-                # keep decode on vLLM FlashAttention until that path is covered.
-                return self._forward_vllm_flash_attn(
-                    layer,
-                    query,
-                    key,
-                    value,
-                    kv_cache,
-                    attn_metadata,
-                    output,
-                    output_scale,
-                    output_block_scale,
-                )
-        if not sparse_kw:
+        if not sparse_kw and p_qdq is None and v_qdq is None:
             # Dynamic calibration can disable sparse work for a launch, e.g.
             # short-prefill thresholds outside the valid lambda range. Avoid
             # swapping in the ModelOpt dense kernel when no sparse feature is active.
@@ -239,6 +263,24 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 output,
                 output_scale,
                 output_block_scale,
+            )
+
+        v_cache_quantized = v_qdq == "nvfp4"
+        if v_cache_quantized:
+            v_qdq_scale = 1.0 if v_qdq_amax is None else v_qdq_amax / (6.0 * 448.0)
+            if not (math.isfinite(v_qdq_scale) and v_qdq_scale > 0):
+                raise ValueError(
+                    f"v_bmm_quantizer amax must be finite and positive, got {v_qdq_amax}"
+                )
+            prev = seq_lens - b_seq_len
+            fake_quant_v_onwrite(
+                value_cache,
+                attn_metadata.block_table,
+                (prev // 16) * 16,
+                (seq_lens // 16) * 16,
+                page_size=page_size,
+                v_qdq_scale=v_qdq_scale,
+                decode=is_decode_only,
             )
 
         # Prepare metadata for our kernel
@@ -271,6 +313,11 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             v_cache=value_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
             block_table=attn_metadata.block_table,  # [batch, max_blocks]
             page_size=page_size,  # tokens per page in the KV cache
+            p_qdq=p_qdq,
+            p_qdq_amax=p_qdq_amax,
+            v_qdq=v_qdq,
+            v_qdq_amax=v_qdq_amax,
+            v_cache_quantized=v_cache_quantized,
             **sparse_kw,
         )
 

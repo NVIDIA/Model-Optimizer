@@ -17,6 +17,7 @@
 
 import math
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -117,7 +118,6 @@ def test_forward_delegates_cascade_metadata_to_vllm(monkeypatch):
 @pytest.mark.parametrize(
     ("sparse_kw", "max_query_len", "max_seq_len"),
     [
-        ({"skip_softmax_threshold": 0.001}, 1, 128),
         (
             {
                 "threshold_scale_factor": {
@@ -248,6 +248,100 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(monkeypatch):
     assert captured["skip_softmax_threshold"] == pytest.approx(expected_scale / seq_len)
     assert "threshold_scale_factor" not in captured
     assert "target_sparse_ratio" not in captured
+
+
+def test_nvfp4_bmm_mapping_and_unsupported_format_failure():
+    """Enabled P/V quantizers map only dynamic block-16 NVFP4."""
+    assert vllm_plugin._p_qdq_from_layer(SimpleNamespace()) == (None, 1.0)
+    assert vllm_plugin._v_qdq_from_layer(SimpleNamespace()) == (None, None)
+
+    good = SimpleNamespace(
+        is_enabled=True,
+        is_nvfp4_dynamic=True,
+        block_sizes={-1: 16},
+        _amax=torch.tensor(6.0 * 448.0),
+    )
+    layer = SimpleNamespace(p_bmm_quantizer=good, v_bmm_quantizer=good)
+    assert vllm_plugin._p_qdq_from_layer(layer) == ("nvfp4", 6.0 * 448.0)
+    assert vllm_plugin._v_qdq_from_layer(layer) == ("nvfp4", 6.0 * 448.0)
+
+    good.block_sizes = {-1: 32}
+    with pytest.raises(NotImplementedError, match="p_bmm_quantizer"):
+        vllm_plugin._p_qdq_from_layer(layer)
+    with pytest.raises(NotImplementedError, match="v_bmm_quantizer"):
+        vllm_plugin._v_qdq_from_layer(layer)
+
+
+def test_quantized_decode_finalizes_v_then_calls_shared_paged_kernel(monkeypatch):
+    """Pure decode uses exact aligned V ranges and the shared Triton FA path."""
+    impl = _clone_sparse_impl(_make_old_impl())
+
+    class UnreadableAmax:
+        def numel(self):
+            return 1
+
+        def __float__(self):
+            raise AssertionError("forward read live quantizer amax")
+
+    quantizer = SimpleNamespace(
+        is_enabled=True,
+        is_nvfp4_dynamic=True,
+        block_sizes={-1: 16},
+        _amax=UnreadableAmax(),
+    )
+    layer = SimpleNamespace(p_bmm_quantizer=quantizer, v_bmm_quantizer=quantizer)
+    impl.quant_kw = {
+        "p_qdq": "nvfp4",
+        "p_qdq_amax": 1.0,
+        "v_qdq": "nvfp4",
+        "v_qdq_amax": 6.0 * 448.0,
+    }
+    q = torch.zeros(2, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 4, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        max_query_len=1,
+        max_seq_len=34,
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([16, 34], dtype=torch.int32),
+        block_table=torch.zeros(2, 3, dtype=torch.int32),
+    )
+    calls = {}
+
+    def fake_finalize(value_cache, block_table, v_lo, v_hi, **kwargs):
+        calls["finalize"] = (v_lo.clone(), v_hi.clone(), kwargs)
+
+    def fake_attention(query, **kwargs):
+        calls["attention"] = kwargs
+        return torch.ones_like(query)
+
+    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", fake_finalize)
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+    monkeypatch.setattr(
+        FlashAttentionImpl,
+        "forward",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("native fallback")),
+    )
+
+    output = torch.empty_like(q)
+    assert impl.forward(layer, q, q, q, kv_cache, metadata, output=output) is output
+    v_lo, v_hi, finalizer_kw = calls["finalize"]
+    torch.testing.assert_close(v_lo, torch.tensor([0, 32], dtype=torch.int32))
+    torch.testing.assert_close(v_hi, torch.tensor([16, 32], dtype=torch.int32))
+    assert finalizer_kw == {"page_size": 16, "v_qdq_scale": 1.0, "decode": True}
+    assert calls["attention"]["p_qdq"] == "nvfp4"
+    assert calls["attention"]["v_qdq"] == "nvfp4"
+    assert calls["attention"]["v_cache_quantized"] is True
+
+
+def test_active_cascade_fails_loud():
+    """Cascade must not silently drop an active ModelOpt transform."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.sparse_kw = {"skip_softmax_threshold": 0.001}
+    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
+    cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    with pytest.raises(NotImplementedError, match="cascade"):
+        impl.forward(None, q, q, q, cache, SimpleNamespace(use_cascade=True), output=q)
 
 
 def test_resolve_calibrated_skip_softmax_threshold_for_decode():
