@@ -1104,6 +1104,18 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    skip_layers: list[str] | None = ModeloptField(
+        default=None,
+        title="Module-name wildcard patterns excluded from the SVDQuant algorithm",
+        description=(
+            "Quantized linears whose module name matches any of these fnmatch-style wildcard "
+            "patterns (e.g. ``'*.attn.add_q_proj'``) keep their quantizer config but skip the "
+            "SVDQuant algorithm entirely: no AWQ smoothing (``pre_quant_scale``) and no "
+            "low-rank branch, leaving their weights unchanged. They are max-calibrated "
+            "instead, i.e. quantized like a plain max recipe."
+        ),
+    )
+
 
 class GPTQCalibConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
