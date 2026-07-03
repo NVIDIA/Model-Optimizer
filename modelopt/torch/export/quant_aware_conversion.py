@@ -23,7 +23,7 @@ in-memory parameter names differ from the original model-hub checkpoint (e.g. fu
 prefix). On save, ``transformers`` reverses this via ``revert_weight_conversion`` so
 the on-disk names match the hub checkpoint again.
 
-ModelOpt's unified export disables that reverse (it raises ``IndexError`` on 0-d
+ModelOpt's unified export disables that reverse (it raises ``RuntimeError`` on 0-d
 scalar scale tensors such as ``weight_scale_2``/``input_scale``), so a quantized
 export emits the *in-memory* (post-conversion) names — violating the unified
 checkpoint contract that names stay aligned with the original hub checkpoint.

@@ -1334,9 +1334,9 @@ def _export_diffusers_checkpoint(
 
 
 # TODO: Remove this workaround once HuggingFace fixes revert_weight_conversion to handle
-# scalar (0-d) tensors. The bug is in transformers' Chunk.convert() which calls
-# tensor.size(self.dim) on quantization scale buffers that are 0-d scalars, causing
-# IndexError. Confirmed still present in transformers 5.2.0.
+# scalar (0-d) tensors. transformers' Chunk.convert() calls torch.chunk() on quantization
+# scale buffers that are 0-d scalars, raising RuntimeError ("chunk expects at least a
+# 1-dimensional tensor"). Confirmed in transformers 5.12.0.
 # See: transformers/core_model_loading.py, Chunk.convert()
 def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
     """No-op replacement for transformers' revert_weight_conversion."""
@@ -1359,7 +1359,7 @@ def _try_patch_module(mod_path: str) -> tuple[Any, Any] | None:
 
 
 def _patch_revert_weight_conversion() -> list[tuple[Any, Any]]:
-    """Patch revert_weight_conversion in transformers to avoid IndexError on scalar tensors."""
+    """Patch revert_weight_conversion in transformers to avoid RuntimeError on scalar tensors."""
     patches: list[tuple[Any, Any]] = []
     for mod_path in [
         "transformers.core_model_loading",
@@ -1484,12 +1484,8 @@ def export_hf_checkpoint(
         # differ from the original hub checkpoint. Reverse it quantization-aware so exported
         # tensor names stay aligned with the hub checkpoint (the unified-checkpoint contract).
         # transformers' own revert_weight_conversion errors on 0-d scalar scale tensors, so we
-        # do the reverse here; for any op we cannot reverse yet (e.g. stacked-expert fusion)
-        # we fall back to the in-memory names.
-        # QuantConversionUnsupportedError flags a mapping op we explicitly do not
-        # reverse yet; catching Exception additionally guards against unanticipated
-        # failures (transformers API drift, unexpected tensor shapes) so a naming
-        # best-effort never aborts the export -- we fall back to in-memory names.
+        # do it here. Best-effort: any failure (an op we cannot reverse yet, transformers API
+        # drift, unexpected shapes) falls back to the in-memory names instead of aborting export.
         try:
             export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
         except Exception as exc:
@@ -1498,11 +1494,10 @@ def export_hf_checkpoint(
                 "names may not match the original HF hub checkpoint."
             )
 
-        # Save model
         # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
-        # above replaces it): it doesn't handle quantized state dicts (0-d scalar scale
-        # tensors cause IndexError). Patch both the source module and the importing module
-        # since modeling_utils does `from core_model_loading import revert_weight_conversion`.
+        # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
+        # scale tensors). Patch both the source and importing module since modeling_utils does
+        # `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
 
         _sanitize_generation_config_for_save(model)
