@@ -33,6 +33,8 @@ from modelopt.torch.export.quant_aware_conversion import (
     SplitRule,
     _assert_experts_pre_expanded,
     apply_reverse_rules,
+    build_reverse_name_mapper,
+    revert_quant_config_names,
     revert_weight_conversion_quant_aware,
 )
 
@@ -290,3 +292,52 @@ def test_stacked_experts_guard():
 
     # No expert converters in the mapping -> guard is a no-op even for 3-D tensors.
     _assert_experts_pre_expanded(bad, [])
+
+
+def test_revert_quant_config_names_mapper():
+    """exclude_modules / quantized_layers keys revert to hub names, preserving wildcards.
+
+    Regression for the bug where the reverse conversion renamed weight tensors to hub
+    names but left the quant-config module references in the in-memory namespace, so a
+    deployment loader matched none of the excludes and loaded an excluded BF16 layer as
+    quantized. Uses Mixtral's real mapping (``mlp.experts`` <-> ``block_sparse_moe.experts``).
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    from transformers import MixtralConfig, MixtralForCausalLM
+
+    model = MixtralForCausalLM(
+        MixtralConfig(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_local_experts=2,
+            num_experts_per_tok=2,
+            vocab_size=64,
+            max_position_embeddings=64,
+        )
+    )
+    mapper = build_reverse_name_mapper(model)
+    assert mapper is not None
+
+    quant = {
+        "quant_algo": "NVFP4",
+        "exclude_modules": [
+            "model.layers.0.self_attn*",  # no container rename -> unchanged, wildcard kept
+            "model.layers.0.mlp.experts.0*",  # in-memory -> block_sparse_moe.experts, wildcard kept
+            "lm_head",
+        ],
+        "quantized_layers": {"model.layers.0.mlp.experts.0.w1": {"quant_algo": "NVFP4"}},
+    }
+    revert_quant_config_names(quant, mapper)
+    assert quant["exclude_modules"] == [
+        "model.layers.0.self_attn*",
+        "model.layers.0.block_sparse_moe.experts.0*",
+        "lm_head",
+    ]
+    assert "model.layers.0.block_sparse_moe.experts.0.w1" in quant["quantized_layers"]
+    # mapper(None) is a no-op
+    q2 = {"exclude_modules": ["x*"]}
+    revert_quant_config_names(q2, None)
+    assert q2["exclude_modules"] == ["x*"]

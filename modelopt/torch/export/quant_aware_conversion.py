@@ -67,6 +67,8 @@ __all__ = [
     "RenameRule",
     "SplitRule",
     "apply_reverse_rules",
+    "build_reverse_name_mapper",
+    "revert_quant_config_names",
     "revert_weight_conversion_quant_aware",
 ]
 
@@ -194,6 +196,70 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
         return state_dict
     _assert_experts_pre_expanded(state_dict, expert_fused_leaves)
     return apply_reverse_rules(state_dict, split_rules, rename_rules)
+
+
+def build_reverse_name_mapper(model):
+    """Build a ``str -> str`` mapper that applies the quant-aware reverse *rename* rules.
+
+    The exported weight tensors are reverted to the original hub names by
+    :func:`revert_weight_conversion_quant_aware`, but the quantization config's module
+    references (``exclude_modules`` and, for mixed precision, ``quantized_layers`` keys)
+    are built from the in-memory module names and would otherwise stay in the
+    post-conversion namespace -- so a deployment loader matching those patterns against
+    the (reverted) hub-named modules finds no match, silently loads an excluded BF16
+    layer as quantized, and fails. Applying the same rename rules to those name strings
+    keeps them aligned with the weights. Only the rename rules apply (splits act on
+    tensors, not names).
+
+    Returns ``None`` when no renaming applies. Raises
+    :class:`QuantConversionUnsupportedError` when the mapping can't be reversed, so the
+    caller can keep the in-memory names for BOTH weights and config (mutually consistent).
+    """
+    _, rename_rules, _ = _build_reverse_rules(model)
+    if not rename_rules:
+        return None
+    compiled = [(re.compile(r.pattern), r.repl) for r in rename_rules]
+    # The rename patterns are anchored on full weight keys and use ``.`` (any char) as a
+    # path separator, so a trailing glob wildcard in an exclude pattern would be consumed
+    # (e.g. ``...mlp.shared_experts.`` -> ``...`` would eat the ``*``). Append a sentinel
+    # path segment so container renames whose pattern ends in ``.`` match the sentinel's
+    # separator, then strip it and restore the wildcard.
+    _sentinel = ".\x00modelopt_name_sentinel"
+
+    def _apply(text: str) -> str:
+        for pattern, repl in compiled:
+            text = pattern.sub(repl, text)
+        return text
+
+    def _map(name: str) -> str:
+        base, suffix = name, ""
+        if name.endswith(".*"):
+            base, suffix = name[:-2], ".*"
+        elif name.endswith("*"):
+            base, suffix = name[:-1], "*"
+        mapped = _apply(base + _sentinel)
+        mapped = mapped.removesuffix(_sentinel)
+        return mapped + suffix
+
+    return _map
+
+
+def revert_quant_config_names(quantization: dict, mapper) -> None:
+    """Revert ``exclude_modules`` / ``quantized_layers`` keys to hub names, in place.
+
+    ``mapper`` is the callable from :func:`build_reverse_name_mapper` (a no-op when
+    ``None``). Applies to the ModelOpt ``{"quantization": {...}}`` sub-dict before it is
+    written / format-converted, so both ``hf_quant_config.json`` and the embedded
+    ``config.json`` ``quantization_config`` inherit the reverted names.
+    """
+    if mapper is None or not isinstance(quantization, dict):
+        return
+    exclude = quantization.get("exclude_modules")
+    if exclude:
+        quantization["exclude_modules"] = [mapper(e) for e in exclude]
+    quantized_layers = quantization.get("quantized_layers")
+    if isinstance(quantized_layers, dict) and quantized_layers:
+        quantization["quantized_layers"] = {mapper(k): v for k, v in quantized_layers.items()}
 
 
 def _assert_experts_pre_expanded(
