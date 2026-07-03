@@ -28,6 +28,7 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
     train_iters = 2
     distill_output_dir = tmp_path / "distill_output"
     distilled_hf_path = tmp_path / "distilled_hf"
+    validation_exports = tmp_path / "validation_exports"
     distill_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
         student_hf_path=teacher_hf_path,
@@ -40,16 +41,19 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
         gbs=4,
         train_iters=train_iters,
         lr_warmup_iters=1,
-        eval_interval=train_iters,
+        eval_interval=1,
         eval_iters=1,
         log_interval=1,
         hf_export_path=distilled_hf_path,
+        hf_validation_export_path=validation_exports,
         student_hf_model=teacher_hf_path,
     )
     run_example_command(distill_cmd_parts, example_path="megatron_bridge")
 
     assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
     assert (distilled_hf_path / "config.json").exists()
+    assert (validation_exports / "iter_0000001/config.json").exists()
+    assert (validation_exports / "iter_0000002/config.json").exists()
 
 
 def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
