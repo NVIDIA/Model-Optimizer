@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
 """Progress report for the Puzzletron MIP step."""
 
+import math
 import re
 import sys
 from datetime import datetime
@@ -31,12 +31,15 @@ except FileNotFoundError:
 
 def norm(r):
     """Normalize a compression rate to a canonical float string."""
-    return str(float(r))
+    value = float(r)
+    if not math.isfinite(value):
+        raise ValueError("compression rate must be finite")
+    return str(value)
 
 
 def fmt(s):
-    """Format seconds as 'Xm Ys', or '—' if None."""
-    return f"{int(s) // 60}m {int(s) % 60}s" if s is not None else "—"
+    """Format seconds as 'Xm Ys', or 'n/a' if None."""
+    return f"{int(s) // 60}m {int(s) % 60}s" if s is not None else "n/a"
 
 
 def get_ts(line):
@@ -45,12 +48,36 @@ def get_ts(line):
     return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S") if m else None
 
 
+def _parse_rates(log_text: str) -> list[str]:
+    """Return configured compression rates, or an empty list when sweep mode is disabled."""
+    rates_match = re.search(r"Compression rates: \[(.*?)\]", log_text)
+    if not rates_match:
+        return []
+
+    raw_rates = [rate.strip() for rate in rates_match.group(1).split(",")]
+    if not raw_rates or any(not rate for rate in raw_rates):
+        raise ValueError("Compression rates must be a non-empty comma-separated list of numbers.")
+
+    try:
+        rates = [norm(rate) for rate in raw_rates]
+    except ValueError as error:
+        raise ValueError(
+            "Compression rates must be a non-empty comma-separated list of numbers."
+        ) from error
+    if len(set(rates)) != len(rates):
+        raise ValueError("Compression rates must be unique after normalization.")
+    return rates
+
+
 now = datetime.now().replace(microsecond=0)
 
-rates_match = re.search(r"Compression rates: \[(.*?)\]", text)
-all_rates = [norm(r.strip()) for r in rates_match.group(1).split(",")] if rates_match else []
+try:
+    all_rates = _parse_rates(text)
+except ValueError as error:
+    print(f"Invalid log.txt: {error}", file=sys.stderr)
+    sys.exit(1)
 
-# Detect completion via step 8 marker or sweep.py:292
+# Detect completion from stable log messages.
 complete_ts = None
 for line in lines:
     ts = get_ts(line)
@@ -78,7 +105,7 @@ if not all_rates:
         cbc_detail = f" ({int(nodes):,} nodes, {float(secs):.1f}s)"
 
     DIV = "─" * 62
-    print("\nOverall: Puzzletron step 7/8 — MIP solve (sweep disabled)")
+    print("\nOverall: Puzzletron step 7/8: MIP solve (sweep disabled)")
     print(DIV)
     print(f"  {'Status':<10}  {'Phase':<32}  {'Elapsed':>8}")
     print(DIV)
@@ -92,7 +119,7 @@ if not all_rates:
         if complete_ts
         else now.strftime("%H:%M:%S") + " (in progress)"
     )
-    print(f"  Started:   {step7_ts.strftime('%H:%M:%S') if step7_ts else '—'}")
+    print(f"  Started:   {step7_ts.strftime('%H:%M:%S') if step7_ts else 'n/a'}")
     print(f"  Finished:  {finished_str}")
     print(f"  Elapsed:   {fmt(total_elapsed)}")
     print(f"  Remaining: {'done' if complete_ts else 'calculating...'}")
@@ -106,40 +133,44 @@ if not all_rates:
 # ── Sweep enabled: per-rate progress ─────────────────────────────────────────
 rate_start = {}
 for line in lines:
-    m = re.search(r"compression_rate=([\d.]+)", line)
+    m = re.search(r"compression_rate=([^\s,;\]]+)", line)
     if m:
-        r = norm(m.group(1))
-        if r in all_rates and r not in rate_start:
-            rate_start[r] = get_ts(line)
+        try:
+            r = norm(m.group(1))
+        except ValueError:
+            print(
+                "Invalid log.txt: compression_rate event must contain a finite number.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        ts = get_ts(line)
+        if ts and r in all_rates and r not in rate_start:
+            rate_start[r] = ts
 
-sweep_start = rate_start.get(all_rates[0]) if all_rates else None
+started_rates = [rate for rate in all_rates if rate in rate_start]
+sweep_start = rate_start[started_rates[0]] if started_rates else None
 
-rate_done = set()
-for i, r in enumerate(all_rates[:-1]):
-    if all_rates[i + 1] in rate_start:
-        rate_done.add(r)
-last = all_rates[-1] if all_rates else None
-if complete_ts and last and last in rate_start:
-    rate_done.add(last)
+rate_done = set(started_rates[:-1])
+if complete_ts and started_rates:
+    rate_done.add(started_rates[-1])
 
 rate_elapsed = {}
-for i, r in enumerate(all_rates):
-    if r not in rate_start:
-        continue
-    end = rate_start[all_rates[i + 1]] if i + 1 < len(all_rates) else (complete_ts or now)
-    rate_elapsed[r] = int((end - rate_start[r]).total_seconds())
+for i, rate in enumerate(started_rates):
+    next_start = rate_start[started_rates[i + 1]] if i + 1 < len(started_rates) else None
+    end = next_start or complete_ts or now
+    rate_elapsed[rate] = int((end - rate_start[rate]).total_seconds())
 
-running_rate = next((r for r in all_rates if r in rate_start and r not in rate_done), None)
+running_rate = started_rates[-1] if started_rates and not complete_ts else None
 
 cur_detail = ""
 if running_rate:
     batch_matches = re.findall(r"calculate_losses_pipeline[^:]*:\s*(\d+)%.*?(\d+)/(\d+)", text)
     if batch_matches:
         pct, cur, total = batch_matches[-1]
-        cur_detail = f" — validating ({cur}/{total} batches)"
+        cur_detail = f" (validating {cur}/{total} batches)"
     elif cbc_matches:
         nodes, secs = cbc_matches[-1]
-        cur_detail = f" — MIP solver ({int(nodes):,} nodes, {float(secs):.1f}s)"
+        cur_detail = f" (MIP solver: {int(nodes):,} nodes, {float(secs):.1f}s)"
 
 end_ts = complete_ts or now
 total_elapsed = int((end_ts - sweep_start).total_seconds()) if sweep_start else 0
@@ -154,7 +185,7 @@ est_rem = (
 )
 
 DIV = "─" * 62
-print(f"\nOverall: Puzzletron step 7/8 — MIP sweep ({len(all_rates)} compression rates)")
+print(f"\nOverall: Puzzletron step 7/8: MIP sweep ({len(all_rates)} compression rates)")
 print(DIV)
 print(f"  {'Status':<10}  {'Phase':<32}  {'Elapsed':>8}")
 print(DIV)
@@ -163,16 +194,15 @@ for r in all_rates:
     if r not in rate_start:
         print(f"  {'[ ]':<10}  {f'compression_rate={r}':<32}  {'pending':>8}")
     elif r == running_rate:
-        print(
-            f"  {'[RUNNING]':<10}  {f'compression_rate={r}{cur_detail}':<32}  {fmt(rate_elapsed.get(r)):>8}"
-        )
+        phase = f"compression_rate={r}{cur_detail}"
+        print(f"  {'[RUNNING]':<10}  {phase:<32}  {fmt(rate_elapsed.get(r)):>8}")
     else:
         print(f"  {'[DONE]':<10}  {f'compression_rate={r}':<32}  {fmt(rate_elapsed.get(r)):>8}")
 print(DIV)
 finished_str = (
     complete_ts.strftime("%H:%M:%S") if complete_ts else now.strftime("%H:%M:%S") + " (in progress)"
 )
-print(f"  Started:   {sweep_start.strftime('%H:%M:%S') if sweep_start else '—'}")
+print(f"  Started:   {sweep_start.strftime('%H:%M:%S') if sweep_start else 'n/a'}")
 print(f"  Finished:  {finished_str}")
 print(f"  Elapsed:   {fmt(total_elapsed)}")
 print(f"  Completed: {done_count}/{len(all_rates)} compression rates")

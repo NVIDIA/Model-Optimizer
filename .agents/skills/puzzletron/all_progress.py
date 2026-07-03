@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
 """Progress report for the full Puzzletron pipeline (all 8 steps)."""
 
 import glob
@@ -31,8 +30,8 @@ except FileNotFoundError:
 
 
 def fmt(s):
-    """Format seconds as 'Xm Ys', or '—' if None."""
-    return f"{int(s) // 60}m {int(s) % 60}s" if s is not None else "—"
+    """Format seconds as 'Xm Ys', or 'n/a' if None."""
+    return f"{int(s) // 60}m {int(s) % 60}s" if s is not None else "n/a"
 
 
 def get_ts(line):
@@ -101,7 +100,7 @@ if not pipeline_complete_ts and cur_step_start_ts:
         rate_per_batch = cur_step_elapsed / int(cur_b)
         step_remaining = rate_per_batch * (int(total_b) - int(cur_b))
 
-print(f"\nOverall: Puzzletron full pipeline (steps 1–{total_steps})")  # noqa: RUF001
+print(f"\nOverall: Puzzletron full pipeline (steps 1-{total_steps})")
 print(DIV)
 print(f"  {'Status':<10}  {'Step':<4}  {'Description':<34}  {'Elapsed':>8}")
 print(DIV)
@@ -119,7 +118,7 @@ for i, (snum, (sdesc, sts)) in enumerate(step_ts_list):
     label = f"{snum}/{total_steps}: {sdesc}{detail}"
     status = "[DONE]" if is_done else "[RUNNING]"
     print(
-        f"  {status:<10}  {'':<4}  {label:<34}  {fmt(elapsed) if elapsed is not None else '—':>8}"
+        f"  {status:<10}  {'':<4}  {label:<34}  {fmt(elapsed) if elapsed is not None else 'n/a':>8}"
     )
 
 for snum in range(last_step_num + 1, total_steps + 1):
@@ -162,7 +161,7 @@ finished_str = (
     if pipeline_complete_ts
     else now.strftime("%H:%M:%S") + " (in progress)"
 )
-print(f"  Started:   {pipeline_start.strftime('%H:%M:%S') if pipeline_start else '—'}")
+print(f"  Started:   {pipeline_start.strftime('%H:%M:%S') if pipeline_start else 'n/a'}")
 print(f"  Finished:  {finished_str}")
 print(f"  Elapsed:   {fmt(total_elapsed)}")
 print(f"  Completed: {done_steps}/{total_steps} steps")

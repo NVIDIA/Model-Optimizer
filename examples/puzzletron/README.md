@@ -382,5 +382,4 @@ Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenari
 
 > **Experimental:** AI agent integration is an experimental feature and may change.
 
-Puzzletron ships a skill for AI coding agents (Claude Code, Cursor, Codex).
-See [`.agents/skills/puzzletron/README.md`](../../.agents/skills/puzzletron/README.md) for setup, commands, and example output.
+Puzzletron includes repo-local skill content under [`.agents/skills/puzzletron/README.md`](../../.agents/skills/puzzletron/README.md). A tracked discovery link exposes that same content to Claude Code. Other agents, including Codex, may need manual loading or tool-specific configuration until repo-local skill activation is documented for this repository.
