@@ -27,6 +27,11 @@ if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention
     from modelopt.torch.kernels.common.attention.triton_fa import LOG2E
 
+NATIVE_E4M3_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (8, 9)
+requires_native_e4m3 = pytest.mark.skipif(
+    not NATIVE_E4M3_AVAILABLE, reason="Native E4M3 requires compute capability >= 8.9"
+)
+
 # The kernel runs with a single pinned config under pytest (see _FWD_CONFIGS):
 # BLOCK_M=128, BLOCK_N=64. The tile-looped reference below relies on it.
 BLOCK_N = 64
@@ -67,8 +72,8 @@ def _qdq_nvfp4(p, global_scale=1.0):
     shape = p.shape
     g = p.reshape(*shape[:-1], shape[-1] // 16, 16)
     block_amax = g.amax(dim=-1, keepdim=True)  # p >= 0, so max == amax
-    scale = fp8_eager(block_amax / 6.0, torch.tensor(FP8_E4M3_MAX * global_scale, device=p.device))
-    scale = torch.where(scale == 0.0, torch.ones_like(scale), scale)
+    raw_scale = (block_amax / 6.0).clamp(2**-9 * global_scale, FP8_E4M3_MAX * global_scale)
+    scale = fp8_eager(raw_scale, torch.tensor(FP8_E4M3_MAX * global_scale, device=p.device))
     q = _fp4_round(g / scale) * scale
     return q.reshape(shape)
 
@@ -135,6 +140,7 @@ class TestSoftmaxQdqForward:
     """Forward correctness of FP8/NVFP4 softmax quant-dequant."""
 
     @pytest.mark.parametrize("mode", ["fp8", "nvfp4"])
+    @requires_native_e4m3
     def test_prefill_matches_tile_reference(self, mode):
         """Kernel qdq output matches the tile-looped torch reference."""
         seq_len, num_heads, num_kv_heads, head_dim = 128, 4, 2, 64
@@ -153,6 +159,7 @@ class TestSoftmaxQdqForward:
         assert not torch.equal(o, o_dense)
 
     @pytest.mark.parametrize("mode", ["fp8", "nvfp4"])
+    @requires_native_e4m3
     def test_varlen_partial_tiles(self, mode):
         """Variable-length batch with partial KV tiles (seq % BLOCK_N != 0)."""
         seq_lens = [96, 80]
@@ -171,6 +178,7 @@ class TestSoftmaxQdqForward:
             torch.testing.assert_close(o[s : s + n].float(), ref, rtol=5e-3, atol=5e-3)
 
     @pytest.mark.parametrize(("mode", "tol"), [("fp8", 5e-2), ("nvfp4", 0.25)])
+    @requires_native_e4m3
     def test_qdq_close_to_dense(self, mode, tol):
         """Quantization is an approximation: output stays near dense attention."""
         seq_len, num_heads, num_kv_heads, head_dim = 128, 4, 2, 64
@@ -185,6 +193,7 @@ class TestSoftmaxQdqForward:
         torch.testing.assert_close(o, ref, rtol=tol, atol=tol)
 
     @pytest.mark.parametrize("mode", ["fp8", "nvfp4"])
+    @requires_native_e4m3
     def test_decode(self, mode):
         """Decode (seq_q=1 vs KV cache) matches the non-causal tile reference."""
         batch, num_heads, num_kv_heads, head_dim = 2, 4, 2, 64
@@ -232,6 +241,7 @@ class TestSoftmaxQdqForward:
             ("nvfp4", 0.7),
         ],
     )
+    @requires_native_e4m3
     def test_custom_amax_matches_tile_reference(self, mode, amax):
         """User-supplied p_qdq_amax changes the grid and matches the reference."""
         seq_len, num_heads, num_kv_heads, head_dim = 128, 4, 2, 64
@@ -265,6 +275,7 @@ class TestSoftmaxQdqForward:
         with pytest.raises(ValueError, match="p_qdq_amax"):
             attention(q, k, v, locs, lens, 8, p_qdq="fp8", p_qdq_amax=0.0)
 
+    @requires_native_e4m3
     def test_composes_with_skip_softmax(self):
         """p_qdq composes with the skip-softmax feature in one launch."""
         seq_len, num_heads, num_kv_heads, head_dim = 256, 4, 2, 64
@@ -294,8 +305,23 @@ class TestSoftmaxQdqForward:
         with pytest.raises(ValueError, match="p_qdq"):
             attention(q, k, v, locs, lens, 8, p_qdq="int8")
 
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"v_qdq": "int8"}, "v_qdq"),
+            ({"v_qdq": "nvfp4", "v_qdq_amax": 0.0}, "v_qdq_amax"),
+            ({"v_qdq": "nvfp4", "v_cache_quantized": True}, "v_cache_quantized"),
+        ],
+    )
+    def test_invalid_v_qdq_configuration(self, kwargs, match):
+        q, k, v = make_qkv(8, 2, 2, 32, dtype=torch.float16)
+        locs, lens = make_varlen_meta([8])
+        with pytest.raises(ValueError, match=match):
+            attention(q, k, v, locs, lens, 8, **kwargs)
+
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+@requires_native_e4m3
 class TestSoftmaxQdqBackward:
     """Backward uses the straight-through estimator (no qdq re-applied)."""
 

@@ -118,8 +118,9 @@ def fp8_quantize_scale(block_amax, global_scale):
         FP8-quantized per-block scale(s), same shape as ``block_amax``.
     """
     FP8_E4M3_MAX: tl.constexpr = 448.0
+    FP8_E4M3_MIN: tl.constexpr = 2**-9
     scale_in_fp8_range = block_amax / (6.0 * global_scale)
-    scale_clamped = tl.minimum(scale_in_fp8_range, FP8_E4M3_MAX)
+    scale_clamped = tl.minimum(tl.maximum(scale_in_fp8_range, FP8_E4M3_MIN), FP8_E4M3_MAX)
     return scale_clamped.to(tl.float8e4nv).to(tl.float32) * global_scale
 
 

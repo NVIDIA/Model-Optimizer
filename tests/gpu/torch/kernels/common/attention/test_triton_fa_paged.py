@@ -20,9 +20,16 @@ import torch
 from conftest import make_qkv, make_varlen_meta
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention
+    from modelopt.torch.kernels.quantization.attention.v_qdq import fake_quant_v_onwrite
+
+NATIVE_E4M3_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (8, 9)
+requires_native_e4m3 = pytest.mark.skipif(
+    not NATIVE_E4M3_AVAILABLE, reason="Native E4M3 requires compute capability >= 8.9"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +119,23 @@ def _suffix_causal_reference(q, k, v, q_lens, kv_lens, num_heads, num_kv_heads, 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 class TestPagedKV:
     """Paged KV cache mode tests — verify paged output matches contiguous."""
+
+    @pytest.mark.parametrize(
+        ("page_size", "v_qdq_scale", "match"),
+        [(8, 1.0, "page_size"), (16, 0.0, "v_qdq_scale"), (16, float("inf"), "v_qdq_scale")],
+    )
+    def test_v_onwrite_validates_page_size_and_scale(self, page_size, v_qdq_scale, match):
+        cache = torch.empty(1, 16, 1, 1, device="cuda")
+        zeros = torch.zeros(1, device="cuda", dtype=torch.int32)
+        with pytest.raises(ValueError, match=match):
+            fake_quant_v_onwrite(
+                cache,
+                zeros.view(1, 1),
+                zeros,
+                zeros,
+                page_size=page_size,
+                v_qdq_scale=v_qdq_scale,
+            )
 
     def test_paged_matches_contiguous(self):
         """Paged mode produces same output as contiguous mode with identical data."""
@@ -495,3 +519,125 @@ class TestPagedKV:
         ref = _suffix_causal_reference(q, k, v, q_lens, kv_lens, num_heads, num_kv_heads, scale)
 
         torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+
+    @requires_native_e4m3
+    def test_v_cache_finalizes_complete_groups_once(self):
+        """Eager prefill and fixed-grid decode bake groups once and leave tails raw."""
+        seq_len, head_dim, page_size = 49, 32, 16
+        k = torch.zeros(seq_len, 1, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.full_like(k, 0.017578125)  # once: 0.015625; twice: 0.01171875
+        locs, lens = make_varlen_meta([seq_len])
+        _, raw, block_table = _scatter_to_paged_cache(k, v, locs, lens, 1, head_dim, page_size)
+        baked = raw.clone()
+        fake_quant_v_onwrite(
+            baked,
+            block_table,
+            torch.zeros(1, device="cuda", dtype=torch.int32),
+            torch.tensor([32], device="cuda", dtype=torch.int32),
+            page_size=page_size,
+        )
+        after_prefill = baked.clone()
+        fake_quant_v_onwrite(
+            baked,
+            block_table,
+            torch.tensor([32], device="cuda", dtype=torch.int32),
+            torch.tensor([48], device="cuda", dtype=torch.int32),
+            page_size=page_size,
+            decode=True,
+        )
+        torch.testing.assert_close(baked[:2], after_prefill[:2], rtol=0, atol=0)
+        assert torch.all(baked[:3] == 0.015625)
+        torch.testing.assert_close(baked[3, 0], raw[3, 0], rtol=0, atol=0)
+
+        tiny = torch.full((1, 16, 1, 16), 2e-6, device="cuda")
+        fake_quant_v_onwrite(
+            tiny,
+            torch.zeros(1, 1, device="cuda", dtype=torch.int32),
+            torch.zeros(1, device="cuda", dtype=torch.int32),
+            torch.tensor([16], device="cuda", dtype=torch.int32),
+            v_qdq_scale=1.0 / (6.0 * 448.0),
+        )
+        assert torch.isfinite(tiny).all() and torch.all(tiny != 0)
+
+    @requires_native_e4m3
+    def test_v_cache_matches_independent_signed_key_axis_oracle(self):
+        page_size, num_kv_heads, head_dim = 8, 2, 4
+        logical = (
+            torch.arange(16 * num_kv_heads * head_dim, device="cuda", dtype=torch.float16)
+            .reshape(16, num_kv_heads, head_dim)
+            .sub_(61)
+            .div_(13)
+        )
+        cache = torch.full(
+            (3, page_size, num_kv_heads, head_dim),
+            99.0,
+            device="cuda",
+            dtype=logical.dtype,
+        )
+        block_table = torch.tensor([[2, 0]], device="cuda", dtype=torch.int32)
+        cache[2], cache[0] = logical[:page_size], logical[page_size:]
+        unused_page = cache[1].clone()
+
+        fake_quant_v_onwrite(
+            cache,
+            block_table,
+            torch.zeros(1, device="cuda", dtype=torch.int32),
+            torch.tensor([16], device="cuda", dtype=torch.int32),
+            page_size=page_size,
+        )
+        key_last = logical.permute(1, 2, 0).contiguous()
+        q, scale, double_scale = NVFP4QTensor.quantize(
+            key_last,
+            16,
+            weights_scaling_factor_2=torch.tensor(1.0, device="cuda"),
+            try_tensorrt=False,
+        )
+        expected = q.dequantize(
+            dtype=logical.dtype,
+            scale=scale,
+            double_scale=double_scale,
+            block_sizes={-1: 16},
+        ).permute(2, 0, 1)
+        actual = torch.cat((cache[2], cache[0]))
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(cache[1], unused_page, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("q_len", [1, 7])
+    @requires_native_e4m3
+    def test_baked_prefix_and_raw_tail_match_full_onread(self, q_len):
+        """The same paged Triton path handles pure decode and chunked prefill."""
+        seq_len, num_heads, head_dim, page_size = 17, 2, 32, 16
+        q = torch.zeros(q_len, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.zeros(seq_len, 1, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.full_like(k, 0.017578125)
+        q_locs, q_lens = make_varlen_meta([q_len])
+        locs, lens = make_varlen_meta([seq_len])
+        k_cache, raw, block_table = _scatter_to_paged_cache(
+            k, v, locs, lens, 1, head_dim, page_size
+        )
+        common = {
+            "is_causal": False,
+            "b_seq_len_k": lens,
+            "max_input_len_k": seq_len,
+            "k_cache": k_cache,
+            "block_table": block_table,
+            "page_size": page_size,
+            "v_qdq": "nvfp4",
+        }
+        out_onread = attention(q, k, v, q_locs, q_lens, q_len, v_cache=raw, **common)
+        baked = raw.clone()
+        fake_quant_v_onwrite(
+            baked, block_table, locs, torch.tensor([16], device="cuda", dtype=torch.int32)
+        )
+        out_baked = attention(
+            q,
+            k,
+            v,
+            q_locs,
+            q_lens,
+            q_len,
+            v_cache=baked,
+            v_cache_quantized=True,
+            **common,
+        )
+        torch.testing.assert_close(out_baked, out_onread, rtol=1e-4, atol=1e-5)

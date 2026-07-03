@@ -81,7 +81,6 @@ def fp4_fake_quant_kernel(
     block_max = tl.max(x_abs, axis=2, keep_dims=True)
 
     block_max_quant = fp8_quantize_scale(block_max, global_scale_safe)
-    block_max_quant = tl.where(block_max_quant >= 1e-5, block_max_quant, 1.0)
 
     block_max_quant_broadcast = tl.broadcast_to(
         block_max_quant, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE)
