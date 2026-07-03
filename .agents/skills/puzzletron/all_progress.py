@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Progress report for the full Puzzletron pipeline (all 8 steps)."""
+"""Progress report for the full Puzzletron pipeline (all 8 steps).
+
+This script was auto-generated with Claude and is intended for experimental use only.
+"""
 
 import glob
 import re

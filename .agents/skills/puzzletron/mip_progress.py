@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Progress report for the Puzzletron MIP step."""
+"""Progress report for the Puzzletron MIP step.
+
+This script was auto-generated with Claude and is intended for experimental use only.
+"""
 
 import math
 import re
