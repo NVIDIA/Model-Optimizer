@@ -174,6 +174,7 @@ def _install_quant_sparse_attn(worker) -> None:
             "v_qdq_amax": v_qdq_amax,
         }
         module.impl = new_impl
+        module._query_quant_in_kernel = True
         module._value_quant_in_kernel = True
     worker.model_runner.cascade_attn_enabled = False
     print(f"[ModelOpt] Installed NVFP4 quant+sparse attention on {len(plans)} layers")

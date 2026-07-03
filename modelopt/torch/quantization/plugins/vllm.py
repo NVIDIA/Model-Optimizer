@@ -166,7 +166,7 @@ def _get_device_dtype(module: torch.nn.Module) -> tuple:
     # kv_cache is a list of tensors (v0) or a single tensor (v1).
     kv = getattr(module, "kv_cache", None)
     if kv is not None:
-        t0 = kv[0] if isinstance(kv, (list, tuple)) and len(kv) > 0 else kv
+        t0 = kv[0] if isinstance(kv, list | tuple) and len(kv) > 0 else kv
         if isinstance(t0, torch.Tensor) and t0.numel() > 0:
             spec = getattr(module, "kv_cache_dtype", t0.dtype)
             out_dtype = (
@@ -523,7 +523,8 @@ class _QuantVLLMAttention(QuantModule):
         self.parallel_state = create_parallel_state()
 
     def forward(self, query, key, value, *args, **kwargs):
-        query = self.q_bmm_quantizer(query)
+        if not getattr(self, "_query_quant_in_kernel", False):
+            query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
         if not getattr(self, "_value_quant_in_kernel", False):
             value = self.v_bmm_quantizer(value)

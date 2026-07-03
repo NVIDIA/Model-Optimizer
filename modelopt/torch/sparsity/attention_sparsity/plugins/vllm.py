@@ -285,6 +285,10 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
 
         # Prepare metadata for our kernel
         q = query[:num_actual_tokens].contiguous()
+        if getattr(layer, "_query_quant_in_kernel", False):
+            valid_q = torch.arange(q.shape[0], device=q.device) < cu_seqlens_q[-1]
+            q = q.masked_fill(~valid_q[:, None, None], 0)
+            q = layer.q_bmm_quantizer(q)
         # Dummy K/V for paged mode: not used by the kernel (KV are read from
         # k_cache/v_cache via block_table), but shape[1] must be num_kv_heads
         # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).

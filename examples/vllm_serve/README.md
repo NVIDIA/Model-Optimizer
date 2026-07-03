@@ -128,10 +128,11 @@ Use the same launcher with the compact worker and FlashAttention selected explic
 ```bash
 python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
   --attention-backend FLASH_ATTN \
+  --no-enable-prefix-caching \
   --worker-cls quant_sparse_attn_worker.QuantSparseAttnWorker
 ```
 
-This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant recipe to Q/K/P/V. Q is dynamic; uncalibrated K/V use global scale 1.0, P uses amax 1.0, and scalar calibrated K/V amax values are preserved. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
+This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant recipe to Q/K/P/V. Q is dynamic, K/V use global scale 1.0, and P uses amax 1.0; calibrated attention amax restore is not part of this fixed path. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
 
 K is QDQ before its cache write, while V is written pristine. Complete 16-token V groups are finalized once in cache; an incomplete tail remains pristine and is QDQ on read. P@V therefore sees uniform fakequant values without re-quantizing the tail.
 
