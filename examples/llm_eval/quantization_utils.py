@@ -49,6 +49,29 @@ CUSTOM_CONFIG = {
         ],
         "algorithm": "max",
     },
+    "NVFP4_W4A4_ROTATE": {
+        "quant_cfg": [
+            *mtq.config._base_disable_all,
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {**mtq.config._nvfp4_cfg, "rotate": {"enable": True}},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*input_quantizer",
+                "cfg": {**mtq.config._nvfp4_cfg, "rotate": {"enable": True}},
+                "enable": True,
+            },
+            *mtq.config._default_disabled_quantizer_cfg,
+            # TODO: The embedding token/input path creates this rotate issue; replace with a better fix.
+            {
+                "quantizer_name": "*embed_tokens*quantizer",
+                "cfg": {"rotate": False},
+                "enable": False,
+            },
+        ],
+        "algorithm": "max",
+    },
 }
 
 
