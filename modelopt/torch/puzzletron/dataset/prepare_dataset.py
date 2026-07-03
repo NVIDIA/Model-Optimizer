@@ -63,7 +63,7 @@ def process_and_save_dataset(
     ds_dict = datasets.DatasetDict(
         {
             "train": ds_split["train"],
-            "valid": ds_split["test"],
+            "validation": ds_split["test"],
         }
     )
     # Save locally

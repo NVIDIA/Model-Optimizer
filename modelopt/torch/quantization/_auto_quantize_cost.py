@@ -16,7 +16,7 @@
 """Cost models for AutoQuantize effective-bits accounting."""
 
 import fnmatch
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Sequence
 from typing import Any, Final
 
 import regex as re
@@ -155,19 +155,6 @@ class AutoQuantizeCostModel:
         ):
             return 0.0
         return 1.0
-
-    def total_weight_size(
-        self,
-        named_modules: Iterable[tuple[str, nn.Module]],
-        is_auto_quantize_module: Callable[[nn.Module], bool],
-        cost_constraints: dict[str, Any],
-    ) -> float:
-        """Return the cost denominator for the effective-bits constraint."""
-        return sum(
-            _get_module_weight_numel(module) * self.module_cost_weight([name], cost_constraints)
-            for name, module in named_modules
-            if is_auto_quantize_module(module)
-        )
 
 
 class WeightCostModel(AutoQuantizeCostModel):

@@ -131,17 +131,18 @@ def test_training_loss_is_kd_and_skips_ce(tmp_path):
     assert loss.item() == pytest.approx(expected_kd_loss.item())
 
 
-def test_eval_loss_is_ce_and_kd_is_secondary_metric(tmp_path):
+def test_eval_loss_is_kd_and_ce_is_secondary_metric(tmp_path):
     student, teacher = _make_models()
     batch = _make_batch()
     expected_ce_loss = student(**batch).loss.detach()
+    expected_kd_loss = _manual_kd_loss(student, teacher, batch)
     trainer = _make_trainer(tmp_path, student, teacher)
 
     metrics = trainer.evaluate()
 
-    assert metrics["eval_loss"] == pytest.approx(expected_ce_loss.item())
-    assert "eval_kd_loss" in metrics
-    assert metrics["eval_kd_loss"] != pytest.approx(metrics["eval_loss"])
+    assert metrics["eval_loss"] == pytest.approx(expected_kd_loss.item())
+    assert metrics["eval_ce_loss"] == pytest.approx(expected_ce_loss.item())
+    assert "eval_kd_loss" not in metrics
 
 
 def test_standard_kd_loss_without_labels_uses_mean(tmp_path):

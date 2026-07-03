@@ -21,7 +21,6 @@ from torch.autograd import Function
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.backends.utils import fp4_compatible
-from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import NVFP4QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils import reduce_amax
 
@@ -202,6 +201,9 @@ def _nvfp4_availability_check(module, input, args, kwargs):
     # Check hardware support
     if not torch.cuda.is_available() or not fp4_compatible():
         return False
+
+    # Import lazily because backend registration can run while quant_linear is initializing.
+    from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 
     # Check module type
     if not isinstance(module, RealQuantLinear):

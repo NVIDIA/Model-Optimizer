@@ -8,8 +8,21 @@ dependencies = [
     "pyyaml",
 ]
 
+[project.scripts]
+modelopt-launcher = "modelopt_launcher.launch:main"
+
 [tool.setuptools]
-py-modules = []
+packages = ["modelopt_launcher"]
+
+[tool.setuptools.package-dir]
+modelopt_launcher = "."
+
+[tool.setuptools.package-data]
+modelopt_launcher = [
+    "common/**/*",
+    "examples/**/*.yaml",
+    "examples/**/*.jinja",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

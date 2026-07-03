@@ -261,6 +261,22 @@ class _Partition:
                 flush=True,
             )
 
+    def _encode_docs(self, encoder: "_Encoder", lines):
+        """Tokenize ``lines``, forking worker processes only when ``workers > 1``.
+
+        ``multiprocessing.Pool`` always ``fork()``s, even for a single worker. Forking a
+        process that has already initialized a CUDA context / many native threads (e.g. when
+        this is called in-process after GPU work) is unsafe and can segfault the children.
+        The single-worker path avoids the fork entirely by tokenizing inline in this process.
+
+        Returns ``(pool, encoded_docs)``; ``pool`` is ``None`` in the inline case.
+        """
+        if self.workers == 1:
+            encoder.initializer()
+            return None, map(encoder.encode, lines)
+        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
+        return pool, pool.imap(encoder.encode, lines, 32)
+
     def process_json_file(
         self, input_file_name: str | Path, output_dir: str | Path, encoder: _Encoder
     ) -> tuple[int, list[str]]:
@@ -275,8 +291,7 @@ class _Partition:
         else:
             fin = open(input_path, encoding="utf-8")
 
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
-        encoded_docs = pool.imap(encoder.encode, fin, 32)
+        pool, encoded_docs = self._encode_docs(encoder, fin)
 
         output_bin_files = {}
         output_idx_files = {}
@@ -308,6 +323,9 @@ class _Partition:
         self._print_processing_stats(i, total_doc_len, total_enc_len, start_time, force_print=True)
 
         fin.close()
+        if pool is not None:
+            pool.close()
+            pool.join()
         for key in builders:
             builders[key].finalize(output_idx_files[key])
 
@@ -382,8 +400,7 @@ class _Partition:
             print(f"\t[SKIP] Output files for {dataset_name} {config}/{split} already exist")
             return 0, prefixes
 
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
-        encoded_docs = pool.imap(encoder.encode, self._iter_hf_as_json(ds), 32)
+        pool, encoded_docs = self._encode_docs(encoder, self._iter_hf_as_json(ds))
 
         start_time = time.time()
         total_doc_len, total_enc_len, final_enc_len = 0, 0, 0
@@ -401,8 +418,9 @@ class _Partition:
                 i, total_doc_len, total_enc_len, start_time, force_print=True
             )
 
-        pool.close()
-        pool.join()
+        if pool is not None:
+            pool.close()
+            pool.join()
         for key in builders:
             builders[key].finalize(output_idx_files[key])
 

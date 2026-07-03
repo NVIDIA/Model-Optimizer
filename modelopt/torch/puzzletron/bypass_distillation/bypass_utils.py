@@ -370,7 +370,7 @@ def expected_bypass_runs(cfg: DictConfig) -> list[dict[str, Any]]:
     """Return expected run metadata for the current bypass config or sweep."""
     runs: list[dict[str, Any]] = []
     configs_list = cfg.bypass.get("configs", None)
-    overrides = configs_list if configs_list else [None]
+    overrides = configs_list or [None]
 
     for override in overrides:
         run_cfg = OmegaConf.create(

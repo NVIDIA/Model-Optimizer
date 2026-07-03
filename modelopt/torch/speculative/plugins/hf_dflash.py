@@ -1,5 +1,26 @@
+# Adapted from https://github.com/sgl-project/SpecForge/blob/8ea5ca6/specforge/core/dflash.py
+# Copyright (c) 2025 sgl-project
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -72,6 +93,55 @@ from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_
 logger = logging.getLogger(__name__)
 
 __all__ = ["HFDFlashModel"]
+
+
+def _dpace_position_weights(
+    confidences: torch.Tensor, alpha: float, valid_mask: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Compute detached D-PACE per-position weights from draft confidences.
+
+    Derived from D-PACE (arXiv:2605.18810). The paper factorizes the per-position
+    weight (Fig. 2 / Eq. 8) into a *cumulative confidence* times a *continuation
+    value*, which is equivalently the suffix sum of the cumulative confidences::
+
+        C_j = prod_{i<=j} q~_i                 # cumulative confidence (Eq. 8)
+        w_j = sum_{m>=j} C_m                    # = C_j * continuation value f~_j
+
+    Each confidence is asymmetrically smoothed toward 1 (Eq. 7)::
+
+        q~_i = (1 - alpha) * q_i + alpha,   alpha in (0, 1],
+
+    so the floor ``q~_i >= alpha`` keeps every cumulative product (hence every
+    weight) strictly positive. We evaluate the suffix sum from its definition as
+    ``total - exclusive_prefix_sum`` of ``C`` rather than reversing the tensor.
+    Positions with ``valid_mask == 0`` are multiplicative no-ops in ``C`` and
+    contribute nothing to the sum, matching the per-token loss mask. Weights are
+    detached (Eq. 9): they reweight the cross-entropy without adding gradient.
+
+    Args:
+        confidences: ``[..., L]`` draft confidence ``q_i = exp(-CE_i)`` per position.
+        alpha: smoothing factor in (0, 1]; raises if outside that range.
+        valid_mask: optional ``[..., L]`` 0/1 mask; ``None`` treats all positions valid.
+
+    Returns:
+        Detached weights with the same shape and dtype as ``confidences``.
+    """
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError(f"dflash_dpace_alpha must be in (0, 1], got {alpha}")
+
+    with torch.no_grad():
+        smoothed = alpha + (1.0 - alpha) * confidences.float()  # Eq. 7
+        if valid_mask is not None:
+            keep = valid_mask.to(torch.bool)
+            smoothed = torch.where(keep, smoothed, torch.ones_like(smoothed))
+        cum_conf = torch.cumprod(smoothed, dim=-1)  # Eq. 8 cumulative confidence C_j
+        if valid_mask is not None:
+            cum_conf = cum_conf * keep.to(cum_conf.dtype)
+        # Suffix sum w_j = sum_{m>=j} C_m, written as total minus the exclusive
+        # prefix sum so no axis reversal is needed (Eq. 8).
+        inclusive = torch.cumsum(cum_conf, dim=-1)
+        weights = inclusive[..., -1:] - inclusive + cum_conf
+        return weights.to(dtype=confidences.dtype)
 
 
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -199,7 +269,9 @@ class HFDFlashModel(DFlashModel):
 
         self._find_base_model_parts()
 
-        self.dflash_module = DFlashModule(self.dflash_config)
+        # Factory hook: subclasses (e.g. Domino) override to build an augmented
+        # draft module while reusing all of DFlash's modify() setup.
+        self.dflash_module = self._build_draft_module(self.dflash_config)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
         if self.dflash_offline:
@@ -215,6 +287,10 @@ class HFDFlashModel(DFlashModel):
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
+
+    def _build_draft_module(self, dflash_config):
+        """Build the draft module. Subclasses override to use an augmented module."""
+        return DFlashModule(dflash_config)
 
     def get_exporter(self):
         """Get the exporter for the DFlash draft model."""
@@ -368,14 +444,40 @@ class HFDFlashModel(DFlashModel):
 
         binary_eval_mask = weight_mask.view(-1)
 
-        # Optional loss decay
-        if self.dflash_loss_decay_factor > 0:
+        flat_logits = logits.view(-1, logits.size(-1))
+        flat_targets = target_ids.view(-1)
+
+        # Non-KD loss is per-token cross-entropy; compute it once (grad enabled) so the
+        # D-PACE confidences below can reuse it instead of a second CE pass. The KD path
+        # (base_logits is not None) optimizes KL, so its confidences need a dedicated
+        # no_grad CE pass.
+        loss_per_token = None
+        if base_logits is None:
+            loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+
+        # Block-position loss weighting: dynamic D-PACE weights or static exponential decay.
+        if self.dflash_loss_objective == "dpace" and block_size > 1:
+            # Draft confidence q_i = exp(-CE) on the target-selected token, over the
+            # predicted positions (slot 0 is the given anchor, already masked above).
+            # Weights are detached (paper Eq.9), so this adds the documented ~2.3%
+            # training overhead without altering the cross-entropy gradient.
+            with torch.no_grad():
+                conf_ce = (
+                    loss_per_token.detach()
+                    if loss_per_token is not None
+                    else F.cross_entropy(flat_logits, flat_targets, reduction="none")
+                ).view(bsz, n_blocks, block_size)
+                confidences = torch.exp(-conf_ce[..., 1:].float())
+                dpace = torch.ones_like(weight_mask)
+                dpace[..., 1:] = _dpace_position_weights(
+                    confidences, self.dflash_dpace_alpha, valid_mask=weight_mask[..., 1:]
+                )
+            weight_mask = weight_mask * dpace
+        elif self.dflash_loss_decay_factor > 0:
             k = torch.arange(block_size, device=device).view(1, 1, -1)
             decay = torch.exp(-(k - 1).clamp(min=0).float() / self.dflash_loss_decay_factor)
             weight_mask = weight_mask * decay
 
-        flat_logits = logits.view(-1, logits.size(-1))
-        flat_targets = target_ids.view(-1)
         flat_weights = weight_mask.view(-1)
         valid_count = flat_weights.sum() + 1e-6
 
@@ -394,7 +496,6 @@ class HFDFlashModel(DFlashModel):
                 kd_loss = -(target_soft * draft_logsoft).sum(dim=-1)
                 loss = (kd_loss * flat_weights).sum() / valid_count
             else:
-                loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
                 loss = (loss_per_token * flat_weights).sum() / valid_count
 
             with torch.no_grad():

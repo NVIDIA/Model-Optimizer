@@ -473,8 +473,8 @@ def temporary_set_config_value(config, field, value):
 def _patch_dynamic_cache_compatibility() -> None:
     """Monkey-patch DynamicCache for Kimi-K2 compatibility."""
     if not hasattr(DynamicCache, "get_usable_length"):
-        DynamicCache.get_usable_length = (
-            lambda self, seq_len, layer_idx=0: DynamicCache.get_seq_length(self, layer_idx)
+        DynamicCache.get_usable_length = lambda self, seq_len, layer_idx=0: (
+            DynamicCache.get_seq_length(self, layer_idx)
         )
 
 

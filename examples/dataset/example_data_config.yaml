@@ -5,12 +5,6 @@ outputs:
       - name: "sharegpt"
         splits:
           all: 0
-      - name: "ultrachat"
-        # UltraChat's loader yields prompt-only turns (no assistant completions),
-        # which makes answer_only_loss=true mask nothing. Use daring-anteater below.
-        splits:
-          train_gen: 0
-          train_sft: 0
       - name: "mtbench"
         splits:
           all: 0

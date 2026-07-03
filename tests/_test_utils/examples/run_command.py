@@ -62,19 +62,14 @@ def run_command_in_background(
     return process
 
 
-def run_llm_ptq_command(*, model: str, quant: str, **kwargs):
+def run_hf_ptq_command(*, model: str, quant: str, vlm: bool = False, **kwargs):
     kwargs.update({"model": model, "quant": quant})
     kwargs.setdefault("tasks", "quant")
     kwargs.setdefault("calib", 16)
 
-    cmd_parts = extend_cmd_parts(["scripts/huggingface_example.sh", "--no-verbose"], **kwargs)
-    run_example_command(cmd_parts, "llm_ptq")
-
-
-def run_vlm_ptq_command(*, model: str, quant: str, **kwargs):
-    kwargs.update({"model": model, "quant": quant})
-    kwargs.setdefault("tasks", "quant")
-    kwargs.setdefault("calib", 16)
-
-    cmd_parts = extend_cmd_parts(["scripts/huggingface_example.sh"], **kwargs)
-    run_example_command(cmd_parts, "vlm_ptq")
+    cmd_parts = ["scripts/huggingface_example.sh", "--no-verbose"]
+    if vlm:
+        # VLM PTQ shares the hf_ptq entry point; --vlm runs the multimodal deploy smoke test.
+        cmd_parts.append("--vlm")
+    cmd_parts = extend_cmd_parts(cmd_parts, **kwargs)
+    run_example_command(cmd_parts, "hf_ptq")

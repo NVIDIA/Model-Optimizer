@@ -56,6 +56,13 @@ the validated runs are comparable:
 6. Judge-backed or simulator-backed tasks use the same judge/user model,
    endpoint class, prompt, and scoring config.
 7. The same accuracy metric and score field is used for both runs.
+8. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
+   full-precision (BF16) baseline. Many models ship *natively quantized* (e.g.
+   INT4 `W4A16` or block-wise FP8) with no BF16 release — a quant-to-quant
+   comparison against the released precision (e.g. INT4 vs NVFP4, as for
+   Kimi-K2.6) is still a valid result; just compare like-for-like, **state which
+   precision the baseline is**, and apply the gate relative to that baseline
+   rather than to an assumed BF16.
 
 If any item differs, either rerun with matched settings or label the result as
 not an apples-to-apples quantization comparison.

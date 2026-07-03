@@ -94,6 +94,11 @@ copybutton_selector = ", ".join(
 exclude_patterns = []
 templates_path = ["_templates"]
 
+# Suppress ambiguous cross-reference warnings that arise because EMAConfig and
+# QuantizerAttributeConfig both define a field named `type`.  Renaming would be
+# an API break; silencing the warning here is the least-invasive fix.
+suppress_warnings = ["ref.python"]
+
 
 # -- Options for HTML output -------------------------------------------------
 

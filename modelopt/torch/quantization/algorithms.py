@@ -80,6 +80,12 @@ _FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS = (
     "down_proj_input_quantizer",
     "down_proj_weight_quantizer",
 )
+_NON_GATED_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS = (
+    "up_proj_input_quantizer",
+    "up_proj_weight_quantizer",
+    "down_proj_input_quantizer",
+    "down_proj_weight_quantizer",
+)
 
 
 def _get_replay_quantizer_attr(attr_name: str) -> str:
@@ -97,7 +103,11 @@ def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
     For standard Linear-derived QuantModules, returns the canonical trio.
     """
     if _is_hf_quant_fused_experts_module(module):
-        return _FUSED_EXPERTS_QUANTIZER_ATTRS
+        try:
+            from .plugins.huggingface import _get_fused_experts_quantizer_attr_names
+        except ImportError:
+            return _FUSED_EXPERTS_QUANTIZER_ATTRS
+        return _get_fused_experts_quantizer_attr_names(module)
     return _STD_QUANTIZER_ATTRS
 
 
@@ -277,7 +287,7 @@ class QuantRecipeHparam(Hparam):
         cost_weight: float = 1.0,
     ) -> None:
         """Initializes Hparam with original value and choices."""
-        choices = sorted({*(choices if choices else []), QuantRecipe(quant_cfg=None)})
+        choices = sorted({*(choices or []), QuantRecipe(quant_cfg=None)})
         super().__init__(choices, original=choices[0])
 
         self.name = name
@@ -368,13 +378,14 @@ class QuantRecipeHparam(Hparam):
                 total_score += importance.cpu().item()
                 continue
 
-            if parallel_state.expert_model_parallel_group.is_initialized():
-                # TODO: Support expert model parallelism for score estimation
-                warnings.warn("AutoQuantize does not support expert model parallelism yet.")
             importance = importance.cpu()
             importance = DistributedProcessGroup.get_dist_syncd_obj(
                 importance,
-                [parallel_state.tensor_parallel_group, parallel_state.data_parallel_group],
+                [
+                    parallel_state.tensor_parallel_group,
+                    parallel_state.data_parallel_group,
+                    parallel_state.expert_model_parallel_group,
+                ],
                 sum,
             )
             total_score += importance.item()
@@ -398,13 +409,12 @@ class QuantRecipeHparam(Hparam):
                 cost += weight_size * recipe.compression
                 continue
 
-            if parallel_state.expert_model_parallel_group.is_initialized():
-                # TODO: Support expert model parallelism
-                warnings.warn("AutoQuantize does not support expert model parallelism yet.")
-
             weight_size = DistributedProcessGroup.get_dist_syncd_obj(
                 weight_size,
-                [parallel_state.tensor_parallel_group],
+                [
+                    parallel_state.tensor_parallel_group,
+                    parallel_state.expert_model_parallel_group,
+                ],
                 sum,
             )
 
@@ -456,6 +466,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
+        # NemotronH MoE experts in MCore naming (linear_fc1=gate+up fused, linear_fc2=down)
+        r"^(.*?\.mlp\.experts\.local_experts)\.\d+\.(linear_fc1|linear_fc2)$",
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
@@ -865,6 +877,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             for module in modules
         )
 
+    @staticmethod
+    def _get_total_weight_size_from_candidate_stats(candidate_stats):
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        total_weight_size = 0
+        for candidate_stat in candidate_stats.values():
+            no_quant_idx = candidate_stat["formats"].index(no_quant_recipe)
+            total_weight_size += candidate_stat["costs"][no_quant_idx]
+        return total_weight_size
+
     def _get_constraints_for_search(self, max_weight_size, lower_bound=None):
         constraints = {
             "weight_size_after_compression": (
@@ -895,9 +916,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         )
 
         compression = self._get_formatted_weight_compression_constraint()
-        total_weight_size = self._cost_model.total_weight_size(
-            self.model.named_modules(), self._is_auto_quantize_module, self.config["cost"]
+        assert self.candidate_stats, (
+            "candidate_stats must be populated by before_search() before run_search()"
         )
+        total_weight_size = self._get_total_weight_size_from_candidate_stats(self.candidate_stats)
         self.cost_denominator = total_weight_size
         max_weight_size = total_weight_size * compression
         if verbose:
@@ -918,12 +940,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         best_recipe = {}
         best_constraints, best_scores = 0, 0
         for name, best_hparam_recipe_info in best_recipe_info.items():
-            # Solvers could give different solutions for the same layer across DP/TP groups even though
-            # the scores and costs are the same. Lets make sure the same recipe is selected across DP/TP
+            # Solvers could give different solutions for the same layer across DP/TP/EP groups even though
+            # the scores and costs are the same. Lets make sure the same recipe is selected across DP/TP/EP
             _ps = self.model.get_submodule(name.split(".quant_recipe")[0]).parallel_state
             best_format = DistributedProcessGroup.get_dist_syncd_obj(
                 best_hparam_recipe_info["format"],
-                [_ps.data_parallel_group, _ps.tensor_parallel_group],
+                [
+                    _ps.data_parallel_group,
+                    _ps.tensor_parallel_group,
+                    _ps.expert_model_parallel_group,
+                ],
                 lambda a: a[0],
             )
 
@@ -1524,7 +1550,11 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         for pattern in _as_list(search_state.get("disabled_layers"))
     )
     per_module_entries: list[dict] = []
-    _per_module_attrs = (*_STD_QUANTIZER_ATTRS, *_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS)
+    _per_module_attrs = (
+        *_STD_QUANTIZER_ATTRS,
+        *_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
+        *_NON_GATED_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
+    )
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}
 

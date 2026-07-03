@@ -256,18 +256,7 @@ The plot shows how token accuracy changes with different compression rates. High
 
 ## Evaluation
 
-Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly.
-
-```bash
-python examples/llm_eval/lm_eval_hf.py \
-   --model hf \
-   --model_args pretrained=path/to/checkpoint,dtype=bfloat16,parallelize=True \
-   --tasks mmlu \
-   --num_fewshot 5 \
-   --batch_size 4
-```
-
-For a quick smoke test, add `--limit 10`.
+Evaluate AnyModel checkpoints using lm-eval. See the [LM-Eval-Harness section](../llm_eval/README.md#lm-eval-harness) in `examples/llm_eval/README.md` for full instructions, including multi-GPU and Slurm setup.
 
 > **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
 > see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
