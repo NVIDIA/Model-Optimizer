@@ -41,8 +41,9 @@ import triton.language as tl
 _apply_sparse_nm_to_qk_tile: Any = None
 _is_dense_region: Any = None
 _skip_softmax_decision: Any = None
-_p_qdq_fp8: Any = None
+_qdq_fp8: Any = None
 _p_qdq_nvfp4: Any = None
+_v_qdq_nvfp4: Any = None
 
 
 def _load_sparsity_helpers() -> None:
@@ -63,18 +64,20 @@ def _load_sparsity_helpers() -> None:
         _skip_softmax_decision = _skip
 
 
-def _load_p_qdq_helpers() -> None:
-    global _p_qdq_fp8, _p_qdq_nvfp4
-    if _p_qdq_fp8 is None:
-        from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4 as _nvfp4
+def _load_qdq_helpers() -> None:
+    global _qdq_fp8, _p_qdq_nvfp4, _v_qdq_nvfp4
+    if _qdq_fp8 is None:
+        from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4 as _p_nvfp4
+        from modelopt.torch.kernels.quantization.attention.v_qdq import _v_qdq_nvfp4 as _v_nvfp4
         from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _fp8
 
-        _p_qdq_fp8 = _fp8
-        _p_qdq_nvfp4 = _nvfp4
+        _qdq_fp8 = _fp8
+        _p_qdq_nvfp4 = _p_nvfp4
+        _v_qdq_nvfp4 = _v_nvfp4
 
 
-# Maps the public p_qdq option to the kernel's P_QDQ constexpr.
-_P_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
+# Maps public P/V QDQ options to kernel constexpr values.
+_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
 
 
 LOG2E: float = 1.44269504088896
@@ -263,6 +266,9 @@ def _attn_fwd(
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     P_QDQ: tl.constexpr = 0,  # Fake quant-dequant of softmax P: 0=off, 1=FP8 E4M3, 2=NVFP4
     p_qdq_scale=1.0,  # Per-tensor scale for softmax qdq (runtime scalar; amax/448 or amax/(6*448))
+    V_QDQ: tl.constexpr = 0,  # Fake quant-dequant of V: 0=off, 1=FP8 E4M3, 2=NVFP4
+    v_qdq_scale=1.0,
+    V_CACHE_QUANTIZED: tl.constexpr = False,  # complete block-16 groups are already QDQ
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
     Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
     MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
@@ -323,6 +329,7 @@ def _attn_fwd(
         if not IS_CAUSAL
         else tl.minimum(causal_offset + (tile_q + 1) * BLOCK_M, seq_len_kv)
     )
+    v_quantized_boundary = (seq_len_kv // 16) * 16
 
     # --- Main loop: iterate over KV tiles ---
     for kv_start in range(0, kv_bound, BLOCK_N):
@@ -404,7 +411,7 @@ def _attn_fwd(
             # row_sum keeps the unquantized p: the softmax denominator stays in
             # fp32 and only the quantized P is fed to BMM2.
             if P_QDQ == 1:
-                p = _p_qdq_fp8(p, p_qdq_scale)
+                p = _qdq_fp8(p, p_qdq_scale)
             elif P_QDQ == 2:
                 p = _p_qdq_nvfp4(p, p_qdq_scale, BLOCK_M, BLOCK_N)
 
@@ -435,6 +442,19 @@ def _attn_fwd(
                     mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                     other=0.0,
                 )
+            if V_QDQ != 0 and (
+                (not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_quantized_boundary)
+            ):
+                if V_QDQ == 1:
+                    v_qdq = _qdq_fp8(v.to(tl.float32), v_qdq_scale)
+                else:
+                    v_qdq = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_D)
+                v_qdq = v_qdq.to(v.dtype)
+                if V_CACHE_QUANTIZED:
+                    use_qdq = (kv_start + kv_pos) >= v_quantized_boundary
+                    v = tl.where(use_qdq[:, None], v_qdq, v)
+                else:
+                    v = v_qdq
             acc = tl.dot(p.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
@@ -833,6 +853,9 @@ class _Attention(torch.autograd.Function):
         measure_sparsity,
         p_qdq_mode,
         p_qdq_scale,
+        v_qdq_mode,
+        v_qdq_scale,
+        v_cache_quantized,
         k_cache,
         v_cache,
         block_table,
@@ -932,6 +955,9 @@ class _Attention(torch.autograd.Function):
             "SKIP_THRESHOLD_LOG2": skip_threshold_log2,
             "P_QDQ": p_qdq_mode,
             "p_qdq_scale": p_qdq_scale,
+            "V_QDQ": v_qdq_mode,
+            "v_qdq_scale": v_qdq_scale,
+            "V_CACHE_QUANTIZED": v_cache_quantized,
             "Sparsity_total": sparsity_total,
             "Sparsity_skipped": sparsity_skipped,
             "MEASURE_SPARSITY": do_measure,
@@ -1137,6 +1163,9 @@ class _Attention(torch.autograd.Function):
             None,  # measure_sparsity
             None,  # p_qdq_mode
             None,  # p_qdq_scale
+            None,  # v_qdq_mode
+            None,  # v_qdq_scale
+            None,  # v_cache_quantized
             None,  # k_cache
             None,  # v_cache
             None,  # block_table
@@ -1165,6 +1194,9 @@ def attention(
     measure_sparsity: bool = False,
     p_qdq: str | None = None,
     p_qdq_amax: float = 1.0,
+    v_qdq: str | None = None,
+    v_qdq_amax: float | None = None,
+    v_cache_quantized: bool = False,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1221,6 +1253,14 @@ def attention(
             and the global scale ``amax / (6 * 448)`` for NVFP4. A runtime
             scalar — user-set or calibrated values do not recompile the
             kernel. Values above amax saturate.
+        v_qdq: Fake quant-dequant of V before ``P @ V``. ``"fp8"`` uses a
+            per-tensor E4M3 scale; ``"nvfp4"`` uses signed E2M1 values with
+            one E4M3 scale per 16 keys. ``None`` disables V QDQ.
+        v_qdq_amax: Optional per-tensor V amax. ``None`` uses global scale 1;
+            otherwise converts to ``amax / 448`` (FP8) or ``amax / (6 * 448)``
+            (NVFP4).
+        v_cache_quantized: Complete block-16 groups in the paged V cache are
+            already QDQ; only the pristine partial group is QDQ on read.
         k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
             When provided, K/V are read from paged cache via block_table
             instead of from contiguous k/v tensors.
@@ -1244,12 +1284,12 @@ def attention(
     # permanently excluded from the cache key and later edits to them would
     # silently reuse stale compiled kernels from the on-disk cache.
     _load_sparsity_helpers()
-    _load_p_qdq_helpers()
-    if p_qdq not in _P_QDQ_MODES:
+    _load_qdq_helpers()
+    if p_qdq not in _QDQ_MODES:
         raise ValueError(
-            f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
+            f"p_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {p_qdq!r}"
         )
-    p_qdq_mode = _P_QDQ_MODES[p_qdq]
+    p_qdq_mode = _QDQ_MODES[p_qdq]
     # Convert the per-tensor amax to the kernel's scale convention
     # (``q = cast(p / scale) * scale``): FP8 uses ``amax / 448``; NVFP4 uses the
     # global scale ``amax / (6 * 448)``. amax=1 (the default, the theoretical
@@ -1259,6 +1299,20 @@ def attention(
         if not (math.isfinite(p_qdq_amax) and p_qdq_amax > 0):
             raise ValueError(f"p_qdq_amax must be a finite positive value, got {p_qdq_amax}")
         p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
+    if v_qdq not in _QDQ_MODES:
+        raise ValueError(
+            f"v_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {v_qdq!r}"
+        )
+    v_qdq_mode = _QDQ_MODES[v_qdq]
+    v_qdq_scale = 1.0
+    if v_qdq_mode and v_qdq_amax is not None:
+        if not (math.isfinite(v_qdq_amax) and v_qdq_amax > 0):
+            raise ValueError(f"v_qdq_amax must be a finite positive value, got {v_qdq_amax}")
+        v_qdq_scale = v_qdq_amax / 448.0 if v_qdq == "fp8" else v_qdq_amax / (6.0 * 448.0)
+    if v_cache_quantized and v_qdq != "nvfp4":
+        raise ValueError("v_cache_quantized requires v_qdq='nvfp4'")
+    if v_cache_quantized and any(x is None for x in (k_cache, v_cache, block_table)):
+        raise ValueError("v_cache_quantized requires a paged KV cache")
     sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
     return _Attention.apply(
         q,
@@ -1280,6 +1334,9 @@ def attention(
         measure_sparsity,
         p_qdq_mode,
         p_qdq_scale,
+        v_qdq_mode,
+        v_qdq_scale,
+        v_cache_quantized,
         k_cache,
         v_cache,
         block_table,
