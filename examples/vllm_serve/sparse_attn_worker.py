@@ -26,8 +26,8 @@ Configuration flows exclusively through the loaded checkpoint's
 checkpoint has no such block, the worker logs a message and passes through
 unchanged.
 
-Quantization combined with sparse attention is not handled by this worker
-and will land in a follow-up PR once the combined path is tested.
+This worker remains sparse-only; the compact quant+sparse path uses
+``quant_sparse_attn_worker.QuantSparseAttnWorker``.
 
 Usage:
     python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>
