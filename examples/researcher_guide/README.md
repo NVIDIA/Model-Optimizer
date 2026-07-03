@@ -7,6 +7,8 @@ ModelOpt workflows for that iterative research process.
 Current workflows include:
 
 - [Efficient model evaluation](#efficient-evaluation-with-lm-eval-harness) with smaller benchmark subsets.
+- [Downstream evaluation over time during distillation](#track-downstream-quality-over-time-during-distillation)
+  with validation checkpoints.
 - [Efficient data blend preparation](#prepare-token-budgeted-data-blends) for distillation experiments.
 
 The guide will grow as additional research workflows are documented. It complements the feature-specific
@@ -46,6 +48,55 @@ and should not be reported as final benchmark results.
 
 Add `--log_samples` for paired per-question analysis. When multiple GPUs are available, use data parallelism to
 split samples across model copies; see the [LM-Eval examples](../llm_eval/README.md) for commands.
+
+## Track downstream quality over time during distillation
+
+Validation KD and CE losses show whether the student is fitting the teacher and validation data, but they do not
+necessarily predict downstream accuracy. Export the live student at each validation interval and evaluate the
+resulting checkpoints to see when downstream quality improves, plateaus, or regresses.
+
+Use `--hf_validation_export_path` with `distill.py` as described in the
+[Megatron-Bridge distillation guide](../megatron_bridge/README.md#converting-to-hugging-face-format-optional).
+
+The export path contains one loadable Hugging Face checkpoint per validation iteration:
+
+```text
+hf_validation/
+├── iter_0000100/
+├── iter_0000200/
+└── iter_0000300/
+```
+
+Evaluate the teacher, pruned student, and each exported checkpoint. Follow the
+[LM-Eval Harness instructions](../llm_eval/README.md#lm-eval-harness) and use the
+[efficient evaluation workflow](#efficient-evaluation-with-lm-eval-harness) to choose limits.
+
+The following experiment pruned Qwen3-8B to 0.7x and distilled it on either Salesforce/wikitext
+(`wikitext-103-v1`) or the math and stem splits of nvidia/Nemotron-Post-Training-Dataset-v2 for 100 iterations,
+exporting every 20 iterations. MMLU used 25 samples per subject and MMLU-Pro used 50.
+
+| Model | Iteration | Validation KD | Validation CE | MMLU | MMLU-Pro |
+|-------|----------:|--------------:|--------------:|-----:|---------:|
+| Teacher: Qwen3-8B | - | - | - | 74.93% (full) | 58.62% (full) |
+| Pruned 0.7x student before distillation | 0 | - | - | 48.69% (full) | 23.09% (full) |
+| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 20 | 0.3031 | 2.6570 | 59.72% | 25.00% |
+| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 40 | 0.2935 | 2.6554 | 60.98% | 28.00% |
+| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 60 | 0.2696 | 2.6412 | 62.46% | 27.57% |
+| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 80 | 0.2479 | 2.6262 | 62.74% | 27.14% |
+| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 100 | 0.2343 | 2.6091 | 63.58% | 29.29% |
+| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 20 | 0.1919 | 1.0931 | 58.74% | 13.14% |
+| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 40 | 0.1731 | 1.0692 | 59.58% | 1.71% |
+| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 60 | 0.1510 | 1.0347 | 58.46% | 14.43% |
+| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 80 | 0.1343 | 1.0466 | 60.35% | 12.29% |
+| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 100 | 0.1342 | 1.0550 | 60.56% | 14.29% |
+
+Interesting observations include:
+
+- On WikiText, both validation losses decrease while MMLU and MMLU-Pro trend upward.
+- On Nemotron, KD loss decreases, but CE loss improves only through iteration 60 and then worsens. This may indicate
+  diminishing learning signal on the Nemotron validation data; distill longer to determine whether CE has plateaued.
+- Investigate the Nemotron iteration-40 MMLU-Pro outlier, which appears despite a stable MMLU score, by inspecting
+  saved samples.
 
 ## Prepare token-budgeted data blends
 
