@@ -25,8 +25,10 @@ pytest.importorskip("transformers")
 from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_params
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import _normalize_fused_experts_quantizer_name
 from modelopt.torch.quantization.model_calib import local_hessian_calibrate
 from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
@@ -335,6 +337,49 @@ class TestQuantFusedExperts:
             recovered_idx = converted._get_expert_idx_from_first_proj(weight_slice)
             assert recovered_idx == idx, f"Expected {idx}, got {recovered_idx}"
         self._cleanup_registry(expert_type)
+
+    def _make_rotated_fused_experts(self, monkeypatch):
+        monkeypatch.setattr(
+            tensor_quantizer_module,
+            "normalized_hadamard_transform",
+            lambda inputs, rotate_fp32=False, block_size=None: inputs,
+        )
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+        converted = QuantModuleRegistry.convert(model.moe.experts)
+        expert_quantizers = list(converted.gate_up_proj_weight_quantizers) + list(
+            converted.down_proj_weight_quantizers
+        )
+        for q in expert_quantizers:
+            q.set_from_attribute_config(
+                QuantizerAttributeConfig(num_bits=8, rotate={"enable": True})
+            )
+            q.amax = torch.tensor(6.0)
+        return converted, expert_quantizers, expert_type
+
+    def test_fold_weight_disables_per_expert_quantizers_and_rotation(self, monkeypatch):
+        converted, expert_quantizers, expert_type = self._make_rotated_fused_experts(monkeypatch)
+        try:
+            converted.fold_weight()
+            for q in expert_quantizers:
+                assert not q.is_enabled
+                assert not q.rotate_is_enabled
+                assert not hasattr(q, "_amax")
+        finally:
+            self._cleanup_registry(expert_type)
+
+    def test_fold_weight_keep_attrs_keeps_amax_disables_rotation(self, monkeypatch):
+        converted, expert_quantizers, expert_type = self._make_rotated_fused_experts(monkeypatch)
+        try:
+            converted.fold_weight(keep_attrs=True)
+            for q in expert_quantizers:
+                assert not q.is_enabled
+                assert not q.rotate_is_enabled
+                assert hasattr(q, "_amax")
+        finally:
+            self._cleanup_registry(expert_type)
 
 
 # ---------------------------------------------------------------------------

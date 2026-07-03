@@ -23,8 +23,10 @@ from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTe
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization import QuantModuleRegistry
+from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
 from modelopt.torch.quantization.nn import (
+    SequentialQuantizer,
     TensorQuantizer,
     register_quant_backend,
     unregister_quant_backend,
@@ -169,6 +171,171 @@ def test_tensor_quantizer_rotate_back_rejects_real_quant(monkeypatch):
 
     with pytest.raises(ValueError, match="rotate_back mode is only supported with fake_quant=True"):
         quantizer(torch.tensor([[1.0, 2.0]]))
+
+
+def test_tensor_quantizer_rotate_back_roundtrips_when_disabled(monkeypatch):
+    calls = []
+
+    def rotate_fn(inputs, rotate_fp32=False, block_size=None):
+        calls.append((rotate_fp32, block_size))
+        return inputs + 10
+
+    monkeypatch.setattr(tensor_quantizer_module, "normalized_hadamard_transform", rotate_fn)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(rotate={"enable": True, "mode": "rotate_back"}, enable=False)
+    )
+    inputs = torch.tensor([[1.0, 2.0]])
+
+    outputs = quantizer(inputs)
+
+    assert quantizer.rotate_back_is_enabled
+    # A disabled quantizer must still round-trip: forward rotate + rotate_back = no-op (+10 twice).
+    assert torch.equal(outputs, inputs + 20)
+    assert len(calls) == 2
+
+
+def test_tensor_quantizer_rotate_only_applies_once_when_disabled(monkeypatch):
+    calls = []
+
+    def rotate_fn(inputs, rotate_fp32=False, block_size=None):
+        calls.append((rotate_fp32, block_size))
+        return inputs + 10
+
+    monkeypatch.setattr(tensor_quantizer_module, "normalized_hadamard_transform", rotate_fn)
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(rotate={"enable": True}, enable=False))
+    inputs = torch.tensor([[1.0, 2.0]])
+
+    outputs = quantizer(inputs)
+
+    assert not quantizer.rotate_back_is_enabled
+    assert torch.equal(outputs, inputs + 10)
+    assert len(calls) == 1
+
+
+def test_disable_rotate_preserves_type():
+    # RotateConfig: enable off, other fields retained.
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(rotate={"enable": True, "mode": "rotate_back", "block_size": 8})
+    )
+    assert isinstance(quantizer._rotate, RotateConfig)
+    quantizer.disable_rotate()
+    assert isinstance(quantizer._rotate, RotateConfig)
+    assert quantizer._rotate.enable is False
+    assert quantizer._rotate.mode == "rotate_back"
+    assert quantizer._rotate.block_size == 8
+    assert not quantizer.rotate_is_enabled
+    quantizer.disable_rotate()  # idempotent
+    assert quantizer._rotate.enable is False
+
+    # Raw dict (old checkpoints).
+    quantizer._rotate = {"enable": True, "mode": "rotate", "block_size": 4}
+    quantizer.disable_rotate()
+    assert quantizer._rotate == {"enable": False, "mode": "rotate", "block_size": 4}
+
+    # Bool.
+    quantizer._rotate = True
+    quantizer.disable_rotate()
+    assert quantizer._rotate is False
+
+
+def test_sequential_quantizer_disable_rotate_delegates():
+    q0 = TensorQuantizer(QuantizerAttributeConfig(rotate={"enable": True}))
+    q1 = TensorQuantizer(QuantizerAttributeConfig(rotate={"enable": True, "mode": "rotate_back"}))
+    seq = SequentialQuantizer(q0, q1)
+
+    seq.disable_rotate()
+
+    assert not q0.rotate_is_enabled
+    assert not q1.rotate_is_enabled
+
+
+def _make_rotated_qlinear(monkeypatch, calls, rotate, backend_name):
+    def rotate_fn(inputs, rotate_fp32=False, block_size=None):
+        calls.append((rotate_fp32, block_size))
+        return inputs + 10
+
+    def backend(inputs, _tq):
+        return inputs * 2
+
+    monkeypatch.setattr(tensor_quantizer_module, "normalized_hadamard_transform", rotate_fn)
+    register_quant_backend(backend_name, backend)
+    qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3))
+    qlinear.input_quantizer.disable()
+    qlinear.output_quantizer.disable()
+    qlinear.weight_quantizer.set_from_attribute_config(
+        QuantizerAttributeConfig(rotate=rotate, backend=backend_name)
+    )
+    return qlinear
+
+
+def test_fold_weight_disables_rotation_no_double_rotate(monkeypatch):
+    calls = []
+    backend_name = "test_fold_rotate_backend"
+    qlinear = _make_rotated_qlinear(monkeypatch, calls, {"enable": True}, backend_name)
+    try:
+        qlinear.weight_quantizer.amax = torch.tensor(1.0)
+        weight0 = qlinear.weight.detach().clone()
+        x = torch.randn(2, 4)
+        out_before = qlinear(x)
+
+        qlinear.fold_weight()
+
+        # Rotation (+10) then backend (*2) is baked into the stored weight.
+        assert torch.allclose(qlinear.weight, (weight0 + 10) * 2)
+        assert not qlinear.weight_quantizer.is_enabled
+        assert not qlinear.weight_quantizer.rotate_is_enabled
+        assert not hasattr(qlinear.weight_quantizer, "_amax")
+
+        calls_after_fold = len(calls)
+        out_after = qlinear(x)
+        assert torch.allclose(out_after, out_before)  # fails pre-fix (weight re-rotated)
+        assert len(calls) == calls_after_fold  # no re-rotation on forward
+
+        # Second fold is a no-op: quantizer is disabled.
+        weight_after = qlinear.weight.detach().clone()
+        qlinear.fold_weight()
+        assert torch.allclose(qlinear.weight, weight_after)
+    finally:
+        unregister_quant_backend(backend_name)
+
+
+def test_fold_weight_keep_attrs_keeps_amax_disables_rotation(monkeypatch):
+    calls = []
+    backend_name = "test_fold_rotate_backend_keep"
+    qlinear = _make_rotated_qlinear(monkeypatch, calls, {"enable": True}, backend_name)
+    try:
+        qlinear.weight_quantizer.amax = torch.tensor(1.0)
+
+        qlinear.fold_weight(keep_attrs=True)
+
+        assert hasattr(qlinear.weight_quantizer, "_amax")
+        assert not qlinear.weight_quantizer.is_enabled
+        assert not qlinear.weight_quantizer.rotate_is_enabled
+    finally:
+        unregister_quant_backend(backend_name)
+
+
+def test_fold_weight_rotate_back_no_double_rotate(monkeypatch):
+    calls = []
+    backend_name = "test_fold_rotate_back_backend"
+    qlinear = _make_rotated_qlinear(
+        monkeypatch, calls, {"enable": True, "mode": "rotate_back"}, backend_name
+    )
+    try:
+        x = torch.randn(2, 4)
+        out_before = qlinear(x)
+
+        qlinear.fold_weight()
+
+        assert not qlinear.weight_quantizer.rotate_is_enabled
+        assert not qlinear.weight_quantizer.is_enabled
+
+        calls_after_fold = len(calls)
+        out_after = qlinear(x)
+        assert torch.allclose(out_after, out_before)  # fails pre-fix (weight re-rotated)
+        assert len(calls) == calls_after_fold  # no rotate calls added on forward
+    finally:
+        unregister_quant_backend(backend_name)
 
 
 WINT4INT8_CFG = {

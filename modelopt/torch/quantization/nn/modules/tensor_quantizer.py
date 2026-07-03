@@ -628,6 +628,19 @@ class TensorQuantizer(nn.Module):
             return self._rotate.get("mode", "rotate") == "rotate_back"
         return False
 
+    def disable_rotate(self):
+        """Disable rotation while preserving the ``_rotate`` field's type.
+
+        Idempotent. Used after folding a weight quantizer so the baked-in rotation is not
+        re-applied on subsequent forwards.
+        """
+        if isinstance(self._rotate, RotateConfig):
+            self._rotate = self._rotate.model_copy(update={"enable": False})
+        elif isinstance(self._rotate, dict):  # backward compat: old checkpoints stored a dict
+            self._rotate = dict(self._rotate, enable=False)
+        else:
+            self._rotate = False
+
     def _rotate_inputs(self, inputs):
         return normalized_hadamard_transform(
             inputs,
@@ -1118,6 +1131,10 @@ class TensorQuantizer(nn.Module):
             # TODO: This is a temporary solution and needs to be removed once megatron supports
             # non-homogeneous layers
             self._input_dtype = inputs.dtype if hasattr(inputs, "dtype") else None
+            # Even when quantization is disabled, honor rotate_back so a rotate/rotate_back
+            # pair stays a no-op roundtrip instead of leaving the tensor rotated.
+            if self.rotate_back_is_enabled:
+                inputs = self._rotate_inputs(inputs)
             return inputs
 
         if (
@@ -1530,6 +1547,7 @@ class SequentialQuantizer(nn.Sequential):
     _delegated_methods = [
         "reset_amax",
         "disable",
+        "disable_rotate",
         "enable",
         "load_calib_amax",
         "load_calib_bias",
