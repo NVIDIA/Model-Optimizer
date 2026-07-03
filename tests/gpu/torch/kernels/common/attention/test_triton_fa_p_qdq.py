@@ -83,14 +83,19 @@ def _qdq_nvfp4(p, global_scale=1.0):
 
     p: [..., n] with n % 16 == 0 and p >= 0. The per-block E4M3 scale is the
     kernel's ``fp8_quantize_scale(block_amax, global_scale)``, which equals
-    ``fp8_eager(block_amax / 6, amax=448 * global_scale)`` — so the FP8 scale
+    ``fp8_eager(block_amax / 6, amax=448 * global_scale)`` with the per-block scale clamped to the
+    E4M3 range ``[2**-9, 448]`` (in units of the global scale) BEFORE the cast — so the FP8 scale
     quantization is reused from modelopt rather than re-spelled here.
     """
     shape = p.shape
     g = p.reshape(*shape[:-1], shape[-1] // 16, 16)
     block_amax = g.amax(dim=-1, keepdim=True)  # p >= 0, so max == amax
-    scale = fp8_eager(block_amax / 6.0, torch.tensor(FP8_E4M3_MAX * global_scale, device=p.device))
-    scale = torch.where(scale == 0.0, torch.ones_like(scale), scale)
+    # Match the kernel's fp8_quantize_scale clamp: floor an underflowed block scale at the smallest
+    # E4M3 subnormal (2**-9) instead of letting it round to 0 (the canonical clamp; replaces the old
+    # ``scale == 0 -> 1.0`` guard). A no-op for non-underflow blocks, so existing conformance is
+    # unchanged; it only makes the reference match the kernel in the underflow band.
+    raw_scale = (block_amax / 6.0).clamp(2**-9 * global_scale, FP8_E4M3_MAX * global_scale)
+    scale = fp8_eager(raw_scale, torch.tensor(FP8_E4M3_MAX * global_scale, device=p.device))
     q = _fp4_round(g / scale) * scale
     return q.reshape(shape)
 

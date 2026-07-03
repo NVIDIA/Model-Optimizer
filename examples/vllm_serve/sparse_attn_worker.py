@@ -54,6 +54,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config impor
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     _build_sparse_kw,
     _clone_sparse_impl,
+    select_sparse_impl_cls,
 )
 
 
@@ -94,10 +95,27 @@ def _replace_attention_impl(worker):
             # Keep vLLM's original impl when the exported layer config does not
             # enable any sparse feature.
             continue
-        new_impl = _clone_sparse_impl(module.impl)
+        # Select the backend-correct sparse impl (FlashAttention vs FlashInfer) instead of
+        # defaulting to FlashAttention, and fail loud on an unsupported backend rather than
+        # installing a mismatched impl.
+        new_cls = select_sparse_impl_cls(module.impl)
+        if new_cls is None:
+            raise NotImplementedError(
+                f"{name}: attention backend {type(module.impl).__name__} is not supported by the "
+                "ModelOpt sparse kernel (need FlashAttention or FlashInfer)."
+            )
+        new_impl = _clone_sparse_impl(module.impl, new_cls)
         new_impl.sparse_kw = sparse_kw
         module.impl = new_impl
         patched += 1
+    if patched:
+        # Disable cascade so shared-prefix batches don't hit the impl's request-time cascade guard
+        # (the ModelOpt sparse kernel cannot consume cascade's split KV layout). Fail-loud at
+        # startup here is preferable to a per-request raise later.
+        runner = worker.model_runner
+        if getattr(runner, "cascade_attn_enabled", False):
+            runner.cascade_attn_enabled = False
+            print("[ModelOpt] Disabled vLLM cascade attention (incompatible with the sparse plan)")
     print(f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers")
 
 

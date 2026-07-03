@@ -56,6 +56,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+import torch
 from fakequant_worker import FakeQuantWorker, _fakequant_run_prolog_worker, quant_config
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
@@ -148,11 +149,22 @@ def _validate_global_runtime(worker) -> list[str]:
             f"{_NVFP4_GROUP_SIZE}"
         )
     model_config = getattr(config, "model_config", None)
-    if model_config is not None and not getattr(model_config, "enforce_eager", False):
-        reasons.append(
-            "enforce_eager is not set (CUDA-graph capture is not yet validated for the ModelOpt "
-            "attention path; launch with --enforce-eager)"
-        )
+    if model_config is not None:
+        if not getattr(model_config, "enforce_eager", False):
+            reasons.append(
+                "enforce_eager is not set (CUDA-graph capture is not yet validated for the ModelOpt "
+                "attention path; launch with --enforce-eager)"
+            )
+        # Validate the RESOLVED KV-cache dtype, not just the kv_cache_dtype string: with
+        # kv_cache_dtype="auto" the cache takes the model's compute dtype, so a string check alone
+        # would let an fp32 model's cache through the fp16/bf16 contract. (Explicit fp8* is still
+        # caught per-layer in _unsupported_attention_reasons.)
+        resolved_dtype = getattr(model_config, "dtype", None)
+        if resolved_dtype is not None and resolved_dtype not in (torch.float16, torch.bfloat16):
+            reasons.append(
+                f"resolved KV-cache/compute dtype {resolved_dtype} is not fp16/bf16 "
+                "(the on-write V bake and NVFP4 QDQ require a fp16/bf16 cache)"
+            )
     return reasons
 
 
@@ -335,8 +347,9 @@ def _attach_attention_quant_impl_swap(model, allowed_names) -> None:
     This attach is attention-ONLY: it converts each approved vLLM ``Attention`` in place to
     ``_QuantVLLMAttention`` (adding the ``q/k/v/p_bmm_quantizer`` sub-quantizers) and never touches
     any Linear/MoE module, so it composes cleanly with a realquant checkpoint. It then configures
-    the four BMM quantizers to dynamic block-16 NVFP4 via ``set_quantizer_by_cfg`` (deny-all first,
-    then enable+configure the targets) and applies the K/V global-scale-1.0 default via
+    the four BMM quantizers to dynamic block-16 NVFP4 via ``set_quantizer_by_cfg`` (reset the
+    ``*_bmm_quantizer`` set first, then enable+configure the targets) and applies the K/V
+    global-scale-1.0 default via
     ``post_restore_vllm_attentions``. ``_install_quant_sparse_attn`` must run AFTER this to read the
     quantizers and install ``ModelOptSparseAttentionImpl``.
 
@@ -366,7 +379,9 @@ def _attach_attention_quant_impl_swap(model, allowed_names) -> None:
     set_quantizer_by_cfg(
         model,
         [
-            {"quantizer_name": "*", "enable": False},
+            # Reset only the attention BMM quantizers (the ones this attach owns), not every
+            # TensorQuantizer in the model, before enabling the four as NVFP4.
+            {"quantizer_name": "*_bmm_quantizer", "enable": False},
             {"quantizer_name": "*q_bmm_quantizer", "cfg": _NVFP4_ATTN_CFG, "enable": True},
             {"quantizer_name": "*k_bmm_quantizer", "cfg": _NVFP4_ATTN_CFG, "enable": True},
             {"quantizer_name": "*v_bmm_quantizer", "cfg": _NVFP4_ATTN_CFG, "enable": True},
@@ -496,6 +511,16 @@ def _resolve_attn_quant_mode() -> str:
             "ATTN_QUANT_MODE=mtq requires a quant source (QUANT_CFG / KV_QUANT_CFG / "
             "MODELOPT_STATE_PATH / RECIPE_PATH); none set, which would serve un-quantized. "
             "Use ATTN_QUANT_MODE=impl_swap to configure NVFP4 attention without a checkpoint."
+        )
+    if mode == "mtq":
+        # De-scope note: the mtq path serves the checkpoint's exported attention recipe as-is. The
+        # preflight validates only the P/V (BMM2) operand format; Q/K (BMM1 pre-step) format is NOT
+        # enforced, so mtq does NOT guarantee the dynamic block-16 NVFP4 Q/K/P/V contract that
+        # impl_swap configures by construction. Prefer impl_swap for the enforced recipe.
+        print(
+            "[ModelOpt] WARNING: ATTN_QUANT_MODE=mtq serves the checkpoint's exported attention "
+            "recipe as-is and does NOT enforce the block-16 NVFP4 Q/K/P/V contract (Q/K format is "
+            "unvalidated). Use ATTN_QUANT_MODE=impl_swap for the enforced recipe."
         )
     return mode
 

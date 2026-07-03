@@ -65,28 +65,42 @@ for module_path in [
     except ImportError:
         continue
 
-try:
-    _has_attention_layers = importlib.util.find_spec("vllm.attention.layers") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_attention_layers = False
 
-if _has_attention_layers:  # vllm < 0.15.0
-    from vllm.attention.layers.cross_attention import CrossAttention
-    from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
-else:
-    try:
-        from vllm.model_executor.layers.attention.cross_attention import CrossAttention
-    except ImportError:
-        CrossAttention = None
-    try:
-        from vllm.model_executor.layers.attention.encoder_only_attention import EncoderOnlyAttention
-    except ImportError:
-        EncoderOnlyAttention = None
+# Optional attention classes (cross / encoder-only / MLA) live in different modules across vLLM
+# versions. Try each candidate path independently and guard every import, so a transitional layout
+# (namespace present but a submodule missing) cannot break the base plugin import or silently omit
+# a class from discovery.
+def _optional_attention_cls(class_name, module_paths):
+    for module_path in module_paths:
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError:
+            continue
+        cls = getattr(module, class_name, None)
+        if cls is not None:
+            return cls
+    return None
 
-try:
-    VllmMLAAttention = vllm_attention.MLAAttention
-except (AttributeError, ImportError):
-    VllmMLAAttention = None
+
+CrossAttention = _optional_attention_cls(
+    "CrossAttention",
+    (
+        "vllm.attention.layers.cross_attention",  # vllm < 0.15.0
+        "vllm.model_executor.layers.attention.cross_attention",
+    ),
+)
+EncoderOnlyAttention = _optional_attention_cls(
+    "EncoderOnlyAttention",
+    (
+        "vllm.attention.layers.encoder_only_attention",  # vllm < 0.15.0
+        "vllm.model_executor.layers.attention.encoder_only_attention",
+    ),
+)
+# MLA may live on the resolved base module or a separate path; search both rather than only the base.
+VllmMLAAttention = getattr(vllm_attention, "MLAAttention", None) or _optional_attention_cls(
+    "MLAAttention",
+    ("vllm.attention.layer", "vllm.model_executor.layers.attention", "vllm.attention"),
+)
 
 _ATTENTION_TYPES = tuple(
     t

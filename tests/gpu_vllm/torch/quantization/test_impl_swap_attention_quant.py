@@ -134,9 +134,10 @@ def _make_worker(
     block_size=16,
     hf_config=None,
     enforce_eager=True,
+    dtype=torch.bfloat16,
 ):
     # In real vLLM ``vllm_config.model_config`` and ``model_runner.model_config`` are the same object.
-    model_config = SimpleNamespace(hf_config=hf_config, enforce_eager=enforce_eager)
+    model_config = SimpleNamespace(hf_config=hf_config, enforce_eager=enforce_eager, dtype=dtype)
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
         cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching, block_size=block_size),
@@ -304,6 +305,10 @@ def test_unsupported_reasons_for_unrecognized_backend():
         ({"block_size": 24}, "multiple"),
         ({"block_size": 0}, "multiple"),
         ({"enforce_eager": False}, "enforce_eager"),
+        (
+            {"dtype": torch.float32},
+            "dtype",
+        ),  # resolved fp32 KV cache (e.g. via kv_cache_dtype=auto)
     ],
 )
 def test_validate_global_runtime_flags_unsupported(kwargs, needle):
