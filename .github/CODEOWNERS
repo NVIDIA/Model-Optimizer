@@ -59,6 +59,7 @@ modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 /examples/specdec_bench @NVIDIA/modelopt-examples-specdec_bench-codeowners
 /examples/speculative_decoding @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/torch_onnx @NVIDIA/modelopt-onnx-codeowners
+/examples/torch_trt @NVIDIA/modelopt-onnx-codeowners
 /examples/vllm_serve @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/windows @NVIDIA/modelopt-windows-codeowners
 
