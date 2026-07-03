@@ -530,7 +530,6 @@ def test_llama_nemotron(command):
     ],
     ids=idfn,
 )
-@pytest.mark.skip(reason="Medusa is not supported yet")
 def test_medusa(command):
     command.run()
 
@@ -556,6 +555,14 @@ def test_medusa(command):
         *ModelDeployerList(
             base_model="nvidia/Kimi-K2.5-NVFP4",
             model_id="nvidia/Kimi-K2.5-Thinking-Eagle3",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+            eagle3_one_model=False,
+        ),
+        *ModelDeployerList(
+            base_model="nvidia/Kimi-K2.6-NVFP4",
+            model_id="nvidia/Kimi-K2.6-Eagle3",
             backend=("trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
