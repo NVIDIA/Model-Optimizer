@@ -152,6 +152,7 @@ def get_mcore_gpt_model(
     moe_shared_expert_intermediate_size: int | None = None,
     moe_latent_size: int | None = None,
     num_moe_experts: int | None = None,
+    sequence_parallel: bool = False,
     # Experimental attention variant (e.g. "gated_delta_net" for Qwen3.5-style hybrid GatedDeltaNet
     # + gated full-attention layers). When set, the experimental block spec is used.
     experimental_attention_variant: str | None = None,
@@ -209,12 +210,18 @@ def get_mcore_gpt_model(
     def squared_relu(x):
         return torch.pow(F.relu(x), 2)
 
+    # ``moe_latent_size`` was added in newer MCore releases. Avoid passing the
+    # optional keyword when unused so this shared test helper also works with
+    # older TransformerConfig implementations (for example NeMo 25.11).
+    if moe_latent_size is not None:
+        config_kwargs["moe_latent_size"] = moe_latent_size
+
     config = config_cls(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         expert_model_parallel_size=expert_model_parallel_size,
         expert_tensor_parallel_size=expert_tensor_parallel_size,
-        sequence_parallel=False,
+        sequence_parallel=sequence_parallel,
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
@@ -234,7 +241,6 @@ def get_mcore_gpt_model(
         moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
-        moe_latent_size=moe_latent_size,
         moe_router_enable_expert_bias=True,
         moe_router_score_function="sigmoid",
         num_moe_experts=num_moe_experts,
