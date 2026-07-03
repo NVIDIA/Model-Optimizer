@@ -15,6 +15,8 @@
 
 """GPU tests for paged KV cache mode of the Triton flash attention kernel."""
 
+import inspect
+
 import pytest
 import torch
 from conftest import make_qkv, make_varlen_meta
@@ -23,13 +25,20 @@ from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNE
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 if TRITON_KERNEL_AVAILABLE:
-    from modelopt.torch.kernels.common.attention import attention
+    from modelopt.torch.kernels.common.attention import attention, triton_fa
     from modelopt.torch.kernels.quantization.attention.v_qdq import fake_quant_v_onwrite
 
 NATIVE_E4M3_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (8, 9)
 requires_native_e4m3 = pytest.mark.skipif(
     not NATIVE_E4M3_AVAILABLE, reason="Native E4M3 requires compute capability >= 8.9"
 )
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
+@pytest.mark.parametrize("loader", ["_load_paged_k_tile", "_load_paged_v_tile"])
+def test_paged_loaders_widen_page_ids_before_pointer_math(loader):
+    source = inspect.getsource(getattr(triton_fa, loader).fn)
+    assert "page_global = page_global.to(tl.int64)" in source
 
 
 # ---------------------------------------------------------------------------

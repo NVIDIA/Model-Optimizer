@@ -88,6 +88,7 @@ def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch
         assert quantizer.block_sizes[-1] == 16
     assert converted.k_bmm_quantizer._amax == 6.0 * 448.0
     assert converted.v_bmm_quantizer._amax == 6.0 * 448.0
+    assert converted._query_quant_in_kernel is True
     assert converted._value_quant_in_kernel is True
     assert isinstance(converted.impl, ModelOptSparseAttentionImpl)
     assert converted.impl.quant_kw == {

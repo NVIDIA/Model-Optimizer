@@ -15,6 +15,8 @@
 
 """GPU tests for the softmax quant-dequant (P_QDQ) feature of the Triton FA kernel."""
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 from conftest import make_qkv, make_varlen_meta, sdpa_reference
@@ -24,13 +26,26 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor, e2m1_
 from modelopt.torch.quantization.tensor_quant import fp8_eager
 
 if TRITON_KERNEL_AVAILABLE:
-    from modelopt.torch.kernels.common.attention import attention
+    from modelopt.torch.kernels.common.attention import attention, triton_fa
     from modelopt.torch.kernels.common.attention.triton_fa import LOG2E
 
 NATIVE_E4M3_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (8, 9)
 requires_native_e4m3 = pytest.mark.skipif(
     not NATIVE_E4M3_AVAILABLE, reason="Native E4M3 requires compute capability >= 8.9"
 )
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
+def test_v_qdq_rejects_autograd_before_kernel_launch(monkeypatch):
+    apply = Mock(side_effect=AssertionError("_Attention.apply reached"))
+    monkeypatch.setattr(triton_fa._Attention, "apply", apply)
+    q, k, v = (torch.zeros(1, 1, 16, requires_grad=True) for _ in range(3))
+    locs = torch.zeros(1, dtype=torch.int32)
+    lens = torch.ones(1, dtype=torch.int32)
+    with pytest.raises(NotImplementedError, match=r"v_qdq.*autograd"):
+        attention(q, k, v, locs, lens, 1, v_qdq="nvfp4")
+    apply.assert_not_called()
+
 
 # The kernel runs with a single pinned config under pytest (see _FWD_CONFIGS):
 # BLOCK_M=128, BLOCK_N=64. The tile-looped reference below relies on it.

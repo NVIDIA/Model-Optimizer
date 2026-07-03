@@ -109,6 +109,7 @@ def test_attention_setup_keeps_qkv_only_checkpoint_surface(monkeypatch, wrapper_
     for name in quantizer_names:
         getattr(attention, name).amax = torch.tensor(1.0)
     assert set(attention.state_dict()) == {f"{name}._amax" for name in quantizer_names}
+    assert not hasattr(attention, "_query_quant_in_kernel")
     assert not hasattr(attention, "_value_quant_in_kernel")
 
     attention.k_bmm_quantizer = _nvfp4_quantizer()
@@ -119,7 +120,7 @@ def test_attention_setup_keeps_qkv_only_checkpoint_surface(monkeypatch, wrapper_
     assert not hasattr(attention.v_bmm_quantizer, "_amax")
 
 
-def test_quant_vllm_attention_forward_skips_only_in_kernel_value_quantization():
+def test_quant_vllm_attention_forward_skips_only_in_kernel_qv_quantization():
     attention = _new_attention(_TestQuantVLLMAttention)
     attention.q_bmm_quantizer = Mock(side_effect=lambda inputs: inputs + 1)
     attention.k_bmm_quantizer = Mock(side_effect=lambda inputs: inputs + 2)
@@ -128,18 +129,20 @@ def test_quant_vllm_attention_forward_skips_only_in_kernel_value_quantization():
     key = torch.tensor(20)
     value = torch.tensor(30)
 
+    assert not hasattr(attention, "_query_quant_in_kernel")
     assert not hasattr(attention, "_value_quant_in_kernel")
     quantized = attention(query, key, value)
+    attention._query_quant_in_kernel = True
+    query_in_kernel = attention(query, key, value)
     attention._value_quant_in_kernel = True
-    in_kernel = attention(query, key, value)
+    qv_in_kernel = attention(query, key, value)
 
     assert quantized[:3] == (torch.tensor(11), torch.tensor(22), torch.tensor(33))
-    assert in_kernel[:3] == (torch.tensor(11), torch.tensor(22), value)
-    assert tuple(q.call_count for q in (attention.q_bmm_quantizer, attention.k_bmm_quantizer)) == (
-        2,
-        2,
-    )
-    assert attention.v_bmm_quantizer.call_count == 1
+    assert query_in_kernel[:3] == (query, torch.tensor(22), torch.tensor(33))
+    assert qv_in_kernel[:3] == (query, torch.tensor(22), value)
+    assert attention.q_bmm_quantizer.call_count == 1
+    assert attention.k_bmm_quantizer.call_count == 3
+    assert attention.v_bmm_quantizer.call_count == 2
 
 
 @pytest.mark.parametrize(

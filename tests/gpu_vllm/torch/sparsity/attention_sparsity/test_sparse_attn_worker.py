@@ -289,17 +289,29 @@ def test_quantized_decode_finalizes_v_then_calls_shared_paged_kernel(monkeypatch
         block_sizes={-1: 16},
         _amax=UnreadableAmax(),
     )
-    layer = SimpleNamespace(p_bmm_quantizer=quantizer, v_bmm_quantizer=quantizer)
+    q_inputs = []
+
+    def quantize_q(query):
+        q_inputs.append(query.clone())
+        return query + 1
+
+    layer = SimpleNamespace(
+        p_bmm_quantizer=quantizer,
+        q_bmm_quantizer=quantize_q,
+        v_bmm_quantizer=quantizer,
+        _query_quant_in_kernel=True,
+    )
     impl.quant_kw = {
         "p_qdq": "nvfp4",
         "p_qdq_amax": 1.0,
         "v_qdq": "nvfp4",
         "v_qdq_amax": 6.0 * 448.0,
     }
-    q = torch.zeros(2, impl.num_heads, impl.head_size, dtype=torch.float16)
+    q = torch.full((4, impl.num_heads, impl.head_size), 2.0, dtype=torch.float16)
+    q[2:] = 10_000
     kv_cache = torch.zeros(2, 4, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
     metadata = SimpleNamespace(
-        num_actual_tokens=2,
+        num_actual_tokens=q.shape[0],
         max_query_len=1,
         max_seq_len=34,
         query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
@@ -312,6 +324,7 @@ def test_quantized_decode_finalizes_v_then_calls_shared_paged_kernel(monkeypatch
         calls["finalize"] = (v_lo.clone(), v_hi.clone(), kwargs)
 
     def fake_attention(query, **kwargs):
+        calls["query"] = query.clone()
         calls["attention"] = kwargs
         return torch.ones_like(query)
 
@@ -332,6 +345,9 @@ def test_quantized_decode_finalizes_v_then_calls_shared_paged_kernel(monkeypatch
     assert calls["attention"]["p_qdq"] == "nvfp4"
     assert calls["attention"]["v_qdq"] == "nvfp4"
     assert calls["attention"]["v_cache_quantized"] is True
+    assert len(q_inputs) == 1 and q_inputs[0].shape[0] == q.shape[0]
+    torch.testing.assert_close(q_inputs[0][:2], q[:2])
+    assert torch.all(q_inputs[0][2:] == 0)
 
 
 def test_active_cascade_fails_loud():

@@ -141,6 +141,7 @@ def _load_paged_k_tile(
         mask=kv_valid,
         other=0,
     )
+    page_global = page_global.to(tl.int64)
 
     # Load K values: K_cache[page_global, offset_in_page, kv_head_idx, dim]
     # K^T layout [BLOCK_D, BLOCK_N] for Q @ K^T matmul
@@ -184,6 +185,7 @@ def _load_paged_v_tile(
         mask=kv_valid,
         other=0,
     )
+    page_global = page_global.to(tl.int64)
 
     # V layout [BLOCK_N, BLOCK_D]
     v_ptrs = (
@@ -1304,6 +1306,8 @@ def attention(
             f"v_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {v_qdq!r}"
         )
     v_qdq_mode = _QDQ_MODES[v_qdq]
+    if v_qdq_mode and any(t.requires_grad for t in (q, k, v)):
+        raise NotImplementedError("v_qdq is inference-only and does not support autograd")
     v_qdq_scale = 1.0
     if v_qdq_mode and v_qdq_amax is not None:
         if not (math.isfinite(v_qdq_amax) and v_qdq_amax > 0):
