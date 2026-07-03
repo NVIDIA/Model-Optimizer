@@ -231,7 +231,7 @@ def test_build_reverse_rules_orders_prefix_reorder_after_container():
     of the hub ``block_sparse_moe.experts.*``. Mixtral does not exercise this (no
     prefix reorder), so this reproduces it with a minimal two-renaming mapping.
     """
-    pytest.importorskip("transformers")
+    pytest.importorskip("transformers.core_model_loading")
     from transformers.core_model_loading import WeightRenaming
 
     # Forward (hub -> in-memory) renamings; ``reverse_transform`` flips them on save.
