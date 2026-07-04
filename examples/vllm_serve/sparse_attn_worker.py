@@ -15,11 +15,10 @@
 
 """Custom vLLM worker for sparse attention.
 
-``SparseAttnWorker``: Replaces ``FlashAttentionImpl`` with
-``ModelOptSparseAttentionImpl`` on each Attention module after model loading.
-The sparse impl uses the ModelOpt Triton kernel for sparse prefill launches.
-Decode-only launches and launches without active sparse work delegate back to
-vLLM FlashAttention.
+``SparseAttnWorker`` replaces the native FlashAttention or FlashInfer impl with
+the matching ModelOpt adapter on each Attention module after model loading.
+The sparse impl uses the ModelOpt Triton kernel for sparse prefill launches and
+delegates inactive launches to the selected native backend.
 
 Configuration flows exclusively through the loaded checkpoint's
 ``sparse_attention_config`` block (written by ModelOpt's HF export). If the
@@ -54,11 +53,12 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config impor
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     _build_sparse_kw,
     _clone_sparse_impl,
+    select_sparse_impl_cls,
 )
 
 
 def _replace_attention_impl(worker):
-    """Replace FlashAttentionImpl with ModelOptSparseAttentionImpl on all Attention layers.
+    """Install the backend-matched ModelOpt sparse impl on attention layers.
 
     The sole configuration source is the checkpoint's ``sparse_attention_config``
     metadata. No-op if the checkpoint has no such block.
@@ -80,7 +80,8 @@ def _replace_attention_impl(worker):
     if hasattr(model, "unwrap"):
         model = model.unwrap()
 
-    patched = 0
+    plans = []
+    errors = []
     for name, module in model.named_modules():
         if not isinstance(module, VLLMAttention):
             continue
@@ -94,11 +95,31 @@ def _replace_attention_impl(worker):
             # Keep vLLM's original impl when the exported layer config does not
             # enable any sparse feature.
             continue
-        new_impl = _clone_sparse_impl(module.impl)
+        new_impl_cls = select_sparse_impl_cls(module.impl)
+        if new_impl_cls is None:
+            errors.append(f"{name or '<root>'}: unsupported backend {type(module.impl).__name__}")
+            continue
+        try:
+            new_impl = _clone_sparse_impl(module.impl, new_impl_cls)
+        except (NotImplementedError, TypeError) as err:
+            errors.append(f"{name or '<root>'}: {err}")
+            continue
+        plans.append((module, new_impl, sparse_kw))
+
+    if errors:
+        raise NotImplementedError(
+            "Unsupported ModelOpt sparse attention plan:\n  - " + "\n  - ".join(errors)
+        )
+
+    installed = {}
+    for module, new_impl, sparse_kw in plans:
         new_impl.sparse_kw = sparse_kw
         module.impl = new_impl
-        patched += 1
-    print(f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers")
+        impl_name = type(new_impl).__name__
+        installed[impl_name] = installed.get(impl_name, 0) + 1
+    print(
+        f"[ModelOpt] Sparse attention: replaced impl on {len(plans)} attention layers: {installed}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +130,8 @@ def _replace_attention_impl(worker):
 class SparseAttnWorker(BaseWorker):
     """vLLM worker that uses the ModelOpt sparse attention backend.
 
-    Replaces FlashAttentionImpl with ModelOptSparseAttentionImpl on each
-    Attention module right after model loading — before any forward pass
-    (including determine_available_memory profiling).
+    Replaces FlashAttention or FlashInfer with its matching ModelOpt adapter on
+    each Attention module right after model loading, before any forward pass.
     """
 
     def load_model(self, *args, **kwargs) -> None:

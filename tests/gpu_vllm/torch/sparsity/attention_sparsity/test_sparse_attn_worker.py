@@ -15,19 +15,31 @@
 
 """Tests for sparse attention vLLM worker compatibility helpers."""
 
+import importlib.util
 import math
 from contextlib import nullcontext
+from itertools import accumulate
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+from vllm.v1.attention.backends.flashinfer import (
+    FlashInferBackend,
+    FlashInferImpl,
+    FlashInferMetadataBuilder,
+)
 
 from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as vllm_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     ModelOptSparseAttentionImpl,
     _build_sparse_kw,
     _clone_sparse_impl,
+    get_flashinfer_sparse_impl_cls,
+    patch_flashinfer_metadata_builder,
+    select_sparse_impl_cls,
 )
 
 
@@ -65,6 +77,420 @@ def test_clone_sparse_impl_rejects_non_none_sinks():
 
     with pytest.raises(NotImplementedError, match="sinks"):
         _clone_sparse_impl(old_impl)
+
+
+def _make_old_flashinfer_impl():
+    """Create a bare FlashInfer impl without requiring a live vLLM config."""
+    impl = object.__new__(FlashInferImpl)
+    impl.__dict__.update(
+        num_heads=2,
+        num_kv_heads=2,
+        head_size=64,
+        scale=0.125,
+        sinks=None,
+        alibi_slopes=None,
+        logits_soft_cap=None,
+        kv_cache_dtype="auto",
+    )
+    return impl
+
+
+def _make_flashinfer_impl(*, sparse=False, quantized=False):
+    impl = _clone_sparse_impl(_make_old_flashinfer_impl(), get_flashinfer_sparse_impl_cls())
+    impl.sparse_kw = {"sparsity_n": 2, "sparsity_m": 4} if sparse else {}
+    impl.quant_kw = {
+        "p_qdq": "nvfp4" if quantized else None,
+        "p_qdq_amax": 1.0,
+        "v_qdq": "nvfp4" if quantized else None,
+        "v_qdq_amax": 6.0 * 448.0 if quantized else None,
+    }
+    return impl
+
+
+def test_flashinfer_metadata_builder_patch_stashes_common_metadata(monkeypatch):
+    """The wrapper must bind the current vLLM signature without shifting arguments."""
+    calls = []
+
+    def fake_build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        calls.append((common_prefix_len, common_attn_metadata, fast_build))
+        return SimpleNamespace()
+
+    monkeypatch.setattr(FlashInferMetadataBuilder, "build", fake_build)
+    monkeypatch.setattr(vllm_plugin, "_FLASHINFER_PATCHED", False)
+    common = SimpleNamespace(
+        block_table_tensor=object(),
+        seq_lens=object(),
+        query_start_loc=object(),
+        num_actual_tokens=7,
+        max_query_len=3,
+        max_seq_len=11,
+        causal=False,
+    )
+
+    assert patch_flashinfer_metadata_builder() is True
+    patched_build = FlashInferMetadataBuilder.build
+    metadata = patched_build(object(), 5, common, fast_build=True)
+    assert calls == [(5, common, True)]
+    assert metadata._modelopt_block_table is common.block_table_tensor
+    assert metadata._modelopt_seq_lens is common.seq_lens
+    assert metadata._modelopt_query_start_loc is common.query_start_loc
+    assert metadata._modelopt_num_actual_tokens == 7
+    assert metadata._modelopt_max_query_len == 3
+    assert metadata._modelopt_max_seq_len == 11
+    assert metadata._modelopt_causal is False
+
+    assert patch_flashinfer_metadata_builder() is True
+    assert FlashInferMetadataBuilder.build is patched_build
+
+
+def test_select_and_clone_flashinfer_impl_preserves_runtime_state(monkeypatch):
+    monkeypatch.setattr(vllm_plugin, "_FLASHINFER_PATCHED", False)
+    monkeypatch.setattr(vllm_plugin, "_FLASHINFER_IMPL_CLS", None)
+    old_impl = _make_old_flashinfer_impl()
+    old_impl.future_attr = object()
+
+    new_cls = select_sparse_impl_cls(old_impl)
+    new_impl = _clone_sparse_impl(old_impl, new_cls)
+
+    assert new_cls is get_flashinfer_sparse_impl_cls()
+    assert isinstance(new_impl, FlashInferImpl)
+    assert type(new_impl).__name__ == "ModelOptSparseFlashInferImpl"
+    assert new_impl.future_attr is old_impl.future_attr
+    assert new_impl.__dict__.items() >= old_impl.__dict__.items()
+    if hasattr(FlashInferImpl, "do_kv_cache_update"):
+        assert type(new_impl).do_kv_cache_update is FlashInferImpl.do_kv_cache_update
+    assert select_sparse_impl_cls(new_impl) is None
+
+
+def _flashinfer_metadata(*, query_lens=(1, 1), seq_lens=(16, 34), max_query_len=None, mixed=False):
+    query_start_loc = list(accumulate(query_lens, initial=0))
+    max_query_len = max_query_len or max(query_lens)
+    metadata = SimpleNamespace(
+        use_cascade=False,
+        _modelopt_block_table=torch.zeros(len(seq_lens), 3, dtype=torch.int32),
+        _modelopt_seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        _modelopt_query_start_loc=torch.tensor(query_start_loc, dtype=torch.int32),
+        _modelopt_num_actual_tokens=sum(query_lens),
+        _modelopt_max_query_len=max_query_len,
+        _modelopt_max_seq_len=max(seq_lens),
+        _modelopt_causal=max_query_len > 1,
+        slot_mapping=torch.arange(sum(query_lens), dtype=torch.int64),
+    )
+    if mixed:
+        metadata.num_decodes = 1
+        metadata.num_prefills = len(query_lens) - 1
+        metadata.num_decode_tokens = query_lens[0]
+        metadata.num_prefill_tokens = sum(query_lens[1:])
+    return metadata
+
+
+def _flash_attention_metadata(q_len, kv_len):
+    return SimpleNamespace(
+        num_actual_tokens=q_len,
+        max_query_len=q_len,
+        max_seq_len=kv_len,
+        query_start_loc=torch.tensor([0, q_len], dtype=torch.int32),
+        seq_lens=torch.tensor([kv_len], dtype=torch.int32),
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+    )
+
+
+@pytest.mark.parametrize("layout", ["NHD", "HND"])
+def test_flashinfer_quantized_decode_preserves_cache_layout(monkeypatch, layout):
+    """Both FI layouts expose one logical cache shape with different strides."""
+    impl = _make_flashinfer_impl(quantized=True)
+    page_size, num_heads, head_dim = 16, 2, 64
+    if layout == "NHD":
+        kv_cache = torch.zeros(4, 2, page_size, num_heads, head_dim, dtype=torch.float16)
+    else:
+        physical = torch.zeros(4, 2, num_heads, page_size, head_dim, dtype=torch.float16)
+        kv_cache = physical.permute(0, 1, 3, 2, 4)
+    metadata = _flashinfer_metadata()
+    query = torch.zeros(4, num_heads, head_dim, dtype=torch.float16)
+    layer = SimpleNamespace(
+        _query_quant_in_kernel=True,
+        q_bmm_quantizer=lambda value: value,
+    )
+    calls = {}
+
+    def fake_finalize(value_cache, block_table, v_lo, v_hi, **kwargs):
+        calls["finalize"] = (value_cache, block_table, kwargs)
+
+    def fake_decode(query, key_cache, value_cache, block_table, seq_lens, **kwargs):
+        calls["decode"] = (key_cache, value_cache, block_table, seq_lens, kwargs)
+        return torch.ones_like(query)
+
+    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", fake_finalize)
+    monkeypatch.setattr(vllm_plugin, "triton_decode_attention", fake_decode)
+
+    output = torch.empty_like(query)
+    assert impl.forward(layer, query, query, query, kv_cache, metadata, output=output) is output
+
+    key_cache, value_cache, block_table, seq_lens, decode_kw = calls["decode"]
+    assert key_cache.shape == (4, page_size, num_heads, head_dim)
+    assert value_cache.shape == key_cache.shape
+    assert key_cache.stride() == kv_cache[:, 0].stride()
+    assert value_cache.stride() == kv_cache[:, 1].stride()
+    assert key_cache.data_ptr() == kv_cache[:, 0].data_ptr()
+    assert value_cache.data_ptr() == kv_cache[:, 1].data_ptr()
+    assert block_table is metadata._modelopt_block_table
+    assert seq_lens is metadata._modelopt_seq_lens
+    assert decode_kw["page_size"] == page_size
+    assert decode_kw["p_qdq"] == "nvfp4"
+    assert decode_kw["v_qdq"] == "nvfp4"
+    finalized_cache, finalized_table, finalize_kw = calls["finalize"]
+    assert finalized_cache.data_ptr() == value_cache.data_ptr()
+    assert finalized_table is block_table
+    assert finalize_kw["page_size"] == page_size
+
+
+def test_flashinfer_sparse_prefill_uses_shared_triton_kernel(monkeypatch):
+    """FlashInfer must route 2:4 prefill through the current ModelOpt kernel."""
+    impl = _make_flashinfer_impl(sparse=True)
+    page_size, num_heads, head_dim = 16, 2, 64
+    physical = torch.zeros(4, 2, num_heads, page_size, head_dim, dtype=torch.float16)
+    kv_cache = physical.permute(0, 1, 3, 2, 4)
+    metadata = _flashinfer_metadata(query_lens=(2, 2), max_query_len=4)
+    query = torch.zeros(4, num_heads, head_dim, dtype=torch.float16)
+    captured = {}
+
+    def fake_attention(query, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+    output = torch.empty_like(query)
+
+    assert (
+        impl.forward(SimpleNamespace(), query, query, query, kv_cache, metadata, output=output)
+        is output
+    )
+    assert captured["sparsity_n"] == 2
+    assert captured["sparsity_m"] == 4
+    assert captured["page_size"] == page_size
+    assert captured["k_cache"].stride() == kv_cache[:, 0].stride()
+    assert captured["v_cache"].stride() == kv_cache[:, 1].stride()
+    assert captured["block_table"] is metadata._modelopt_block_table
+    assert captured["b_seq_len_k"] is metadata._modelopt_seq_lens
+
+
+@pytest.mark.parametrize(("updates_in_forward", "expected_writes"), [(True, 1), (False, 0)])
+def test_flashinfer_legacy_forward_writes_kv_cache(
+    monkeypatch, updates_in_forward, expected_writes
+):
+    """vLLM releases where FlashInfer updates in forward must retain that write."""
+    impl = _make_flashinfer_impl(sparse=True)
+    impl.kv_sharing_target_layer_name = None
+    query = torch.zeros(4, 2, 64, dtype=torch.float16)
+    kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
+    metadata = _flashinfer_metadata(query_lens=(2, 2), max_query_len=4)
+    writes = []
+
+    monkeypatch.setattr(FlashInferBackend, "forward_includes_kv_cache_update", updates_in_forward)
+    monkeypatch.setattr(vllm_plugin, "_flashinfer_cache_write", lambda *args: writes.append(args))
+    monkeypatch.setattr(
+        vllm_plugin, "triton_attention", lambda query, **kwargs: torch.zeros_like(query)
+    )
+
+    layer = SimpleNamespace()
+    impl.forward(layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query))
+
+    assert len(writes) == expected_writes
+    if expected_writes:
+        assert writes == [(layer, query, query, kv_cache, metadata, impl)]
+
+
+def test_flashinfer_q_only_transform_does_not_fallback(monkeypatch):
+    """Withheld Q QDQ must run even when sparse/P/V transforms are inactive."""
+    impl = _make_flashinfer_impl()
+    query = torch.zeros(4, 2, 64, dtype=torch.float16)
+    kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
+    metadata = _flashinfer_metadata(query_lens=(2, 2), max_query_len=4)
+    captured = {}
+    layer = SimpleNamespace(
+        _query_quant_in_kernel=True,
+        q_bmm_quantizer=lambda value: value + 1,
+    )
+
+    monkeypatch.setattr(
+        FlashInferImpl,
+        "forward",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("native fallback")),
+    )
+
+    def fake_attention(query, **kwargs):
+        captured["query"] = query
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+
+    impl.forward(layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query))
+
+    assert torch.all(captured["query"] == 1)
+
+
+def test_flashinfer_legacy_inactive_launch_writes_only_in_native_fallback(monkeypatch):
+    impl = _make_flashinfer_impl(sparse=True)
+    impl.kv_sharing_target_layer_name = None
+    query = torch.zeros(1, 2, 64, dtype=torch.float16)
+    kv_cache = torch.zeros(1, 2, 16, 2, 64, dtype=torch.float16)
+    metadata = _flashinfer_metadata(query_lens=(1,), seq_lens=(16,))
+    manual_writes = []
+    native_calls = []
+
+    monkeypatch.setattr(FlashInferBackend, "forward_includes_kv_cache_update", True)
+    monkeypatch.setattr(
+        vllm_plugin, "_flashinfer_cache_write", lambda *args: manual_writes.append(args)
+    )
+    monkeypatch.setattr(
+        FlashInferImpl,
+        "forward",
+        lambda *args, **kwargs: native_calls.append(True) or kwargs.get("output", args[7]),
+    )
+
+    impl.forward(
+        SimpleNamespace(), query, query, query, kv_cache, metadata, output=torch.empty_like(query)
+    )
+
+    assert manual_writes == []
+    assert native_calls == [True]
+
+
+@pytest.mark.parametrize("quantized", [False, True], ids=["sparse-only", "quantized"])
+def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized):
+    prefill_tokens = 17
+    impl = _make_flashinfer_impl(sparse=True, quantized=quantized)
+    query = torch.zeros(1 + prefill_tokens, 2, 64, dtype=torch.float16)
+    kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
+    metadata = _flashinfer_metadata(query_lens=(1, prefill_tokens), mixed=True)
+    layer = SimpleNamespace(
+        _query_quant_in_kernel=quantized,
+        q_bmm_quantizer=lambda value: value,
+    )
+    calls = {"native": [], "decode": [], "prefill": [], "finalize": []}
+
+    def fake_decode(query, *args, **kwargs):
+        calls["decode"].append((query, kwargs))
+        return torch.zeros_like(query)
+
+    def fake_attention(query, **kwargs):
+        calls["prefill"].append((query, kwargs))
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(
+        FlashInferImpl,
+        "forward",
+        lambda *args, **kwargs: calls["native"].append(True) or args[7],
+    )
+    monkeypatch.setattr(
+        vllm_plugin,
+        "fake_quant_v_onwrite",
+        lambda *args, **kwargs: calls["finalize"].append(kwargs),
+    )
+    monkeypatch.setattr(vllm_plugin, "triton_decode_attention", fake_decode)
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+
+    impl.forward(layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query))
+
+    assert len(calls["prefill"]) == 1
+    prefill_query, prefill_kw = calls["prefill"][0]
+    assert prefill_query.shape[0] == prefill_tokens
+    assert prefill_kw["sparsity_n"] == 2
+    assert prefill_kw["sparsity_m"] == 4
+    torch.testing.assert_close(
+        prefill_kw["b_seq_len"], torch.tensor([prefill_tokens], dtype=torch.int32)
+    )
+
+    if quantized:
+        assert calls["native"] == []
+        assert len(calls["decode"]) == 1
+        decode_query, decode_kw = calls["decode"][0]
+        assert decode_query.shape[0] == 1
+        assert decode_kw["p_qdq"] == "nvfp4"
+        assert "sparsity_n" not in decode_kw
+        assert prefill_kw["p_qdq"] == "nvfp4"
+        assert [(kw["max_new_tokens"], kw["decode"]) for kw in calls["finalize"]] == [
+            (1, True),
+            (prefill_tokens, False),
+        ]
+    else:
+        assert calls["native"] == [True]
+        assert calls["decode"] == []
+        assert calls["finalize"] == []
+
+
+def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
+    worker_path = Path(__file__).parents[5] / "examples/vllm_serve/sparse_attn_worker.py"
+    spec = importlib.util.spec_from_file_location("sparse_attn_worker_test", worker_path)
+    worker_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker_module)
+    good = object.__new__(worker_module.VLLMAttention)
+    nn.Module.__init__(good)
+    good.impl = object.__new__(FlashAttentionImpl)
+    good.impl.sinks = None
+    bad = object.__new__(worker_module.VLLMAttention)
+    nn.Module.__init__(bad)
+    bad.impl = SimpleNamespace()
+    original_good_impl = good.impl
+    model = nn.ModuleDict({"good": good, "bad": bad})
+    state = SimpleNamespace(
+        model_runner=SimpleNamespace(
+            model=model,
+            model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        )
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "load_from_checkpoint_metadata",
+        lambda _: ({}, "test"),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "match_sparse_config",
+        lambda *_: {"enable": True, "sparsity_n": 2, "sparsity_m": 4},
+    )
+
+    with pytest.raises(NotImplementedError, match=r"bad.*SimpleNamespace"):
+        worker_module._replace_attention_impl(state)
+
+    assert good.impl is original_good_impl
+    assert bad.impl.__class__ is SimpleNamespace
+
+
+@pytest.mark.parametrize(
+    ("failure", "active"),
+    [("cascade", True), ("cascade", False), ("metadata", True), ("metadata", False)],
+)
+def test_flashinfer_transform_safety_for_unsupported_metadata(monkeypatch, failure, active):
+    impl = _make_flashinfer_impl(sparse=active)
+    metadata = (
+        SimpleNamespace(use_cascade=True)
+        if failure == "cascade"
+        else SimpleNamespace(use_cascade=False)
+    )
+    native_calls = []
+    query = torch.zeros(1, 2, 64, dtype=torch.float16)
+    output = torch.empty_like(query)
+
+    def fake_forward(self, *args, **kwargs):
+        native_calls.append((self, args[5]))
+        output = args[6]
+        output.fill_(9)
+        return output
+
+    monkeypatch.setattr(FlashInferImpl, "forward", fake_forward)
+
+    if active:
+        with pytest.raises(NotImplementedError, match="ModelOpt attention transform"):
+            impl.forward(None, query, query, query, torch.empty(0), metadata, output=output)
+        assert native_calls == []
+    else:
+        assert (
+            impl.forward(None, query, query, query, torch.empty(0), metadata, output=output)
+            is output
+        )
+        assert native_calls == [(impl, metadata)]
+        assert torch.all(output == 9)
 
 
 def test_forward_delegates_cascade_metadata_to_vllm(monkeypatch):
@@ -129,6 +555,16 @@ def test_forward_delegates_cascade_metadata_to_vllm(monkeypatch):
             4,
             4,
         ),
+        (
+            {
+                "sparsity_n": 2,
+                "sparsity_m": 4,
+                "dense_sink_tokens": 4,
+                "dense_recent_tokens": 128,
+            },
+            1,
+            16,
+        ),
     ],
 )
 def test_forward_delegates_launches_without_effective_sparse_work(
@@ -142,18 +578,7 @@ def test_forward_delegates_launches_without_effective_sparse_work(
         2, 1, max_seq_len, impl.num_kv_heads, impl.head_size, dtype=torch.float16
     )
     output = torch.empty_like(q)
-    attn_metadata = type(
-        "AttnMetadata",
-        (),
-        {
-            "num_actual_tokens": max_query_len,
-            "max_query_len": max_query_len,
-            "max_seq_len": max_seq_len,
-            "query_start_loc": torch.tensor([0, max_query_len], dtype=torch.int32),
-            "seq_lens": torch.tensor([max_seq_len], dtype=torch.int32),
-            "block_table": torch.zeros(1, 1, dtype=torch.int32),
-        },
-    )()
+    attn_metadata = _flash_attention_metadata(max_query_len, max_seq_len)
     called = {}
 
     def fake_attention(*args, **kwargs):
@@ -215,18 +640,7 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(monkeypatch):
     }
     q = torch.zeros(max_query_len, impl.num_heads, impl.head_size, dtype=torch.float16)
     kv_cache = torch.zeros(2, 1, seq_len, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
-    attn_metadata = type(
-        "AttnMetadata",
-        (),
-        {
-            "num_actual_tokens": max_query_len,
-            "max_query_len": max_query_len,
-            "max_seq_len": seq_len,
-            "query_start_loc": torch.tensor([0, max_query_len], dtype=torch.int32),
-            "seq_lens": torch.tensor([seq_len], dtype=torch.int32),
-            "block_table": torch.zeros(1, 1, dtype=torch.int32),
-        },
-    )()
+    attn_metadata = _flash_attention_metadata(max_query_len, seq_len)
     captured = {}
 
     def fake_attention(q, **kwargs):
@@ -368,41 +782,6 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     assert calls["query"].dtype == torch.float32
 
 
-def test_quantized_prefill_passes_host_v_group_bound(monkeypatch):
-    impl = _clone_sparse_impl(_make_old_impl())
-    impl.quant_kw = {
-        "p_qdq": None,
-        "p_qdq_amax": 1.0,
-        "v_qdq": "nvfp4",
-        "v_qdq_amax": 6.0 * 448.0,
-    }
-    q_len, kv_len = 17, 31
-    q = torch.zeros(q_len, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = torch.zeros(2, 2, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
-    metadata = SimpleNamespace(
-        num_actual_tokens=q_len,
-        max_query_len=q_len,
-        max_seq_len=kv_len,
-        query_start_loc=torch.tensor([0, q_len], dtype=torch.int32),
-        seq_lens=torch.tensor([kv_len], dtype=torch.int32),
-        block_table=torch.zeros(1, 2, dtype=torch.int32),
-    )
-    calls = {}
-
-    def fake_finalize(*args, **kwargs):
-        calls["finalize"] = kwargs
-
-    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", fake_finalize)
-    monkeypatch.setattr(
-        vllm_plugin, "triton_attention", lambda query, **kwargs: torch.zeros_like(query)
-    )
-
-    impl.forward(None, q, q, q, kv_cache, metadata, output=torch.empty_like(q))
-
-    assert calls["finalize"]["max_new_tokens"] == q_len
-    assert calls["finalize"]["decode"] is False
-
-
 def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
     """Split-local maxima must not change calibrated skip-softmax semantics."""
     impl = _clone_sparse_impl(_make_old_impl())
@@ -415,14 +794,7 @@ def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
     impl.sparse_kw = {"skip_softmax_threshold": 0.001}
     q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
     kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
-    metadata = SimpleNamespace(
-        num_actual_tokens=1,
-        max_query_len=1,
-        max_seq_len=16,
-        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
-        seq_lens=torch.tensor([16], dtype=torch.int32),
-        block_table=torch.zeros(1, 1, dtype=torch.int32),
-    )
+    metadata = _flash_attention_metadata(1, 16)
     captured = {}
 
     monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", lambda *args, **kwargs: None)
@@ -516,66 +888,6 @@ def test_build_sparse_kw_restores_checkpoint_sparse_metadata():
     }
 
 
-def test_forward_delegates_sparse_nm_only_decode_to_vllm(monkeypatch):
-    """N:M sparse softmax is prefill-only, so N:M-only decode uses vLLM."""
-    impl = _clone_sparse_impl(_make_old_impl())
-    impl.sparse_kw = {
-        "sparsity_n": 2,
-        "sparsity_m": 4,
-        "dense_sink_tokens": 4,
-        "dense_recent_tokens": 128,
-    }
-    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
-    attn_metadata = type(
-        "AttnMetadata",
-        (),
-        {
-            "num_actual_tokens": 1,
-            "max_query_len": 1,
-            "max_seq_len": 16,
-            "query_start_loc": torch.tensor([0, 1], dtype=torch.int32),
-            "seq_lens": torch.tensor([16], dtype=torch.int32),
-            "block_table": torch.zeros(1, 1, dtype=torch.int32),
-        },
-    )()
-
-    def fake_attention(q, **kwargs):
-        raise AssertionError("N:M-only decode should not call ModelOpt Triton")
-
-    def fake_forward(
-        self,
-        layer,
-        query,
-        key,
-        value,
-        kv_cache_arg,
-        attn_metadata_arg,
-        output_arg=None,
-        output_scale=None,
-        output_block_scale=None,
-    ):
-        output_arg.fill_(7)
-        return output_arg
-
-    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
-    monkeypatch.setattr(FlashAttentionImpl, "forward", fake_forward)
-
-    output = torch.empty_like(q)
-    result = impl.forward(
-        layer=None,
-        query=q,
-        key=q,
-        value=q,
-        kv_cache=kv_cache,
-        attn_metadata=attn_metadata,
-        output=output,
-    )
-
-    assert result is output
-    assert torch.all(result == 7)
-
-
 def test_forward_allows_chunked_prefill_metadata(monkeypatch):
     """vLLM V1 can pass suffix-Q/chunked-prefill metadata; the kernel handles it."""
     impl = _clone_sparse_impl(_make_old_impl())
@@ -584,18 +896,7 @@ def test_forward_allows_chunked_prefill_metadata(monkeypatch):
     kv_len = 10
     q = torch.zeros(q_len, impl.num_heads, impl.head_size, dtype=torch.float16)
     kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
-    attn_metadata = type(
-        "AttnMetadata",
-        (),
-        {
-            "num_actual_tokens": q_len,
-            "max_query_len": q_len,
-            "max_seq_len": kv_len,
-            "query_start_loc": torch.tensor([0, q_len], dtype=torch.int32),
-            "seq_lens": torch.tensor([kv_len], dtype=torch.int32),
-            "block_table": torch.zeros(1, 1, dtype=torch.int32),
-        },
-    )()
+    attn_metadata = _flash_attention_metadata(q_len, kv_len)
     captured = {}
 
     def fake_attention(q, **kwargs):

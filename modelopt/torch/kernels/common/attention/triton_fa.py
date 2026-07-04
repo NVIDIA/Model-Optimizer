@@ -956,7 +956,10 @@ class _Attention(torch.autograd.Function):
             lse.stride(1),
         )
         fwd_kwargs = {
-            "N_CTX": max_input_len,
+            # N_CTX is an autotune key only. Bucket variable prefill lengths so
+            # each power-of-two regime reuses one tuned configuration; the grid
+            # below still uses the exact max_input_len.
+            "N_CTX": triton.next_power_of_2(max(1, max_input_len)),
             "kv_group_num": kv_group_num,
             "BLOCK_D": BLOCK_D,
             "IS_CAUSAL": is_causal,

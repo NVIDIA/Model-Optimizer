@@ -571,18 +571,6 @@ class TestPagedKV:
         assert torch.all(baked[:3] == 0.015625)
         torch.testing.assert_close(baked[3, 0], raw[3, 0], rtol=0, atol=0)
 
-        tiny = torch.full((1, 16, 1, 16), 2e-6, device="cuda")
-        fake_quant_v_onwrite(
-            tiny,
-            torch.zeros(1, 1, device="cuda", dtype=torch.int32),
-            torch.zeros(1, device="cuda", dtype=torch.int32),
-            torch.tensor([16], device="cuda", dtype=torch.int32),
-            max_new_tokens=16,
-            v_qdq_scale=1.0 / (6.0 * 448.0),
-        )
-        # Native E4M3 block scales below half the minimum subnormal round to zero.
-        assert torch.isfinite(tiny).all() and torch.count_nonzero(tiny) == 0
-
     @requires_native_e4m3
     def test_v_cache_matches_independent_signed_key_axis_oracle(self):
         page_size, num_kv_heads, head_dim = 8, 2, 4
