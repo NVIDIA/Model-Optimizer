@@ -1628,6 +1628,10 @@ class GroupedQuantizer(nn.ModuleList):
             "All quantizers must be a TensorQuantizer or SequentialQuantizer."
         )
 
+    def forward(self, inputs):
+        """Apply the representative quantizer for single-weight compatibility paths."""
+        return self[0](inputs)
+
     def __getattr__(self, name):
         """Delegate property reads to the first member and method calls to all members."""
         if name in self._delegated_properties:
