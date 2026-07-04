@@ -27,10 +27,14 @@ from torch import nn
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+from vllm.v1.attention.backends.flashinfer import FlashInferImpl
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 from modelopt.torch.quantization.plugins import vllm as quant_plugin
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    ModelOptSparseAttentionImpl,
+    get_flashinfer_sparse_impl_cls,
+)
 
 _WORKER_PATH = Path(__file__).parents[5] / "examples/vllm_serve/quant_sparse_attn_worker.py"
 
@@ -52,11 +56,11 @@ def test_worker_rejects_vllm_before_v1_attention_api(monkeypatch):
         _load_worker_module()
 
 
-def _attention(attn_type=AttentionType.DECODER):
+def _attention(attn_type=AttentionType.DECODER, impl_cls=FlashAttentionImpl):
     module = object.__new__(quant_plugin.vllm_attention.Attention)
     nn.Module.__init__(module)
     module.dummy = nn.Parameter(torch.zeros(1, dtype=torch.float16))
-    module.impl = object.__new__(FlashAttentionImpl)
+    module.impl = object.__new__(impl_cls)
     module.impl.__dict__.update(alibi_slopes=None, logits_soft_cap=None, sinks=None)
     module.__dict__.update(
         attn_type=attn_type,
@@ -86,9 +90,10 @@ def _patch_conversion(monkeypatch):
     monkeypatch.setattr(worker_module, "_global_errors", lambda _: [])
 
 
-def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch):
+@pytest.mark.parametrize("impl_cls", [FlashAttentionImpl, FlashInferImpl])
+def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch, impl_cls):
     _patch_conversion(monkeypatch)
-    attention = _attention()
+    attention = _attention(impl_cls=impl_cls)
     linear = nn.Linear(4, 4)
     model = nn.ModuleDict({"attn": attention, "linear": linear})
     state = _worker(model)
@@ -106,7 +111,13 @@ def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch
     assert converted.v_bmm_quantizer._amax == 6.0 * 448.0
     assert converted._query_quant_in_kernel is True
     assert converted._value_quant_in_kernel is True
-    assert isinstance(converted.impl, ModelOptSparseAttentionImpl)
+    expected_impl_cls = (
+        ModelOptSparseAttentionImpl
+        if impl_cls is FlashAttentionImpl
+        else get_flashinfer_sparse_impl_cls()
+    )
+    assert isinstance(converted.impl, impl_cls)
+    assert type(converted.impl) is expected_impl_cls
     assert converted.impl.quant_kw == {
         "p_qdq": "nvfp4",
         "p_qdq_amax": 1.0,
@@ -133,17 +144,15 @@ def test_validation_of_all_layouts_precedes_mutation(monkeypatch):
     assert not isinstance(good, quant_plugin._QuantVLLMAttention)
 
 
-def test_worker_installs_before_base_warmup(monkeypatch):
+def test_worker_installs_after_base_load(monkeypatch):
     events = []
     monkeypatch.setattr(
         worker_module, "_install_quant_sparse_attn", lambda _: events.append("install")
     )
-    monkeypatch.setattr(
-        BaseWorker, "compile_or_warm_up_model", lambda _: events.append("base") or 1.25
-    )
+    monkeypatch.setattr(BaseWorker, "load_model", lambda *_args, **_kwargs: events.append("base"))
     instance = object.__new__(worker_module.QuantSparseAttnWorker)
-    assert instance.compile_or_warm_up_model() == 1.25
-    assert events == ["install", "base"]
+    assert instance.load_model() is None
+    assert events == ["base", "install"]
 
 
 def test_memory_profile_disables_compilation(monkeypatch):
@@ -180,3 +189,24 @@ def test_full_mixed_cudagraph_validation(mode, rejected):
         SimpleNamespace(model_runner=SimpleNamespace(vllm_config=config))
     )
     assert any("mixed" in error for error in errors) is rejected
+
+
+def test_calibrated_decode_skip_softmax_rejects_full_decode_graphs():
+    sparse_kw = {
+        "threshold_scale_factor": {
+            "prefill": {"a": 1.0, "b": 2.0},
+            "decode": {"a": 0.1, "b": 1.0},
+        }
+    }
+
+    assert "calibrated decode skip-softmax" in worker_module._sparse_graph_error(
+        sparse_kw, CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    assert worker_module._sparse_graph_error(sparse_kw, CUDAGraphMode.PIECEWISE) is None
+    assert (
+        worker_module._sparse_graph_error(
+            {"threshold_scale_factor": {"prefill": {"a": 1.0, "b": 2.0}}},
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        )
+        is None
+    )

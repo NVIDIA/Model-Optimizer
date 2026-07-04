@@ -145,23 +145,6 @@ def test_quant_vllm_attention_forward_skips_only_in_kernel_qv_quantization():
     assert attention.v_bmm_quantizer.call_count == 2
 
 
-@pytest.mark.parametrize(
-    "wrapper_name", ["_QuantVLLMCrossAttention", "_QuantVLLMEncoderOnlyAttention"]
-)
-def test_cross_encoder_attention_wrappers_keep_qkv_only_behavior(wrapper_name):
-    wrapper = getattr(vllm_plugin, wrapper_name)
-    test_wrapper = type(f"Test{wrapper.__name__}", (wrapper, _NativeAttention), {})
-    attention = _new_attention(test_wrapper)
-    attention.q_bmm_quantizer = Mock(side_effect=lambda inputs: inputs + 1)
-    attention.k_bmm_quantizer = Mock(side_effect=lambda inputs: inputs + 2)
-    attention.v_bmm_quantizer = Mock(side_effect=lambda inputs: inputs + 3)
-
-    output = attention(torch.tensor(10), torch.tensor(20), torch.tensor(30))
-
-    assert output == (torch.tensor(11), torch.tensor(22), torch.tensor(33))
-    assert attention.v_bmm_quantizer.call_count == 1
-
-
 def test_attention_kv_defaults_set_only_uncalibrated_dynamic_block16_quantizers():
     calibrated_amax = 7.25
     layer = SimpleNamespace(

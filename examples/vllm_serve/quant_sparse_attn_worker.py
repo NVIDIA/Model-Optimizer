@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fixed NVFP4 Q/K/P/V worker for ModelOpt sparse attention on vLLM."""
+"""Fixed NVFP4 Q/K/P/V worker for FlashAttention and FlashInfer in vLLM."""
 
 import torch
 import vllm
@@ -22,7 +22,6 @@ from packaging import version
 try:
     from vllm.config.compilation import CUDAGraphMode
     from vllm.v1.attention.backend import AttentionType
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
     from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
     from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
@@ -43,6 +42,7 @@ try:
         _clone_sparse_impl,
         _p_qdq_from_layer,
         _v_qdq_from_layer,
+        select_sparse_impl_cls,
     )
 except ImportError as err:
     if version.parse(vllm.__version__) < version.parse("0.14.0"):
@@ -106,8 +106,6 @@ def _layer_errors(module) -> list[str]:
         errors.append(f"layout {type(module).__name__} is not regular decoder self-attention")
     if getattr(module, "attn_type", None) != AttentionType.DECODER:
         errors.append("attn_type must be DECODER")
-    if not isinstance(impl, FlashAttentionImpl):
-        errors.append(f"backend {type(impl).__name__} is not FlashAttentionImpl")
     head_size = getattr(module, "head_size", None)
     if not isinstance(head_size, int) or head_size % 16:
         errors.append(f"head_size={head_size!r} must be a multiple of 16")
@@ -129,12 +127,29 @@ def _layer_errors(module) -> list[str]:
     return errors
 
 
+def _sparse_graph_error(sparse_kw: dict, mode: CUDAGraphMode) -> str | None:
+    """Reject decode calibration whose live length would be frozen by a full graph."""
+    params = sparse_kw.get("threshold_scale_factor")
+    if (
+        mode.decode_mode() == CUDAGraphMode.FULL
+        and isinstance(params, dict)
+        and isinstance(params.get("decode"), dict)
+    ):
+        return "calibrated decode skip-softmax requires a non-FULL CUDA graph mode"
+    return None
+
+
 def _validated_attention_plans(worker):
     """Validate every attention layout without mutation, then return regular-layer tuples."""
     model = _unwrapped_model(worker)
-    detected = load_from_checkpoint_metadata(worker.model_runner.model_config.hf_config)
+    model_config = worker.model_runner.model_config
+    model_dtype = getattr(model_config, "dtype", None)
+    detected = load_from_checkpoint_metadata(model_config.hf_config)
     sparse_cfg = detected[0] if detected is not None else None
     errors = _global_errors(worker)
+    vllm_config = getattr(worker.model_runner, "vllm_config", None)
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    cudagraph_mode = getattr(compilation_config, "cudagraph_mode", CUDAGraphMode.NONE)
     plans = []
     attention_count = 0
     for name, module in model.named_modules():
@@ -142,7 +157,19 @@ def _validated_attention_plans(worker):
             continue
         attention_count += 1
         reasons = _layer_errors(module)
+        new_impl_cls = select_sparse_impl_cls(module.impl)
+        if new_impl_cls is None:
+            reasons.append(
+                f"backend {type(module.impl).__name__} is not supported; "
+                "expected FlashAttentionImpl or FlashInferImpl"
+            )
         device, dtype = _get_device_dtype(module)
+        # The install runs in load_model (before KV-cache allocation), so the
+        # buffer scan in _get_device_dtype can pick up fp32 scale buffers
+        # (_k_scale/_v_scale/...) on the attention module. Prefer the
+        # authoritative model compute dtype when it is fp16/bf16.
+        if model_dtype in (torch.float16, torch.bfloat16):
+            dtype = model_dtype
         if device is None or dtype is None:
             reasons.append("device/dtype could not be resolved")
         elif dtype not in (torch.float16, torch.bfloat16):
@@ -156,7 +183,11 @@ def _validated_attention_plans(worker):
             if layer_cfg is not None and layer_cfg.get("enable", True)
             else {}
         )
-        plans.append((name, module, sparse_kw, device, dtype))
+        graph_error = _sparse_graph_error(sparse_kw, cudagraph_mode)
+        if graph_error is not None:
+            errors.append(f"{name or '<root>'}: {graph_error}")
+            continue
+        plans.append((name, module, new_impl_cls, sparse_kw, device, dtype))
     if attention_count == 0:
         errors.append("no regular attention layers were found")
     if errors:
@@ -168,13 +199,14 @@ def _validated_attention_plans(worker):
 
 def _install_quant_sparse_attn(worker) -> None:
     plans = _validated_attention_plans(worker)
-    for _name, module, sparse_kw, device, dtype in plans:
+    installed = {}
+    for _name, module, new_impl_cls, sparse_kw, device, dtype in plans:
         module.device, module.dtype = device, dtype
         QuantModuleRegistry.convert(module)
         module.p_bmm_quantizer = TensorQuantizer()
         set_quantizer_by_cfg(module, _BMM_CFG)
         _set_vllm_attention_kv_default_amax(module, device)
-        new_impl = _clone_sparse_impl(module.impl)
+        new_impl = _clone_sparse_impl(module.impl, new_impl_cls)
         new_impl.sparse_kw = sparse_kw
         p_qdq, p_qdq_amax = _p_qdq_from_layer(module)
         v_qdq, v_qdq_amax = _v_qdq_from_layer(module)
@@ -187,18 +219,28 @@ def _install_quant_sparse_attn(worker) -> None:
         module.impl = new_impl
         module._query_quant_in_kernel = True
         module._value_quant_in_kernel = True
+        impl_name = type(new_impl).__name__
+        installed[impl_name] = installed.get(impl_name, 0) + 1
     worker.model_runner.cascade_attn_enabled = False
-    print(f"[ModelOpt] Installed NVFP4 quant+sparse attention on {len(plans)} layers")
+    print(f"[ModelOpt] Installed NVFP4 quant+sparse attention on {len(plans)} layers: {installed}")
 
 
 class QuantSparseAttnWorker(BaseWorker):
-    """Install the fixed attention-only recipe before vLLM warmup and graph capture."""
+    """Install the fixed NVFP4 attention recipe right after model load.
+
+    The impl swap must happen before the first forward pass -- including the
+    ``determine_available_memory`` profiling run -- so that profiling exercises
+    the ModelOpt Triton path that real serving uses. Installing here also patches
+    FlashInfer metadata before cache and metadata-builder initialization. This
+    mirrors ``SparseAttnWorker``, which installs in ``load_model`` for the same
+    reason.
+    """
+
+    def load_model(self, *args, **kwargs) -> None:
+        super().load_model(*args, **kwargs)
+        _install_quant_sparse_attn(self)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         with disable_compilation(_unwrapped_model(self)):
             return BaseWorker.determine_available_memory(self)
-
-    def compile_or_warm_up_model(self) -> float:
-        _install_quant_sparse_attn(self)
-        return BaseWorker.compile_or_warm_up_model(self)
