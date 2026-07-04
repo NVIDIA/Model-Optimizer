@@ -78,12 +78,13 @@ exporting every 20 iterations. MMLU used 25 samples per subject and MMLU-Pro use
 | Model | Iteration | Validation KD | Validation CE | MMLU | MMLU-Pro |
 |-------|----------:|--------------:|--------------:|-----:|---------:|
 | Teacher: Qwen3-8B | - | - | - | 74.93% (full) | 58.62% (full) |
-| Pruned 0.7x student before distillation | 0 | - | - | 48.69% (full) | 23.09% (full) |
+| Pruned 0.7x student (Salesforce/wikitext validation) | 0 | 0.8261 | 3.3458 | 48.69% (full) | 23.09% (full) |
 | Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 20 | 0.3031 | 2.6570 | 59.72% | 25.00% |
 | Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 40 | 0.2935 | 2.6554 | 60.98% | 28.00% |
 | Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 60 | 0.2696 | 2.6412 | 62.46% | 27.57% |
 | Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 80 | 0.2479 | 2.6262 | 62.74% | 27.14% |
 | Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 100 | 0.2343 | 2.6091 | 63.58% | 29.29% |
+| Pruned 0.7x student (Nemotron validation) | 0 | 0.5187 | 1.4739 | 48.69% (full) | 23.09% (full) |
 | Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 20 | 0.1919 | 1.0931 | 58.74% | 13.14% |
 | Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 40 | 0.1731 | 1.0692 | 59.58% | 1.71% |
 | Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 60 | 0.1510 | 1.0347 | 58.46% | 14.43% |
