@@ -91,6 +91,8 @@ exporting every 20 iterations. MMLU used 25 samples per subject and MMLU-Pro use
 | Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 80 | 0.1343 | 1.0466 | 60.35% | 12.29% |
 | Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 100 | 0.1342 | 1.0550 | 60.56% | 14.29% |
 
+On the same validation samples, the teacher CE was 2.6834 on WikiText and 1.1566 on Nemotron.
+
 Interesting observations include:
 
 - On WikiText, both validation losses decrease while MMLU and MMLU-Pro trend upward.
