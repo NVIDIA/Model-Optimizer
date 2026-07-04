@@ -1619,7 +1619,9 @@ class GroupedQuantizer(nn.ModuleList):
     fused experts of a TEGroupedLinear, where each of the ``num_gemms`` weights needs its
     own ``amax``. Unlike :class:`SequentialQuantizer` (an ``nn.Sequential`` that *chains*
     quantizers over one tensor), the contained quantizers act on *different* tensors, so
-    there is no inherent forward path: index in with ``grouped[i](weight_i)``.
+    grouped execution must index in with ``grouped[i](weight_i)``. The compatibility
+    ``forward`` applies only the representative first quantizer for lifecycle paths that
+    operate on one weight at a time, such as post-restore calibration.
 
     Property reads (``amax``, ``is_enabled``) delegate to the first quantizer — all members
     share one config, so the first is representative for "is this calibrated/enabled"
@@ -1642,6 +1644,10 @@ class GroupedQuantizer(nn.ModuleList):
         assert all(isinstance(q, (TensorQuantizer, SequentialQuantizer)) for q in self), (
             "All quantizers must be a TensorQuantizer or SequentialQuantizer."
         )
+
+    def forward(self, inputs):
+        """Apply the representative quantizer for single-weight compatibility paths."""
+        return self[0](inputs)
 
     def __getattr__(self, name):
         """Delegate property reads to the first member and method calls to all members."""

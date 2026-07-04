@@ -15,11 +15,16 @@
 
 """Tests of tensor quantizer."""
 
+from unittest.mock import Mock
+
+import torch
+
 from _test_utils.torch.quantization.tensor_quantizer_common import (
     BlockQuantTester,
     SequentialQuantizerTester,
     TensorQuantizerTester,
 )
+from modelopt.torch.quantization.nn import GroupedQuantizer, TensorQuantizer
 
 
 class TestTensorQuantizerCPU(TensorQuantizerTester):
@@ -32,3 +37,19 @@ class TestBlockQuantCPU(BlockQuantTester):
 
 class TestSequentialQuantizerCPU(SequentialQuantizerTester):
     device = "cpu"
+
+
+def test_grouped_quantizer_forward_uses_representative_quantizer():
+    """Single-weight compatibility paths use only the first grouped quantizer."""
+    representative = TensorQuantizer()
+    other = TensorQuantizer()
+    expected = torch.randn(4)
+    representative.forward = Mock(return_value=expected)
+    other.forward = Mock(side_effect=AssertionError("non-representative quantizer was called"))
+
+    inputs = torch.randn(4)
+    output = GroupedQuantizer(representative, other)(inputs)
+
+    assert output is expected
+    representative.forward.assert_called_once_with(inputs)
+    other.forward.assert_not_called()
