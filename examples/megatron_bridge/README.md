@@ -148,6 +148,9 @@ Tensorboard logging is enabled by default and logs are saved to `<output_dir>/te
 To use Weights & Biases for logging, set the `WANDB_API_KEY` environment variable and pass the `--wandb_project` argument.
 Optionally, you can also pass `--wandb_entity` and `--wandb_exp_name` arguments to group runs under a project and experiment name.
 
+To measure the initial student's CE and distillation losses, add `--validate_only` to the command.
+This skips training and evaluates the student at iteration 0.
+
 To see all available arguments:
 
 ```bash

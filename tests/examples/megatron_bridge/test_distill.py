@@ -56,6 +56,37 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
     assert (validation_exports / "iter_0000002/config.json").exists()
 
 
+def test_distill_validate_only(tmp_path: Path, num_gpus):
+    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    output_dir = tmp_path / "validation_output"
+    validation_exports = tmp_path / "validation_exports"
+    cmd_parts = extend_cmd_parts(
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--validate_only",
+        ],
+        student_hf_path=teacher_hf_path,
+        teacher_hf_path=teacher_hf_path,
+        output_dir=output_dir,
+        tp_size=num_gpus,
+        pp_size=1,
+        seq_length=16,
+        mbs=1,
+        gbs=4,
+        train_iters=1,
+        eval_iters=1,
+        hf_validation_export_path=validation_exports,
+        student_hf_model=teacher_hf_path,
+    )
+    run_example_command(cmd_parts, example_path="megatron_bridge")
+
+    assert (validation_exports / "iter_0000000/config.json").exists()
+    assert not (output_dir / "checkpoints/iter_0000001").exists()
+
+
 def test_distill_puzzletron_anymodel(tmp_path: Path, num_gpus):
     """Integration test for distill.py with Puzzletron AnyModel (heterogeneous) checkpoints.
 

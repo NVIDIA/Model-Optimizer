@@ -324,6 +324,11 @@ def get_args():
     parser.add_argument(
         "--eval_iters", type=int, default=32, help="Number of batches per validation stage"
     )
+    parser.add_argument(
+        "--validate_only",
+        action="store_true",
+        help="Run validation on the initial student without training",
+    )
     # Logging arguments
     parser.add_argument("--log_interval", type=int, default=10, help="Write to log every <N> steps")
     parser.add_argument(
@@ -364,6 +369,8 @@ def get_args():
     if not args.use_mock_data and not args.data_paths:
         raise ValueError("Must provide either --data_paths or set --use_mock_data.")
 
+    if args.validate_only and args.hf_export_path:
+        raise ValueError("--hf_export_path cannot be used with --validate_only.")
     if (args.hf_export_path or args.hf_validation_export_path) and not args.student_hf_model:
         raise ValueError(
             "Must provide --student_hf_model when HuggingFace checkpoint export is enabled."
@@ -468,6 +475,7 @@ def main(args: argparse.Namespace):
             train_iters=args.train_iters,
             eval_interval=args.eval_interval,
             eval_iters=args.eval_iters,
+            skip_train=args.validate_only,
             global_batch_size=args.gbs,
             micro_batch_size=args.mbs,
             manual_gc=True,
@@ -501,7 +509,7 @@ def main(args: argparse.Namespace):
         checkpoint=CheckpointConfig(
             save_interval=args.eval_interval,
             save=checkpoint_dir,
-            load=checkpoint_dir,  # Resume from this directory (if exists)
+            load=None if args.validate_only else checkpoint_dir,
             most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
             async_save=True,
@@ -526,10 +534,13 @@ def main(args: argparse.Namespace):
         pretrain(config, forward_step_modelopt, callbacks=[callback])
     else:
         distill(config)
-    print_rank_0(
-        f"\nDistillation done! Saved checkpoint to {checkpoint_dir}"
-        " in megatron distributed checkpoint format.\n"
-    )
+    if args.validate_only:
+        print_rank_0("\nValidation-only run done!\n")
+    else:
+        print_rank_0(
+            f"\nDistillation done! Saved checkpoint to {checkpoint_dir}"
+            " in megatron distributed checkpoint format.\n"
+        )
 
     # TODO: Extend _HFValidationExportCallback to export --hf_export_path from the in-memory
     # student at the end of training. This avoids reloading the newly saved Megatron checkpoint
