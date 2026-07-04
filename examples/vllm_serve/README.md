@@ -4,7 +4,8 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
-This example is tested with vllm 0.9.0 and 0.19.1
+The general fakequant example is tested with vLLM 0.9.0 and 0.19.1. The compact
+NVFP4 attention worker documented below requires vLLM 0.14.0 or newer.
 
 ## Prepare environment
 
@@ -123,6 +124,8 @@ Limitations:
 
 ### Compact NVFP4 attention worker
 
+This worker requires vLLM 0.14.0 or newer and fails at import time on older releases.
+
 Use the same launcher with the compact worker and FlashAttention selected explicitly:
 
 ```bash
@@ -133,6 +136,10 @@ python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
 ```
 
 This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant recipe to Q/K/P/V. Q is dynamic, K/V use global scale 1.0, and P uses amax 1.0; calibrated attention amax restore is not part of this fixed path. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
+
+Decode uses a fixed 32-split, 128-key-tile schedule. P QDQ consumes split-local,
+unnormalized online-softmax probabilities, so changing that schedule can change
+quantized results; split count is part of the numerical contract.
 
 K is QDQ before its cache write, while V is written pristine. Complete 16-token V groups are finalized once in cache; an incomplete tail remains pristine and is QDQ on read. P@V therefore sees uniform fakequant values without re-quantizing the tail.
 

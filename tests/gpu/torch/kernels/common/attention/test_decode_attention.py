@@ -131,6 +131,7 @@ def test_baked_v_prefix_and_pristine_tail_match_full_onread():
         block_table,
         torch.zeros(1, device="cuda", dtype=torch.int32),
         torch.tensor([16], device="cuda", dtype=torch.int32),
+        max_new_tokens=16,
     )
     baked_v_before = baked_v_cache.clone()
     baked = attention_decode(
@@ -145,6 +146,45 @@ def test_baked_v_prefix_and_pristine_tail_match_full_onread():
 
     torch.testing.assert_close(baked, onread, rtol=0, atol=0)
     torch.testing.assert_close(baked_v_cache, baked_v_before, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
+@requires_native_e4m3
+def test_baked_v_prefix_uses_same_cache_carrier_as_tail():
+    """A non-default V scale must not change values at the bake boundary."""
+    seq_len, head_dim = 17, 16
+    q = torch.zeros(1, 1, head_dim, device="cuda", dtype=torch.float32)
+    k = torch.zeros(1, 1, seq_len, head_dim, device="cuda", dtype=torch.bfloat16)
+    v = torch.full_like(k, 0.019)
+    seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
+    k_cache, raw_v_cache, block_table = _paged_cache(k, v, (seq_len,))
+    common = {
+        "num_kv_splits": 1,
+        "v_qdq": "nvfp4",
+        "v_qdq_amax": 1.0,
+    }
+
+    onread = attention_decode(q, k_cache, raw_v_cache, block_table, seq_lens, **common)
+    baked_v_cache = raw_v_cache.clone()
+    fake_quant_v_onwrite(
+        baked_v_cache,
+        block_table,
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        torch.tensor([16], device="cuda", dtype=torch.int32),
+        max_new_tokens=16,
+        v_qdq_scale=1.0 / (6.0 * 448.0),
+    )
+    baked = attention_decode(
+        q,
+        k_cache,
+        baked_v_cache,
+        block_table,
+        seq_lens,
+        v_cache_quantized=True,
+        **common,
+    )
+
+    torch.testing.assert_close(baked, onread, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
@@ -176,5 +216,52 @@ def test_p_quantizes_model_dtype_input_but_accumulates_fp32():
     p = torch.exp2(scores - scores.max())
     p_qdq = _nvfp4_qdq_reference(p.to(torch.bfloat16).float())
     reference = (p_qdq[:, None] * v[0, 0].float()).sum(0) / p.sum()
+
+    torch.testing.assert_close(output[0, 0], reference, rtol=5e-5, atol=5e-5)
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
+@requires_native_e4m3
+def test_p_qdq_matches_fixed_split_local_oracle():
+    """The production 32-split schedule quantizes split-local unnormalized P."""
+    seq_len, head_dim, num_splits = 4096, 16, 32
+    scale = head_dim**-0.5
+    q = torch.zeros(1, 1, head_dim, device="cuda", dtype=torch.float32)
+    q[..., 0] = 1.0
+    k = torch.zeros(1, 1, seq_len, head_dim, device="cuda", dtype=torch.bfloat16)
+    k[..., 0] = torch.linspace(-8.0, 8.0, seq_len, device="cuda", dtype=torch.bfloat16)
+    torch.manual_seed(19)
+    v = torch.randn_like(k)
+    k_cache, v_cache, block_table = _paged_cache(k, v, (seq_len,))
+    seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
+
+    output = attention_decode(
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        seq_lens,
+        softmax_scale=scale,
+        num_kv_splits=num_splits,
+        p_qdq="nvfp4",
+    )
+
+    scores = torch.matmul(k[0, 0].float(), q[0, 0]) * (scale * 1.4426950408889634)
+    split_scores = scores.reshape(num_splits, -1)
+    split_max = split_scores.amax(dim=1)
+    p = torch.exp2(split_scores - split_max[:, None])
+    p_qdq = _nvfp4_qdq_reference(p.to(torch.bfloat16).float())
+    split_acc = torch.einsum("sk,skd->sd", p_qdq, v[0, 0].float().reshape(num_splits, -1, head_dim))
+    running_max = torch.tensor(-float("inf"), device="cuda")
+    running_sum = torch.tensor(0.0, device="cuda")
+    acc = torch.zeros(head_dim, device="cuda")
+    for split_idx in range(num_splits):
+        new_max = torch.maximum(running_max, split_max[split_idx])
+        correction = torch.exp2(running_max - new_max)
+        split_correction = torch.exp2(split_max[split_idx] - new_max)
+        acc = acc * correction + split_acc[split_idx] * split_correction
+        running_sum = running_sum * correction + p[split_idx].sum() * split_correction
+        running_max = new_max
+    reference = acc / running_sum
 
     torch.testing.assert_close(output[0, 0], reference, rtol=5e-5, atol=5e-5)

@@ -16,30 +16,41 @@
 """Fixed NVFP4 Q/K/P/V worker for ModelOpt sparse attention on vLLM."""
 
 import torch
-from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-from vllm.v1.worker.gpu_worker import Worker as BaseWorker
+import vllm
+from packaging import version
 
-from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
-from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
-from modelopt.torch.quantization.plugins.vllm import (
-    _ATTENTION_TYPES,
-    _get_device_dtype,
-    _set_vllm_attention_kv_default_amax,
-    disable_compilation,
-    vllm_attention,
-)
-from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config import (
-    load_from_checkpoint_metadata,
-    match_sparse_config,
-)
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
-    _build_sparse_kw,
-    _clone_sparse_impl,
-    _p_qdq_from_layer,
-    _v_qdq_from_layer,
-)
+try:
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.attention.backend import AttentionType
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+    from vllm.v1.worker.gpu_worker import Worker as BaseWorker
+
+    from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
+    from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+    from modelopt.torch.quantization.plugins.vllm import (
+        _ATTENTION_TYPES,
+        _get_device_dtype,
+        _set_vllm_attention_kv_default_amax,
+        disable_compilation,
+        vllm_attention,
+    )
+    from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config import (
+        load_from_checkpoint_metadata,
+        match_sparse_config,
+    )
+    from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+        _build_sparse_kw,
+        _clone_sparse_impl,
+        _p_qdq_from_layer,
+        _v_qdq_from_layer,
+    )
+except ImportError as err:
+    if version.parse(vllm.__version__) < version.parse("0.14.0"):
+        raise RuntimeError("The compact NVFP4 attention worker requires vLLM >= 0.14.0") from err
+    raise
+
+if version.parse(vllm.__version__) < version.parse("0.14.0"):
+    raise RuntimeError("The compact NVFP4 attention worker requires vLLM >= 0.14.0")
 
 __all__ = ["QuantSparseAttnWorker"]
 

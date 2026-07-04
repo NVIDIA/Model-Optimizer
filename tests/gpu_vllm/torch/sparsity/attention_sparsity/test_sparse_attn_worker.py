@@ -347,7 +347,12 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     v_lo, v_hi, finalizer_kw = calls["finalize"]
     torch.testing.assert_close(v_lo, torch.tensor([0, 32], dtype=torch.int32))
     torch.testing.assert_close(v_hi, torch.tensor([16, 32], dtype=torch.int32))
-    assert finalizer_kw == {"page_size": 16, "v_qdq_scale": 1.0, "decode": True}
+    assert finalizer_kw == {
+        "max_new_tokens": 1,
+        "page_size": 16,
+        "v_qdq_scale": 1.0,
+        "decode": True,
+    }
     key_cache, value_cache, block_table, seq_lens, decode_kw = calls["decode"]
     assert key_cache.data_ptr() == kv_cache[0].data_ptr()
     assert value_cache.data_ptr() == kv_cache[1].data_ptr()
@@ -361,6 +366,41 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     torch.testing.assert_close(q_inputs[0][:2], q[:2].float())
     assert torch.all(q_inputs[0][2:] == 0)
     assert calls["query"].dtype == torch.float32
+
+
+def test_quantized_prefill_passes_host_v_group_bound(monkeypatch):
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.quant_kw = {
+        "p_qdq": None,
+        "p_qdq_amax": 1.0,
+        "v_qdq": "nvfp4",
+        "v_qdq_amax": 6.0 * 448.0,
+    }
+    q_len, kv_len = 17, 31
+    q = torch.zeros(q_len, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 2, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    metadata = SimpleNamespace(
+        num_actual_tokens=q_len,
+        max_query_len=q_len,
+        max_seq_len=kv_len,
+        query_start_loc=torch.tensor([0, q_len], dtype=torch.int32),
+        seq_lens=torch.tensor([kv_len], dtype=torch.int32),
+        block_table=torch.zeros(1, 2, dtype=torch.int32),
+    )
+    calls = {}
+
+    def fake_finalize(*args, **kwargs):
+        calls["finalize"] = kwargs
+
+    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", fake_finalize)
+    monkeypatch.setattr(
+        vllm_plugin, "triton_attention", lambda query, **kwargs: torch.zeros_like(query)
+    )
+
+    impl.forward(None, q, q, q, kv_cache, metadata, output=torch.empty_like(q))
+
+    assert calls["finalize"]["max_new_tokens"] == q_len
+    assert calls["finalize"]["decode"] is False
 
 
 def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
