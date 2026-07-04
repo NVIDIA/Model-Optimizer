@@ -35,6 +35,15 @@ requires_native_e4m3 = pytest.mark.skipif(
 )
 
 
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
+def test_v_onwrite_prefill_grid_uses_host_metadata():
+    signature = inspect.signature(fake_quant_v_onwrite)
+    source = inspect.getsource(fake_quant_v_onwrite)
+
+    assert "max_new_tokens" in signature.parameters
+    assert ".item()" not in source
+
+
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
 @pytest.mark.parametrize("loader", ["_load_paged_k_tile", "_load_paged_v_tile"])
 def test_paged_loaders_widen_page_ids_before_pointer_math(loader):
@@ -143,6 +152,7 @@ class TestPagedKV:
                 zeros.view(1, 1),
                 zeros,
                 zeros,
+                max_new_tokens=1,
                 page_size=page_size,
                 v_qdq_scale=v_qdq_scale,
             )
@@ -544,6 +554,7 @@ class TestPagedKV:
             block_table,
             torch.zeros(1, device="cuda", dtype=torch.int32),
             torch.tensor([32], device="cuda", dtype=torch.int32),
+            max_new_tokens=32,
             page_size=page_size,
         )
         after_prefill = baked.clone()
@@ -552,6 +563,7 @@ class TestPagedKV:
             block_table,
             torch.tensor([32], device="cuda", dtype=torch.int32),
             torch.tensor([48], device="cuda", dtype=torch.int32),
+            max_new_tokens=1,
             page_size=page_size,
             decode=True,
         )
@@ -565,6 +577,7 @@ class TestPagedKV:
             torch.zeros(1, 1, device="cuda", dtype=torch.int32),
             torch.zeros(1, device="cuda", dtype=torch.int32),
             torch.tensor([16], device="cuda", dtype=torch.int32),
+            max_new_tokens=16,
             v_qdq_scale=1.0 / (6.0 * 448.0),
         )
         # Native E4M3 block scales below half the minimum subnormal round to zero.
@@ -594,6 +607,7 @@ class TestPagedKV:
             block_table,
             torch.zeros(1, device="cuda", dtype=torch.int32),
             torch.tensor([16], device="cuda", dtype=torch.int32),
+            max_new_tokens=16,
             page_size=page_size,
         )
         key_last = logical.permute(1, 2, 0).contiguous()
@@ -639,7 +653,11 @@ class TestPagedKV:
         out_onread = attention(q, k, v, q_locs, q_lens, q_len, v_cache=raw, **common)
         baked = raw.clone()
         fake_quant_v_onwrite(
-            baked, block_table, locs, torch.tensor([16], device="cuda", dtype=torch.int32)
+            baked,
+            block_table,
+            locs,
+            torch.tensor([16], device="cuda", dtype=torch.int32),
+            max_new_tokens=16,
         )
         out_baked = attention(
             q,

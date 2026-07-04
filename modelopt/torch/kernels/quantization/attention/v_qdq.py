@@ -83,14 +83,16 @@ def fake_quant_v_onwrite(
     v_lo: torch.Tensor,
     v_hi: torch.Tensor,
     *,
+    max_new_tokens: int,
     page_size: int = 16,
     v_qdq_scale: float = 1.0,
     decode: bool = False,
 ) -> None:
     """NVFP4-finalize complete block-16 groups in ``[v_lo, v_hi)`` in place.
 
-    Decode uses one fixed group per request without reading device metadata on the
-    host. Eager prefill sizes the grid to cover every newly completed group.
+    ``max_new_tokens`` is host metadata used to size the masked launch grid.
+    Decode uses one fixed group per request. Eager prefill covers every group
+    that the largest query chunk can complete without reading device metadata.
     ``v_lo`` and ``v_hi`` must describe aligned, completed block-16 boundaries;
     their device values are not host-validated.
     """
@@ -98,17 +100,12 @@ def fake_quant_v_onwrite(
         raise ValueError(f"page_size {page_size} must match v_cache.shape[1] {v_cache.shape[1]}")
     if not (math.isfinite(v_qdq_scale) and v_qdq_scale > 0):
         raise ValueError(f"v_qdq_scale must be finite and positive, got {v_qdq_scale}")
+    if max_new_tokens < 1:
+        raise ValueError(f"max_new_tokens must be positive, got {max_new_tokens}")
 
     batch, max_blocks = block_table.shape
     num_kv_heads, head_dim = v_cache.shape[2:]
-    if decode:
-        num_groups = 1
-    else:
-        first_group = v_lo // _BLOCK_N
-        span = int((v_hi - first_group * _BLOCK_N).max().item())
-        if span <= 0:
-            return
-        num_groups = triton.cdiv(span, _BLOCK_N)
+    num_groups = 1 if decode else triton.cdiv(max_new_tokens, _BLOCK_N)
 
     with torch.cuda.device(v_cache.device):
         _fake_quant_v_onwrite_kernel[(batch, num_kv_heads, num_groups)](

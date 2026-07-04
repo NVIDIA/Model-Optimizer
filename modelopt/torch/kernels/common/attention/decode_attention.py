@@ -14,7 +14,11 @@
 # limitations under the License.
 
 
-"""Split-K decode attention for the ModelOpt paged NVFP4 serving path."""
+"""Split-K decode attention for the ModelOpt paged NVFP4 serving path.
+
+P QDQ operates on split-local, unnormalized online-softmax probabilities. Its
+numerics therefore include the fixed split count as part of the kernel schedule.
+"""
 
 import math
 
@@ -165,6 +169,7 @@ def _decode_split_kernel(
         ).to(tl.float32)
         if V_QDQ and ((not V_CACHE_QUANTIZED) or kv_start + BLOCK_N > v_quantized_boundary):
             v_qdq = _v_qdq_nvfp4(v, v_qdq_scale, BLOCK_N, BLOCK_D)
+            v_qdq = v_qdq.to(V_cache.dtype.element_ty).to(tl.float32)
             if V_CACHE_QUANTIZED:
                 use_qdq = kv_start + kv_pos >= v_quantized_boundary
                 v = tl.where(use_qdq[:, None], v_qdq, v)
@@ -268,6 +273,8 @@ def attention_decode(
     one. P is rounded to the model/cache dtype before native-style quantization,
     then its QDQ result remains FP32. Complete block-16 V groups may be finalized
     in the cache; only the pristine partial group is then quantized on read.
+    P QDQ intentionally follows the split-local online-softmax schedule; changing
+    ``num_kv_splits`` can therefore change quantized results.
     """
     if q.ndim != 3:
         raise ValueError(f"q must have shape [batch, heads, head_dim], got {tuple(q.shape)}")

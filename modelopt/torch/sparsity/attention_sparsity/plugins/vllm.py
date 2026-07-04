@@ -281,6 +281,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 attn_metadata.block_table,
                 (prev // 16) * 16,
                 (seq_lens // 16) * 16,
+                max_new_tokens=attn_metadata.max_query_len,
                 page_size=page_size,
                 v_qdq_scale=v_qdq_scale,
                 decode=is_decode_only,

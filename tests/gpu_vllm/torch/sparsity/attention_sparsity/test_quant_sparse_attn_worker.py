@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import vllm
 from torch import nn
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionType
@@ -32,9 +33,23 @@ from modelopt.torch.quantization.plugins import vllm as quant_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
 
 _WORKER_PATH = Path(__file__).parents[5] / "examples/vllm_serve/quant_sparse_attn_worker.py"
-_SPEC = importlib.util.spec_from_file_location("quant_sparse_attn_worker", _WORKER_PATH)
-worker_module = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(worker_module)
+
+
+def _load_worker_module():
+    spec = importlib.util.spec_from_file_location("quant_sparse_attn_worker", _WORKER_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+worker_module = _load_worker_module()
+
+
+def test_worker_rejects_vllm_before_v1_attention_api(monkeypatch):
+    monkeypatch.setattr(vllm, "__version__", "0.9.0")
+
+    with pytest.raises(RuntimeError, match=r"vLLM >= 0\.14\.0"):
+        _load_worker_module()
 
 
 def _attention(attn_type=AttentionType.DECODER):
