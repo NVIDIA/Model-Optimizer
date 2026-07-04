@@ -266,6 +266,9 @@ class TensorQuantizer(nn.Module):
             )
             setattr(self, _tq_attribute_name, _setter(val))
 
+        if isinstance(attribute_cfg, dict) and attribute_cfg == {"enable": False}:
+            self.disable_rotate()
+
         if self.is_mx_format:
             self._pass_through_bwd = True
 

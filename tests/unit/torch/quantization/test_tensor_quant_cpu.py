@@ -206,6 +206,22 @@ def test_tensor_quantizer_disabled_rotate_modes_roundtrip(
     assert len(calls) == expected_call_count
 
 
+def test_disable_only_update_clears_regular_quantizer_rotate_state():
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(rotate={"enable": True, "mode": "rotate_back", "block_size": 8})
+    )
+    assert quantizer.rotate_is_enabled
+    assert quantizer.rotate_back_is_enabled
+
+    quantizer.set_from_attribute_config({"enable": False})
+
+    assert not quantizer.is_enabled
+    assert not quantizer.rotate_is_enabled
+    assert isinstance(quantizer._rotate, RotateConfig)
+    assert quantizer._rotate.mode == "rotate_back"
+    assert quantizer._rotate.block_size == 8
+
+
 def test_disable_rotate_preserves_type():
     # RotateConfig: enable off, other fields retained.
     quantizer = TensorQuantizer(
