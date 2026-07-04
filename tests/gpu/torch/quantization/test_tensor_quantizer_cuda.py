@@ -126,3 +126,17 @@ class TestTensorQuantizerfp4:
         output_contiguous = quantizer(contiguous_tensor)
         output_non_contiguous = quantizer(non_contiguous_tensor)
         assert torch.equal(output_contiguous, output_non_contiguous)
+
+    def test_real_quantize_uses_canonical_scale_layout(self):
+        """NVFP4 compression keeps checkpoint-friendly per-block scale dimensions."""
+        quantizer = tensor_quantizer.TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            )
+        ).cuda()
+        weight = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
+
+        quantizer._real_quantize(weight)
+
+        assert quantizer._scale.shape == (17, 4)

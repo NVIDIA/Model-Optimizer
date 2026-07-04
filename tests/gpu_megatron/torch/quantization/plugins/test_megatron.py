@@ -299,9 +299,8 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
-                sequence_parallel=(
-                    tp_size > 1
-                ),  # OMNIML-5030: Required for MoE + TP (mirrors hybrid path)
+                # MoE with TP requires sequence parallelism, matching the hybrid path.
+                sequence_parallel=(tp_size > 1),
             )
 
     if not meta_device:
@@ -922,8 +921,8 @@ def test_te_grouped_n_modules_sharded_state_dict(
 ):
     """Per-expert GroupedQuantizer amax round-trips through dist-checkpoint on TEGroupedMLP.
 
-    OMNIML-5072 AC4. Each local quantizer amax is saved under its stable
-    global-expert key, without an EP all-gather or replicated payload.
+    Each local quantizer amax is saved under its stable global-expert key,
+    without an EP all-gather or replicated payload.
     """
     if config == mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG and tp_size > 1:
         pytest.skip("Static-block NVFP4 calibration is not supported with TP > 1")

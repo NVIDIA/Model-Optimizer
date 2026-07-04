@@ -818,9 +818,8 @@ class TensorQuantizer(nn.Module):
             # model expects, so dist_checkpointing raises
             # `Global shape mismatch ... for key ...weight_quantizer._scale`.
             # Forcing the non-trtllm path produces canonical-layout per-block
-            # scales that survive save/load; HF export / cutlass kernels can
-            # re-interleave at deploy time via
-            # `cutlass_fp4_scale_to_modelopt_fp4_scale` and its inverse.
+            # scales that survive save/load. Export prepares the runtime-specific
+            # scale layout when needed by its target backend.
             if self._block_sizes.get("four_over_six", False):
                 raise NotImplementedError(
                     "NVFP4 Four-Over-Six (4/6) is not supported via mtq.compress: the per-block "

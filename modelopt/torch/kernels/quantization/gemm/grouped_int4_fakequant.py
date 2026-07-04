@@ -11,19 +11,15 @@ Design — tensor of pointers
 ---------------------------
 
 The N expert weights live as separate Parameters (one per expert), so they're
-NOT contiguous in HBM. To avoid a `torch.stack` memcopy (the cost AC5
-characterized on OMNIML-5064), we feed the kernel a `[N]` int64 tensor of
-expert base pointers. Each Triton program reads its expert's pointer first,
-then strides through a block of elements at that address.
+not contiguous in HBM. To avoid a `torch.stack` memcopy, we feed the kernel a
+`[N]` int64 tensor of expert base pointers. Each Triton program reads its
+expert's pointer first, then strides through a block of elements at that address.
 
 Grid: (N, num_blocks_per_expert).
 Program 0 of axis 0 → expert 0, program 1 → expert 1, etc.
 
-See OMNIML-5072 AC5 (Option B follow-up) for the motivation.
-
-VALIDATION STATUS (2026-06-11): kernel implemented, numerical fidelity NOT
-yet validated against modelopt's reference `fake_quant_impl`, and bench
-performance NOT yet measured. See VALIDATION_TODO.md in this directory.
+Numerical parity against ModelOpt's reference fake-quantization path is covered
+by the grouped Triton parity tests.
 """
 
 from __future__ import annotations

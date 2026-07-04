@@ -199,10 +199,9 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # self.weight0 to self.weight to run the quantizer states initialization.
         assert not hasattr(self, "weight"), "self.weight should not exist for TEGroupedLinear"
         self.weight = self.weight0
-        # _ParallelLinear.modelopt_post_restore expects a callable weight_quantizer.
-        # GroupedQuantizer is a ModuleList-like container without forward(), so
-        # temporarily expose expert 0's quantizer while the inherited hook restores
-        # the base state. The loop below then recalibrates every expert quantizer.
+        # The inherited restore hook operates on one weight and one quantizer. Expose
+        # expert 0's quantizer while it restores that representative base state; the
+        # loop below then recalibrates every expert quantizer against its own weight.
         grouped_weight_quantizer = self.weight_quantizer
         self.weight_quantizer = grouped_weight_quantizer[0]
         try:
@@ -249,10 +248,9 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         via _invalidate_per_expert_amax_cache (called from modelopt_post_restore)
         in case checkpoint reload changes the amax values.
 
-        Eliminates the O(N)-Python-overhead-per-forward walk over N submodules
-        observed in OMNIML-5072 AC3's microbench (the gap to Btriton5 grew
-        with N — 1.59x at N=32, 2.18x at N=128 — symptomatic of per-forward
-        scaling that disappears once the gathered tensor is reused).
+        Eliminates the O(N) Python walk over submodules on every forward;
+        gathering once and reusing the vector keeps that overhead out of the
+        hot path.
         """
         cached = getattr(self, "_per_expert_amax_cache", None)
         if cached is not None:

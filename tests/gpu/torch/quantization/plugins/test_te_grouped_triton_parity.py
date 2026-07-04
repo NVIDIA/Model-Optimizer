@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""OMNIML-5072 AC2 — ATriton vs A parity on the N-modules per-expert path.
+"""Parity tests for grouped Triton and per-expert fake quantization.
 
-ATriton = A's `_per_expert_weight_quantizer == True` path with the Triton
-fakequant dispatch added in OMNIML-5072 (see
-`modelopt/torch/quantization/plugins/transformer_engine.py`).
+The grouped path uses the Triton fake-quant dispatch in
+`modelopt.torch.quantization.plugins.transformer_engine`.
 
-A = the same N-modules path but going through `FakeTensorQuantFunction.apply`
-per expert (cuda_ext under the hood).
+The reference path invokes each expert's `TensorQuantizer` independently
+(cuda_ext under the hood for integer fake quantization).
 
 Two checks at each shape:
 
