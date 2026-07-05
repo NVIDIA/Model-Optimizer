@@ -1208,6 +1208,74 @@ def test_job_status_slurm_sidecar_reports_terminal_state(tmp_path, monkeypatch):
     assert result["slurm_status"]["slurm_exit_code"] == "0:0"
 
 
+def test_job_status_slurm_not_found_falls_back_to_local_done_marker(tmp_path, monkeypatch):
+    """Aged-out Slurm records should not make completed local experiments run forever."""
+    exp = tmp_path / "experiments" / "cicd" / "exp_slurm_aged_out"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    (exp / bridge._SLURM_STATUS_META).write_text(
+        json.dumps(
+            {
+                "executor": "slurm",
+                "experiment_id": "exp_slurm_aged_out",
+                "slurm_job_id": "12348",
+                "cluster_host": "cluster.example.com",
+                "cluster_user": "alice",
+            }
+        )
+    )
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge,
+        "_query_slurm_status",
+        lambda meta: {
+            "ok": False,
+            "reason": "slurm_status_not_found",
+            "slurm_job_id": meta["slurm_job_id"],
+        },
+    )
+
+    result = bridge.job_status_impl("exp_slurm_aged_out")
+
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    assert result["slurm_status"]["reason"] == "slurm_status_not_found"
+
+
+def test_job_status_slurm_not_found_falls_back_to_local_failed_marker(tmp_path, monkeypatch):
+    """Aged-out Slurm records still preserve local task failure status."""
+    exp = tmp_path / "experiments" / "cicd" / "exp_slurm_aged_out_failed"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    (exp / "status_task_0.out").write_text("failed (rc=1)\n")
+    (exp / bridge._SLURM_STATUS_META).write_text(
+        json.dumps(
+            {
+                "executor": "slurm",
+                "experiment_id": "exp_slurm_aged_out_failed",
+                "slurm_job_id": "12349",
+                "cluster_host": "cluster.example.com",
+                "cluster_user": "alice",
+            }
+        )
+    )
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge,
+        "_query_slurm_status",
+        lambda meta: {
+            "ok": False,
+            "reason": "slurm_status_not_found",
+            "slurm_job_id": meta["slurm_job_id"],
+        },
+    )
+
+    result = bridge.job_status_impl("exp_slurm_aged_out_failed")
+
+    assert result["ok"] is True
+    assert result["status"] == "failed"
+
+
 def test_job_status_launcher_experiments_fallback(tmp_path, monkeypatch):
     """Resolve experiments under the installed launcher's package directory."""
     launcher_dir = tmp_path / "launcher"

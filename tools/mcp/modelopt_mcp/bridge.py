@@ -1621,6 +1621,13 @@ def _experiment_not_found_diagnostic() -> str:
     )
 
 
+def _local_completion_status(done_marker: Path, any_failed: bool) -> str:
+    """Return status based on local nemo_run completion markers."""
+    if done_marker.exists():
+        return "failed" if any_failed else "done"
+    return "running"
+
+
 def _write_slurm_status_metadata(
     *,
     experiment_id: str,
@@ -1828,6 +1835,8 @@ def job_status_impl(experiment_id: str) -> dict:
         slurm_status = _query_slurm_status(slurm_meta)
         if slurm_status.get("ok"):
             overall = slurm_status.get("status", "unknown")
+        elif slurm_status.get("reason") == "slurm_status_not_found":
+            overall = _local_completion_status(done_marker, any_failed)
         else:
             overall = "running"
         return {
@@ -1840,10 +1849,7 @@ def job_status_impl(experiment_id: str) -> dict:
             "slurm_status": slurm_status,
         }
 
-    if done_marker.exists():
-        overall = "failed" if any_failed else "done"
-    else:
-        overall = "running"
+    overall = _local_completion_status(done_marker, any_failed)
 
     return {
         "ok": True,
