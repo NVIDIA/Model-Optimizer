@@ -319,8 +319,11 @@ def torch_to_tensorrt_llm_checkpoint(
                 ):
                     config.share_embedding_table = True
                 else:
-                    # This will update lm_head quantization config according to constraints from TRT-LLM
-                    update_lm_head_quantization(config, module, inference_pipeline_parallel)
+                    # This will update lm_head quantization config according to constraints from TRT-LLM.
+                    # The lm_head (column linear) vocab dim is sharded by TP, not PP, so the AWQ
+                    # block divisibility check needs the inference TP size (0 means keeping the
+                    # calibration parallelism, i.e. no extra split).
+                    update_lm_head_quantization(config, module, max(inference_tensor_parallel, 1))
                     config.lm_head = build_linear_config(module, "column")
             elif is_conv(module) and decoder_type == "whisper":
                 if config.conv1 is None:

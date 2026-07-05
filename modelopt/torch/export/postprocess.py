@@ -746,7 +746,8 @@ def update_lm_head_quantization(
         input_quantizer.disable()
         print("Disable lm_head quantization for TRT-LLM export due to deployment limitations.")
 
-    else:
+    elif weight_quantizer.is_enabled:
+        # Only warn when lm_head quantization is actually enabled and kept.
         warn(
             "Enable lm_head quantization. lm_head quantization may lead to additional accuracy loss."
         )
