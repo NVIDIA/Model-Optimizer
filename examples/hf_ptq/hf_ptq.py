@@ -85,6 +85,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
+from modelopt.torch.utils.distributed import shard_dataloader
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader

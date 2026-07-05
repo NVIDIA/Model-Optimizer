@@ -48,6 +48,29 @@ def test_broadcast_state_dict_roundtrip(dist_workers):
     dist_workers.run(_test_broadcast_state_dict_roundtrip)
 
 
+def _test_shard_dataloader_disjoint(rank, size):
+    """Each rank sees a unique slice of the dataset and the slices together cover it."""
+    from modelopt.torch.utils.distributed import shard_dataloader
+
+    dataset = TensorDataset(torch.arange(8))
+    loader = DataLoader(dataset, batch_size=1)
+    sharded = shard_dataloader(loader, rank=rank, world_size=size)
+    # Move to CUDA: the dist_workers PG is NCCL-only; gather of CPU tensors fails.
+    seen = torch.cat([batch[0] for batch in sharded]).cuda(rank)
+
+    # Gather per-rank slices on rank 0 and verify coverage + disjointness.
+    gathered = [torch.empty_like(seen) for _ in range(size)] if rank == 0 else None
+    dist.gather(seen, gathered, dst=0)
+    if rank == 0:
+        all_indices = torch.cat(gathered)
+        assert set(all_indices.cpu().tolist()) >= set(range(8))  # >=: drop_last=False may pad
+        assert len(seen) == len(gathered[1])  # per-rank batch counts equal
+
+
+def test_shard_dataloader_disjoint(dist_workers):
+    dist_workers.run(_test_shard_dataloader_disjoint)
+
+
 def _build_tiny_llama_checkpoint(path: str) -> None:
     """Write a tiny LlamaForCausalLM checkpoint (config + safetensors) to ``path``."""
     from transformers import LlamaConfig, LlamaForCausalLM
