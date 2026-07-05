@@ -42,7 +42,8 @@ docker run --gpus all \
   -p 8889:8889 \
   -p 6006:6006 \
   --rm -it \
-  -v <BASE_PATH>/Model-Optimizer:/dli/Model-Optimizer \
+  -e HF_TOKEN=<HF-TOKEN> \
+  -v Model-Optimizer:/dli/Model-Optimizer \
   modelopt-notebooks \
   jupyter lab --ip=0.0.0.0 --port=8889 --no-browser --allow-root \
   --notebook-dir=/dli/Model-Optimizer/examples/megatron_bridge/notebooks \
