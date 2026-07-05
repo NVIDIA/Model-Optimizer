@@ -16,6 +16,8 @@
 import contextlib
 import os
 
+os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Unit tests must run on CPU-only
+
 # Enforce no HuggingFace Hub network access for unit tests
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
