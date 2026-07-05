@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -772,8 +772,20 @@ class TestQuantBackendRegistry:
         with pytest.raises(ValueError, match="non-empty string"):
             unregister_quant_backend("")
 
-    def test_register_forward_unregister(self):
+    @pytest.fixture
+    def backend(self):
+        """Registers a backend name and always unregisters it on teardown."""
         name = "_tq_unit_test_backend"
+
+        def _register(entrypoint):
+            register_quant_backend(name, entrypoint)
+            return name
+
+        yield _register
+        if is_registered_quant_backend(name):
+            unregister_quant_backend(name)
+
+    def test_register_forward_unregister(self, backend):
         received = {}
 
         def entrypoint(inputs, tq):
@@ -781,28 +793,22 @@ class TestQuantBackendRegistry:
             offset = (tq.backend_extra_args or {}).get("offset", 0.0)
             return inputs + offset
 
-        register_quant_backend(name, entrypoint)
-        try:
-            assert is_registered_quant_backend(name)
-            tq = _tq(num_bits=8, backend=name, backend_extra_args={"offset": 2.5})
-            x = torch.tensor([1.0, -1.0])
-            out = tq(x)
-            # Backend fully replaces the fake-quant math
-            assert torch.equal(out, torch.tensor([3.5, 1.5]))
-            # Entrypoint receives the quantizer itself
-            assert received["quantizer"] is tq
-        finally:
-            unregister_quant_backend(name)
+        name = backend(entrypoint)
+        assert is_registered_quant_backend(name)
+        tq = _tq(num_bits=8, backend=name, backend_extra_args={"offset": 2.5})
+        x = torch.tensor([1.0, -1.0])
+        out = tq(x)
+        # Backend fully replaces the fake-quant math
+        assert torch.equal(out, torch.tensor([3.5, 1.5]))
+        # Entrypoint receives the quantizer itself
+        assert received["quantizer"] is tq
+        unregister_quant_backend(name)
         assert not is_registered_quant_backend(name)
 
-    def test_reregister_warns(self):
-        name = "_tq_unit_test_backend_dup"
-        register_quant_backend(name, lambda x, tq: x)
-        try:
-            with pytest.warns(UserWarning, match="Overwriting existing backend"):
-                register_quant_backend(name, lambda x, tq: x)
-        finally:
-            unregister_quant_backend(name)
+    def test_reregister_warns(self, backend):
+        name = backend(lambda x, tq: x)
+        with pytest.warns(UserWarning, match="Overwriting existing backend"):
+            register_quant_backend(name, lambda x, tq: x)
 
     def test_unregistered_backend_forward_raises(self):
         tq = _tq(num_bits=8, backend="_tq_never_registered")
