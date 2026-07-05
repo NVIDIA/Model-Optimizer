@@ -17,6 +17,7 @@
 
 import json
 import os
+import time
 from collections.abc import Callable
 from typing import Any
 from warnings import warn
@@ -38,6 +39,29 @@ from modelopt.torch.utils.distributed import (
 )
 
 
+def _phase_logger(rank: int) -> Callable[[str], None]:
+    """Return a rank-prefixed, elapsed-time progress printer.
+
+    Active only when ``MODELOPT_FSDP2_LOAD_VERBOSE`` is set in the environment;
+    otherwise a no-op so normal loads (and tests) stay silent. Each line is
+    flushed immediately so per-rank progress interleaves readably under torchrun.
+    """
+    if not os.environ.get("MODELOPT_FSDP2_LOAD_VERBOSE"):
+        return lambda msg: None
+
+    start = time.perf_counter()
+
+    def log(msg: str) -> None:
+        print(f"[fsdp2-load][rank {rank}] +{time.perf_counter() - start:6.1f}s  {msg}", flush=True)
+
+    return log
+
+
+def _state_dict_gb(state: dict) -> float:
+    """Total size in GB of the tensors in a name->tensor dict."""
+    return sum(t.numel() * t.element_size() for t in state.values()) / 1e9
+
+
 def read_safetensors_subset(
     ckpt_path: str,
     weight_map: dict,
@@ -47,6 +71,13 @@ def read_safetensors_subset(
 
     Groups param names by file to avoid re-opening. Returns CPU tensors.
     Uses ``safe_open`` so only the requested tensors' bytes are read.
+
+    ``get_tensor`` returns a zero-copy view into the mmap'd file; the bytes are
+    not actually read from disk until first touched. We ``clone()`` here to force
+    the read eagerly, while this function runs (each rank reading its own layers
+    in parallel). Without it the read is deferred to the later per-source
+    broadcast (``.to(device)``), which is serialized across ranks and silently
+    destroys the read parallelism this loader exists to provide.
     """
     by_file: dict[str, list[str]] = {}
     for name, file in weight_map.items():
@@ -57,7 +88,7 @@ def read_safetensors_subset(
     for file, names in by_file.items():
         with safe_open(os.path.join(ckpt_path, file), framework="pt", device="cpu") as f:
             for name in names:
-                state[name] = f.get_tensor(name)
+                state[name] = f.get_tensor(name).clone()
     return state
 
 
@@ -162,6 +193,8 @@ def parallel_load_and_prepare_fsdp2(
     Set ``freeze=False`` for training callers; PTQ keeps the default ``True``.
     Pass ``hf_config`` if the caller has already fetched it (skips a redundant fetch).
     """
+    log = _phase_logger(rank)
+
     # Resolve HF Hub IDs to a local cache dir (rank 0 downloads; others wait).
     if os.path.isdir(ckpt_path):
         resolved_path = ckpt_path
@@ -183,17 +216,26 @@ def parallel_load_and_prepare_fsdp2(
 
     # Materialize meta → empty real tensors (CPU when cpu_offload, GPU otherwise).
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
+    log(f"meta skeleton built + sharded ({len(decoder_layers)} decoder layers)")
 
     # Round-robin ownership: each rank reads only its owned layers from disk in parallel.
+    owned_indices = [i for i in range(len(decoder_layers)) if i % world_size == rank]
+    log(f"reading {len(owned_indices)} owned layers from disk: {owned_indices}")
     owned: dict[int, dict] = {}
-    for layer_idx in range(len(decoder_layers)):
-        if layer_idx % world_size == rank:
-            prefix = layer_prefixes[layer_idx]
+    t_read = time.perf_counter()
+    for n_done, layer_idx in enumerate(owned_indices, 1):
+        prefix = layer_prefixes[layer_idx]
 
-            def _has_prefix(n: str) -> bool:
-                return n.startswith(prefix)
+        def _has_prefix(n: str) -> bool:
+            return n.startswith(prefix)
 
-            owned[layer_idx] = read_safetensors_subset(resolved_path, weight_map, _has_prefix)
+        owned[layer_idx] = read_safetensors_subset(resolved_path, weight_map, _has_prefix)
+        log(f"  read layer {layer_idx} ({n_done}/{len(owned_indices)})")
+    read_gb = sum(_state_dict_gb(d) for d in owned.values())
+    read_s = time.perf_counter() - t_read
+    log(
+        f"owned read done: {read_gb:.1f} GB in {read_s:.1f}s ({read_gb / max(read_s, 1e-9):.2f} GB/s)"
+    )
 
     # Per-source batching: each owner broadcasts all its owned layers in one collective.
     # Cuts metadata broadcasts from N_layers to world_size; peak transient memory per rank
@@ -209,7 +251,12 @@ def parallel_load_and_prepare_fsdp2(
                 big_dict.update(owned[i])
         else:
             big_dict = None
+        t_bcast = time.perf_counter()
         full = broadcast_state_dict(big_dict, src=src, device=device)
+        log(
+            f"broadcast src={src} ({len(src_layers)} layers, {_state_dict_gb(full):.1f} GB) "
+            f"in {time.perf_counter() - t_bcast:.1f}s"
+        )
 
         for layer_idx in src_layers:
             prefix = layer_prefixes[layer_idx]
@@ -228,9 +275,11 @@ def parallel_load_and_prepare_fsdp2(
             for i in src_layers:
                 del owned[i]
 
+    log("decoder layers loaded; reading non-layer params (embed/lm_head/norm) on rank 0")
     # Non-decoder params (embed, lm_head, norm) — rank 0 reads + broadcasts.
     # TODO: add support for shard_root=True and layerwise.
     layer_prefix_tuple = tuple(layer_prefixes)
+    t_nl = time.perf_counter()
     non_layer = (
         read_safetensors_subset(
             resolved_path, weight_map, lambda n: not n.startswith(layer_prefix_tuple)
@@ -239,6 +288,9 @@ def parallel_load_and_prepare_fsdp2(
         else None
     )
     non_layer = broadcast_state_dict(non_layer, src=0, device=device)
+    log(
+        f"non-layer params loaded ({_state_dict_gb(non_layer):.1f} GB) in {time.perf_counter() - t_nl:.1f}s"
+    )
     if cpu_offload:
         non_layer = {k: v.cpu() for k, v in non_layer.items()}
     # strict=False: non_layer is a subset of the full model — decoder keys will
@@ -260,4 +312,5 @@ def parallel_load_and_prepare_fsdp2(
         model.tie_weights()
     if freeze:
         model.requires_grad_(False)
+    log("load complete")
     return model
