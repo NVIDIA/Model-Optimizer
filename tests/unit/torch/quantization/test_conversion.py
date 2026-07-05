@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -196,7 +196,12 @@ class TestRegisterUnregister:
             replace_quant_module(model)
             assert isinstance(model[1], _QuantPlainAct)
             assert isinstance(model[1].input_quantizer, TensorQuantizer)
-            model(torch.randn(2, 4))  # forward must route through the quantizer
+            # Pin the routing: with a static amax of 1.0 the activation input is
+            # fake-quant clamped to [-1, 1]; silu is monotonic increasing, so a
+            # bypassed quantizer would produce silu(100) ~= 100 >> silu(1).
+            model[1].input_quantizer.amax = torch.tensor(1.0)
+            out = model[1](torch.full((2, 4), 100.0))
+            assert torch.all(out <= torch.nn.functional.silu(torch.tensor(1.0)) + 1e-6)
         finally:
             unregister(_PlainAct)
 
