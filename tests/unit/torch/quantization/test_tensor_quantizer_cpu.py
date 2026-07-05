@@ -15,11 +15,14 @@
 
 """Tests of tensor quantizer."""
 
+import torch
 from _test_utils.torch.quantization.tensor_quantizer_common import (
     BlockQuantTester,
     SequentialQuantizerTester,
     TensorQuantizerTester,
 )
+
+from modelopt.torch.quantization.nn import GroupedQuantizer, TensorQuantizer
 
 
 class TestTensorQuantizerCPU(TensorQuantizerTester):
@@ -32,3 +35,15 @@ class TestBlockQuantCPU(BlockQuantTester):
 
 class TestSequentialQuantizerCPU(SequentialQuantizerTester):
     device = "cpu"
+
+
+def test_grouped_quantizer_forward_uses_representative_quantizer():
+    """Single-weight compatibility paths should dispatch to the first group."""
+    representative = TensorQuantizer()
+    other = TensorQuantizer()
+    other.disable()
+    grouped = GroupedQuantizer(representative, other)
+    inputs = torch.tensor([0.1234, -0.5678])
+
+    assert torch.equal(grouped(inputs), representative(inputs))
+    assert not torch.equal(grouped(inputs), other(inputs))

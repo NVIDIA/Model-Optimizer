@@ -62,6 +62,9 @@ from modelopt.torch.quantization.plugins.megatron import (
     _QuantTEMCoreRowParallelLinear,
     get_mcore_layerwise_calibration_layers,
 )
+from modelopt.torch.quantization.plugins.transformer_engine import (
+    _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
+)
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -758,6 +761,75 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
     )
 
 
+@pytest.mark.parametrize("compile_enabled", [False, True])
+def test_te_grouped_compiled_weight_quantizer_loop(
+    distributed_setup_size_1, monkeypatch, compile_enabled
+):
+    """The opt-in flag controls compilation and preserves per-expert backward."""
+    compile_kwargs = []
+    compiled_calls = []
+
+    def fake_compile(fn, **kwargs):
+        compile_kwargs.append(kwargs)
+
+        def compiled(*args):
+            compiled_calls.append(len(args))
+            return fn(*args)
+
+        return compiled
+
+    if compile_enabled:
+        monkeypatch.setenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "1")
+    else:
+        monkeypatch.delenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, raising=False)
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    initialize_for_megatron(seed=SEED)
+    model = _gpt_model_provider(
+        tp_size=1,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
+    )
+    forward = get_forward(model)
+    for module in model.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+
+    mtq.quantize(model, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
+    grouped_modules = [
+        module
+        for module in model.modules()
+        if isinstance(getattr(module, "weight_quantizer", None), mtq.nn.GroupedQuantizer)
+    ]
+    compiled_modules = [
+        module for module in model.modules() if hasattr(module, "_compiled_weight_quantizer_loop")
+    ]
+    assert grouped_modules
+    assert len(compiled_modules) == (len(grouped_modules) if compile_enabled else 0)
+    assert len(compile_kwargs) == (len(grouped_modules) if compile_enabled else 0)
+    assert all(
+        kwargs == {"backend": "inductor", "fullgraph": False, "mode": "reduce-overhead"}
+        for kwargs in compile_kwargs
+    )
+    # Calibration mutates collector state and must stay eager even when the flag is enabled.
+    assert not compiled_calls
+
+    loss = forward(model).sum()
+    loss.backward()
+    if compile_enabled:
+        assert compiled_calls
+        assert set(compiled_calls) == {4}
+    else:
+        assert not compiled_calls
+    assert all(
+        torch.isfinite(getattr(module, f"weight{i}").grad).all()
+        for module in grouped_modules
+        for i in range(module.num_gemms)
+    )
+    destroy_model_parallel()
+
+
 def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_cfg, rank, size):
     """TEGrouped keeps a per-expert weight quantizer (GroupedQuantizer) by default; each
     expert's amax should match the corresponding SequentialMLP expert (no cross-expert sharing)."""
@@ -903,7 +975,7 @@ def test_te_grouped_vs_sequential_default_loss(dist_workers_size_4, quant_cfg):
         partial(_test_te_grouped_vs_sequential_default_loss_helper, 1, 2, quant_cfg)
     )
 
-    
+
 def _test_auto_quantize_moe_ep_helper(rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=1,
