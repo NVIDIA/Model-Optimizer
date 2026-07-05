@@ -13,15 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end test that resolve_descriptor_from_pretrained caches dynamic modules.
-
-Lives in tests/gpu because it requires ``mamba_ssm`` (only installed in the GPU
-lane) and downloads a real Nemotron-H checkpoint's config and custom code.
-"""
+"""End-to-end test that resolve_descriptor_from_pretrained caches dynamic modules."""
 
 import pytest
 
-pytest.importorskip("transformers")
 pytest.importorskip("mamba_ssm")
 
 import modelopt.torch.puzzletron as mtpz
