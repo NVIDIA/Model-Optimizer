@@ -25,6 +25,11 @@ RUN git clone https://github.com/NVIDIA/Model-Optimizer.git /dli/Model-Optimizer
     pip install -e .
 
 
+# Install aiperf for inference benchmarking using uv
+ENV UV_TOOL_BIN_DIR=/usr/local/bin
+RUN uv tool install aiperf
+
+
 # Install lmms-eval for VLM evaluation (§6 BLINK / RealWorldQA)
 RUN git clone https://github.com/EvolvingLMMs-Lab/lmms-eval.git /dli/lmms-eval && \
     cd /dli/lmms-eval && git checkout v0.7.1 && \
