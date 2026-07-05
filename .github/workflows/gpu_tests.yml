@@ -22,6 +22,7 @@ jobs:
     secrets: inherit
     with:
       files: |
+        .github/actions/cache-extensions/**
         .github/workflows/gpu_tests.yml
         modelopt/**
         noxfile.py
