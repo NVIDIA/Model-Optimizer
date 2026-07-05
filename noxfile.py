@@ -114,8 +114,9 @@ def gpu(session):
         "pip",
         "install",
         "--no-build-isolation",
-        "git+https://github.com/state-spaces/mamba.git",
-        "git+https://github.com/Dao-AILab/causal-conv1d.git",
+        # Install the latest *released* sdists (built against the container torch)
+        "mamba_ssm",
+        "causal-conv1d",
     )
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 
