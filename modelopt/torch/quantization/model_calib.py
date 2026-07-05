@@ -1165,6 +1165,12 @@ def awq(
     See :class:`AWQFullCalibConfig <modelopt.torch.quantization.config.AWQFullCalibConfig>` for
     details on the remaining arguments.
     """
+    if algorithm not in ["awq_lite", "awq_clip", "awq_full"]:
+        raise ValueError(
+            f"Invalid AWQ algorithm {algorithm!r}. "
+            "Valid algorithms are 'awq_lite', 'awq_clip', and 'awq_full'."
+        )
+
     with SequentialQuantizer.convert_to_single_quantizer(model):
         if algorithm in ["awq_full", "awq_lite"]:
             awq_lite(model, forward_loop, **kwargs)
