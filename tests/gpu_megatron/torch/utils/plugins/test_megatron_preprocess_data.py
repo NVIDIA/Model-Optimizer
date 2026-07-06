@@ -62,23 +62,22 @@ def test_megatron_preprocess_data_jsonl_stops_at_max_tokens(tmp_path):
 
     common_args = {
         "jsonl_paths": input_path,
+        "output_dir": tmp_path,
         "tokenizer_name_or_path": "gpt2",
         "json_keys": "text",
         "workers": 2,
     }
     limited_prefix = megatron_preprocess_data(
         **common_args,
-        output_dir=tmp_path / "limited",
         max_tokens=100,
     )[0]
-    full_prefix = megatron_preprocess_data(
-        **common_args,
-        output_dir=tmp_path / "full",
-    )[0]
+    full_prefix = megatron_preprocess_data(**common_args)[0]
 
     # The .bin file stores token IDs, so its byte size reflects how many tokens were written.
     limited_size = Path(limited_prefix + ".bin").stat().st_size
     full_size = Path(full_prefix + ".bin").stat().st_size
+    assert limited_prefix == str(tmp_path / "data_text_tokens100")
+    assert full_prefix == str(tmp_path / "data_text")
     assert limited_size < full_size
 
 

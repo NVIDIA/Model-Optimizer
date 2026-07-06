@@ -325,7 +325,8 @@ class _Partition:
         input_path = Path(input_file_name)
         stem = input_path.stem if input_path.suffix != ".gz" else Path(input_path.stem).stem
         output_prefix = Path(output_dir) / stem
-        prefixes = [f"{output_prefix}_{key}" for key in self.json_keys]
+        token_tag = f"_tokens{max_tokens}" if max_tokens is not None else ""
+        prefixes = [f"{output_prefix}_{key}{token_tag}" for key in self.json_keys]
 
         print(f"\nOpening {input_file_name}")
         if input_path.suffix == ".gz":
@@ -341,8 +342,9 @@ class _Partition:
         builders = {}
 
         for key in self.json_keys:
-            output_bin_files[key] = f"{output_prefix}_{key}.bin"
-            output_idx_files[key] = f"{output_prefix}_{key}.idx"
+            prefix = f"{output_prefix}_{key}{token_tag}"
+            output_bin_files[key] = f"{prefix}.bin"
+            output_idx_files[key] = f"{prefix}.idx"
             if Path(output_bin_files[key]).exists() and Path(output_idx_files[key]).exists():
                 continue
             builders[key] = indexed_dataset.IndexedDatasetBuilder(
