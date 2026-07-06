@@ -27,6 +27,7 @@ from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.dynamic import _pytorch_managed
+from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
     persistent_materialization,
@@ -134,6 +135,50 @@ def test_fsdp_simple_linear(dist_workers):
 )
 def test_nested_fsdp2_backward(quant_cfg, dist_workers):
     dist_workers.run(partial(_test_nested_fsdp2_backward, quant_cfg=quant_cfg))
+
+
+class _LAQBf16Linear(nn.Module):
+    """Minimal bf16 module with LAQ learnable amax parameters."""
+
+    def __init__(self, dim=16):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(dim, dim, dtype=torch.bfloat16))
+
+        tq = TensorQuantizer()
+        tq._num_bits = 4
+        tq._unsigned = False
+        tq._narrow_range = True
+        tq._disabled = False
+        tq._block_sizes = {-1: dim}
+        tq._pass_through_bwd = True
+        tq.register_buffer("_amax", torch.ones(dim, dtype=torch.bfloat16))
+        self.weight_quantizer = StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
+        self.weight_quantizer.enable_laq(
+            torch.ones(dim, dtype=torch.bfloat16),
+            quantize_scales=False,
+            learnable_amax=["pre", "post"],
+        )
+
+    def forward(self, inputs):
+        weight = self.weight_quantizer._fake_quantize(self.weight)
+        return torch.nn.functional.linear(inputs, weight)
+
+
+def _test_laq_bf16_learnable_amax_fsdp2(rank, size):
+    torch.manual_seed(1)
+    model = _LAQBf16Linear().cuda(rank)
+    inputs = torch.randn(2, 16, device=rank, dtype=torch.bfloat16)
+    synchronize_state_dict(model)
+
+    assert {p.dtype for p in model.parameters()} == {torch.bfloat16}
+
+    model = fully_shard(model)
+    output = model(inputs)
+    output.float().sum().backward()
+
+
+def test_laq_bf16_learnable_amax_fsdp2(dist_workers):
+    dist_workers.run(_test_laq_bf16_learnable_amax_fsdp2)
 
 
 class _DecoderBlock(nn.Module):
