@@ -57,13 +57,11 @@ expanding every scenario by default.
 import copy
 import json
 from datetime import timedelta
-from functools import partial
 from pathlib import Path
 
 import hydra
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 from omegaconf import OmegaConf
@@ -101,6 +99,9 @@ PRUNED_NUM_LOCAL_EXPERTS = 8
 # Training budget: 128 tokens / (64 block * 1 mbs) = 2 steps — completes fast
 TRAINING_TOKENS = 128
 BLOCK_SIZE = 64
+
+# Static tiny-dims bypass config skeleton loaded by ``_make_bypass_cfg_dict``.
+BYPASS_TEST_CONFIG_PATH = Path(__file__).parent / "resources/configs/bypass_test_defaults.yaml"
 
 # Llama-3.2-3B is the smallest dense family and the canonical "FFN bypass" path.
 LLAMA_FAMILY = pytest.param(
@@ -185,96 +186,19 @@ def _make_bypass_cfg_dict(
 
     mlp_init_mode, mlp_init_config = _mlp_init_settings(has_moe_layers, hydra_cfg)
 
-    cfg = {
-        "dtype": "bf16",
-        "seed": 42,
-        "experiment_id": None,
-        "experiment_dir": None,
-        "iter_num": 1,
-        "step_num": 1,
-        "token_count": 0,
-        "data": {
-            # The dummy test dataset stores conversations under the "conversation" column.
-            "data_column": "conversation",
-            "block_size": BLOCK_SIZE,
-            "bos_rate": 0.5,
-            "fim_rate": 0,
-            "fim_spm_rate": 0,
-            "source_datasets_to_discard": [],
-            "load_from_disk": True,
-            "keep_in_memory": False,
-            "val_dataset_name": "valid",
-            "max_eval_samples": 1,
-            "eval_samples_per_process": None,
-            "shuffle_train_data_seed": 42,
-        },
-        "training": {
-            "learning_rate": 1e-4,
-            "training_tokens": TRAINING_TOKENS,
-            "micro_batch_size": 1,
-            "val_micro_batch_size": 1,
-            "warmup_ratio": 0.05,
-            "warmup_steps": None,
-            "min_lr_factor": 1e-5,
-            "grad_accumulation_steps": 1,
-            "skip_first_batches": 0,
-            "weight_decay": 0.1,
-            "decay_lr": True,
-            "beta1": 0.9,
-            "beta2": 0.95,
-            "use_grad_scaling": False,
-            "grad_clip": 1.0,
-            "grad_clip_type": "norm",
-            "clipping_count": 0,
-            "log_interval": 5,
-            # Large eval_interval so validation is skipped during this short run.
-            # Validation is fully disabled anyway (disable_validation=True below).
-            "eval_interval": 100,
-        },
-        "resume_checkpoint_path": None,
-        "find_last_ckpt_for_resume": False,
-        "parameter_count": None,
-        "init_checkpoint_path": None,
-        "model": {
-            "student_weights_dtype": "bf16",
-            "model_overrides": {
-                "delete_old_checkpoints": True,
-                "save_interval_seconds": None,
-                # Effectively disable step-interval saving; rely on save_checkpoint_when_done.
-                "save_interval": 1_000_000_000,
-                "save_checkpoint_when_done": True,
-            },
-            "model_config_overrides": overrides,
-        },
-        "model_factory": {
-            "factory": "bypass_factory_fn",
-            "block_loss_func": "normalized_mse_loss",
-            "gqa_init_mode": "AverageKV",
-            "mlp_init_mode": mlp_init_mode,
-            "mlp_init_config": mlp_init_config,
-            "linear_init_mode": "FromTeacher",
-            "submodule_for_loss_calculation": None,
-            "keys_to_learn": "entire_block",
-        },
-        # Disable all validation to keep tests fast.
-        "disable_initial_validate": True,
-        "validate_teacher_model": False,
-        "validate_student_model": False,
-        "disable_validation": True,
-        "best_val_loss": 1e9,
-        "compile": False,
-        "disable_fa2": False,
-        "teacher_model_load_on_cpu": False,
-        "save_checkpoint_before_training": False,
-        "disable_checkpoint_save": False,
-        "save_best_ckpt": True,
-        # Do NOT use kill_after_first_save — it raises RuntimeError which becomes sys.exit(1).
-        # Instead let the short training run (2 steps) complete naturally.
-        "kill_after_first_save": False,
-        "realize_best_or_latest": "best",
-        "wandb_log": False,
-        "wandb": {"project": None, "entity": None},
-    }
+    # Load the static tiny-dims skeleton from yaml, then inject the per-scenario
+    # dynamic fields below. ``resolve=True`` returns a plain dict, matching the
+    # OmegaConf.update injection sites downstream.
+    cfg = OmegaConf.to_container(OmegaConf.load(BYPASS_TEST_CONFIG_PATH), resolve=True)
+
+    # Re-apply the values that the test module owns as the single source of truth.
+    cfg["data"]["block_size"] = BLOCK_SIZE
+    cfg["training"]["training_tokens"] = TRAINING_TOKENS
+
+    # Per-scenario / per-family dynamic fields.
+    cfg["model"]["model_config_overrides"] = overrides
+    cfg["model_factory"]["mlp_init_mode"] = mlp_init_mode
+    cfg["model_factory"]["mlp_init_config"] = mlp_init_config
 
     if configs_list is not None:
         cfg["configs"] = configs_list
@@ -757,14 +681,14 @@ def _scenario_then_build_library(
 
 
 def _run_llama_scenarios_job(
+    rank: int,
+    size: int,
     project_root_path: Path,
     tmp_path: Path,
     hf_model_name: str,
     converter: str,
     hybrid_override_pattern: str | None,
     has_moe_layers: bool,
-    rank: int,
-    size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
         project_root_path,
@@ -784,8 +708,8 @@ def _run_llama_scenarios_job(
     # build_library runs last so discovery sees a fully populated puzzle_dir.
     _scenario_then_build_library(hydra_cfg, puzzle_dir, has_moe_layers, rank)
 
-    dist.cleanup()
-
+    # NOTE: no dist.cleanup() here — the dist_workers pool owns the process-group
+    # lifecycle and reuses it across tests.
     print(
         f"PYTEST SUMMARY: test_bypass_llama_scenarios[{hf_model_name}] completed. "
         f"Puzzle directory: {puzzle_dir}"
@@ -793,14 +717,14 @@ def _run_llama_scenarios_job(
 
 
 def _run_gpt_oss_scenarios_job(
+    rank: int,
+    size: int,
     project_root_path: Path,
     tmp_path: Path,
     hf_model_name: str,
     converter: str,
     hybrid_override_pattern: str | None,
     has_moe_layers: bool,
-    rank: int,
-    size: int,
 ):
     puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
         project_root_path,
@@ -815,8 +739,8 @@ def _run_gpt_oss_scenarios_job(
     _scenario_block_pruning(hydra_cfg, puzzle_dir, has_moe_layers, rank)
     _scenario_subblock_mode(hydra_cfg, puzzle_dir, has_moe_layers, "subblock_attention", rank)
 
-    dist.cleanup()
-
+    # NOTE: no dist.cleanup() here — the dist_workers pool owns the process-group
+    # lifecycle and reuses it across tests.
     print(
         f"PYTEST SUMMARY: test_bypass_gpt_oss_scenarios[{hf_model_name}] completed. "
         f"Puzzle directory: {puzzle_dir}"
@@ -828,6 +752,7 @@ def _run_gpt_oss_scenarios_job(
     [LLAMA_FAMILY],
 )
 def test_bypass_llama_scenarios(
+    dist_workers,
     project_root_path: Path,
     tmp_path: Path,
     hf_model_name: str,
@@ -842,18 +767,14 @@ def test_bypass_llama_scenarios(
     build-replacement-library wiring. Each scenario writes to its own
     ``experiment_id`` directory so their outputs never collide.
     """
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _run_llama_scenarios_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
+    dist_workers.run(
+        _run_llama_scenarios_job,
+        project_root_path,
+        tmp_path,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
+        has_moe_layers,
     )
 
 
@@ -862,6 +783,7 @@ def test_bypass_llama_scenarios(
     [GPT_OSS_FAMILY],
 )
 def test_bypass_gpt_oss_scenarios(
+    dist_workers,
     project_root_path: Path,
     tmp_path: Path,
     hf_model_name: str,
@@ -875,16 +797,12 @@ def test_bypass_gpt_oss_scenarios(
     (which must include GPT-OSS's windowed-attention sink parameters in the
     attention group). Each scenario writes to its own ``experiment_id`` directory.
     """
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _run_gpt_oss_scenarios_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
+    dist_workers.run(
+        _run_gpt_oss_scenarios_job,
+        project_root_path,
+        tmp_path,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
+        has_moe_layers,
     )

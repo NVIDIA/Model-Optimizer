@@ -20,6 +20,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
@@ -120,11 +121,21 @@ def _slug(value: Any) -> str:
 
 
 def _teacher_dir_identity(cfg: DictConfig) -> str | None:
+    """Return a canonical identity string for the teacher checkpoint location.
+
+    ``teacher_dir`` may be either a local filesystem path or a remote URI (e.g.
+    ``s3://bucket/run`` or ``hdfs://...``). Local paths are normalized with
+    ``expanduser`` so that ``~/run`` and ``/home/me/run`` hash to the same
+    experiment identity; remote URIs are returned verbatim because ``Path``
+    would mangle the ``scheme://`` prefix. Presence of a URI scheme (via
+    ``urlparse``) is a more robust remote-vs-local signal than a bare ``"://"``
+    substring test.
+    """
     teacher_dir = cfg.get("teacher_dir", None)
     if teacher_dir is None:
         return None
     teacher_dir = str(teacher_dir)
-    if "://" in teacher_dir:
+    if urlparse(teacher_dir).scheme:
         return teacher_dir
     return str(Path(teacher_dir).expanduser())
 

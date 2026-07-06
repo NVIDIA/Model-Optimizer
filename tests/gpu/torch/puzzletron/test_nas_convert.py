@@ -15,11 +15,8 @@
 
 import os
 from datetime import timedelta
-from functools import partial
 from pathlib import Path
 
-import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 
 import modelopt.torch.nas as mtn
@@ -27,16 +24,12 @@ import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
 
 
-def test_nas_convert_ffn_pruning(project_root_path: Path, tmp_path: Path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_nas_convert_ffn_pruning_multiprocess_job, project_root_path, tmp_path),
-        backend="nccl",
-    )
+def test_nas_convert_ffn_pruning(dist_workers, project_root_path: Path, tmp_path: Path):
+    dist_workers.run(_test_nas_convert_ffn_pruning_multiprocess_job, project_root_path, tmp_path)
 
 
 def _test_nas_convert_ffn_pruning_multiprocess_job(
-    project_root_path: Path, tmp_path: Path, rank: int, size: int
+    rank: int, size: int, project_root_path: Path, tmp_path: Path
 ):
     dist.setup(timeout=timedelta(minutes=10))
     # Setup the test model and data.
@@ -80,19 +73,16 @@ def _test_nas_convert_ffn_pruning_multiprocess_job(
         # assertions for the pruning_ckpts step
         assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
 
-    dist.cleanup()
+    # NOTE: no dist.cleanup() here — the dist_workers pool owns the process-group
+    # lifecycle and reuses it across tests.
 
 
-def test_nas_convert_attn_pruning(project_root_path: Path, tmp_path: Path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_nas_convert_attn_pruning_multiprocess_job, project_root_path, tmp_path),
-        backend="nccl",
-    )
+def test_nas_convert_attn_pruning(dist_workers, project_root_path: Path, tmp_path: Path):
+    dist_workers.run(_test_nas_convert_attn_pruning_multiprocess_job, project_root_path, tmp_path)
 
 
 def _test_nas_convert_attn_pruning_multiprocess_job(
-    project_root_path: Path, tmp_path: Path, rank: int, size: int
+    rank: int, size: int, project_root_path: Path, tmp_path: Path
 ):
     dist.setup(timeout=timedelta(minutes=10))
     # Setup the test model and data.
@@ -139,4 +129,5 @@ def _test_nas_convert_attn_pruning_multiprocess_job(
         assert (puzzle_dir / "ckpts/n_heads_in_group16").exists()
         assert (puzzle_dir / "ckpts/n_heads_in_group32").exists()
 
-    dist.cleanup()
+    # NOTE: no dist.cleanup() here — the dist_workers pool owns the process-group
+    # lifecycle and reuses it across tests.

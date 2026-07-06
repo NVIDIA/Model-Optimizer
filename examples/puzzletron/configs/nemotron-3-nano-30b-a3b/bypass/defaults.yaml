@@ -31,7 +31,7 @@ data:
   source_datasets_to_discard: []
   load_from_disk: true
   keep_in_memory: false
-  val_dataset_name: valid
+  val_dataset_name: validation
   max_eval_samples: 4
   eval_samples_per_process:
   shuffle_train_data_seed: ${random_int:0,9999}

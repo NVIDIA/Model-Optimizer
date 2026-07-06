@@ -1,0 +1,107 @@
+# Tiny bypass-distillation config for the GPU integration tests in test_bypass.py.
+#
+# Full-size, production example configs live under
+# examples/puzzletron/configs/*/bypass/defaults.yaml, but those use hydra
+# interpolations (${...}) and full model dims, so they cannot be loaded
+# standalone. This file mirrors that schema with tiny, interpolation-free values
+# so the tests can load it directly via OmegaConf.
+#
+# The test helper (_make_bypass_cfg_dict) loads this file and then injects the
+# per-scenario dynamic fields: model_config_overrides (ffn/attention pruning),
+# mlp_init_mode / mlp_init_config (family-aware), and an optional configs sweep.
+# block_size, training_tokens and val_dataset_name are also re-applied from the
+# test module constants so those stay the single source of truth.
+
+dtype: bf16
+seed: 42
+experiment_id: null
+experiment_dir: null
+iter_num: 1
+step_num: 1
+token_count: 0
+
+data:
+  # The dummy test dataset stores conversations under the "conversation" column.
+  data_column: conversation
+  block_size: 64
+  bos_rate: 0.5
+  fim_rate: 0
+  fim_spm_rate: 0
+  source_datasets_to_discard: []
+  load_from_disk: true
+  keep_in_memory: false
+  val_dataset_name: validation
+  max_eval_samples: 1
+  eval_samples_per_process: null
+  shuffle_train_data_seed: 42
+
+training:
+  learning_rate: 1e-4
+  training_tokens: 128
+  micro_batch_size: 1
+  val_micro_batch_size: 1
+  warmup_ratio: 0.05
+  warmup_steps: null
+  min_lr_factor: 1e-5
+  grad_accumulation_steps: 1
+  skip_first_batches: 0
+  weight_decay: 0.1
+  decay_lr: true
+  beta1: 0.9
+  beta2: 0.95
+  use_grad_scaling: false
+  grad_clip: 1.0
+  grad_clip_type: norm
+  clipping_count: 0
+  log_interval: 5
+  # Large eval_interval so validation is skipped during this short run.
+  # Validation is fully disabled anyway (disable_validation=true below).
+  eval_interval: 100
+
+resume_checkpoint_path: null
+find_last_ckpt_for_resume: false
+parameter_count: null
+init_checkpoint_path: null
+
+model:
+  student_weights_dtype: bf16
+  model_overrides:
+    delete_old_checkpoints: true
+    save_interval_seconds: null
+    # Effectively disable step-interval saving; rely on save_checkpoint_when_done.
+    save_interval: 1000000000
+    save_checkpoint_when_done: true
+  # Populated per-scenario by _make_bypass_cfg_dict.
+  model_config_overrides: {}
+
+model_factory:
+  factory: bypass_factory_fn
+  block_loss_func: normalized_mse_loss
+  gqa_init_mode: AverageKV
+  # mlp_init_mode / mlp_init_config are set per-family by _make_bypass_cfg_dict.
+  mlp_init_mode: Truncate
+  mlp_init_config: {}
+  linear_init_mode: FromTeacher
+  submodule_for_loss_calculation: null
+  keys_to_learn: entire_block
+
+# Disable all validation to keep tests fast.
+disable_initial_validate: true
+validate_teacher_model: false
+validate_student_model: false
+disable_validation: true
+best_val_loss: 1e9
+compile: false
+disable_fa2: false
+teacher_model_load_on_cpu: false
+save_checkpoint_before_training: false
+disable_checkpoint_save: false
+save_best_ckpt: true
+# Do NOT use kill_after_first_save — it raises RuntimeError which becomes sys.exit(1).
+# Instead let the short training run (2 steps) complete naturally.
+kill_after_first_save: false
+realize_best_or_latest: best
+wandb_log: false
+wandb:
+  project: null
+  entity: null

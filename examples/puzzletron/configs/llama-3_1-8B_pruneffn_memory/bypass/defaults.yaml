@@ -25,7 +25,7 @@ data:
   source_datasets_to_discard: []
   load_from_disk: true              # Load preprocessed data from disk or from stream
   keep_in_memory: false
-  val_dataset_name: valid
+  val_dataset_name: validation
   max_eval_samples: 4
   eval_samples_per_process:         # Samples per GPU during distributed eval (auto if null)
   shuffle_train_data_seed: ${random_int:0,9999}     # Seed for shuffling train data

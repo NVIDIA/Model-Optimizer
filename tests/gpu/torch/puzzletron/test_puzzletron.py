@@ -14,12 +14,10 @@
 # limitations under the License.
 import json
 from datetime import timedelta
-from functools import partial
 from pathlib import Path
 
 import pytest
 import transformers
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.puzzletron.utils import PUZZLETRON_FAMILIES, setup_test_model_and_data
 from packaging.version import Version
@@ -41,9 +39,9 @@ SEED = 1234
     PUZZLETRON_FAMILIES,
 )
 def test_puzzletron(
+    dist_workers,
     project_root_path: Path,
     tmp_path: Path,
-    num_gpus,
     hf_model_name: str,
     converter: str,
     hybrid_override_pattern: str,
@@ -55,30 +53,26 @@ def test_puzzletron(
     if "Nemotron" in hf_model_name:
         pytest.importorskip("mamba_ssm", reason="mamba_ssm required for Nemotron tests")
 
-    spawn_multiprocess_job(
-        size=num_gpus,
-        job=partial(
-            _test_puzzletron_multiprocess_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
+    dist_workers.run(
+        _test_puzzletron_multiprocess_job,
+        project_root_path,
+        tmp_path,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
+        has_moe_layers,
     )
 
 
 def _test_puzzletron_multiprocess_job(
+    rank: int,
+    size: int,
     project_root_path: Path,
     tmp_path: Path,
     hf_model_name: str,
     converter: str,
     hybrid_override_pattern: str,
     has_moe_layers: bool,
-    rank: int,
-    size: int,
 ):
     # Set seed BEFORE dist.setup() to ensure reproducibility across all processes
     set_seed(SEED)
@@ -186,8 +180,8 @@ def _test_puzzletron_multiprocess_job(
         )
         check(solution_0_filepath.exists(), f"Expected {solution_0_filepath} to exist")
 
-    dist.cleanup()
-
+    # NOTE: no dist.cleanup() here — the dist_workers pool owns the process-group
+    # lifecycle and reuses it across tests.
     if errors:
         pytest.fail(
             f"{len(errors)} assertion(s) failed for {hf_model_name}:\n  - " + "\n  - ".join(errors)

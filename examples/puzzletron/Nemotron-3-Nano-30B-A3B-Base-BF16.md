@@ -16,7 +16,7 @@ Both runs use the same MIP solver and the same constraint (`target_num_kv_heads:
 ## Hardware & install
 
 - 8×H100 80GB (the teacher needs ≥60 GiB for activation scoring on a 4096 context).
-- Container: `nvcr.io/nvidia/nemo:26.04` or later.
+- Container: `nvcr.io/nvidia/nemo:26.06` or later.
 - `pip install -e ".[dev]"` from the modelopt repo root.
 - HF auth set up so the model is downloadable: `huggingface-cli login`.
 

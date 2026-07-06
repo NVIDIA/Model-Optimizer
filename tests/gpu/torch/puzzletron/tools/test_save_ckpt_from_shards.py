@@ -16,11 +16,9 @@
 """Tests for save_checkpoint_from_shards in checkpoint_utils_hf."""
 
 import json
-from functools import partial
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file as safe_load_file
 
@@ -117,8 +115,8 @@ def _distributed_save_worker(rank, world_size, checkpoint_dir):
 class TestSaveCheckpointFromShardsMultiProcess:
     """Tests that exercise the distributed gather path (world_size > 1)."""
 
-    def test_distributed_save_creates_valid_checkpoint(self, tmp_path):
-        spawn_multiprocess_job(2, partial(_distributed_save_worker, checkpoint_dir=tmp_path))
+    def test_distributed_save_creates_valid_checkpoint(self, dist_workers, tmp_path):
+        dist_workers.run(_distributed_save_worker, checkpoint_dir=tmp_path)
 
         index_path = tmp_path / SAFE_WEIGHTS_INDEX_NAME
         assert index_path.exists()

@@ -275,5 +275,7 @@ def save_dummy_dataset(dataset_path: Path | str):
     data = [{"conversation": sample}] * 2500
 
     # For train-val splits
-    data_dict = DatasetDict({"train": Dataset.from_list(data), "valid": Dataset.from_list(data)})
+    data_dict = DatasetDict(
+        {"train": Dataset.from_list(data), "validation": Dataset.from_list(data)}
+    )
     data_dict.save_to_disk(str(dataset_path))
