@@ -1301,10 +1301,12 @@ class _DynamicMCoreLanguageModel(DynamicModule):
 # Gemma4TransformerLayer override forward/__init__, so DMRegistry's exact-class match misses them
 # and they must be registered explicitly. Guarded import: gemma4 only exists on that branch.
 #
-# Pruning policy (width-only): hidden_size + ffn_hidden_size. Attention heads are NOT pruned (like
-# GDN/MLA) -- heterogeneous sliding/full kv_channels and the cross-layer KV bus make head pruning
-# unsafe -- so the base _DynamicAttention hidden_size-only path is used. Depth (num_layers) pruning
-# is not yet supported (PLE per-layer slabs + KV-bus producer/borrower integrity must be handled).
+# Pruning policy: width (hidden_size + ffn_hidden_size) and depth (num_layers). Attention heads are
+# NOT pruned (like GDN/MLA) -- heterogeneous sliding/full kv_channels and the cross-layer KV bus make
+# head pruning unsafe -- so the base _DynamicAttention hidden_size-only path is used. Depth pruning
+# additionally repairs the PLE per-layer slabs and the KV-bus producer/borrower roles via
+# _DynamicGemma4Model.handle_layer_drop (see mcore_minitron.drop_mcore_language_model_layers); the
+# structure-aware drop policy protects full-attention (KV-producer) layers from being dropped.
 try:
     from megatron.core.models.gemma4.gemma4_model import Gemma4Model
     from megatron.core.transformer.gemma4_attention import Gemma4SelfAttention
@@ -1419,8 +1421,10 @@ class _DynamicGemma4Model(_DynamicMCoreLanguageModel):
 
     Identical to ``_DynamicMCoreLanguageModel`` except for the model-level PLE projection
     (``ple.per_layer_model_projection``: ``nn.Linear(hidden_size, num_layers * ple_dim)``), whose
-    input dimension must shrink with ``hidden_size``. Its output dimension scales with num_layers
-    and stays static (depth pruning is not yet supported).
+    input dimension shrinks with ``hidden_size`` (width pruning). Its output dimension scales with
+    num_layers and stays static under width pruning; depth pruning resizes the PLE per-layer slabs
+    physically at drop time via :meth:`handle_layer_drop` (called by
+    ``mcore_minitron.drop_mcore_language_model_layers``).
     """
 
     def _setup(self):
@@ -1437,6 +1441,126 @@ class _DynamicGemma4Model(_DynamicMCoreLanguageModel):
         if is_pipeline_first_stage():
             self.ple.per_layer_model_projection.export()
         return super().export()
+
+    def handle_layer_drop(self, kept_layer_numbers: list[int]) -> None:
+        """Repair Gemma4-specific state after depth pruning drops decoder layers.
+
+        Called by ``drop_mcore_language_model_layers`` once it has removed and reindexed
+        ``self.decoder.layers``. It fixes the two things generic (GPT/Mamba) layer-dropping cannot:
+
+          1. the model-level PLE per-layer slabs (``embed_tokens_per_layer`` /
+             ``per_layer_model_projection``, both sized ``num_layers * ple_dim``), and
+          2. the heterogeneous sliding/full attention pattern + cross-layer KV-bus roles, which
+             every :class:`Gemma4SelfAttention` caches from its ORIGINAL 1-based ``layer_number`` at
+             build time (so a plain reindex leaves them stale).
+
+        The recomputed ``config`` fields (``num_layers`` / ``num_kv_shared_layers`` /
+        ``full_attention_layers`` / ``layer_types``) are written back so that an exported +
+        reloaded checkpoint rebuilds identical roles from config.
+
+        Args:
+            kept_layer_numbers: ORIGINAL 1-based layer numbers of the surviving layers, in order.
+        """
+        kept0 = [n - 1 for n in kept_layer_numbers]  # original 0-based indices of survivors
+        cfg = self.config
+        old_num_layers = len(cfg.layer_types)
+        new_num_layers = len(kept0)
+
+        # Each survivor keeps its original attention type (full/sliding); their kv_channels (256 vs
+        # 512) and window differ physically, so type CANNOT be reassigned -- only relabeled.
+        kept_types = [cfg.layer_types[i] for i in kept0]
+
+        # Preserve each survivor's original KV-bus role. Borrowers were the top
+        # ``num_kv_shared_layers`` layers; dropping (which keeps order) leaves them contiguous at the
+        # end, so the new borrower count is just how many survived.
+        old_first_shared = old_num_layers - getattr(cfg, "num_kv_shared_layers", 0)
+        kept_is_borrower = [i >= old_first_shared for i in kept0]
+        assert kept_is_borrower == sorted(kept_is_borrower), (
+            "KV-shared (borrower) layers must remain contiguous at the end after dropping; the drop "
+            "policy must not drop an own-KV layer from below the shared region while keeping borrowers."
+        )
+        new_num_shared = sum(kept_is_borrower)
+        new_first_shared = new_num_layers - new_num_shared
+
+        # Every surviving borrower type must still have a surviving own-layer to be its KV producer.
+        borrower_types = set(kept_types[new_first_shared:])
+        own_types = set(kept_types[:new_first_shared])
+        assert borrower_types <= own_types, (
+            f"Depth prune dropped all producer (own-KV) layers of type(s) {borrower_types - own_types}; "
+            "the KV bus would have no producer. Keep >=1 own-layer of each attention type."
+        )
+
+        # Recompute the pattern/KV config on the kept layers (0-based positions of kept full layers).
+        new_full_attention_layers = tuple(j for j, t in enumerate(kept_types) if t == "full")
+        new_layer_types = tuple(kept_types)
+        for c in [cfg] + [layer.self_attention.config for layer in self.decoder.layers]:
+            c.num_layers = new_num_layers
+            c.num_kv_shared_layers = new_num_shared
+            c.full_attention_layers = new_full_attention_layers
+            c.layer_types = new_layer_types
+
+        # Re-derive each surviving attention's cached KV role from the recomputed config, using the
+        # exact formula in Gemma4SelfAttention.__init__ (so in-memory == reload-from-config).
+        for new_idx, layer in enumerate(self.decoder.layers):
+            attn = layer.self_attention
+            assert attn.layer_type == new_layer_types[new_idx], (
+                "Attention layer_type (sliding/full) changed after drop -- kv_channels/window differ "
+                "per type and cannot be reassigned; the drop policy must preserve each layer's type."
+            )
+            # The generic drop reindexes ``layer.layer_number`` but not the attention's own cached
+            # ``layer_number``; sync it to the new 0-based position and re-derive roles from that.
+            layer_idx = new_idx
+            attn.layer_number = new_idx + 1
+            attn.is_kv_shared_layer = new_num_shared > 0 and layer_idx >= new_first_shared
+            prev_types = new_layer_types[:new_first_shared]
+            attn.store_full_length_kv = not attn.is_kv_shared_layer and layer_idx == len(
+                prev_types
+            ) - 1 - prev_types[::-1].index(attn.layer_type)
+
+        if is_pipeline_first_stage():
+            self._resize_ple_layers(kept0)
+
+    def _resize_ple_layers(self, kept0: list[int]) -> None:
+        """Drop the PLE per-layer slabs of removed layers, keeping surviving slabs in kept order.
+
+        Both PLE tables lay out ``num_layers`` contiguous ``ple_dim`` slabs. Slab ``i`` (original
+        0-based layer index) is columns ``[i*P:(i+1)*P]`` of ``embed_tokens_per_layer`` and rows
+        ``[i*P:(i+1)*P]`` of ``per_layer_model_projection``. Gathering the kept slabs in kept order
+        makes slab position equal the new layer index, so ``per_layer_inputs[..., j, :]`` still feeds
+        new decoder layer ``j``.
+        """
+        ple = self.ple
+        p = ple.ple_dim
+        keep = torch.cat([torch.arange(i * p, (i + 1) * p) for i in kept0])
+        new_out = len(kept0) * p
+
+        # embed_tokens_per_layer: plain nn.Embedding(vocab, num_layers*P) -> slice output columns.
+        emb = ple.embed_tokens_per_layer
+        new_emb = nn.Embedding(
+            emb.num_embeddings, new_out, device=emb.weight.device, dtype=emb.weight.dtype
+        )
+        with torch.no_grad():
+            new_emb.weight.copy_(emb.weight[:, keep])
+        ple.embed_tokens_per_layer = new_emb
+
+        # per_layer_model_projection: _DynamicGemma4PLEProjection wraps nn.Linear(hidden, L*P). Read
+        # the RAW (unsliced) stored weight so the hidden_size width-slicing is not baked in, rebuild
+        # at the reduced output, then re-attach the hidden_size input hparam so export still slices
+        # the input dim (mirrors _DynamicGemma4Model._setup).
+        proj = ple.per_layer_model_projection
+        raw_w = proj._parameters["weight"]  # [L*P, hidden_full], pre width-slice
+        new_proj = nn.Linear(
+            raw_w.shape[1], new_out, bias=False, device=raw_w.device, dtype=raw_w.dtype
+        )
+        with torch.no_grad():
+            new_proj.weight.copy_(raw_w[keep, :])
+        ple.per_layer_model_projection = new_proj
+        if isinstance(proj, _DynamicGemma4PLEProjection):
+            _DynamicGemma4PLEProjection.convert(
+                new_proj, hidden_size=self.get_hparam("hidden_size")
+            )
+
+        ple.num_layers = len(kept0)
 
 
 # Register the Gemma4 dynamic modules only when the megatron-core Gemma4 model is importable

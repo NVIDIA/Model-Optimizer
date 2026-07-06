@@ -165,14 +165,34 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     # reindex kept layers, exclude sharded state dict for dropped layers
     layer_number = sum(layers_remaining_per_pp[: get_pipeline_model_parallel_rank()]) + 1
     kept_layers = []
+    kept_original_layer_numbers = []  # ORIGINAL (pre-reindex) 1-based numbers of surviving layers
     for layer in model.decoder.layers:
         if layer.layer_number not in layers_to_drop:
+            kept_original_layer_numbers.append(layer.layer_number)
             layer.layer_number = layer_number
             layer_number += 1
             kept_layers.append(layer)
     model.decoder.layers = nn.ModuleList(kept_layers)
 
     model.config.num_layers = new_num_layers
+
+    # Models with per-layer embeddings / a cross-layer KV bus (Gemma4) must additionally repair
+    # their PLE per-layer slabs and re-derive the sliding/full + KV-bus roles that each attention
+    # caches from its original layer index. Plain GPT/Mamba models have neither and skip this.
+    if hasattr(model, "handle_layer_drop"):
+        model.handle_layer_drop(kept_original_layer_numbers)
+
+
+def _protected_layer_numbers(model: nn.Module) -> set[int]:
+    """Return 1-based layer numbers that depth pruning must never drop.
+
+    For Gemma4, the global *full-attention* layers are the cross-layer KV-bus producers and the only
+    layers that mix long-range context; dropping them both breaks the bus (borrowers lose their
+    producer) and disproportionately hurts quality, which the local input->output cosine score does
+    not capture. Other model families expose no ``full_attention_layers`` and have no protected layers.
+    """
+    full = getattr(getattr(model, "config", None), "full_attention_layers", None)
+    return {i + 1 for i in full} if full else set()  # config indices are 0-based
 
 
 def _get_hybrid_pattern_key(model: nn.Module) -> str | None:
@@ -247,6 +267,9 @@ class MCoreMinitronSearcher(BaseSearcher):
             "max_iter_data_loader": 1024,
             "skip_sorting": False,
             "scores_path": None,
+            # Explicit 1-indexed layer numbers to drop, overriding the cosine-based ranking (depth
+            # pruning only). Protected layers (e.g. Gemma4 full-attention) may not be listed.
+            "layers_to_drop": None,
             # Additional search config for metric-based pruning
             "max_width_pruning": 0.40,
             "max_depth_pruning": 0.20,
@@ -366,13 +389,36 @@ class MCoreMinitronSearcher(BaseSearcher):
             sort_parameters(self.model, self.hps_to_sort, verbose=False)
         registry.cleanup()
 
-        if self.layer_scores:
+        manual_drop = self.config["layers_to_drop"]
+        if manual_drop:
+            # Explicit layer selection overrides the cosine-based ranking (no scores needed): put the
+            # requested layers at the tail so _prune drops exactly them.
+            n = self.model.config.num_layers
+            manual_drop = sorted(set(manual_drop))
+            assert manual_drop[0] >= 1 and manual_drop[-1] <= n, (
+                f"layers_to_drop must be 1-indexed within 1..{n}, got {manual_drop}"
+            )
+            bad = _protected_layer_numbers(self.model) & set(manual_drop)
+            assert not bad, (
+                f"layers_to_drop includes protected layers {sorted(bad)} (e.g. Gemma4 full-attention "
+                "/ KV-bus producer layers) which must not be dropped."
+            )
+            self.sorted_layers = [i for i in range(1, n + 1) if i not in manual_drop] + manual_drop
+        elif self.layer_scores:
             # sort layers by scores and drop the lowest ones
             self.sorted_layers = [
                 layer
                 for layer, _ in sorted(self.layer_scores.items(), key=lambda x: x[1], reverse=True)
             ]
             assert sorted(self.sorted_layers) == list(range(1, self.model.config.num_layers + 1))
+            # Structure-aware protection: force layers that are unsafe to drop (e.g. Gemma4 global
+            # full-attention / KV-bus producer layers) to the front of the ranking so depth pruning
+            # only ever drops from the unprotected tail, regardless of their cosine score.
+            protected = _protected_layer_numbers(self.model)
+            if protected:
+                self.sorted_layers = [n for n in self.sorted_layers if n in protected] + [
+                    n for n in self.sorted_layers if n not in protected
+                ]
         else:
             assert (
                 self.constraints.keys() == {"export_config"}
@@ -384,6 +430,13 @@ class MCoreMinitronSearcher(BaseSearcher):
             export_config = self.search_best_arch_by_metrics()
         else:
             export_config = self.constraints["export_config"]
+
+        # An explicit layers_to_drop implies the target depth (num_layers = kept count).
+        if manual_drop:
+            export_config = {
+                **export_config,
+                "num_layers": self.model.config.num_layers - len(manual_drop),
+            }
 
         # Prune homogeneously
         self._prune(export_config, prune_depth=True)
@@ -429,6 +482,12 @@ class MCoreMinitronSearcher(BaseSearcher):
             if num_layers_hp.active != num_layers_hp.max:
                 assert self.sorted_layers is not None
                 layers_to_drop = self.sorted_layers[num_layers_hp.active :]
+                protected = _protected_layer_numbers(self.model) & set(layers_to_drop)
+                assert not protected, (
+                    f"Requested num_layers={num_layers_hp.active} is too small to keep all protected "
+                    f"(e.g. Gemma4 full-attention) layers; would drop protected layers {sorted(protected)}. "
+                    "Increase the target num_layers."
+                )
                 drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
 
         # Update model config with pruned architecture

@@ -13,18 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-r"""Minitron (width) pruning of a Gemma4-E4B language model on a single GPU.
+r"""Minitron width and depth pruning of a Gemma4-E4B language model on a single GPU.
 
 Loads a Megatron dist-checkpoint of the Gemma4-E4B language tower (produced by the Megatron-LM
 ``examples/gemma4/hf_to_mlm_convert.py`` converter), calibrates on a text dataset, prunes the
-requested width hyperparameters (``hidden_size`` / ``ffn_hidden_size``) with ModelOpt's
-``mcore_minitron`` algorithm, and saves the pruned dist-checkpoint.
+requested width (``hidden_size`` / ``ffn_hidden_size``) and/or depth (``num_layers``)
+hyperparameters with ModelOpt's ``mcore_minitron`` algorithm, and saves the pruned dist-checkpoint.
 
-Notes (validated on google/gemma-4-E4B):
+Notes (validated on google/gemma-4-E4B, full MMLU):
   * Attention heads are NOT pruned (Gemma4 uses the hidden-size-only policy, like GDN/MLA).
   * ``ffn_hidden_size`` prunes gracefully un-distilled; ``hidden_size`` is a sharp capacity cliff
     (fine <= ~2.5%, collapses by ~10%) and needs knowledge-distillation recovery for larger cuts.
-  * Depth (``num_layers``) pruning is not yet supported for Gemma4 (PLE per-layer slabs + KV bus).
+  * ``num_layers`` (depth): layers are ranked by input->output cosine similarity and the least
+    important are dropped, but the global full-attention layers (cross-layer KV-bus producers) are
+    protected and never dropped. Graceful un-distilled to ~14% (42->36: MMLU 0.665->0.637);
+    collapses by ~19% (42->34: 0.665->0.28). Beyond ~14% needs knowledge-distillation recovery.
   * Pipeline parallelism is not supported by the fork's Gemma4Model, so this runs on a single GPU.
 
 Running in the NeMo container (nvcr.io/nvidia/nemo:26.06)
@@ -66,6 +69,24 @@ Run it (single GPU, no ``torchrun`` -- the fork's Gemma4Model has no pipeline pa
         --save /workspace/ckpts/gemma4_e4b_base_pruned \
         --export_config '{"ffn_hidden_size": 9216}' \
         --hf_model google/gemma-4-E4B
+
+Width and depth can be combined; e.g. drop 6 layers and shrink ffn:
+
+    python /opt/Model-Optimizer/prune_gemma4_e4b.py \
+        --ckpt /workspace/ckpts/gemma4_e4b_base_mlm_ckpt \
+        --save /workspace/ckpts/gemma4_e4b_base_pruned \
+        --export_config '{"num_layers": 36, "ffn_hidden_size": 9216}' \
+        --hf_model google/gemma-4-E4B
+
+To drop specific 1-indexed layers instead of letting the cosine ranking choose (protected
+full-attention layers may not be listed), use ``--layers_to_drop``. With no width hparams this
+needs no calibration data:
+
+    python /opt/Model-Optimizer/prune_gemma4_e4b.py \
+        --ckpt /workspace/ckpts/gemma4_e4b_base_mlm_ckpt \
+        --save /workspace/ckpts/gemma4_e4b_base_pruned \
+        --layers_to_drop 38 39 40 41 \
+        --hf_model google/gemma-4-E4B
 """
 
 import argparse
@@ -104,9 +125,20 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--save", required=True, help="Output path for the pruned dist-checkpoint.")
     parser.add_argument(
         "--export_config",
-        required=True,
-        help='Target width as JSON, e.g. \'{"hidden_size": 2304, "ffn_hidden_size": 9216}\'. '
-        "Attention heads and num_layers are not pruned for Gemma4.",
+        default="{}",
+        help="Target architecture as JSON of width and/or depth hparams, e.g. "
+        '\'{"hidden_size": 2304, "ffn_hidden_size": 9216, "num_layers": 36}\'. '
+        "Attention heads are not pruned for Gemma4; full-attention layers are protected from "
+        "depth pruning. Provide this and/or --layers_to_drop.",
+    )
+    parser.add_argument(
+        "--layers_to_drop",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Explicit 1-indexed layer numbers to drop (depth pruning), overriding the cosine-based "
+        "ranking. Protected full-attention layers may not be listed. Mutually exclusive with "
+        '"num_layers" in --export_config; combine with width hparams to prune both at once.',
     )
     parser.add_argument(
         "--hf_model",
@@ -124,11 +156,18 @@ def get_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
-    """Load the checkpoint, calibrate, width-prune, and save the pruned checkpoint."""
+    """Load the checkpoint, calibrate, prune (width and/or depth), and save the checkpoint."""
     export_config = json.loads(args.export_config)
-    assert isinstance(export_config, dict) and export_config, (
-        "--export_config must be a non-empty dict"
+    assert isinstance(export_config, dict), "--export_config must be a JSON dict"
+    assert export_config or args.layers_to_drop, (
+        "Provide a non-empty --export_config and/or --layers_to_drop"
     )
+    assert not (args.layers_to_drop and "num_layers" in export_config), (
+        '--layers_to_drop is mutually exclusive with "num_layers" in --export_config'
+    )
+    # Width pruning (hidden_size / ffn_hidden_size) needs activation-based importance sorting;
+    # dropping an explicit set of layers with no width change does not, so skip calibration then.
+    need_calib = bool(export_config)
 
     spec_fn = (
         get_gemma4_layer_with_transformer_engine_spec
@@ -146,30 +185,41 @@ def main(args: argparse.Namespace) -> None:
     model.load_state_dict(dist_checkpointing.load(sharded_sd, args.ckpt), strict=False)
     model.eval()
 
-    # Only apply the chat template when the tokenizer has one (base/PT models do not).
-    use_chat_template = getattr(tokenizer, "chat_template", None) is not None
-    forward_loop = get_megatron_calibration_forward_loop(
-        tokenizer,
-        dataset_name=args.calib_dataset,
-        num_samples=args.calib_samples,
-        seq_length=args.calib_seq_length,
-        batch_size=args.calib_batch_size,
-        pack=True,
-        apply_chat_template=use_chat_template,
-    )
+    forward_loop = None
+    if need_calib:
+        # Only apply the chat template when the tokenizer has one (base/PT models do not).
+        use_chat_template = getattr(tokenizer, "chat_template", None) is not None
+        forward_loop = get_megatron_calibration_forward_loop(
+            tokenizer,
+            dataset_name=args.calib_dataset,
+            num_samples=args.calib_samples,
+            seq_length=args.calib_seq_length,
+            batch_size=args.calib_batch_size,
+            pack=True,
+            apply_chat_template=use_chat_template,
+        )
 
-    # Manual pruning: fine (64) search-space granularity for every dimension, so any export_config
-    # value that is a multiple of 64 is a valid choice.
+    # Manual pruning: fine search-space granularity for every dimension, so any export_config value
+    # that is a multiple of the divisor is a valid choice (64 for width, 1 for num_layers so any
+    # target depth is reachable).
     ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
-        hidden_size_divisor=64, ffn_hidden_size_divisor=64
+        hidden_size_divisor=64, ffn_hidden_size_divisor=64, num_layers_divisor=1
     )
-    print(f"Pruning Gemma4-E4B ({args.spec} spec) with export_config={export_config}", flush=True)
+    print(
+        f"Pruning Gemma4-E4B ({args.spec} spec) with export_config={export_config}"
+        + (f", layers_to_drop={args.layers_to_drop}" if args.layers_to_drop else ""),
+        flush=True,
+    )
     model, _ = mtp.prune(
         model,
         mode=[("mcore_minitron", ss_config)],  # type: ignore[arg-type]
         constraints={"export_config": export_config},
         dummy_input=None,
-        config={"forward_loop": forward_loop},
+        config={
+            "forward_loop": forward_loop,
+            "layers_to_drop": args.layers_to_drop,
+            "skip_sorting": not need_calib,
+        },
     )
     # Homogeneous checkpoint -> drop the modelopt state.
     if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=model):
@@ -177,8 +227,16 @@ def main(args: argparse.Namespace) -> None:
 
     n_params = sum(p.numel() for p in model.parameters())
     print(
-        f"Pruned config: hidden_size={model.config.hidden_size} "
-        f"ffn_hidden_size={model.config.ffn_hidden_size} | params={n_params / 1e9:.2f}B",
+        f"Pruned config: num_layers={model.config.num_layers} "
+        f"hidden_size={model.config.hidden_size} ffn_hidden_size={model.config.ffn_hidden_size} "
+        f"| params={n_params / 1e9:.2f}B",
+        flush=True,
+    )
+    # Depth pruning also rewrites the heterogeneous-attention / KV-bus fields; print them so the
+    # pruned checkpoint can be rebuilt (a fresh Gemma4TransformerConfig must use these values).
+    print(
+        f"  full_attention_layers={model.config.full_attention_layers} "
+        f"num_kv_shared_layers={model.config.num_kv_shared_layers}",
         flush=True,
     )
 
@@ -186,7 +244,9 @@ def main(args: argparse.Namespace) -> None:
     dist_checkpointing.save(model.sharded_state_dict(), args.save)
     print(f"Saved pruned Gemma4-E4B checkpoint -> {args.save}", flush=True)
     print(
-        "To reload, build the model with the pruned hidden_size/ffn_hidden_size above.", flush=True
+        "To reload, build Gemma4Model with the pruned num_layers / hidden_size / ffn_hidden_size "
+        "and the full_attention_layers / num_kv_shared_layers printed above.",
+        flush=True,
     )
 
 
