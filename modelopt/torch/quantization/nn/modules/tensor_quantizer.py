@@ -266,6 +266,9 @@ class TensorQuantizer(nn.Module):
             )
             setattr(self, _tq_attribute_name, _setter(val))
 
+        if isinstance(attribute_cfg, dict) and attribute_cfg == {"enable": False}:
+            self.disable_rotate()
+
         if self.is_mx_format:
             self._pass_through_bwd = True
 
@@ -618,6 +621,35 @@ class TensorQuantizer(nn.Module):
         if isinstance(self._rotate, dict) and self.rotate_is_enabled:
             return self._rotate.get("block_size", None)
         return None
+
+    @property
+    def rotate_back_is_enabled(self):
+        """Check if inverse rotation should be applied after quantization."""
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.enable and self._rotate.mode == "rotate_back"
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("mode", "rotate") == "rotate_back"
+        return False
+
+    def disable_rotate(self):
+        """Disable rotation while preserving the ``_rotate`` field's type.
+
+        Idempotent. Used after folding a weight quantizer so the baked-in rotation is not
+        re-applied on subsequent forwards.
+        """
+        if isinstance(self._rotate, RotateConfig):
+            self._rotate = self._rotate.model_copy(update={"enable": False})
+        elif isinstance(self._rotate, dict):  # backward compat: old checkpoints stored a dict
+            self._rotate = dict(self._rotate, enable=False)
+        else:
+            self._rotate = False
+
+    def _rotate_inputs(self, inputs):
+        return normalized_hadamard_transform(
+            inputs,
+            rotate_fp32=self.rotate_is_fp32,
+            block_size=self.rotate_block_size,
+        )
 
     def disable_calib(self):
         """Disable calibration."""
@@ -1090,19 +1122,22 @@ class TensorQuantizer(nn.Module):
         if self.pre_quant_scale is not None:
             inputs = inputs * self.pre_quant_scale
 
+        if self.rotate_back_is_enabled and self._if_quant and not self.fake_quant:
+            raise ValueError("rotate_back mode is only supported with fake_quant=True.")
+
         # Rotating the input
         if self.rotate_is_enabled:
-            inputs = normalized_hadamard_transform(
-                inputs,
-                rotate_fp32=self.rotate_is_fp32,
-                block_size=self.rotate_block_size,
-            )
+            inputs = self._rotate_inputs(inputs)
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
             # TODO: This is a temporary solution and needs to be removed once megatron supports
             # non-homogeneous layers
             self._input_dtype = inputs.dtype if hasattr(inputs, "dtype") else None
+            # Even when quantization is disabled, honor rotate_back so a rotate/rotate_back
+            # pair stays a no-op roundtrip instead of leaving the tensor rotated.
+            if self.rotate_back_is_enabled:
+                inputs = self._rotate_inputs(inputs)
             return inputs
 
         if (
@@ -1159,6 +1194,9 @@ class TensorQuantizer(nn.Module):
         if self.is_static_block_quant:
             outputs = self._reset_to_original_shape(outputs)
 
+        if self.rotate_back_is_enabled and isinstance(outputs, torch.Tensor):
+            outputs = self._rotate_inputs(outputs)
+
         return outputs
 
     def _short_amax(self, fmt=".2e"):
@@ -1185,6 +1223,14 @@ class TensorQuantizer(nn.Module):
             return f"{tensor.item():{fmt}}"
         return f"[{tensor.min().item():{fmt}}, {tensor.max().item():{fmt}}]({tensor.numel()})"
 
+    def _rotation_extra_repr(self):
+        s = " rotated" if self.rotate_is_enabled else ""
+        s += " (rotate_back)" if self.rotate_back_is_enabled else ""
+        s += " (fp32)" if self.rotate_is_fp32 else ""
+        if self.rotate_block_size is not None:
+            s += f" (block={self.rotate_block_size})"
+        return s
+
     def extra_repr(self):
         """Set the extra information about this module."""
         if self._disabled:
@@ -1194,7 +1240,8 @@ class TensorQuantizer(nn.Module):
                 if self.pre_quant_scale is not None
                 else ""
             )
-            return "disabled"
+            s += self._rotation_extra_repr()
+            return s
         s = f"{'unsigned ' if self._unsigned else ''}{self._num_bits} bit"
         s += " narrow" if (self._narrow_range) else ""
         s += " fake" if (self._fake_quant) else ""
@@ -1208,10 +1255,7 @@ class TensorQuantizer(nn.Module):
             if self.pre_quant_scale is not None
             else ""
         )
-        s += " rotated" if self.rotate_is_enabled else ""
-        s += " (fp32)" if self.rotate_is_fp32 else ""
-        if self.rotate_block_size is not None:
-            s += f" (block={self.rotate_block_size})"
+        s += self._rotation_extra_repr()
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)
@@ -1511,6 +1555,7 @@ class SequentialQuantizer(nn.Sequential):
     _delegated_methods = [
         "reset_amax",
         "disable",
+        "disable_rotate",
         "enable",
         "load_calib_amax",
         "load_calib_bias",
