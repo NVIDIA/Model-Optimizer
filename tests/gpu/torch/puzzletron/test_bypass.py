@@ -728,15 +728,22 @@ def _scenario_then_build_library(
             add_attention_no_ops=False,
             trust_remote_code=False,
         )
-        # Some subblock row's checkpoint_dir column must reference the bypass path.
+        # Some subblock row's checkpoint_dir column must reference a bypass run.
+        # The sibling scenarios in this merged job produce the same student
+        # architecture (ffn=256 / heads=4), so ``_build_subblocks_df``'s
+        # ``drop_duplicates(keep="first")`` may award a given subblock row to
+        # another bypass run rather than this one — but its priority sort still
+        # guarantees the winner is bypass-rooted over any untrained pruned
+        # source. Assert that bypass entries flow into the library (the wiring
+        # under test); the ``bypass_resolved in discovered`` check above already
+        # proves this specific run was realized and discovered.
         # FFN-only rows leave attention_checkpoint_dir as NaN (and vice versa); we
         # drop those before string-casting because pandas' .astype(str) doesn't
         # reliably stringify NaN on object-dtype columns, and 'X' in float('nan')
         # raises TypeError.
-        bypass_str = str(bypass_resolved)
         attn_sources = subblocks_df["attention_checkpoint_dir"].dropna().astype(str).tolist()
         ffn_sources = subblocks_df["ffn_checkpoint_dir"].dropna().astype(str).tolist()
-        assert any(bypass_str in s for s in attn_sources + ffn_sources), (
+        assert any("bypass_runs" in s for s in attn_sources + ffn_sources), (
             f"replacement_library subblocks_df has no bypass-sourced rows. "
             f"attn_sources={set(attn_sources)}, ffn_sources={set(ffn_sources)}"
         )
