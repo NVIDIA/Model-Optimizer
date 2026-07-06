@@ -29,17 +29,16 @@ import torch
 import triton
 import triton.language as tl
 
-# Helpers for optional N:M sparsity and sink/window-aware dense regions live
-# in the sparsity package. The baseline forward kernel below calls them
-# conditionally under constexpr guards, so the unified single-kernel design
-# stays intact while keeping feature-specific logic in its own subpackage.
+# Helpers for optional N:M sparsity and skip-softmax live in the sparsity
+# package. The baseline forward kernel below calls them conditionally under
+# constexpr guards, so the unified single-kernel design stays intact while
+# keeping feature-specific logic in its own subpackage.
 #
 # Lazy import: Triton resolves @triton.jit names at kernel compile time (first
 # call), not at definition time, so populating the module globals before the
 # first ``attention()`` call is sufficient. Deferring avoids a circular import
 # (common.attention/__init__.py ↔ sparsity.attention/__init__.py via this file).
 _apply_sparse_nm_to_qk_tile: Any = None
-_is_dense_region: Any = None
 _skip_softmax_decision: Any = None
 _qdq_fp8: Any = None
 _p_qdq_nvfp4: Any = None
@@ -47,20 +46,16 @@ _v_qdq_nvfp4: Any = None
 
 
 def _load_sparsity_helpers() -> None:
-    global _apply_sparse_nm_to_qk_tile, _is_dense_region, _skip_softmax_decision
+    global _apply_sparse_nm_to_qk_tile, _skip_softmax_decision
     if _apply_sparse_nm_to_qk_tile is None:
         from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
             _apply_sparse_nm_to_qk_tile as _nm,
-        )
-        from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
-            _is_dense_region as _dense,
         )
         from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
             _skip_softmax_decision as _skip,
         )
 
         _apply_sparse_nm_to_qk_tile = _nm
-        _is_dense_region = _dense
         _skip_softmax_decision = _skip
 
 
@@ -86,21 +81,15 @@ LOG2E: float = 1.44269504088896
 # Autotune configs for forward kernel
 # ---------------------------------------------------------------------------
 _FWD_CONFIGS = [
-    triton.Config({"BLOCK_M": bm, "BLOCK_N": bn}, num_stages=s, num_warps=w)
-    for bm in [64, 128]
-    for bn in [32, 64, 128]
-    for s in [1, 2, 3]
-    for w in [4, 8]
+    triton.Config({"BLOCK_M": block_m, "BLOCK_N": 32}, num_stages=2, num_warps=4)
+    for block_m in (16, 64, 128)
 ]
 
-# Use a single config in testing for reproducibility
-if "PYTEST_VERSION" in __import__("os").environ:
-    _FWD_CONFIGS = [triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1, num_warps=4)]
-
 _MEASURE_BLOCK_M = 128
+_P_QDQ_MEASURE_BLOCK_M = 16
 # 128 so the kernel sparsity-measurement block matches the PyTorch
-# flash_skip_softmax calibration block (br = bc = 128) and the Triton
-# calibration kernel; otherwise the two measure at different granularities.
+# calibration/reference granularity. This is deliberately independent of the
+# autotuned compute tile.
 _MEASURE_BLOCK_N = 128
 _MEASURE_NUM_STAGES = 1
 _MEASURE_NUM_WARPS = 4
@@ -226,10 +215,41 @@ def _apply_mask(
     return scores
 
 
+@triton.jit
+def _apply_sparse_nm_with_dense_tokens(
+    scores,
+    kv_start,
+    q_pos,
+    kv_pos,
+    seq_len_q,
+    seq_len_kv,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SPARSITY_N: tl.constexpr,
+    SPARSITY_M: tl.constexpr,
+    DENSE_SINK_TOKENS: tl.constexpr,
+    DENSE_RECENT_TOKENS: tl.constexpr,
+):
+    """Apply N:M sparsity outside token-exact sink and recent regions."""
+    sparse_scores = _apply_sparse_nm_to_qk_tile(scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M)
+    q_abs_pos = q_pos[:, None] + seq_len_kv - seq_len_q
+    kv_abs_pos = kv_start + kv_pos[None, :]
+    token_distance = q_abs_pos - kv_abs_pos
+    dense_tokens = (
+        (seq_len_q <= 1)
+        | (kv_abs_pos < DENSE_SINK_TOKENS)
+        | ((token_distance >= 0) & (token_distance < DENSE_RECENT_TOKENS))
+    )
+    return tl.where(dense_tokens, scores, sparse_scores)
+
+
 # ---------------------------------------------------------------------------
 # Forward kernel
 # ---------------------------------------------------------------------------
-@triton.autotune(configs=_FWD_CONFIGS, key=["N_CTX", "HEAD_DIM"])
+@triton.autotune(
+    configs=(_FWD_CONFIGS[:1] if "PYTEST_VERSION" in __import__("os").environ else _FWD_CONFIGS),
+    key=["N_CTX", "HEAD_DIM", "Q_IS_FP32", "P_QDQ", "V_QDQ"],
+)
 @triton.jit
 def _attn_fwd(
     Q,  # [total_q, num_q_heads, head_dim] query tensor
@@ -375,18 +395,20 @@ def _attn_fwd(
 
         # --- Optional N:M sparse softmax ---
         if SPARSITY_N > 0:
-            if not _is_dense_region(
+            scores = _apply_sparse_nm_with_dense_tokens(
+                scores,
                 kv_start,
-                tile_q,
+                q_pos,
+                kv_pos,
                 seq_len_q,
                 seq_len_kv,
                 BLOCK_M,
+                BLOCK_N,
+                SPARSITY_N,
+                SPARSITY_M,
                 DENSE_SINK_TOKENS,
                 DENSE_RECENT_TOKENS,
-            ):
-                scores = _apply_sparse_nm_to_qk_tile(
-                    scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
-                )
+            )
 
         # Optional skip-softmax decision — the decision logic (and optional
         # atomic counter updates) lives in sparsity/attention; this kernel
@@ -650,24 +672,26 @@ def _attn_bwd_dq(
 
         # Re-apply N:M sparse softmax to match forward pass
         if SPARSITY_N > 0:
-            if not _is_dense_region(
+            scores = _apply_sparse_nm_with_dense_tokens(
+                scores,
                 kv_start,
-                tile_q,
+                q_pos,
+                kv_pos,
                 seq_len_q,
                 seq_len_kv,
                 BLOCK_M,
+                BLOCK_N,
+                SPARSITY_N,
+                SPARSITY_M,
                 DENSE_SINK_TOKENS,
                 DENSE_RECENT_TOKENS,
-            ):
-                scores = _apply_sparse_nm_to_qk_tile(
-                    scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
-                )
+            )
 
         p = tl.math.exp2(scores - lse[:, None])
 
         # Skip-softmax backward: zero out P for rows with negligible contribution.
         # Per-row using final LSE because forward/backward tile sizes may differ
-        # (forward autotunes BLOCK_N; backward uses a fixed size), so per-tile
+        # (forward autotunes BLOCK_M; backward uses a different fixed tile), so per-tile
         # skip masks from forward wouldn't align. LSE >= any intermediate running
         # max, so this conservatively zeros out at least what forward skipped.
         if APPLY_SKIP_SOFTMAX:
@@ -804,24 +828,26 @@ def _attn_bwd_dkdv(
 
             # Re-apply N:M sparse softmax to match forward pass
             if SPARSITY_N > 0:
-                if not _is_dense_region(
+                scores = _apply_sparse_nm_with_dense_tokens(
+                    scores,
                     kv_start,
-                    qi,
+                    q_pos,
+                    kv_pos,
                     seq_len_q,
                     seq_len_kv,
                     BLOCK_M,
+                    BLOCK_N,
+                    SPARSITY_N,
+                    SPARSITY_M,
                     DENSE_SINK_TOKENS,
                     DENSE_RECENT_TOKENS,
-                ):
-                    scores = _apply_sparse_nm_to_qk_tile(
-                        scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
-                    )
+                )
 
             p = tl.math.exp2(scores - lse[:, None])
 
             # Skip-softmax backward: zero out P for rows with negligible contribution.
             # Per-row using final LSE because forward/backward tile sizes may differ
-            # (forward autotunes BLOCK_N; backward uses a fixed size), so per-tile
+            # (forward autotunes BLOCK_M; backward uses a different fixed tile), so per-tile
             # skip masks from forward wouldn't align. LSE >= any intermediate running
             # max, so this conservatively zeros out at least what forward skipped.
             if APPLY_SKIP_SOFTMAX:
@@ -1010,7 +1036,7 @@ class _Attention(torch.autograd.Function):
                 _attn_fwd.fn[grid](
                     *fwd_args,
                     **fwd_kwargs,
-                    BLOCK_M=_MEASURE_BLOCK_M,
+                    BLOCK_M=_P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M,
                     BLOCK_N=_MEASURE_BLOCK_N,
                     num_warps=_MEASURE_NUM_WARPS,
                     num_stages=_MEASURE_NUM_STAGES,
@@ -1262,8 +1288,8 @@ def attention(
             BLOCK_N is a multiple of 16). The softmax denominator stays
             unquantized. The backward pass uses the straight-through estimator:
             gradients are computed from the unquantized P, matching QAT
-            references that keep the backward dots in high precision.
-            Set to ``None`` to disable.
+            references that keep the backward dots in high precision. Set to
+            ``None`` to disable.
         p_qdq_amax: Per-tensor amax for the softmax-P quant-dequant. The
             kernel's unnormalized P lies in [0, 1] (the max-subtraction caps
             every entry at ``exp2(0) = 1``), so 1 is the theoretical upper
