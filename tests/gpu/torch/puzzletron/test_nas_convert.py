@@ -14,14 +14,12 @@
 # limitations under the License.
 
 import os
-from datetime import timedelta
 from pathlib import Path
 
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 
 import modelopt.torch.nas as mtn
 import modelopt.torch.puzzletron as mtpz
-import modelopt.torch.utils.distributed as dist
 
 
 def test_nas_convert_ffn_pruning(dist_workers, project_root_path: Path, tmp_path: Path):
@@ -31,7 +29,8 @@ def test_nas_convert_ffn_pruning(dist_workers, project_root_path: Path, tmp_path
 def _test_nas_convert_ffn_pruning_multiprocess_job(
     rank: int, size: int, project_root_path: Path, tmp_path: Path
 ):
-    dist.setup(timeout=timedelta(minutes=10))
+    # NOTE: no dist.setup() — the dist_workers pool initializes the process group
+    # and sets the cuda device.
     # Setup the test model and data.
     puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
         tmp_path, rank, "meta-llama/Llama-3.1-8B-Instruct"
@@ -84,7 +83,8 @@ def test_nas_convert_attn_pruning(dist_workers, project_root_path: Path, tmp_pat
 def _test_nas_convert_attn_pruning_multiprocess_job(
     rank: int, size: int, project_root_path: Path, tmp_path: Path
 ):
-    dist.setup(timeout=timedelta(minutes=10))
+    # NOTE: no dist.setup() — the dist_workers pool initializes the process group
+    # and sets the cuda device.
     # Setup the test model and data.
     puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
         tmp_path, rank, "meta-llama/Llama-3.1-8B-Instruct"

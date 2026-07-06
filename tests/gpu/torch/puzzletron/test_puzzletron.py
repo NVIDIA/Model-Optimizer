@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -74,9 +73,9 @@ def _test_puzzletron_multiprocess_job(
     hybrid_override_pattern: str,
     has_moe_layers: bool,
 ):
-    # Set seed BEFORE dist.setup() to ensure reproducibility across all processes
+    # Seed for reproducibility across all processes. The dist_workers pool already
+    # initializes the process group and sets the cuda device, so no dist.setup().
     set_seed(SEED)
-    dist.setup(timeout=timedelta(minutes=10))
 
     # Setup the test model and data.
     puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(

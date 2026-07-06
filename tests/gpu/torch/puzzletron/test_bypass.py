@@ -56,7 +56,6 @@ expanding every scenario by default.
 
 import copy
 import json
-from datetime import timedelta
 from pathlib import Path
 
 import hydra
@@ -239,7 +238,8 @@ def _setup_hydra_cfg_and_pruning(
     5. Run ``pruning_ckpts`` (rank 0 only) then barrier.
     """
     set_seed(SEED)
-    dist.setup(timeout=timedelta(minutes=10))
+    # NOTE: no dist.setup() — the dist_workers pool initializes the process group
+    # and sets the cuda device.
 
     puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(
         tmp_path, rank, hf_model_name, hybrid_override_pattern
