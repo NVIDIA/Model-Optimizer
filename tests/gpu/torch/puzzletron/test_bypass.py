@@ -23,13 +23,22 @@ the full Puzzletron family matrix:
 
 The broader no-bypass family matrix remains covered by ``test_puzzletron.py``.
 
+To keep GPU CI within its time budget, all bypass scenarios for a family run inside a
+single spawned multi-process job that performs the expensive one-time setup
+(``setup_test_model_and_data`` -> convert -> score activations -> pruning ckpts) *once*
+and then executes each scenario sequentially against that shared teacher/pruning state.
+This is safe because ``launch_bypass_distillation`` is idempotent across sequential
+launches (already exercised by the multi-config sweep) and each scenario writes to a
+distinct ``experiment_id`` directory, so runs never clobber each other. Every scenario
+helper is a collective operation: it runs on all ranks and gates assertions on rank 0.
+
 Tiny model dimensions used throughout (set by ``setup_test_model_and_data``):
   - hidden_size: 256, intermediate_size: 512, num_layers: max(2, world_size)
   - num_attention_heads: 32, num_key_value_heads: 8
   - num_local_experts: 16 (MoE families only, e.g. Qwen3-VL)
   - training_tokens: 128, block_size: 64, micro_batch_size: 1  -> max_steps = 2
 
-Pruning targets (used by all four tests):
+Pruning targets (used by all scenarios):
   - pruned intermediate_size: 256 (dense) — half of teacher
   - pruned num_local_experts: 8 (MoE)    — half of teacher
   - pruned num_key_value_heads: 4         — half of teacher
@@ -41,8 +50,8 @@ mlp_init_mode is family-aware:
     sourced from the family's pruning YAML (``mlp_init_config_yaml``) — no
     per-family branching needed in this test file.
 
-To add a new bypass-specific model family, add it deliberately to the targeted
-case lists below instead of expanding every test by default.
+To add a new bypass-specific model family, add a targeted scenario job below instead of
+expanding every scenario by default.
 """
 
 import copy
@@ -100,26 +109,6 @@ LLAMA_FAMILY = pytest.param(
 # GPT-OSS adds MoE expert pruning (mlp_init_mode="ExpertRemoval") and windowed
 # attention with sinks — different code paths than dense Llama.
 GPT_OSS_FAMILY = pytest.param("openai/gpt-oss-20b", "gpt_oss", None, True, id="gpt-oss-20b")
-BYPASS_SMOKE_FAMILIES = [LLAMA_FAMILY, GPT_OSS_FAMILY]
-
-BYPASS_SUBBLOCK_MODE_CASES = [
-    pytest.param(
-        "meta-llama/Llama-3.2-3B-Instruct",
-        "llama",
-        None,
-        False,
-        "subblock_ffn",
-        id="llama-subblock-ffn",
-    ),
-    pytest.param(
-        "openai/gpt-oss-20b",
-        "gpt_oss",
-        None,
-        True,
-        "subblock_attention",
-        id="gpt-oss-subblock-attention",
-    ),
-]
 
 
 # ---------------------------------------------------------------------------
@@ -368,72 +357,36 @@ def _setup_hydra_cfg_and_pruning(
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Scenarios
+#
+# Each scenario is a collective operation: it runs on all ranks against the
+# shared post-setup ``hydra_cfg`` and gates its assertions on rank 0. Scenarios
+# deepcopy the base config so their bypass overrides never leak into the next
+# scenario, and each pins an explicit ``experiment_id`` (or, for the multi-config
+# sweep, relies on the auto architecture-derived IDs) so their output
+# directories never collide. Every scenario ends with a ``dist.barrier()`` so all
+# ranks re-synchronize before the next collective launch.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    BYPASS_SMOKE_FAMILIES,
-)
-def test_bypass_block_pruning(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-):
+def _scenario_block_pruning(hydra_cfg, puzzle_dir: Path, has_moe_layers: bool, rank: int) -> None:
     """Bypass distillation with the per-block sub-component pruned.
 
     For dense families, prunes FFN intermediate (512 -> 256). For MoE families,
     prunes num_local_experts (16 -> 8). KV heads are also halved (8 -> 4).
     """
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _test_bypass_block_pruning_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
-    )
+    cfg = copy.deepcopy(hydra_cfg)
+    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, cfg)
+    bypass_cfg_dict["experiment_id"] = "bypass_scn_block_pruning"
+    OmegaConf.update(cfg, "bypass", bypass_cfg_dict, merge=True)
 
-
-def _test_bypass_block_pruning_job(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-    rank: int,
-    size: int,
-):
-    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path,
-        tmp_path,
-        rank,
-        size,
-        hf_model_name,
-        converter,
-        hybrid_override_pattern,
-    )
-
-    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
-    OmegaConf.update(hydra_cfg, "bypass", bypass_cfg_dict, merge=True)
-
-    bypass_distillation.launch_bypass_distillation(hydra_cfg)
+    bypass_distillation.launch_bypass_distillation(cfg)
     dist.barrier()
 
     if rank == 0:
-        expected_experiment_id = _expected_experiment_id(hydra_cfg, bypass_cfg_dict)
-        experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
-        ckpt_symlink = puzzle_dir / "ckpts" / expected_experiment_id
+        experiment_id = bypass_cfg_dict["experiment_id"]
+        experiment_dir = puzzle_dir / "bypass/bypass_runs" / experiment_id
+        ckpt_symlink = puzzle_dir / "ckpts" / experiment_id
 
         assert experiment_dir.exists(), (
             f"Expected bypass experiment directory to exist: {experiment_dir}"
@@ -449,81 +402,30 @@ def _test_bypass_block_pruning_job(
             f"Expected saving_completed marker inside checkpoint: {resolved}"
         )
 
-    dist.cleanup()
-
-    print(
-        f"PYTEST SUMMARY: test_bypass_block_pruning[{hf_model_name}] completed. "
-        f"Puzzle directory: {puzzle_dir}"
-    )
+    dist.barrier()
 
 
-@pytest.mark.parametrize(
-    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    [LLAMA_FAMILY],
-)
-def test_bypass_kv_head_compression(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-):
-    """Bypass distillation with KV heads halved (8 -> 4) and FFN block pinned to teacher.
-
-    For dense, the experiment_id will be ``bypass_ffn_512_heads_4`` (FFN at teacher size,
-    attention halved). For MoE, ``bypass_experts_16_heads_4``.
-    """
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _test_bypass_kv_head_compression_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
-    )
-
-
-def _test_bypass_kv_head_compression_job(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-    rank: int,
-    size: int,
-):
-    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path,
-        tmp_path,
-        rank,
-        size,
-        hf_model_name,
-        converter,
-        hybrid_override_pattern,
-    )
-
+def _scenario_kv_head_compression(
+    hydra_cfg, puzzle_dir: Path, has_moe_layers: bool, rank: int
+) -> None:
+    """Bypass distillation with KV heads halved (8 -> 4) and FFN block pinned to teacher."""
+    cfg = copy.deepcopy(hydra_cfg)
     bypass_cfg_dict = _make_bypass_cfg_dict(
         has_moe_layers,
-        hydra_cfg,
+        cfg,
         block_pruned=False,  # keep FFN/experts at teacher
         attention_pruned=True,  # halve KV heads
     )
-    OmegaConf.update(hydra_cfg, "bypass", bypass_cfg_dict, merge=True)
+    bypass_cfg_dict["experiment_id"] = "bypass_scn_kv_head"
+    OmegaConf.update(cfg, "bypass", bypass_cfg_dict, merge=True)
 
-    bypass_distillation.launch_bypass_distillation(hydra_cfg)
+    bypass_distillation.launch_bypass_distillation(cfg)
     dist.barrier()
 
     if rank == 0:
-        expected_experiment_id = _expected_experiment_id(hydra_cfg, bypass_cfg_dict)
-        experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
-        ckpt_symlink = puzzle_dir / "ckpts" / expected_experiment_id
+        experiment_id = bypass_cfg_dict["experiment_id"]
+        experiment_dir = puzzle_dir / "bypass/bypass_runs" / experiment_id
+        ckpt_symlink = puzzle_dir / "ckpts" / experiment_id
 
         assert experiment_dir.exists(), (
             f"Expected bypass experiment directory to exist: {experiment_dir}"
@@ -532,67 +434,22 @@ def _test_bypass_kv_head_compression_job(
             f"Expected bypass checkpoint symlink to exist: {ckpt_symlink}"
         )
 
-    dist.cleanup()
-
-    print(
-        f"PYTEST SUMMARY: test_bypass_kv_head_compression[{hf_model_name}] completed. "
-        f"Puzzle directory: {puzzle_dir}"
-    )
+    dist.barrier()
 
 
-@pytest.mark.parametrize(
-    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    [LLAMA_FAMILY],
-)
-def test_bypass_multi_config_sequential(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-):
+def _scenario_multi_config_sequential(
+    hydra_cfg, puzzle_dir: Path, has_moe_layers: bool, rank: int
+) -> None:
     """Bypass distillation sweep: two configs run sequentially via bypass.configs list.
 
     Config 0: block pruned + attention pruned
     Config 1: block at teacher + attention pruned
-    Both checkpoint symlinks must exist after the sweep completes.
+    Both checkpoint symlinks must exist after the sweep completes. The sub-run
+    experiment IDs are the auto architecture-derived IDs (``ffn_256_heads_4`` /
+    ``ffn_512_heads_4``), which are distinct from the explicit ``bypass_scn_*`` IDs
+    the other scenarios use, so nothing collides.
     """
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _test_bypass_multi_config_sequential_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
-    )
-
-
-def _test_bypass_multi_config_sequential_job(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-    rank: int,
-    size: int,
-):
-    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path,
-        tmp_path,
-        rank,
-        size,
-        hf_model_name,
-        converter,
-        hybrid_override_pattern,
-    )
-
+    cfg = copy.deepcopy(hydra_cfg)
     configs_list = [
         {
             "model_config_overrides": {
@@ -609,10 +466,10 @@ def _test_bypass_multi_config_sequential_job(
             "keys_to_learn": "entire_block",
         },
     ]
-    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg, configs_list=configs_list)
-    OmegaConf.update(hydra_cfg, "bypass", bypass_cfg_dict, merge=True)
+    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, cfg, configs_list=configs_list)
+    OmegaConf.update(cfg, "bypass", bypass_cfg_dict, merge=True)
 
-    bypass_distillation.launch_bypass_distillation(hydra_cfg)
+    bypass_distillation.launch_bypass_distillation(cfg)
     dist.barrier()
 
     if rank == 0:
@@ -622,7 +479,7 @@ def _test_bypass_multi_config_sequential_job(
             sub_cfg = copy.deepcopy(bypass_cfg_dict)
             sub_cfg["model"]["model_config_overrides"] = sub["model_config_overrides"]
             sub_cfg["experiment_id"] = None
-            expected_ids.append(_expected_experiment_id(hydra_cfg, sub_cfg))
+            expected_ids.append(_expected_experiment_id(cfg, sub_cfg))
 
         for experiment_id in expected_ids:
             experiment_dir = puzzle_dir / "bypass/bypass_runs" / experiment_id
@@ -635,32 +492,13 @@ def _test_bypass_multi_config_sequential_job(
                 f"Expected bypass checkpoint symlink to exist: {ckpt_symlink}"
             )
 
-    dist.cleanup()
-
-    print(
-        f"PYTEST SUMMARY: test_bypass_multi_config_sequential[{hf_model_name}] completed. "
-        f"Puzzle directory: {puzzle_dir}"
-    )
+    dist.barrier()
 
 
-# ---------------------------------------------------------------------------
-# Resume from checkpoint
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    [LLAMA_FAMILY],
-)
-def test_bypass_resume_from_checkpoint(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-):
-    """Two-phase test: train + save, then re-launch with resume and verify continuity.
+def _scenario_resume_from_checkpoint(
+    hydra_cfg, puzzle_dir: Path, has_moe_layers: bool, rank: int
+) -> None:
+    """Two-phase scenario: train + save, then re-launch with resume and verify continuity.
 
     Phase 1: short bypass run (2 steps), checkpoint saved under
         ``puzzle_dir/bypass/bypass_runs/<exp_id>/step-NNNNNN-ckpt/``.
@@ -670,58 +508,29 @@ def test_bypass_resume_from_checkpoint(
         ``iter_num`` / ``step_num`` / ``token_count`` from the saved
         ``args.json`` and load stitched-module + optimizer state from disk.
 
+    Both phases pin the same explicit ``experiment_id`` so phase 2 discovers phase
+    1's checkpoint.
+
     The GradScaler save/load mechanism added in the recent CodeRabbit-driven
     fix is tested separately in
     ``tests/gpu/torch/puzzletron/test_bypass_checkpoint_utils.py`` because
     GradScaler is fp16-only and the bypass test infrastructure ships bf16,
     which makes ``GradScaler.step()`` raise on the unscale path.
     """
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _test_bypass_resume_from_checkpoint_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
-    )
-
-
-def _test_bypass_resume_from_checkpoint_job(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-    rank: int,
-    size: int,
-):
-    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path,
-        tmp_path,
-        rank,
-        size,
-        hf_model_name,
-        converter,
-        hybrid_override_pattern,
-    )
+    experiment_id = "bypass_scn_resume"
+    experiment_dir = puzzle_dir / "bypass/bypass_runs" / experiment_id
 
     # ---- Phase 1: train + save ---------------------------------------------
-    phase1_cfg = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
+    cfg = copy.deepcopy(hydra_cfg)
+    phase1_cfg = _make_bypass_cfg_dict(has_moe_layers, cfg)
+    phase1_cfg["experiment_id"] = experiment_id
     phase1_cfg["find_last_ckpt_for_resume"] = False
-    OmegaConf.update(hydra_cfg, "bypass", phase1_cfg, merge=True)
+    OmegaConf.update(cfg, "bypass", phase1_cfg, merge=True)
 
-    bypass_distillation.launch_bypass_distillation(hydra_cfg)
+    bypass_distillation.launch_bypass_distillation(cfg)
     dist.barrier()
 
-    expected_experiment_id = _expected_experiment_id(hydra_cfg, phase1_cfg)
-    experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
-
+    phase1_iter_num = None
     if rank == 0:
         resume_checkpoint = find_latest_run_dir(experiment_dir)
         assert resume_checkpoint is not None, f"Phase 1 missing resume checkpoint: {experiment_dir}"
@@ -742,13 +551,15 @@ def _test_bypass_resume_from_checkpoint_job(
     dist.barrier()
 
     # ---- Phase 2: resume and continue --------------------------------------
-    phase2_cfg = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
+    cfg = copy.deepcopy(hydra_cfg)
+    phase2_cfg = _make_bypass_cfg_dict(has_moe_layers, cfg)
+    phase2_cfg["experiment_id"] = experiment_id
     phase2_cfg["find_last_ckpt_for_resume"] = True
     # Double the budget so the resumed run takes additional steps.
     phase2_cfg["training"]["training_tokens"] = TRAINING_TOKENS * 2
-    OmegaConf.update(hydra_cfg, "bypass", phase2_cfg, merge=True)
+    OmegaConf.update(cfg, "bypass", phase2_cfg, merge=True)
 
-    bypass_distillation.launch_bypass_distillation(hydra_cfg)
+    bypass_distillation.launch_bypass_distillation(cfg)
     dist.barrier()
 
     if rank == 0:
@@ -766,35 +577,15 @@ def _test_bypass_resume_from_checkpoint_job(
             f"Resume did not advance: phase1={phase1_iter_num}, phase2={phase2_iter_num}"
         )
 
-    dist.cleanup()
-
-    print(
-        f"PYTEST SUMMARY: test_bypass_resume_from_checkpoint[{hf_model_name}] completed. "
-        f"Puzzle directory: {puzzle_dir}"
-    )
+    dist.barrier()
 
 
-# ---------------------------------------------------------------------------
-# Per-subblock training modes (Llama dense + GPT-OSS MoE/windowed-attn-sinks)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers", "keys_to_learn"),
-    BYPASS_SUBBLOCK_MODE_CASES,
-)
-def test_bypass_subblock_modes(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-    keys_to_learn: str,
-):
+def _scenario_subblock_mode(
+    hydra_cfg, puzzle_dir: Path, has_moe_layers: bool, keys_to_learn: str, rank: int
+) -> None:
     """Verify that ``keys_to_learn`` correctly freezes the right param groups.
 
-    For each (family, keys_to_learn) cell:
+    For each keys_to_learn value:
       - Run bypass for 2 steps with that keys_to_learn.
       - After training, load the saved HF-format checkpoints.
       - Compare against the start checkpoint, which holds the post-init pre-train weights:
@@ -807,55 +598,20 @@ def test_bypass_subblock_modes(
     windowed attention adds attention-sink parameters that the freeze must
     correctly include in the "attention" group.
     """
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _test_bypass_subblock_modes_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-            keys_to_learn,
-        ),
-        backend="nccl",
-    )
-
-
-def _test_bypass_subblock_modes_job(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-    keys_to_learn: str,
-    rank: int,
-    size: int,
-):
-    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path,
-        tmp_path,
-        rank,
-        size,
-        hf_model_name,
-        converter,
-        hybrid_override_pattern,
-    )
-
-    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
+    cfg = copy.deepcopy(hydra_cfg)
+    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, cfg)
+    bypass_cfg_dict["experiment_id"] = f"bypass_scn_{keys_to_learn}"
     bypass_cfg_dict["model_factory"]["keys_to_learn"] = keys_to_learn
     # Save start-of-training checkpoint so we can diff trained-vs-init.
     bypass_cfg_dict["save_checkpoint_before_training"] = True
-    OmegaConf.update(hydra_cfg, "bypass", bypass_cfg_dict, merge=True)
+    OmegaConf.update(cfg, "bypass", bypass_cfg_dict, merge=True)
 
-    bypass_distillation.launch_bypass_distillation(hydra_cfg)
+    bypass_distillation.launch_bypass_distillation(cfg)
     dist.barrier()
 
     if rank == 0:
-        expected_experiment_id = _expected_experiment_id(hydra_cfg, bypass_cfg_dict)
-        experiment_dir = puzzle_dir / "bypass/bypass_runs" / expected_experiment_id
+        experiment_id = bypass_cfg_dict["experiment_id"]
+        experiment_dir = puzzle_dir / "bypass/bypass_runs" / experiment_id
         # `start-step-*` is the pre-training snapshot (saved when
         # save_checkpoint_before_training=True). The post-training snapshot
         # under this short-budget config lives at `final-step-*` (saved by the
@@ -877,7 +633,7 @@ def _test_bypass_subblock_modes_job(
         # optimizer/scaler state; model weights live in the checkpoint root.
         start_state = load_state_dict(start_dir)
         end_state = load_state_dict(end_dir)
-        descriptor = ModelDescriptorFactory.get(hydra_cfg.descriptor)
+        descriptor = ModelDescriptorFactory.get(cfg.descriptor)
         model_config = load_model_config(start_dir)
         lm_config = descriptor.get_language_model_config(model_config)
         weight_groups = descriptor.get_weight_groups(
@@ -904,49 +660,22 @@ def _test_bypass_subblock_modes_job(
                 attn_changed = True
 
         if keys_to_learn == "subblock_ffn":
-            assert ffn_changed, f"subblock_ffn should change FFN weights ({hf_model_name})"
-            assert not attn_changed, (
-                f"subblock_ffn should leave attention weights bit-identical ({hf_model_name})"
-            )
+            assert ffn_changed, "subblock_ffn should change FFN weights"
+            assert not attn_changed, "subblock_ffn should leave attention weights bit-identical"
         elif keys_to_learn == "subblock_attention":
-            assert attn_changed, (
-                f"subblock_attention should change attention weights ({hf_model_name})"
-            )
-            assert not ffn_changed, (
-                f"subblock_attention should leave FFN weights bit-identical ({hf_model_name})"
-            )
+            assert attn_changed, "subblock_attention should change attention weights"
+            assert not ffn_changed, "subblock_attention should leave FFN weights bit-identical"
         else:  # entire_block
             assert ffn_changed and attn_changed, (
-                f"entire_block should change both groups ({hf_model_name}); "
-                f"got ffn={ffn_changed}, attn={attn_changed}"
+                f"entire_block should change both groups; got ffn={ffn_changed}, attn={attn_changed}"
             )
 
-    dist.cleanup()
-
-    print(
-        f"PYTEST SUMMARY: test_bypass_subblock_modes"
-        f"[{hf_model_name}, keys_to_learn={keys_to_learn}] completed. "
-        f"Puzzle directory: {puzzle_dir}"
-    )
+    dist.barrier()
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: bypass then build replacement library
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
-    [LLAMA_FAMILY],
-)
-def test_bypass_then_build_library(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-):
+def _scenario_then_build_library(
+    hydra_cfg, puzzle_dir: Path, has_moe_layers: bool, rank: int
+) -> None:
     """Run bypass, then build the replacement library; assert bypass entries appear.
 
     Verifies the wiring between the bypass step and the downstream NAS step:
@@ -957,54 +686,24 @@ def test_bypass_then_build_library(
       before non-bypass ones in the resulting DataFrame.
     - The final ``replacement_library.json`` includes entries pointing at
       the bypass experiment.
+
+    Runs last in the scenario sequence, so discovery also exercises a puzzle_dir
+    populated with the other scenarios' bypass runs.
     """
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _test_bypass_then_build_library_job,
-            project_root_path,
-            tmp_path,
-            hf_model_name,
-            converter,
-            hybrid_override_pattern,
-            has_moe_layers,
-        ),
-        backend="nccl",
-    )
+    cfg = copy.deepcopy(hydra_cfg)
+    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, cfg)
+    bypass_cfg_dict["experiment_id"] = "bypass_scn_build_lib"
+    OmegaConf.update(cfg, "bypass", bypass_cfg_dict, merge=True)
 
-
-def _test_bypass_then_build_library_job(
-    project_root_path: Path,
-    tmp_path: Path,
-    hf_model_name: str,
-    converter: str,
-    hybrid_override_pattern: str | None,
-    has_moe_layers: bool,
-    rank: int,
-    size: int,
-):
-    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
-        project_root_path,
-        tmp_path,
-        rank,
-        size,
-        hf_model_name,
-        converter,
-        hybrid_override_pattern,
-    )
-
-    bypass_cfg_dict = _make_bypass_cfg_dict(has_moe_layers, hydra_cfg)
-    OmegaConf.update(hydra_cfg, "bypass", bypass_cfg_dict, merge=True)
-
-    bypass_distillation.launch_bypass_distillation(hydra_cfg)
+    bypass_distillation.launch_bypass_distillation(cfg)
     dist.barrier()
 
     if rank == 0:
-        expected_experiment_id = _expected_experiment_id(hydra_cfg, bypass_cfg_dict)
+        experiment_id = bypass_cfg_dict["experiment_id"]
         ckpts_dir = puzzle_dir / "ckpts"
 
         # 1. The realize step must have created a symlink for this bypass run.
-        bypass_symlink = ckpts_dir / expected_experiment_id
+        bypass_symlink = ckpts_dir / experiment_id
         assert bypass_symlink.is_symlink() or bypass_symlink.exists(), (
             f"Expected bypass symlink at {bypass_symlink}"
         )
@@ -1042,9 +741,143 @@ def _test_bypass_then_build_library_job(
             f"attn_sources={set(attn_sources)}, ffn_sources={set(ffn_sources)}"
         )
 
+    dist.barrier()
+
+
+# ---------------------------------------------------------------------------
+# Tests — one spawned job per family, running all scenarios after a single setup
+# ---------------------------------------------------------------------------
+
+
+def _run_llama_scenarios_job(
+    project_root_path: Path,
+    tmp_path: Path,
+    hf_model_name: str,
+    converter: str,
+    hybrid_override_pattern: str | None,
+    has_moe_layers: bool,
+    rank: int,
+    size: int,
+):
+    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
+    )
+
+    _scenario_block_pruning(hydra_cfg, puzzle_dir, has_moe_layers, rank)
+    _scenario_kv_head_compression(hydra_cfg, puzzle_dir, has_moe_layers, rank)
+    _scenario_multi_config_sequential(hydra_cfg, puzzle_dir, has_moe_layers, rank)
+    _scenario_subblock_mode(hydra_cfg, puzzle_dir, has_moe_layers, "subblock_ffn", rank)
+    _scenario_resume_from_checkpoint(hydra_cfg, puzzle_dir, has_moe_layers, rank)
+    # build_library runs last so discovery sees a fully populated puzzle_dir.
+    _scenario_then_build_library(hydra_cfg, puzzle_dir, has_moe_layers, rank)
+
     dist.cleanup()
 
     print(
-        f"PYTEST SUMMARY: test_bypass_then_build_library[{hf_model_name}] completed. "
+        f"PYTEST SUMMARY: test_bypass_llama_scenarios[{hf_model_name}] completed. "
         f"Puzzle directory: {puzzle_dir}"
+    )
+
+
+def _run_gpt_oss_scenarios_job(
+    project_root_path: Path,
+    tmp_path: Path,
+    hf_model_name: str,
+    converter: str,
+    hybrid_override_pattern: str | None,
+    has_moe_layers: bool,
+    rank: int,
+    size: int,
+):
+    puzzle_dir, _, hydra_cfg = _setup_hydra_cfg_and_pruning(
+        project_root_path,
+        tmp_path,
+        rank,
+        size,
+        hf_model_name,
+        converter,
+        hybrid_override_pattern,
+    )
+
+    _scenario_block_pruning(hydra_cfg, puzzle_dir, has_moe_layers, rank)
+    _scenario_subblock_mode(hydra_cfg, puzzle_dir, has_moe_layers, "subblock_attention", rank)
+
+    dist.cleanup()
+
+    print(
+        f"PYTEST SUMMARY: test_bypass_gpt_oss_scenarios[{hf_model_name}] completed. "
+        f"Puzzle directory: {puzzle_dir}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
+    [LLAMA_FAMILY],
+)
+def test_bypass_llama_scenarios(
+    project_root_path: Path,
+    tmp_path: Path,
+    hf_model_name: str,
+    converter: str,
+    hybrid_override_pattern: str | None,
+    has_moe_layers: bool,
+):
+    """All dense-family bypass scenarios in one spawned job (single shared setup).
+
+    Covers block pruning, KV-head compression, the multi-config sequential sweep,
+    the subblock_ffn freeze mode, resume-from-checkpoint, and the bypass ->
+    build-replacement-library wiring. Each scenario writes to its own
+    ``experiment_id`` directory so their outputs never collide.
+    """
+    spawn_multiprocess_job(
+        size=torch.cuda.device_count(),
+        job=partial(
+            _run_llama_scenarios_job,
+            project_root_path,
+            tmp_path,
+            hf_model_name,
+            converter,
+            hybrid_override_pattern,
+            has_moe_layers,
+        ),
+        backend="nccl",
+    )
+
+
+@pytest.mark.parametrize(
+    ("hf_model_name", "converter", "hybrid_override_pattern", "has_moe_layers"),
+    [GPT_OSS_FAMILY],
+)
+def test_bypass_gpt_oss_scenarios(
+    project_root_path: Path,
+    tmp_path: Path,
+    hf_model_name: str,
+    converter: str,
+    hybrid_override_pattern: str | None,
+    has_moe_layers: bool,
+):
+    """MoE-family bypass scenarios in one spawned job (single shared setup).
+
+    Covers MoE expert-removal block pruning and the subblock_attention freeze mode
+    (which must include GPT-OSS's windowed-attention sink parameters in the
+    attention group). Each scenario writes to its own ``experiment_id`` directory.
+    """
+    spawn_multiprocess_job(
+        size=torch.cuda.device_count(),
+        job=partial(
+            _run_gpt_oss_scenarios_job,
+            project_root_path,
+            tmp_path,
+            hf_model_name,
+            converter,
+            hybrid_override_pattern,
+            has_moe_layers,
+        ),
+        backend="nccl",
     )
