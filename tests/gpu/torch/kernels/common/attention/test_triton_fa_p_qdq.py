@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU tests for the softmax quant-dequant (P_QDQ) feature of the Triton FA kernel."""
+"""GPU tests for P-QDQ and tile-sensitive behavior of the Triton FA kernel."""
 
 import math
 from unittest.mock import Mock
@@ -48,10 +48,141 @@ def test_v_qdq_rejects_autograd_before_kernel_launch(monkeypatch):
     apply.assert_not_called()
 
 
-# The kernel runs with a single pinned config under pytest (see _FWD_CONFIGS):
-# BLOCK_M=128, BLOCK_N=64. The tile-looped reference below relies on it.
-BLOCK_N = 64
+# P-QDQ is tile-local, so this is the normal autotuned forward path's numerical
+# contract rather than an implementation detail inferred from whichever
+# configuration autotune selects. Direct measurement uses separate geometry.
+P_QDQ_BLOCK_N = 32
 FP8_E4M3_MAX = 448.0
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
+def test_p_qdq_block_n_matches_forward_configs():
+    assert {config.kwargs["BLOCK_N"] for config in triton_fa._FWD_CONFIGS} == {P_QDQ_BLOCK_N}
+
+
+class _FixedBlockMForward:
+    """Launch the raw forward kernel with one selected query tile."""
+
+    def __init__(self, autotuner, block_m):
+        self.fn = autotuner.fn
+        self._block_m = block_m
+
+    def __getitem__(self, grid):
+        resolved_grid = grid({"BLOCK_M": self._block_m}) if callable(grid) else grid
+
+        def launch(*args, **kwargs):
+            return self.fn[resolved_grid](
+                *args,
+                **kwargs,
+                BLOCK_M=self._block_m,
+                BLOCK_N=P_QDQ_BLOCK_N,
+                num_stages=2,
+                num_warps=4,
+            )
+
+        return launch
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
+@pytest.mark.parametrize(
+    ("seq_len_q", "seq_len_kv", "is_causal"),
+    [(256, 256, True), (197, 233, True), (256, 256, False)],
+    ids=["causal", "chunked-prefill", "non-causal"],
+)
+def test_sparse_dense_window_is_block_m_invariant(monkeypatch, seq_len_q, seq_len_kv, is_causal):
+    """The dense recent-token policy must not depend on the compute query tile."""
+    num_heads, head_dim = 2, 64
+    torch.manual_seed(20260706)
+    q = torch.randn(seq_len_q, num_heads, head_dim, device="cuda", dtype=torch.float16)
+    k = torch.randn(seq_len_kv, num_heads, head_dim, device="cuda", dtype=torch.float16)
+    v = torch.randn_like(k)
+    q_locs, q_lens = make_varlen_meta([seq_len_q])
+    kv_locs, kv_lens = make_varlen_meta([seq_len_kv])
+
+    autotuner = triton_fa._attn_fwd
+    outputs = {}
+    for block_m in (16, 64, 128):
+        monkeypatch.setattr(triton_fa, "_attn_fwd", _FixedBlockMForward(autotuner, block_m))
+        outputs[block_m] = attention(
+            q,
+            k,
+            v,
+            q_locs,
+            q_lens,
+            seq_len_q,
+            is_causal=is_causal,
+            b_start_loc_k=kv_locs,
+            b_seq_len_k=kv_lens,
+            max_input_len_k=seq_len_kv,
+            sparsity_n=2,
+            sparsity_m=4,
+            dense_recent_tokens=64,
+        )
+
+    for block_m in (64, 128):
+        torch.testing.assert_close(outputs[16], outputs[block_m], rtol=2e-3, atol=2e-4)
+
+
+def _sparse_attention_reference(q, k, v, scale, dense_recent_tokens):
+    """Differentiable 2:4 attention with token-exact dense recent positions."""
+    seq_len_q, seq_len_kv = q.shape[0], k.shape[0]
+    scores = torch.einsum("qhd,khd->hqk", q, k) * scale
+    q_abs = torch.arange(seq_len_q, device=q.device) + seq_len_kv - seq_len_q
+    kv_abs = torch.arange(seq_len_kv, device=q.device)
+    causal = q_abs[:, None] >= kv_abs[None, :]
+    scores = scores.masked_fill(~causal[None, :, :], float("-inf"))
+
+    grouped = scores.reshape(scores.shape[0], seq_len_q, seq_len_kv // 4, 4)
+    kept = torch.zeros_like(grouped, dtype=torch.bool)
+    kept.scatter_(-1, grouped.topk(2, dim=-1).indices, True)
+    sparse_scores = grouped.masked_fill(~kept, float("-inf")).reshape_as(scores)
+
+    distance = q_abs[:, None] - kv_abs[None, :]
+    dense = (distance >= 0) & (distance < dense_recent_tokens)
+    scores = torch.where(dense[None, :, :], scores, sparse_scores)
+    probabilities = torch.softmax(scores, dim=-1)
+    return torch.einsum("hqk,khd->qhd", probabilities, v)
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
+def test_sparse_dense_window_forward_and_backward_match_token_reference():
+    """Forward and both backward phases use the same tile-independent dense policy."""
+    seq_len, num_heads, head_dim = 96, 1, 32
+    scale = 1.0 / math.sqrt(head_dim)
+    dense_recent_tokens = 17
+    torch.manual_seed(31415)
+    q = torch.randn(seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    weights = torch.randn_like(q)
+    locs, lens = make_varlen_meta([seq_len])
+
+    q_actual, k_actual, v_actual = (tensor.clone().requires_grad_(True) for tensor in (q, k, v))
+    actual = attention(
+        q_actual,
+        k_actual,
+        v_actual,
+        locs,
+        lens,
+        seq_len,
+        softmax_scale=scale,
+        sparsity_n=2,
+        sparsity_m=4,
+        dense_recent_tokens=dense_recent_tokens,
+    )
+    (actual * weights).sum().backward()
+
+    q_ref, k_ref, v_ref = (tensor.clone().requires_grad_(True) for tensor in (q, k, v))
+    reference = _sparse_attention_reference(q_ref, k_ref, v_ref, scale, dense_recent_tokens)
+    (reference * weights).sum().backward()
+
+    torch.testing.assert_close(actual, reference, rtol=1e-2, atol=1e-2)
+    for actual_grad, reference_grad in (
+        (q_actual.grad, q_ref.grad),
+        (k_actual.grad, k_ref.grad),
+        (v_actual.grad, v_ref.grad),
+    ):
+        torch.testing.assert_close(actual_grad, reference_grad, rtol=2e-2, atol=2e-2)
 
 
 def _qdq_fp8(p, scale=1.0):
@@ -103,11 +234,11 @@ def _apply_qdq(p, mode, qdq_scale=1.0):
     return _qdq_nvfp4(p, qdq_scale)
 
 
-def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0):
+def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0, block_n=P_QDQ_BLOCK_N):
     """Tile-looped online-softmax reference replicating kernel P_QDQ semantics.
 
     Single sequence: q [s, h, d], k/v [s_kv, h_kv, d] (fp16). Walks KV tiles
-    of BLOCK_N exactly like the kernel, keeps the softmax denominator
+    of ``block_n`` exactly like the kernel, keeps the softmax denominator
     unquantized, applies qdq to the unnormalized p of each tile, and mirrors
     the kernel's operand carrier before the P @ V dot. Native NVFP4 rounds P
     to the model dtype before packing, then keeps the QDQ result in FP32. FP8
@@ -138,8 +269,8 @@ def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0):
     row_max = torch.full((h, s), float("-inf"), device=q.device)
     row_sum = torch.zeros(h, s, device=q.device)
     acc = torch.zeros(h, s, d, device=q.device)
-    for start in range(0, s_kv, BLOCK_N):
-        tile = t[:, :, start : start + BLOCK_N]
+    for start in range(0, s_kv, block_n):
+        tile = t[:, :, start : start + block_n]
         m_new = torch.maximum(row_max, tile.amax(dim=-1))
         p = torch.exp2(tile - m_new[..., None])
         l_new = p.sum(dim=-1)
@@ -151,7 +282,7 @@ def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0):
         p = _apply_qdq(p, mode, qdq_scale)
         if mode == "fp8":
             p = p.to(v.dtype).float()
-        acc = acc + torch.einsum("hqk,khd->hqd", p, vv[start : start + BLOCK_N].float())
+        acc = acc + torch.einsum("hqk,khd->hqd", p, vv[start : start + block_n].float())
         row_max = m_new
     out = acc / row_sum[..., None]
     return out.permute(1, 0, 2)
@@ -165,7 +296,7 @@ class TestSoftmaxQdqForward:
     @requires_native_e4m3
     def test_prefill_matches_tile_reference(self, mode):
         """Kernel qdq output matches the tile-looped torch reference."""
-        seq_len, num_heads, num_kv_heads, head_dim = 128, 4, 2, 64
+        seq_len, num_heads, num_kv_heads, head_dim = 256, 4, 2, 64
         scale = 1.0 / (head_dim**0.5)
 
         torch.manual_seed(7)
@@ -174,7 +305,10 @@ class TestSoftmaxQdqForward:
 
         o = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale, p_qdq=mode)
         ref = qdq_attention_reference(q, k, v, scale, mode)
-        torch.testing.assert_close(o.float(), ref, rtol=5e-3, atol=5e-3)
+        atol = 2e-2 if mode == "nvfp4" else 5e-3
+        # Isolated Triton-vs-PyTorch exp2 differences can cross an NVFP4 quantization
+        # boundary, so use the same NVFP4 tolerance as the partial-tile coverage.
+        torch.testing.assert_close(o.float(), ref, rtol=5e-3, atol=atol)
 
         # The feature must actually change the output vs dense attention.
         o_dense = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale)
@@ -185,7 +319,7 @@ class TestSoftmaxQdqForward:
         """Dynamic-Q and P QDQ stay FP32 until their native MMA boundaries."""
         num_heads = num_kv_heads = 1
         head_dim = 16
-        seq_len_kv = BLOCK_N
+        seq_len_kv = P_QDQ_BLOCK_N
         scale = 1.0 / math.sqrt(head_dim)
 
         q = torch.zeros(1, num_heads, head_dim, device="cuda", dtype=torch.float32)
@@ -227,7 +361,7 @@ class TestSoftmaxQdqForward:
     @pytest.mark.parametrize("mode", ["fp8", "nvfp4"])
     @requires_native_e4m3
     def test_varlen_partial_tiles(self, mode):
-        """Variable-length batch with partial KV tiles (seq % BLOCK_N != 0)."""
+        """Variable-length batch with partial KV tiles (seq % P_QDQ_BLOCK_N != 0)."""
         seq_lens = [96, 80]
         total = sum(seq_lens)
         num_heads, num_kv_heads, head_dim = 4, 2, 64
