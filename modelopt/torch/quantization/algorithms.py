@@ -632,7 +632,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     _self_attn_group_score_module,
                     _linear_attn_group_score_module,
                     _fused_experts_group_score_module,
-                    r"^((?:.*\.)?mlp)\.shared_expert\.(gate_proj|up_proj|down_proj)$",
                 ]
             )
         rules.extend(self.score_module_rules)
@@ -1171,6 +1170,10 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     score_module_rules = [
         # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
         r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
+        # Preserve the historical local-score boundary for shared experts. The
+        # projections are one semantic path, so score their combined effect at
+        # the parent MLP output even when attention uses leaf-local scoring.
+        r"^((?:.*\.)?mlp)\.shared_expert\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts

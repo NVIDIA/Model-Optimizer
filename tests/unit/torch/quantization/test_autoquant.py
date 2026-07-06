@@ -386,6 +386,26 @@ def test_auto_quantize_groups_shared_expert_projections():
     assert group_keys == ["model.layers.0.mlp.shared_expert"] * 3
 
 
+def test_auto_quantize_local_boundary_scores_shared_expert_at_parent_mlp():
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.config = {"score_boundary": "local"}
+
+    score_modules = []
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        name = f"model.layers.0.mlp.shared_expert.{projection}"
+        score_module = next(
+            (
+                result
+                for rule in searcher._get_score_module_rules()
+                if (result := searcher._apply_score_group_rule(name, rule)) is not None
+            ),
+            name,
+        )
+        score_modules.append(score_module)
+
+    assert score_modules == ["model.layers.0.mlp"] * 3
+
+
 def test_auto_quantize_group_reconstruction_score_is_normalized_mse():
     reference = torch.tensor([[1.0, 2.0]])
     quantized = torch.tensor([[2.0, 4.0]])
