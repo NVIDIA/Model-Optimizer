@@ -83,7 +83,8 @@ checkpoints; token counts are derived from the consumed fixed-length training se
 
 ### WikiText
 
-Distillation and validation used Salesforce/wikitext (`wikitext-103-v1`).
+- Dataset: Salesforce/wikitext (`wikitext-103-v1`)
+- Teacher CE: 2.6834
 
 | Training tokens | Validation KD | Validation CE | MMLU | MMLU-Pro |
 |----------------:|--------------:|--------------:|-----:|---------:|
@@ -96,8 +97,8 @@ Distillation and validation used Salesforce/wikitext (`wikitext-103-v1`).
 
 ### Nemotron v2
 
-Distillation and validation used the math and stem splits of
-nvidia/Nemotron-Post-Training-Dataset-v2.
+- Dataset: nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem)
+- Teacher CE: 1.1566
 
 | Training tokens | Validation KD | Validation CE | MMLU | MMLU-Pro |
 |----------------:|--------------:|--------------:|-----:|---------:|
@@ -110,11 +111,12 @@ nvidia/Nemotron-Post-Training-Dataset-v2.
 
 ### 50/50 WikiText and Nemotron v2 blend
 
-Distillation and validation used an equal-weight blend of WikiText and the Nemotron v2 math and stem data.
+- Dataset: 50/50 blend of WikiText and Nemotron v2 math and stem
+- Teacher CE: 1.9025
 
 | Training tokens | Validation KD | Validation CE | MMLU | MMLU-Pro |
 |----------------:|--------------:|--------------:|-----:|---------:|
-| 0 | Not measured | Not measured | 48.69% (full) | 23.09% (full) |
+| 0 | 0.6662 | 2.3780 | 48.69% (full) | 23.09% (full) |
 | 0.7M | 0.2479 | 1.8363 | 57.89% | 12.57% |
 | 3.3M | 0.1824 | 2.0265 | 62.46% | 23.14% |
 | 39.3M | 0.1164 | 1.9157 | 67.44% | 33.86% |
@@ -123,19 +125,17 @@ Distillation and validation used an equal-weight blend of WikiText and the Nemot
 
 ### Nemotron 3
 
-Distillation and validation used the Nemotron 3 Nano distillation blend described in the
-[data-blend workflow](#prepare-token-budgeted-data-blends).
+- Dataset: Nemotron 3 Nano [distillation blend](#prepare-token-budgeted-data-blends)
+- Teacher CE: 1.4702
 
 | Training tokens | Validation KD | Validation CE | MMLU | MMLU-Pro |
 |----------------:|--------------:|--------------:|-----:|---------:|
-| 0 | Not measured | Not measured | 48.69% (full) | 23.09% (full) |
+| 0 | 0.6395 | 1.9113 | 48.69% (full) | 23.09% (full) |
 | 0.7M | 0.2424 | 1.5910 | 57.05% | 24.86% |
 | 3.3M | 0.1604 | 1.5190 | 62.46% | 36.86% |
 | 39.3M | 0.0978 | 1.4144 | 67.23% | 45.00% |
 | 78.6M | 0.0890 | 1.4112 | 67.93% | 47.14% |
 | 100.0M | 0.0845 | 1.4656 | 67.37% | 47.71% |
-
-On the same validation samples, the teacher CE was 2.6834 on WikiText and 1.1566 on Nemotron v2.
 
 Interesting observations include:
 
