@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""Show distillation training progress for a puzzle_dir.
+"""This AI-generated script is for experimental use only.
+
+Show distillation training progress for a puzzle_dir.
 
 Usage:
   python distill_progress.py [puzzle_dir] [--ratio <r>]

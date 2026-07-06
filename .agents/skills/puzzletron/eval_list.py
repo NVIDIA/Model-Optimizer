@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""List available checkpoints for MMLU eval.
+"""This AI-generated script is for experimental use only.
+
+List available checkpoints for MMLU eval.
 
 Usage:
   python eval_list.py [puzzle_dir]

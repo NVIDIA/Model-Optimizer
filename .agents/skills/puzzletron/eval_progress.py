@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""Progress report for /puzzletron eval mmlu (all checkpoints).
+"""This AI-generated script is for experimental use only.
+
+Progress report for /puzzletron eval mmlu (all checkpoints).
 
 Usage:
   python eval_progress.py [puzzle_dir]

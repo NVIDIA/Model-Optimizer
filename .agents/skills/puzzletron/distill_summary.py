@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
+"""This AI-generated script is for experimental use only.
 
-"""Summarize and compare Puzzletron distillation runs.
+Summarize and compare Puzzletron distillation runs.
 
 Usage:
   python distill_summary.py [puzzle_dir]

@@ -1,6 +1,6 @@
 ---
 name: puzzletron
-description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu/mmlu-pro), distill (run/list/summary/progress). Usage: /puzzletron COMMAND [ARGS]"
+description: "End-to-end workflow for model pruning and MIP-based optimization. Commands: mip, all, add-model, eval (list/mmlu/mmlu-pro), distill (run/list/summary/progress/estimate). Usage: /puzzletron COMMAND [ARGS]"
 license: Apache-2.0
 ---
 
@@ -34,6 +34,7 @@ Available commands:
 - `distill list [puzzle_dir]` — List all distillation runs with status
 - `distill summary [puzzle_dir]` — Compare datasets, recipes, checkpoints, MMLU, and disk usage across runs
 - `distill progress [--puzzle_dir <dir>] [--ratio <r>]` — Show training progress for distillation runs
+- `distill estimate <run_dir> --target-tokens <N> [interval options]` — Estimate distillation, export, MMLU, and MMLU-Pro time and storage
 - `distill tokenize --hf_dataset <name> --output_dir <dir> --tokenizer <path> [--hf_name <s>] [--hf_split <s>] [--hf_max_samples <n>] [--json_keys text|messages]` — Tokenize an HF dataset to Megatron binary format for distillation
 
 Usage: `/puzzletron <command> [args]`
@@ -509,7 +510,7 @@ run puzzletron all for <model_name> on <N> GPUs
 
 ## Command: distill
 
-- If the second word is not exactly `run`, `list`, `summary`, `progress`, or `tokenize`, tell the user: "Unknown distill sub-command. Available: `run`, `list`, `summary`, `progress`, `tokenize`." and **STOP**.
+- If the second word is not exactly `run`, `list`, `summary`, `progress`, `estimate`, or `tokenize`, tell the user: "Unknown distill sub-command. Available: `run`, `list`, `summary`, `progress`, `estimate`, `tokenize`." and **STOP**.
 
 ### distill run
 
@@ -685,6 +686,34 @@ Example output for a completed job (Dataset and Tokens always shown when `run_co
 **Loss data sources:**
 - **Running job**: parsed in real-time from `<output_dir>/log.txt` — objective loss matches `iteration <N>/<total> ... total loss: <val>` and `validation loss at iteration <N> ... total loss value: <val>`; student CE matches `lm loss value: <val>` on validation lines
 - **Stopped/done jobs**: read from `<output_dir>/tb_logs/` TensorBoard event files via `EventAccumulator`
+
+**Trajectory reporting:** Prefer processed training tokens over raw iterations when presenting loss
+or downstream-evaluation trajectories. Compute `tokens = iteration × global batch size × sequence
+length` from the run configuration. Keep the iteration only when it helps identify the checkpoint,
+and label the token count as approximate if batches are not all full-length. Whenever a score uses
+`--limit`, report both the limit per task and the total number of evaluated questions. Read the
+question count from the saved result metadata when available; for a uniform task group it is
+`number of tasks × limit` (for example, MMLU `--limit 25` evaluates 57 × 25 = 1,425 questions).
+
+### distill estimate
+
+Require an existing `run_dir` and `--target-tokens <N>`. Run:
+
+```bash
+python3 .agents/skills/puzzletron/distill_estimate.py <run_dir> \
+  --target-tokens <N> \
+  [--eval-interval <N>] \
+  [--hf-export-interval <N>] \
+  [--mmlu-interval <N>] \
+  [--mmlu-pro-interval <N>] \
+  [--mmlu-limit <N>] \
+  [--mmlu-pro-limit <N>]
+```
+
+The estimator calibrates training, validation, export size, and downstream evaluation duration
+from that run's logs and artifacts. Evaluation intervals must be multiples of the HF export
+interval because only exported checkpoints can be evaluated. Present its output in a fenced code
+block and preserve `unavailable` values rather than inventing missing measurements.
 
 ### distill tokenize
 

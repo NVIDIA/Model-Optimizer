@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""Progress report for the Puzzletron MIP step."""
+"""This AI-generated script is for experimental use only.
+
+Progress report for the Puzzletron MIP step.
+"""
 
 import re
 import sys

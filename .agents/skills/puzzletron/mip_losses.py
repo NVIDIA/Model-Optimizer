@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""Teacher vs. compressed model accuracy for the single constrained MIP solution.
+"""This AI-generated script is for experimental use only.
+
+Teacher vs. compressed model accuracy for the single constrained MIP solution.
 
 For sweep results across multiple compression rates use mip_sweep.py instead.
 """

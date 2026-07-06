@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""Progress report for the full Puzzletron pipeline (all 8 steps)."""
+"""This AI-generated script is for experimental use only.
+
+Progress report for the full Puzzletron pipeline (all 8 steps).
+"""
 
 import glob
 import re

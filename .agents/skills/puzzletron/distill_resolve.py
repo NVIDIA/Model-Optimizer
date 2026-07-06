@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""Resolve distillation paths for a given puzzle_dir and compression ratio.
+"""This AI-generated script is for experimental use only.
+
+Resolve distillation paths for a given puzzle_dir and compression ratio.
 
 Usage:
   python distill_resolve.py [puzzle_dir] [--ratio <r>]

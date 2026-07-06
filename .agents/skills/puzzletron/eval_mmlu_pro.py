@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Evaluate MMLU-Pro subjects concurrently across local GPUs."""
+"""This AI-generated script is for experimental use only.
+
+Evaluate MMLU-Pro subjects concurrently across local GPUs.
+"""
 
 import argparse
 import json

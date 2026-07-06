@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Codex
+"""This AI-generated script is for experimental use only.
 
-"""Tests for the Puzzletron distillation-run summary."""
+Tests for the Puzzletron distillation-run summary.
+"""
 
 import importlib.util
 import json

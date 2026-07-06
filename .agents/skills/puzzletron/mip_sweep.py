@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""Display MIP sweep results across all compression rates from the sweep CSV."""
+"""This AI-generated script is for experimental use only.
+
+Display MIP sweep results across all compression rates from the sweep CSV.
+"""
 
 import contextlib
 import csv

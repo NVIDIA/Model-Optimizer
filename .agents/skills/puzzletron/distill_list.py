@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Generated with Claude Code
-"""List distillation runs under puzzle_dir/distillation/.
+"""This AI-generated script is for experimental use only.
+
+List distillation runs under puzzle_dir/distillation/.
 
 Usage:
   python distill_list.py [puzzle_dir]
