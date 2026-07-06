@@ -165,7 +165,7 @@ DistillationProvider.provide = _distill_provide_with_megatron_student
 
 
 class _HFValidationExportCallback(Callback):
-    """Export the live student to Hugging Face format after each validation stage."""
+    """Export the live student to Hugging Face format at selected validation stages."""
 
     def __init__(
         self,
@@ -173,10 +173,12 @@ class _HFValidationExportCallback(Callback):
         student_hf_model: str,
         student_hf_path: str,
         trust_remote_code: bool,
+        export_interval: int,
     ) -> None:
         self.export_dir = Path(export_dir)
         self.student_hf_path = student_hf_path
         self.trust_remote_code = trust_remote_code
+        self.export_interval = export_interval
         self._last_exported_iteration: int | None = None
         self.bridge = AutoBridge.from_hf_pretrained(
             student_hf_model, trust_remote_code=trust_remote_code
@@ -185,6 +187,9 @@ class _HFValidationExportCallback(Callback):
     def on_eval_end(self, context) -> None:
         """Export the student at the iteration that was just validated."""
         iteration = context.state.train_state.step
+        train_iters = context.state.cfg.train.train_iters
+        if iteration % self.export_interval != 0 and iteration != train_iters:
+            return
         # The final iteration can be validated both on its regular interval and after training.
         # Avoid exporting and overwriting the same Hugging Face checkpoint twice.
         if iteration == self._last_exported_iteration:
@@ -291,6 +296,11 @@ def get_args():
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
     parser.add_argument("--lr_warmup_iters", type=int, default=50, help="Number of LR warmup steps")
     parser.add_argument(
+        "--reset_optimizer",
+        action="store_true",
+        help="Do not restore optimizer or scheduler state when resuming from a checkpoint",
+    )
+    parser.add_argument(
         "--recompute_granularity",
         type=str,
         default=None,
@@ -356,6 +366,15 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--hf_validation_export_interval",
+        type=int,
+        default=None,
+        help=(
+            "Export a HuggingFace checkpoint every <N> training steps. "
+            "The final iteration is always exported."
+        ),
+    )
+    parser.add_argument(
         "--student_hf_model",
         type=str,
         required=False,
@@ -375,6 +394,13 @@ def get_args():
         raise ValueError(
             "Must provide --student_hf_model when HuggingFace checkpoint export is enabled."
         )
+    if args.hf_validation_export_interval is not None and not args.hf_validation_export_path:
+        raise ValueError("--hf_validation_export_interval requires --hf_validation_export_path.")
+    if args.hf_validation_export_path:
+        if args.hf_validation_export_interval is None:
+            raise ValueError(
+                "--hf_validation_export_path requires --hf_validation_export_interval."
+            )
 
     print_args(args)
 
@@ -510,6 +536,7 @@ def main(args: argparse.Namespace):
             save_interval=args.eval_interval,
             save=checkpoint_dir,
             load=None if args.validate_only else checkpoint_dir,
+            load_optim=not args.reset_optimizer,
             most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
             async_save=True,
@@ -529,6 +556,7 @@ def main(args: argparse.Namespace):
             student_hf_model=args.student_hf_model,
             student_hf_path=args.student_hf_path,
             trust_remote_code=args.trust_remote_code,
+            export_interval=args.hf_validation_export_interval,
         )
         # TODO: Use distill(..., callbacks=[callback]) once Megatron-Bridge supports callbacks.
         pretrain(config, forward_step_modelopt, callbacks=[callback])

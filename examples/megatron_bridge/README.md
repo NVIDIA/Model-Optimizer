@@ -228,17 +228,20 @@ torchrun --nnodes 1 --nproc_per_node 8 distill.py \
 
 `--student_hf_model` should match the base architecture of the student (used as a template for export). For non-Puzzletron (i.e. standard) models, it should be same as `--student_hf_path`.
 
-To export the live student after every validation stage, use `--hf_validation_export_path`:
+To export the live student periodically during validation, use `--hf_validation_export_path`:
 
 ```bash
 torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     ... \
-    --eval_interval 100 \
+    --eval_interval 20 \
     --hf_validation_export_path /path/to/save/validation_checkpoints \
+    --hf_validation_export_interval 200 \
     --student_hf_model Qwen/Qwen3-4B
 ```
 
-The exports are saved as `iter_0000100`, `iter_0000200`, and so on. They contain only
+The example validates every 20 steps and exports at iterations 200, 400, and so on. The final
+iteration is always exported. `--hf_validation_export_path` and
+`--hf_validation_export_interval` must be specified together. These directories contain only
 HuggingFace model artifacts and can be evaluated independently while distillation retains its
 normal resumable Megatron checkpoints.
 

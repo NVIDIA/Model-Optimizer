@@ -71,35 +71,65 @@ Evaluate the teacher, pruned student, and each exported checkpoint. Follow the
 [LM-Eval Harness instructions](../llm_eval/README.md#lm-eval-harness) and use the
 [efficient evaluation workflow](#efficient-evaluation-with-lm-eval-harness) to choose limits.
 
-The following experiment pruned Qwen3-8B to 0.7x and distilled it on either Salesforce/wikitext
-(`wikitext-103-v1`) or the math and stem splits of nvidia/Nemotron-Post-Training-Dataset-v2 for 100 iterations,
-exporting every 20 iterations. MMLU used 25 samples per subject and MMLU-Pro used 50.
+The following experiment pruned Qwen3-8B to 0.7x and distilled the same student for approximately 100 million
+tokens on three datasets. All runs used a global batch size of 8 and sequence length of 4,096. MMLU used 25
+questions per subject (1,425 total), and MMLU-Pro used 50 per subject (700 total). The tables show representative
+checkpoints; token counts are derived from the consumed fixed-length training sequences.
 
-| Model | Iteration | Validation KD | Validation CE | MMLU | MMLU-Pro |
-|-------|----------:|--------------:|--------------:|-----:|---------:|
-| Teacher: Qwen3-8B | - | - | - | 74.93% (full) | 58.62% (full) |
-| Pruned 0.7x student (Salesforce/wikitext validation) | 0 | 0.8261 | 3.3458 | 48.69% (full) | 23.09% (full) |
-| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 20 | 0.3031 | 2.6570 | 59.72% | 25.00% |
-| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 40 | 0.2935 | 2.6554 | 60.98% | 28.00% |
-| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 60 | 0.2696 | 2.6412 | 62.46% | 27.57% |
-| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 80 | 0.2479 | 2.6262 | 62.74% | 27.14% |
-| Distilled on Salesforce/wikitext (`wikitext-103-v1`) | 100 | 0.2343 | 2.6091 | 63.58% | 29.29% |
-| Pruned 0.7x student (Nemotron validation) | 0 | 0.5187 | 1.4739 | 48.69% (full) | 23.09% (full) |
-| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 20 | 0.1919 | 1.0931 | 58.74% | 13.14% |
-| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 40 | 0.1731 | 1.0692 | 59.58% | 1.71% |
-| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 60 | 0.1510 | 1.0347 | 58.46% | 14.43% |
-| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 80 | 0.1343 | 1.0466 | 60.35% | 12.29% |
-| Distilled on nvidia/Nemotron-Post-Training-Dataset-v2 (math and stem) | 100 | 0.1342 | 1.0550 | 60.56% | 14.29% |
+| Baseline model | MMLU | MMLU-Pro |
+|----------------|-----:|---------:|
+| Teacher: Qwen3-8B | 74.93% (full) | 58.62% (full) |
+| Pruned 0.7x student | 48.69% (full) | 23.09% (full) |
 
-On the same validation samples, the teacher CE was 2.6834 on WikiText and 1.1566 on Nemotron.
+### WikiText
+
+Distillation and validation used Salesforce/wikitext (`wikitext-103-v1`).
+
+| Training tokens | Validation KD | Validation CE | MMLU | MMLU-Pro |
+|----------------:|--------------:|--------------:|-----:|---------:|
+| 0 | 0.8261 | 3.3458 | 48.69% (full) | 23.09% (full) |
+| 0.7M | 0.3031 | 2.6570 | 59.72% | 25.00% |
+| 3.3M | 0.2343 | 2.6091 | 63.58% | 29.29% |
+| 39.3M | 0.1495 | 2.5665 | 65.89% | 39.86% |
+| 78.6M | 0.1315 | 2.5699 | 66.46% | 39.57% |
+| 100.0M | 0.1291 | 2.5863 | 67.30% | 40.57% |
+
+### Nemotron v2
+
+Distillation and validation used the math and stem splits of
+nvidia/Nemotron-Post-Training-Dataset-v2.
+
+| Training tokens | Validation KD | Validation CE | MMLU | MMLU-Pro |
+|----------------:|--------------:|--------------:|-----:|---------:|
+| 0 | 0.5187 | 1.4739 | 48.69% (full) | 23.09% (full) |
+| 0.7M | 0.1919 | 1.0931 | 58.74% | 13.14% |
+| 3.3M | 0.1342 | 1.0550 | 60.56% | 14.29% |
+| 39.3M | 0.0675 | 1.0296 | 64.63% | 6.14% |
+| 78.6M | 0.0613 | 1.0773 | 65.61% | 7.71% |
+| 100.0M | 0.0582 | 1.0516 | 65.75% | 11.29% |
+
+### Nemotron 3
+
+Distillation and validation used the Nemotron 3 Nano distillation blend described in the
+[data-blend workflow](#prepare-token-budgeted-data-blends).
+
+| Training tokens | Validation KD | Validation CE | MMLU | MMLU-Pro |
+|----------------:|--------------:|--------------:|-----:|---------:|
+| 0 | Not measured | Not measured | 48.69% (full) | 23.09% (full) |
+| 0.7M | 0.2424 | 1.5910 | 57.05% | 24.86% |
+| 3.3M | 0.1604 | 1.5190 | 62.46% | 36.86% |
+| 39.3M | 0.0978 | 1.4144 | 67.23% | 45.00% |
+| 78.6M | 0.0890 | 1.4112 | 67.93% | 47.14% |
+| 100.0M | 0.0845 | 1.4656 | 67.37% | 47.71% |
+
+On the same validation samples, the teacher CE was 2.6834 on WikiText and 1.1566 on Nemotron v2.
 
 Interesting observations include:
 
-- On WikiText, both validation losses decrease while MMLU and MMLU-Pro trend upward.
-- On Nemotron, KD loss decreases, but CE loss improves only through iteration 60 and then worsens. This may indicate
-  diminishing learning signal on the Nemotron validation data; distill longer to determine whether CE has plateaued.
-- Investigate the Nemotron iteration-40 MMLU-Pro outlier, which appears despite a stable MMLU score, by inspecting
-  saved samples.
+- All three datasets recover MMLU to about 66--67% by 100 million tokens.
+- Nemotron 3 produces the strongest MMLU-Pro trajectory, reaching 47.71%, followed by WikiText at 40.57%.
+- Nemotron v2 KD continues to decrease, but its MMLU-Pro score remains below the pruned baseline. This shows why
+  validation loss alone is insufficient for selecting distillation data.
 
 ## Prepare token-budgeted data blends
 
