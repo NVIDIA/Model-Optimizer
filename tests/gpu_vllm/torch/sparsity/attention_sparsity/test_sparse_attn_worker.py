@@ -18,11 +18,10 @@
 import builtins
 import importlib.util
 import math
-import sys
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from itertools import accumulate
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -56,10 +55,21 @@ def _load_worker_module(name="sparse_attn_worker_test"):
     return module
 
 
-def _legacy_quant_module(installer):
-    module = ModuleType("quant_sparse_attn_worker")
-    setattr(module, "_install_quant_sparse_attn", installer)
+def _bare_attention(worker_module, impl_cls=FlashAttentionImpl):
+    module = object.__new__(worker_module.VLLMAttention)
+    nn.Module.__init__(module)
+    module.impl = object.__new__(impl_cls)
+    module.impl.sinks = None
     return module
+
+
+def _sparse_worker_state(model):
+    return SimpleNamespace(
+        model_runner=SimpleNamespace(
+            model=model,
+            model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        )
+    )
 
 
 def test_shared_worker_import_does_not_resolve_quant_only_apis(monkeypatch):
@@ -107,70 +117,6 @@ def test_public_workers_install_after_base_load(monkeypatch, class_name, quantiz
     assert events == ["base", ("install", quantize)]
 
 
-def test_shared_worker_quant_install_rejects_old_vllm_before_delegation(monkeypatch):
-    worker_module = _load_worker_module("quant_install_version_test")
-    worker = object()
-    delegated = []
-    monkeypatch.setitem(
-        sys.modules, "quant_sparse_attn_worker", _legacy_quant_module(delegated.append)
-    )
-    monkeypatch.setattr(vllm, "__version__", "0.9.0")
-    worker_module._load_quant_api.cache_clear()
-
-    try:
-        with pytest.raises(RuntimeError, match=r"vLLM >= 0\.14\.0"):
-            worker_module._install_attention(worker, quantize=True)
-    finally:
-        worker_module._load_quant_api.cache_clear()
-
-    assert delegated == []
-
-
-def test_shared_worker_quant_install_validates_before_delegation(monkeypatch):
-    worker_module = _load_worker_module("quant_install_order_test")
-    worker = object()
-    events = []
-    delegated = []
-    real_import = builtins.__import__
-
-    def install(actual_worker):
-        events.append("delegate")
-        delegated.append(actual_worker)
-
-    def recording_import(name, *args, **kwargs):
-        if name == "quant_sparse_attn_worker":
-            events.append("import")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setitem(sys.modules, "quant_sparse_attn_worker", _legacy_quant_module(install))
-    monkeypatch.setattr(builtins, "__import__", recording_import)
-    monkeypatch.setattr(worker_module, "_quant_api", lambda: events.append("validate"))
-
-    worker_module._install_attention(worker, quantize=True)
-
-    assert events == ["validate", "import", "delegate"]
-    assert len(delegated) == 1 and delegated[0] is worker
-
-
-def test_shared_worker_sparse_install_does_not_import_legacy_quant_worker(monkeypatch):
-    worker_module = _load_worker_module("sparse_install_test")
-    worker = object()
-    replaced = []
-    real_import = builtins.__import__
-
-    def guarded_import(name, *args, **kwargs):
-        if name == "quant_sparse_attn_worker":
-            raise AssertionError("legacy quant worker imported for sparse attention")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
-    monkeypatch.setattr(worker_module, "_replace_attention_impl", replaced.append)
-
-    worker_module._install_attention(worker, quantize=False)
-
-    assert len(replaced) == 1 and replaced[0] is worker
-
-
 def test_sparse_worker_keeps_base_memory_profile():
     worker_module = _load_worker_module("sparse_profile_test")
 
@@ -178,46 +124,6 @@ def test_sparse_worker_keeps_base_memory_profile():
         worker_module.SparseAttnWorker.determine_available_memory
         is BaseWorker.determine_available_memory
     )
-
-
-def test_shared_worker_quant_memory_profile_uses_both_contexts(monkeypatch):
-    worker_module = _load_worker_module("quant_profile_test")
-    events = []
-    model = object()
-
-    @contextmanager
-    def recorded_context(name, value=None):
-        events.append(("enter", name, value))
-        try:
-            yield
-        finally:
-            events.append(("exit", name, value))
-
-    api = SimpleNamespace(
-        torch=SimpleNamespace(inference_mode=lambda: recorded_context("inference")),
-        plugin=SimpleNamespace(
-            disable_compilation=lambda actual_model: recorded_context("compilation", actual_model)
-        ),
-    )
-    monkeypatch.setattr(worker_module, "_quant_api", lambda: api)
-
-    instance = object.__new__(worker_module.QuantSparseAttnWorker)
-    instance.model_runner = SimpleNamespace(model=SimpleNamespace(unwrap=lambda: model))
-
-    def profile(actual_worker):
-        events.append(("profile", actual_worker))
-        return 73
-
-    monkeypatch.setattr(BaseWorker, "determine_available_memory", profile)
-
-    assert instance.determine_available_memory() == 73
-    assert events == [
-        ("enter", "inference", None),
-        ("enter", "compilation", model),
-        ("profile", instance),
-        ("exit", "compilation", model),
-        ("exit", "inference", None),
-    ]
 
 
 def _make_old_impl():
@@ -596,23 +502,70 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
         assert calls["finalize"] == []
 
 
+def test_sparse_worker_is_noop_without_checkpoint_metadata(monkeypatch, capsys):
+    worker_module = _load_worker_module()
+    attention = _bare_attention(worker_module)
+    original_impl = attention.impl
+    state = _sparse_worker_state(nn.ModuleDict({"attn": attention}))
+    monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: None)
+
+    worker_module._install_attention(state, quantize=False)
+
+    output = capsys.readouterr().out
+    assert attention.impl is original_impl
+    assert "No sparse_attention_config found in the checkpoint" in output
+    assert "replaced impl on 0" not in output
+
+
+def test_sparse_worker_installs_only_active_layer(monkeypatch):
+    worker_module = _load_worker_module()
+    active = _bare_attention(worker_module)
+    disabled = _bare_attention(worker_module, FlashInferImpl)
+    empty = _bare_attention(worker_module)
+    original_disabled_impl = disabled.impl
+    original_empty_impl = empty.impl
+    model = nn.ModuleDict({"active": active, "disabled": disabled, "empty": empty})
+    state = _sparse_worker_state(model)
+    configs = {
+        "active": {"enable": True, "sparsity_n": 2, "sparsity_m": 4},
+        "disabled": {"enable": False, "sparsity_n": 2, "sparsity_m": 4},
+        "empty": {"enable": True},
+    }
+    monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: ({}, "test"))
+    monkeypatch.setattr(worker_module, "match_sparse_config", lambda name, _cfg: configs[name])
+
+    worker_module._install_attention(state, quantize=False)
+
+    assert type(active.impl) is ModelOptSparseAttentionImpl
+    assert active.impl.sparse_kw["sparsity_n"] == 2
+    assert disabled.impl is original_disabled_impl
+    assert empty.impl is original_empty_impl
+
+
+def test_sparse_worker_does_not_load_quant_api(monkeypatch):
+    worker_module = _load_worker_module()
+    attention = _bare_attention(worker_module)
+    state = _sparse_worker_state(nn.ModuleDict({"attn": attention}))
+    monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: ({}, "test"))
+    monkeypatch.setattr(
+        worker_module,
+        "match_sparse_config",
+        lambda *_: {"enable": True, "sparsity_n": 2, "sparsity_m": 4},
+    )
+    monkeypatch.setattr(worker_module, "_quant_api", lambda: pytest.fail("loaded quant API"))
+
+    worker_module._install_attention(state, quantize=False)
+
+    assert type(attention.impl) is ModelOptSparseAttentionImpl
+
+
 def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
     worker_module = _load_worker_module()
-    good = object.__new__(worker_module.VLLMAttention)
-    nn.Module.__init__(good)
-    good.impl = object.__new__(FlashAttentionImpl)
-    good.impl.sinks = None
-    bad = object.__new__(worker_module.VLLMAttention)
-    nn.Module.__init__(bad)
+    good = _bare_attention(worker_module)
+    bad = _bare_attention(worker_module)
     bad.impl = SimpleNamespace()
     original_good_impl = good.impl
-    model = nn.ModuleDict({"good": good, "bad": bad})
-    state = SimpleNamespace(
-        model_runner=SimpleNamespace(
-            model=model,
-            model_config=SimpleNamespace(hf_config=SimpleNamespace()),
-        )
-    )
+    state = _sparse_worker_state(nn.ModuleDict({"good": good, "bad": bad}))
     monkeypatch.setattr(
         worker_module,
         "load_from_checkpoint_metadata",
@@ -624,9 +577,12 @@ def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
         lambda *_: {"enable": True, "sparsity_n": 2, "sparsity_m": 4},
     )
 
-    with pytest.raises(NotImplementedError, match=r"bad.*SimpleNamespace"):
-        worker_module._replace_attention_impl(state)
+    with pytest.raises(NotImplementedError) as exc:
+        worker_module._install_attention(state, quantize=False)
 
+    assert str(exc.value) == (
+        "Unsupported ModelOpt sparse attention plan:\n  - bad: unsupported backend SimpleNamespace"
+    )
     assert good.impl is original_good_impl
     assert bad.impl.__class__ is SimpleNamespace
 

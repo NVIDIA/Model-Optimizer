@@ -36,11 +36,13 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     get_flashinfer_sparse_impl_cls,
 )
 
-_WORKER_PATH = Path(__file__).parents[5] / "examples/vllm_serve/quant_sparse_attn_worker.py"
+_WORKER_PATH = Path(__file__).parents[5] / "examples/vllm_serve/sparse_attn_worker.py"
 
 
 def _load_worker_module():
-    spec = importlib.util.spec_from_file_location("quant_sparse_attn_worker", _WORKER_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "shared_attention_worker_quant_test", _WORKER_PATH
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -49,11 +51,15 @@ def _load_worker_module():
 worker_module = _load_worker_module()
 
 
-def test_worker_rejects_vllm_before_v1_attention_api(monkeypatch):
+def test_quant_policy_rejects_old_vllm(monkeypatch):
     monkeypatch.setattr(vllm, "__version__", "0.9.0")
+    worker_module._load_quant_api.cache_clear()
 
-    with pytest.raises(RuntimeError, match=r"vLLM >= 0\.14\.0"):
-        _load_worker_module()
+    try:
+        with pytest.raises(RuntimeError, match=r"vLLM >= 0\.14\.0"):
+            worker_module._install_attention(SimpleNamespace(), quantize=True)
+    finally:
+        worker_module._load_quant_api.cache_clear()
 
 
 def _attention(attn_type=AttentionType.DECODER, impl_cls=FlashAttentionImpl):
@@ -87,7 +93,7 @@ def _patch_conversion(monkeypatch):
         lambda: quant_plugin.ParallelState(data_parallel_group=None),
     )
     monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: None)
-    monkeypatch.setattr(worker_module, "_global_errors", lambda _: [])
+    monkeypatch.setattr(worker_module, "_global_errors", lambda _worker, _api=None: [])
 
 
 @pytest.mark.parametrize("impl_cls", [FlashAttentionImpl, FlashInferImpl])
@@ -98,7 +104,7 @@ def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch
     model = nn.ModuleDict({"attn": attention, "linear": linear})
     state = _worker(model)
 
-    worker_module._install_quant_sparse_attn(state)
+    worker_module._install_attention(state, quantize=True)
 
     converted = model["attn"]
     assert isinstance(converted, quant_plugin._QuantVLLMAttention)
@@ -128,6 +134,29 @@ def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch
     assert state.model_runner.cascade_attn_enabled is False
 
 
+def test_quant_off_disables_recipe_but_keeps_modelopt_adapter(monkeypatch):
+    _patch_conversion(monkeypatch)
+    monkeypatch.setenv("MODELOPT_ATTN_QUANT_OFF", "1")
+    attention = _attention()
+    state = _worker(nn.ModuleDict({"attn": attention}))
+
+    worker_module._install_attention(state, quantize=True)
+
+    converted = state.model_runner.model["attn"]
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "p_bmm_quantizer", "v_bmm_quantizer"):
+        assert not getattr(converted, name).is_enabled
+    assert converted._query_quant_in_kernel is False
+    assert converted._value_quant_in_kernel is False
+    assert converted._modelopt_force_kernel is True
+    assert type(converted.impl) is ModelOptSparseAttentionImpl
+    assert converted.impl.quant_kw == {
+        "p_qdq": None,
+        "p_qdq_amax": 1.0,
+        "v_qdq": None,
+        "v_qdq_amax": None,
+    }
+
+
 def test_validation_of_all_layouts_precedes_mutation(monkeypatch):
     _patch_conversion(monkeypatch)
     good, bad = _attention(), _attention(AttentionType.ENCODER)
@@ -137,41 +166,50 @@ def test_validation_of_all_layouts_precedes_mutation(monkeypatch):
     original_impl = good.impl
 
     with pytest.raises(NotImplementedError) as exc:
-        worker_module._install_quant_sparse_attn(_worker(model))
+        worker_module._install_attention(_worker(model), quantize=True)
 
     assert all(needle in str(exc.value) for needle in ("bad: attn_type", "head_size_v", "float32"))
     assert model["good"] is good and good.impl is original_impl
     assert not isinstance(good, quant_plugin._QuantVLLMAttention)
 
 
-def test_worker_installs_after_base_load(monkeypatch):
+def test_quant_memory_profile_uses_inference_mode_and_disables_compilation(monkeypatch):
     events = []
-    monkeypatch.setattr(
-        worker_module, "_install_quant_sparse_attn", lambda _: events.append("install")
-    )
-    monkeypatch.setattr(BaseWorker, "load_model", lambda *_args, **_kwargs: events.append("base"))
-    instance = object.__new__(worker_module.QuantSparseAttnWorker)
-    assert instance.load_model() is None
-    assert events == ["base", "install"]
-
-
-def test_memory_profile_disables_compilation(monkeypatch):
-    events, model = [], object()
+    model = object()
 
     @contextmanager
-    def disabled(actual):
-        events.append(("enter", actual))
-        yield
-        events.append(("exit", actual))
+    def recorded_context(name, value=None):
+        events.append(("enter", name, value))
+        try:
+            yield
+        finally:
+            events.append(("exit", name, value))
 
-    monkeypatch.setattr(worker_module, "disable_compilation", disabled, raising=False)
-    monkeypatch.setattr(
-        BaseWorker, "determine_available_memory", lambda _: events.append(("profile", model)) or 7
+    api = SimpleNamespace(
+        torch=SimpleNamespace(inference_mode=lambda: recorded_context("inference")),
+        plugin=SimpleNamespace(
+            disable_compilation=lambda actual_model: recorded_context("compilation", actual_model)
+        ),
     )
+    monkeypatch.setattr(worker_module, "_quant_api", lambda: api)
+
     instance = object.__new__(worker_module.QuantSparseAttnWorker)
     instance.model_runner = SimpleNamespace(model=SimpleNamespace(unwrap=lambda: model))
-    assert instance.determine_available_memory() == 7
-    assert events == [("enter", model), ("profile", model), ("exit", model)]
+
+    def profile(actual_worker):
+        events.append(("profile", actual_worker))
+        return 73
+
+    monkeypatch.setattr(BaseWorker, "determine_available_memory", profile)
+
+    assert instance.determine_available_memory() == 73
+    assert events == [
+        ("enter", "inference", None),
+        ("enter", "compilation", model),
+        ("profile", instance),
+        ("exit", "compilation", model),
+        ("exit", "inference", None),
+    ]
 
 
 @pytest.mark.parametrize(
