@@ -76,6 +76,15 @@ tokens using four data recipes. All runs used a global batch size of 8 and seque
 questions per subject (1,425 total), and MMLU-Pro used 50 per subject (700 total). The tables show representative
 checkpoints; token counts are derived from the consumed fixed-length training sequences.
 
+Measured compute per data recipe on eight H100 80GB GPUs:
+
+| Stage | Checkpoints | Time | GPU use |
+|-------|------------:|-----:|---------|
+| Distillation to 100M tokens | - | ~2h10m | 8 GPUs |
+| MMLU trajectory | 21 | ~51m | 8 GPUs |
+| MMLU-Pro trajectory | 13 | ~3h50m | Two checkpoints in parallel, 4 GPUs each |
+| Total | - | ~6h50m | Excludes Slurm queue and worker setup |
+
 | Baseline model | MMLU | MMLU-Pro |
 |----------------|-----:|---------:|
 | Teacher: Qwen3-8B | 74.93% (full) | 58.62% (full) |
