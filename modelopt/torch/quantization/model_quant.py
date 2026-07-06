@@ -619,7 +619,11 @@ def print_quant_summary(model: nn.Module, output_dir: str | None = None):
 
 
 def fold_weight(model: nn.Module, keep_attrs: bool = False):
-    """Fold weight quantizer for fast evaluation."""
+    """Fold weight quantizer for fast evaluation.
+
+    Any weight-quantizer rotation is folded into the weights and disabled so subsequent
+    forwards do not re-rotate the already-folded weights.
+    """
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)
