@@ -368,6 +368,41 @@ def test_auto_quantize_per_element_changes_selector_objective():
     }
 
 
+def test_auto_quantize_per_element_tiny_scores_are_order_invariant():
+    candidate_stats = {
+        "small.quant_recipe": {
+            "formats": ["compressed", "bf16"],
+            "costs": [4.0, 8.0],
+            "element_costs": [4.0, 8.0],
+            "scores": [8.0e-12, 0.0],
+        },
+        "large.quant_recipe": {
+            "formats": ["compressed", "bf16"],
+            "costs": [4.0, 8.0],
+            "element_costs": [400.0, 800.0],
+            "scores": [80.0e-12, 0.0],
+        },
+    }
+
+    def solve(candidate_items):
+        searcher = AutoQuantizeGradientSearcher()
+        searcher.config = {"cost_model": "weight"}
+        searcher.cost_model = "weight"
+        searcher.constraints = {"effective_bits": 6.0, "score_model": "per_element"}
+        searcher.candidate_stats = copy.deepcopy(dict(candidate_items))
+        recipes, is_satisfied = searcher.run_search_with_stats(12.0)
+        assert is_satisfied
+        return {name: info["format"] for name, info in recipes.items()}
+
+    expected = {
+        "small.quant_recipe": "bf16",
+        "large.quant_recipe": "compressed",
+    }
+    items = list(candidate_stats.items())
+    assert solve(items) == expected
+    assert solve(reversed(items)) == expected
+
+
 def test_auto_quantize_groups_shared_expert_projections():
     searcher = AutoQuantizeGradientSearcher()
     group_keys = []
