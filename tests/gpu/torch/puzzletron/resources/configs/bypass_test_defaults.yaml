@@ -14,8 +14,8 @@
 
 dtype: bf16
 seed: 42
-experiment_id: null
-experiment_dir: null
+experiment_id:
+experiment_dir:
 iter_num: 1
 step_num: 1
 token_count: 0
@@ -32,7 +32,7 @@ data:
   keep_in_memory: false
   val_dataset_name: validation
   max_eval_samples: 1
-  eval_samples_per_process: null
+  eval_samples_per_process:
   shuffle_train_data_seed: 42
 
 training:
@@ -41,7 +41,7 @@ training:
   micro_batch_size: 1
   val_micro_batch_size: 1
   warmup_ratio: 0.05
-  warmup_steps: null
+  warmup_steps:
   min_lr_factor: 1e-5
   grad_accumulation_steps: 1
   skip_first_batches: 0
@@ -58,16 +58,16 @@ training:
   # Validation is fully disabled anyway (disable_validation=true below).
   eval_interval: 100
 
-resume_checkpoint_path: null
+resume_checkpoint_path:
 find_last_ckpt_for_resume: false
-parameter_count: null
-init_checkpoint_path: null
+parameter_count:
+init_checkpoint_path:
 
 model:
   student_weights_dtype: bf16
   model_overrides:
     delete_old_checkpoints: true
-    save_interval_seconds: null
+    save_interval_seconds:
     # Effectively disable step-interval saving; rely on save_checkpoint_when_done.
     save_interval: 1000000000
     save_checkpoint_when_done: true
@@ -82,7 +82,7 @@ model_factory:
   mlp_init_mode: Truncate
   mlp_init_config: {}
   linear_init_mode: FromTeacher
-  submodule_for_loss_calculation: null
+  submodule_for_loss_calculation:
   keys_to_learn: entire_block
 
 # Disable all validation to keep tests fast.
@@ -103,5 +103,5 @@ kill_after_first_save: false
 realize_best_or_latest: best
 wandb_log: false
 wandb:
-  project: null
-  entity: null
+  project:
+  entity:
