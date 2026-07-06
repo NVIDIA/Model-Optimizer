@@ -16,6 +16,7 @@
 
 import json
 import math
+import threading
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -201,14 +202,25 @@ def _load_activations_log(mlp_init_config: dict[str, Any], module_name: str) -> 
 
 
 ACTIVATIONS_LOG = dict()
+# Source dir the current ACTIVATIONS_LOG contents were loaded from. Used to reload
+# when a different run/config is processed in the same process (e.g. persistent
+# multi-process test workers), instead of silently reusing another run's scores.
+_ACTIVATIONS_LOG_DIR: str | None = None
+# _cache_activations_log is called from ThreadPoolExecutor workers, so guard the
+# lazy (re)load against concurrent clear/update races.
+_ACTIVATIONS_LOG_LOCK = threading.Lock()
 
 
 def _cache_activations_log(mlp_init_config: dict[str, Any]) -> None:
-    if len(ACTIVATIONS_LOG) == 0:
-        assert "activations_log_dir" in mlp_init_config
-        activations_log_dir = mlp_init_config["activations_log_dir"]
+    global _ACTIVATIONS_LOG_DIR
+    assert "activations_log_dir" in mlp_init_config
+    activations_log_dir = mlp_init_config["activations_log_dir"]
+    with _ACTIVATIONS_LOG_LOCK:
+        if _ACTIVATIONS_LOG_DIR == activations_log_dir and ACTIVATIONS_LOG:
+            return
         print(f"Loading activations_log from {activations_log_dir}")
         # Only load rank_*.pth files to avoid loading hook_states_*.pth checkpoint files
+        ACTIVATIONS_LOG.clear()
         ACTIVATIONS_LOG.update(
             {
                 module_name: module_log
@@ -216,6 +228,7 @@ def _cache_activations_log(mlp_init_config: dict[str, Any]) -> None:
                 for module_name, module_log in torch.load(p).items()
             }
         )
+        _ACTIVATIONS_LOG_DIR = activations_log_dir
 
 
 def _init_attention_weights(
