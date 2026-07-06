@@ -502,6 +502,37 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
         assert calls["finalize"] == []
 
 
+def test_flashinfer_forced_kernel_mixed_batch_never_uses_native_fallback(monkeypatch):
+    prefill_tokens = 17
+    impl = _make_flashinfer_impl(sparse=False, quantized=False)
+    query = torch.zeros(1 + prefill_tokens, 2, 64, dtype=torch.float16)
+    kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
+    metadata = _flashinfer_metadata(query_lens=(1, prefill_tokens), mixed=True)
+    layer = SimpleNamespace(_modelopt_force_kernel=True)
+    calls = {"native": 0, "decode": 0, "prefill": 0}
+
+    def native_fallback(*args, **kwargs):
+        calls["native"] += 1
+        raise AssertionError("native FlashInfer fallback")
+
+    def fake_decode(query, *args, **kwargs):
+        calls["decode"] += 1
+        return torch.zeros_like(query)
+
+    def fake_attention(query, **kwargs):
+        phase = "decode" if kwargs["max_input_len"] == 1 else "prefill"
+        calls[phase] += 1
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(FlashInferImpl, "forward", native_fallback)
+    monkeypatch.setattr(vllm_plugin, "triton_decode_attention", fake_decode)
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+
+    impl.forward(layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query))
+
+    assert calls == {"native": 0, "decode": 1, "prefill": 1}
+
+
 def test_sparse_worker_is_noop_without_checkpoint_metadata(monkeypatch, capsys):
     worker_module = _load_worker_module()
     attention = _bare_attention(worker_module)
