@@ -305,6 +305,16 @@ class _Partition:
             encoded_docs = pool.imap(encoder.encode, lines, 32)
         return pool, encoded_docs
 
+    @staticmethod
+    def _cached_token_count(prefixes: list[str]) -> int:
+        """Return the number of tokens represented by cached Megatron datasets."""
+        token_count = 0
+        for prefix in prefixes:
+            # Avoid memory-mapping the token file because a cached split can be empty.
+            dataset = indexed_dataset.IndexedDataset(prefix, mmap=False)
+            token_count += int(dataset.sequence_lengths.sum())
+        return token_count
+
     def process_json_file(
         self,
         input_file_name: str | Path,
@@ -342,7 +352,7 @@ class _Partition:
 
         if not builders:
             print(f"\t[SKIP] Output files corresponding to {input_file_name} already exist")
-            return 0, prefixes
+            return self._cached_token_count(prefixes), prefixes
 
         start_time = time.time()
         total_doc_len, total_enc_len = 0, 0
@@ -437,7 +447,7 @@ class _Partition:
 
         if not builders:
             print(f"\t[SKIP] Output files for {dataset_name} {config}/{split} already exist")
-            return 0, prefixes
+            return self._cached_token_count(prefixes), prefixes
 
         # Workers encode asynchronously; iterating encoded_docs waits for results in input order.
         pool, encoded_docs = self._encode_docs(

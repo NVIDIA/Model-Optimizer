@@ -108,6 +108,27 @@ def test_megatron_preprocess_data_hf_split_stops_at_max_tokens(tmp_path):
     assert limited_size < full_size
 
 
+def test_megatron_preprocess_data_hf_splits_resume_uses_cached_token_count(tmp_path):
+    args = {
+        "hf_dataset": "Salesforce/wikitext",
+        "hf_name": "wikitext-2-raw-v1",
+        "hf_max_samples_per_split": 1,
+        "hf_streaming": True,
+        "max_tokens": 100,
+        "output_dir": tmp_path,
+        "tokenizer_name_or_path": "gpt2",
+        "json_keys": "text",
+        "max_sequence_length": 16,
+        "workers": 2,
+    }
+
+    prefixes = megatron_preprocess_data(**args)
+    cached_files = set(tmp_path.iterdir())
+
+    assert megatron_preprocess_data(**args) == prefixes
+    assert set(tmp_path.iterdir()) == cached_files
+
+
 @pytest.mark.parametrize(
     ("hf_dataset", "hf_split", "json_keys"),
     [
