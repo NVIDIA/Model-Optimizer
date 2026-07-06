@@ -30,11 +30,13 @@ except Exception:
 from _test_utils.torch.quantization.models import SDPAAttention
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import (
     set_quantizer_by_cfg,
     set_quantizer_by_cfg_context,
 )
 from modelopt.torch.quantization.nn.functional import normalized_hadamard_transform
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
 
 
 @pytest.mark.parametrize(
@@ -109,3 +111,24 @@ def test_kv_rotate(rotate_fp32):
     assert not torch.allclose(output_ref, output_test1, atol=0.05)
 
     mtq.unregister(SDPAAttention)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["rotate", "rotate_back"],
+)
+def test_rotate_backward(mode):
+    """Autograd backward should flow through a rotation-enabled TensorQuantizer."""
+    x = torch.randn(4, 64, device="cuda", requires_grad=True)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=8, axis=None, rotate={"enable": True, "mode": mode}),
+        amax=x.detach().abs().amax(),
+    ).cuda()
+
+    out = quantizer(x)
+    out.sum().backward()
+
+    assert x.grad is not None
+    assert x.grad.shape == x.shape
+    assert torch.isfinite(x.grad).all()
+    assert not torch.all(x.grad == 0)
