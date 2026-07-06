@@ -173,7 +173,9 @@ def _has_active_quant_transform(layer, p_qdq, v_qdq) -> bool:
 def _has_active_transform(impl, layer, p_qdq, v_qdq) -> bool:
     """Return whether native fallback would omit any ModelOpt transform."""
     return bool(
-        getattr(impl, "sparse_kw", None) or _has_active_quant_transform(layer, p_qdq, v_qdq)
+        getattr(layer, "_modelopt_force_kernel", False)
+        or getattr(impl, "sparse_kw", None)
+        or _has_active_quant_transform(layer, p_qdq, v_qdq)
     )
 
 
@@ -217,9 +219,16 @@ def _forward_modelopt(
         # N:M sparse softmax is prefill-only.
         for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
             sparse_kw.pop(name, None)
-    if not sparse_kw and not quant_transform_active:
+    if (
+        not sparse_kw
+        and not quant_transform_active
+        and not getattr(layer, "_modelopt_force_kernel", False)
+    ):
         # Dynamic calibration can disable sparse work for a launch. Preserve the
         # backend's native dense path when no ModelOpt transform remains active.
+        # ``_modelopt_force_kernel`` (isolation knob) keeps the bf16 kernel path
+        # even with all quant disabled, so the on/off PPL diff holds the kernel
+        # constant.
         return dense_fallback()
     if prepare_modelopt is not None:
         prepare_modelopt()
@@ -611,7 +620,7 @@ def get_flashinfer_sparse_impl_cls() -> type:
             # Sparse-only launches may have an inactive phase (for example N:M
             # is prefill-only). Compute the native result once, then overwrite
             # each active phase with its ModelOpt result.
-            if not quant_transform_active:
+            if not quant_transform_active and not getattr(layer, "_modelopt_force_kernel", False):
                 dense_fallback()
 
             block_table = attn_metadata._modelopt_block_table
