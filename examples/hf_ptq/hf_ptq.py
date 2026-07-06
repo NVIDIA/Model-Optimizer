@@ -347,6 +347,7 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
         "method": aq_config.auto_quantize_method,
+        "quant_grouping_scheme": aq_config.quant_grouping_scheme,
         "score_boundary": aq_config.score_boundary,
         "score_size": aq_config.score_size,
     }
@@ -388,6 +389,7 @@ def _auto_quantize_config_from_cli(args: argparse.Namespace):
         ),
         candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES[q]) for q in args.qformat.split(",")],
         auto_quantize_method=args.auto_quantize_method,
+        quant_grouping_scheme=args.auto_quantize_grouping_scheme,
         score_boundary=args.auto_quantize_score_boundary,
         score_size=args.auto_quantize_score_size,
         disabled_layers=disabled_layers,
@@ -476,6 +478,7 @@ def auto_quantize(
         verbose=True,
         disabled_layers=inputs["disabled_layers"],
         method=inputs["method"],
+        quant_grouping_scheme=inputs["quant_grouping_scheme"],
         score_boundary=inputs["score_boundary"],
         checkpoint=args.auto_quantize_checkpoint,
     )
@@ -1503,6 +1506,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         choices=["local", "group"],
         help="[Deprecated: use an AutoQuantize --recipe] Sensitivity score boundary.",
+    )
+    parser.add_argument(
+        "--auto_quantize_grouping_scheme",
+        type=str,
+        default="runtime_fused",
+        choices=[
+            "runtime_fused",
+            "runtime_fused+linear_attn_layer",
+            "runtime_fused+self_attn_layer",
+            "runtime_fused+linear_attn_layer+self_attn_layer",
+        ],
+        help="[Deprecated: use an AutoQuantize --recipe] Quantization decision grouping.",
     )
     parser.add_argument(
         "--auto_quantize_cost_model",

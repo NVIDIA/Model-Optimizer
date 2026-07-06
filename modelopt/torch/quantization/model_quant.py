@@ -287,6 +287,7 @@ def auto_quantize(
     num_score_steps: int = 128,
     verbose: bool = False,
     method: str = "gradient",
+    quant_grouping_scheme: str = "runtime_fused",
     score_boundary: str | None = None,
     checkpoint: str | None = None,
 ):
@@ -457,6 +458,10 @@ def auto_quantize(
             ``forward_step``), and
             ``"kl_div"`` (uses KL divergence between unquantized and quantized outputs, relies on
             threshold-based binary search, and only requires ``forward_step`` returning logits).
+        quant_grouping_scheme: Search-decision grouping. ``"runtime_fused"`` enforces only
+            mandatory runtime fusion groups. The optional ``linear_attn_layer`` and
+            ``self_attn_layer`` suffixes group each full attention projection family into one
+            recipe decision. This is independent of ``score_boundary``.
         score_boundary: Boundary used to measure perturbations. ``"local"``
             preserves the existing per-module behavior. ``"group"`` scores attention
             projections at their shared self-attention or linear-attention group output and scores
@@ -566,6 +571,7 @@ def auto_quantize(
         "forward_backward_step": forward_backward_step,
         "num_calib_steps": num_calib_steps,
         "num_score_steps": num_score_steps,
+        "quant_grouping_scheme": quant_grouping_scheme,
         "score_boundary": score_boundary,
         "disabled_layers": disabled_layers,
         "verbose": verbose,

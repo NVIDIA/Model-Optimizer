@@ -446,8 +446,11 @@ class QuantRecipeHparam(Hparam):
         return ["name", "cost_weight", *super().attrs]
 
 
-_LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
-_LINEAR_ATTN_BA_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_a|in_proj_b)$")
+_LINEAR_ATTN_QKVZ_RE = re.compile(r"^((?:.*\.)?linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
+_LINEAR_ATTN_BA_RE = re.compile(r"^((?:.*\.)?linear_attn)\.(?:in_proj_a|in_proj_b)$")
+_LINEAR_ATTN_LAYER_GROUP_RE = re.compile(
+    r"^((?:.*\.)?linear_attn)\.(?:in_proj_qkv|in_proj_z|out_proj)$"
+)
 _SELF_ATTN_GROUP_RE = re.compile(r"^((?:.*\.)?self_attn)\.(?:q_proj|k_proj|v_proj|o_proj)$")
 _LINEAR_ATTN_GROUP_RE = re.compile(
     r"^((?:.*\.)?linear_attn)\.(?:in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj)$"
@@ -459,6 +462,20 @@ AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP = "group"
 AUTO_QUANTIZE_SCORE_BOUNDARIES = frozenset(
     {AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL, AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP}
 )
+AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED = "runtime_fused"
+AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED_LINEAR_ATTN_LAYER = "runtime_fused+linear_attn_layer"
+AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED_SELF_ATTN_LAYER = "runtime_fused+self_attn_layer"
+AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED_LINEAR_SELF_ATTN_LAYER = (
+    "runtime_fused+linear_attn_layer+self_attn_layer"
+)
+AUTO_QUANTIZE_GROUPING_SCHEMES = frozenset(
+    {
+        AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED,
+        AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED_LINEAR_ATTN_LAYER,
+        AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED_SELF_ATTN_LAYER,
+        AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED_LINEAR_SELF_ATTN_LAYER,
+    }
+)
 
 
 def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
@@ -469,6 +486,16 @@ def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
 def _linear_attn_ba_group_key(_model, name: str) -> str | None:
     m = _LINEAR_ATTN_BA_RE.match(name)
     return f"{m.group(1)}/ba" if m else None
+
+
+def _linear_attn_layer_group_key(_model, name: str) -> str | None:
+    match = _LINEAR_ATTN_LAYER_GROUP_RE.match(name)
+    return f"{match.group(1)}/layer" if match else None
+
+
+def _self_attn_layer_group_key(_model, name: str) -> str | None:
+    match = _SELF_ATTN_GROUP_RE.match(name)
+    return f"{match.group(1)}/layer" if match else None
 
 
 def _self_attn_group_score_module(_model, name: str) -> str | None:
@@ -543,6 +570,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": COST_MODEL_WEIGHT,
             "cost": {},
             "active_moe_expert_ratio": None,
+            "quant_grouping_scheme": AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED,
             "score_boundary": AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL,
         }
 
@@ -555,6 +583,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost": {},
             "active_moe_expert_ratio": None,
             "score_model": AUTO_QUANTIZE_SCORE_MODEL_RAW,
+            "quant_grouping_scheme": AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED,
             "score_boundary": AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL,
             "cost_denominator": None,
             "disabled_layers": None,
@@ -577,7 +606,23 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             raise ValueError(
                 f"score_boundary must be one of {sorted(AUTO_QUANTIZE_SCORE_BOUNDARIES)}."
             )
+        if config["quant_grouping_scheme"] not in AUTO_QUANTIZE_GROUPING_SCHEMES:
+            raise ValueError(
+                f"quant_grouping_scheme must be one of {sorted(AUTO_QUANTIZE_GROUPING_SCHEMES)}."
+            )
         return config
+
+    def _get_quant_grouping_rules(self):
+        rules: list[Any] = []
+        scheme = self.config["quant_grouping_scheme"]
+        if "linear_attn_layer" in scheme:
+            # Keep A/B in their runtime-required pair; they are not part of the
+            # deployable qkv/z/out family decision and are commonly disabled.
+            rules.append(_linear_attn_layer_group_key)
+        if "self_attn_layer" in scheme:
+            rules.append(_self_attn_layer_group_key)
+        rules.extend(self.quant_grouping_rules)
+        return rules
 
     def _get_score_module_rules(self):
         rules = []
@@ -711,7 +756,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
             # Apply quant_grouping_rules to determine the group key
             group_key = name  # Default: each module in its own group
-            for rule in self.quant_grouping_rules:
+            for rule in self._get_quant_grouping_rules():
                 result = self._apply_quant_group_rule(name, rule)
                 if result is not None:
                     group_key = result
@@ -849,6 +894,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         restored_score_boundary = getattr(
             self, "score_boundary", AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL
         )
+        restored_quant_grouping_scheme = getattr(
+            self,
+            "quant_grouping_scheme",
+            AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED,
+        )
         if self.candidate_stats and (
             restored_cost_model != self.config["cost_model"]
             or restored_active_moe_expert_ratio != self.config["active_moe_expert_ratio"]
@@ -865,11 +915,21 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 f"checkpoint={restored_score_boundary}, current={self.config['score_boundary']}. "
                 "Use a different checkpoint path."
             )
+        if (
+            self.candidate_stats
+            and restored_quant_grouping_scheme != self.config["quant_grouping_scheme"]
+        ):
+            raise ValueError(
+                "Checkpoint AutoQuantize quant grouping scheme does not match current search "
+                f"config: checkpoint={restored_quant_grouping_scheme}, "
+                f"current={self.config['quant_grouping_scheme']}. Use a different checkpoint path."
+            )
         self.method = self.method_name
         self.cost_model = self.config["cost_model"]
         self.cost = self.config["cost"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
         self.score_model = self.constraints["score_model"]
+        self.quant_grouping_scheme = self.config["quant_grouping_scheme"]
         self.score_boundary = self.config["score_boundary"]
         self.disabled_layers = self.config["disabled_layers"]
         self.cost_denominator = getattr(self, "cost_denominator", None)

@@ -225,6 +225,18 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         "MoE projection perturbations at their shared attention/MLP output. Defaults to 'group' "
         "for group_recon and 'local' otherwise.",
     )
+    quant_grouping_scheme: Literal[
+        "runtime_fused",
+        "runtime_fused+linear_attn_layer",
+        "runtime_fused+self_attn_layer",
+        "runtime_fused+linear_attn_layer+self_attn_layer",
+    ] = ModeloptField(
+        default="runtime_fused",
+        title="Quantization decision grouping",
+        description="Search-decision grouping beyond mandatory runtime-fused groups. Attention-"
+        "layer options make all listed projections in one layer share a quantization recipe; "
+        "this is independent of score_boundary.",
+    )
     score_size: int = ModeloptField(
         default=128,
         title="Scoring sample count",

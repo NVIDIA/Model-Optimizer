@@ -440,6 +440,36 @@ def test_auto_quantize_group_score_boundary_does_not_group_recipe_decisions():
     assert (False, False) in model.use_cache_seen
 
 
+def test_auto_quantize_attention_layer_grouping_groups_recipe_decisions():
+    model = _GroupBoundaryModel()
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0, "score_model": "per_element"},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method="group_recon",
+        quant_grouping_scheme="runtime_fused+linear_attn_layer+self_attn_layer",
+    )
+
+    self_qkv = model.self_attn.q_proj.get_hparam("quant_recipe")
+    self_o = model.self_attn.o_proj.get_hparam("quant_recipe")
+    linear_qkvz = model.linear_attn.in_proj_qkv.get_hparam("quant_recipe")
+    linear_ba = model.linear_attn.in_proj_a.get_hparam("quant_recipe")
+    linear_out = model.linear_attn.out_proj.get_hparam("quant_recipe")
+
+    assert self_qkv is self_o
+    assert linear_qkvz is linear_out
+    assert linear_ba is not linear_qkvz
+    assert self_qkv.score_modules == [model.self_attn]
+    assert linear_qkvz.score_modules == [model.linear_attn]
+    assert search_state["quant_grouping_scheme"] == (
+        "runtime_fused+linear_attn_layer+self_attn_layer"
+    )
+
+
 # use this config to test custom quantization config
 INT8_CUSTOM_QUANT_TEST_CFG = {
     "quant_cfg": [
@@ -935,6 +965,38 @@ def test_auto_quantize_checkpoint_rejects_score_boundary_mismatch(tmp_path):
             resumed_model,
             data_loader=[resumed_model.get_input()],
             score_boundary="local",
+            **common,
+        )
+
+
+def test_auto_quantize_checkpoint_rejects_quant_grouping_mismatch(tmp_path):
+    checkpoint_path = str(tmp_path / "autoquant_grouping.pth")
+    model = _GroupBoundaryModel()
+    common = {
+        "constraints": {"effective_bits": 8.0, "score_model": "per_element"},
+        "quantization_formats": [
+            mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+            mtq.INT8_DEFAULT_CFG,
+        ],
+        "forward_step": lambda model, batch: model(batch),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "method": "group_recon",
+        "checkpoint": checkpoint_path,
+    }
+    mtq.auto_quantize(
+        model,
+        data_loader=[model.get_input()],
+        quant_grouping_scheme="runtime_fused+linear_attn_layer+self_attn_layer",
+        **common,
+    )
+
+    resumed_model = _GroupBoundaryModel()
+    with pytest.raises(ValueError, match="quant grouping scheme does not match"):
+        mtq.auto_quantize(
+            resumed_model,
+            data_loader=[resumed_model.get_input()],
+            quant_grouping_scheme="runtime_fused",
             **common,
         )
 

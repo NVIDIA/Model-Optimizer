@@ -388,10 +388,13 @@ keeps the more sensitive ones at higher precision (or unquantized), so the model
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
 `constraints.effective_bits`, `auto_quantize_method` (`gradient` / `group_recon` / `kl_div`),
 `constraints.score_model` (`raw` / `per_element`), `score_boundary` (`local` / `group`),
-`score_size`, `disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out
+`quant_grouping_scheme`, `score_size`, `disabled_layers` (excluded from the search), and
+`cost_excluded_layers` (kept out
 of the bit-budget accounting — e.g. VL vision towers). `group_recon` measures normalized
 reconstruction error at shared attention/MLP outputs; group scoring changes the measurement
-boundary but does not force those projections to share one recipe decision. Recipes can splice a
+boundary but does not force those projections to share one recipe decision. Set
+`quant_grouping_scheme` to an attention-layer variant when the search should make one recipe
+decision for self-attention q/k/v/o and/or linear-attention qkv/z/out. Recipes can splice a
 shared base `disabled_layers` set via
 `$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
