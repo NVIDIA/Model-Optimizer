@@ -14,10 +14,19 @@
 # limitations under the License.
 
 import warnings
+from contextlib import contextmanager
 
 import pytest
 
 from modelopt.torch.utils.import_utils import import_plugin
+
+
+@contextmanager
+def no_warnings():
+    """Fail the test if any warning is emitted inside the block."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        yield
 
 
 def _import_missing_module(tracker=None, **kwargs):
@@ -34,10 +43,8 @@ def _raise_runtime_error(**kwargs):
 
 
 def test_no_error_and_no_success_msg_is_silent():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # any warning would fail the test
-        with import_plugin("foo"):
-            pass
+    with no_warnings(), import_plugin("foo"):
+        pass
 
 
 def test_success_msg_emitted_on_clean_import():
@@ -56,14 +63,12 @@ def test_module_not_found_suppressed_with_message():
 
 
 def test_module_not_found_without_message_is_silent():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with no_warnings():
         _import_missing_module()
 
 
 def test_module_not_found_verbose_false_is_silent():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with no_warnings():
         _import_missing_module(msg_if_missing="should not appear", verbose=False)
 
 
@@ -74,12 +79,10 @@ def test_generic_exception_suppressed_with_warning():
 
 
 def test_generic_exception_verbose_false_is_silent():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with no_warnings():
         _raise_runtime_error(verbose=False)
 
 
 def test_success_msg_not_emitted_when_import_fails():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with no_warnings():
         _import_missing_module(success_msg="should not appear", verbose=True)
