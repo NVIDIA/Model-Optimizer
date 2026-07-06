@@ -94,29 +94,27 @@ if [ "$LOW_MEMORY_MODE" = "true" ]; then
     PTQ_ARGS+=" --low_memory_mode "
 fi
 
-if [ -n "$AUTO_QUANTIZE_BITS" ]; then
-    PTQ_ARGS+=" --auto_quantize_bits=$AUTO_QUANTIZE_BITS "
-fi
-
-if [ -n "$AUTO_QUANTIZE_METHOD" ]; then
-    PTQ_ARGS+=" --auto_quantize_method=$AUTO_QUANTIZE_METHOD "
-fi
-
-if [ -n "$AUTO_QUANTIZE_SCORE_SIZE" ]; then
-    PTQ_ARGS+=" --auto_quantize_score_size=$AUTO_QUANTIZE_SCORE_SIZE "
-fi
-
-# Automatically generate auto_quantize checkpoint path if not provided
-if [ -n "$AUTO_QUANTIZE_BITS" ] && [ -z "$AUTO_QUANTIZE_CHECKPOINT" ]; then
-    # Create a descriptive checkpoint name based on model and quantization settings
-    AQ_METHOD=${AUTO_QUANTIZE_METHOD:-gradient}
-    AUTO_QUANTIZE_CHECKPOINT="${ROOT_SAVE_PATH}/auto_quantize_checkpoints/${MODEL_NAME}_${AQ_METHOD}.pth"
-    mkdir -p $(dirname $AUTO_QUANTIZE_CHECKPOINT)
+# AutoQuantize runs via an AutoQuantize --recipe or the deprecated --auto_quantize_bits CLI path.
+# Auto-generate a checkpoint path (to save/restore the search state) when the user didn't supply one.
+if [ -z "$AUTO_QUANTIZE_CHECKPOINT" ] && { [[ "$RECIPE" == *auto_quantize* ]] || [ -n "$AUTO_QUANTIZE_BITS" ]; }; then
+    AUTO_QUANTIZE_CHECKPOINT="${ROOT_SAVE_PATH}/auto_quantize_checkpoints/${MODEL_NAME}.pth"
+    mkdir -p "$(dirname "$AUTO_QUANTIZE_CHECKPOINT")"
     echo "Auto-generated auto_quantize checkpoint path: $AUTO_QUANTIZE_CHECKPOINT"
 fi
-
-if [ -n "$AUTO_QUANTIZE_BITS" ]; then
+if [ -n "$AUTO_QUANTIZE_CHECKPOINT" ]; then
     PTQ_ARGS+=" --auto_quantize_checkpoint=$AUTO_QUANTIZE_CHECKPOINT "
+fi
+
+# Deprecated AutoQuantize CLI flags: passed through to hf_ptq.py, which converts them into an
+# AutoQuantizeConfig on the fly. Prefer an AutoQuantize --recipe.
+if [ -n "$AUTO_QUANTIZE_BITS" ]; then
+    PTQ_ARGS+=" --auto_quantize_bits=$AUTO_QUANTIZE_BITS "
+    PTQ_ARGS+=" --auto_quantize_method=${AUTO_QUANTIZE_METHOD:-gradient} "
+    PTQ_ARGS+=" --auto_quantize_score_size=${AUTO_QUANTIZE_SCORE_SIZE:-128} "
+    PTQ_ARGS+=" --auto_quantize_cost_model=${AUTO_QUANTIZE_COST_MODEL:-weight} "
+    if [ -n "$AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO" ]; then
+        PTQ_ARGS+=" --auto_quantize_active_moe_expert_ratio=$AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO "
+    fi
 fi
 
 if [ -n "$CALIB_DATASET" ]; then
