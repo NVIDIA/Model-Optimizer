@@ -59,6 +59,8 @@ jobs:
         GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # Build CUDA kernels only for the runner's RTX PRO 6000 (sm_120), not the image's ~6 archs.
+        TORCH_CUDA_ARCH_LIST: "12.0"
     steps:
       - name: Install git
         # The vllm container ships without git; needed for a real checkout (correct
