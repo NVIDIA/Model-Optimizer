@@ -357,7 +357,14 @@ class _ModeRegistryCls:
 def get_mode_config(mode_like: ModeLike) -> ModeConfigList:
     """Standardize mode to ModeConfigDict and return."""
     mode_and_config = [
-        ((m, {}) if isinstance(m, str) else (m[0], m[1] or {})) for m in val2list(mode_like)
+        (
+            (m.name, {})
+            if isinstance(m, ModeDescriptor)
+            else (m, {})
+            if isinstance(m, str)
+            else (m[0], m[1] or {})
+        )
+        for m in val2list(mode_like)
     ]
 
     return mode_and_config
