@@ -15,15 +15,18 @@
 
 """Tests for sparse attention vLLM worker compatibility helpers."""
 
+import builtins
 import importlib.util
 import math
-from contextlib import nullcontext
+import sys
+from contextlib import contextmanager, nullcontext
 from itertools import accumulate
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
+import vllm
 from torch import nn
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 from vllm.v1.attention.backends.flashinfer import (
@@ -31,6 +34,7 @@ from vllm.v1.attention.backends.flashinfer import (
     FlashInferImpl,
     FlashInferMetadataBuilder,
 )
+from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as vllm_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
@@ -41,6 +45,179 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     patch_flashinfer_metadata_builder,
     select_sparse_impl_cls,
 )
+
+_WORKER_PATH = Path(__file__).parents[5] / "examples/vllm_serve/sparse_attn_worker.py"
+
+
+def _load_worker_module(name="sparse_attn_worker_test"):
+    spec = importlib.util.spec_from_file_location(name, _WORKER_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _legacy_quant_module(installer):
+    module = ModuleType("quant_sparse_attn_worker")
+    setattr(module, "_install_quant_sparse_attn", installer)
+    return module
+
+
+def test_shared_worker_import_does_not_resolve_quant_only_apis(monkeypatch):
+    forbidden = {
+        "vllm.config.compilation",
+        "vllm.v1.attention.backend",
+        "modelopt.torch.quantization.conversion",
+        "modelopt.torch.quantization.nn",
+        "modelopt.torch.quantization.plugins.vllm",
+    }
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        fromlist = kwargs.get("fromlist", args[2] if len(args) > 2 else ())
+        requested = {name, *(f"{name}.{item}" for item in fromlist or ())}
+        if blocked := requested & forbidden:
+            raise AssertionError(
+                f"quant-only import during sparse module load: {sorted(blocked)[0]}"
+            )
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(vllm, "__version__", "0.9.0")
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    worker_module = _load_worker_module("sparse_attn_worker_import_test")
+
+    assert worker_module.__all__ == ["SparseAttnWorker", "QuantSparseAttnWorker"]
+
+
+@pytest.mark.parametrize(
+    ("class_name", "quantize"),
+    [("SparseAttnWorker", False), ("QuantSparseAttnWorker", True)],
+)
+def test_public_workers_install_after_base_load(monkeypatch, class_name, quantize):
+    worker_module = _load_worker_module(f"worker_order_{class_name}")
+    events = []
+    monkeypatch.setattr(BaseWorker, "load_model", lambda *_a, **_k: events.append("base"))
+    monkeypatch.setattr(
+        worker_module,
+        "_install_attention",
+        lambda _worker, *, quantize: events.append(("install", quantize)),
+    )
+
+    instance = object.__new__(getattr(worker_module, class_name))
+    assert instance.load_model() is None
+    assert events == ["base", ("install", quantize)]
+
+
+def test_shared_worker_quant_install_rejects_old_vllm_before_delegation(monkeypatch):
+    worker_module = _load_worker_module("quant_install_version_test")
+    worker = object()
+    delegated = []
+    monkeypatch.setitem(
+        sys.modules, "quant_sparse_attn_worker", _legacy_quant_module(delegated.append)
+    )
+    monkeypatch.setattr(vllm, "__version__", "0.9.0")
+    worker_module._load_quant_api.cache_clear()
+
+    try:
+        with pytest.raises(RuntimeError, match=r"vLLM >= 0\.14\.0"):
+            worker_module._install_attention(worker, quantize=True)
+    finally:
+        worker_module._load_quant_api.cache_clear()
+
+    assert delegated == []
+
+
+def test_shared_worker_quant_install_validates_before_delegation(monkeypatch):
+    worker_module = _load_worker_module("quant_install_order_test")
+    worker = object()
+    events = []
+    delegated = []
+    real_import = builtins.__import__
+
+    def install(actual_worker):
+        events.append("delegate")
+        delegated.append(actual_worker)
+
+    def recording_import(name, *args, **kwargs):
+        if name == "quant_sparse_attn_worker":
+            events.append("import")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setitem(sys.modules, "quant_sparse_attn_worker", _legacy_quant_module(install))
+    monkeypatch.setattr(builtins, "__import__", recording_import)
+    monkeypatch.setattr(worker_module, "_quant_api", lambda: events.append("validate"))
+
+    worker_module._install_attention(worker, quantize=True)
+
+    assert events == ["validate", "import", "delegate"]
+    assert len(delegated) == 1 and delegated[0] is worker
+
+
+def test_shared_worker_sparse_install_does_not_import_legacy_quant_worker(monkeypatch):
+    worker_module = _load_worker_module("sparse_install_test")
+    worker = object()
+    replaced = []
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "quant_sparse_attn_worker":
+            raise AssertionError("legacy quant worker imported for sparse attention")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(worker_module, "_replace_attention_impl", replaced.append)
+
+    worker_module._install_attention(worker, quantize=False)
+
+    assert len(replaced) == 1 and replaced[0] is worker
+
+
+def test_sparse_worker_keeps_base_memory_profile():
+    worker_module = _load_worker_module("sparse_profile_test")
+
+    assert (
+        worker_module.SparseAttnWorker.determine_available_memory
+        is BaseWorker.determine_available_memory
+    )
+
+
+def test_shared_worker_quant_memory_profile_uses_both_contexts(monkeypatch):
+    worker_module = _load_worker_module("quant_profile_test")
+    events = []
+    model = object()
+
+    @contextmanager
+    def recorded_context(name, value=None):
+        events.append(("enter", name, value))
+        try:
+            yield
+        finally:
+            events.append(("exit", name, value))
+
+    api = SimpleNamespace(
+        torch=SimpleNamespace(inference_mode=lambda: recorded_context("inference")),
+        plugin=SimpleNamespace(
+            disable_compilation=lambda actual_model: recorded_context("compilation", actual_model)
+        ),
+    )
+    monkeypatch.setattr(worker_module, "_quant_api", lambda: api)
+
+    instance = object.__new__(worker_module.QuantSparseAttnWorker)
+    instance.model_runner = SimpleNamespace(model=SimpleNamespace(unwrap=lambda: model))
+
+    def profile(actual_worker):
+        events.append(("profile", actual_worker))
+        return 73
+
+    monkeypatch.setattr(BaseWorker, "determine_available_memory", profile)
+
+    assert instance.determine_available_memory() == 73
+    assert events == [
+        ("enter", "inference", None),
+        ("enter", "compilation", model),
+        ("profile", instance),
+        ("exit", "compilation", model),
+        ("exit", "inference", None),
+    ]
 
 
 def _make_old_impl():
@@ -420,10 +597,7 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
 
 
 def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
-    worker_path = Path(__file__).parents[5] / "examples/vllm_serve/sparse_attn_worker.py"
-    spec = importlib.util.spec_from_file_location("sparse_attn_worker_test", worker_path)
-    worker_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(worker_module)
+    worker_module = _load_worker_module()
     good = object.__new__(worker_module.VLLMAttention)
     nn.Module.__init__(good)
     good.impl = object.__new__(FlashAttentionImpl)

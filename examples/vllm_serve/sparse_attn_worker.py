@@ -13,26 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Custom vLLM worker for sparse attention.
+"""Custom vLLM workers for ModelOpt attention policies.
 
 ``SparseAttnWorker`` replaces the native FlashAttention or FlashInfer impl with
-the matching ModelOpt adapter on each Attention module after model loading.
-The sparse impl uses the ModelOpt Triton kernel for sparse prefill launches and
-delegates inactive launches to the selected native backend.
+the matching checkpoint-driven ModelOpt sparse adapter. ``QuantSparseAttnWorker``
+installs fixed NVFP4 attention plus optional checkpoint-driven sparsity. Both
+policies install their attention implementation after model loading.
 
 Configuration flows exclusively through the loaded checkpoint's
 ``sparse_attention_config`` block (written by ModelOpt's HF export). If the
-checkpoint has no such block, the worker logs a message and passes through
-unchanged.
-
-This worker remains sparse-only; the compact quant+sparse path uses
-``quant_sparse_attn_worker.QuantSparseAttnWorker``.
+checkpoint has no such block, the sparse-only policy logs a message and passes
+through unchanged.
 
 Usage:
     python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>
 """
 
 import importlib
+from functools import cache
+from types import SimpleNamespace
 
 try:
     _has_legacy_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
@@ -56,6 +55,45 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
     select_sparse_impl_cls,
 )
 
+__all__ = ["SparseAttnWorker", "QuantSparseAttnWorker"]  # noqa: RUF022
+
+
+def _unwrapped_model(worker):
+    model = worker.model_runner.model
+    return model.unwrap() if hasattr(model, "unwrap") else model
+
+
+@cache
+def _load_quant_api(vllm_version: str):
+    # Keep sparse-only module loading independent of quant-specific vLLM APIs.
+    import torch
+    from packaging import version
+
+    if version.parse(vllm_version) < version.parse("0.14.0"):
+        raise RuntimeError("The compact NVFP4 attention worker requires vLLM >= 0.14.0")
+
+    from vllm.config import compilation
+    from vllm.v1.attention import backend
+
+    from modelopt.torch.quantization import conversion
+    from modelopt.torch.quantization import nn as quant_nn
+    from modelopt.torch.quantization.plugins import vllm as quant_plugin
+
+    return SimpleNamespace(
+        torch=torch,
+        compilation=compilation,
+        backend=backend,
+        conversion=conversion,
+        nn=quant_nn,
+        plugin=quant_plugin,
+    )
+
+
+def _quant_api():
+    import vllm
+
+    return _load_quant_api(vllm.__version__)
+
 
 def _replace_attention_impl(worker):
     """Install the backend-matched ModelOpt sparse impl on attention layers.
@@ -76,9 +114,7 @@ def _replace_attention_impl(worker):
     cfg, preset_name = detected
     print(f"[ModelOpt] Sparse attention config: algo -> {preset_name}")
 
-    model = worker.model_runner.model
-    if hasattr(model, "unwrap"):
-        model = model.unwrap()
+    model = _unwrapped_model(worker)
 
     plans = []
     errors = []
@@ -122,19 +158,40 @@ def _replace_attention_impl(worker):
     )
 
 
+def _install_attention(worker, *, quantize: bool) -> None:
+    if quantize:
+        _quant_api()
+        # Keep the compatibility delegation lazy until both policies share one planner.
+        from quant_sparse_attn_worker import _install_quant_sparse_attn
+
+        _install_quant_sparse_attn(worker)
+        return
+    _replace_attention_impl(worker)
+
+
 # ---------------------------------------------------------------------------
 # Workers
 # ---------------------------------------------------------------------------
 
 
-class SparseAttnWorker(BaseWorker):
-    """vLLM worker that uses the ModelOpt sparse attention backend.
-
-    Replaces FlashAttention or FlashInfer with its matching ModelOpt adapter on
-    each Attention module right after model loading, before any forward pass.
-    """
+class _ModelOptAttentionWorker(BaseWorker):
+    quantize_attention = False
 
     def load_model(self, *args, **kwargs) -> None:
-        """Load model, then replace attention impl with sparse variant."""
         super().load_model(*args, **kwargs)
-        _replace_attention_impl(self)
+        _install_attention(self, quantize=self.quantize_attention)
+
+
+class SparseAttnWorker(_ModelOptAttentionWorker):
+    """Install checkpoint-driven ModelOpt sparse attention after model load."""
+
+
+class QuantSparseAttnWorker(_ModelOptAttentionWorker):
+    """Install fixed NVFP4 attention plus optional checkpoint sparsity."""
+
+    quantize_attention = True
+
+    def determine_available_memory(self) -> int:
+        api = _quant_api()
+        with api.torch.inference_mode(), api.plugin.disable_compilation(_unwrapped_model(self)):
+            return BaseWorker.determine_available_memory(self)
