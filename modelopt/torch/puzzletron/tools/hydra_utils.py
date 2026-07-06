@@ -91,15 +91,20 @@ def _warmup_steps_resolver(*args):
 
 
 def register_hydra_resolvers():
-    OmegaConf.register_new_resolver("to_path", lambda x: Path(x))
+    # replace=True makes this idempotent: it is safe to call more than once in the
+    # same process (e.g. persistent multi-process test workers that run several
+    # puzzletron jobs), which otherwise raises "resolver '...' is already registered".
+    OmegaConf.register_new_resolver("to_path", lambda x: Path(x), replace=True)
     OmegaConf.register_new_resolver(
-        "random_int", lambda low, high: random.randint(int(low), int(high))
+        "random_int", lambda low, high: random.randint(int(low), int(high)), replace=True
     )
     OmegaConf.register_new_resolver(
-        "timedelta_minutes", lambda x: datetime.timedelta(minutes=x) if x is not None else None
+        "timedelta_minutes",
+        lambda x: datetime.timedelta(minutes=x) if x is not None else None,
+        replace=True,
     )
-    OmegaConf.register_new_resolver("warmup_steps", _warmup_steps_resolver)
-    OmegaConf.register_new_resolver("get_object", lambda x: get_object(x))
+    OmegaConf.register_new_resolver("warmup_steps", _warmup_steps_resolver, replace=True)
+    OmegaConf.register_new_resolver("get_object", lambda x: get_object(x), replace=True)
 
 
 def initialize_hydra_config_for_dir(
