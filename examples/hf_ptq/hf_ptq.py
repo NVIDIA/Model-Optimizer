@@ -327,8 +327,8 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
     # Translate each candidate to its mtq preset dict and, in the same pass, guard export
     # compatibility (fails fast, before the expensive search). Custom configs matching no shipped
     # preset can't be verified, so warn rather than block.
-    quantization_formats = []
-    for fmt in aq_config.candidate_formats:
+    quantization_formats: list[dict | tuple[dict, str]] = []
+    for index, fmt in enumerate(aq_config.candidate_formats):
         preset_name, quant_cfg = _match_candidate_to_preset(fmt)
         if preset_name is not None and preset_name not in _AUTO_QUANTIZE_QFORMATS:
             raise ValueError(
@@ -340,7 +340,12 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
                 "An AutoQuantize candidate_formats entry matches no shipped preset; its export "
                 "compatibility cannot be verified. Ensure it is safe for HF checkpoint export."
             )
-        quantization_formats.append(quant_cfg)
+            # QuantRecipe requires an explicit name for custom dictionaries. Keep
+            # the name deterministic so recipe and deprecated-CLI paths remain
+            # reproducible and restored checkpoints can validate their choices.
+            quantization_formats.append((quant_cfg, f"CUSTOM_AUTOQUANT_CFG_{index}"))
+        else:
+            quantization_formats.append(quant_cfg)
     return {
         "constraints": constraints,
         "quantization_formats": quantization_formats,

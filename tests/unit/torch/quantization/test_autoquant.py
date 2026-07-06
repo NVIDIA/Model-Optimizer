@@ -723,6 +723,10 @@ def test_estimate_quant_compression():
     nvfp4_kv_rotate_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_KV_ROTATE_CFG)
     assert estimate_quant_compression(nvfp4_kv_rotate_cfg) == 0.28125
 
+    # Static-scale NVFP4 candidates carry the same block-scale storage cost.
+    nvfp4_mse_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG)
+    assert estimate_quant_compression(nvfp4_mse_cfg) == 0.28125
+
     nvfp4_svdquant_default_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_SVDQUANT_DEFAULT_CFG)
     assert estimate_quant_compression(nvfp4_svdquant_default_cfg) == 0.28125
 

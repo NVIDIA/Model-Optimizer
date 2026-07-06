@@ -22,6 +22,7 @@ import pytest
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.torch.quantization.algorithms import QuantRecipe
 from modelopt.torch.quantization.config import QuantizeConfig
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
@@ -111,7 +112,7 @@ def test_autoquant_rejects_non_export_safe_candidate(monkeypatch):
 
 
 def test_autoquant_warns_on_custom_candidate(monkeypatch):
-    """A candidate matching no shipped preset can't be export-verified, so it warns (not blocks)."""
+    """A custom candidate warns but remains usable by AutoQuant."""
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
@@ -121,7 +122,12 @@ def test_autoquant_warns_on_custom_candidate(monkeypatch):
         candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES["fp8"]), custom],
     )
     with pytest.warns(UserWarning, match="export compatibility cannot be verified"):
-        hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+        inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    custom_config, custom_name = inputs["quantization_formats"][1]
+    assert custom_config == custom.model_dump()
+    assert custom_name == "CUSTOM_AUTOQUANT_CFG_1"
+    QuantRecipe(custom_config, name=custom_name)
 
 
 def test_autoquant_export_guard_not_bypassed_by_effective_bits(monkeypatch):
