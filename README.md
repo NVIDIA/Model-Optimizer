@@ -1,5 +1,7 @@
 <div align="center">
 
+<!-- Temporary BeeBot dispatch-speed benchmark; this draft PR is not intended to merge. -->
+
 ![Banner image](docs/source/assets/model-optimizer-banner.png)
 
 # NVIDIA Model Optimizer
