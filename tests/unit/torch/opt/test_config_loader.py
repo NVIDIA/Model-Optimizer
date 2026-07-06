@@ -241,6 +241,9 @@ def test_resolve_config_path_invalid_type_raises():
         _resolve_config_path(12345)  # type: ignore[arg-type]
 
 
+# These two tests read the shipped configs/numerics/fp8.yaml — the canonical
+# minimal builtin snippet. If that file's content changes upstream, update the
+# expected mapping here.
 def test_resolve_config_path_builtin_library(tmp_path, monkeypatch):
     """A relative name missing locally resolves into the built-in config library."""
     monkeypatch.chdir(tmp_path)  # ensure no accidental local hit
