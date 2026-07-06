@@ -415,8 +415,10 @@ class _DynamicTEQKVLayerNormColumnParallelLinear(DynamicModule, TELayerNormColum
         self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
             "out_features",
-            lambda mod, val: (num_attention_heads.active + 2 * mod.config.num_query_groups)
-            * mod.config.kv_channels,
+            lambda mod, val: (
+                (num_attention_heads.active + 2 * mod.config.num_query_groups)
+                * mod.config.kv_channels
+            ),
         )
         # in_features must track input_size so TE's forward-time inp_shape[-1] == in_features
         # assertion holds when hidden_size is pruned.
@@ -930,7 +932,7 @@ class MambaNumHeadsHp(TracedHp):
         else:
             slice_order = self._slice_order
         target_nheads_per_group = self.active // self._ngroups
-        return slice_order.view(self._ngroups, -1)[:, :target_nheads_per_group].flatten()  # type: ignore[misc]
+        return slice_order.view(self._ngroups, -1)[:, :target_nheads_per_group].flatten()
 
 
 class MambaDInnerHp(TracedHp):

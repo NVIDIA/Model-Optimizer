@@ -25,6 +25,7 @@ import modelopt.torch.kernels.quantization.gemm as triton_kernel
 
 from .config import QuantizerAttributeConfig
 from .extensions import get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx
+from .utils.numeric_utils import E4M3_MAX
 
 mx_format_map = {
     (4, 3): "E4M3",
@@ -577,6 +578,7 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
         amax,
         global_amax=None,
         quantize_block_scales=True,
+        fp8_max_for_normalization=E4M3_MAX,
         out_dtype=None,
         pass_through_bwd=False,
     ):
@@ -592,13 +594,14 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
             amax,
             global_amax,
             quantize_block_scales,
+            fp8_max_for_normalization,
             out_dtype,
         )
 
     @staticmethod
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
-        return _fake_quant_backward_function(ctx, grad_outputs, num_args=6)
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=len(ctx.needs_input_grad))
 
 
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):

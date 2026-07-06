@@ -104,6 +104,21 @@ def _build_server() -> FastMCP:
                 description=("SSH identity file (-i) override. None uses default key / ssh-agent.")
             ),
         ] = None,
+        control_socket: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "OpenSSH ControlMaster socket path for MFA clusters. "
+                    "When set, verify_setup checks the socket and reuses it."
+                )
+            ),
+        ] = None,
+        reconnect_command: Annotated[
+            str | None,
+            Field(
+                description=("Command shown to the user when control_socket is missing or expired.")
+            ),
+        ] = None,
     ) -> dict:
         if executor == "docker":
             return bridge.verify_docker_setup_impl()
@@ -119,6 +134,8 @@ def _build_server() -> FastMCP:
                 cluster_host=cluster_host,
                 cluster_user=cluster_user,
                 identity=identity,
+                control_socket=control_socket,
+                reconnect_command=reconnect_command,
             )
         # Pydantic Literal already constrains; this is a defensive fallback.
         return {"ok": False, "reason": "unknown_executor"}
@@ -130,10 +147,12 @@ def _build_server() -> FastMCP:
             "determined by mutually-exclusive args:\n"
             "  - hf_local=<path>      → Docker (local GPU)\n"
             "  - cluster_host=<host>  → Slurm (remote SSH)\n\n"
-            "Returns the experiment_id (Slurm) or PID (Docker, "
-            "experiment_id captured in Phase 2) immediately; the actual "
-            "job runs detached. Poll status via job_status, fetch "
-            "output via job_logs.\n\n"
+            "Returns PID for Docker, plus experiment_id when the id is "
+            "printed during the short launch-output tail; if the tail times "
+            "out, Docker returns experiment_id=None and stdout_log for "
+            "diagnostics. Slurm returns experiment_id. The actual job runs "
+            "detached. Poll status via job_status, fetch output via "
+            "job_logs.\n\n"
             "Auto-verifies the executor first by default (skip_verify="
             "False is recommended unless you just called verify_setup)."
         ),
@@ -174,6 +193,57 @@ def _build_server() -> FastMCP:
         identity: Annotated[
             str | None,
             Field(description=("SSH identity file (-i). None uses ssh-agent / default key.")),
+        ] = None,
+        account: Annotated[
+            str | None,
+            Field(description=("Slurm account override, usually from nmm-sandbox cluster config.")),
+        ] = None,
+        partition: Annotated[
+            str | None,
+            Field(
+                description=("Slurm partition override, usually from nmm-sandbox cluster config.")
+            ),
+        ] = None,
+        container: Annotated[
+            str | None,
+            Field(
+                description=("Container image override for pipeline.task_0.slurm_config.container.")
+            ),
+        ] = None,
+        gpus_per_node: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Slurm GPUs-per-node override. Omit for CPU-only or nmm-sandbox "
+                    "MFA clusters that intentionally leave GPU GRES unset."
+                )
+            ),
+        ] = None,
+        ntasks_per_node: Annotated[
+            int | None,
+            Field(description=("Slurm ntasks-per-node override.")),
+        ] = None,
+        control_socket: Annotated[
+            str | None,
+            Field(description=("OpenSSH ControlMaster socket path for MFA-backed clusters.")),
+        ] = None,
+        reconnect_command: Annotated[
+            str | None,
+            Field(
+                description=("Command shown to the user when the ControlMaster socket has expired.")
+            ),
+        ] = None,
+        gpu_type: Annotated[
+            str | None,
+            Field(description=("Informational GPU type from cluster inventory.")),
+        ] = None,
+        mfa: Annotated[
+            bool,
+            Field(description=("Whether this cluster requires MFA-backed SSH.")),
+        ] = False,
+        ssh_alias: Annotated[
+            str | None,
+            Field(description=("Optional SSH alias from cluster inventory.")),
         ] = None,
         job_dir: Annotated[
             str | None,
@@ -256,6 +326,16 @@ def _build_server() -> FastMCP:
             cluster_host=cluster_host,
             cluster_user=cluster_user,
             identity=identity,
+            account=account,
+            partition=partition,
+            container=container,
+            gpus_per_node=gpus_per_node,
+            ntasks_per_node=ntasks_per_node,
+            control_socket=control_socket,
+            reconnect_command=reconnect_command,
+            gpu_type=gpu_type,
+            mfa=mfa,
+            ssh_alias=ssh_alias,
             job_dir=job_dir,
             job_name=job_name,
             extra_overrides=extra_overrides,

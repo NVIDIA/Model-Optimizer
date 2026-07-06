@@ -131,7 +131,7 @@ def convert_to_tensorrt_llm_config(
         # For encoder
         if model_config.enc_dec == "enc":
             config_architecture = MODEL_NAME_TO_HF_ARCH_MAP[
-                f"{decoder_type}_encoder" if decoder_type in ["whisper"] else "enc"
+                f"{decoder_type}_encoder" if decoder_type == "whisper" else "enc"
             ]
         # For decoder
         else:
@@ -164,11 +164,7 @@ def convert_to_tensorrt_llm_config(
         "position_embedding_type": (
             "alibi"
             if first_attention_decoder_config.use_alibi
-            else (
-                first_attention_decoder_config.position_embedding_type
-                if first_attention_decoder_config.position_embedding_type
-                else "rope_gpt_neox"
-            )
+            else (first_attention_decoder_config.position_embedding_type or "rope_gpt_neox")
         ),
         "share_embedding_table": bool(model_config.lm_head is None and pp_size == 1),
         "residual_mlp": first_attention_decoder_config.residual_mlp is not None,
@@ -260,7 +256,7 @@ def convert_to_tensorrt_llm_config(
         config["emb_scale_by_sqrt_dim"] = model_config.layers[0].emb_scale_by_sqrt_dim
         config["layer_types"] = model_config.layers[0].layer_types
     elif is_enc_dec:
-        if decoder_type in ["whisper"]:
+        if decoder_type == "whisper":
             config["n_mels"] = hf_config.num_mel_bins
             model_is_multilingual = hf_config.vocab_size >= 51865
             num_languages = hf_config.vocab_size - 51765 - int(model_is_multilingual)

@@ -57,14 +57,6 @@ from .utils import (
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
-try:
-    from .plugins.megatron import _check_nvfp4_static_tp_supported
-except ImportError:
-
-    def _check_nvfp4_static_tp_supported(model: nn.Module) -> None:  # no-op without megatron
-        return
-
-
 __all__ = [
     "CalibratorFactory",
     "awq",
@@ -305,7 +297,12 @@ def max_calibrate(
             module.layer_sync_moe_local_experts_amax(sync_weight_amax=sync_expert_weight_amax)
 
     # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
-    _check_nvfp4_static_tp_supported(model)
+    try:
+        from .plugins.megatron import _check_nvfp4_static_tp_supported
+    except ImportError:
+        pass
+    else:
+        _check_nvfp4_static_tp_supported(model)
 
     if not distributed_sync:
         # Single-process: _amax is final.

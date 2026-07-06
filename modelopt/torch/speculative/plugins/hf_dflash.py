@@ -1,5 +1,26 @@
+# Adapted from https://github.com/sgl-project/SpecForge/blob/8ea5ca6/specforge/core/dflash.py
+# Copyright (c) 2025 sgl-project
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -248,7 +269,9 @@ class HFDFlashModel(DFlashModel):
 
         self._find_base_model_parts()
 
-        self.dflash_module = DFlashModule(self.dflash_config)
+        # Factory hook: subclasses (e.g. Domino) override to build an augmented
+        # draft module while reusing all of DFlash's modify() setup.
+        self.dflash_module = self._build_draft_module(self.dflash_config)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
         if self.dflash_offline:
@@ -264,6 +287,10 @@ class HFDFlashModel(DFlashModel):
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
+
+    def _build_draft_module(self, dflash_config):
+        """Build the draft module. Subclasses override to use an augmented module."""
+        return DFlashModule(dflash_config)
 
     def get_exporter(self):
         """Get the exporter for the DFlash draft model."""

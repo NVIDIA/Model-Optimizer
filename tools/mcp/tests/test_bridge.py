@@ -187,18 +187,94 @@ def test_verify_slurm_ssh_success(monkeypatch):
         return subprocess.CompletedProcess(
             args=argv,
             returncode=0,
-            stdout="chenhany\ncluster-login-01\n",
+            stdout="alice\ncluster-login-01\n",
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = bridge.verify_slurm_setup_impl(
-        cluster_host="cw-dfw-cs-001-login-01.nvidia.com",
-        cluster_user="chenhany",
+        cluster_host="login.example.com",
+        cluster_user="alice",
     )
     assert result["ok"] is True
-    assert result["whoami"] == "chenhany"
+    assert result["whoami"] == "alice"
     assert result["remote_hostname"] == "cluster-login-01"
+
+
+def test_verify_slurm_controlmaster_success(monkeypatch):
+    """MFA clusters can verify through an existing OpenSSH ControlMaster socket."""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ["ssh", "-O", "check"]:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        assert "ControlPath=/tmp/mfa.sock" in argv
+        assert "ControlMaster=no" in argv
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="alice-mfa\nmfa-login\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.verify_slurm_setup_impl(
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        control_socket="/tmp/mfa.sock",
+        reconnect_command="ssh mfa-cluster",
+    )
+
+    assert result["ok"] is True
+    assert result["control_socket"] == "/tmp/mfa.sock"
+    assert len(calls) == 2
+
+
+def test_verify_slurm_controlmaster_missing(monkeypatch):
+    """Missing ControlMaster socket returns a reauth diagnostic before probing SSH."""
+
+    def fake_run(argv, **kwargs):
+        assert argv[:3] == ["ssh", "-O", "check"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=255,
+            stdout="",
+            stderr="Control socket connect failed",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.verify_slurm_setup_impl(
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        control_socket="/tmp/missing.sock",
+        reconnect_command="ssh mfa-cluster",
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "mfa_reauth_required"
+    assert result["reconnect_command"] == "ssh mfa-cluster"
+
+
+def test_verify_slurm_controlmaster_timeout(monkeypatch):
+    """ControlMaster probe timeouts return structured ssh_timeout diagnostics."""
+
+    def fake_run(argv, **kwargs):
+        assert argv[:3] == ["ssh", "-O", "check"]
+        raise subprocess.TimeoutExpired(argv, timeout=15)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.verify_slurm_setup_impl(
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        control_socket="/tmp/mfa.sock",
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "ssh_timeout"
 
 
 def test_verify_slurm_auth_failed(monkeypatch):
@@ -214,7 +290,7 @@ def test_verify_slurm_auth_failed(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = bridge.verify_slurm_setup_impl(
-        cluster_host="ghost-cluster.nvidia.com",
+        cluster_host="ghost-cluster.example.com",
     )
     assert result["ok"] is False
     assert result["reason"] == "ssh_auth_failed"
@@ -247,7 +323,7 @@ def test_submit_job_rejects_both_executors():
     result = bridge.submit_job_impl(
         yaml_path="examples/test.yaml",
         hf_local="/tmp/hf",
-        cluster_host="cluster.nvidia.com",
+        cluster_host="cluster.example.com",
         cluster_user=None,
         identity=None,
         job_dir=None,
@@ -275,6 +351,21 @@ def test_submit_job_yaml_not_found(monkeypatch, tmp_path):
     )
     assert result["ok"] is False
     assert result["reason"] == "yaml_not_found"
+
+
+def test_submit_job_mfa_requires_control_socket():
+    """MFA Slurm submissions require a reusable ControlMaster socket."""
+    result = bridge.submit_job_impl(
+        yaml_path="examples/test.yaml",
+        cluster_host="mfa-login.example.com",
+        mfa=True,
+        ssh_alias="mfa-cluster",
+        skip_verify=True,
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "mfa_control_socket_required"
+    assert result["ssh_alias"] == "mfa-cluster"
 
 
 def test_ensure_source_checkout_defaults_to_main(monkeypatch, tmp_path):
@@ -349,9 +440,11 @@ def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["source_ref"] == "feature/ref"
     assert result["source_sha"] == "b" * 40
-    assert captured["argv"][:5] == [
+    assert captured["argv"][:7] == [
         "uv",
         "run",
+        "--reinstall-package",
+        "modelopt-launcher",
         "--project",
         str(checkout_root / "tools" / "launcher"),
         "modelopt-launcher",
@@ -390,6 +483,140 @@ def test_submit_job_source_checkout_failure_short_circuits(monkeypatch):
     assert result["ok"] is False
     assert result["dry_run"] is True
     assert result["reason"] == "source_ref_not_found"
+
+
+def test_submit_job_docker_captures_experiment_id_from_launcher_output(monkeypatch, tmp_path):
+    """Docker submit tails launcher output long enough to return nemo_run's id."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "nemo"))
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    class FakePopen:
+        pid = 4242
+
+        def __init__(self, argv, **kwargs):
+            self.argv = argv
+            out = kwargs["stdout"]
+            out.write(
+                b"Experiment Status for docker_1782173197\n"
+                b'experiment = run.Experiment.from_id("docker_1782173197")\n'
+            )
+            out.flush()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local="/tmp/hf",
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+
+    assert result["ok"] is True
+    assert result["executor"] == "docker"
+    assert result["pid"] == 4242
+    assert result["experiment_id"] == "docker_1782173197"
+    assert "docker_1782173197" in result["stdout_tail"]
+    assert result["stdout_log"].endswith(".log")
+
+
+def test_submit_job_docker_no_experiment_id_returns_pid_and_log(monkeypatch, tmp_path):
+    """Docker submit stays detached when the id is not printed immediately."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "nemo"))
+    monkeypatch.setenv("MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC", "0")
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    class FakePopen:
+        pid = 4243
+
+        def __init__(self, argv, **kwargs):
+            kwargs["stdout"].write(b"launcher starting\n")
+            kwargs["stdout"].flush()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local="/tmp/hf",
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+
+    assert result["ok"] is True
+    assert result["executor"] == "docker"
+    assert result["pid"] == 4243
+    assert result["experiment_id"] is None
+    assert "launcher starting" in result["stdout_tail"]
+    assert "no experiment_id was captured" in result["diagnostic"]
+
+
+def test_parse_launcher_submission_ignores_experiment_dir_as_id():
+    """A path field must not be misread as a usable experiment id."""
+    experiment_id, experiment_dir, slurm_job_id = bridge._parse_launcher_submission(
+        "experiment_dir=/tmp/nemorun/experiments/docker_1782173197\n"
+    )
+
+    assert experiment_id is None
+    assert experiment_dir == "/tmp/nemorun/experiments/docker_1782173197"
+    assert slurm_job_id is None
+
+
+def test_submit_job_docker_log_creation_failure_is_structured(monkeypatch, tmp_path):
+    """Docker submit should not raise if the side-channel log cannot be created."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    yaml_path = yaml_dir / "config.yaml"
+    yaml_path.write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "nemo"))
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    def fail_named_temporary_file(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bridge.tempfile, "NamedTemporaryFile", fail_named_temporary_file)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local="/tmp/hf",
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+
+    assert result["ok"] is False
+    assert result["executor"] == "docker"
+    assert result["reason"] == "docker_submit_log_unavailable"
+    assert "disk full" in result["diagnostic"]
 
 
 def test_submit_job_slurm_zero_exit_without_ids_is_failure(monkeypatch, tmp_path):
@@ -471,6 +698,64 @@ def test_submit_job_slurm_parses_nemo_job_id(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["slurm_job_id"] == "13049989"
     assert result["experiment_id"] == "cicd_1782173197"
+
+
+def test_submit_job_slurm_accepts_nmm_cluster_fields(monkeypatch, tmp_path):
+    """nmm-sandbox resolved cluster config maps to launcher overrides and env."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "config.yaml").write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    verify_seen = {}
+
+    def fake_verify(**kwargs):
+        verify_seen.update(kwargs)
+        return {"ok": True}
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=(
+                "Experiment Status for cicd_1782173197\n"
+                "- Job id: 13049989\n"
+                'experiment = run.Experiment.from_id("cicd_1782173197")\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(bridge, "verify_slurm_setup_impl", fake_verify)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        account="project_account",
+        partition="batch",
+        container="ubuntu:24.04",
+        ntasks_per_node=1,
+        control_socket="~/.ssh/mfa.sock",
+        reconnect_command="ssh mfa-cluster",
+        skip_verify=False,
+    )
+
+    assert result["ok"] is True
+    assert verify_seen["control_socket"] == "~/.ssh/mfa.sock"
+    assert verify_seen["reconnect_command"] == "ssh mfa-cluster"
+    assert "pipeline.task_0.slurm_config.account=project_account" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.partition=batch" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.container=ubuntu:24.04" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.ntasks_per_node=1" in captured["argv"]
+    assert captured["env"]["SLURM_ACCOUNT"] == "project_account"
+    assert captured["env"]["SLURM_PARTITION"] == "batch"
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"].endswith(".ssh/mfa.sock")
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] == "ssh mfa-cluster"
 
 
 def test_submit_job_slurm_job_id_without_experiment_id_is_failure(monkeypatch, tmp_path):
@@ -595,6 +880,53 @@ def test_submit_job_dry_run_yaml_validates(monkeypatch, tmp_path):
     assert "experiment_id" not in result  # dry-run produces no experiment
     assert "--dryrun" in captured["argv"]  # launcher CLI spells it as one word
     assert "--yes" in captured["argv"]  # launcher requires --yes to suppress confirm prompt
+
+
+def test_submit_job_dry_run_uses_slurm_inventory_fields(monkeypatch, tmp_path):
+    """dry-run must mirror live submit Slurm overrides and env."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "config.yaml").write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="Dry-run OK\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        cluster_host="mfa-login.example.com",
+        cluster_user="alice-mfa",
+        account="project_account",
+        partition="batch",
+        container="ubuntu:24.04",
+        ntasks_per_node=1,
+        control_socket="~/.ssh/mfa.sock",
+        ssh_alias="mfa-cluster",
+        skip_verify=True,
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    assert "pipeline.task_0.slurm_config.account=project_account" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.partition=batch" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.container=ubuntu:24.04" in captured["argv"]
+    assert "pipeline.task_0.slurm_config.ntasks_per_node=1" in captured["argv"]
+    assert captured["env"]["SLURM_HOST"] == "mfa-login.example.com"
+    assert captured["env"]["SLURM_ACCOUNT"] == "project_account"
+    assert captured["env"]["SLURM_PARTITION"] == "batch"
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"].endswith(".ssh/mfa.sock")
+    assert captured["env"]["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] == "ssh mfa-cluster"
 
 
 def test_submit_job_dry_run_yaml_invalid(monkeypatch, tmp_path):

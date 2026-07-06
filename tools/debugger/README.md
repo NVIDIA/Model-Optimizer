@@ -47,7 +47,7 @@ bash tools/debugger/client.sh handshake
 bash tools/debugger/client.sh run "echo hello"
 
 # Run a test script
-bash tools/debugger/client.sh run "bash llm_ptq/scripts/huggingface_example.sh"
+bash tools/debugger/client.sh run "bash hf_ptq/scripts/huggingface_example.sh"
 
 # Run with a long timeout (default is 600s)
 bash tools/debugger/client.sh --timeout 1800 run "python my_long_test.py"

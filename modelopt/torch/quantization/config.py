@@ -323,6 +323,22 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         #. String specifying the quantization format. This is current used only for custom backends.""",
     )
 
+    effective_bits: float | None = ModeloptField(
+        default=None,
+        title="Effective bits per element (autoquant cost).",
+        description=(
+            "Per-format effective bits for the autoquant cost model; overrides the "
+            "``num_bits`` heuristic for this entry (e.g. NVFP4 = 4.5). Must be in (0, 16]."
+        ),
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
+
     @model_validator(mode="before")
     @classmethod
     def validate_config(cls, values):
@@ -507,7 +523,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         return {
             k: v
             for k, v in block_sizes.items()
-            if k not in ["type", "scale_bits", "scale_block_sizes"]
+            if k not in ["type", "scale_bits", "scale_block_sizes", "four_over_six"]
         }
 
     @field_validator("block_sizes")
@@ -523,7 +539,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             )
         for _k, _v in v.items():
             if isinstance(_k, str):
-                assert _k in ["type", "scale_bits", "scale_block_sizes"]
+                assert _k in ["type", "scale_bits", "scale_block_sizes", "four_over_six"]
             else:
                 assert isinstance(_k, int) and (_v is None or isinstance(_v, int))
         return v
@@ -1317,6 +1333,22 @@ class QuantizeConfig(ModeloptBaseConfig):
         validate_default=True,
     )
 
+    effective_bits: float | None = ModeloptField(
+        default=None,
+        title="Effective bits per element (autoquant cost override)",
+        description=(
+            "Recipe-level override for the autoquant cost model; replaces the per-entry "
+            "``num_bits`` heuristic for the whole config. Must be in (0, 16]."
+        ),
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
+
     @field_validator("quant_cfg", mode="before")
     @classmethod
     def normalize_quant_cfg(
@@ -1435,6 +1467,9 @@ FP8_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/
 FP8_AFFINE_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8_affine")
 
 NVFP4_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/nvfp4")
+NVFP4_FOUR_OVER_SIX_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_four_over_six"
+)
 NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/nvfp4_w4a4_weight_mse_fp8_sweep"
 )
@@ -1513,6 +1548,7 @@ choices: set[str] = {
     "NVFP4_AWQ_FULL_CFG",
     "NVFP4_AWQ_LITE_CFG",
     "NVFP4_DEFAULT_CFG",
+    "NVFP4_FOUR_OVER_SIX_CFG",
     "NVFP4_FP8_MHA_CONFIG",
     "NVFP4_KV_CFG",
     "NVFP4_KV_ROTATE_CFG",

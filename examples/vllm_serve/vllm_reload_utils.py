@@ -89,8 +89,8 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     if "quantizer" not in key:
         return ("copy", key, value)
 
-    # Skip softmax_quantizer and lm_head quantizers (not needed in vLLM).
-    if "softmax_quantizer" in key or (key.startswith("lm_head.") and "quantizer" in key):
+    # Skip p_bmm_quantizer (softmax-P) and lm_head quantizers (not needed in vLLM).
+    if "p_bmm_quantizer" in key or (key.startswith("lm_head.") and "quantizer" in key):
         return ("skip", None, None)
 
     # Check if this is a q/k/v projection that needs merging

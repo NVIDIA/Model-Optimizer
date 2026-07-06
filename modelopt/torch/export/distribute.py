@@ -157,6 +157,7 @@ def get_tensors_parallel(tensor: torch.Tensor, ranks: list[int], group=None):
                 tensors.append(tensor)
             else:
                 shm = SharedMemory(name=f"rank_{rank}", create=False)
+                assert shm.buf is not None
                 shared_tensor = torch.load(BytesIO(shm.buf))
                 tensors.append(shared_tensor)
                 shm_readers.append(shm)
@@ -235,6 +236,7 @@ def get_configs_parallel(config, ranks: list[int], group, workspace_path: Path |
                     create=True,
                     size=(8 + len(config_json) + _get_weights_nbytes(weights)),
                 )
+                assert shm_writer.buf is not None
 
                 # Write json length to the shm
                 shm_writer.buf[:8] = len(config_json).to_bytes(8, "little")
@@ -252,6 +254,7 @@ def get_configs_parallel(config, ranks: list[int], group, workspace_path: Path |
                 create=True,
                 size=8,
             )
+            assert shm_writer.buf is not None
 
             shm_writer.buf[:8] = (0).to_bytes(8, "little")
 
@@ -272,6 +275,7 @@ def get_configs_parallel(config, ranks: list[int], group, workspace_path: Path |
                     configs.append(config)
             else:
                 shm = SharedMemory(name=f"rank_{rank}_config", create=False)
+                assert shm.buf is not None
                 len_json = int.from_bytes(shm.buf[:8], "little")
 
                 if len_json != 0:

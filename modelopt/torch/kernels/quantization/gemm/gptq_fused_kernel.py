@@ -30,7 +30,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .nvfp4_quant import nvfp4_scalar_qdq
+from ..common.nvfp4_quant import nvfp4_scalar_qdq
 
 __all__ = ["gptq_fused_block_scalar"]
 

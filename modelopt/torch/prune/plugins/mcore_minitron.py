@@ -311,19 +311,25 @@ class MCoreMinitronSearcher(BaseSearcher):
                 assert isinstance(self.constraints[k], (int, float)), f"{k} must be a float!"
             assert self.has_score, "score_func (e.g. MMLU) is required for metric-based pruning!"
             export_config = None
-            # Sort all parameters for metric-based pruning
-            self.hps_to_sort = SUPPORTED_HPARAMS
+            # Sort only hparams that may be pruned: sorting never-pruned hparams is churn, and is
+            # unsafe for ``hidden_size`` on VLMs (shared with the frozen vision projector, so
+            # permuting it would misalign injected image features).
+            self.hps_to_sort = SUPPORTED_HPARAMS - set(self.config["hparams_to_skip"] or [])
 
         for n, hp in named_hparams(self.model, unique=True):
             hp_name = n.split(".")[-1]
+            hp.reset_choices()  # Refresh ConcatHparam choices (recomputed after modify()) before validating
             if hp.is_configurable:
                 # Make sure configurable hparams are the ones with right names else implementation needs to be fixed!
                 assert hp_name in SUPPORTED_HPARAMS, f"[ImplError] Invalid hparam {hp_name}!"
-                if export_config is not None and hp_name in export_config:
-                    assert export_config[hp_name] in hp.choices, (
-                        f"Invalid choice {export_config[hp_name]} for {n}! Available choices: {hp.choices}"
-                    )
-            hp.reset_choices()  # Make sure ConcatHparam choices are updated after modify()
+            # Validate every matching hparam (even non-configurable): an out-of-range value is else
+            # silently ignored while model.config is overwritten -> weights mismatch the saved config.
+            if export_config is not None and hp_name in export_config:
+                assert export_config[hp_name] in hp.choices, (
+                    f"Invalid choice {export_config[hp_name]} for {n}! Available choices: "
+                    f"{hp.choices}. Manual export_config values must match the search-space "
+                    "granularity (see the *_divisor settings)."
+                )
 
         assert isinstance(self.model, _DynamicMCoreLanguageModel), (
             "Input should be unwrapped MCore model!"
@@ -794,13 +800,42 @@ def get_mcore_minitron_config(
     return config
 
 
+def _inherit_base_model_rules(model: nn.Module, rules: dict) -> dict:
+    """Let registered model subclasses inherit their base ``SUPPORTED_MODELS`` rule.
+
+    Model subclasses (e.g. VLM language models like ``Qwen3VLGPTModel``) are registered under their
+    own ``DMRegistry`` key but share the dynamic class (and thus the search-space rule schema) of
+    their base ``GPTModel``/``MambaModel``. ``MCoreMinitronConfig`` only defines rule fields for the
+    base classes, so without this a subclass module would have no matching rule and get *frozen*
+    during conversion (disabling width/depth pruning). Copy the base rule onto the subclass key.
+    """
+    rules = dict(rules)
+    for base_cls, base_key in SUPPORTED_MODELS.items():
+        base_rule = rules.get(base_key)
+        if base_rule is None:
+            continue
+        # GPTModel/MambaModel are siblings (not subclasses of each other), so isinstance uniquely
+        # assigns each module to its base; the subclass shares the base's dynamic class and hence its
+        # rule schema. A subclass registered under its own key but absent from rules inherits it here.
+        for mod in model.modules():
+            if not isinstance(mod, base_cls) or type(mod) not in DMRegistry:
+                continue
+            key = DMRegistry.get_key(type(mod))
+            if key not in rules:
+                rules[key] = base_rule
+    return rules
+
+
 def _convert_model_to_dynamic_space(
     model: nn.Module, config: ModeloptBaseConfig | None = None
 ) -> DynamicSpace:
     """Create a dynamic space for the model (in-place)."""
     dynamic_space = DynamicSpace(model)
     dynamic_space._should_be_converted = lambda mod: isinstance(mod, tuple(SUPPORTED_MODELS.keys()))
-    dynamic_space.convert_to_dynamic(config.model_dump() if config else None, DMRegistry)
+    rules = config.model_dump() if config else None
+    if rules is not None:
+        rules = _inherit_base_model_rules(model, rules)
+    dynamic_space.convert_to_dynamic(rules, DMRegistry)
     if not dynamic_space.is_configurable():
         raise ApplyModeError(
             "The model does not contain any configurable hyperparameters! Please check the"

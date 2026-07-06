@@ -33,6 +33,10 @@ from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+# FP8 dtypes do not implement reduction kernels (e.g. ``max_all_cuda``), ``abs``, or
+# elementwise ``maximum``, so tensors of these dtypes must be upcast before amax reduction.
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+
 
 def reduce_block_amax(input_tensor: torch.Tensor, block_sizes: dict):
     """Computes the amax of the input tensor using block-based reduction for each dimension.
@@ -157,6 +161,10 @@ def reduce_amax(input, axis=None, keepdims=True, squeeze_scalar=True):
     Returns:
         The reduced tensor.
     """
+    # FP8 dtypes lack reduction/abs kernels (e.g. ``max_all_cuda``); upcast to the default
+    # float dtype, which represents every FP8 value exactly so the amax is computed losslessly.
+    if input.dtype in _FP8_DTYPES:
+        input = input.to(torch.get_default_dtype())
     # A memory-efficient implementation that avoids copying input tensor
     if axis is None:
         max_val = torch.max(input)

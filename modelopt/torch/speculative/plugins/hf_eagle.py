@@ -122,7 +122,7 @@ class HFEagleModel(EagleModel):
 
         torch._dynamo.config.suppress_errors = True  # Allow fallback to eager mode
 
-        compile_targets = [
+        compile_targets: list[tuple[str, dict[str, Any]]] = [
             ("_prepare_eagle_inputs", {}),
             ("_eagle_forward", {"mode": "max-autotune"}),
             ("_eagle_loss", {"fullgraph": True}),
