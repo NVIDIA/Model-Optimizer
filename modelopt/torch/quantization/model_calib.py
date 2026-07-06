@@ -1161,6 +1161,11 @@ def awq(
         model: Model to be calibrated.
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
+        algorithm: The AWQ variant to run; one of ``"awq_lite"``,
+            ``"awq_clip"``, or ``"awq_full"``.
+
+    Raises:
+        ValueError: If ``algorithm`` is not one of the valid AWQ algorithms.
 
     See :class:`AWQFullCalibConfig <modelopt.torch.quantization.config.AWQFullCalibConfig>` for
     details on the remaining arguments.
