@@ -59,6 +59,12 @@ prepare a weighted subset, or omit it to prepare every source in full. This exam
 [Nemotron 3 Nano distillation blend](../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md#1-data-preparation)
 down to one billion tokens while preserving its source weights:
 
+> [!IMPORTANT]
+> When `target_tokens` is set, JSONL records specified with `files` are consumed from the beginning
+> of each file rather than selected randomly. Pre-shuffle JSONL files to obtain a random subset.
+> Hugging Face dataset splits are shuffled deterministically; streaming datasets use an
+> approximate buffer shuffle.
+
 ```yaml
 tokenizer: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 output_dir: /path/to/nemotron_3_nano_30b_distillation_blend_1b
