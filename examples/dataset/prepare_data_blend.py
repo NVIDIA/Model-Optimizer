@@ -84,6 +84,8 @@ def _prepare_sources(
     workers = min(32, os.cpu_count() or 1)
     blend: list[tuple[float, str]] = []  # (weight, shared .bin/.idx path without extension)
     allocated_tokens = 0
+    # Weights are relative, not required to sum to 100 (matching data_blend.txt semantics).
+    weight_sum = sum(float(source["weight"]) for source in sources)
 
     for index, source in enumerate(sources):
         weight = float(source["weight"])
@@ -92,7 +94,7 @@ def _prepare_sources(
         elif index == len(sources) - 1:
             source_tokens = total_tokens - allocated_tokens
         else:
-            source_tokens = round(total_tokens * weight / 100)
+            source_tokens = round(total_tokens * weight / weight_sum)
             allocated_tokens += source_tokens
 
         dataset = source["hf_dataset"]
