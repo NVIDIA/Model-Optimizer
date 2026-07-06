@@ -55,8 +55,9 @@ Validation KD and CE losses show whether the student is fitting the teacher and 
 necessarily predict downstream accuracy. Export the live student at each validation interval and evaluate the
 resulting checkpoints to see when downstream quality improves, plateaus, or regresses.
 
-Use `--hf_validation_export_path` with `distill.py` as described in the
-[Megatron-Bridge distillation guide](../megatron_bridge/README.md#converting-to-hugging-face-format-optional).
+Use `--hf_validation_export_path` to choose the output directory and
+`--hf_validation_export_interval` to choose how often `distill.py` saves a Hugging Face checkpoint, as described in
+the [Megatron-Bridge distillation guide](../megatron_bridge/README.md#converting-to-hugging-face-format-optional).
 
 The export path contains one loadable Hugging Face checkpoint per validation iteration:
 
