@@ -72,7 +72,7 @@ Evaluate the teacher, pruned student, and each exported checkpoint. Follow the
 [efficient evaluation workflow](#efficient-evaluation-with-lm-eval-harness) to choose limits.
 
 The following experiment pruned Qwen3-8B to 0.7x and distilled the same student for approximately 100 million
-tokens on three datasets. All runs used a global batch size of 8 and sequence length of 4,096. MMLU used 25
+tokens using four data recipes. All runs used a global batch size of 8 and sequence length of 4,096. MMLU used 25
 questions per subject (1,425 total), and MMLU-Pro used 50 per subject (700 total). The tables show representative
 checkpoints; token counts are derived from the consumed fixed-length training sequences.
 
@@ -108,6 +108,19 @@ nvidia/Nemotron-Post-Training-Dataset-v2.
 | 78.6M | 0.0613 | 1.0773 | 65.61% | 7.71% |
 | 100.0M | 0.0582 | 1.0516 | 65.75% | 11.29% |
 
+### 50/50 WikiText and Nemotron v2 blend
+
+Distillation and validation used an equal-weight blend of WikiText and the Nemotron v2 math and stem data.
+
+| Training tokens | Validation KD | Validation CE | MMLU | MMLU-Pro |
+|----------------:|--------------:|--------------:|-----:|---------:|
+| 0 | Not measured | Not measured | 48.69% (full) | 23.09% (full) |
+| 0.7M | 0.2479 | 1.8363 | 57.89% | 12.57% |
+| 3.3M | 0.1824 | 2.0265 | 62.46% | 23.14% |
+| 39.3M | 0.1164 | 1.9157 | 67.44% | 33.86% |
+| 78.6M | 0.0973 | 1.8503 | 67.72% | 41.57% |
+| 100.0M | 0.0916 | 1.7680 | 68.28% | 41.71% |
+
 ### Nemotron 3
 
 Distillation and validation used the Nemotron 3 Nano distillation blend described in the
@@ -126,10 +139,13 @@ On the same validation samples, the teacher CE was 2.6834 on WikiText and 1.1566
 
 Interesting observations include:
 
-- All three datasets recover MMLU to about 66--67% by 100 million tokens.
-- Nemotron 3 produces the strongest MMLU-Pro trajectory, reaching 47.71%, followed by WikiText at 40.57%.
-- Nemotron v2 KD continues to decrease, but its MMLU-Pro score remains below the pruned baseline. This shows why
-  validation loss alone is insufficient for selecting distillation data.
+- All four data recipes recover MMLU to about 66% to 68% by 100 million tokens. The 50/50 blend is numerically
+  highest at 68.28%.
+- Nemotron 3 produces the strongest MMLU-Pro trajectory, reaching 47.71%.
+- Although Nemotron v2 performs poorly alone, its 50/50 blend with WikiText slightly outperforms WikiText alone
+  on both final benchmarks.
+- Nemotron v2 KD continues to decrease, but its MMLU-Pro score remains below the pruned baseline. Understanding
+  this discrepancy could help design better distillation corpora.
 
 ## Prepare token-budgeted data blends
 
