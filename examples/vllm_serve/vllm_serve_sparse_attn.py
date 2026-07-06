@@ -22,7 +22,7 @@ no such block, that worker logs a message and the server runs as standard
 vLLM.
 
 The launcher defaults to ``sparse_attn_worker.SparseAttnWorker``. Pass
-``--worker-cls quant_sparse_attn_worker.QuantSparseAttnWorker`` for quant+sparse.
+``--worker-cls sparse_attn_worker.QuantSparseAttnWorker`` for quant+sparse.
 
 Usage:
     python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>

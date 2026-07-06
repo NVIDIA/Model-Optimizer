@@ -117,6 +117,8 @@ Workflow:
 
 If the checkpoint has no `sparse_attention_config`, the worker logs a message and passes through — vLLM runs unchanged. Whole-model fakequant flows remain handled by `vllm_serve_fakequant.py`; the compact attention-only path is below.
 
+Both explicit serving policies live in `sparse_attn_worker.py`: `SparseAttnWorker` is checkpoint-driven sparse-only, while `QuantSparseAttnWorker` uses fixed NVFP4 Q/K/P/V plus optional checkpoint sparsity. The launcher keeps `SparseAttnWorker` as its default.
+
 Limitations:
 
 - vLLM V1 chunked prefill and prefix-cache suffix attention are supported by offsetting query positions into the longer KV span.
@@ -124,14 +126,14 @@ Limitations:
 
 ### Compact NVFP4 attention worker
 
-This worker requires vLLM 0.14.0 or newer and fails at import time on older releases.
+vLLM 0.14.0 or newer is checked when `QuantSparseAttnWorker` is selected. Importing or using `SparseAttnWorker` does not resolve quant-only APIs.
 
 Use the same launcher with the compact worker. By default, vLLM selects the backend for the model and platform; NemotronH on Blackwell selects FlashInfer:
 
 ```bash
 python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
   --no-enable-prefix-caching \
-  --worker-cls quant_sparse_attn_worker.QuantSparseAttnWorker
+  --worker-cls sparse_attn_worker.QuantSparseAttnWorker
 ```
 
 The worker supports both FlashInfer and FlashAttention and prints the installed adapter counts. Pass `--attention-backend FLASHINFER` or `--attention-backend FLASH_ATTN` only when an explicit override is needed.
