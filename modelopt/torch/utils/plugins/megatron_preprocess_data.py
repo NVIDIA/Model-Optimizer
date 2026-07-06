@@ -535,6 +535,11 @@ def megatron_preprocess_data(
 
     Exactly one of ``input_dir``, ``jsonl_paths``, or ``hf_dataset`` must be provided.
 
+    Important: When ``max_tokens`` is set, JSONL records are consumed from the beginning of each
+    file rather than selected randomly. Pre-shuffle JSONL files to obtain a random subset. Hugging
+    Face datasets are shuffled deterministically before applying the limit; streaming datasets use
+    an approximate buffer shuffle.
+
     Args:
         input_dir: Directory containing JSONL files to tokenize.
         jsonl_paths: One or more paths to JSONL files.
@@ -547,7 +552,7 @@ def megatron_preprocess_data(
             nested message schemas that cause Arrow type-cast errors in non-streaming mode.
             Note: streaming does not cache to disk, so re-runs re-download. Defaults to False.
         max_tokens: Stop after processing at least this many tokens across the source files or
-            selected Hugging Face split. The final document may make the result slightly larger.
+            selected Hugging Face splits. The final document may make the result slightly larger.
         output_dir: Path to directory to save binary output files.
         tokenizer_name_or_path: Name or path of the Hugging Face tokenizer to use.
         json_keys: Key or list of keys to extract from json. Defaults to ["text"].
