@@ -25,7 +25,7 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 
 def test_distill_and_convert(tmp_path: Path, num_gpus):
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
-    train_iters = 2
+    train_iters = 3
     distill_output_dir = tmp_path / "distill_output"
     distilled_hf_path = tmp_path / "distilled_hf"
     validation_exports = tmp_path / "validation_exports"
@@ -46,14 +46,16 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
         log_interval=1,
         hf_export_path=distilled_hf_path,
         hf_validation_export_path=validation_exports,
+        hf_validation_export_interval=2,
         student_hf_model=teacher_hf_path,
     )
     run_example_command(distill_cmd_parts, example_path="megatron_bridge")
 
     assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
     assert (distilled_hf_path / "config.json").exists()
-    assert (validation_exports / "iter_0000001/config.json").exists()
     assert (validation_exports / "iter_0000002/config.json").exists()
+    assert (validation_exports / "iter_0000003/config.json").exists()
+    assert not (validation_exports / "iter_0000001").exists()
 
 
 def test_distill_validate_only(tmp_path: Path, num_gpus):
@@ -79,6 +81,7 @@ def test_distill_validate_only(tmp_path: Path, num_gpus):
         train_iters=1,
         eval_iters=1,
         hf_validation_export_path=validation_exports,
+        hf_validation_export_interval=1,
         student_hf_model=teacher_hf_path,
     )
     run_example_command(cmd_parts, example_path="megatron_bridge")
