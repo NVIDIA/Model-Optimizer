@@ -100,7 +100,7 @@ class _GroupBoundaryModel(torch.nn.Module):
 
     def forward(self, x):
         self.use_cache_seen.append((self.config.use_cache, self.config.text_config.use_cache))
-        return self.linear_attn(self.self_attn(x))
+        return self.linear_attn(x=self.self_attn(x=x))
 
     def get_input(self):
         return torch.randn(1, 4, 32)
@@ -438,6 +438,28 @@ def test_auto_quantize_group_score_boundary_does_not_group_recipe_decisions():
     assert model.config.use_cache is True
     assert model.config.text_config.use_cache is True
     assert (False, False) in model.use_cache_seen
+
+
+def test_auto_quantize_gradient_group_score_boundary_supports_keyword_calls():
+    model = _GroupBoundaryModel()
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0, "score_model": "per_element"},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method="gradient",
+        score_boundary="group",
+    )
+
+    assert search_state["score_boundary"] == "group"
+    assert search_state["method"] == "gradient"
+    assert any(
+        score > 0 for stats in search_state["candidate_stats"].values() for score in stats["scores"]
+    )
 
 
 def test_auto_quantize_attention_layer_grouping_groups_recipe_decisions():
