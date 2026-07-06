@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Qwen3.6 MoE parent-boundary diagnostic: long-code calibration is selected by
-# the HF PTQ command, while this recipe captures the grouped search policy.
+# Qwen3.6 MoE P0 reproduction lane. The HF PTQ command selects the long-code
+# calibration data; this recipe captures the old P0 score and allocation axes.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
@@ -13,9 +13,8 @@ imports:
 metadata:
   recipe_type: auto_quantize
   description: >-
-    Qwen3.6 MoE: grouped parent-boundary gradient search over FP8 and W4A16 NVFP4
-    at 6.0 active-MoE effective bits. This tests parent-output scoring; the confirmed
-    P0 source state used local gradient scores instead.
+    Qwen3.6 MoE: local-gradient scores with grouped FP8/W4A16 NVFP4 decisions at
+    6.0 active-MoE effective bits, matching the confirmed P0 score provenance.
 
 auto_quantize:
   constraints:
@@ -30,7 +29,7 @@ auto_quantize:
     - $import: w4a16_nvfp4
 
   auto_quantize_method: gradient
-  score_boundary: group
+  score_boundary: local
   quant_grouping_scheme: runtime_fused+linear_attn_layer+self_attn_layer
   score_size: 64
 

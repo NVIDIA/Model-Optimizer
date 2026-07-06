@@ -221,7 +221,7 @@ def test_autoquant_group_scoring_recipe_matches_deprecated_cli(monkeypatch):
 
 
 def test_autoquant_grouped_gradient_recipe_matches_deprecated_cli(monkeypatch):
-    """The P0 reproduction recipe and deprecated CLI map to identical grouped search inputs."""
+    """The grouped parent-score recipe and deprecated CLI map to identical search inputs."""
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch,
         "--pyt_ckpt_path",
@@ -250,6 +250,44 @@ def test_autoquant_grouped_gradient_recipe_matches_deprecated_cli(monkeypatch):
     recipe_config = load_recipe(
         "huggingface/qwen3_6_moe/auto_quantize/"
         "w4a16_nvfp4_fp8_at_6p0bits-active_moe-grouped-gradient"
+    ).auto_quantize
+    cli_config = hf_ptq._auto_quantize_config_from_cli(args)
+
+    assert hf_ptq._mtq_inputs_from_auto_quantize_config(
+        recipe_config, args
+    ) == hf_ptq._mtq_inputs_from_auto_quantize_config(cli_config, args)
+
+
+def test_autoquant_grouped_local_gradient_recipe_matches_deprecated_cli(monkeypatch):
+    """The local-score P0 recipe and deprecated CLI map to identical grouped search inputs."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "dummy",
+        "--qformat",
+        "fp8,w4a16_nvfp4",
+        "--auto_quantize_bits",
+        "6.0",
+        "--auto_quantize_method",
+        "gradient",
+        "--auto_quantize_score_model",
+        "per_element",
+        "--auto_quantize_score_boundary",
+        "local",
+        "--auto_quantize_grouping_scheme",
+        "runtime_fused+linear_attn_layer+self_attn_layer",
+        "--auto_quantize_score_size",
+        "64",
+        "--auto_quantize_cost_model",
+        "active_moe",
+        "--auto_quantize_active_moe_expert_ratio",
+        "0.03125",
+        "--kv_cache_qformat",
+        "none",
+    )
+    recipe_config = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/"
+        "w4a16_nvfp4_fp8_at_6p0bits-active_moe-grouped-gradient-local"
     ).auto_quantize
     cli_config = hf_ptq._auto_quantize_config_from_cli(args)
 
