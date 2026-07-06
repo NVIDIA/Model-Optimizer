@@ -863,19 +863,47 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
 
 
 def copy_custom_model_files(source_path: str, export_path: str, trust_remote_code: bool = False):
-    """Copy custom model files (configuration_*.py, modeling_*.py, *.json, etc.) from source to export directory.
+    """Copy processor/tokenizer artifacts (and, with trust_remote_code, custom code) to export.
 
-    This function copies custom Python files and JSON configuration files that are needed for
-    models with custom code. It excludes config.json and model.safetensors.index.json as these
-    are typically handled separately by the model export process.
+    Processor and tokenizer *data* artifacts -- e.g. a VLM's ``preprocessor_config.json``,
+    ``merges.txt``/``vocab.json``, and the processor helper modules -- are needed by the
+    deployment stack (vLLM/SGLang) even when the model itself runs on native (non-remote)
+    transformers code. transformers 5.x restructured many VLM configs and no longer
+    re-saves these on ``save_pretrained`` for models loaded natively, so without copying
+    them a native-path export is missing e.g. ``preprocessor_config.json`` and fails to
+    load (``Can't load image processor``). These are copied regardless of
+    ``trust_remote_code``. Executable model/config code (``modeling*.py``,
+    ``configuration_*.py``, ``tokenization_*.py``, and other custom JSON) is only meaningful
+    with ``trust_remote_code`` and is copied only then. ``config.json`` and
+    ``model.safetensors.index.json`` are always skipped (handled by the export itself).
 
     Args:
         source_path: Path to the original model directory or HuggingFace model ID
         export_path: Path to the exported model directory
-        trust_remote_code: Whether trust_remote_code was used (only copy files if True)
+        trust_remote_code: Whether trust_remote_code was used (gates the executable code files)
     """
-    if not trust_remote_code:
-        return
+    # Deployment-critical processor/tokenizer artifacts: safe to copy regardless of
+    # trust_remote_code (data + processor helpers, not model code).
+    always_copy_patterns = [
+        "preprocessor_config.json",
+        "processor_config.json",
+        "image_processing*.py",
+        "processing_*.py",
+        "video_processing*.py",
+        "feature_extraction_*.py",
+        "added_tokens.json",
+        "special_tokens_map.json",
+        "vocab.json",
+        "merges.txt",
+        "tokenizer.model",
+    ]
+    # Executable custom model/config code + other custom JSON: only used with trust_remote_code.
+    code_patterns = [
+        "configuration_*.py",
+        "modeling*.py",
+        "tokenization_*.py",
+        "*.json",
+    ]
 
     # Resolve the source path (handles both local paths and HF model IDs)
     resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
@@ -897,23 +925,16 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print(f"Warning: Export directory {export_path} does not exist")
         return
 
-    # Common patterns for custom model files that need to be copied
-    custom_file_patterns = [
-        "configuration_*.py",
-        "modeling*.py",
-        "tokenization_*.py",
-        "processing_*.py",
-        "image_processing*.py",
-        "feature_extraction_*.py",
-        "*.json",
-    ]
+    patterns = [*always_copy_patterns, *(code_patterns if trust_remote_code else [])]
 
-    copied_files = []
-    for pattern in custom_file_patterns:
+    copied_files: list[str] = []
+    for pattern in patterns:
         for file_path in source_dir.glob(pattern):
             if file_path.is_file():
                 # Skip config.json and model.safetensors.index.json as they're handled separately
                 if file_path.name in ["config.json", "model.safetensors.index.json"]:
+                    continue
+                if file_path.name in copied_files:  # e.g. matched by both pattern lists
                     continue
                 dest_path = export_dir / file_path.name
                 try:
