@@ -83,6 +83,25 @@ def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
     } <= disabled_quantizers
 
 
+@pytest.mark.parametrize("preset", ["nvfp4", "fp8"])
+def test_generic_presets_disable_packed_linear_attn_projections(preset):
+    # TRT-LLM's Qwen3.5/3.6 weight mapper repacks linear_attn.in_proj_qkv /
+    # in_proj_z by splitting every checkpoint tensor along dim 0; scalar
+    # per-tensor scales (input_scale, weight_scale_2) crash it with
+    # "IndexError: tuple index out of range" (GitHub issue #1933). The generic
+    # presets must keep these packed projections unquantized.
+    disabled_quantizers = {
+        entry["quantizer_name"]
+        for entry in presets.QUANT_CFG_CHOICES[preset]["quant_cfg"]
+        if entry.get("enable") is False
+    }
+
+    assert {
+        "*linear_attn.in_proj_qkv*",
+        "*linear_attn.in_proj_z*",
+    } <= disabled_quantizers
+
+
 def test_load_quant_cfg_choices_rejects_stale_alias():
     with pytest.raises(ValueError, match="does-not-exist"):
         presets.load_quant_cfg_choices(

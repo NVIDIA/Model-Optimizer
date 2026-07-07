@@ -56,17 +56,10 @@ imports:
   - quantizer_name: '*self_attn*input_quantizer'
     cfg: {$import: fp8}
 
-  # FP8 large linear-attention projections. in_proj_a and in_proj_b are
-  # re-disabled explicitly below; conv1d stays disabled via base_disable_all
-  # (no rule re-enables it).
-  - quantizer_name: '*linear_attn.in_proj_qkv*weight_quantizer'
-    cfg: {$import: fp8}
-  - quantizer_name: '*linear_attn.in_proj_qkv*input_quantizer'
-    cfg: {$import: fp8}
-  - quantizer_name: '*linear_attn.in_proj_z*weight_quantizer'
-    cfg: {$import: fp8}
-  - quantizer_name: '*linear_attn.in_proj_z*input_quantizer'
-    cfg: {$import: fp8}
+  # FP8 linear-attention out_proj. The large in_proj_qkv/in_proj_z projections
+  # are re-enabled after default_disabled_quantizers below; in_proj_a and
+  # in_proj_b are re-disabled explicitly below; conv1d stays disabled via
+  # base_disable_all (no rule re-enables it).
   - quantizer_name: '*linear_attn.out_proj*weight_quantizer'
     cfg: {$import: fp8}
   - quantizer_name: '*linear_attn.out_proj*input_quantizer'
@@ -93,6 +86,20 @@ imports:
   # MTP layers identified by index instead.
   - quantizer_name: '*mtp*'
     enable: false
+
+  # Re-enable FP8 on the large linear-attention projections per the reference
+  # recipe. Must come after default_disabled_quantizers, which disables
+  # `*linear_attn.in_proj_qkv*` / `*linear_attn.in_proj_z*` by default because
+  # TRT-LLM's Qwen3.5 weight mapper cannot split their scalar per-tensor scales
+  # (GitHub issue #1933).
+  - quantizer_name: '*linear_attn.in_proj_qkv*weight_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*linear_attn.in_proj_qkv*input_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*linear_attn.in_proj_z*weight_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*linear_attn.in_proj_z*input_quantizer'
+    cfg: {$import: fp8}
 
   # Re-enable NVFP4 on lm_head weights (static MSE scales). Must come after
   # default_disabled_quantizers, which disables `*lm_head*`.
