@@ -78,8 +78,6 @@ def _run_speed_bench(
 ) -> Path:
     save_dir = tmp_path / f"{engine.lower()}_qualitative"
 
-    setup_cmd = ["python3", "-m", "pip", "install", "-r", "requirements.txt"]
-
     cmd = [
         "python3",
         "run.py",
@@ -108,7 +106,6 @@ def _run_speed_bench(
         "--save_dir",
         str(save_dir),
     ]
-    run_example_command(setup_cmd, "specdec_bench")
     run_example_command(cmd, "specdec_bench")
     return save_dir
 
