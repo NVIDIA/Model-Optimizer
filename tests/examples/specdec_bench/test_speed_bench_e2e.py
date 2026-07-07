@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 from _test_utils.examples.run_command import run_example_command
-from datasets import Dataset
 
 ENGINE_IMPORTS = {
     "SGLANG": "sglang",
@@ -29,21 +28,33 @@ ENGINE_IMPORTS = {
 
 
 def _create_dummy_speed_bench_qualitative_split(output_dir: Path) -> Path:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+
     prompts = [
-        ("coding", ["Python code"]),
-        ("math", ["17"]),
-        ("reasoning", ["strawberries"]),
-        ("writing", ["movie"]),
+        ("coding", ["Write a Python function that returns the square of an integer."]),
+        ("math", ["What is 17 plus 25? Explain in one short sentence."]),
+        ("reasoning", ["List two reasons caching can improve application latency."]),
+        ("writing", ["Rewrite this sentence to be more concise: The system is not unavailable."]),
+        ("summarization", ["Summarize in five words: GPUs accelerate matrix multiplication."]),
+        ("qa", ["Name one benefit of batching inference requests."]),
+        ("coding", ["Write a Python expression that checks whether x is even."]),
+        ("math", ["What is 9 multiplied by 8?"]),
+        ("reasoning", ["Which is usually faster for lookup, a list scan or a hash map?"]),
+        ("writing", ["Convert this to active voice: The benchmark was run by the engineer."]),
     ]
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "test.parquet"
-    Dataset.from_dict(
-        {
-            "question_id": list(range(len(prompts))),
-            "category": [category for category, _ in prompts],
-            "turns": [turns for _, turns in prompts],
-            "source": ["mock_qualitative"] * len(prompts),
-        }
+    pd.DataFrame(
+        [
+            {
+                "question_id": question_id,
+                "category": category,
+                "turns": turns,
+                "source": "mock_qualitative",
+            }
+            for question_id, (category, turns) in enumerate(prompts)
+        ]
     ).to_parquet(output_path)
     return output_path
 
@@ -70,21 +81,20 @@ def dummy_speed_bench_qualitative_split(tmp_path_factory) -> Path:
 
 def _run_speed_bench(
     *,
-    tiny_qwen3_path: str,
+    tiny_llama_path: str,
     tmp_path: Path,
     engine: str,
     dataset_path: Path,
-    num_gpus: int,
 ) -> Path:
     save_dir = tmp_path / f"{engine.lower()}_qualitative"
 
     cmd = [
-        "python3",
+        "python",
         "run.py",
         "--model_dir",
-        tiny_qwen3_path,
+        tiny_llama_path,
         "--tokenizer",
-        tiny_qwen3_path,
+        tiny_llama_path,
         "--dataset",
         "speed",
         "--dataset_path",
@@ -94,15 +104,15 @@ def _run_speed_bench(
         "--speculative_algorithm",
         "NONE",
         "--output_length",
-        "2",
+        "100",
         "--tp_size",
-        str(num_gpus),
+        "1",
         "--ep_size",
         "1",
         "--concurrency",
         "10",
         "--max_seq_len",
-        "20",
+        "8192",
         "--save_dir",
         str(save_dir),
     ]
@@ -120,23 +130,17 @@ def _read_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in f]
 
 
-@pytest.mark.parametrize("engine", ["VLLM"])
+@pytest.mark.parametrize("engine", ["TRTLLM"])
 def test_speed_bench_qualitative_runs_example_script(
-    tiny_qwen3_path, dummy_speed_bench_qualitative_split, tmp_path, engine, num_gpus
+    tiny_llama_path, dummy_speed_bench_qualitative_split, tmp_path, engine
 ):
     _require_engine(engine)
     save_dir = _run_speed_bench(
-        tiny_qwen3_path=tiny_qwen3_path,
+        tiny_llama_path=tiny_llama_path,
         tmp_path=tmp_path,
         engine=engine,
         dataset_path=dummy_speed_bench_qualitative_split,
-        num_gpus=num_gpus,
     )
-
-    assert (save_dir / "configuration.json").is_file()
-    assert (save_dir / "specbench_results.json").is_file()
-    assert (save_dir / "timing.json").is_file()
-    assert (save_dir / "specbench_responses.jsonl").is_file()
 
     config = _read_json(save_dir / "configuration.json")
     specbench = _read_json(save_dir / "specbench_results.json")
@@ -147,6 +151,6 @@ def test_speed_bench_qualitative_runs_example_script(
     assert config["dataset_path"] == str(dummy_speed_bench_qualitative_split)
     assert config["engine"] == engine
     assert specbench["Average_AL"] > 0
-    assert len(specbench["Request_AL"]) == 4
-    assert len(responses) == 4
+    assert len(specbench["Request_AL"]) == 10
+    assert len(responses) == 10
     assert timing[0]["Number of Output Tokens"]["mean"]
