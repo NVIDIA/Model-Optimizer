@@ -23,7 +23,19 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
 )
+from megatron.bridge.models.conversion import model_bridge
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+
+
+def _qwen35_moe_bridge_supported() -> bool:
+    """Whether MBridge supports Qwen3.5-MoE per-expert weight assembly, i.e. nemo:26.08+.
+
+    Mount an updated MBridge to run them on 26.06.
+    """
+    try:
+        return hasattr(model_bridge, "_fuse_per_expert_hf_weight")
+    except Exception:
+        return False
 
 
 @pytest.mark.parametrize(
@@ -109,6 +121,10 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
                 max_position_embeddings=1024,
             ),
             id="qwen3_5_moe_vl",
+            marks=pytest.mark.skipif(
+                not _qwen35_moe_bridge_supported(),
+                reason="Qwen3.5-MoE needs Megatron-Bridge native MoE support (nemo:26.08+)",
+            ),
         ),
     ],
 )

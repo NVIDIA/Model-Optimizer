@@ -47,6 +47,13 @@ docker run \
 > [!WARNING]
 > Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers. You may also refer to this [doc](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docker/common/README.md#installing-packages-inside-the-container) on how to correctly install packages in the NeMo containers without breaking existing torch installation.
 
+> [!NOTE]
+> **Working with MoE Vision-Language Models (e.g. Qwen3.5-VL-MoE)?** The `nemo:26.06` container's Megatron-Bridge lacks the MoE expert weight mappings these models need (dense VLMs such as Gemma3-VL and Qwen3-VL work as-is). Until the `nemo:26.08` container is released, mount the latest [Megatron-Bridge `main`](https://github.com/NVIDIA-NeMo/Megatron-Bridge) source over the pre-installed copy by adding this to the `docker run` command above:
+>
+> ```bash
+> -v /path/to/Megatron-Bridge/src/megatron/bridge:/opt/Megatron-Bridge/src/megatron/bridge
+> ```
+
 You also need to login with your HuggingFace token to download gated datasets / models.
 Note that the default dataset for pruning and quantization is [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), which is gated.
 
@@ -59,7 +66,7 @@ hf auth login --token <your token>
 This section shows how to quantize a HuggingFace model using ModelOpt in the Megatron-Bridge framework. Quantization is a two-step flow:
 
 1. [quantize.py](quantize.py) applies post-training quantization (PTQ) with calibration and saves a **Megatron checkpoint** (with ModelOpt state). Tensor / pipeline / expert parallelism are all supported, and the checkpoint can be reloaded for further training (Quantization Aware Training / Quantization Aware Distillation).
-2. [export.py](export.py) converts that Megatron checkpoint to a **HuggingFace (unified) checkpoint** that deploys directly with TensorRT-LLM, vLLM, or SGLang.
+2. [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) converts that Megatron checkpoint to a **HuggingFace (unified) checkpoint** that deploys directly with TensorRT-LLM, vLLM, or SGLang.
 
 `quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `NVFP4_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/nvfp4_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
 
@@ -81,7 +88,7 @@ torchrun --nproc_per_node 2 quantize.py \
 **Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
 
 ```bash
-torchrun --nproc_per_node 2 export.py \
+torchrun --nproc_per_node 2 export_quantized_megatron_to_hf.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
     --megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
     --pp_size 2 \
@@ -89,12 +96,12 @@ torchrun --nproc_per_node 2 export.py \
 ```
 
 > [!NOTE]
-> The HuggingFace unified exporter does not gather tensor-parallel-sharded weights. Use `--pp_size` on `export.py` to shard a large model with pipeline parallelism across GPUs for export.
+> The HuggingFace unified exporter does not gather tensor-parallel-sharded weights. Use `--pp_size` on `export_quantized_megatron_to_hf.py` to shard a large model with pipeline parallelism across GPUs for export.
 
 > [!TIP]
 > To recover the accuracy lost during quantization, fine-tune the quantized Megatron checkpoint (from step 1) with [Quantization Aware Distillation (QAD)](#quantization-aware-distillation-qad) before running the step 2 export.
 
-To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export.py --help`).
+To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export_quantized_megatron_to_hf.py --help`).
 
 ### Vision-Language Models (VLMs)
 
@@ -104,7 +111,7 @@ For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automati
 - A **text** dataset runs text-only calibration of the language model (vision tower idle).
 
 > [!NOTE]
-> HuggingFace unified export (`export.py`) of a quantized VLM is not yet supported; the quantized VLM is saved in Megatron checkpoint format only.
+> HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM is not yet supported; the quantized VLM is saved in Megatron checkpoint format only.
 
 ## Sanity-Check Generation
 
@@ -204,7 +211,7 @@ torchrun --nproc_per_node 8 distill.py \
     --output_dir /output/qwen3_8b_nvfp4_qad
 ```
 
-The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export.py](export.py) (point `--megatron_path` at `<output_dir>/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
+The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `<output_dir>/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
 
 ### Slurm Usage
 
@@ -214,27 +221,36 @@ To run the distillation script on a Slurm cluster for multi-node training, you j
 
 The distilled checkpoint is saved in Megatron distributed format. If you need a HuggingFace checkpoint, there are two ways to convert it:
 
-**Inline** -- add `--hf_export_path` and `--student_hf_model` to the `distill.py` command to automatically convert the final checkpoint after distillation:
+**Inline** -- add `--hf_export_path` to the `distill.py` command to automatically convert the **final** checkpoint after distillation:
 
 ```bash
 torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     ... \
-    --hf_export_path /path/to/save/distilled_hf_ckpt \
-    --student_hf_model Qwen/Qwen3-4B
+    --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
 
-`--student_hf_model` should match the base architecture of the student (used as a template for export). For non-Puzzletron (i.e. standard) models, it should be same as `--student_hf_path`.
+`--student_hf_model` is also needed for heterogeneous (Puzzletron/NAS) students whose architecture differs from `--student_hf_path`; for standard (homogeneous) models it defaults to `--student_hf_path`, and it is unused for VLMs.
 
-**Separate conversion** -- convert any saved iteration using the Megatron-Bridge conversion script:
+**Separate conversion** -- convert **any** saved iteration (intermediate or final) with [export_distilled_megatron_to_hf.py](export_distilled_megatron_to_hf.py):
 
 ```bash
-uv run python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
-    --hf-model <path_to_pruned_hf_ckpt> \
-    --megatron-path <distill_output_dir>/checkpoints/iter_<iter_number> \
-    --hf-path <path_to_save_distilled_hf_ckpt>
+torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+    --student_hf_path <student_hf_model_or_path> \
+    --megatron_path <distill_output_dir>/checkpoints/iter_<iter_number> \
+    --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
 
-For more details, see the [Megatron-Bridge conversion README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion).
+### Vision-Language Models (VLMs)
+
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `distill.py` automatically distills only the **language model** (on text data) and leaves the vision tower and vision-language projector untouched, then saves the full VLM back. This also aligns with pruning and quantization behavior where we leave the vision tower and projector untouched. This composes with pruning and QAD (`--student_megatron_path`) exactly as for LLMs, and the HF export reuses `--student_hf_path` (no `--student_hf_model` needed).
+
+```bash
+torchrun --nproc_per_node 8 distill.py \
+    --tp_size 8 \
+    --teacher_hf_path Qwen/Qwen3-VL-2B-Thinking \
+    --student_hf_path Qwen/Qwen3-VL-2B-Thinking \
+    ...
+```
 
 ### Distillation Results
 
