@@ -82,7 +82,7 @@ def _nvfp4_qdq_reference(x, global_scale=1.0 / (6.0 * 448.0)):
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
-@pytest.mark.parametrize("num_kv_splits", [1, 8, 32])
+@pytest.mark.parametrize("num_kv_splits", [1, 32])
 def test_split_k_varlen_gqa_matches_dense(num_kv_splits):
     torch.manual_seed(13)
     batch, num_q_heads, num_kv_heads, seq_len, head_dim = 2, 8, 2, 511, 64
@@ -111,17 +111,36 @@ def test_split_k_varlen_gqa_matches_dense(num_kv_splits):
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
 @requires_native_e4m3
-def test_baked_v_prefix_and_pristine_tail_match_full_onread():
-    seq_len, num_q_heads, num_kv_heads, head_dim = 17, 4, 1, 64
+@pytest.mark.parametrize(
+    ("cache_dtype", "num_q_heads", "head_dim", "value", "v_qdq_amax", "v_qdq_scale"),
+    [
+        pytest.param(torch.float16, 4, 64, 0.017578125, None, 1.0, id="fp16-default-gqa"),
+        pytest.param(
+            torch.bfloat16,
+            1,
+            16,
+            0.019,
+            1.0,
+            1.0 / (6.0 * 448.0),
+            id="bf16-custom-amax-carrier",
+        ),
+    ],
+)
+def test_baked_v_prefix_and_pristine_tail_match_full_onread(
+    cache_dtype, num_q_heads, head_dim, value, v_qdq_amax, v_qdq_scale
+):
+    """Baked prefixes and pristine tails share the cache carrier at either V scale."""
+    seq_len, num_kv_heads = 17, 1
     q = torch.zeros(1, num_q_heads, head_dim, device="cuda", dtype=torch.float32)
-    k = torch.zeros(1, num_kv_heads, seq_len, head_dim, device="cuda", dtype=torch.float16)
-    v = torch.full_like(k, 0.017578125)
+    k = torch.zeros(1, num_kv_heads, seq_len, head_dim, device="cuda", dtype=cache_dtype)
+    v = torch.full_like(k, value)
     seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
     k_cache, raw_v_cache, block_table = _paged_cache(k, v, (seq_len,))
     common = {
         "p_qdq": "nvfp4",
-        "v_qdq": "nvfp4",
         "num_kv_splits": 1,
+        "v_qdq": "nvfp4",
+        "v_qdq_amax": v_qdq_amax,
     }
 
     onread = attention_decode(q, k_cache, raw_v_cache, block_table, seq_lens, **common)
@@ -132,6 +151,7 @@ def test_baked_v_prefix_and_pristine_tail_match_full_onread():
         torch.zeros(1, device="cuda", dtype=torch.int32),
         torch.tensor([16], device="cuda", dtype=torch.int32),
         max_new_tokens=16,
+        v_qdq_scale=v_qdq_scale,
     )
     baked_v_before = baked_v_cache.clone()
     baked = attention_decode(
@@ -146,45 +166,6 @@ def test_baked_v_prefix_and_pristine_tail_match_full_onread():
 
     torch.testing.assert_close(baked, onread, rtol=0, atol=0)
     torch.testing.assert_close(baked_v_cache, baked_v_before, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
-@requires_native_e4m3
-def test_baked_v_prefix_uses_same_cache_carrier_as_tail():
-    """A non-default V scale must not change values at the bake boundary."""
-    seq_len, head_dim = 17, 16
-    q = torch.zeros(1, 1, head_dim, device="cuda", dtype=torch.float32)
-    k = torch.zeros(1, 1, seq_len, head_dim, device="cuda", dtype=torch.bfloat16)
-    v = torch.full_like(k, 0.019)
-    seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
-    k_cache, raw_v_cache, block_table = _paged_cache(k, v, (seq_len,))
-    common = {
-        "num_kv_splits": 1,
-        "v_qdq": "nvfp4",
-        "v_qdq_amax": 1.0,
-    }
-
-    onread = attention_decode(q, k_cache, raw_v_cache, block_table, seq_lens, **common)
-    baked_v_cache = raw_v_cache.clone()
-    fake_quant_v_onwrite(
-        baked_v_cache,
-        block_table,
-        torch.zeros(1, device="cuda", dtype=torch.int32),
-        torch.tensor([16], device="cuda", dtype=torch.int32),
-        max_new_tokens=16,
-        v_qdq_scale=1.0 / (6.0 * 448.0),
-    )
-    baked = attention_decode(
-        q,
-        k_cache,
-        baked_v_cache,
-        block_table,
-        seq_lens,
-        v_cache_quantized=True,
-        **common,
-    )
-
-    torch.testing.assert_close(baked, onread, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")

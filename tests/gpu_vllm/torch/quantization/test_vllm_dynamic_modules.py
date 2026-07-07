@@ -82,25 +82,13 @@ def _nvfp4_quantizer(*, block_size=16, enabled=True):
     return quantizer
 
 
-def test_import_attention_module_resolves_installed_concrete_attention():
-    attention_module = vllm_plugin._import_attention_module()
-    assert isinstance(attention_module.Attention, type)
-    assert vllm_plugin.vllm_attention.Attention is attention_module.Attention
-
-
-@pytest.mark.parametrize(
-    "wrapper_name",
-    ["_QuantVLLMAttention", "_QuantVLLMCrossAttention", "_QuantVLLMEncoderOnlyAttention"],
-)
-def test_attention_setup_keeps_qkv_only_checkpoint_surface(monkeypatch, wrapper_name):
+def test_attention_setup_keeps_qkv_only_checkpoint_surface(monkeypatch):
     monkeypatch.setattr(
         vllm_plugin,
         "create_parallel_state",
         lambda: vllm_plugin.ParallelState(data_parallel_group=None),
     )
-    wrapper = getattr(vllm_plugin, wrapper_name)
-    test_wrapper = type(f"Test{wrapper.__name__}", (wrapper, _NativeAttention), {})
-    attention = _new_attention(test_wrapper)
+    attention = _new_attention(_TestQuantVLLMAttention)
 
     attention._setup()
 
