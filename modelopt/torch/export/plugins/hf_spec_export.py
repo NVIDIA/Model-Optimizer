@@ -477,3 +477,31 @@ class DominoExporter(DFlashExporter):
             }
         )
         return config
+
+
+class DSparkExporter(DFlashExporter):
+    """Draft model exporter for DSpark (DFlash backbone + sequential Markov head).
+
+    Same z-lab-compatible format as DFlash, plus the DSpark head weights
+    (``markov_w1.*`` / ``markov_w2.*`` / ``gate_proj.*`` / ``joint_proj.*`` /
+    ``confidence_proj.*``, already captured by the inherited ``dflash_module.``
+    stripping) and the extra config fields the loader needs to rebuild the head
+    (``projector_type``, ``markov_rank``, ``markov_head_type``,
+    ``use_confidence_head``, ``shift_label``).
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the DSpark head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "dspark"),
+                "shift_label": getattr(draft_config, "shift_label", True),
+                "markov_rank": draft_config.markov_rank,
+                "markov_head_type": getattr(draft_config, "markov_head_type", "vanilla"),
+                "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),
+            }
+        )
+        return config
