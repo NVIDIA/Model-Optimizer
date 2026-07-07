@@ -385,7 +385,7 @@ def main(args: argparse.Namespace):
         save_vlm_to_hf(
             full_student,
             args.hf_export_path,
-            args.student_hf_model,
+            args.student_hf_path,
             trust_remote_code=args.trust_remote_code,
         )
         print_rank_0(f"Saved distilled VLM to {args.hf_export_path} in HF format")

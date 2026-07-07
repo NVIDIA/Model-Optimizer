@@ -414,10 +414,16 @@ def main(args: argparse.Namespace):
         hf_tokenizer_path=args.hf_model_name_or_path,
         hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
     )
-    print_rank_0(
-        f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. To deploy this model "
-        "(TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py"
-    )
+    if is_vlm:
+        print_rank_0(
+            f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format "
+            "(HuggingFace unified export of a quantized VLM is not yet supported)."
+        )
+    else:
+        print_rank_0(
+            f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. To deploy this model "
+            "(TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py"
+        )
 
     # Sanity-check generation with the fake-quantized model. Skipped when --compress is set: the
     # weights are now real low-bit and megatron_generate may not support compressed forward for

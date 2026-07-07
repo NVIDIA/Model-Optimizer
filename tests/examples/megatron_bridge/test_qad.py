@@ -17,24 +17,13 @@
 from pathlib import Path
 
 import pytest
+from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
 )
-from megatron.bridge.models.conversion import model_bridge
-
-
-def _qwen35_moe_bridge_supported() -> bool:
-    """Whether MBridge supports Qwen3.5-MoE per-expert weight assembly, i.e. nemo:26.08+.
-
-    Mount an updated MBridge to run them on 26.06.
-    """
-    try:
-        return hasattr(model_bridge, "_fuse_per_expert_hf_weight")
-    except Exception:
-        return False
 
 
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
@@ -61,7 +50,7 @@ def _qwen35_moe_bridge_supported() -> bool:
             True,
             True,
             marks=pytest.mark.skipif(
-                not _qwen35_moe_bridge_supported(),
+                not qwen35_moe_bridge_supported(),
                 reason="Qwen3.5-MoE needs Megatron-Bridge native MoE support (nemo:26.08+)",
             ),
         ),
