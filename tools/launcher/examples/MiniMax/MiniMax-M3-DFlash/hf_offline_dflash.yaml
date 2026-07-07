@@ -98,11 +98,13 @@ pipeline:
       - training.output_dir=/scratchspace/dflash_minimax_m3_offline
       - training.num_train_epochs=10
       # Offline training uses the lightweight FakeBaseModel (lm_head + embed only) + a small
-      # 5-layer draft, so far fewer nodes than M2.7's 8x suffice. But bs is still bounded by the
-      # activation-heavy offline inputs (M3's 6144 hidden x 5 aux layers x 8192 seq): bs=4 OOMs
-      # on 80 GB. bs=2 x grad_accum=2 = effective batch 64 (16 ranks over 2 nodes), memory-safe.
+      # 5-layer draft, so a SINGLE node suffices (vs M2.7's 8x). Single-node also avoids the
+      # cross-node C10d rendezvous that repeatedly crashed the 2-node run on cw-dfw
+      # (DistNetworkError ~every 20-60min; slurm --requeue doesn't catch app-level NCCL crashes).
+      # bs is bounded by the activation-heavy offline inputs (6144 hidden x 5 aux layers x 8192
+      # seq): bs=4 OOMs on 80 GB. bs=2 x grad_accum=4 on 1 node x 8 GPU = effective batch 64.
       - training.per_device_train_batch_size=2
-      - training.gradient_accumulation_steps=2
+      - training.gradient_accumulation_steps=4
       - training.learning_rate=1.2e-3
       - training.warmup_steps=100
       - training.training_seq_len=8192
@@ -133,7 +135,7 @@ pipeline:
       - dflash.dflash_export_rope_scaling.mscale=1.0
       - dflash.dflash_export_rope_scaling.mscale_all_dim=1.0
     environment:
-      - NUM_NODES: "2"
+      - NUM_NODES: "1"
       - PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       # Offline training uses a lightweight FakeBaseModel, so plain DDP suffices (no
       # ACCELERATE_CONFIG / FSDP2 patches). transformers 4.57.1 (not M3's 4.52.4): 4.52.4's
@@ -144,6 +146,6 @@ pipeline:
       - MIXED_PRECISION: "no"
     slurm_config:
       _factory_: "slurm_factory"
-      nodes: 2
+      nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 8
