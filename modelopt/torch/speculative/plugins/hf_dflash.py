@@ -88,7 +88,12 @@ from .modeling_dflash import (  # noqa: F401
     DFlashModule,
     build_target_layer_ids,
 )
-from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
+from .modeling_fakebase import (
+    _BASE_MODEL_PATHS,
+    _EMBED_TOKENS_PATHS,
+    _FINAL_NORM_PATHS,
+    _LM_HEAD_PATHS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +166,16 @@ class HFDFlashModel(DFlashModel):
         return self.get_submodule(self.base_model_lm_head_path)
 
     @property
+    def _base_model_norm(self):
+        """Base model's final pre-lm_head RMSNorm, or None if none was located.
+
+        Applied before lm_head in the offline/streaming distillation path only when the
+        producer captured a pre-norm hidden (base_hidden_prenorm), to reconstruct true logits.
+        """
+        path = getattr(self, "base_model_norm_path", None)
+        return self.get_submodule(path) if path else None
+
+    @property
     def _base_llm_config(self):
         return (
             getattr(self.config, "text_config", None)
@@ -188,6 +203,16 @@ class HFDFlashModel(DFlashModel):
                     continue
             else:
                 raise ValueError(f"Part {name} not found in model")
+        # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
+        # un-normed final hidden collect by vllm.
+        self.base_model_norm_path = None
+        for path in _FINAL_NORM_PATHS:
+            try:
+                assert isinstance(self.get_submodule(path), torch.nn.Module)
+                self.base_model_norm_path = path
+                break
+            except Exception:
+                continue
 
     def modify(self, config):
         """Initialize DFlash draft module."""
@@ -566,13 +591,15 @@ class HFDFlashModel(DFlashModel):
         # 1. Run base model → extract target hidden states
         if self.dflash_offline:
             assert "base_model_outputs" in kwargs
-            base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
-            if base_outputs.logits is None and self.dflash_self_logit_distillation:
-                # Compute logits from last-layer hidden states for KD loss.
-                # base_model_hidden_states is required on this path — fail fast
-                # with KeyError rather than lm_head(None).
-                out_hiddens = kwargs["base_model_outputs"]["base_model_hidden_states"]
-                base_outputs.logits = self._base_model_lm_head(out_hiddens)
+            # For self-logit-distillation, from_offline_dict reconstructs base logits from the
+            # captured hidden (final norm re-applied as needed) when the producer didn't supply
+            # them, and raises if anything needed for that is missing.
+            base_outputs = DFlashBaseModelOutput.from_offline_dict(
+                kwargs["base_model_outputs"],
+                self._base_model_norm,
+                self._base_model_lm_head,
+                need_logits=self.dflash_self_logit_distillation,
+            )
             target_hidden = base_outputs.target_hidden
         else:
             # TODO: For co-training the base model, remove no_grad and eval() switch.

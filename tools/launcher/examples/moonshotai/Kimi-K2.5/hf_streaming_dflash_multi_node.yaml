@@ -7,8 +7,10 @@
 # on one 4-GPU node, so each serve replica owns a whole node.
 #
 # Capture ids: build_target_layer_ids(num_orig=61, num_draft=5)=[1,15,30,44,58]
-# -> +1 for embedding = [2,16,31,45,59], append base 60 (final layer uncapturable).
+# -> +1 for embedding = [2,16,31,45,59], append true final layer 61.
 # 6 captured = 5 aux layers, matching the 5-layer DFlash draft block.
+# (61 = true final hidden; requires a vLLM with the aux-capture fix vllm#46788.
+#  Without it use 60 — the 2nd-to-last layer — which caps acceptance length.)
 #
 # Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
 #   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
@@ -72,7 +74,7 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       # See header for derivation.
-      - EAGLE_CAPTURE_IDS: "[2,16,31,45,59,60]"
+      - EAGLE_CAPTURE_IDS: "[2,16,31,45,59,61]"
       - SERVE_NODES: "2"
       - SERVE_TP: "4"
       # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).

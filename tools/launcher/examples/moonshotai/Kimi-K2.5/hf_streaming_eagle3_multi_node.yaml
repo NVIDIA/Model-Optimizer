@@ -4,8 +4,9 @@
 # common/eagle3/train_eagle_streaming.sh header.
 #
 # Requires GB200: native NVFP4 + 192 GB/GPU fits ~551 GB Kimi at TP=4 on one node.
-# Capture ids = [2,30,58] aux + [60] base = 4 (kimi_k25/deepseek_v3, 61 layers;
-# layer 60 is the last capturable, used as base).
+# Capture ids = [2,30,58] aux + [61] true final = 4 (kimi_k25/deepseek_v3, 61 layers;
+# layer 61 is the true final hidden, used as base). 61 requires a vLLM with the
+# aux-capture fix vllm#46788; without it use 60 — the 2nd-to-last layer (caps AL).
 #
 # Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
 #   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
@@ -57,7 +58,7 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       # No spaces in values: nemo_run emits `export FOO=value` unquoted.
-      - EAGLE_CAPTURE_IDS: "[2,30,58,60]"
+      - EAGLE_CAPTURE_IDS: "[2,30,58,61]"
       - SERVE_NODES: "2"
       - SERVE_TP: "4"
       # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
