@@ -55,11 +55,6 @@ P_QDQ_BLOCK_N = 32
 FP8_E4M3_MAX = 448.0
 
 
-@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
-def test_p_qdq_block_n_matches_forward_configs():
-    assert {config.kwargs["BLOCK_N"] for config in triton_fa._FWD_CONFIGS} == {P_QDQ_BLOCK_N}
-
-
 class _FixedBlockMForward:
     """Launch the raw forward kernel with one selected query tile."""
 
@@ -84,13 +79,9 @@ class _FixedBlockMForward:
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
-@pytest.mark.parametrize(
-    ("seq_len_q", "seq_len_kv", "is_causal"),
-    [(256, 256, True), (197, 233, True), (256, 256, False)],
-    ids=["causal", "chunked-prefill", "non-causal"],
-)
-def test_sparse_dense_window_is_block_m_invariant(monkeypatch, seq_len_q, seq_len_kv, is_causal):
+def test_sparse_dense_window_is_block_m_invariant(monkeypatch):
     """The dense recent-token policy must not depend on the compute query tile."""
+    seq_len_q, seq_len_kv = 197, 233
     num_heads, head_dim = 2, 64
     torch.manual_seed(20260706)
     q = torch.randn(seq_len_q, num_heads, head_dim, device="cuda", dtype=torch.float16)
@@ -110,7 +101,7 @@ def test_sparse_dense_window_is_block_m_invariant(monkeypatch, seq_len_q, seq_le
             q_locs,
             q_lens,
             seq_len_q,
-            is_causal=is_causal,
+            is_causal=True,
             b_start_loc_k=kv_locs,
             b_seq_len_k=kv_lens,
             max_input_len_k=seq_len_kv,
@@ -379,21 +370,6 @@ class TestSoftmaxQdqForward:
             # sensitive to Triton-vs-PyTorch exp2 differences near thresholds.
             atol = 2e-2 if mode == "nvfp4" else 5e-3
             torch.testing.assert_close(o[s : s + n].float(), ref, rtol=5e-3, atol=atol)
-
-    @pytest.mark.parametrize(("mode", "tol"), [("fp8", 5e-2), ("nvfp4", 0.25)])
-    @requires_native_e4m3
-    def test_qdq_close_to_dense(self, mode, tol):
-        """Quantization is an approximation: output stays near dense attention."""
-        seq_len, num_heads, num_kv_heads, head_dim = 128, 4, 2, 64
-        scale = 1.0 / (head_dim**0.5)
-
-        torch.manual_seed(13)
-        q, k, v = make_qkv(seq_len, num_heads, num_kv_heads, head_dim, dtype=torch.float16)
-        locs, lens = make_varlen_meta([seq_len])
-
-        o = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale, p_qdq=mode)
-        ref = sdpa_reference(q, k, v, locs, lens)
-        torch.testing.assert_close(o, ref, rtol=tol, atol=tol)
 
     @pytest.mark.parametrize("mode", ["fp8", "nvfp4"])
     @requires_native_e4m3

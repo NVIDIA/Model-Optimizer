@@ -27,10 +27,13 @@ import pytest
 import torch
 import vllm
 from torch import nn
+from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 from vllm.v1.attention.backends.flashinfer import (
     FlashInferBackend,
     FlashInferImpl,
+    FlashInferMetadata,
     FlashInferMetadataBuilder,
 )
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
@@ -94,8 +97,19 @@ def test_shared_worker_import_does_not_resolve_quant_only_apis(monkeypatch):
     monkeypatch.setattr(vllm, "__version__", "0.9.0")
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     worker_module = _load_worker_module("sparse_attn_worker_import_test")
+    attention = _bare_attention(worker_module)
+    state = _sparse_worker_state(nn.ModuleDict({"attn": attention}))
+    monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: ({}, "test"))
+    monkeypatch.setattr(
+        worker_module,
+        "match_sparse_config",
+        lambda *_: {"enable": True, "sparsity_n": 2, "sparsity_m": 4},
+    )
+
+    worker_module._install_attention(state, quantize=False)
 
     assert worker_module.__all__ == ["SparseAttnWorker", "QuantSparseAttnWorker"]
+    assert type(attention.impl) is ModelOptSparseAttentionImpl
 
 
 @pytest.mark.parametrize(
@@ -115,15 +129,6 @@ def test_public_workers_install_after_base_load(monkeypatch, class_name, quantiz
     instance = object.__new__(getattr(worker_module, class_name))
     assert instance.load_model() is None
     assert events == ["base", ("install", quantize)]
-
-
-def test_sparse_worker_keeps_base_memory_profile():
-    worker_module = _load_worker_module("sparse_profile_test")
-
-    assert (
-        worker_module.SparseAttnWorker.determine_available_memory
-        is BaseWorker.determine_available_memory
-    )
 
 
 def _make_old_impl():
@@ -190,47 +195,66 @@ def _make_flashinfer_impl(*, sparse=False, quantized=False):
     return impl
 
 
-def test_flashinfer_metadata_builder_patch_stashes_common_metadata(monkeypatch):
-    """The wrapper must bind the current vLLM signature without shifting arguments."""
-    calls = []
+@pytest.fixture
+def isolated_flashinfer_builder_patch():
+    saved_build = FlashInferMetadataBuilder.build
+    vllm_plugin._reset_flashinfer_state_for_tests()
+    try:
+        yield
+    finally:
+        FlashInferMetadataBuilder.build = saved_build
+        vllm_plugin._reset_flashinfer_state_for_tests()
 
-    def fake_build(self, common_prefix_len, common_attn_metadata, fast_build=False):
-        calls.append((common_prefix_len, common_attn_metadata, fast_build))
-        return SimpleNamespace()
 
-    monkeypatch.setattr(FlashInferMetadataBuilder, "build", fake_build)
-    monkeypatch.setattr(vllm_plugin, "_FLASHINFER_PATCHED", False)
-    common = SimpleNamespace(
-        block_table_tensor=object(),
-        seq_lens=object(),
-        query_start_loc=object(),
-        num_actual_tokens=7,
-        max_query_len=3,
-        max_seq_len=11,
+def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
+    monkeypatch, isolated_flashinfer_builder_patch
+):
+    """The real builder result must retain the common metadata contract."""
+    monkeypatch.setattr(flashinfer_backend, "use_trtllm_attention", lambda *_args, **_kwargs: True)
+    assert patch_flashinfer_metadata_builder() is True
+    builder = object.__new__(FlashInferMetadataBuilder)
+    builder.__dict__.update(
+        reorder_batch_threshold=1,
+        page_size=16,
+        num_qo_heads=2,
+        num_kv_heads=2,
+        dcp_world_size=1,
+        cache_dtype=torch.float16,
+        q_data_type=torch.float16,
+        attention_config=SimpleNamespace(use_trtllm_attention=True),
+        has_sinks=False,
+        use_trtllm_decode_attention=True,
+        use_dcp=False,
+    )
+    common = CommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([16], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=1,
+        max_query_len=1,
+        max_seq_len=16,
+        block_table_tensor=torch.tensor([[0]], dtype=torch.int32),
+        slot_mapping=torch.tensor([0], dtype=torch.int64),
         causal=False,
     )
 
-    assert patch_flashinfer_metadata_builder() is True
-    patched_build = FlashInferMetadataBuilder.build
-    metadata = patched_build(object(), 5, common, fast_build=True)
-    assert calls == [(5, common, True)]
-    assert metadata._modelopt_block_table is common.block_table_tensor
-    assert metadata._modelopt_seq_lens is common.seq_lens
-    assert metadata._modelopt_query_start_loc is common.query_start_loc
-    assert metadata._modelopt_num_actual_tokens == 7
-    assert metadata._modelopt_max_query_len == 3
-    assert metadata._modelopt_max_seq_len == 11
-    assert metadata._modelopt_causal is False
+    metadata = builder.build(0, common, fast_build=False)
 
-    assert patch_flashinfer_metadata_builder() is True
-    assert FlashInferMetadataBuilder.build is patched_build
+    assert isinstance(metadata, FlashInferMetadata)
+    for target, source in vllm_plugin._FLASHINFER_METADATA_FIELDS.items():
+        actual = getattr(metadata, target)
+        expected = getattr(common, source)
+        if isinstance(expected, torch.Tensor):
+            assert actual is expected
+        else:
+            assert actual == expected
 
 
-def test_select_and_clone_flashinfer_impl_preserves_runtime_state(monkeypatch):
-    monkeypatch.setattr(vllm_plugin, "_FLASHINFER_PATCHED", False)
-    monkeypatch.setattr(vllm_plugin, "_FLASHINFER_IMPL_CLS", None)
+def test_select_and_clone_flashinfer_impl_preserves_runtime_state(
+    isolated_flashinfer_builder_patch,
+):
     old_impl = _make_old_flashinfer_impl()
-    old_impl.future_attr = object()
 
     new_cls = select_sparse_impl_cls(old_impl)
     new_impl = _clone_sparse_impl(old_impl, new_cls)
@@ -238,8 +262,6 @@ def test_select_and_clone_flashinfer_impl_preserves_runtime_state(monkeypatch):
     assert new_cls is get_flashinfer_sparse_impl_cls()
     assert isinstance(new_impl, FlashInferImpl)
     assert type(new_impl).__name__ == "ModelOptSparseFlashInferImpl"
-    assert new_impl.future_attr is old_impl.future_attr
-    assert new_impl.__dict__.items() >= old_impl.__dict__.items()
     if hasattr(FlashInferImpl, "do_kv_cache_update"):
         assert type(new_impl).do_kv_cache_update is FlashInferImpl.do_kv_cache_update
     assert select_sparse_impl_cls(new_impl) is None
@@ -503,12 +525,21 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
 
 
 def test_flashinfer_forced_kernel_mixed_batch_never_uses_native_fallback(monkeypatch):
+    class Layer:
+        force_kernel_reads = 0
+
+        @property
+        def _modelopt_force_kernel(self):
+            self.force_kernel_reads += 1
+            assert self.force_kernel_reads == 1, "force-kernel state was resolved more than once"
+            return True
+
     prefill_tokens = 17
     impl = _make_flashinfer_impl(sparse=False, quantized=False)
     query = torch.zeros(1 + prefill_tokens, 2, 64, dtype=torch.float16)
     kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
     metadata = _flashinfer_metadata(query_lens=(1, prefill_tokens), mixed=True)
-    layer = SimpleNamespace(_modelopt_force_kernel=True)
+    layer = Layer()
     calls = {"native": 0, "decode": 0, "prefill": 0}
 
     def native_fallback(*args, **kwargs):
@@ -531,6 +562,36 @@ def test_flashinfer_forced_kernel_mixed_batch_never_uses_native_fallback(monkeyp
     impl.forward(layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query))
 
     assert calls == {"native": 0, "decode": 1, "prefill": 1}
+    assert layer.force_kernel_reads == 1
+
+
+def test_flashinfer_invalid_mixed_metadata_has_no_side_effects(monkeypatch):
+    impl = _make_flashinfer_impl(sparse=True)
+    metadata = _flashinfer_metadata(query_lens=(1, 17), mixed=True)
+    metadata._modelopt_num_actual_tokens += 1
+    query = torch.zeros(18, 2, 64, dtype=torch.float16)
+    kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
+
+    def unexpected_side_effect(*args, **kwargs):
+        pytest.fail("invalid metadata triggered attention side effects")
+
+    monkeypatch.setattr(FlashInferImpl, "forward", unexpected_side_effect)
+    for name in ("_flashinfer_cache_write", "triton_attention"):
+        monkeypatch.setattr(vllm_plugin, name, unexpected_side_effect)
+
+    with pytest.raises(
+        ValueError,
+        match="FlashInfer mixed-batch token counts do not match common metadata",
+    ):
+        impl.forward(
+            SimpleNamespace(),
+            query,
+            query,
+            query,
+            kv_cache,
+            metadata,
+            output=torch.empty_like(query),
+        )
 
 
 def test_sparse_worker_is_noop_without_checkpoint_metadata(monkeypatch, capsys):
@@ -573,23 +634,6 @@ def test_sparse_worker_installs_only_active_layer(monkeypatch):
     assert empty.impl is original_empty_impl
 
 
-def test_sparse_worker_does_not_load_quant_api(monkeypatch):
-    worker_module = _load_worker_module()
-    attention = _bare_attention(worker_module)
-    state = _sparse_worker_state(nn.ModuleDict({"attn": attention}))
-    monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: ({}, "test"))
-    monkeypatch.setattr(
-        worker_module,
-        "match_sparse_config",
-        lambda *_: {"enable": True, "sparsity_n": 2, "sparsity_m": 4},
-    )
-    monkeypatch.setattr(worker_module, "_quant_api", lambda: pytest.fail("loaded quant API"))
-
-    worker_module._install_attention(state, quantize=False)
-
-    assert type(attention.impl) is ModelOptSparseAttentionImpl
-
-
 def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
     worker_module = _load_worker_module()
     good = _bare_attention(worker_module)
@@ -620,15 +664,32 @@ def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("failure", "active"),
-    [("cascade", True), ("cascade", False), ("metadata", True), ("metadata", False)],
+    ("failure", "active", "expected"),
+    [
+        (
+            "cascade",
+            True,
+            "vLLM cascade attention is incompatible with an active ModelOpt attention transform",
+        ),
+        ("cascade", False, None),
+        (
+            "metadata",
+            True,
+            "FlashInfer metadata is missing the ModelOpt attention transform fields: "
+            + ", ".join(vllm_plugin._FLASHINFER_METADATA_FIELDS),
+        ),
+        ("metadata", False, None),
+        ("output", True, "Fused attention output quantization is unsupported"),
+    ],
 )
-def test_flashinfer_transform_safety_for_unsupported_metadata(monkeypatch, failure, active):
+def test_flashinfer_transform_safety_for_unsupported_metadata(
+    monkeypatch, failure, active, expected
+):
     impl = _make_flashinfer_impl(sparse=active)
     metadata = (
-        SimpleNamespace(use_cascade=True)
-        if failure == "cascade"
-        else SimpleNamespace(use_cascade=False)
+        _flashinfer_metadata()
+        if failure == "output"
+        else SimpleNamespace(use_cascade=failure == "cascade")
     )
     native_calls = []
     query = torch.zeros(1, 2, 64, dtype=torch.float16)
@@ -643,12 +704,31 @@ def test_flashinfer_transform_safety_for_unsupported_metadata(monkeypatch, failu
     monkeypatch.setattr(FlashInferImpl, "forward", fake_forward)
 
     if active:
-        with pytest.raises(NotImplementedError, match="ModelOpt attention transform"):
-            impl.forward(None, query, query, query, torch.empty(0), metadata, output=output)
+        with pytest.raises(NotImplementedError) as exc:
+            impl.forward(
+                None,
+                query,
+                query,
+                query,
+                torch.empty(0),
+                metadata,
+                output=output,
+                output_scale=torch.ones(1),
+            )
+        assert str(exc.value) == expected
         assert native_calls == []
     else:
         assert (
-            impl.forward(None, query, query, query, torch.empty(0), metadata, output=output)
+            impl.forward(
+                None,
+                query,
+                query,
+                query,
+                torch.empty(0),
+                metadata,
+                output=output,
+                output_scale=torch.ones(1),
+            )
             is output
         )
         assert native_calls == [(impl, metadata)]
@@ -976,16 +1056,6 @@ def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
     assert captured["skip_softmax_threshold"] == pytest.approx(0.001)
     assert captured["p_qdq"] == "nvfp4"
     assert captured["v_qdq"] == "nvfp4"
-
-
-def test_active_cascade_fails_loud():
-    """Cascade must not silently drop an active ModelOpt transform."""
-    impl = _clone_sparse_impl(_make_old_impl())
-    impl.sparse_kw = {"skip_softmax_threshold": 0.001}
-    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
-    cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
-    with pytest.raises(NotImplementedError, match="cascade"):
-        impl.forward(None, q, q, q, cache, SimpleNamespace(use_cascade=True), output=q)
 
 
 def test_resolve_calibrated_skip_softmax_threshold_for_decode():

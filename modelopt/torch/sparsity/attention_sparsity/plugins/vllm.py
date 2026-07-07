@@ -31,6 +31,7 @@ import functools
 import inspect
 import math
 import warnings
+from dataclasses import dataclass
 
 import torch
 from vllm.v1.attention.backends.flash_attn import (
@@ -159,7 +160,7 @@ def _quant_kw_from_impl(impl, layer):
     return p_qdq, p_qdq_amax, v_qdq, v_qdq_amax
 
 
-def _has_active_quant_transform(layer, p_qdq, v_qdq) -> bool:
+def _any_quant_active(layer, p_qdq, v_qdq) -> bool:
     """Return whether native fallback would omit any Q/K/P/V transform."""
     k_quantizer = getattr(layer, "k_bmm_quantizer", None)
     return bool(
@@ -170,15 +171,75 @@ def _has_active_quant_transform(layer, p_qdq, v_qdq) -> bool:
     )
 
 
-def _has_active_transform(impl, layer, p_qdq, v_qdq) -> bool:
-    """Return whether native fallback would omit any ModelOpt transform."""
-    return bool(
-        getattr(layer, "_modelopt_force_kernel", False)
-        or getattr(impl, "sparse_kw", None)
-        or _has_active_quant_transform(layer, p_qdq, v_qdq)
+def _should_run_modelopt_kernel(sparse_kw, quant_active: bool, force_kernel: bool) -> bool:
+    """Return whether a launch has effective work for the ModelOpt kernel."""
+    return bool(sparse_kw or quant_active or force_kernel)
+
+
+def _mixed_batch_needs_dense_base(quant_active: bool, force_kernel: bool) -> bool:
+    """Return whether sparse-only mixed phases need one native output seed."""
+    return not quant_active and not force_kernel
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedForward:
+    p_qdq: str | None
+    p_qdq_amax: float
+    v_qdq: str | None
+    v_qdq_amax: float | None
+    quant_active: bool
+    force_kernel: bool
+
+
+def _resolve_forward(
+    impl,
+    layer,
+    attn_metadata,
+    output_scale,
+    output_block_scale,
+    *,
+    require_flashinfer_metadata: bool = False,
+) -> _ResolvedForward | None:
+    """Resolve shared transform state or request the backend's native path."""
+    p_qdq, p_qdq_amax, v_qdq, v_qdq_amax = _quant_kw_from_impl(impl, layer)
+    quant_active = _any_quant_active(layer, p_qdq, v_qdq)
+    force_kernel = getattr(layer, "_modelopt_force_kernel", False)
+    transform_active = _should_run_modelopt_kernel(
+        getattr(impl, "sparse_kw", None), quant_active, force_kernel
+    )
+
+    if getattr(attn_metadata, "use_cascade", False):
+        if transform_active:
+            raise NotImplementedError(
+                "vLLM cascade attention is incompatible with an active ModelOpt attention transform"
+            )
+        return None
+
+    if require_flashinfer_metadata:
+        missing = [name for name in _FLASHINFER_METADATA_FIELDS if not hasattr(attn_metadata, name)]
+        if missing:
+            if transform_active:
+                raise NotImplementedError(
+                    "FlashInfer metadata is missing the ModelOpt attention transform "
+                    f"fields: {', '.join(missing)}"
+                )
+            return None
+
+    if transform_active and (output_scale is not None or output_block_scale is not None):
+        raise NotImplementedError("Fused attention output quantization is unsupported")
+
+    return _ResolvedForward(
+        p_qdq=p_qdq,
+        p_qdq_amax=p_qdq_amax,
+        v_qdq=v_qdq,
+        v_qdq_amax=v_qdq_amax,
+        quant_active=quant_active,
+        force_kernel=force_kernel,
     )
 
 
+# Resolution guards raw configured transforms; dispatch rechecks effective
+# sparse work after calibration and decode-only pruning.
 def _forward_modelopt(
     impl,
     *,
@@ -198,7 +259,8 @@ def _forward_modelopt(
     p_qdq_amax: float,
     v_qdq: str | None,
     v_qdq_amax: float | None,
-    quant_transform_active: bool,
+    quant_active: bool,
+    force_kernel: bool,
     dense_fallback,
     prepare_modelopt=None,
 ) -> torch.Tensor:
@@ -219,10 +281,10 @@ def _forward_modelopt(
         # N:M sparse softmax is prefill-only.
         for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
             sparse_kw.pop(name, None)
-    if (
-        not sparse_kw
-        and not quant_transform_active
-        and not getattr(layer, "_modelopt_force_kernel", False)
+    if not _should_run_modelopt_kernel(
+        sparse_kw,
+        quant_active,
+        force_kernel,
     ):
         # Dynamic calibration can disable sparse work for a launch. Preserve the
         # backend's native dense path when no ModelOpt transform remains active.
@@ -353,14 +415,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         if attn_metadata is None:
             return output.fill_(0)
 
-        p_qdq, p_qdq_amax, v_qdq, v_qdq_amax = _quant_kw_from_impl(self, layer)
-        quant_transform_active = _has_active_quant_transform(layer, p_qdq, v_qdq)
-        active = _has_active_transform(self, layer, p_qdq, v_qdq)
-        if getattr(attn_metadata, "use_cascade", False):
-            if active:
-                raise NotImplementedError(
-                    "vLLM cascade attention is incompatible with an active ModelOpt attention transform"
-                )
+        def native_forward():
             return self._forward_vllm_flash_attn(
                 layer,
                 query,
@@ -372,8 +427,16 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 output_scale,
                 output_block_scale,
             )
-        if active and (output_scale is not None or output_block_scale is not None):
-            raise NotImplementedError("Fused attention output quantization is unsupported")
+
+        resolved = _resolve_forward(
+            self,
+            layer,
+            attn_metadata,
+            output_scale,
+            output_block_scale,
+        )
+        if resolved is None:
+            return native_forward()
 
         key_cache, value_cache = kv_cache.unbind(0)
         is_decode_only = attn_metadata.max_query_len <= 1
@@ -391,22 +454,13 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             max_seq_len=attn_metadata.max_seq_len,
             is_causal=getattr(attn_metadata, "causal", not is_decode_only),
             output=output,
-            p_qdq=p_qdq,
-            p_qdq_amax=p_qdq_amax,
-            v_qdq=v_qdq,
-            v_qdq_amax=v_qdq_amax,
-            quant_transform_active=quant_transform_active,
-            dense_fallback=lambda: self._forward_vllm_flash_attn(
-                layer,
-                query,
-                key,
-                value,
-                kv_cache,
-                attn_metadata,
-                output,
-                output_scale,
-                output_block_scale,
-            ),
+            p_qdq=resolved.p_qdq,
+            p_qdq_amax=resolved.p_qdq_amax,
+            v_qdq=resolved.v_qdq,
+            v_qdq_amax=resolved.v_qdq_amax,
+            quant_active=resolved.quant_active,
+            force_kernel=resolved.force_kernel,
+            dense_fallback=native_forward,
         )
 
 
@@ -440,6 +494,13 @@ _FLASHINFER_METADATA_FIELDS = {
 }
 
 
+def _reset_flashinfer_state_for_tests() -> None:
+    """Clear lazy state without unwrapping the process-wide builder patch."""
+    global _FLASHINFER_PATCHED, _FLASHINFER_IMPL_CLS
+    _FLASHINFER_PATCHED = False
+    _FLASHINFER_IMPL_CLS = None
+
+
 def patch_flashinfer_metadata_builder() -> bool:
     """Attach the common paged metadata needed by the ModelOpt kernels."""
     global _FLASHINFER_PATCHED
@@ -454,6 +515,8 @@ def patch_flashinfer_metadata_builder() -> bool:
     if getattr(orig_build, "_modelopt_sparse_metadata_patch", False):
         _FLASHINFER_PATCHED = True
         return True
+    # vLLM compatibility contract: build has a named ``common_attn_metadata``
+    # argument and returns a mutable metadata object that accepts attached fields.
     build_sig = inspect.signature(orig_build)
 
     @functools.wraps(orig_build)
@@ -495,6 +558,146 @@ def _maybe_update_flashinfer_cache(layer, key, value, kv_cache, attn_metadata, i
     _flashinfer_cache_write(layer, key, value, kv_cache, attn_metadata, impl)
 
 
+def _flashinfer_forward(
+    impl,
+    native_forward,
+    layer,
+    query,
+    key,
+    value,
+    kv_cache,
+    attn_metadata,
+    output=None,
+    output_scale=None,
+    output_block_scale=None,
+):
+    """Run the FlashInfer adapter with module-scope, directly testable logic."""
+    assert output is not None, "Output tensor must be provided."
+    if attn_metadata is None:
+        return output.fill_(0)
+
+    dense_output = None
+    cache_prepared = False
+
+    def dense_fallback():
+        nonlocal cache_prepared, dense_output
+        if dense_output is None:
+            dense_output = native_forward(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+            cache_prepared = True
+        return dense_output
+
+    def prepare_modelopt():
+        nonlocal cache_prepared
+        if not cache_prepared:
+            _maybe_update_flashinfer_cache(layer, key, value, kv_cache, attn_metadata, impl)
+            cache_prepared = True
+
+    resolved = _resolve_forward(
+        impl,
+        layer,
+        attn_metadata,
+        output_scale,
+        output_block_scale,
+        require_flashinfer_metadata=True,
+    )
+    if resolved is None:
+        return dense_fallback()
+
+    if kv_cache.ndim != 5 or kv_cache.shape[1] != 2:
+        raise ValueError(
+            "FlashInfer KV cache must have logical shape [blocks, 2, page, heads, dim]"
+        )
+
+    key_cache = kv_cache[:, 0]
+    value_cache = kv_cache[:, 1]
+    max_query_len = attn_metadata._modelopt_max_query_len
+    is_decode_only = max_query_len <= 1
+    common_kw = {
+        "layer": layer,
+        "key_cache": key_cache,
+        "value_cache": value_cache,
+        "max_seq_len": attn_metadata._modelopt_max_seq_len,
+        "is_causal": getattr(attn_metadata, "_modelopt_causal", not is_decode_only),
+        "p_qdq": resolved.p_qdq,
+        "p_qdq_amax": resolved.p_qdq_amax,
+        "v_qdq": resolved.v_qdq,
+        "v_qdq_amax": resolved.v_qdq_amax,
+        "quant_active": resolved.quant_active,
+        "force_kernel": resolved.force_kernel,
+        "dense_fallback": dense_fallback,
+        "prepare_modelopt": prepare_modelopt,
+    }
+    num_decodes = getattr(attn_metadata, "num_decodes", 0)
+    num_prefills = getattr(attn_metadata, "num_prefills", 0)
+    if not (num_decodes and num_prefills):
+        return _forward_modelopt(
+            impl,
+            query=query,
+            block_table=attn_metadata._modelopt_block_table,
+            seq_lens=attn_metadata._modelopt_seq_lens,
+            cu_seqlens_q=attn_metadata._modelopt_query_start_loc,
+            num_actual_tokens=attn_metadata._modelopt_num_actual_tokens,
+            max_query_len=max_query_len,
+            output=output,
+            **common_kw,
+        )
+
+    num_decode_tokens = attn_metadata.num_decode_tokens
+    num_prefill_tokens = attn_metadata.num_prefill_tokens
+    if num_decode_tokens % num_decodes:
+        raise NotImplementedError("Non-uniform mixed FlashInfer decode is unsupported")
+    if num_decode_tokens + num_prefill_tokens != attn_metadata._modelopt_num_actual_tokens:
+        raise ValueError("FlashInfer mixed-batch token counts do not match common metadata")
+
+    # Sparse-only launches may have an inactive phase (for example N:M
+    # is prefill-only). Compute the native result once, then overwrite
+    # each active phase with its ModelOpt result.
+    if _mixed_batch_needs_dense_base(
+        resolved.quant_active,
+        resolved.force_kernel,
+    ):
+        dense_fallback()
+
+    block_table = attn_metadata._modelopt_block_table
+    seq_lens = attn_metadata._modelopt_seq_lens
+    cu_seqlens_q = attn_metadata._modelopt_query_start_loc
+    _forward_modelopt(
+        impl,
+        query=query[:num_decode_tokens],
+        block_table=block_table[:num_decodes],
+        seq_lens=seq_lens[:num_decodes],
+        cu_seqlens_q=cu_seqlens_q[: num_decodes + 1],
+        num_actual_tokens=num_decode_tokens,
+        max_query_len=num_decode_tokens // num_decodes,
+        output=output[:num_decode_tokens],
+        **common_kw,
+    )
+    prefill_start = num_decode_tokens
+    prefill_cu_seqlens_q = cu_seqlens_q[num_decodes:] - cu_seqlens_q[num_decodes]
+    _forward_modelopt(
+        impl,
+        query=query[prefill_start : prefill_start + num_prefill_tokens],
+        block_table=block_table[num_decodes : num_decodes + num_prefills],
+        seq_lens=seq_lens[num_decodes : num_decodes + num_prefills],
+        cu_seqlens_q=prefill_cu_seqlens_q,
+        num_actual_tokens=num_prefill_tokens,
+        max_query_len=max_query_len,
+        output=output[prefill_start : prefill_start + num_prefill_tokens],
+        **common_kw,
+    )
+    return output
+
+
 def get_flashinfer_sparse_impl_cls() -> type:
     """Return the lazy FlashInfer adapter without requiring it for FA users."""
     global _FLASHINFER_IMPL_CLS
@@ -518,139 +721,19 @@ def get_flashinfer_sparse_impl_cls() -> type:
             output_scale=None,
             output_block_scale=None,
         ):
-            assert output is not None, "Output tensor must be provided."
-            if attn_metadata is None:
-                return output.fill_(0)
-
-            dense_output = None
-            cache_prepared = False
-
-            def dense_fallback():
-                nonlocal cache_prepared, dense_output
-                if dense_output is None:
-                    dense_output = FlashInferImpl.forward(
-                        self,
-                        layer,
-                        query,
-                        key,
-                        value,
-                        kv_cache,
-                        attn_metadata,
-                        output,
-                        output_scale,
-                        output_block_scale,
-                    )
-                    cache_prepared = True
-                return dense_output
-
-            def prepare_modelopt():
-                nonlocal cache_prepared
-                if not cache_prepared:
-                    _maybe_update_flashinfer_cache(layer, key, value, kv_cache, attn_metadata, self)
-                    cache_prepared = True
-
-            p_qdq, p_qdq_amax, v_qdq, v_qdq_amax = _quant_kw_from_impl(self, layer)
-            quant_transform_active = _has_active_quant_transform(layer, p_qdq, v_qdq)
-            active = _has_active_transform(self, layer, p_qdq, v_qdq)
-            if getattr(attn_metadata, "use_cascade", False):
-                if active:
-                    raise NotImplementedError(
-                        "vLLM cascade attention is incompatible with an active "
-                        "ModelOpt attention transform"
-                    )
-                return dense_fallback()
-
-            missing = [
-                name for name in _FLASHINFER_METADATA_FIELDS if not hasattr(attn_metadata, name)
-            ]
-            if missing:
-                if active:
-                    raise NotImplementedError(
-                        "FlashInfer metadata is missing the ModelOpt attention transform "
-                        f"fields: {', '.join(missing)}"
-                    )
-                return dense_fallback()
-            if active and (output_scale is not None or output_block_scale is not None):
-                raise NotImplementedError("Fused attention output quantization is unsupported")
-            if kv_cache.ndim != 5 or kv_cache.shape[1] != 2:
-                raise ValueError(
-                    "FlashInfer KV cache must have logical shape [blocks, 2, page, heads, dim]"
-                )
-
-            key_cache = kv_cache[:, 0]
-            value_cache = kv_cache[:, 1]
-            max_query_len = attn_metadata._modelopt_max_query_len
-            is_decode_only = max_query_len <= 1
-            common_kw = {
-                "layer": layer,
-                "key_cache": key_cache,
-                "value_cache": value_cache,
-                "max_seq_len": attn_metadata._modelopt_max_seq_len,
-                "is_causal": getattr(attn_metadata, "_modelopt_causal", not is_decode_only),
-                "p_qdq": p_qdq,
-                "p_qdq_amax": p_qdq_amax,
-                "v_qdq": v_qdq,
-                "v_qdq_amax": v_qdq_amax,
-                "quant_transform_active": quant_transform_active,
-                "dense_fallback": dense_fallback,
-                "prepare_modelopt": prepare_modelopt,
-            }
-            num_decodes = getattr(attn_metadata, "num_decodes", 0)
-            num_prefills = getattr(attn_metadata, "num_prefills", 0)
-            if not (num_decodes and num_prefills):
-                return _forward_modelopt(
-                    self,
-                    query=query,
-                    block_table=attn_metadata._modelopt_block_table,
-                    seq_lens=attn_metadata._modelopt_seq_lens,
-                    cu_seqlens_q=attn_metadata._modelopt_query_start_loc,
-                    num_actual_tokens=attn_metadata._modelopt_num_actual_tokens,
-                    max_query_len=max_query_len,
-                    output=output,
-                    **common_kw,
-                )
-
-            num_decode_tokens = attn_metadata.num_decode_tokens
-            num_prefill_tokens = attn_metadata.num_prefill_tokens
-            if num_decode_tokens % num_decodes:
-                raise NotImplementedError("Non-uniform mixed FlashInfer decode is unsupported")
-            if num_decode_tokens + num_prefill_tokens != attn_metadata._modelopt_num_actual_tokens:
-                raise ValueError("FlashInfer mixed-batch token counts do not match common metadata")
-
-            # Sparse-only launches may have an inactive phase (for example N:M
-            # is prefill-only). Compute the native result once, then overwrite
-            # each active phase with its ModelOpt result.
-            if not quant_transform_active and not getattr(layer, "_modelopt_force_kernel", False):
-                dense_fallback()
-
-            block_table = attn_metadata._modelopt_block_table
-            seq_lens = attn_metadata._modelopt_seq_lens
-            cu_seqlens_q = attn_metadata._modelopt_query_start_loc
-            _forward_modelopt(
+            return _flashinfer_forward(
                 self,
-                query=query[:num_decode_tokens],
-                block_table=block_table[:num_decodes],
-                seq_lens=seq_lens[:num_decodes],
-                cu_seqlens_q=cu_seqlens_q[: num_decodes + 1],
-                num_actual_tokens=num_decode_tokens,
-                max_query_len=num_decode_tokens // num_decodes,
-                output=output[:num_decode_tokens],
-                **common_kw,
+                super().forward,
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
             )
-            prefill_start = num_decode_tokens
-            prefill_cu_seqlens_q = cu_seqlens_q[num_decodes:] - cu_seqlens_q[num_decodes]
-            _forward_modelopt(
-                self,
-                query=query[prefill_start : prefill_start + num_prefill_tokens],
-                block_table=block_table[num_decodes : num_decodes + num_prefills],
-                seq_lens=seq_lens[num_decodes : num_decodes + num_prefills],
-                cu_seqlens_q=prefill_cu_seqlens_q,
-                num_actual_tokens=num_prefill_tokens,
-                max_query_len=max_query_len,
-                output=output[prefill_start : prefill_start + num_prefill_tokens],
-                **common_kw,
-            )
-            return output
 
     _FLASHINFER_IMPL_CLS = ModelOptSparseFlashInferImpl
     return _FLASHINFER_IMPL_CLS

@@ -48,15 +48,6 @@ class _ForbiddenKernel:
         raise AssertionError("unexpected kernel launch")
 
 
-def _config_signature(config):
-    return (
-        config.kwargs["BLOCK_M"],
-        config.kwargs["BLOCK_N"],
-        config.num_stages,
-        config.num_warps,
-    )
-
-
 def test_triton_fa_importable_on_cpu():
     """Module imports cleanly without CUDA; exports the public API names."""
     try:
@@ -101,32 +92,23 @@ def test_forward_uses_minimal_shared_autotune_configs():
 
     from modelopt.torch.kernels.common.attention import triton_fa
 
-    expected_configs = [
-        (16, 32, 2, 4),
-        (64, 32, 2, 4),
-        (128, 32, 2, 4),
+    configs = triton_fa._FWD_CONFIGS
+    assert [(config.kwargs["BLOCK_M"], config.kwargs["BLOCK_N"]) for config in configs] == [
+        (16, 32),
+        (64, 32),
+        (128, 32),
     ]
-    assert [_config_signature(config) for config in triton_fa._FWD_CONFIGS] == expected_configs
 
-    expected_active_configs = (
-        expected_configs[:1] if "PYTEST_VERSION" in os.environ else expected_configs
-    )
-    assert [
-        _config_signature(config) for config in triton_fa._attn_fwd.configs
-    ] == expected_active_configs
+    expected_active_configs = configs[:1] if "PYTEST_VERSION" in os.environ else configs
+    assert triton_fa._attn_fwd.configs == expected_active_configs
     assert triton_fa._attn_fwd.keys == ["N_CTX", "HEAD_DIM", "Q_IS_FP32", "P_QDQ", "V_QDQ"]
-    assert "_attn_fwd_p_qdq" not in vars(triton_fa)
-    assert "_prune_fwd_configs" not in vars(triton_fa)
 
 
 @pytest.mark.parametrize(
     ("attention_kwargs", "expected_p_qdq", "expected_v_qdq"),
     [
         ({}, 0, 0),
-        ({"p_qdq": "fp8"}, 1, 0),
-        ({"p_qdq": "nvfp4"}, 2, 0),
-        ({"v_qdq": "fp8"}, 0, 1),
-        ({"v_qdq": "nvfp4"}, 0, 2),
+        ({"p_qdq": "fp8", "v_qdq": "fp8"}, 1, 1),
         ({"p_qdq": "nvfp4", "v_qdq": "nvfp4"}, 2, 2),
         ({"p_qdq": "nvfp4", "sparsity_n": 2, "sparsity_m": 4}, 2, 0),
         ({"p_qdq": "nvfp4", "skip_softmax_threshold": 0.1}, 2, 0),

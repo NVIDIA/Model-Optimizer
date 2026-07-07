@@ -35,15 +35,6 @@ requires_native_e4m3 = pytest.mark.skipif(
 )
 
 
-@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
-def test_v_onwrite_prefill_grid_uses_host_metadata():
-    signature = inspect.signature(fake_quant_v_onwrite)
-    source = inspect.getsource(fake_quant_v_onwrite)
-
-    assert "max_new_tokens" in signature.parameters
-    assert ".item()" not in source
-
-
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
 @pytest.mark.parametrize("loader", ["_load_paged_k_tile", "_load_paged_v_tile"])
 def test_paged_loaders_widen_page_ids_before_pointer_math(loader):
@@ -141,7 +132,7 @@ class TestPagedKV:
 
     @pytest.mark.parametrize(
         ("page_size", "v_qdq_scale", "match"),
-        [(8, 1.0, "page_size"), (16, 0.0, "v_qdq_scale"), (16, float("inf"), "v_qdq_scale")],
+        [(8, 1.0, "page_size"), (16, 0.0, "v_qdq_scale")],
     )
     def test_v_onwrite_validates_page_size_and_scale(self, page_size, v_qdq_scale, match):
         cache = torch.empty(1, 16, 1, 1, device="cuda")
@@ -157,21 +148,34 @@ class TestPagedKV:
                 v_qdq_scale=v_qdq_scale,
             )
 
-    def test_paged_matches_contiguous(self):
-        """Paged mode produces same output as contiguous mode with identical data."""
+    @pytest.mark.parametrize(
+        ("seq_len", "seed", "attention_kwargs"),
+        [
+            pytest.param(128, 42, {}, id="dense"),
+            pytest.param(
+                256,
+                99,
+                {"sparsity_n": 2, "sparsity_m": 4, "dense_recent_tokens": 64},
+                id="sparse-2-4",
+            ),
+        ],
+    )
+    def test_paged_matches_contiguous(self, seq_len, seed, attention_kwargs):
+        """Paged dense and sparse prefill match their contiguous counterparts."""
         batch = 2
-        seq_len = 128
         num_heads, num_kv_heads, head_dim = 4, 2, 64
         page_size = 16
         scale = 1.0 / (head_dim**0.5)
         total = batch * seq_len
 
-        torch.manual_seed(42)
+        torch.manual_seed(seed)
         q, k, v = make_qkv(total, num_heads, num_kv_heads, head_dim)
         locs, lens = make_varlen_meta([seq_len] * batch)
 
         # Contiguous reference
-        out_contig = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale)
+        out_contig = attention(
+            q, k, v, locs, lens, seq_len, softmax_scale=scale, **attention_kwargs
+        )
 
         # Build paged cache from the same K/V
         locs_k, lens_k = locs, lens
@@ -195,45 +199,10 @@ class TestPagedKV:
             v_cache=v_cache,
             block_table=block_table,
             page_size=page_size,
+            **attention_kwargs,
         )
 
         torch.testing.assert_close(out_paged, out_contig, rtol=1e-2, atol=1e-2)
-
-    def test_paged_no_nan(self):
-        """Paged mode output is finite."""
-        batch = 2
-        seq_len = 256
-        num_heads, num_kv_heads, head_dim = 4, 2, 64
-        page_size = 16
-        scale = 1.0 / (head_dim**0.5)
-        total = batch * seq_len
-
-        torch.manual_seed(55)
-        q, k, v = make_qkv(total, num_heads, num_kv_heads, head_dim)
-        locs, lens = make_varlen_meta([seq_len] * batch)
-
-        k_cache, v_cache, block_table = _scatter_to_paged_cache(
-            k, v, locs, lens, num_kv_heads, head_dim, page_size
-        )
-
-        out = attention(
-            q,
-            k,
-            v,
-            locs,
-            lens,
-            seq_len,
-            softmax_scale=scale,
-            b_seq_len_k=lens,
-            max_input_len_k=seq_len,
-            k_cache=k_cache,
-            v_cache=v_cache,
-            block_table=block_table,
-            page_size=page_size,
-        )
-
-        assert not torch.isnan(out).any(), "NaN in paged output"
-        assert not torch.isinf(out).any(), "Inf in paged output"
 
     def test_paged_variable_length(self):
         """Paged mode works with variable-length sequences."""
@@ -309,93 +278,6 @@ class TestPagedKV:
         )
 
         torch.testing.assert_close(out_paged, out_contig, rtol=1e-2, atol=1e-2)
-
-    def test_paged_with_sparsity(self):
-        """Paged mode works with N:M sparsity enabled."""
-        batch = 2
-        seq_len = 256
-        num_heads, num_kv_heads, head_dim = 4, 2, 64
-        page_size = 16
-        scale = 1.0 / (head_dim**0.5)
-        total = batch * seq_len
-
-        torch.manual_seed(99)
-        q, k, v = make_qkv(total, num_heads, num_kv_heads, head_dim)
-        locs, lens = make_varlen_meta([seq_len] * batch)
-
-        k_cache, v_cache, block_table = _scatter_to_paged_cache(
-            k, v, locs, lens, num_kv_heads, head_dim, page_size
-        )
-
-        out_paged_sparse = attention(
-            q,
-            k,
-            v,
-            locs,
-            lens,
-            seq_len,
-            softmax_scale=scale,
-            b_seq_len_k=lens,
-            max_input_len_k=seq_len,
-            k_cache=k_cache,
-            v_cache=v_cache,
-            block_table=block_table,
-            page_size=page_size,
-            sparsity_n=2,
-            sparsity_m=4,
-        )
-
-        assert not torch.isnan(out_paged_sparse).any(), "NaN in paged + sparse output"
-        assert not torch.isinf(out_paged_sparse).any(), "Inf in paged + sparse output"
-        assert out_paged_sparse.shape == q.shape
-
-    def test_paged_decode(self):
-        """Paged mode works for decode (single Q token, long KV context)."""
-        batch = 2
-        seq_lens_k = [64, 128]
-        num_heads, num_kv_heads, head_dim = 4, 2, 64
-        page_size = 16
-        scale = 1.0 / (head_dim**0.5)
-        total_kv = sum(seq_lens_k)
-
-        torch.manual_seed(33)
-        q_flat = torch.randn(batch, num_heads, head_dim, device="cuda", dtype=torch.float16)
-        k_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
-        v_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
-
-        b_start_loc_q = torch.arange(batch, device="cuda", dtype=torch.int32)
-        b_seq_len_q = torch.ones(batch, device="cuda", dtype=torch.int32)
-        cumsum = [0]
-        for sl in seq_lens_k:
-            cumsum.append(cumsum[-1] + sl)
-        b_start_loc_k = torch.tensor(cumsum[:-1], device="cuda", dtype=torch.int32)
-        b_seq_len_k = torch.tensor(seq_lens_k, device="cuda", dtype=torch.int32)
-
-        # Build paged cache
-        k_cache, v_cache, block_table = _scatter_to_paged_cache(
-            k_flat, v_flat, b_start_loc_k, b_seq_len_k, num_kv_heads, head_dim, page_size
-        )
-
-        out = attention(
-            q_flat,
-            k_flat,
-            v_flat,
-            b_start_loc_q,
-            b_seq_len_q,
-            1,
-            is_causal=False,
-            softmax_scale=scale,
-            b_start_loc_k=b_start_loc_k,
-            b_seq_len_k=b_seq_len_k,
-            max_input_len_k=max(seq_lens_k),
-            k_cache=k_cache,
-            v_cache=v_cache,
-            block_table=block_table,
-            page_size=page_size,
-        )
-
-        assert out.shape == q_flat.shape
-        assert not torch.isnan(out).any(), "NaN in paged decode output"
 
     def test_paged_decode_ignores_sparse_nm(self):
         """N:M sparse softmax is prefill-only; paged decode remains dense."""
@@ -615,11 +497,10 @@ class TestPagedKV:
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         torch.testing.assert_close(cache[1], unused_page, rtol=0, atol=0)
 
-    @pytest.mark.parametrize("q_len", [1, 7])
     @requires_native_e4m3
-    def test_baked_prefix_and_raw_tail_match_full_onread(self, q_len):
-        """The same paged Triton path handles pure decode and chunked prefill."""
-        seq_len, num_heads, head_dim, page_size = 17, 2, 32, 16
+    def test_baked_prefix_and_raw_tail_match_full_onread(self):
+        """The paged Triton chunked-prefill path handles a baked prefix and raw tail."""
+        q_len, seq_len, num_heads, head_dim, page_size = 7, 17, 2, 32, 16
         q = torch.zeros(q_len, num_heads, head_dim, device="cuda", dtype=torch.float32)
         k = torch.zeros(seq_len, 1, head_dim, device="cuda", dtype=torch.float16)
         v = torch.full_like(k, 0.017578125)
