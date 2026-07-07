@@ -22,6 +22,7 @@ from _test_utils.import_helper import skip_if_no_libcudnn, skip_if_no_tensorrt
 from _test_utils.onnx.autocast.utils import _assert_tensors_are_fp16
 from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 
+import modelopt.onnx.trt_utils as trt_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.quantization.quantize import quantize
@@ -160,7 +161,6 @@ def test_get_custom_layers_file_backed_matches_in_memory(tmp_path, monkeypatch):
     forces the file-backed path on a small custom-op model and asserts the result matches
     both the in-memory fast path and the file-path baseline.
     """
-    import modelopt.onnx.trt_utils as trt_utils
 
     model = _create_test_model_trt()
     onnx_path = os.path.join(tmp_path, "model_with_trt_plugin_file_backed.onnx")
