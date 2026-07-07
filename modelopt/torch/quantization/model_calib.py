@@ -2122,10 +2122,10 @@ def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
         _convert_to_static_block_quantizers(model)
 
 
-def _compute_block_scales(quantizer):
-    """Compute per-block and per-tensor scales from a StaticBlockScaleQuantizer.
+def _compute_block_amax(quantizer):
+    """Compute per-block amax and per-tensor scale from a StaticBlockScaleQuantizer.
 
-    Returns (per_block_scale, per_tensor_scale, quantize_scales).
+    Returns (per_block_amax, per_tensor_scale, quantize_scales).
     """
     from .nn.modules.tensor_quantizer import _FP8_E4M3_MIN_POSITIVE, _amax_to_scale
     from .tensor_quant import scaled_e4m3
@@ -2153,14 +2153,13 @@ def _compute_block_scales(quantizer):
         else:
             per_block_scale = _amax_to_scale(amax, max_representable)
 
-    return per_block_scale, per_tensor_scale, quantize_scales
+    per_block_amax = per_block_scale * max_representable
+    return per_block_amax, per_tensor_scale, quantize_scales
 
 
 def _compute_lsq_params(quantizer):
     """Compute amax and scale-quantization params for LSQ."""
-    per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
-    amax = per_block_scale * quantizer._quant_max_bound
-    return amax, per_tensor_scale, quantize_scales
+    return _compute_block_amax(quantizer)
 
 
 @torch.no_grad()
