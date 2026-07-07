@@ -43,7 +43,24 @@ class TELinear(nn.Module):
         return torch.randn(2, 16)
 
 
-@pytest.mark.parametrize("model_cls", [TELinear])
+class TEGroupedLinear(nn.Module):
+    """Exercises `_QuantTEGroupedLinear`, used by MoE expert grouped GEMMs."""
+
+    num_gemms = 3
+
+    def __init__(self):
+        super().__init__()
+        self.net = te.pytorch.GroupedLinear(self.num_gemms, 16, 32)
+
+    def forward(self, x):
+        m_splits = [x.shape[0] // self.num_gemms] * self.num_gemms
+        return self.net(x, m_splits)
+
+    def get_input(self):
+        return torch.randn(self.num_gemms * 2, 16)
+
+
+@pytest.mark.parametrize("model_cls", [TELinear, TEGroupedLinear])
 @pytest.mark.parametrize(
     "config",
     [
