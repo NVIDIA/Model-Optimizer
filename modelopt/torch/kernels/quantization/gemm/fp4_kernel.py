@@ -366,18 +366,16 @@ def static_blockwise_fp4_cast_kernel(
 def static_blockwise_fp4_cast(
     x: torch.Tensor,
     out_dtype: torch.dtype | None = None,
-    rounding: str = "rne",
 ) -> torch.Tensor:
     """Round pre-scaled values to nearest FP4 E2M1 representable value.
 
     Unlike ``static_blockwise_fp4_fake_quant``, this does **not** apply any
     scale -- the caller is responsible for pre-dividing by scale_pre and
-    post-multiplying by scale_post (as in LAQ).
+    post-multiplying by scale_post (as in LSQ).
 
     Args:
         x: Input tensor (any shape) on CUDA.
         out_dtype: Output dtype. Defaults to x.dtype.
-        rounding: Rounding mode (only ``"rne"`` supported currently).
     """
     if out_dtype is None:
         out_dtype = x.dtype

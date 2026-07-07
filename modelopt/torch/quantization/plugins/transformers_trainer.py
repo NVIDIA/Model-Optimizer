@@ -103,10 +103,10 @@ def resolve_quant_cfg_from_args(
 
     recipe_path = getattr(quant_args, "recipe", None)
     if recipe_path:
-        from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+        from modelopt.recipe import ModelOptQuantizeRecipe, load_recipe
 
         recipe = load_recipe(recipe_path)
-        if not isinstance(recipe, ModelOptPTQRecipe):
+        if not isinstance(recipe, ModelOptQuantizeRecipe):
             raise ValueError(
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {recipe_path}"
             )
@@ -171,10 +171,12 @@ def _patch_fsdp2_post_backward():
     FSDPParamGroup.post_backward = _patched_post_backward
 
 
-def _align_laq_amax_param_dtypes(model):
-    """Cast LAQ learnable amax params to their owning weight dtype for FSDP2."""
-    # TODO: Remove this once a stable PyTorch release supports FSDP2 mixed
-    # precision parameter dtypes for this case.
+def _align_lsq_amax_param_dtypes(model):
+    """Cast LSQ learnable amax params to their owning weight dtype for FSDP2."""
+    # FSDP2 currently requires all parameters in a module to use the same dtype,
+    # so align the LSQ amax parameters with their owning weights.
+    # TODO: Remove this once a stable PyTorch release supports mixed-dtype
+    # parameters within an FSDP2 module.
     for module in model.modules():
         for weight_name in weight_attr_names(module):
             weight = getattr(module, weight_name, None)
@@ -183,7 +185,7 @@ def _align_laq_amax_param_dtypes(model):
 
             quantizer_name = quantizer_attr_names(weight_name).weight_quantizer
             quantizer = getattr(module, quantizer_name, None)
-            if not isinstance(quantizer, TensorQuantizer) or not getattr(quantizer, "_laq", False):
+            if not isinstance(quantizer, TensorQuantizer) or not getattr(quantizer, "_lsq", False):
                 continue
 
             for amax_name in ("_amax_pre", "_amax_post"):
@@ -395,7 +397,7 @@ class QATTrainer(ModelOptHFTrainer):
             if model is None:
                 return self._original_prepare(*args, **kwargs)
 
-            _align_laq_amax_param_dtypes(model)
+            _align_lsq_amax_param_dtypes(model)
 
             # Hide TQ buffers from accelerate's FSDP2 state_dict handling.
             tq_og_non_prsist_buffers = {}

@@ -71,9 +71,9 @@ from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 __all__ = [
     "CalibratorFactory",
     "awq",
-    "laq",
     "layerwise_calibrate",
     "local_hessian_calibrate",
+    "lsq",
     "max_calibrate",
     "smoothquant",
     "svdquant",
@@ -2173,15 +2173,15 @@ def _iter_weight_quantizers(model):
                 break
 
 
-def _compute_laq_params(quantizer):
-    """Compute amax and scale-quantization params for LAQ."""
+def _compute_lsq_params(quantizer):
+    """Compute amax and scale-quantization params for LSQ."""
     per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
     amax = per_block_scale * quantizer._quant_max_bound
     return amax, per_tensor_scale, quantize_scales
 
 
 @torch.no_grad()
-def laq(
+def lsq(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
     scale_algorithm: dict | None = None,
@@ -2190,7 +2190,7 @@ def laq(
     quantize_pre_scale: bool = True,
     **kwargs,
 ):
-    """Run scale calibration then convert to LAQ mode.
+    """Run scale calibration then convert to LSQ mode.
 
     Uses separate pre (quant) and post (dequant) amax values.
     Forward: ``w_q = Q_STE(w / s_pre) * s_post`` where ``s = amax / Q_max``.
@@ -2204,17 +2204,17 @@ def laq(
         learnable_amax: Which amax params are learnable: 'pre', 'post',
             ['pre', 'post'], or [].
         tied_amax: If True, pre and post share a single tensor.
-        quantize_pre_scale: If False, skip FP8 quantization for the LAQ pre scale.
+        quantize_pre_scale: If False, skip FP8 quantization for the LSQ pre scale.
     """
-    _run_scale_calibration(model, forward_loop, scale_algorithm, "laq")
+    _run_scale_calibration(model, forward_loop, scale_algorithm, "lsq")
 
     for module, weight_name, quantizer in _iter_weight_quantizers(model):
-        amax, per_tensor_scale, quantize_scales = _compute_laq_params(quantizer)
+        amax, per_tensor_scale, quantize_scales = _compute_lsq_params(quantizer)
         weight_dtype = getattr(module, weight_name).dtype
         amax = amax.to(weight_dtype)
         if per_tensor_scale is not None:
             per_tensor_scale = per_tensor_scale.to(weight_dtype)
-        quantizer.enable_laq(
+        quantizer.enable_lsq(
             amax,
             per_tensor_scale,
             quantize_scales,

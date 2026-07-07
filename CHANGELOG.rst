@@ -11,6 +11,7 @@ Changelog
 
 **Deprecations**
 
+- Renamed ``modelopt.recipe.ModelOptPTQRecipe`` to ``ModelOptQuantizeRecipe`` because it now backs the ``ptq``, ``qat/qad``, and ``ptq/qat/qad`` recipe types (not just PTQ). The old ``ModelOptPTQRecipe`` name remains as a **deprecated alias** of ``ModelOptQuantizeRecipe`` and will be removed in a future release. Please update imports and ``isinstance`` checks to the new name.
 - ``examples/hf_ptq`` AutoQuantize is now driven by an **AutoQuantize recipe** (``--recipe``). The ``--auto_quantize_bits``, ``--auto_quantize_method``, ``--auto_quantize_score_size``, ``--auto_quantize_cost_model``, and ``--auto_quantize_active_moe_expert_ratio`` flags are **deprecated** but still work: they are converted into an ``AutoQuantizeConfig`` on the fly (emitting a ``DeprecationWarning``) and will be removed in a future release. Prefer a recipe under ``modelopt_recipes/general/auto_quantize/``. See ``examples/hf_ptq/README.md``.
 
 - Renamed ``examples/llm_ptq`` to ``examples/hf_ptq`` to reflect that it covers Hugging Face LLM **and** VLM PTQ. A relative symlink ``examples/llm_ptq`` -> ``hf_ptq`` keeps existing paths and commands working; it will be removed in a future release. Please update references to the new ``examples/hf_ptq`` path.

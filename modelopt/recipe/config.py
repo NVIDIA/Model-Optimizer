@@ -43,6 +43,7 @@ __all__ = [
     "ModelOptEagleRecipe",
     "ModelOptMedusaRecipe",
     "ModelOptPTQRecipe",
+    "ModelOptQuantizeRecipe",
     "ModelOptRecipeBase",
     "ModelOptSpeculativeRecipeBase",
     "RecipeMetadataConfig",
@@ -54,6 +55,8 @@ class RecipeType(str, Enum):
     """List of recipe types. See ``RECIPE_TYPE_TO_CLASS`` at the bottom for the schema mapping."""
 
     PTQ = "ptq"
+    QAT_QAD = "qat/qad"
+    PTQ_QAT_QAD = "ptq/qat/qad"
     AUTO_QUANTIZE = "auto_quantize"
     SPECULATIVE_EAGLE = "speculative_eagle"
     SPECULATIVE_DFLASH = "speculative_dflash"
@@ -112,15 +115,22 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
         return self.metadata.description
 
 
-class ModelOptPTQRecipe(ModelOptRecipeBase):
-    """Our config class for PTQ recipes."""
+class ModelOptQuantizeRecipe(ModelOptRecipeBase):
+    """Config class for quantization recipes — PTQ, QAT/QAD, or both.
+
+    ``metadata.recipe_type`` declares which workflow(s) the recipe is intended for.
+    """
 
     quantize: QuantizeConfig = Field(
-        title="PTQ config",
-        description="PTQ config containing quant_cfg and algorithm. Required: a PTQ "
-        "recipe without a ``quantize`` section is rejected so that a missing section "
-        "can't silently fall back to the default INT8 config.",
+        title="Quantization config",
+        description="Quantization config containing quant_cfg and algorithm. Required: a "
+        "quantization recipe without a ``quantize`` section is rejected so that a missing "
+        "section can't silently fall back to the default INT8 config.",
     )
+
+
+# Deprecated alias (shipped in 0.43 as ModelOptPTQRecipe); remove in a future release.
+ModelOptPTQRecipe = ModelOptQuantizeRecipe
 
 
 # Named alias so a shared layer-pattern unit (e.g. configs/auto_quantize/units/base_disabled_layers)
@@ -358,7 +368,9 @@ class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
 # Single source of truth mapping YAML ``metadata.recipe_type`` to its schema class. The loader
 # uses this for typed-list ``$import`` resolution; add a new entry when introducing a recipe.
 RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
-    RecipeType.PTQ: ModelOptPTQRecipe,
+    RecipeType.PTQ: ModelOptQuantizeRecipe,
+    RecipeType.QAT_QAD: ModelOptQuantizeRecipe,
+    RecipeType.PTQ_QAT_QAD: ModelOptQuantizeRecipe,
     RecipeType.AUTO_QUANTIZE: ModelOptAutoQuantizeRecipe,
     RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,

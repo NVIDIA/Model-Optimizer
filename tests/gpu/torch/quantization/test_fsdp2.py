@@ -137,8 +137,8 @@ def test_nested_fsdp2_backward(quant_cfg, dist_workers):
     dist_workers.run(partial(_test_nested_fsdp2_backward, quant_cfg=quant_cfg))
 
 
-class _LAQBf16Linear(nn.Module):
-    """Minimal bf16 module with LAQ learnable amax parameters."""
+class _LSQBf16Linear(nn.Module):
+    """Minimal bf16 module with LSQ learnable amax parameters."""
 
     def __init__(self, dim=16):
         super().__init__()
@@ -153,7 +153,7 @@ class _LAQBf16Linear(nn.Module):
         tq._pass_through_bwd = True
         tq.register_buffer("_amax", torch.ones(dim, dtype=torch.bfloat16))
         self.weight_quantizer = StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
-        self.weight_quantizer.enable_laq(
+        self.weight_quantizer.enable_lsq(
             torch.ones(dim, dtype=torch.bfloat16),
             quantize_scales=False,
             learnable_amax=["pre", "post"],
@@ -164,9 +164,9 @@ class _LAQBf16Linear(nn.Module):
         return torch.nn.functional.linear(inputs, weight)
 
 
-def _test_laq_bf16_learnable_amax_fsdp2(rank, size):
+def _test_lsq_bf16_learnable_amax_fsdp2(rank, size):
     torch.manual_seed(1)
-    model = _LAQBf16Linear().cuda(rank)
+    model = _LSQBf16Linear().cuda(rank)
     inputs = torch.randn(2, 16, device=rank, dtype=torch.bfloat16)
     synchronize_state_dict(model)
 
@@ -177,8 +177,8 @@ def _test_laq_bf16_learnable_amax_fsdp2(rank, size):
     output.float().sum().backward()
 
 
-def test_laq_bf16_learnable_amax_fsdp2(dist_workers):
-    dist_workers.run(_test_laq_bf16_learnable_amax_fsdp2)
+def test_lsq_bf16_learnable_amax_fsdp2(dist_workers):
+    dist_workers.run(_test_lsq_bf16_learnable_amax_fsdp2)
 
 
 class _DecoderBlock(nn.Module):

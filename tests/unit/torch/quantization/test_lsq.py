@@ -13,28 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU unit tests for the LAQ algorithm using INT4 quantization."""
+"""CPU unit tests for the LSQ algorithm using INT4 quantization."""
 
 import pytest
 import torch
 from torch import nn
 
-from modelopt.torch.quantization.config import LAQConfig
+from modelopt.torch.quantization.config import LSQConfig
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _FP8_E4M3_MIN_POSITIVE,
     StaticBlockScaleQuantizer,
     TensorQuantizer,
 )
-from modelopt.torch.quantization.plugins.transformers_trainer import _align_laq_amax_param_dtypes
 from modelopt.torch.quantization.tensor_quant import int_cast_ste
 
 
-class TestLAQConfig:
-    """Tests for LAQConfig validation."""
+class TestLSQConfig:
+    """Tests for LSQConfig validation."""
 
     def test_default_config(self):
-        cfg = LAQConfig()
-        assert cfg.method == "laq"
+        cfg = LSQConfig()
+        assert cfg.method == "lsq"
         assert cfg.learnable_amax == ["post"]
         assert cfg.tied_amax is False
         assert cfg.quantize_pre_scale is True
@@ -54,7 +53,7 @@ class TestLAQConfig:
         ],
     )
     def test_valid_combinations(self, learnable_amax, tied_amax):
-        cfg = LAQConfig(learnable_amax=learnable_amax, tied_amax=tied_amax)
+        cfg = LSQConfig(learnable_amax=learnable_amax, tied_amax=tied_amax)
         assert cfg.tied_amax is tied_amax
 
     @pytest.mark.parametrize(
@@ -63,11 +62,11 @@ class TestLAQConfig:
     )
     def test_invalid_tied_with_single_learnable(self, learnable_amax):
         with pytest.raises(ValueError, match="tied_amax=True requires"):
-            LAQConfig(learnable_amax=learnable_amax, tied_amax=True)
+            LSQConfig(learnable_amax=learnable_amax, tied_amax=True)
 
 
-class TestEnableLAQ:
-    """Tests for StaticBlockScaleQuantizer.enable_laq() with INT4 format."""
+class TestEnableLSQ:
+    """Tests for StaticBlockScaleQuantizer.enable_lsq() with INT4 format."""
 
     def _make_quantizer(self):
         """Create a StaticBlockScaleQuantizer configured for INT4."""
@@ -86,8 +85,8 @@ class TestEnableLAQ:
     def test_post_only_learnable(self):
         q = self._make_quantizer()
         amax = torch.ones(8) * 3.0
-        q.enable_laq(amax, quantize_scales=False, learnable_amax=["post"], tied_amax=False)
-        assert q._laq is True
+        q.enable_lsq(amax, quantize_scales=False, learnable_amax=["post"], tied_amax=False)
+        assert q._lsq is True
         assert isinstance(q._amax_post, nn.Parameter)
         assert q._amax_post.requires_grad is True
         assert not isinstance(q._amax_pre, nn.Parameter)
@@ -96,7 +95,7 @@ class TestEnableLAQ:
     def test_pre_only_learnable(self):
         q = self._make_quantizer()
         amax = torch.ones(8) * 3.0
-        q.enable_laq(amax, quantize_scales=False, learnable_amax=["pre"], tied_amax=False)
+        q.enable_lsq(amax, quantize_scales=False, learnable_amax=["pre"], tied_amax=False)
         assert isinstance(q._amax_pre, nn.Parameter)
         assert q._amax_pre.requires_grad is True
         assert not isinstance(q._amax_post, nn.Parameter)
@@ -104,14 +103,14 @@ class TestEnableLAQ:
     def test_both_learnable(self):
         q = self._make_quantizer()
         amax = torch.ones(8) * 3.0
-        q.enable_laq(amax, quantize_scales=False, learnable_amax=["pre", "post"], tied_amax=False)
+        q.enable_lsq(amax, quantize_scales=False, learnable_amax=["pre", "post"], tied_amax=False)
         assert isinstance(q._amax_pre, nn.Parameter)
         assert isinstance(q._amax_post, nn.Parameter)
 
     def test_tied_both_learnable(self):
         q = self._make_quantizer()
         amax = torch.ones(8) * 3.0
-        q.enable_laq(amax, quantize_scales=False, learnable_amax=["pre", "post"], tied_amax=True)
+        q.enable_lsq(amax, quantize_scales=False, learnable_amax=["pre", "post"], tied_amax=True)
         assert q._tied_amax is True
         assert isinstance(q._amax_post, nn.Parameter)
         assert not hasattr(q, "_amax_pre")
@@ -120,19 +119,19 @@ class TestEnableLAQ:
     def test_frozen(self):
         q = self._make_quantizer()
         amax = torch.ones(8) * 3.0
-        q.enable_laq(amax, quantize_scales=False, learnable_amax=[], tied_amax=False)
+        q.enable_lsq(amax, quantize_scales=False, learnable_amax=[], tied_amax=False)
         assert not isinstance(q._amax_post, nn.Parameter)
         assert not isinstance(q._amax_pre, nn.Parameter)
 
     def test_old_amax_deleted(self):
         q = self._make_quantizer()
         assert hasattr(q, "_amax")
-        q.enable_laq(torch.ones(8), quantize_scales=False)
+        q.enable_lsq(torch.ones(8), quantize_scales=False)
         assert not hasattr(q, "_amax")
 
     def test_can_skip_pre_scale_quantization(self):
         q = self._make_quantizer()
-        q.enable_laq(
+        q.enable_lsq(
             torch.ones(8),
             quantize_scales=False,
             quantize_pre_scale=False,
@@ -142,7 +141,7 @@ class TestEnableLAQ:
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_learnable_amax_uses_input_dtype(self, dtype):
         q = self._make_quantizer()
-        q.enable_laq(
+        q.enable_lsq(
             torch.ones(8, dtype=dtype),
             quantize_scales=False,
             learnable_amax=["pre", "post"],
@@ -153,7 +152,7 @@ class TestEnableLAQ:
 
     def test_dtype_cast_updates_learnable_amax_dtype(self):
         q = self._make_quantizer()
-        q.enable_laq(
+        q.enable_lsq(
             torch.ones(8),
             quantize_scales=False,
             learnable_amax=["pre", "post"],
@@ -164,11 +163,16 @@ class TestEnableLAQ:
         assert q._amax_pre.dtype == torch.bfloat16
         assert q._amax_post.dtype == torch.bfloat16
 
-    def test_align_laq_amax_param_dtypes_uses_weight_dtype(self):
+    def test_align_lsq_amax_param_dtypes_uses_weight_dtype(self):
+        pytest.importorskip("transformers")
+        from modelopt.torch.quantization.plugins.transformers_trainer import (
+            _align_lsq_amax_param_dtypes,
+        )
+
         module = nn.Module()
         module.weight = nn.Parameter(torch.ones(8, 16, dtype=torch.bfloat16))
         module.weight_quantizer = self._make_quantizer()
-        module.weight_quantizer.enable_laq(
+        module.weight_quantizer.enable_lsq(
             torch.ones(8),
             quantize_scales=False,
             learnable_amax=["pre", "post"],
@@ -177,7 +181,7 @@ class TestEnableLAQ:
         assert module.weight_quantizer._amax_pre.dtype == torch.float32
         assert module.weight_quantizer._amax_post.dtype == torch.float32
 
-        _align_laq_amax_param_dtypes(module)
+        _align_lsq_amax_param_dtypes(module)
 
         assert module.weight_quantizer._amax_pre.dtype == torch.bfloat16
         assert module.weight_quantizer._amax_post.dtype == torch.bfloat16
@@ -203,10 +207,10 @@ class TestIntCastSTE:
         assert torch.all(x.grad == 1.0)
 
 
-class TestFakeQuantizeLAQ:
-    """Tests for _fake_quantize() LAQ path with INT4."""
+class TestFakeQuantizeLSQ:
+    """Tests for _fake_quantize() LSQ path with INT4."""
 
-    def _make_laq_quantizer(self, learnable_amax=("post",), tied_amax=False):
+    def _make_lsq_quantizer(self, learnable_amax=("post",), tied_amax=False):
         tq = TensorQuantizer()
         tq._num_bits = 4
         tq._unsigned = False
@@ -217,19 +221,19 @@ class TestFakeQuantizeLAQ:
         tq.register_buffer("_amax", torch.ones(4))
         sbsq = StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
         amax = torch.ones(4) * 3.5
-        sbsq.enable_laq(
+        sbsq.enable_lsq(
             amax, quantize_scales=False, learnable_amax=learnable_amax, tied_amax=tied_amax
         )
         return sbsq
 
     def test_output_shape(self):
-        q = self._make_laq_quantizer()
+        q = self._make_lsq_quantizer()
         x = torch.randn(4, 16)
         out = q._fake_quantize(x)
         assert out.shape == x.shape
 
     def test_differentiable_post(self):
-        q = self._make_laq_quantizer(learnable_amax=["post"])
+        q = self._make_lsq_quantizer(learnable_amax=["post"])
         x = torch.randn(4, 16)
         out = q._fake_quantize(x)
         out.sum().backward()
@@ -237,7 +241,7 @@ class TestFakeQuantizeLAQ:
         assert q._amax_pre.grad is None
 
     def test_differentiable_pre(self):
-        q = self._make_laq_quantizer(learnable_amax=["pre"])
+        q = self._make_lsq_quantizer(learnable_amax=["pre"])
         x = torch.randn(4, 16)
         out = q._fake_quantize(x)
         out.sum().backward()
@@ -245,7 +249,7 @@ class TestFakeQuantizeLAQ:
         assert q._amax_post.grad is None
 
     def test_differentiable_both(self):
-        q = self._make_laq_quantizer(learnable_amax=["pre", "post"])
+        q = self._make_lsq_quantizer(learnable_amax=["pre", "post"])
         x = torch.randn(4, 16)
         out = q._fake_quantize(x)
         out.sum().backward()
@@ -253,14 +257,14 @@ class TestFakeQuantizeLAQ:
         assert q._amax_post.grad is not None
 
     def test_tied_shares_tensor(self):
-        q = self._make_laq_quantizer(learnable_amax=["pre", "post"], tied_amax=True)
+        q = self._make_lsq_quantizer(learnable_amax=["pre", "post"], tied_amax=True)
         x = torch.randn(4, 16)
         out = q._fake_quantize(x)
         out.sum().backward()
         assert q._amax_post.grad is not None
 
     def test_skip_pre_scale_quantization_still_quantizes_post(self, monkeypatch):
-        q = self._make_laq_quantizer()
+        q = self._make_lsq_quantizer()
         q._quantize_scales = True
         q._quantize_pre_scale = False
         q.register_buffer("_per_tensor_scale", torch.tensor(1.0))
@@ -278,7 +282,7 @@ class TestFakeQuantizeLAQ:
         assert len(calls) == 1
 
     def test_skip_pre_scale_quantization_uses_raw_scale_floor(self, monkeypatch):
-        q = self._make_laq_quantizer()
+        q = self._make_lsq_quantizer()
         q._quantize_scales = True
         q._quantize_pre_scale = False
         q.register_buffer("_per_tensor_scale", torch.tensor(1.0))

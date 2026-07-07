@@ -41,7 +41,7 @@ from transformers import AutoImageProcessor, ViTForImageClassification
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.recipe import ModelOptQuantizeRecipe, load_recipe
 from modelopt.torch.quantization.utils import export_torch_mode
 
 # Default ViT PTQ recipe under `modelopt_recipes/huggingface/vit/ptq/`. The
@@ -97,7 +97,7 @@ def quantize_with_recipe(model, recipe_path: str, calib_batches):
     """Resolve the YAML recipe and run `mtq.quantize`."""
     print(f"Loading recipe: {recipe_path}")
     recipe = load_recipe(recipe_path)
-    if not isinstance(recipe, ModelOptPTQRecipe):
+    if not isinstance(recipe, ModelOptQuantizeRecipe):
         raise TypeError(f"Expected PTQ recipe, got {type(recipe).__name__}")
     quant_cfg = recipe.quantize.model_dump()
 

@@ -14,40 +14,36 @@
 # limitations under the License.
 
 metadata:
-  recipe_type: ptq
-  description: NVFP4 LAQ post-only learnable amax (W4A16), MSE init with FP8 scale sweep, FP8 KV cache.
+  recipe_type: qat/qad
+  description: >-
+    Learns one shared pre-quantization and post-quantization NVFP4 weight scale with MSE
+    initialization and FP8 scale sweep; uses dynamic NVFP4 activations and FP8 KV cache.
+    QAT/QAD-only: the LSQ scales are learned during training, so this recipe is not
+    suitable for calibration-only PTQ.
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  kv_fp8: configs/ptq/units/kv_fp8
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_static: configs/numerics/nvfp4_static
 quantize:
   algorithm:
-    method: laq
+    method: lsq
     learnable_amax:
+      - pre
       - post
-    tied_amax: false
+    tied_amax: true
+    quantize_pre_scale: true
     scale_algorithm:
       method: mse
       fp8_scale_sweep: true
   quant_cfg:
-    - quantizer_name: '*'
-      enable: false
+    - $import: base_disable_all
     - quantizer_name: '*weight_quantizer'
-      enable: true
       cfg:
-        block_sizes:
-          -1: 16
-          type: static
-          scale_bits: e4m3
-        num_bits: e2m1
+        $import: nvfp4_static
     - quantizer_name: '*input_quantizer'
-      enable: true
       cfg:
-        block_sizes:
-          -1: 16
-          type: dynamic
-          scale_bits: e4m3
-        num_bits: e2m1
-    - quantizer_name: '*[kv]_bmm_quantizer'
-      enable: true
-      cfg:
-        num_bits: e4m3
-        axis:
-    - quantizer_name: '*lm_head*'
-      enable: false
+        $import: nvfp4
+    - $import: kv_fp8
+    - $import: default_disabled_quantizers

@@ -649,26 +649,24 @@ class FP4CastSTEFunction(Function):
     """FP4 cast with STE backward -- no scale/descale, just rounding."""
 
     @staticmethod
-    def forward(ctx, x, out_dtype=None, rounding="rne"):
+    def forward(ctx, x, out_dtype=None):
         """Forward pass: cast to FP4 using triton kernel.
 
         Args:
             x: Input tensor of shape [NUM_BLOCKS, BLOCK_SIZE].
             out_dtype: Output dtype. Defaults to x.dtype.
-            rounding: Rounding mode -- ``"rne"`` (round to nearest even, default)
-                or ``"down"`` (floor toward zero).
         """
         if not triton_kernel.IS_AVAILABLE:
             raise RuntimeError("FP4CastSTEFunction requires triton.")
         ctx.save_for_backward(x)
-        return triton_kernel.static_blockwise_fp4_cast(x, out_dtype, rounding=rounding)
+        return triton_kernel.static_blockwise_fp4_cast(x, out_dtype)
 
     @staticmethod
     def backward(ctx, grad_outputs):
-        """Backward pass: STE with clip mask at |x| <= 6.0."""
+        """Backward pass: STE with clip mask at ``|x| <= 6.0``."""
         (x,) = ctx.saved_tensors
         grad = torch.where(x.abs() <= 6.0, grad_outputs, torch.zeros_like(grad_outputs))
-        return grad, None, None
+        return grad, None
 
 
 class IntCastSTEFunction(Function):

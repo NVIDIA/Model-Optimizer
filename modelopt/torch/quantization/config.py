@@ -1204,11 +1204,21 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         return self
 
 
-class LAQConfig(QuantizeAlgorithmConfig):
-    """Config for LAQ (Learnt Amax Quantization) algorithm.
+class LSQConfig(QuantizeAlgorithmConfig):
+    """Config for LSQ (Learnt Scale Quantization) and Dual-LSQ algorithms.
 
-    LAQ uses separate learnable pre-quantization and post-dequantization amax
-    values.  Forward: ``w_q = Q_STE(w / s_pre) * s_post`` where ``s = amax / Q_max``.
+    In LSQ, the scale used for quantization is learnt. ModelOpt's LSQ is similar to the
+    original `Learned Step Size Quantization paper <https://arxiv.org/pdf/1902.08153>`_.
+    Its forward pass is ``w_q = Q_STE(w / s) * s``, where ``s`` is learnt.
+
+    Dual-LSQ learns separate pre-quantization and post-quantization scales. Its forward
+    pass is ``w_q = Q_STE(w / s_pre) * s_post``, where ``s_pre`` and ``s_post`` are
+    learnt. Dual-LSQ generally performs better than LSQ for learning NVFP4 per-block
+    weight scales.
+
+    Currently, only NVFP4 per-block weight-scale learning is supported. Both LSQ and
+    Dual-LSQ use a reparameterization that learns ``amax`` instead of scale directly,
+    where ``scale = amax / max_bound``.
 
     ``learnable_amax`` controls which amax parameters are learnable vs frozen:
         - ``["pre", "post"]``: both learnable
@@ -1224,7 +1234,7 @@ class LAQConfig(QuantizeAlgorithmConfig):
     while preserving the existing post-scale quantization behavior.
     """
 
-    method: Literal["laq"] = ModeloptField("laq")
+    method: Literal["lsq"] = ModeloptField("lsq")
 
     learnable_amax: list[Literal["pre", "post"]] | Literal["pre", "post"] = ModeloptField(
         default=["post"],
@@ -1247,9 +1257,9 @@ class LAQConfig(QuantizeAlgorithmConfig):
 
     quantize_pre_scale: bool = ModeloptField(
         default=True,
-        title="FP8-quantize the LAQ pre-quantization scale.",
+        title="FP8-quantize the LSQ pre-quantization scale.",
         description=(
-            "If False, LAQ uses the raw pre-quantization scale while keeping post-scale "
+            "If False, LSQ uses the raw pre-quantization scale while keeping post-scale "
             "quantization controlled by the quantizer's block-scale settings."
         ),
     )

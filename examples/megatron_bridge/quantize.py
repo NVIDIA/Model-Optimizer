@@ -65,7 +65,7 @@ from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
-from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.recipe import ModelOptQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
@@ -227,7 +227,7 @@ def get_quant_config(args: argparse.Namespace) -> dict:
                 "--recipe is set; the recipe is authoritative."
             )
         recipe = load_recipe(args.recipe)
-        if not isinstance(recipe, ModelOptPTQRecipe):
+        if not isinstance(recipe, ModelOptQuantizeRecipe):
             raise TypeError(
                 f"Expected a PTQ recipe but got {type(recipe).__name__} from {args.recipe}"
             )

@@ -1476,9 +1476,10 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     Preserves static amax states in fp32.
     """
 
-    _laq: bool = False
+    _lsq: bool = False
     _learnable_amax: list = []
     _tied_amax: bool = False
+    # FP4 default; overwritten on promotion with the format-specific bound, including INT.
     _quant_max_bound: float = 6.0
     _quantize_scales: bool = True
     _quantize_pre_scale: bool = True
@@ -1544,13 +1545,13 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     @property
     def amax(self):
-        """Return amax, derived from learnable amax parameters if in LAQ mode."""
-        if self._laq and not self._tied_amax:
+        """Return amax, derived from learnable amax parameters if in LSQ mode."""
+        if self._lsq and not self._tied_amax:
             raise RuntimeError(
-                "LAQ with untied amaxes has separate pre and post parameters. "
+                "LSQ with untied amaxes has separate pre and post parameters. "
                 "Access them via amax_pre / amax_post."
             )
-        if self._laq:
+        if self._lsq:
             return self._amax_post
         if not hasattr(self, "_amax"):
             return None
@@ -1601,19 +1602,19 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         return module
 
     def _short_amax(self, fmt=".4f"):
-        """Short description of amax, accounting for LAQ mode."""
-        if not self._laq:
+        """Short description of amax, accounting for LSQ mode."""
+        if not self._lsq:
             return super()._short_amax(fmt)
         learn = self._learnable_amax
         learn_str = "frozen" if not learn else f"learn=[{','.join(learn)}]"
         if self._tied_amax:
-            return f"LAQ(tied={self._short_tensor(self._amax_post.data, fmt)}, {learn_str})"
+            return f"LSQ(tied={self._short_tensor(self._amax_post.data, fmt)}, {learn_str})"
         return (
-            f"LAQ(pre={self._short_tensor(self._amax_pre.data, fmt)}, "
+            f"LSQ(pre={self._short_tensor(self._amax_pre.data, fmt)}, "
             f"post={self._short_tensor(self._amax_post.data, fmt)}, {learn_str})"
         )
 
-    def enable_laq(
+    def enable_lsq(
         self,
         amax: torch.Tensor,
         per_tensor_scale: torch.Tensor = None,
@@ -1622,16 +1623,16 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         tied_amax: bool = False,
         quantize_pre_scale: bool = True,
     ):
-        """LAQ mode with configurable learnable/frozen amax tensors.
+        """LSQ mode with configurable learnable/frozen amax tensors.
 
         Args:
             amax: Initial amax values (per-block).
             per_tensor_scale: Optional per-tensor scale (frozen buffer).
-            quantize_scales: Whether to FP8-quantize per-block scales.
+            quantize_scales: Whether to FP8-quantize per-block scales. Used for NVFP4 quantization.
             learnable_amax: Which amax params are learnable: 'pre', 'post',
                 ['pre', 'post'], or [].
             tied_amax: If True, pre and post share a single tensor.
-            quantize_pre_scale: Whether to FP8-quantize the LAQ pre scale.
+            quantize_pre_scale: Whether to FP8-quantize the LSQ pre scale.
         """
         if hasattr(self, "_amax"):
             delattr(self, "_amax")
@@ -1659,7 +1660,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             self.register_buffer("_per_tensor_scale", per_tensor_scale.clone().detach())
         self._quantize_scales = quantize_scales
         self._quantize_pre_scale = quantize_pre_scale
-        self._laq = True
+        self._lsq = True
         self._learnable_amax = sorted(learn)
         self._tied_amax = tied_amax
 
@@ -1677,7 +1678,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
-        if self._laq:
+        if self._lsq:
             scale_min_post = (
                 _FP8_E4M3_MIN_POSITIVE * self._per_tensor_scale.view(-1)
                 if self._quantize_scales
@@ -1701,7 +1702,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
                 self._quant_max_bound,
                 min_value=scale_min_pre,
             )
-            if self._quantize_pre_scale:
+            if self._quantize_scales and self._quantize_pre_scale:
                 scale_pre = self._maybe_quantize_scale(scale_pre)
             quant_input = inputs.float() / scale_pre.float().view(-1, 1)
             w_cast = self._cast_ste(quant_input)

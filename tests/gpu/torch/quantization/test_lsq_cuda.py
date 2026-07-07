@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU unit tests for the LAQ algorithm using FP4 (NVFP4) quantization."""
+"""GPU unit tests for the LSQ algorithm using FP4 (NVFP4) quantization."""
 
 import pytest
 import torch
@@ -21,7 +21,7 @@ from torch import nn
 
 import modelopt.torch.quantization as mtq
 
-NVFP4_LAQ_POST_MSE_CFG = {
+NVFP4_LSQ_POST_MSE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -34,13 +34,13 @@ NVFP4_LAQ_POST_MSE_CFG = {
         },
     },
     "algorithm": {
-        "method": "laq",
+        "method": "lsq",
         "learnable_amax": ["post"],
         "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
     },
 }
 
-NVFP4_LAQ_PRE_POST_MSE_CFG = {
+NVFP4_LSQ_PRE_POST_MSE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -53,13 +53,13 @@ NVFP4_LAQ_PRE_POST_MSE_CFG = {
         },
     },
     "algorithm": {
-        "method": "laq",
+        "method": "lsq",
         "learnable_amax": ["pre", "post"],
         "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
     },
 }
 
-NVFP4_LAQ_TIED_MSE_CFG = {
+NVFP4_LSQ_TIED_MSE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -72,14 +72,14 @@ NVFP4_LAQ_TIED_MSE_CFG = {
         },
     },
     "algorithm": {
-        "method": "laq",
+        "method": "lsq",
         "learnable_amax": ["pre", "post"],
         "tied_amax": True,
         "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
     },
 }
 
-NVFP4_LAQ_SKIP_PRE_SCALE_MSE_CFG = {
+NVFP4_LSQ_SKIP_PRE_SCALE_MSE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -92,7 +92,7 @@ NVFP4_LAQ_SKIP_PRE_SCALE_MSE_CFG = {
         },
     },
     "algorithm": {
-        "method": "laq",
+        "method": "lsq",
         "learnable_amax": ["post"],
         "quantize_pre_scale": False,
         "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
@@ -101,7 +101,7 @@ NVFP4_LAQ_SKIP_PRE_SCALE_MSE_CFG = {
 
 
 class SimpleModel(nn.Module):
-    """Minimal model for LAQ testing."""
+    """Minimal model for LSQ testing."""
 
     def __init__(self):
         super().__init__()
@@ -123,15 +123,15 @@ def _make_forward_loop(model, device):
 @pytest.mark.parametrize(
     "config",
     [
-        NVFP4_LAQ_POST_MSE_CFG,
-        NVFP4_LAQ_PRE_POST_MSE_CFG,
-        NVFP4_LAQ_TIED_MSE_CFG,
-        NVFP4_LAQ_SKIP_PRE_SCALE_MSE_CFG,
+        NVFP4_LSQ_POST_MSE_CFG,
+        NVFP4_LSQ_PRE_POST_MSE_CFG,
+        NVFP4_LSQ_TIED_MSE_CFG,
+        NVFP4_LSQ_SKIP_PRE_SCALE_MSE_CFG,
     ],
     ids=["post_only", "pre_and_post", "tied", "skip_pre_scale"],
 )
-def test_laq_quantize_e2e(config):
-    """End-to-end: quantize a small model with LAQ + NVFP4 on GPU."""
+def test_lsq_quantize_e2e(config):
+    """End-to-end: quantize a small model with LSQ + NVFP4 on GPU."""
     device = torch.device("cuda")
     model = SimpleModel().to(device)
     forward_loop = _make_forward_loop(model, device)
@@ -147,8 +147,8 @@ def test_laq_quantize_e2e(config):
     assert out.shape == (2, 64)
 
 
-def test_laq_fp4_fake_quantize_differentiable():
-    """Test that _fake_quantize in FP4 LAQ mode is differentiable."""
+def test_lsq_fp4_fake_quantize_differentiable():
+    """Test that _fake_quantize in FP4 LSQ mode is differentiable."""
     from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
         StaticBlockScaleQuantizer,
         TensorQuantizer,
@@ -170,7 +170,7 @@ def test_laq_fp4_fake_quantize_differentiable():
 
     amax = torch.ones(4, device=device) * 3.0
     per_tensor_scale = torch.tensor(1.0 / 6.0, device=device)
-    sbsq.enable_laq(
+    sbsq.enable_lsq(
         amax,
         per_tensor_scale=per_tensor_scale,
         quantize_scales=True,
@@ -184,7 +184,7 @@ def test_laq_fp4_fake_quantize_differentiable():
     assert sbsq._amax_post.grad is not None
 
 
-def test_laq_fp4_cast_ste():
+def test_lsq_fp4_cast_ste():
     """Test fp4_cast_ste on GPU."""
     from modelopt.torch.quantization.tensor_quant import fp4_cast_ste
 

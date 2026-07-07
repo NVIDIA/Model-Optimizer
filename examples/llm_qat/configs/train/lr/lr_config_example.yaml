@@ -12,7 +12,7 @@
 #   eps          - term added to denominator for numerical stability
 #
 # Usage:
-#   --lr_config configs/train/lr_config_example.yaml
+#   --lr_config configs/train/lr/lr_config_example.yaml
 #
 # Tip: use `model.named_parameters()` to find the exact parameter names
 # for your model.
