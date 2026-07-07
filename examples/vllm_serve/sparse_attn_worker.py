@@ -17,6 +17,7 @@
 
 import importlib
 import os
+from collections import Counter
 from functools import cache
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -61,7 +62,6 @@ _BMM_CFG = [
 
 
 class _AttentionPlan(NamedTuple):
-    name: str
     module: object
     new_impl: object
     sparse_kw: dict
@@ -72,6 +72,15 @@ class _AttentionPlan(NamedTuple):
 def _unwrapped_model(worker):
     model = worker.model_runner.model
     return model.unwrap() if hasattr(model, "unwrap") else model
+
+
+def _sparse_kwargs(name: str, sparse_cfg: dict | None) -> dict:
+    if sparse_cfg is None:
+        return {}
+    layer_cfg = match_sparse_config(name, sparse_cfg)
+    if layer_cfg is None or not layer_cfg.get("enable", True):
+        return {}
+    return _build_sparse_kw(layer_cfg)
 
 
 @cache
@@ -113,16 +122,16 @@ def _cudagraph_mode(worker, api):
     return mode if mode is not None else api.compilation.CUDAGraphMode.NONE
 
 
-def _global_errors(worker, api=None) -> list[str]:
-    api = api or _quant_api()
+def _global_errors(worker, api) -> list[str]:
     config = worker.model_runner.vllm_config
-    parallel, cache, model_config = config.parallel_config, config.cache_config, config.model_config
+    parallel = config.parallel_config
+    cache_config, model_config = config.cache_config, config.model_config
     errors = []
     if getattr(parallel, "decode_context_parallel_size", 1) != 1:
         errors.append("decode_context_parallel_size must be 1")
     if getattr(parallel, "enable_dbo", False) or getattr(parallel, "use_ubatching", False):
         errors.append("DBO/ubatching is unsupported")
-    if getattr(cache, "enable_prefix_caching", False):
+    if getattr(cache_config, "enable_prefix_caching", False):
         errors.append("prefix caching is unsupported")
     if getattr(config, "kv_transfer_config", None) is not None:
         errors.append("KV transfer is unsupported")
@@ -132,7 +141,7 @@ def _global_errors(worker, api=None) -> list[str]:
         errors.append("FULL mixed-batch cudagraph mode is unsupported")
     if getattr(model_config, "dtype", None) not in (api.torch.float16, api.torch.bfloat16):
         errors.append("resolved model/KV-cache dtype must be fp16 or bf16")
-    cache_dtype = getattr(cache, "cache_dtype", "auto")
+    cache_dtype = getattr(cache_config, "cache_dtype", "auto")
     if str(cache_dtype) not in {"auto", "bfloat16", "float16", "torch.bfloat16", "torch.float16"}:
         errors.append(f"resolved KV-cache dtype {cache_dtype!r} must be fp16 or bf16")
     return errors
@@ -166,21 +175,8 @@ def _quant_layer_errors(module, api) -> list[str]:
     return errors
 
 
-def _validated_device_dtype(module, model_config, api):
-    device, dtype = api.plugin._get_device_dtype(module)
-    model_dtype = getattr(model_config, "dtype", None)
-    if model_dtype in (api.torch.float16, api.torch.bfloat16):
-        dtype = model_dtype
-    if device is None or dtype is None:
-        return device, dtype, "device/dtype could not be resolved"
-    if dtype not in (api.torch.float16, api.torch.bfloat16):
-        return device, dtype, f"resolved dtype {dtype} must be fp16 or bf16"
-    return device, dtype, None
-
-
-def _sparse_graph_error(sparse_kw: dict, mode, api=None) -> str | None:
+def _sparse_graph_error(sparse_kw: dict, mode, api) -> str | None:
     """Reject decode calibration whose live length would be frozen by a full graph."""
-    api = api or _quant_api()
     params = sparse_kw.get("threshold_scale_factor")
     if (
         mode.decode_mode() == api.compilation.CUDAGraphMode.FULL
@@ -191,99 +187,103 @@ def _sparse_graph_error(sparse_kw: dict, mode, api=None) -> str | None:
     return None
 
 
-def _validated_attention_plans(worker, *, quantize: bool):
-    """Validate and clone every selected attention adapter before mutating layers."""
-    api = _quant_api() if quantize else None
-    model = _unwrapped_model(worker)
-    model_config = worker.model_runner.model_config
-    detected = load_from_checkpoint_metadata(getattr(model_config, "hf_config", None))
-    if not quantize and detected is None:
-        print(
-            "[ModelOpt] No sparse_attention_config found in the checkpoint; "
-            "skipping sparse attention. Run examples/llm_sparsity/"
-            "attention_sparsity/hf_sa.py to calibrate and export a checkpoint "
-            "with the config embedded."
+def _select_new_impl(module):
+    """Clone the module's attention impl into its sparse-capable subclass; return (impl, error)."""
+    try:
+        cls = select_sparse_impl_cls(module.impl)
+    except (NotImplementedError, TypeError) as err:
+        return None, str(err)
+    if cls is None:
+        return None, (
+            f"backend {type(module.impl).__name__} is not supported; "
+            "expected FlashAttentionImpl or FlashInferImpl"
         )
-        return None
+    return _clone_sparse_impl(module.impl, cls), None
 
-    sparse_cfg = detected[0] if detected is not None else None
-    if quantize:
-        assert api is not None
-        errors = _global_errors(worker, api)
-        mode = _cudagraph_mode(worker, api)
-        attention_types = api.plugin._ATTENTION_TYPES
-    else:
-        assert detected is not None
-        print(f"[ModelOpt] Sparse attention config: algo -> {detected[1]}")
-        errors, mode, attention_types = [], None, (VLLMAttention,)
-    plans = []
-    attention_count = 0
-    for name, module in model.named_modules():
-        if not isinstance(module, attention_types):
-            continue
-        if quantize:
-            assert api is not None
-            attention_count += 1
-            reasons = _quant_layer_errors(module, api)
-            device, dtype, dtype_error = _validated_device_dtype(module, model_config, api)
-            if dtype_error:
-                reasons.append(dtype_error)
-            layer_cfg = match_sparse_config(name, sparse_cfg) if sparse_cfg is not None else None
-            sparse_kw = (
-                _build_sparse_kw(layer_cfg)
-                if layer_cfg is not None and layer_cfg.get("enable", True)
-                else {}
-            )
-            if graph_error := _sparse_graph_error(sparse_kw, mode, api):
-                reasons.append(graph_error)
-        else:
-            assert sparse_cfg is not None
-            layer_cfg = match_sparse_config(name, sparse_cfg)
-            if layer_cfg is None or not layer_cfg.get("enable", True):
-                continue
-            sparse_kw = _build_sparse_kw(layer_cfg)
-            if not sparse_kw:
-                continue
-            reasons, device, dtype = [], None, None
 
-        new_impl = None
-        try:
-            new_impl_cls = select_sparse_impl_cls(module.impl)
-            if new_impl_cls is None:
-                backend = type(module.impl).__name__
-                message = (
-                    f"backend {backend} is not supported; expected FlashAttentionImpl or FlashInferImpl"
-                    if quantize
-                    else f"unsupported backend {backend}"
-                )
-                reasons.append(message)
-            else:
-                new_impl = _clone_sparse_impl(module.impl, new_impl_cls)
-        except (NotImplementedError, TypeError) as err:
-            reasons.append(str(err))
-        layer_name = name or "<root>"
-        if reasons:
-            errors.extend(f"{layer_name}: {reason}" for reason in reasons)
-        else:
-            plans.append(_AttentionPlan(name, module, new_impl, sparse_kw, device, dtype))
-
-    if quantize and attention_count == 0:
-        errors.append("no regular attention layers were found")
+def _raise_unsupported(errors: list[str], policy: str) -> None:
     if errors:
-        policy = "attention" if quantize else "sparse attention"
         raise NotImplementedError(
             f"Unsupported ModelOpt {policy} plan:\n  - " + "\n  - ".join(errors)
         )
+
+
+def _sparse_plans(worker):
+    """Plans for checkpoint-driven sparse attention; skips layers without a sparse config."""
+    model = _unwrapped_model(worker)
+    detected = load_from_checkpoint_metadata(
+        getattr(worker.model_runner.model_config, "hf_config", None)
+    )
+    if detected is None:
+        print(
+            "[ModelOpt] No sparse_attention_config found in the checkpoint; "
+            "skipping sparse attention. Run examples/llm_sparsity/attention_sparsity/"
+            "hf_sa.py to calibrate and export a checkpoint with the config embedded."
+        )
+        return None
+    sparse_cfg, sparse_algo = detected
+    print(f"[ModelOpt] Sparse attention config: algo -> {sparse_algo}")
+    plans, errors = [], []
+    for name, module in model.named_modules():
+        if not isinstance(module, VLLMAttention):
+            continue
+        sparse_kw = _sparse_kwargs(name, sparse_cfg)
+        if not sparse_kw:
+            continue
+        new_impl, error = _select_new_impl(module)
+        if error:
+            errors.append(f"{name or '<root>'}: {error}")
+        else:
+            plans.append(_AttentionPlan(module, new_impl, sparse_kw, None, None))
+    _raise_unsupported(errors, "sparse attention")
+    return tuple(plans)
+
+
+def _quant_plans(worker):
+    """Plans for fixed-NVFP4 attention on every decoder self-attention layer (+ optional sparsity)."""
+    api = _quant_api()
+    model = _unwrapped_model(worker)
+    model_config = worker.model_runner.model_config
+    detected = load_from_checkpoint_metadata(getattr(model_config, "hf_config", None))
+    sparse_cfg = detected[0] if detected is not None else None
+    errors = _global_errors(worker, api)
+    mode = _cudagraph_mode(worker, api)
+    plans, attention_count = [], 0
+    for name, module in model.named_modules():
+        if not isinstance(module, api.plugin._ATTENTION_TYPES):
+            continue
+        attention_count += 1
+        reasons = _quant_layer_errors(module, api)
+        # Prefer the model compute dtype (fp16/bf16); _get_device_dtype's buffer scan
+        # can otherwise report fp32 from the attention module's scale buffers.
+        device, dtype = api.plugin._get_device_dtype(module)
+        if getattr(model_config, "dtype", None) in (api.torch.float16, api.torch.bfloat16):
+            dtype = model_config.dtype
+        if device is None or dtype is None:
+            reasons.append("device/dtype could not be resolved")
+        elif dtype not in (api.torch.float16, api.torch.bfloat16):
+            reasons.append(f"resolved dtype {dtype} must be fp16 or bf16")
+        sparse_kw = _sparse_kwargs(name, sparse_cfg)
+        if graph_error := _sparse_graph_error(sparse_kw, mode, api):
+            reasons.append(graph_error)
+        new_impl, error = _select_new_impl(module)
+        if error:
+            reasons.append(error)
+        if reasons:
+            errors.extend(f"{name or '<root>'}: {reason}" for reason in reasons)
+        else:
+            plans.append(_AttentionPlan(module, new_impl, sparse_kw, device, dtype))
+    if attention_count == 0:
+        errors.append("no regular attention layers were found")
+    _raise_unsupported(errors, "attention")
     return tuple(plans)
 
 
 def _install_sparse_plans(plans) -> None:
-    installed = {}
     for plan in plans:
         plan.new_impl.sparse_kw = plan.sparse_kw
         plan.module.impl = plan.new_impl
-        impl_name = type(plan.new_impl).__name__
-        installed[impl_name] = installed.get(impl_name, 0) + 1
+    installed = dict(Counter(type(plan.new_impl).__name__ for plan in plans))
     print(
         f"[ModelOpt] Sparse attention: replaced impl on {len(plans)} attention layers: {installed}"
     )
@@ -292,7 +292,6 @@ def _install_sparse_plans(plans) -> None:
 def _install_quant_plans(worker, plans) -> None:
     api = _quant_api()
     quant_off = os.environ.get("MODELOPT_ATTN_QUANT_OFF") == "1"
-    installed = {}
     for plan in plans:
         module = plan.module
         module.device, module.dtype = plan.device, plan.dtype
@@ -322,20 +321,18 @@ def _install_quant_plans(worker, plans) -> None:
         module._value_quant_in_kernel = not quant_off
         if quant_off:
             module._modelopt_force_kernel = True
-        impl_name = type(plan.new_impl).__name__
-        installed[impl_name] = installed.get(impl_name, 0) + 1
     worker.model_runner.cascade_attn_enabled = False
+    installed = dict(Counter(type(plan.new_impl).__name__ for plan in plans))
     print(f"[ModelOpt] Installed NVFP4 quant+sparse attention on {len(plans)} layers: {installed}")
 
 
 def _install_attention(worker, *, quantize: bool) -> None:
-    plans = _validated_attention_plans(worker, quantize=quantize)
-    if plans is None:
-        return
     if quantize:
-        _install_quant_plans(worker, plans)
+        _install_quant_plans(worker, _quant_plans(worker))
     else:
-        _install_sparse_plans(plans)
+        plans = _sparse_plans(worker)
+        if plans is not None:
+            _install_sparse_plans(plans)
 
 
 class _ModelOptAttentionWorker(BaseWorker):

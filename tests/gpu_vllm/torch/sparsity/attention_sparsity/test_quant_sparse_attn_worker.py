@@ -93,7 +93,7 @@ def _patch_conversion(monkeypatch):
         lambda: quant_plugin.ParallelState(data_parallel_group=None),
     )
     monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: None)
-    monkeypatch.setattr(worker_module, "_global_errors", lambda _worker, _api=None: [])
+    monkeypatch.setattr(worker_module, "_global_errors", lambda _worker, _api: [])
 
 
 @pytest.mark.parametrize("impl_cls", [FlashAttentionImpl, FlashInferImpl])
@@ -217,6 +217,7 @@ def test_quant_memory_profile_uses_inference_mode_and_disables_compilation(monke
     [(CUDAGraphMode.FULL, True), (CUDAGraphMode.FULL_AND_PIECEWISE, False)],
 )
 def test_full_mixed_cudagraph_validation(mode, rejected):
+    api = worker_module._quant_api()
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(),
         cache_config=SimpleNamespace(),
@@ -224,12 +225,13 @@ def test_full_mixed_cudagraph_validation(mode, rejected):
         compilation_config=SimpleNamespace(cudagraph_mode=mode),
     )
     errors = worker_module._global_errors(
-        SimpleNamespace(model_runner=SimpleNamespace(vllm_config=config))
+        SimpleNamespace(model_runner=SimpleNamespace(vllm_config=config)), api
     )
     assert any("mixed" in error for error in errors) is rejected
 
 
 def test_calibrated_decode_skip_softmax_rejects_full_decode_graphs():
+    api = worker_module._quant_api()
     sparse_kw = {
         "threshold_scale_factor": {
             "prefill": {"a": 1.0, "b": 2.0},
@@ -238,13 +240,14 @@ def test_calibrated_decode_skip_softmax_rejects_full_decode_graphs():
     }
 
     assert "calibrated decode skip-softmax" in worker_module._sparse_graph_error(
-        sparse_kw, CUDAGraphMode.FULL_AND_PIECEWISE
+        sparse_kw, CUDAGraphMode.FULL_AND_PIECEWISE, api
     )
-    assert worker_module._sparse_graph_error(sparse_kw, CUDAGraphMode.PIECEWISE) is None
+    assert worker_module._sparse_graph_error(sparse_kw, CUDAGraphMode.PIECEWISE, api) is None
     assert (
         worker_module._sparse_graph_error(
             {"threshold_scale_factor": {"prefill": {"a": 1.0, "b": 2.0}}},
             CUDAGraphMode.FULL_AND_PIECEWISE,
+            api,
         )
         is None
     )

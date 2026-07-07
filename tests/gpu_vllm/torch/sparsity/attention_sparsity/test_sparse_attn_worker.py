@@ -612,7 +612,8 @@ def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
         worker_module._install_attention(state, quantize=False)
 
     assert str(exc.value) == (
-        "Unsupported ModelOpt sparse attention plan:\n  - bad: unsupported backend SimpleNamespace"
+        "Unsupported ModelOpt sparse attention plan:\n  - bad: backend SimpleNamespace "
+        "is not supported; expected FlashAttentionImpl or FlashInferImpl"
     )
     assert good.impl is original_good_impl
     assert bad.impl.__class__ is SimpleNamespace
