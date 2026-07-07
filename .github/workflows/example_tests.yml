@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [hf_ptq, specdec_bench]
+        example: [hf_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
@@ -108,11 +108,27 @@ jobs:
       pip_install_extras: "[onnx,hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
 
+  ##### VLLM Example Tests #####
+  vllm:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.any_changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [specdec_bench]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "docker.io/vllm/vllm-openai:v0.22.0"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-1
+
   ##### Required Check for PR #####
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, torch, trtllm-pr, megatron, onnx]
+    needs: [pr-gate, torch, trtllm-pr, megatron, onnx, vllm]
     runs-on: ubuntu-latest
     steps:
       - name: Required example tests did not succeed
@@ -122,6 +138,7 @@ jobs:
             needs.torch.result != 'success' ||
             needs.trtllm-pr.result != 'success' ||
             needs.megatron.result != 'success' ||
-            needs.onnx.result != 'success'
+            needs.onnx.result != 'success' ||
+            needs.vllm.result != 'success'
           ))
         run: exit 1
