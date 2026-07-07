@@ -22,6 +22,7 @@ import pytest
 import torch
 from torch import nn
 
+import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
 from modelopt.torch.quantization.config import LSQConfig
 from modelopt.torch.quantization.model_calib import lsq
 from modelopt.torch.quantization.nn import QuantLinear
@@ -50,6 +51,36 @@ def _skip_scale_calibration(monkeypatch):
         "modelopt.torch.quantization.model_calib._run_scale_calibration",
         lambda *args, **kwargs: None,
     )
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "expected_dispatch"),
+    [pytest.param((2, 1), "nvfp4", id="nvfp4"), pytest.param((4, 3), "generic", id="fp8")],
+)
+def test_non_lsq_static_float_dispatches_only_nvfp4_to_fp4_kernel(
+    monkeypatch, num_bits, expected_dispatch
+):
+    tq = TensorQuantizer()
+    tq._num_bits = num_bits
+    tq._block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
+    tq.register_buffer("_amax", torch.ones(4))
+    quantizer = StaticBlockScaleQuantizer.from_tensor_quantizer(tq, global_amax=torch.tensor(1.0))
+    dispatches = []
+
+    def fake_nvfp4(inputs, *_args):
+        dispatches.append("nvfp4")
+        return inputs
+
+    def fake_generic(_self, inputs):
+        dispatches.append("generic")
+        return inputs
+
+    monkeypatch.setattr(tensor_quantizer_module, "static_blockwise_fp4_fake_quant", fake_nvfp4)
+    monkeypatch.setattr(TensorQuantizer, "_fake_quantize", fake_generic)
+
+    quantizer._fake_quantize(torch.ones(4, 16))
+
+    assert dispatches == [expected_dispatch]
 
 
 class TestLSQConfig:

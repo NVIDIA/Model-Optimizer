@@ -1709,7 +1709,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             return (w_cast * scale_post.view(-1, 1).to(w_cast.dtype)).to(inputs.dtype)
 
         if self.amax is not None:
-            if isinstance(self._num_bits, tuple):
+            if self.is_nvfp4_static:
                 return static_blockwise_fp4_fake_quant(
                     inputs,
                     self.amax,
