@@ -62,9 +62,7 @@ from .utils import (
     is_quantized_row_parallel_linear,
     persistent_materialization,
     promote_nvfp4_static_quantizers,
-    quantizer_attr_names,
     reduce_amax,
-    weight_attr_names,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -2158,21 +2156,6 @@ def _compute_block_scales(quantizer):
     return per_block_scale, per_tensor_scale, quantize_scales
 
 
-def _iter_weight_quantizers(model):
-    """Yield (module, weight_name, quantizer) for each StaticBlockScaleQuantizer with amax."""
-    seen_modules = set()
-    for name, module in model.named_modules():
-        if module in seen_modules:
-            continue
-        for weight_name in weight_attr_names(module):
-            wq_name = quantizer_attr_names(weight_name).weight_quantizer
-            quantizer = getattr(module, wq_name, None)
-            if isinstance(quantizer, StaticBlockScaleQuantizer) and hasattr(quantizer, "_amax"):
-                seen_modules.add(module)
-                yield module, weight_name, quantizer
-                break
-
-
 def _compute_lsq_params(quantizer):
     """Compute amax and scale-quantization params for LSQ."""
     per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
@@ -2208,17 +2191,31 @@ def lsq(
     """
     _run_scale_calibration(model, forward_loop, scale_algorithm, "lsq")
 
-    for module, weight_name, quantizer in _iter_weight_quantizers(model):
-        amax, per_tensor_scale, quantize_scales = _compute_lsq_params(quantizer)
-        weight_dtype = getattr(module, weight_name).dtype
-        amax = amax.to(weight_dtype)
-        if per_tensor_scale is not None:
-            per_tensor_scale = per_tensor_scale.to(weight_dtype)
-        quantizer.enable_lsq(
-            amax,
-            per_tensor_scale,
-            quantize_scales,
-            learnable_amax=learnable_amax,
-            tied_amax=tied_amax,
-            quantize_pre_scale=quantize_pre_scale,
-        )
+    name_to_module = dict(model.named_modules())
+    seen_modules: set[int] = set()
+    seen_quantizers: set[int] = set()
+    for module in name_to_module.values():
+        if id(module) in seen_modules or not isinstance(module, QuantModule):
+            continue
+        seen_modules.add(id(module))
+        with enable_weight_access_and_writeback(module, model, name_to_module):
+            for weight, quantizer in module.iter_weights_for_calibration():
+                if id(quantizer) in seen_quantizers:
+                    continue
+                seen_quantizers.add(id(quantizer))
+                if not isinstance(quantizer, StaticBlockScaleQuantizer) or not hasattr(
+                    quantizer, "_amax"
+                ):
+                    continue
+                amax, per_tensor_scale, quantize_scales = _compute_lsq_params(quantizer)
+                amax = amax.to(weight.dtype)
+                if per_tensor_scale is not None:
+                    per_tensor_scale = per_tensor_scale.to(weight.dtype)
+                quantizer.enable_lsq(
+                    amax,
+                    per_tensor_scale,
+                    quantize_scales,
+                    learnable_amax=learnable_amax,
+                    tied_amax=tied_amax,
+                    quantize_pre_scale=quantize_pre_scale,
+                )

@@ -15,17 +15,41 @@
 
 """CPU unit tests for the LSQ algorithm using INT4 quantization."""
 
+import types
+from unittest.mock import Mock
+
 import pytest
 import torch
 from torch import nn
 
 from modelopt.torch.quantization.config import LSQConfig
+from modelopt.torch.quantization.model_calib import lsq
+from modelopt.torch.quantization.nn import QuantLinear
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _FP8_E4M3_MIN_POSITIVE,
     StaticBlockScaleQuantizer,
     TensorQuantizer,
 )
 from modelopt.torch.quantization.tensor_quant import int_cast_ste
+
+
+def _make_int4_static_quantizer():
+    tq = TensorQuantizer()
+    tq._num_bits = 4
+    tq._unsigned = False
+    tq._narrow_range = True
+    tq._disabled = False
+    tq._block_sizes = {-1: 16}
+    tq._pass_through_bwd = True
+    tq.register_buffer("_amax", torch.ones(8))
+    return StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
+
+
+def _skip_scale_calibration(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.model_calib._run_scale_calibration",
+        lambda *args, **kwargs: None,
+    )
 
 
 class TestLSQConfig:
@@ -70,15 +94,7 @@ class TestEnableLSQ:
 
     def _make_quantizer(self):
         """Create a StaticBlockScaleQuantizer configured for INT4."""
-        tq = TensorQuantizer()
-        tq._num_bits = 4
-        tq._unsigned = False
-        tq._narrow_range = True
-        tq._disabled = False
-        tq._block_sizes = {-1: 16}
-        tq._pass_through_bwd = True
-        tq.register_buffer("_amax", torch.ones(8))
-        sbsq = StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
+        sbsq = _make_int4_static_quantizer()
         assert sbsq._quant_max_bound == 7.0
         return sbsq
 
@@ -185,6 +201,60 @@ class TestEnableLSQ:
 
         assert module.weight_quantizer._amax_pre.dtype == torch.bfloat16
         assert module.weight_quantizer._amax_post.dtype == torch.bfloat16
+
+
+class TestLSQWeightIteration:
+    """Tests LSQ conversion for each weight exposed by QuantModule's iterator contract."""
+
+    def test_multiple_singular_weight_quantizers_use_their_weight_dtypes(self, monkeypatch):
+        _skip_scale_calibration(monkeypatch)
+        module = QuantLinear(16, 8, bias=False, dtype=torch.bfloat16)
+        module.weight_quantizer = _make_int4_static_quantizer()
+        module.proj = nn.Parameter(torch.ones(8, 16, dtype=torch.float16))
+        module.proj_weight_quantizer = _make_int4_static_quantizer()
+
+        lsq(module)
+
+        assert module.weight_quantizer._lsq
+        assert module.proj_weight_quantizer._lsq
+        assert module.weight_quantizer._amax_post.dtype == torch.bfloat16
+        assert module.proj_weight_quantizer._amax_post.dtype == torch.float16
+
+    def test_plural_expert_weight_quantizers_enter_lsq(self, monkeypatch):
+        _skip_scale_calibration(monkeypatch)
+        module = QuantLinear(16, 8, bias=False)
+        module.expert_weight = nn.Parameter(torch.ones(2, 8, 16))
+        module.expert_weight_quantizers = nn.ModuleList(
+            [_make_int4_static_quantizer(), _make_int4_static_quantizer()]
+        )
+
+        def iter_expert_weights(self):
+            yield from zip(self.expert_weight, self.expert_weight_quantizers)
+
+        module.iter_weights_for_calibration = types.MethodType(iter_expert_weights, module)
+
+        lsq(module)
+
+        assert all(quantizer._lsq for quantizer in module.expert_weight_quantizers)
+
+    def test_shared_weight_quantizer_enters_lsq_once(self, monkeypatch):
+        _skip_scale_calibration(monkeypatch)
+        module = QuantLinear(16, 8, bias=False)
+        shared_quantizer = _make_int4_static_quantizer()
+
+        def mark_lsq_enabled(*_args, **_kwargs):
+            shared_quantizer._lsq = True
+
+        shared_quantizer.enable_lsq = Mock(side_effect=mark_lsq_enabled)
+        module.weight_quantizer = shared_quantizer
+        module.proj = nn.Parameter(torch.ones(8, 16))
+        module.proj_weight_quantizer = shared_quantizer
+
+        lsq(module)
+
+        assert shared_quantizer._lsq
+        assert shared_quantizer.enable_lsq.call_count == 1
+        assert module.weight_quantizer is module.proj_weight_quantizer
 
 
 class TestIntCastSTE:
