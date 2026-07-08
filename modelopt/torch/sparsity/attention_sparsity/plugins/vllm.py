@@ -171,14 +171,9 @@ def _any_quant_active(layer, p_qdq, v_qdq) -> bool:
     )
 
 
-def _should_run_modelopt_kernel(sparse_kw, quant_active: bool, force_kernel: bool) -> bool:
+def _should_run_modelopt_kernel(sparse_kw, quant_active: bool) -> bool:
     """Return whether a launch has effective work for the ModelOpt kernel."""
-    return bool(sparse_kw or quant_active or force_kernel)
-
-
-def _mixed_batch_needs_dense_base(quant_active: bool, force_kernel: bool) -> bool:
-    """Return whether sparse-only mixed phases need one native output seed."""
-    return not quant_active and not force_kernel
+    return bool(sparse_kw or quant_active)
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +183,6 @@ class _ResolvedForward:
     v_qdq: str | None
     v_qdq_amax: float | None
     quant_active: bool
-    force_kernel: bool
 
 
 def _resolve_forward(
@@ -203,10 +197,7 @@ def _resolve_forward(
     """Resolve shared transform state or request the backend's native path."""
     p_qdq, p_qdq_amax, v_qdq, v_qdq_amax = _quant_kw_from_impl(impl, layer)
     quant_active = _any_quant_active(layer, p_qdq, v_qdq)
-    force_kernel = getattr(layer, "_modelopt_force_kernel", False)
-    transform_active = _should_run_modelopt_kernel(
-        getattr(impl, "sparse_kw", None), quant_active, force_kernel
-    )
+    transform_active = _should_run_modelopt_kernel(getattr(impl, "sparse_kw", None), quant_active)
 
     if getattr(attn_metadata, "use_cascade", False):
         if transform_active:
@@ -234,7 +225,6 @@ def _resolve_forward(
         v_qdq=v_qdq,
         v_qdq_amax=v_qdq_amax,
         quant_active=quant_active,
-        force_kernel=force_kernel,
     )
 
 
@@ -260,7 +250,6 @@ def _forward_modelopt(
     v_qdq: str | None,
     v_qdq_amax: float | None,
     quant_active: bool,
-    force_kernel: bool,
     dense_fallback,
     prepare_modelopt=None,
 ) -> torch.Tensor:
@@ -281,16 +270,9 @@ def _forward_modelopt(
         # N:M sparse softmax is prefill-only.
         for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
             sparse_kw.pop(name, None)
-    if not _should_run_modelopt_kernel(
-        sparse_kw,
-        quant_active,
-        force_kernel,
-    ):
+    if not _should_run_modelopt_kernel(sparse_kw, quant_active):
         # Dynamic calibration can disable sparse work for a launch. Preserve the
         # backend's native dense path when no ModelOpt transform remains active.
-        # ``_modelopt_force_kernel`` (isolation knob) keeps the bf16 kernel path
-        # even with all quant disabled, so the on/off PPL diff holds the kernel
-        # constant.
         return dense_fallback()
     if prepare_modelopt is not None:
         prepare_modelopt()
@@ -309,7 +291,6 @@ def _forward_modelopt(
             max_new_tokens=max_query_len,
             page_size=page_size,
             v_qdq_scale=v_qdq_scale,
-            decode=is_decode_only,
         )
 
     q = query[:num_actual_tokens].contiguous()
@@ -459,7 +440,6 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             v_qdq=resolved.v_qdq,
             v_qdq_amax=resolved.v_qdq_amax,
             quant_active=resolved.quant_active,
-            force_kernel=resolved.force_kernel,
             dense_fallback=native_forward,
         )
 
@@ -633,7 +613,6 @@ def _flashinfer_forward(
         "v_qdq": resolved.v_qdq,
         "v_qdq_amax": resolved.v_qdq_amax,
         "quant_active": resolved.quant_active,
-        "force_kernel": resolved.force_kernel,
         "dense_fallback": dense_fallback,
         "prepare_modelopt": prepare_modelopt,
     }
@@ -662,10 +641,7 @@ def _flashinfer_forward(
     # Sparse-only launches may have an inactive phase (for example N:M
     # is prefill-only). Compute the native result once, then overwrite
     # each active phase with its ModelOpt result.
-    if _mixed_batch_needs_dense_base(
-        resolved.quant_active,
-        resolved.force_kernel,
-    ):
+    if not resolved.quant_active:
         dense_fallback()
 
     block_table = attn_metadata._modelopt_block_table

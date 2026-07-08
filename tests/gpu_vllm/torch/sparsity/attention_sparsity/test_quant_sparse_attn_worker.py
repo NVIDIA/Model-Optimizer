@@ -134,29 +134,6 @@ def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch
     assert state.model_runner.cascade_attn_enabled is False
 
 
-def test_quant_off_disables_recipe_but_keeps_modelopt_adapter(monkeypatch):
-    _patch_conversion(monkeypatch)
-    monkeypatch.setenv("MODELOPT_ATTN_QUANT_OFF", "1")
-    attention = _attention()
-    state = _worker(nn.ModuleDict({"attn": attention}))
-
-    worker_module._install_attention(state, quantize=True)
-
-    converted = state.model_runner.model["attn"]
-    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "p_bmm_quantizer", "v_bmm_quantizer"):
-        assert not getattr(converted, name).is_enabled
-    assert converted._query_quant_in_kernel is False
-    assert converted._value_quant_in_kernel is False
-    assert converted._modelopt_force_kernel is True
-    assert type(converted.impl) is ModelOptSparseAttentionImpl
-    assert converted.impl.quant_kw == {
-        "p_qdq": None,
-        "p_qdq_amax": 1.0,
-        "v_qdq": None,
-        "v_qdq_amax": None,
-    }
-
-
 def test_validation_of_all_layouts_precedes_mutation(monkeypatch):
     _patch_conversion(monkeypatch)
     good, bad = _attention(), _attention(AttentionType.ENCODER)
