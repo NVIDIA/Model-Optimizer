@@ -113,16 +113,23 @@ def test_forward_uses_minimal_shared_autotune_configs():
 
 
 @pytest.mark.parametrize(
-    ("attention_kwargs", "expected_p_qdq", "expected_v_qdq"),
+    ("attention_kwargs", "expected_p_qdq", "expected_v_qdq", "expected_mixed_fp16"),
     [
-        ({}, 0, 0),
-        ({"p_qdq": "fp8"}, 1, 0),
-        ({"p_qdq": "nvfp4", "v_qdq": "nvfp4"}, 2, 2),
-        ({"p_qdq": "nvfp4", "sparsity_n": 2, "sparsity_m": 4}, 2, 0),
+        ({}, 0, 0, False),
+        ({"softmax_mode": "mixed_fp16"}, 0, 0, True),
+        ({"p_qdq": "fp8"}, 1, 0, False),
+        ({"p_qdq": "nvfp4", "v_qdq": "nvfp4"}, 2, 2, False),
+        (
+            {"softmax_mode": "mixed_fp16", "p_qdq": "nvfp4", "v_qdq": "nvfp4"},
+            2,
+            2,
+            True,
+        ),
+        ({"p_qdq": "nvfp4", "sparsity_n": 2, "sparsity_m": 4}, 2, 0, False),
     ],
 )
 def test_forward_routes_every_mode_to_single_autotuner(
-    monkeypatch, attention_kwargs, expected_p_qdq, expected_v_qdq
+    monkeypatch, attention_kwargs, expected_p_qdq, expected_v_qdq, expected_mixed_fp16
 ):
     """Every non-measurement launch uses the unified autotuner."""
     pytest.importorskip("triton")
@@ -148,6 +155,7 @@ def test_forward_routes_every_mode_to_single_autotuner(
 
     assert kernel.kwargs["P_QDQ"] == expected_p_qdq
     assert kernel.kwargs["V_QDQ"] == expected_v_qdq
+    assert kernel.kwargs["MIXED_FP16"] is expected_mixed_fp16
 
 
 @pytest.mark.parametrize(

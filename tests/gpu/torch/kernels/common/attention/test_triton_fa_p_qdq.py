@@ -77,14 +77,21 @@ def test_ex2_fp16_matches_fp16_reference():
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
-def test_v_qdq_rejects_autograd_before_kernel_launch(monkeypatch):
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"v_qdq": "nvfp4"}, r"v_qdq.*autograd"),
+        ({"softmax_mode": "mixed_fp16"}, r"mixed_fp16.*autograd"),
+    ],
+)
+def test_inference_only_modes_reject_autograd_before_kernel_launch(monkeypatch, kwargs, match):
     apply = Mock(side_effect=AssertionError("_Attention.apply reached"))
     monkeypatch.setattr(triton_fa._Attention, "apply", apply)
     q, k, v = (torch.zeros(1, 1, 16, requires_grad=True) for _ in range(3))
     locs = torch.zeros(1, dtype=torch.int32)
     lens = torch.ones(1, dtype=torch.int32)
-    with pytest.raises(NotImplementedError, match=r"v_qdq.*autograd"):
-        attention(q, k, v, locs, lens, 1, v_qdq="nvfp4")
+    with pytest.raises(NotImplementedError, match=match):
+        attention(q, k, v, locs, lens, 1, **kwargs)
     apply.assert_not_called()
 
 
@@ -258,6 +265,22 @@ def _qdq_nvfp4(p, global_scale=1.0):
     return q.reshape(shape)
 
 
+def _qdq_v_nvfp4(v, global_scale=1.0):
+    """Signed NVFP4 V qdq in block-16 groups along the key axis."""
+    carrier_dtype = v.dtype
+    shape = v.shape
+    assert shape[0] % 16 == 0
+    g = v.float().reshape(shape[0] // 16, 16, *shape[1:])
+    block_amax = g.abs().amax(dim=1, keepdim=True)
+    scale_in_fp8_range = (block_amax / (6.0 * global_scale)).clamp(max=FP8_E4M3_MAX)
+    scale = scale_in_fp8_range.to(torch.float8_e4m3fn).float() * global_scale
+    scale_safe = torch.where(scale == 0, 1.0, scale)
+    q = _fp4_round(g.abs() / scale_safe) * scale_safe
+    q = torch.where(g < 0, -q, q)
+    q = torch.where(scale == 0, 0.0, q)
+    return q.reshape(shape).to(carrier_dtype).float()
+
+
 def _apply_qdq(p, mode, qdq_scale=1.0):
     if mode == "fp8":
         return _qdq_fp8(p, qdq_scale)
@@ -265,7 +288,45 @@ def _apply_qdq(p, mode, qdq_scale=1.0):
     return _qdq_nvfp4(p, qdq_scale)
 
 
-def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0, block_n=P_QDQ_BLOCK_N):
+def _softmax_exp2(x, softmax_mode):
+    if softmax_mode == "mixed_fp16":
+        return torch.exp2(x.to(torch.float16)).to(torch.float32)
+    assert softmax_mode == "fp32"
+    return torch.exp2(x)
+
+
+def _apply_top_n_of_m_tile(scores, n, m):
+    """Apply the kernel's per-tile top-N-of-M masking along the key axis."""
+    assert m in (4, 8) and scores.shape[-1] % m == 0
+    grouped = scores.reshape(*scores.shape[:-1], scores.shape[-1] // m, m)
+    if m == 4:
+        # The Triton comparison network breaks ties in favor of lower indices.
+        order = torch.argsort(grouped, dim=-1, descending=True, stable=True)
+        kept = torch.zeros_like(grouped, dtype=torch.bool)
+        kept.scatter_(-1, order[..., :n], True)
+    else:
+        # The Triton M=8 path keeps every value tied at the Nth-largest threshold.
+        threshold = grouped.sort(dim=-1).values[..., m - n]
+        kept = grouped >= threshold[..., None]
+    return grouped.masked_fill(~kept, float("-inf")).reshape_as(scores)
+
+
+def qdq_attention_reference(
+    q,
+    k,
+    v,
+    scale,
+    mode,
+    is_causal=True,
+    amax=1.0,
+    block_n=P_QDQ_BLOCK_N,
+    softmax_mode="fp32",
+    v_qdq=None,
+    sparsity_n=0,
+    sparsity_m=4,
+    dense_sink_tokens=0,
+    dense_recent_tokens=64,
+):
     """Tile-looped online-softmax reference replicating kernel P_QDQ semantics.
 
     Single sequence: q [s, h, d], k/v [s_kv, h_kv, d] (fp16). Walks KV tiles
@@ -302,10 +363,21 @@ def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0, bloc
     acc = torch.zeros(h, s, d, device=q.device)
     for start in range(0, s_kv, block_n):
         tile = t[:, :, start : start + block_n]
+        if sparsity_n:
+            sparse_tile = _apply_top_n_of_m_tile(tile, sparsity_n, sparsity_m)
+            q_abs = torch.arange(s, device=q.device) + s_kv - s
+            kv_abs = torch.arange(start, start + tile.shape[-1], device=q.device)
+            distance = q_abs[:, None] - kv_abs[None, :]
+            dense = (kv_abs[None, :] < dense_sink_tokens) | (
+                (distance >= 0) & (distance < dense_recent_tokens)
+            )
+            if s <= 1:
+                dense = torch.ones_like(dense)
+            tile = torch.where(dense[None], tile, sparse_tile)
         m_new = torch.maximum(row_max, tile.amax(dim=-1))
-        p = torch.exp2(tile - m_new[..., None])
+        p = _softmax_exp2(tile - m_new[..., None], softmax_mode)
         l_new = p.sum(dim=-1)
-        corr = torch.exp2(row_max - m_new)
+        corr = _softmax_exp2(row_max - m_new, softmax_mode)
         row_sum = row_sum * corr + l_new
         acc = acc * corr[..., None]
         if mode == "nvfp4":
@@ -313,7 +385,13 @@ def qdq_attention_reference(q, k, v, scale, mode, is_causal=True, amax=1.0, bloc
         p = _apply_qdq(p, mode, qdq_scale)
         if mode == "fp8":
             p = p.to(v.dtype).float()
-        acc = acc + torch.einsum("hqk,khd->hqd", p, vv[start : start + block_n].float())
+        v_tile = vv[start : start + block_n]
+        if v_qdq == "nvfp4":
+            # The kernel QDQs in FP32, then rounds back to the cache/model carrier dtype.
+            v_tile = _qdq_v_nvfp4(v_tile)
+        else:
+            assert v_qdq is None
+        acc = acc + torch.einsum("hqk,khd->hqd", p, v_tile.float())
         row_max = m_new
     out = acc / row_sum[..., None]
     return out.permute(1, 0, 2)
@@ -344,6 +422,63 @@ class TestSoftmaxQdqForward:
         # The feature must actually change the output vs dense attention.
         o_dense = attention(q, k, v, locs, lens, seq_len, softmax_scale=scale)
         assert not torch.equal(o, o_dense)
+
+    @requires_native_fp16_ex2
+    @requires_native_e4m3
+    def test_mixed_fp16_prefill_matches_tile_reference(self):
+        """Mixed softmax composes with P/V NVFP4 and tile-local 2:4 sparsity."""
+        seq_len, num_heads, num_kv_heads, head_dim = 128, 2, 1, 64
+        scale = 1.0 / math.sqrt(head_dim)
+
+        torch.manual_seed(29)
+        q, k, v = make_qkv(seq_len, num_heads, num_kv_heads, head_dim, dtype=torch.float16)
+        locs, lens = make_varlen_meta([seq_len])
+
+        actual = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            softmax_scale=scale,
+            softmax_mode="mixed_fp16",
+            p_qdq="nvfp4",
+            v_qdq="nvfp4",
+            sparsity_n=2,
+            sparsity_m=4,
+            dense_recent_tokens=0,
+        )
+        reference = qdq_attention_reference(
+            q,
+            k,
+            v,
+            scale,
+            "nvfp4",
+            softmax_mode="mixed_fp16",
+            v_qdq="nvfp4",
+            sparsity_n=2,
+            sparsity_m=4,
+            dense_recent_tokens=0,
+        )
+        fp32 = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            softmax_scale=scale,
+            softmax_mode="fp32",
+            p_qdq="nvfp4",
+            v_qdq="nvfp4",
+            sparsity_n=2,
+            sparsity_m=4,
+            dense_recent_tokens=0,
+        )
+
+        torch.testing.assert_close(actual.float(), reference, rtol=5e-3, atol=2e-2)
+        assert not torch.equal(actual, fp32)
 
     @requires_native_e4m3
     def test_nvfp4_uses_native_p_input_and_fp32_carriers(self):

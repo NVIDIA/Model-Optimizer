@@ -29,6 +29,11 @@ import torch
 import triton
 import triton.language as tl
 
+from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
+    ex2_fp16,
+    resolve_softmax_mode,
+)
+
 # Helpers for optional N:M sparsity and skip-softmax live in the sparsity
 # package. The baseline forward kernel below calls them conditionally under
 # constexpr guards, so the unified single-kernel design stays intact while
@@ -282,6 +287,7 @@ def _attn_fwd(
     HEAD_DIM: tl.constexpr,  # Actual head dimension (for d_mask)
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
     Q_IS_FP32: tl.constexpr,  # Dynamic NVFP4 QDQ carrier uses FP32
+    MIXED_FP16: tl.constexpr = False,  # FP16 exp2 with FP32 reductions and accumulators
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
     DENSE_SINK_TOKENS: tl.constexpr = 0,  # Leading KV tokens kept dense (attention sinks)
@@ -430,9 +436,13 @@ def _attn_fwd(
         if not skip_tile:
             # --- Online softmax update ---
             m_new = tl.maximum(row_max, tl.max(scores, 1))
-            p = tl.math.exp2(scores - m_new[:, None])
+            if MIXED_FP16:
+                p = ex2_fp16(scores - m_new[:, None])
+                correction = ex2_fp16(row_max - m_new)
+            else:
+                p = tl.math.exp2(scores - m_new[:, None])
+                correction = tl.math.exp2(row_max - m_new)
             l_new = tl.sum(p, 1)
-            correction = tl.math.exp2(row_max - m_new)
             row_sum = row_sum * correction + l_new
             acc = acc * correction[:, None]
 
@@ -881,6 +891,7 @@ class _Attention(torch.autograd.Function):
         max_input_len,
         is_causal,
         sm_scale,
+        mixed_fp16,
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,
@@ -990,6 +1001,7 @@ class _Attention(torch.autograd.Function):
             "HEAD_DIM": HEAD_DIM,
             "STORE_LSE": True,
             "Q_IS_FP32": q.dtype == torch.float32 and (p_qdq_mode == 2 or v_qdq_mode == 2),
+            "MIXED_FP16": mixed_fp16,
             "SPARSITY_N": sparsity_n,
             "SPARSITY_M": sparsity_m,
             "DENSE_SINK_TOKENS": dense_sink_tokens,
@@ -1195,6 +1207,7 @@ class _Attention(torch.autograd.Function):
             None,  # max_input_len
             None,  # is_causal
             None,  # sm_scale
+            None,  # mixed_fp16
             None,  # b_start_loc_k
             None,  # b_seq_len_k
             None,  # max_input_len_k
@@ -1235,6 +1248,7 @@ def attention(
     dense_recent_tokens: int = 64,
     skip_softmax_threshold: float | None = None,
     measure_sparsity: bool = False,
+    softmax_mode: str = "fp32",
     p_qdq: str | None = None,
     p_qdq_amax: float = 1.0,
     v_qdq: str | None = None,
@@ -1277,6 +1291,12 @@ def attention(
             and skipped tiles via atomic counters. The counts are stored as
             ``_sparsity_total`` and ``_sparsity_skipped`` attributes on the
             returned output tensor.
+        softmax_mode: Exponentiation mode for the forward online-softmax update.
+            ``"fp32"`` evaluates probability and running-maximum correction
+            exponentials in FP32. ``"mixed_fp16"`` evaluates those exponentials
+            in native FP16 and converts their results back to FP32; row maxima,
+            denominator sums, and output accumulation remain FP32. Mixed mode is
+            inference-only because backward continues to use FP32 exponentials.
         p_qdq: Fake quant-dequant of the softmax probabilities ``P``
             before the ``P @ V`` matmul (BMM2), emulating quantized attention.
             ``"fp8"`` round-trips P through FP8 E4M3 with a static per-tensor
@@ -1327,6 +1347,11 @@ def attention(
     # silently reuse stale compiled kernels from the on-disk cache.
     _load_sparsity_helpers()
     _load_qdq_helpers()
+    mixed_fp16 = resolve_softmax_mode(softmax_mode)
+    if mixed_fp16 and any(t.requires_grad for t in (q, k, v)):
+        raise NotImplementedError(
+            "mixed_fp16 softmax is inference-only and does not support autograd"
+        )
     if p_qdq not in _P_QDQ_MODES:
         raise ValueError(
             f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
@@ -1367,6 +1392,7 @@ def attention(
         max_input_len,
         is_causal,
         sm_scale,
+        mixed_fp16,
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,
