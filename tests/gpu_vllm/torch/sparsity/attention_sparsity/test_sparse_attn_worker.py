@@ -524,7 +524,9 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
         assert calls["finalize"] == []
 
 
-def test_flashinfer_forced_kernel_mixed_batch_never_uses_native_fallback(monkeypatch):
+def test_flashinfer_forced_kernel_mixed_batch_uses_dedicated_decode_and_shared_prefill(
+    monkeypatch,
+):
     class Layer:
         force_kernel_reads = 0
 
@@ -540,18 +542,18 @@ def test_flashinfer_forced_kernel_mixed_batch_never_uses_native_fallback(monkeyp
     kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
     metadata = _flashinfer_metadata(query_lens=(1, prefill_tokens), mixed=True)
     layer = Layer()
-    calls = {"native": 0, "decode": 0, "prefill": 0}
+    calls = {"native": 0, "dedicated_decode": 0, "shared_decode": 0, "shared_prefill": 0}
 
     def native_fallback(*args, **kwargs):
         calls["native"] += 1
         raise AssertionError("native FlashInfer fallback")
 
     def fake_decode(query, *args, **kwargs):
-        calls["decode"] += 1
+        calls["dedicated_decode"] += 1
         return torch.zeros_like(query)
 
     def fake_attention(query, **kwargs):
-        phase = "decode" if kwargs["max_input_len"] == 1 else "prefill"
+        phase = "shared_decode" if kwargs["max_input_len"] == 1 else "shared_prefill"
         calls[phase] += 1
         return torch.zeros_like(query)
 
@@ -561,7 +563,12 @@ def test_flashinfer_forced_kernel_mixed_batch_never_uses_native_fallback(monkeyp
 
     impl.forward(layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query))
 
-    assert calls == {"native": 0, "decode": 1, "prefill": 1}
+    assert calls == {
+        "native": 0,
+        "dedicated_decode": 1,
+        "shared_decode": 0,
+        "shared_prefill": 1,
+    }
     assert layer.force_kernel_reads == 1
 
 
@@ -1024,8 +1031,8 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     assert calls["query"].dtype == torch.float32
 
 
-def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
-    """Split-local maxima must not change calibrated skip-softmax semantics."""
+def test_quantized_skip_softmax_decode_uses_dedicated_kernel(monkeypatch):
+    """Dedicated decode must receive skip-softmax and P/V QDQ configuration."""
     impl = _clone_sparse_impl(_make_old_impl())
     impl.quant_kw = {
         "p_qdq": "nvfp4",
@@ -1040,10 +1047,45 @@ def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", lambda *args, **kwargs: None)
+
+    def fake_decode(query, *args, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(vllm_plugin, "triton_decode_attention", fake_decode)
+    monkeypatch.setattr(
+        vllm_plugin,
+        "triton_attention",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("shared kernel")),
+    )
+    output = torch.empty_like(q)
+    assert impl.forward(SimpleNamespace(), q, q, q, kv_cache, metadata, output=output) is output
+    assert captured["skip_softmax_threshold"] == pytest.approx(0.001)
+    assert captured["p_qdq"] == "nvfp4"
+    assert captured["p_qdq_amax"] == pytest.approx(1.0)
+    assert captured["v_qdq"] == "nvfp4"
+    assert captured["v_qdq_amax"] == pytest.approx(6.0 * 448.0)
+
+
+def test_decode_with_unrecognized_sparse_kw_uses_shared_kernel(monkeypatch):
+    """Decode must preserve future sparse options by routing them through the shared kernel."""
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.quant_kw = {
+        "p_qdq": "nvfp4",
+        "p_qdq_amax": 1.0,
+        "v_qdq": None,
+        "v_qdq_amax": None,
+    }
+    impl.sparse_kw = {"future_sparse_option": True}
+    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    metadata = _flash_attention_metadata(1, 16)
+    captured = {}
+
     monkeypatch.setattr(
         vllm_plugin,
         "triton_decode_attention",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("split-K kernel")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dedicated kernel")),
     )
 
     def fake_attention(query, **kwargs):
@@ -1052,10 +1094,10 @@ def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
 
     monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
     output = torch.empty_like(q)
-    assert impl.forward(None, q, q, q, kv_cache, metadata, output=output) is output
-    assert captured["skip_softmax_threshold"] == pytest.approx(0.001)
+    assert impl.forward(SimpleNamespace(), q, q, q, kv_cache, metadata, output=output) is output
+    assert captured["future_sparse_option"] is True
     assert captured["p_qdq"] == "nvfp4"
-    assert captured["v_qdq"] == "nvfp4"
+    assert captured["p_qdq_amax"] == pytest.approx(1.0)
 
 
 def test_resolve_calibrated_skip_softmax_threshold_for_decode():

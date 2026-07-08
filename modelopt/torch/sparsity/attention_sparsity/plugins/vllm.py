@@ -46,6 +46,8 @@ from modelopt.torch.kernels.common.attention.decode_attention import (
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
 from modelopt.torch.kernels.quantization.attention.v_qdq import fake_quant_v_onwrite
 
+_DEDICATED_DECODE_SPARSE_KWARGS = frozenset({"skip_softmax_threshold"})
+
 
 def _target_sparse_ratio_for_phase(target_sparse_ratio, phase: str) -> float:
     """Return target sparsity for a phase, defaulting old checkpoint metadata."""
@@ -317,12 +319,10 @@ def _forward_modelopt(
         valid_q = torch.arange(q.shape[0], device=q.device) < cu_seqlens_q[-1]
         q = q.masked_fill(~valid_q[:, None, None], 0)
         q = layer.q_bmm_quantizer(q.float())
-    use_split_k_decode = (
-        is_decode_only
-        and "skip_softmax_threshold" not in sparse_kw
-        and (p_qdq == "nvfp4" or v_qdq == "nvfp4")
-    )
-    if use_split_k_decode:
+    # The earlier active-work gate makes empty sparse kwargs valid for Q/K or forced decode;
+    # unknown sparse keys remain on the shared kernel.
+    use_dedicated_decode = is_decode_only and sparse_kw.keys() <= _DEDICATED_DECODE_SPARSE_KWARGS
+    if use_dedicated_decode:
         triton_out = triton_decode_attention(
             q[:batch],
             key_cache,
@@ -331,6 +331,7 @@ def _forward_modelopt(
             seq_lens,
             softmax_scale=impl.scale,
             page_size=page_size,
+            skip_softmax_threshold=sparse_kw.get("skip_softmax_threshold"),
             p_qdq=p_qdq,
             p_qdq_amax=p_qdq_amax,
             v_qdq=v_qdq,

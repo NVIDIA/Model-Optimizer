@@ -24,6 +24,7 @@ from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNE
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention.decode_attention import attention_decode
+    from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_fa_attention
     from modelopt.torch.kernels.quantization.attention.v_qdq import fake_quant_v_onwrite
 
 NATIVE_E4M3_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (8, 9)
@@ -107,6 +108,147 @@ def test_split_k_varlen_gqa_matches_dense(num_kv_splits):
     torch.testing.assert_close(
         output, _dense_decode(q, k, v, seq_lens, scale), rtol=5e-3, atol=5e-3
     )
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
+@pytest.mark.parametrize(
+    "skip_softmax_threshold",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-inf"),
+        pytest.param(float("-inf"), id="negative-inf"),
+    ],
+)
+def test_skip_softmax_rejects_non_finite_threshold(skip_softmax_threshold):
+    q = torch.zeros(1, 1, 16, device="cuda", dtype=torch.float16)
+    k = torch.zeros(1, 1, 1, 16, device="cuda", dtype=torch.float16)
+    v = torch.zeros_like(k)
+    k_cache, v_cache, block_table = _paged_cache(k, v, (1,))
+    seq_lens = torch.ones(1, device="cuda", dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="finite"):
+        attention_decode(
+            q,
+            k_cache,
+            v_cache,
+            block_table,
+            seq_lens,
+            skip_softmax_threshold=skip_softmax_threshold,
+        )
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
+@pytest.mark.parametrize(
+    "qdq_kwargs",
+    [
+        pytest.param({}, id="dense"),
+        pytest.param(
+            {"p_qdq": "nvfp4", "v_qdq": "nvfp4"},
+            marks=requires_native_e4m3,
+            id="nvfp4-p-v",
+        ),
+    ],
+)
+def test_skip_softmax_matches_32_token_paged_reference(qdq_kwargs):
+    seq_len, head_dim = 96, 64
+    scale = head_dim**-0.5
+    skip_softmax_threshold = 0.1
+    q = torch.zeros(1, 1, head_dim, device="cuda", dtype=torch.float16)
+    q[..., 0] = 1.0
+    k = torch.zeros(1, 1, seq_len, head_dim, device="cuda", dtype=torch.float16)
+    k[:, :, 32:, 0] = -4.0 / scale
+    v = torch.full_like(k, 4.0)
+    v[:, :, :32] = -1.0
+    k_cache, v_cache, block_table = _paged_cache(k, v, (seq_len,))
+    seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
+    decode_kwargs = {
+        "softmax_scale": scale,
+        **qdq_kwargs,
+    }
+
+    no_skip_output = attention_decode(
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        seq_lens,
+        **decode_kwargs,
+    )
+
+    # The reference forward configs use BLOCK_N=32, so only the first tile contributes.
+    k_flat = k[0].transpose(0, 1).contiguous()
+    v_flat = v[0].transpose(0, 1).contiguous()
+    query_starts = torch.zeros(1, device="cuda", dtype=torch.int32)
+    query_lens = torch.ones(1, device="cuda", dtype=torch.int32)
+    reference = triton_fa_attention(
+        q,
+        k_flat,
+        v_flat,
+        query_starts,
+        query_lens,
+        1,
+        is_causal=False,
+        softmax_scale=scale,
+        b_start_loc_k=query_starts,
+        b_seq_len_k=seq_lens,
+        max_input_len_k=seq_len,
+        skip_softmax_threshold=skip_softmax_threshold,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        block_table=block_table,
+        **qdq_kwargs,
+    )
+    # Skip decode owns the sequential one-split, BLOCK_N=32 schedule.
+    skip_output = attention_decode(
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        seq_lens,
+        skip_softmax_threshold=skip_softmax_threshold,
+        **decode_kwargs,
+    )
+
+    torch.testing.assert_close(skip_output, reference, rtol=5e-3, atol=5e-3)
+    assert (skip_output.float() - no_skip_output.float()).abs().max() > 0.05
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
+def test_skip_softmax_cuda_graph_replay_uses_live_seq_len():
+    captured_seq_len, replay_seq_len, head_dim = 64, 96, 64
+    scale = head_dim**-0.5
+    q = torch.zeros(1, 1, head_dim, device="cuda", dtype=torch.float16)
+    q[..., 0] = 1.0
+    k = torch.zeros(1, 1, replay_seq_len, head_dim, device="cuda", dtype=torch.float16)
+    k[:, :, 32:64, 0] = -4.0 / scale
+    v = torch.ones_like(k)
+    v[:, :, :32] = -1.0
+    v[:, :, 32:64] = 4.0
+    k_cache, v_cache, block_table = _paged_cache(k, v, (replay_seq_len,))
+    seq_lens = torch.tensor([captured_seq_len], device="cuda", dtype=torch.int32)
+    decode_kwargs = {"softmax_scale": scale, "skip_softmax_threshold": 0.1}
+
+    warmup_stream = torch.cuda.Stream()
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            attention_decode(q, k_cache, v_cache, block_table, seq_lens, **decode_kwargs)
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    captured_length_output = attention_decode(
+        q, k_cache, v_cache, block_table, seq_lens, **decode_kwargs
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output = attention_decode(q, k_cache, v_cache, block_table, seq_lens, **decode_kwargs)
+
+    seq_lens.fill_(replay_seq_len)
+    graph.replay()
+    replay_output = graph_output.clone()
+    eager_output = attention_decode(q, k_cache, v_cache, block_table, seq_lens, **decode_kwargs)
+
+    torch.testing.assert_close(replay_output, eager_output, rtol=5e-3, atol=5e-3)
+    assert (eager_output.float() - captured_length_output.float()).abs().max() > 0.5
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")

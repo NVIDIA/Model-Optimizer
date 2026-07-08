@@ -14,10 +14,10 @@
 # limitations under the License.
 
 
-"""Split-K decode attention for the ModelOpt paged NVFP4 serving path.
+"""Paged decode attention for the ModelOpt NVFP4 serving path.
 
-P QDQ operates on split-local, unnormalized online-softmax probabilities. Its
-numerics therefore include the fixed split count as part of the kernel schedule.
+Normal decode uses fixed-size split-K tiles. Skip-softmax instead scans 32-key
+tiles sequentially so its running maximum and tile decisions match prefill.
 """
 
 import math
@@ -37,7 +37,9 @@ from modelopt.torch.kernels.quantization.attention.v_qdq import _v_qdq_nvfp4
 __all__ = ["attention_decode"]
 
 _BLOCK_N = 128
+_SKIP_BLOCK_N = 32
 _DEFAULT_KV_SPLITS = 32
+_SKIP_KV_SPLITS = 1
 _MAX_KV_SPLITS = 32
 _QDQ_MODES = {None, "nvfp4"}
 
@@ -78,6 +80,8 @@ def _decode_split_kernel(
     P_QDQ: tl.constexpr,
     V_QDQ: tl.constexpr,
     V_CACHE_QUANTIZED: tl.constexpr,
+    APPLY_SKIP: tl.constexpr,
+    skip_threshold_log2,
 ):
     """Compute one partial softmax for one request, query head, and KV split."""
     batch_idx = tl.program_id(0)
@@ -131,53 +135,58 @@ def _decode_split_kernel(
         scores = tl.sum(q[:, None] * k, axis=0) * qk_scale
         scores = tl.where(kv_valid, scores, -float("inf"))
         tile_max = tl.max(scores, axis=0)
-        new_max = tl.maximum(running_max, tile_max)
-        p = tl.math.exp2(scores - new_max)
-        p = tl.where(kv_valid, p, 0.0)
-        correction = tl.math.exp2(running_max - new_max)
-        running_sum = running_sum * correction + tl.sum(p, axis=0)
-        acc *= correction
+        skip_tile = False
+        if APPLY_SKIP:
+            skip_tile = tile_max < running_max + skip_threshold_log2
 
-        if P_QDQ:
-            p = tl.reshape(
-                _p_qdq_nvfp4(
-                    tl.reshape(p.to(V_cache.dtype.element_ty).to(tl.float32), (1, BLOCK_N)),
-                    p_qdq_scale,
-                    1,
-                    BLOCK_N,
-                ),
-                (BLOCK_N,),
-            )
+        if not skip_tile:
+            new_max = tl.maximum(running_max, tile_max)
+            p = tl.math.exp2(scores - new_max)
+            p = tl.where(kv_valid, p, 0.0)
+            correction = tl.math.exp2(running_max - new_max)
+            running_sum = running_sum * correction + tl.sum(p, axis=0)
+            acc *= correction
 
-        v = _load_paged_v_tile(
-            V_cache,
-            Block_table,
-            batch_idx,
-            kv_head_idx,
-            kv_start,
-            kv_pos,
-            dim_pos,
-            seq_len_kv,
-            stride_vc_block,
-            stride_vc_pos,
-            stride_vc_head,
-            PAGE_SIZE,
-            BLOCK_N,
-            BLOCK_D,
-            HEAD_DIM,
-            max_blocks_per_seq,
-        ).to(tl.float32)
-        if V_QDQ and ((not V_CACHE_QUANTIZED) or kv_start + BLOCK_N > v_quantized_boundary):
-            v_qdq = _v_qdq_nvfp4(v, v_qdq_scale, BLOCK_N, BLOCK_D)
-            v_qdq = v_qdq.to(V_cache.dtype.element_ty).to(tl.float32)
-            if V_CACHE_QUANTIZED:
-                use_qdq = kv_start + kv_pos >= v_quantized_boundary
-                v = tl.where(use_qdq[:, None], v_qdq, v)
-            else:
-                v = v_qdq
+            if P_QDQ:
+                p = tl.reshape(
+                    _p_qdq_nvfp4(
+                        tl.reshape(p.to(V_cache.dtype.element_ty).to(tl.float32), (1, BLOCK_N)),
+                        p_qdq_scale,
+                        1,
+                        BLOCK_N,
+                    ),
+                    (BLOCK_N,),
+                )
 
-        acc += tl.sum(p[:, None] * v, axis=0)
-        running_max = new_max
+            v = _load_paged_v_tile(
+                V_cache,
+                Block_table,
+                batch_idx,
+                kv_head_idx,
+                kv_start,
+                kv_pos,
+                dim_pos,
+                seq_len_kv,
+                stride_vc_block,
+                stride_vc_pos,
+                stride_vc_head,
+                PAGE_SIZE,
+                BLOCK_N,
+                BLOCK_D,
+                HEAD_DIM,
+                max_blocks_per_seq,
+            ).to(tl.float32)
+            if V_QDQ and ((not V_CACHE_QUANTIZED) or kv_start + BLOCK_N > v_quantized_boundary):
+                v_qdq = _v_qdq_nvfp4(v, v_qdq_scale, BLOCK_N, BLOCK_D)
+                v_qdq = v_qdq.to(V_cache.dtype.element_ty).to(tl.float32)
+                if V_CACHE_QUANTIZED:
+                    use_qdq = kv_start + kv_pos >= v_quantized_boundary
+                    v = tl.where(use_qdq[:, None], v_qdq, v)
+                else:
+                    v = v_qdq
+
+            acc += tl.sum(p[:, None] * v, axis=0)
+            running_max = new_max
 
     partial_offset = batch_idx * stride_mb + head_idx * stride_mh + split_idx
     tl.store(M_partial + partial_offset, running_max)
@@ -260,6 +269,7 @@ def attention_decode(
     softmax_scale: float | None = None,
     page_size: int = 16,
     num_kv_splits: int = _DEFAULT_KV_SPLITS,
+    skip_softmax_threshold: float | None = None,
     p_qdq: str | None = None,
     p_qdq_amax: float = 1.0,
     v_qdq: str | None = None,
@@ -273,15 +283,35 @@ def attention_decode(
     one. P is rounded to the model/cache dtype before native-style quantization,
     then its QDQ result remains FP32. Complete block-16 V groups may be finalized
     in the cache; only the pristine partial group is then quantized on read.
-    P QDQ intentionally follows the split-local online-softmax schedule; changing
-    ``num_kv_splits`` can therefore change quantized results.
+    Without skip-softmax, P QDQ follows the split-local 32-split, 128-key-tile
+    schedule by default; explicit split counts retain that same tile size. A
+    finite positive ``skip_softmax_threshold`` instead uses one sequential split
+    with 32-key tiles and skips tiles whose contribution is negligible versus
+    the running maximum. Finite non-positive values disable skipping. In skip
+    mode, ``num_kv_splits`` must be the legacy default (which is overridden) or
+    ``1``; other explicit values are rejected.
     """
+    if skip_softmax_threshold is not None and not math.isfinite(skip_softmax_threshold):
+        raise ValueError(f"skip_softmax_threshold must be finite, got {skip_softmax_threshold}")
     if q.ndim != 3:
         raise ValueError(f"q must have shape [batch, heads, head_dim], got {tuple(q.shape)}")
     if page_size != k_cache.shape[1] or page_size != v_cache.shape[1]:
         raise ValueError("page_size must match both paged KV cache tensors")
     if not 1 <= num_kv_splits <= _MAX_KV_SPLITS:
         raise ValueError(f"num_kv_splits must be in [1, {_MAX_KV_SPLITS}], got {num_kv_splits}")
+    if skip_softmax_threshold is not None and skip_softmax_threshold > 0.0:
+        apply_skip = True
+        skip_threshold_log2 = math.log2(skip_softmax_threshold)
+    else:
+        apply_skip = False
+        skip_threshold_log2 = 0.0
+    if apply_skip and num_kv_splits not in {_DEFAULT_KV_SPLITS, _SKIP_KV_SPLITS}:
+        raise ValueError(
+            "skip-softmax requires num_kv_splits=1; omit num_kv_splits to use its owned schedule"
+        )
+    if apply_skip:
+        num_kv_splits = _SKIP_KV_SPLITS
+    block_n = _SKIP_BLOCK_N if apply_skip else _BLOCK_N
     batch, num_q_heads, head_dim = q.shape
     num_kv_heads = k_cache.shape[2]
     if num_q_heads % num_kv_heads:
@@ -333,7 +363,7 @@ def attention_decode(
             v_qdq_scale,
             kv_group_num=num_q_heads // num_kv_heads,
             BLOCK_D=block_d,
-            BLOCK_N=_BLOCK_N,
+            BLOCK_N=block_n,
             HEAD_DIM=head_dim,
             PAGE_SIZE=page_size,
             max_blocks_per_seq=block_table.shape[1],
@@ -341,6 +371,8 @@ def attention_decode(
             P_QDQ=p_qdq == "nvfp4",
             V_QDQ=v_qdq == "nvfp4",
             V_CACHE_QUANTIZED=v_cache_quantized,
+            APPLY_SKIP=apply_skip,
+            skip_threshold_log2=skip_threshold_log2,
             num_warps=4,
             num_stages=2,
         )
