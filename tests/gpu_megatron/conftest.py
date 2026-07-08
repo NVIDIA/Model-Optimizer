@@ -17,9 +17,23 @@ import contextlib
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
+from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 from megatron.core.parallel_state import destroy_model_parallel
 
 import modelopt.torch.utils.distributed as dist
+
+
+@pytest.fixture(scope="session")
+def tiny_qwen3_path(tmp_path_factory):
+    return str(
+        create_tiny_qwen3_dir(
+            tmp_path_factory.mktemp("tiny_qwen3"),
+            with_tokenizer=True,
+            hidden_size=512,
+            intermediate_size=512,
+        )
+    )
+
 
 apex_destroy = None
 with contextlib.suppress(ImportError):

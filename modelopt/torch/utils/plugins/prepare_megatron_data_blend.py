@@ -21,10 +21,12 @@ import shutil
 from pathlib import Path
 from typing import Any, cast
 
+import huggingface_hub
 import yaml
-from huggingface_hub import hf_hub_download
 
 from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
+
+__all__ = ["prepare_megatron_data_blend"]
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -104,7 +106,7 @@ def _prepare_sources(
         if "files" in source:
             raw_dir = output_dir.parent / "raw" / dataset.replace("/", "--")
             paths = [
-                hf_hub_download(
+                huggingface_hub.hf_hub_download(
                     repo_id=dataset,
                     filename=file,
                     repo_type="dataset",
@@ -144,7 +146,7 @@ def _prepare_sources(
     return blend
 
 
-def prepare_data_blend(config_path: Path) -> list[tuple[float, str]]:
+def prepare_megatron_data_blend(config_path: Path) -> list[tuple[float, str]]:
     """Download and tokenize the configured weighted data sources."""
     config = load_config(config_path)
     output_dir = Path(config["output_dir"])
@@ -163,7 +165,7 @@ def main() -> None:
     """Prepare a data blend from the supplied configuration."""
     parser = _build_parser()
     args = parser.parse_args()
-    blend = prepare_data_blend(args.config)
+    blend = prepare_megatron_data_blend(args.config)
     print(f"Prepared {len(blend)} data paths. See data_blend.txt and config.yaml in the output.")
 
 

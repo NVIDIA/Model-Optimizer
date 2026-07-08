@@ -18,13 +18,11 @@ import sys
 from pathlib import Path
 from unittest.mock import Mock
 
+import huggingface_hub
 import pytest
 import yaml
 
-# examples/dataset is not a package; add it to the path to import and test the script in-process.
-sys.path.insert(0, str(Path(__file__).parents[3] / "examples/dataset"))
-
-import prepare_data_blend
+from modelopt.torch.utils.plugins.prepare_megatron_data_blend import main
 
 
 def _setup_test(
@@ -65,21 +63,23 @@ def _setup_test(
         "".join(json.dumps(conversation) + "\n" for _ in range(20)), encoding="utf-8"
     )
     download = Mock(return_value=str(jsonl_path))
-    monkeypatch.setattr(prepare_data_blend, "hf_hub_download", download)
-    monkeypatch.setattr(sys, "argv", ["prepare_data_blend.py", "--config", str(config_path)])
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    monkeypatch.setattr(
+        sys, "argv", ["prepare_megatron_data_blend.py", "--config", str(config_path)]
+    )
     return output_dir, config_path, download
 
 
 @pytest.mark.parametrize("target_tokens", [1_000, None], ids=["token-budget", "all-data"])
-def test_prepare_data_blend_with_split_and_files_sources(
+def test_prepare_megatron_data_blend_with_split_and_files_sources(
     tiny_qwen3_path: str, tmp_path: Path, monkeypatch, target_tokens: int | None
 ):
     output_dir, config_path, download = _setup_test(
         tiny_qwen3_path, tmp_path, monkeypatch, target_tokens
     )
 
-    # Run in-process so the mocked NVIDIA download is visible; run_example_command uses a subprocess.
-    prepare_data_blend.main()
+    # Run in-process so the CLI entry point uses the mocked NVIDIA download.
+    main()
 
     download.assert_called_once_with(
         repo_id="nvidia/Nemotron-SFT-Competitive-Programming-v2",
