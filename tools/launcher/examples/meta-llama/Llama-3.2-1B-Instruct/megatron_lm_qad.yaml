@@ -1,0 +1,107 @@
+# Llama-3.2-1B-Instruct Megatron QAD (Quantization-Aware Distillation / SFT).
+#
+# 2-step pipeline (tasks share the persisted /cicd checkpoint dir):
+#   task_0: common/megatron_lm/quantize/quantize.sh — NVFP4 PTQ quantize + MMLU
+#           gate (--lower-bound is the regression floor); export skipped. Saves an
+#           MCore ckpt to /cicd/megatron-lm/meta-llama/Llama-3.2-1B-Instruct.
+#   task_1: common/megatron_lm/train/sft.sh — QAD/SFT training (--modelopt-enabled)
+#           that loads that quantized ckpt.
+#
+# Uses nvcr.io/nvidia/nemo:26.06.00 (ships nvidia-resiliency-ext>=0.6.0). The
+# common/* wrappers install extra deps and assemble MLM_EXTRA_ARGS from the CLI
+# args below, so flags pass via `args:` (robust) rather than space-containing env
+# vars. (Making the Megatron-LM example scripts accept CLI args directly, to drop
+# these wrappers, is tracked in OMNIML-5421.)
+#
+# The QAD train step loads a quantized ckpt whose TE mcore model declares
+# `decoder.final_layernorm._extra_state` that the PTQ save doesn't emit; it passes
+# `--dist-ckpt-strictness log_all` so the main model load drops only that
+# genuinely-missing key instead of the DCP planner hard-raising.
+#
+# Usage:
+#   uv run launch.py --yaml examples/meta-llama/Llama-3.2-1B-Instruct/megatron_lm_qad.yaml --yes
+
+job_name: Llama-3.2-1B-Instruct_Megatron_QAD
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  # Step 1: PTQ quantize (NVFP4) + MMLU gate. export skipped (QAD only needs the
+  # MCore ckpt). Calib flags pass via args: → MLM_EXTRA_ARGS inside quantize.sh.
+  task_0:
+    script: common/megatron_lm/quantize/quantize.sh
+    args:
+      - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
+      - --calib-size 32
+      - --calib-max-sequence-length 512
+    environment:
+      - MLM_MODEL_CFG: meta-llama/Llama-3.2-1B-Instruct
+      - QUANT_CFG: NVFP4_DEFAULT_CFG
+      - HF_MODEL_CKPT: /hf-local/meta-llama/Llama-3.2-1B-Instruct
+      - MMLU_DATASET: /hf-local/cais/mmlu
+      - MMLU_LOWER_BOUND: "0.40"
+      - RUN_EXPORT: "false"
+      - TP: 1
+      - EP: 1
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      container: nvcr.io/nvidia/nemo:26.06.00
+
+  # Step 2: QAD/SFT training on the quantized checkpoint from task_0. All train
+  # flags pass via args: → MLM_EXTRA_ARGS inside sft.sh (MLM_DATA_ARGS=--sft keeps
+  # train.sh from falling back to its default data block).
+  task_1:
+    script: common/megatron_lm/train/sft.sh
+    args:
+      # data
+      - --seq-length 1024
+      - --train-samples 1024
+      - --lr-decay-samples 256
+      - --lr-warmup-samples 128
+      - --sft
+      - --sft-tokenizer-prompt-format default
+      - --tokenizer-type SFTTokenizer
+      - --no-create-attention-mask-in-dataloader
+      - --per-split-data-args-path /hf-local/modelopt/test-sft/blend.json
+      - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
+      # train
+      - --micro-batch-size 1
+      - --attention-dropout 0.0
+      - --hidden-dropout 0.0
+      - --no-check-for-nan-in-loss-and-grad
+      - --recompute-granularity selective
+      - --recompute-modules layernorm moe
+      # optimizer
+      - --lr 5.0e-5
+      - --min-lr 5.0e-6
+      - --lr-decay-style cosine
+      - --clip-grad 1.0
+      - --weight-decay 0.0
+      - --adam-beta1 0.9
+      - --adam-beta2 0.95
+      - --init-method-std 0.010
+      - --use-distributed-optimizer
+      # evaluate
+      - --eval-iters 4
+      - --eval-interval 1000
+      - --save-interval 1000
+      - --log-interval 100
+      # load the quantized ckpt: drop only the genuinely-missing norm _extra_state
+      - --dist-ckpt-strictness log_all
+    environment:
+      - MLM_MODEL_CFG: meta-llama/Llama-3.2-1B-Instruct
+      - MLM_MODEL_CKPT: /cicd/megatron-lm/meta-llama/Llama-3.2-1B-Instruct
+      - HF_MODEL_CKPT: /hf-local/meta-llama/Llama-3.2-1B-Instruct
+      - MLM_DATA_ARGS: --sft
+      - DP: 1
+      - CP: 1
+      - TP: 1
+      - PP: 1
+      - EP: 1
+      - ETP: 1
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      container: nvcr.io/nvidia/nemo:26.06.00
