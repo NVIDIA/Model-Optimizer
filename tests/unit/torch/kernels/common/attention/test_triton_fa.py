@@ -61,6 +61,17 @@ def test_triton_fa_importable_on_cpu():
     assert callable(calibrate.attention_calibrate)
 
 
+def test_softmax_mode_validation():
+    pytest.importorskip("triton")
+
+    from modelopt.torch.kernels.quantization.attention.softmax_fakequant import resolve_softmax_mode
+
+    assert resolve_softmax_mode("fp32") is False
+    assert resolve_softmax_mode("mixed_fp16") is True
+    with pytest.raises(ValueError, match="softmax_mode"):
+        resolve_softmax_mode("fp16")
+
+
 def test_forward_buckets_autotune_key_without_bucketing_grid(monkeypatch):
     """Reuse autotune results by length regime without launching extra query tiles."""
     pytest.importorskip("triton")

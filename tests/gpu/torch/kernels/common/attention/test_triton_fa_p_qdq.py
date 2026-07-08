@@ -27,13 +27,53 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor, e2m1_
 from modelopt.torch.quantization.tensor_quant import fp8_eager
 
 if TRITON_KERNEL_AVAILABLE:
+    import triton
+    import triton.language as tl
+
     from modelopt.torch.kernels.common.attention import attention, triton_fa
     from modelopt.torch.kernels.common.attention.triton_fa import LOG2E
+    from modelopt.torch.kernels.quantization.attention.softmax_fakequant import ex2_fp16
 
+    @triton.jit
+    def _ex2_fp16_test_kernel(x, out, n, BLOCK: tl.constexpr):  # noqa: N803
+        offsets = tl.arange(0, BLOCK)
+        mask = offsets < n
+        tl.store(out + offsets, ex2_fp16(tl.load(x + offsets, mask=mask)), mask=mask)
+
+
+NATIVE_FP16_EX2_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (7, 5)
+requires_native_fp16_ex2 = pytest.mark.skipif(
+    not NATIVE_FP16_EX2_AVAILABLE,
+    reason="Native FP16 ex2 requires compute capability >= 7.5",
+)
 NATIVE_E4M3_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (8, 9)
 requires_native_e4m3 = pytest.mark.skipif(
     not NATIVE_E4M3_AVAILABLE, reason="Native E4M3 requires compute capability >= 8.9"
 )
+
+
+@requires_native_fp16_ex2
+def test_ex2_fp16_matches_fp16_reference():
+    x = torch.tensor(
+        [float("-inf"), -12.0, -3.25, -1.0, -0.125, -0.1, 0.0],
+        dtype=torch.float32,
+        device="cuda",
+    )
+    actual = torch.empty_like(x)
+
+    _ex2_fp16_test_kernel[(1,)](x, actual, x.numel(), BLOCK=8)
+
+    expected = torch.exp2(x.to(torch.float16)).to(torch.float32)
+    # PTX specifies a maximum relative error of 2**-9.9 for ex2.approx.f16.
+    torch.testing.assert_close(actual, expected, rtol=2**-9, atol=0.0)
+    actual_finite = actual[torch.isfinite(actual)]
+    torch.testing.assert_close(
+        actual_finite,
+        actual_finite.to(torch.float16).float(),
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert actual[0].item() == 0.0
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need triton")
