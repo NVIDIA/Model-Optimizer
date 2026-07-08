@@ -671,6 +671,29 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         """,
     )
 
+    constant_amax: float | None = ModeloptField(
+        default=None,
+        title="Pin the quantizer amax to a constant value and skip calibration.",
+        description="""If set, the quantizer ``amax`` is fixed to this constant value and no
+        activation calibration is performed (no forward statistics are collected). The constant
+        is stored on the ``_amax`` buffer, so it is used by both the fake-quant forward pass and
+        the exported scaling factor (e.g. ``input_scale``).
+
+        This differs from ``use_constant_amax``, which pins amax to the FP8 E4M3 range (448.0)
+        for KV-cache cast math and does not register an ``_amax`` buffer. For NVFP4 activations
+        the exported ``input_scale`` equals ``amax / (E2M1_MAX * E4M3_MAX) = amax / (6 * 448)``;
+        setting ``constant_amax`` to ``2688.0`` therefore yields an exported ``input_scale`` of
+        ``1.0``.
+        """,
+    )
+
+    @field_validator("constant_amax")
+    @classmethod
+    def validate_constant_amax(cls, v):
+        """Validate that constant_amax, when set, is a positive value."""
+        assert v is None or v > 0, "constant_amax must be a positive value."
+        return v
+
 
 class LayerwiseConfig(ModeloptBaseConfig):
     """Nested config for layer-by-layer calibration behavior."""
