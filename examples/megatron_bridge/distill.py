@@ -24,9 +24,9 @@ import argparse
 import contextlib
 import os
 from dataclasses import fields
-from pathlib import Path
 
 import torch
+from distill_callbacks import _HFValidationExportCallback, _TargetValidationCallback
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.distillation_provider import (
     DistillationProvider,
@@ -35,7 +35,6 @@ from megatron.bridge.models.distillation_provider import (
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
-from megatron.bridge.training.callbacks import Callback
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
@@ -53,7 +52,6 @@ from megatron.bridge.training.post_training.distillation import ModelOptDistillC
 from megatron.bridge.training.pretrain import pretrain
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
-from megatron.core.utils import unwrap_model
 from transformers import AutoConfig
 
 import modelopt.torch.distill as mtd
@@ -164,63 +162,6 @@ def _distill_provide_with_megatron_student(
 DistillationProvider.provide = _distill_provide_with_megatron_student
 
 
-class _HFValidationExportCallback(Callback):
-    """Export the live student to Hugging Face format at selected validation stages."""
-
-    def __init__(
-        self,
-        export_dir: str,
-        student_hf_model: str,
-        student_hf_path: str,
-        trust_remote_code: bool,
-        export_interval: int,
-    ) -> None:
-        self.export_dir = Path(export_dir)
-        self.student_hf_path = student_hf_path
-        self.trust_remote_code = trust_remote_code
-        self.export_interval = export_interval
-        self._last_exported_iteration: int | None = None
-        self.bridge = AutoBridge.from_hf_pretrained(
-            student_hf_model, trust_remote_code=trust_remote_code
-        )
-
-    def on_eval_end(self, context) -> None:
-        """Export the student at the iteration that was just validated."""
-        iteration = context.state.train_state.step
-        train_iters = context.state.cfg.train.train_iters
-        if iteration % self.export_interval != 0 and iteration != train_iters:
-            return
-        # The final iteration can be validated both on its regular interval and after training.
-        # Avoid exporting and overwriting the same Hugging Face checkpoint twice.
-        if iteration == self._last_exported_iteration:
-            return
-        output_path = self.export_dir / f"iter_{iteration:07d}"
-        print_rank_0(f"Exporting validation checkpoint {iteration} to {output_path}")
-
-        # DistillationModel is the student with teacher and KD-loss modules attached. Hide the
-        # auxiliary modules temporarily so the Hugging Face export contains only student weights.
-        with contextlib.ExitStack() as stack:
-            for model_chunk in unwrap_model(context.model):
-                if isinstance(model_chunk, mtd.DistillationModel):
-                    stack.enter_context(model_chunk.hide_teacher_model())
-                    stack.enter_context(model_chunk.hide_loss_modules())
-            self.bridge.save_hf_pretrained(
-                context.model,
-                output_path,
-                show_progress=True,
-                strict=True,
-            )
-
-        if dist.rank() == 0:
-            # Preserve the student architecture from student_hf_path, including heterogeneous
-            # layer changes; AutoConfig supports both local paths and Hugging Face model IDs.
-            AutoConfig.from_pretrained(
-                self.student_hf_path, trust_remote_code=self.trust_remote_code
-            ).save_pretrained(output_path)
-        torch.distributed.barrier()
-        self._last_exported_iteration = iteration
-
-
 def get_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Distillation for Megatron-Bridge.")
@@ -266,6 +207,14 @@ def get_args():
         "--data_paths",
         nargs="+",
         help="List of tokenized data paths to load from (weight1 path1 weight2 path2 ...)",
+    )
+    parser.add_argument(
+        "--target_validation_data_paths",
+        nargs="+",
+        help=(
+            "Optional target validation blend (weight1 path1 weight2 path2 ...) evaluated "
+            "separately from the validation split derived from --data_paths."
+        ),
     )
     parser.add_argument(
         "--data_path_to_cache", type=str, default=None, help="Path to cache the dataset indices"
@@ -387,6 +336,8 @@ def get_args():
     # Sanity checks
     if not args.use_mock_data and not args.data_paths:
         raise ValueError("Must provide either --data_paths or set --use_mock_data.")
+    if args.use_mock_data and args.target_validation_data_paths:
+        raise ValueError("--target_validation_data_paths cannot be used with --use_mock_data.")
 
     if args.validate_only and args.hf_export_path:
         raise ValueError("--hf_export_path cannot be used with --validate_only.")
@@ -491,8 +442,8 @@ def main(args: argparse.Namespace):
         dataset_config = MockGPTDatasetConfig(**dataset_kwargs)
     else:
         # Convert flat CLI list (e.g. ["1.0", "/path/data"]) to Megatron blend format
-        blend = get_blend_from_list(args.data_paths)
-        dataset_config = GPTDatasetConfig(blend=blend, split="99,1,0", **dataset_kwargs)
+        training_blend = get_blend_from_list(args.data_paths)
+        dataset_config = GPTDatasetConfig(blend=training_blend, split="99,1,0", **dataset_kwargs)
 
     # Assemble ConfigContainer and run distillation
     config = ConfigContainer(
@@ -547,19 +498,27 @@ def main(args: argparse.Namespace):
     )
 
     print_rank_0("\nStarting distillation...")
+    callbacks = []
+    if args.target_validation_data_paths:
+        callbacks.append(
+            _TargetValidationCallback(get_blend_from_list(args.target_validation_data_paths))
+        )
     if args.hf_validation_export_path:
         assert isinstance(config.model, DistillationProvider), (
             "Distillation requires a DistillationProvider"
         )
-        callback = _HFValidationExportCallback(
-            export_dir=args.hf_validation_export_path,
-            student_hf_model=args.student_hf_model,
-            student_hf_path=args.student_hf_path,
-            trust_remote_code=args.trust_remote_code,
-            export_interval=args.hf_validation_export_interval,
+        callbacks.append(
+            _HFValidationExportCallback(
+                export_dir=args.hf_validation_export_path,
+                student_hf_model=args.student_hf_model,
+                student_hf_path=args.student_hf_path,
+                trust_remote_code=args.trust_remote_code,
+                export_interval=args.hf_validation_export_interval,
+            )
         )
-        # TODO: Use distill(..., callbacks=[callback]) once Megatron-Bridge supports callbacks.
-        pretrain(config, forward_step_modelopt, callbacks=[callback])
+    if callbacks:
+        # TODO: Use distill(..., callbacks=callbacks) once Megatron-Bridge supports callbacks.
+        pretrain(config, forward_step_modelopt, callbacks=callbacks)
     else:
         distill(config)
     if args.validate_only:

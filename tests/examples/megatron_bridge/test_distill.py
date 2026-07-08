@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests for prune_minitron.py and distill.py scripts."""
 
+import json
 from pathlib import Path
 
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
@@ -21,6 +22,7 @@ from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir, get_tiny_tokenizer
 
 from modelopt.torch.puzzletron.anymodel import convert_model
+from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
 
 
 def test_distill_and_convert(tmp_path: Path, num_gpus):
@@ -58,8 +60,10 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
     assert not (validation_exports / "iter_0000001").exists()
 
 
-def test_distill_validate_only(tmp_path: Path, num_gpus):
+def test_distill_validate_only(tmp_path: Path, num_gpus, capfd):
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    training_data_path = _create_megatron_dataset(tmp_path, "training", teacher_hf_path)
+    validation_data_path = _create_megatron_dataset(tmp_path, "validation", teacher_hf_path)
     output_dir = tmp_path / "validation_output"
     validation_exports = tmp_path / "validation_exports"
     cmd_parts = extend_cmd_parts(
@@ -67,8 +71,13 @@ def test_distill_validate_only(tmp_path: Path, num_gpus):
             "torchrun",
             f"--nproc_per_node={num_gpus}",
             "distill.py",
-            "--use_mock_data",
             "--validate_only",
+            "--data_paths",
+            "1.0",
+            training_data_path,
+            "--target_validation_data_paths",
+            "1.0",
+            validation_data_path,
         ],
         student_hf_path=teacher_hf_path,
         teacher_hf_path=teacher_hf_path,
@@ -86,6 +95,15 @@ def test_distill_validate_only(tmp_path: Path, num_gpus):
     )
     run_example_command(cmd_parts, example_path="megatron_bridge")
 
+    # capfd captures stdout and stderr from the torchrun subprocess.
+    captured = capfd.readouterr()
+    output = captured.out + captured.err
+    assert "validation loss at iteration 0 on validation set" in output
+    assert "total loss value:" in output
+    assert "lm loss value:" in output
+    assert "target validation loss at iteration 0" in output
+    assert "target total loss validation:" in output
+    assert "target lm loss validation:" in output
     assert (validation_exports / "iter_0000000/config.json").exists()
     assert not (output_dir / "checkpoints/iter_0000001").exists()
 
@@ -153,3 +171,21 @@ def _prepare_puzzletron_anymodel_student_and_teacher(tmp_path: Path) -> tuple[Pa
     )
 
     return student_hf_dir, student_anymodel_dir, teacher_hf_dir
+
+
+def _create_megatron_dataset(tmp_path: Path, name: str, tokenizer: Path) -> str:
+    """Create a small local Megatron dataset for a distillation test."""
+    jsonl_path = tmp_path / f"{name}.jsonl"
+    documents = ({"text": f"{name} document {index}. " * 32} for index in range(256))
+    jsonl_path.write_text(
+        "".join(f"{json.dumps(document)}\n" for document in documents), encoding="utf-8"
+    )
+    return megatron_preprocess_data(
+        jsonl_paths=jsonl_path,
+        output_dir=tmp_path / f"{name}_data",
+        tokenizer_name_or_path=tokenizer,
+        json_keys="text",
+        append_eod=True,
+        max_sequence_length=256,
+        workers=1,
+    )[0]

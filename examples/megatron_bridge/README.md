@@ -155,6 +155,19 @@ torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     --output_dir /output/qwen3_8b_to_4b_distill
 ```
 
+By default, validation uses the validation portion of the `99,1,0` split of `--data_paths`.
+To also track a fixed target blend, pass its weight and prefix pairs through
+`--target_validation_data_paths`:
+
+```bash
+--data_paths 1.0 tokenized_qwen3/train_text_document \
+--target_validation_data_paths 0.5 tokenized_qwen3/target1_text_document 0.5 tokenized_qwen3/target2_text_document
+```
+
+The target blend is evaluated and logged separately after every normal validation. Its datasets
+are used directly, and the caller is responsible for ensuring that they do not overlap with the
+training data.
+
 Tensorboard logging is enabled by default and logs are saved to `<output_dir>/tensorboard` directory.
 To use Weights & Biases for logging, set the `WANDB_API_KEY` environment variable and pass the `--wandb_project` argument.
 Optionally, you can also pass `--wandb_entity` and `--wandb_exp_name` arguments to group runs under a project and experiment name.
