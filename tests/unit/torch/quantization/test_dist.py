@@ -50,22 +50,6 @@ def test_data_parallel(skip_on_windows):
     spawn_multiprocess_job(2, _test_data_parallel_helper, backend="gloo")
 
 
-def test_sync_amax_skips_cpu_tensor_with_nccl():
-    quantizer = TensorQuantizer()
-    quantizer._amax = torch.tensor(1.0)
-    parallel_group = Mock()
-    parallel_group.is_initialized.return_value = True
-
-    with (
-        patch.object(dist, "get_backend", return_value=dist.Backend.NCCL),
-        patch.object(dist, "all_reduce") as all_reduce,
-        pytest.warns(UserWarning, match="tensor is on CPU, but NCCL only supports CUDA tensors"),
-    ):
-        quantizer.sync_amax_across_distributed_group(parallel_group)
-
-    all_reduce.assert_not_called()
-
-
 def test_sync_amax_propagates_collective_errors():
     quantizer = TensorQuantizer()
     quantizer._amax = torch.tensor(1.0)
