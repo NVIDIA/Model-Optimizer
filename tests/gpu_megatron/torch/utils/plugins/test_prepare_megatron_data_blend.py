@@ -48,10 +48,11 @@ def _setup_test(
             },
         ],
     }
-    if target_tokens is not None:
-        config["target_tokens"] = target_tokens
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    config_yaml = yaml.safe_dump(config)
+    if target_tokens is not None:
+        config_yaml += "target_tokens: 1_000\n"
+    config_path.write_text(config_yaml, encoding="utf-8")
     jsonl_path = tmp_path / "competitive_programming_python_00.jsonl"
     conversation = {
         "messages": [
@@ -95,5 +96,9 @@ def test_prepare_megatron_data_blend_with_split_and_files_sources(
     for _, prefix in blend:
         assert Path(prefix + ".bin").exists()
         assert Path(prefix + ".idx").exists()
-    assert ("_tokens" in blend[0][1]) is (target_tokens is not None)
+    token_suffixes = ["_tokens600", "_tokens400"] if target_tokens is not None else ["", ""]
+    assert [Path(prefix).name for _, prefix in blend] == [
+        f"nanotron--minipile_100_samples_None_train_text_max100{token_suffixes[0]}",
+        f"competitive_programming_python_00_messages{token_suffixes[1]}",
+    ]
     assert (output_dir / "config.yaml").read_bytes() == config_path.read_bytes()

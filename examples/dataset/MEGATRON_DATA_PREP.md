@@ -90,7 +90,7 @@ down to one billion tokens while preserving its source weights:
 tokenizer: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 output_dir: /path/to/nemotron_3_distillation_blend_1b
 # Optional; omit this field to prepare every source in full.
-target_tokens: 1000000000
+target_tokens: 1_000_000_000
 sources:
   - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
     config: Nemotron-SFT-Code
