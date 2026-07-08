@@ -23,6 +23,7 @@ to ensure compatibility with downstream evaluation pipelines.
 """
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,14 +91,21 @@ def save_model_as_anymodel(model, output_dir: Path, descriptor):
             json.dump(config_data, f, indent=2)
 
 
-def convert_config_to_vllm_anymodel(input_dir: Path, output_dir: Path):
+def convert_config_to_vllm_anymodel(config_dir: Path):
     """Convert a model to vLLM AnyModel format."""
     # Load the model config.json, update "architectures" to ["AnyModel"], and write back to disk.
-    input_config_path = Path(input_dir) / "config.json"
-    if not input_config_path.exists():
-        raise FileNotFoundError(f"Config file not found at {input_config_path}")
+    config_path = Path(config_dir) / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found at {config_path}")
+
+    backup_config_path = config_path.with_suffix(".bak")
+    if backup_config_path.exists():
+        raise FileExistsError(f"Backup config file already exists at {backup_config_path}")
+
+    shutil.copy(config_path, backup_config_path)
+
     try:
-        with open(input_config_path) as f:
+        with open(config_path) as f:
             config_data = json.load(f)
     except json.JSONDecodeError as e:
         raise ValueError(f"Error loading config file: {e}") from e
@@ -110,5 +118,11 @@ def convert_config_to_vllm_anymodel(input_dir: Path, output_dir: Path):
         mprint("Converted block configs to per-layer config")
     else:
         mprint("No block configs to convert")
-    with open(Path(output_dir) / "config.json", "w") as f:
+    with open(config_path, "w") as f:
         json.dump(vars(config), f, indent=2)
+
+
+if __name__ == "__main__":
+    import fire
+
+    fire.Fire()
