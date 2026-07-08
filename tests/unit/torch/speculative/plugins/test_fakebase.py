@@ -134,3 +134,36 @@ def test_load_vlm_or_llm_offline_zero_layers(monkeypatch):
     model = load_vlm_or_llm("fake-model", use_offline_training=True, use_fake_base=False)
     assert captured_kwargs.get("num_hidden_layers") == 0
     assert model.config.num_orig_hidden_layers == 4
+
+
+def test_load_vlm_or_llm_uses_transformers5_vlm_auto_model(monkeypatch):
+    """Use the renamed VLM auto-model entry point when the legacy alias is absent."""
+    cfg = transformers.PretrainedConfig()
+    cfg.model_type = "qwen3_vl"
+    cfg.num_hidden_layers = 4
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: cfg)
+    monkeypatch.setattr(transformers, "AutoModelForVision2Seq", None, raising=False)
+
+    captured_kwargs = {}
+
+    class _FakeModel:
+        config = cfg
+
+    class _ImageTextModel:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return _FakeModel()
+
+    monkeypatch.setattr(
+        transformers, "AutoModelForImageTextToText", _ImageTextModel, raising=False
+    )
+
+    model = load_vlm_or_llm("fake-vlm")
+
+    assert isinstance(model, _FakeModel)
+    assert captured_kwargs == {
+        "trust_remote_code": False,
+        "torch_dtype": None,
+        "device_map": None,
+    }
