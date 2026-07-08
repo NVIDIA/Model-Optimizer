@@ -128,25 +128,29 @@ Limitations:
 
 vLLM 0.14.0 or newer is checked when `QuantSparseAttnWorker` is selected. Importing or using `SparseAttnWorker` does not resolve quant-only APIs.
 
-Use the same launcher with the compact worker. By default, vLLM selects the backend for the model and platform; NemotronH on Blackwell selects FlashInfer:
+Use the same launcher with the compact worker. By default, vLLM selects the backend for the model and platform; NemotronH on Blackwell selects FlashInfer. Select the mixed-FP16 softmax policy explicitly and use eager execution because CUDA graph capture has not been validated for this path:
 
 ```bash
+MODELOPT_ATTN_SOFTMAX_MODE=mixed_fp16 \
 python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
+  --enforce-eager \
   --no-enable-prefix-caching \
   --worker-cls sparse_attn_worker.QuantSparseAttnWorker
 ```
 
 The worker supports both FlashInfer and FlashAttention and prints the installed adapter counts. Pass `--attention-backend FLASHINFER` or `--attention-backend FLASH_ATTN` only when an explicit override is needed.
 
-This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant recipe to Q/K/P/V. Q is dynamic, K/V use global scale 1.0, and P uses amax 1.0; calibrated attention amax restore is not part of this fixed path. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
+`MODELOPT_ATTN_SOFTMAX_MODE` accepts `fp32` (the default) or `mixed_fp16`. Values are stripped and lowercased; an invalid value fails before adapters are installed. The launcher forwards the variable to Ray workers.
 
-Decode uses a fixed 32-split, 128-key-tile schedule. P QDQ consumes split-local,
-unnormalized online-softmax probabilities, so changing that schedule can change
-quantized results; split count is part of the numerical contract.
+Mixed mode uses native FP16 `exp2` only for tile probabilities and the online-maximum correction, then converts those results back to FP32. Denominator reductions and running state, weighted-value accumulators, and split reconciliation remain FP32. P NVFP4 QDQ happens after the unquantized denominator update. Native FP16 `exp2` requires SM75 or newer, while this worker's NVFP4 Q/K/P/V path uses native E4M3 and requires SM89 or newer. The mode is inference-only; backward and autograd are unsupported.
+
+This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant recipe to Q/K/P/V. Q is dynamic, K/V use global scale 1.0, and P uses amax 1.0; calibrated attention amax restore is not part of this fixed path. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored, so NVFP4 and mixed softmax can compose with N:M sparsity. N:M sparsity applies only to prefill.
+
+Decode-only launches use a fixed 32-split, 128-key-tile schedule when NVFP4 P or V is active and decode skip-softmax is not active. P QDQ consumes split-local, unnormalized online-softmax probabilities, so changing that schedule can change quantized results; split count is part of the numerical contract. Split reconciliation remains FP32.
 
 K is QDQ before its cache write, while V is written pristine. Complete 16-token V groups are finalized once in cache; an incomplete tail remains pristine and is QDQ on read. P@V therefore sees uniform fakequant values without re-quantizing the tail.
 
-Supported configurations are regular decoder self-attention with FlashInfer or FlashAttention, fp16/bf16 model and KV cache, equal Q/K/V head dimensions that are multiples of 16, and DCP 1. The FlashInfer adapter preserves both NHD and HND cache strides and separates mixed decode/prefill launches so each phase keeps its own kernel contract. The default `FULL_AND_PIECEWISE` mode remains enabled for fixed N:M and attention-only NVFP4; checkpoints with calibrated decode `threshold_scale_factor` must use a non-`FULL` decode graph mode such as `--enforce-eager` because the live sequence length is not replayed as a Python scalar.
+Supported configurations are regular decoder self-attention with FlashInfer or FlashAttention, fp16/bf16 model and KV cache, equal Q/K/V head dimensions that are multiples of 16, and DCP 1. The FlashInfer adapter preserves both NHD and HND cache strides and separates mixed decode/prefill launches so each phase keeps its own kernel contract. Checkpoints with calibrated decode `threshold_scale_factor` must use a non-`FULL` decode graph mode such as `--enforce-eager` because the live sequence length is not replayed as a Python scalar.
 
 Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cross/encoder/MLA attention, KV sharing or transfer, prefix caching, speculative decoding, DBO/ubatching, and `FULL` mixed/prefill CUDA graphs.
 
