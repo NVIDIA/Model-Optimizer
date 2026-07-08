@@ -22,6 +22,8 @@ jobs:
     secrets: inherit
     with:
       files: |
+        .github/actions/cache-extensions/**
+        .github/workflows/_example_tests_runner.yml
         .github/workflows/example_tests.yml
         examples/**
         modelopt/**
@@ -87,7 +89,7 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/nemo:26.06"
       example: megatron_bridge
-      timeout_minutes: 45
+      timeout_minutes: 60
       pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
 

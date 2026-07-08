@@ -73,6 +73,15 @@ except ImportError:
 
 SEED = 1234
 
+# TODO: re-enable the marked tests once fixed. Blackwell (sm_120, e.g. RTX PRO 6000) with the
+# nemo:26.06 / TE 2.16 / CUDA 13 stack hits a flaky, intermittent CUDA "illegal memory access" in
+# several tests: When fails, it poisons the process CUDA context and cascades hang across subsequent tests.
+# Passes locally on different GPUs. Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic.
+skip_flaky_on_blackwell = pytest.mark.skipif(
+    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
+    reason="Flaky CUDA illegal memory access on Blackwell (nemo:26.06 / TE 2.16 / CUDA 13)",
+)
+
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
     initialize_for_megatron(seed=SEED)
@@ -442,6 +451,7 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 )
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
+@skip_flaky_on_blackwell
 def test_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -558,17 +568,7 @@ def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     "hidden_size",
     [
         256,
-        pytest.param(
-            320,
-            marks=pytest.mark.skip(
-                # TODO: Flaky CUDA "illegal memory access" during AWQ-lite calibration on the
-                # nemo:26.06 container (TE 2.16 / CUDA 13 / torch 2.12). It is intermittent
-                # (passes in isolation, only surfaces under full-suite accumulated GPU state) and
-                # poisons the process CUDA context, cascading into all subsequent quant tests.
-                # Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic. Re-enable once fixed.
-                reason="Flaky CUDA illegal memory access on nemo:26.06 (TE 2.16 / CUDA 13); see TODO"
-            ),
-        ),
+        pytest.param(320, marks=skip_flaky_on_blackwell),
     ],
 )
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):

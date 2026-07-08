@@ -91,7 +91,19 @@ def make_speculative_data_module(
             EagleVllmStreamingDataset,
         )
 
-        ds = load_dataset("json", data_files=data_args.data_path, split="train")
+        # data_path may be a single jsonl, a glob string, or a directory of shards.
+        # HF load_dataset's data_files takes a file/glob/list but NOT a bare directory,
+        # so expand a directory into its sorted *.jsonl files (avoids physically
+        # concatenating large multi-shard corpora and shell-glob fragility).
+        _dp = data_args.data_path
+        if Path(_dp).is_dir():
+            _data_files = sorted(str(p) for p in Path(_dp).glob("*.jsonl"))
+            if not _data_files:
+                raise ValueError(f"No .jsonl files found in directory {_dp}")
+            print_rank_0(f"Loading {len(_data_files)} jsonl shards from directory {_dp}")
+        else:
+            _data_files = _dp
+        ds = load_dataset("json", data_files=_data_files, split="train")
         if data_args.sample_size > 0:
             ds = ds.select(range(data_args.sample_size))
         # Map-style dataset: each rank fetches its own DistributedSampler shard.

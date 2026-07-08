@@ -111,6 +111,30 @@ def filter_func_wan_video(name: str) -> bool:
     return pattern.match(name) is not None
 
 
+# Qwen-Image's transformer has 60 ``transformer_blocks``. The recipe quantizes
+# only those blocks while keeping the first two and last two -- and everything
+# outside ``transformer_blocks`` -- in original precision. The model-agnostic,
+# config-driven form of this recipe (deriving the block count from the model)
+# lives in quantize.py; this name-only filter covers the plain FP8/NVFP4 path
+# for the full 60-block Qwen-Image transformer.
+QWEN_IMAGE_NUM_TRANSFORMER_BLOCKS = 60
+_QWEN_IMAGE_BLOCK_RE = re.compile(r"(?:^|\.)transformer_blocks\.(\d+)(?:\.|$)")
+
+
+def filter_func_qwen_image(name: str) -> bool:
+    """Filter function specifically for Qwen-Image models.
+
+    Returns ``True`` for modules to keep in original precision (quantization
+    disabled): everything outside ``transformer_blocks``, plus the first two and
+    last two transformer blocks.
+    """
+    match = _QWEN_IMAGE_BLOCK_RE.search(name)
+    if match is None:
+        return True
+    block_idx = int(match.group(1))
+    return block_idx < 2 or block_idx >= QWEN_IMAGE_NUM_TRANSFORMER_BLOCKS - 2
+
+
 def load_calib_prompts(
     batch_size,
     calib_data_path: str | Path = "Gustavosta/Stable-Diffusion-Prompts",
