@@ -16,7 +16,6 @@
 """Custom vLLM workers for checkpoint-driven sparse and fixed-NVFP4 attention."""
 
 import importlib
-import os
 from collections import Counter
 from functools import cache
 from types import SimpleNamespace
@@ -291,21 +290,12 @@ def _install_sparse_plans(plans) -> None:
 
 def _install_quant_plans(worker, plans) -> None:
     api = _quant_api()
-    quant_off = os.environ.get("MODELOPT_ATTN_QUANT_OFF") == "1"
     for plan in plans:
         module = plan.module
         module.device, module.dtype = plan.device, plan.dtype
         api.nn.QuantModuleRegistry.convert(module)
         module.p_bmm_quantizer = api.nn.TensorQuantizer()
         api.conversion.set_quantizer_by_cfg(module, _BMM_CFG)
-        if quant_off:
-            # Isolation knob: keep the ModelOpt kernel fixed while disabling all
-            # Q/K/P/V NVFP4 transforms, so quant-on minus quant-off isolates the
-            # fakequant loss without triggering the native dense fallback.
-            for name in ("q", "k", "p", "v"):
-                quantizer = getattr(module, f"{name}_bmm_quantizer", None)
-                if quantizer is not None:
-                    quantizer.disable()
         api.plugin._set_vllm_attention_kv_default_amax(module, plan.device)
         plan.new_impl.sparse_kw = plan.sparse_kw
         p_qdq, p_qdq_amax = _p_qdq_from_layer(module)
@@ -317,10 +307,8 @@ def _install_quant_plans(worker, plans) -> None:
             "v_qdq_amax": v_qdq_amax,
         }
         module.impl = plan.new_impl
-        module._query_quant_in_kernel = not quant_off
-        module._value_quant_in_kernel = not quant_off
-        if quant_off:
-            module._modelopt_force_kernel = True
+        module._query_quant_in_kernel = True
+        module._value_quant_in_kernel = True
     worker.model_runner.cascade_attn_enabled = False
     installed = dict(Counter(type(plan.new_impl).__name__ for plan in plans))
     print(f"[ModelOpt] Installed NVFP4 quant+sparse attention on {len(plans)} layers: {installed}")

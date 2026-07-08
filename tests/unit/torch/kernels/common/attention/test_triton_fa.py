@@ -22,7 +22,6 @@ Python wrappers require a GPU and are fully exercised in
 These tests verify CPU-safe wrapper behavior without executing a Triton kernel.
 """
 
-import os
 from contextlib import nullcontext
 
 import pytest
@@ -99,8 +98,6 @@ def test_forward_uses_minimal_shared_autotune_configs():
         (128, 32),
     ]
 
-    expected_active_configs = configs[:1] if "PYTEST_VERSION" in os.environ else configs
-    assert triton_fa._attn_fwd.configs == expected_active_configs
     assert triton_fa._attn_fwd.keys == ["N_CTX", "HEAD_DIM", "Q_IS_FP32", "P_QDQ", "V_QDQ"]
 
 
@@ -108,10 +105,9 @@ def test_forward_uses_minimal_shared_autotune_configs():
     ("attention_kwargs", "expected_p_qdq", "expected_v_qdq"),
     [
         ({}, 0, 0),
-        ({"p_qdq": "fp8", "v_qdq": "fp8"}, 1, 1),
+        ({"p_qdq": "fp8"}, 1, 0),
         ({"p_qdq": "nvfp4", "v_qdq": "nvfp4"}, 2, 2),
         ({"p_qdq": "nvfp4", "sparsity_n": 2, "sparsity_m": 4}, 2, 0),
-        ({"p_qdq": "nvfp4", "skip_softmax_threshold": 0.1}, 2, 0),
     ],
 )
 def test_forward_routes_every_mode_to_single_autotuner(

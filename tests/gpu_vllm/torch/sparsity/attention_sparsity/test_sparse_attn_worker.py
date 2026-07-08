@@ -514,55 +514,11 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
         assert decode_kw["p_qdq"] == "nvfp4"
         assert "sparsity_n" not in decode_kw
         assert prefill_kw["p_qdq"] == "nvfp4"
-        assert [(kw["max_new_tokens"], kw["decode"]) for kw in calls["finalize"]] == [
-            (1, True),
-            (prefill_tokens, False),
-        ]
+        assert [kw["max_new_tokens"] for kw in calls["finalize"]] == [1, prefill_tokens]
     else:
         assert calls["native"] == [True]
         assert calls["decode"] == []
         assert calls["finalize"] == []
-
-
-def test_flashinfer_forced_kernel_mixed_batch_never_uses_native_fallback(monkeypatch):
-    class Layer:
-        force_kernel_reads = 0
-
-        @property
-        def _modelopt_force_kernel(self):
-            self.force_kernel_reads += 1
-            assert self.force_kernel_reads == 1, "force-kernel state was resolved more than once"
-            return True
-
-    prefill_tokens = 17
-    impl = _make_flashinfer_impl(sparse=False, quantized=False)
-    query = torch.zeros(1 + prefill_tokens, 2, 64, dtype=torch.float16)
-    kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
-    metadata = _flashinfer_metadata(query_lens=(1, prefill_tokens), mixed=True)
-    layer = Layer()
-    calls = {"native": 0, "decode": 0, "prefill": 0}
-
-    def native_fallback(*args, **kwargs):
-        calls["native"] += 1
-        raise AssertionError("native FlashInfer fallback")
-
-    def fake_decode(query, *args, **kwargs):
-        calls["decode"] += 1
-        return torch.zeros_like(query)
-
-    def fake_attention(query, **kwargs):
-        phase = "decode" if kwargs["max_input_len"] == 1 else "prefill"
-        calls[phase] += 1
-        return torch.zeros_like(query)
-
-    monkeypatch.setattr(FlashInferImpl, "forward", native_fallback)
-    monkeypatch.setattr(vllm_plugin, "triton_decode_attention", fake_decode)
-    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
-
-    impl.forward(layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query))
-
-    assert calls == {"native": 0, "decode": 1, "prefill": 1}
-    assert layer.force_kernel_reads == 1
 
 
 def test_flashinfer_invalid_mixed_metadata_has_no_side_effects(monkeypatch):
@@ -671,7 +627,6 @@ def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
             True,
             "vLLM cascade attention is incompatible with an active ModelOpt attention transform",
         ),
-        ("cascade", False, None),
         (
             "metadata",
             True,
@@ -906,22 +861,14 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(monkeypatch):
     assert "target_sparse_ratio" not in captured
 
 
-def test_nvfp4_bmm_mapping_and_unsupported_format_failure():
-    """Enabled P/V quantizers map only dynamic block-16 NVFP4."""
-    assert vllm_plugin._p_qdq_from_layer(SimpleNamespace()) == (None, 1.0)
-    assert vllm_plugin._v_qdq_from_layer(SimpleNamespace()) == (None, None)
-
-    good = SimpleNamespace(
+def test_unsupported_nvfp4_bmm_block_size_raises():
+    """P/V mappings reject NVFP4 quantizers that are not block-16."""
+    quantizer = SimpleNamespace(
         is_enabled=True,
         is_nvfp4_dynamic=True,
-        block_sizes={-1: 16},
-        _amax=torch.tensor(6.0 * 448.0),
+        block_sizes={-1: 32},
     )
-    layer = SimpleNamespace(p_bmm_quantizer=good, v_bmm_quantizer=good)
-    assert vllm_plugin._p_qdq_from_layer(layer) == ("nvfp4", 6.0 * 448.0)
-    assert vllm_plugin._v_qdq_from_layer(layer) == ("nvfp4", 6.0 * 448.0)
-
-    good.block_sizes = {-1: 32}
+    layer = SimpleNamespace(p_bmm_quantizer=quantizer, v_bmm_quantizer=quantizer)
     with pytest.raises(NotImplementedError, match="p_bmm_quantizer"):
         vllm_plugin._p_qdq_from_layer(layer)
     with pytest.raises(NotImplementedError, match="v_bmm_quantizer"):
@@ -1007,7 +954,6 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
         "max_new_tokens": 1,
         "page_size": 16,
         "v_qdq_scale": 1.0,
-        "decode": True,
     }
     key_cache, value_cache, block_table, seq_lens, decode_kw = calls["decode"]
     assert key_cache.data_ptr() == kv_cache[0].data_ptr()

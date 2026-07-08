@@ -488,6 +488,7 @@ class TestSoftmaxQdqForward:
         ("kwargs", "match"),
         [
             ({"v_qdq": "int8"}, "v_qdq"),
+            ({"v_qdq": "fp8"}, "v_qdq"),
             ({"v_qdq": "nvfp4", "v_qdq_amax": 0.0}, "v_qdq_amax"),
             ({"v_qdq": "nvfp4", "v_cache_quantized": True}, "v_cache_quantized"),
         ],

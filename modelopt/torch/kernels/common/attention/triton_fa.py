@@ -71,8 +71,9 @@ def _load_qdq_helpers() -> None:
         _v_qdq_nvfp4 = _v_nvfp4
 
 
-# Maps public P/V QDQ options to kernel constexpr values.
-_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
+# Maps public QDQ options to kernel constexpr values.
+_P_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
+_V_QDQ_MODES = {None: 0, "nvfp4": 2}
 
 
 LOG2E: float = 1.44269504088896
@@ -289,7 +290,7 @@ def _attn_fwd(
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     P_QDQ: tl.constexpr = 0,  # Fake quant-dequant of softmax P: 0=off, 1=FP8 E4M3, 2=NVFP4
     p_qdq_scale=1.0,  # Per-tensor scale for softmax qdq (runtime scalar; amax/448 or amax/(6*448))
-    V_QDQ: tl.constexpr = 0,  # Fake quant-dequant of V: 0=off, 1=FP8 E4M3, 2=NVFP4
+    V_QDQ: tl.constexpr = 0,  # Fake quant-dequant of V: 0=off, 2=NVFP4
     v_qdq_scale=1.0,
     V_CACHE_QUANTIZED: tl.constexpr = False,  # complete block-16 groups are already QDQ
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
@@ -476,13 +477,10 @@ def _attn_fwd(
                     mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                     other=0.0,
                 )
-            if V_QDQ != 0 and (
+            if V_QDQ == 2 and (
                 (not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_quantized_boundary)
             ):
-                if V_QDQ == 1:
-                    v_qdq = _qdq_fp8(v.to(tl.float32), v_qdq_scale)
-                else:
-                    v_qdq = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_D)
+                v_qdq = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_D)
                 v_qdq = v_qdq.to(v.dtype)
                 if V_CACHE_QUANTIZED:
                     use_qdq = (kv_start + kv_pos) >= v_quantized_boundary
@@ -1298,12 +1296,11 @@ def attention(
             and the global scale ``amax / (6 * 448)`` for NVFP4. A runtime
             scalar — user-set or calibrated values do not recompile the
             kernel. Values above amax saturate.
-        v_qdq: Fake quant-dequant of V before ``P @ V``. ``"fp8"`` uses a
-            per-tensor E4M3 scale; ``"nvfp4"`` uses signed E2M1 values with
-            one E4M3 scale per 16 keys. ``None`` disables V QDQ.
+        v_qdq: Fake quant-dequant of V before ``P @ V``. ``"nvfp4"`` uses
+            signed E2M1 values with one E4M3 scale per 16 keys. ``None``
+            disables V QDQ.
         v_qdq_amax: Optional per-tensor V amax. ``None`` uses global scale 1;
-            otherwise converts to ``amax / 448`` (FP8) or ``amax / (6 * 448)``
-            (NVFP4).
+            otherwise converts to the NVFP4 global scale ``amax / (6 * 448)``.
         v_cache_quantized: Complete block-16 groups in the paged V cache are
             already QDQ; only the pristine partial group is QDQ on read.
         k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
@@ -1330,11 +1327,11 @@ def attention(
     # silently reuse stale compiled kernels from the on-disk cache.
     _load_sparsity_helpers()
     _load_qdq_helpers()
-    if p_qdq not in _QDQ_MODES:
+    if p_qdq not in _P_QDQ_MODES:
         raise ValueError(
-            f"p_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {p_qdq!r}"
+            f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
         )
-    p_qdq_mode = _QDQ_MODES[p_qdq]
+    p_qdq_mode = _P_QDQ_MODES[p_qdq]
     # Convert the per-tensor amax to the kernel's scale convention
     # (``q = cast(p / scale) * scale``): FP8 uses ``amax / 448``; NVFP4 uses the
     # global scale ``amax / (6 * 448)``. amax=1 (the default, the theoretical
@@ -1344,18 +1341,18 @@ def attention(
         if not (math.isfinite(p_qdq_amax) and p_qdq_amax > 0):
             raise ValueError(f"p_qdq_amax must be a finite positive value, got {p_qdq_amax}")
         p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
-    if v_qdq not in _QDQ_MODES:
+    if v_qdq not in _V_QDQ_MODES:
         raise ValueError(
-            f"v_qdq must be one of {sorted(k for k in _QDQ_MODES if k)} or None, got {v_qdq!r}"
+            f"v_qdq must be one of {sorted(k for k in _V_QDQ_MODES if k)} or None, got {v_qdq!r}"
         )
-    v_qdq_mode = _QDQ_MODES[v_qdq]
+    v_qdq_mode = _V_QDQ_MODES[v_qdq]
     if v_qdq_mode and any(t.requires_grad for t in (q, k, v)):
         raise NotImplementedError("v_qdq is inference-only and does not support autograd")
     v_qdq_scale = 1.0
     if v_qdq_mode and v_qdq_amax is not None:
         if not (math.isfinite(v_qdq_amax) and v_qdq_amax > 0):
             raise ValueError(f"v_qdq_amax must be a finite positive value, got {v_qdq_amax}")
-        v_qdq_scale = v_qdq_amax / 448.0 if v_qdq == "fp8" else v_qdq_amax / (6.0 * 448.0)
+        v_qdq_scale = v_qdq_amax / (6.0 * 448.0)
     if v_cache_quantized and v_qdq != "nvfp4":
         raise ValueError("v_cache_quantized requires v_qdq='nvfp4'")
     if v_cache_quantized and any(x is None for x in (k_cache, v_cache, block_table)):
