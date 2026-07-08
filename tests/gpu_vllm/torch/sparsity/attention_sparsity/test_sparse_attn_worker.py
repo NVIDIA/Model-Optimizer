@@ -183,7 +183,7 @@ def _make_old_flashinfer_impl():
     return impl
 
 
-def _make_flashinfer_impl(*, sparse=False, quantized=False):
+def _make_flashinfer_impl(*, sparse=False, quantized=False, softmax_mode="fp32"):
     impl = _clone_sparse_impl(_make_old_flashinfer_impl(), get_flashinfer_sparse_impl_cls())
     impl.sparse_kw = {"sparsity_n": 2, "sparsity_m": 4} if sparse else {}
     impl.quant_kw = {
@@ -191,6 +191,7 @@ def _make_flashinfer_impl(*, sparse=False, quantized=False):
         "p_qdq_amax": 1.0,
         "v_qdq": "nvfp4" if quantized else None,
         "v_qdq_amax": 6.0 * 448.0 if quantized else None,
+        "softmax_mode": softmax_mode,
     }
     return impl
 
@@ -405,17 +406,21 @@ def test_flashinfer_legacy_forward_writes_kv_cache(
         assert writes == [(layer, query, query, kv_cache, metadata, impl)]
 
 
-def test_flashinfer_q_only_transform_does_not_fallback(monkeypatch):
-    """Withheld Q QDQ must run even when sparse/P/V transforms are inactive."""
-    impl = _make_flashinfer_impl()
+@pytest.mark.parametrize(
+    ("query_quantized", "softmax_mode"),
+    [(True, "fp32"), (False, "mixed_fp16")],
+    ids=["q-only", "mixed-softmax-only"],
+)
+def test_flashinfer_q_only_transform_does_not_fallback(monkeypatch, query_quantized, softmax_mode):
+    """Q QDQ and mixed softmax must run when other transforms are inactive."""
+    impl = _make_flashinfer_impl(softmax_mode=softmax_mode)
     query = torch.zeros(4, 2, 64, dtype=torch.float16)
     kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
     metadata = _flashinfer_metadata(query_lens=(2, 2), max_query_len=4)
     captured = {}
-    layer = SimpleNamespace(
-        _query_quant_in_kernel=True,
-        q_bmm_quantizer=lambda value: value + 1,
-    )
+    layer = SimpleNamespace(_query_quant_in_kernel=query_quantized)
+    if query_quantized:
+        layer.q_bmm_quantizer = lambda value: value + 1
 
     monkeypatch.setattr(
         FlashInferImpl,
@@ -425,13 +430,16 @@ def test_flashinfer_q_only_transform_does_not_fallback(monkeypatch):
 
     def fake_attention(query, **kwargs):
         captured["query"] = query
+        captured.update(kwargs)
         return torch.zeros_like(query)
 
     monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
 
     impl.forward(layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query))
 
-    assert torch.all(captured["query"] == 1)
+    expected_query = 1 if query_quantized else 0
+    assert torch.all(captured["query"] == expected_query)
+    assert captured["softmax_mode"] == softmax_mode
 
 
 def test_flashinfer_legacy_inactive_launch_writes_only_in_native_fallback(monkeypatch):
@@ -461,10 +469,18 @@ def test_flashinfer_legacy_inactive_launch_writes_only_in_native_fallback(monkey
     assert native_calls == [True]
 
 
-@pytest.mark.parametrize("quantized", [False, True], ids=["sparse-only", "quantized"])
-def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized):
+@pytest.mark.parametrize(
+    ("quantized", "softmax_mode"),
+    [(False, "fp32"), (True, "mixed_fp16")],
+    ids=["sparse-only", "quantized-mixed-fp16"],
+)
+def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized, softmax_mode):
     prefill_tokens = 17
-    impl = _make_flashinfer_impl(sparse=True, quantized=quantized)
+    impl = _make_flashinfer_impl(
+        sparse=True,
+        quantized=quantized,
+        softmax_mode=softmax_mode,
+    )
     query = torch.zeros(1 + prefill_tokens, 2, 64, dtype=torch.float16)
     kv_cache = torch.zeros(4, 2, 16, 2, 64, dtype=torch.float16)
     metadata = _flashinfer_metadata(query_lens=(1, prefill_tokens), mixed=True)
@@ -502,6 +518,7 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
     assert prefill_query.shape[0] == prefill_tokens
     assert prefill_kw["sparsity_n"] == 2
     assert prefill_kw["sparsity_m"] == 4
+    assert prefill_kw["softmax_mode"] == softmax_mode
     torch.testing.assert_close(
         prefill_kw["b_seq_len"], torch.tensor([prefill_tokens], dtype=torch.int32)
     )
@@ -512,6 +529,7 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
         decode_query, decode_kw = calls["decode"][0]
         assert decode_query.shape[0] == 1
         assert decode_kw["p_qdq"] == "nvfp4"
+        assert decode_kw["softmax_mode"] == "mixed_fp16"
         assert "sparsity_n" not in decode_kw
         assert prefill_kw["p_qdq"] == "nvfp4"
         assert [kw["max_new_tokens"] for kw in calls["finalize"]] == [1, prefill_tokens]
@@ -910,6 +928,7 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
         "p_qdq_amax": 1.0,
         "v_qdq": "nvfp4",
         "v_qdq_amax": 6.0 * 448.0,
+        "softmax_mode": "mixed_fp16",
     }
     q = torch.full((4, impl.num_heads, impl.head_size), 2.0, dtype=torch.float16)
     q[2:] = 10_000
@@ -963,6 +982,7 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     assert calls["query"].shape[0] == metadata.seq_lens.shape[0]
     assert decode_kw["p_qdq"] == "nvfp4"
     assert decode_kw["v_qdq"] == "nvfp4"
+    assert decode_kw["softmax_mode"] == "mixed_fp16"
     assert decode_kw["v_cache_quantized"] is True
     assert len(q_inputs) == 1 and q_inputs[0].shape[0] == q.shape[0]
     torch.testing.assert_close(q_inputs[0][:2], q[:2].float())
@@ -1002,6 +1022,7 @@ def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
     assert captured["skip_softmax_threshold"] == pytest.approx(0.001)
     assert captured["p_qdq"] == "nvfp4"
     assert captured["v_qdq"] == "nvfp4"
+    assert captured["softmax_mode"] == "fp32"
 
 
 def test_resolve_calibrated_skip_softmax_threshold_for_decode():

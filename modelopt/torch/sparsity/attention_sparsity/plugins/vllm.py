@@ -149,23 +149,26 @@ def _v_qdq_from_layer(layer) -> tuple[str | None, float | None]:
 
 
 def _quant_kw_from_impl(impl, layer):
-    """Resolve the compact P/V QDQ contract once for one attention launch."""
+    """Resolve the compact attention quantization contract for one launch."""
     quant_kw = getattr(impl, "quant_kw", None)
     if quant_kw is None:
         p_qdq, p_qdq_amax = _p_qdq_from_layer(layer)
         v_qdq, v_qdq_amax = _v_qdq_from_layer(layer)
+        softmax_mode = "fp32"
     else:
         p_qdq, p_qdq_amax = quant_kw["p_qdq"], quant_kw["p_qdq_amax"]
         v_qdq, v_qdq_amax = quant_kw["v_qdq"], quant_kw["v_qdq_amax"]
-    return p_qdq, p_qdq_amax, v_qdq, v_qdq_amax
+        softmax_mode = quant_kw.get("softmax_mode", "fp32")
+    return p_qdq, p_qdq_amax, v_qdq, v_qdq_amax, softmax_mode
 
 
-def _any_quant_active(layer, p_qdq, v_qdq) -> bool:
-    """Return whether native fallback would omit any Q/K/P/V transform."""
+def _any_quant_active(layer, p_qdq, v_qdq, softmax_mode) -> bool:
+    """Return whether native fallback would omit any quantized operation."""
     k_quantizer = getattr(layer, "k_bmm_quantizer", None)
     return bool(
         p_qdq
         or v_qdq
+        or softmax_mode != "fp32"
         or getattr(layer, "_query_quant_in_kernel", False)
         or getattr(k_quantizer, "is_enabled", False)
     )
@@ -182,6 +185,7 @@ class _ResolvedForward:
     p_qdq_amax: float
     v_qdq: str | None
     v_qdq_amax: float | None
+    softmax_mode: str
     quant_active: bool
 
 
@@ -195,8 +199,8 @@ def _resolve_forward(
     require_flashinfer_metadata: bool = False,
 ) -> _ResolvedForward | None:
     """Resolve shared transform state or request the backend's native path."""
-    p_qdq, p_qdq_amax, v_qdq, v_qdq_amax = _quant_kw_from_impl(impl, layer)
-    quant_active = _any_quant_active(layer, p_qdq, v_qdq)
+    p_qdq, p_qdq_amax, v_qdq, v_qdq_amax, softmax_mode = _quant_kw_from_impl(impl, layer)
+    quant_active = _any_quant_active(layer, p_qdq, v_qdq, softmax_mode)
     transform_active = _should_run_modelopt_kernel(getattr(impl, "sparse_kw", None), quant_active)
 
     if getattr(attn_metadata, "use_cascade", False):
@@ -224,6 +228,7 @@ def _resolve_forward(
         p_qdq_amax=p_qdq_amax,
         v_qdq=v_qdq,
         v_qdq_amax=v_qdq_amax,
+        softmax_mode=softmax_mode,
         quant_active=quant_active,
     )
 
@@ -249,6 +254,7 @@ def _forward_modelopt(
     p_qdq_amax: float,
     v_qdq: str | None,
     v_qdq_amax: float | None,
+    softmax_mode: str,
     quant_active: bool,
     dense_fallback,
     prepare_modelopt=None,
@@ -317,6 +323,7 @@ def _forward_modelopt(
             v_qdq=v_qdq,
             v_qdq_amax=v_qdq_amax,
             v_cache_quantized=v_cache_quantized,
+            softmax_mode=softmax_mode,
         )
         output[:batch] = triton_out
         return output
@@ -344,6 +351,7 @@ def _forward_modelopt(
         v_qdq=v_qdq,
         v_qdq_amax=v_qdq_amax,
         v_cache_quantized=v_cache_quantized,
+        softmax_mode=softmax_mode,
         **sparse_kw,
     )
     output[:num_actual_tokens] = triton_out
@@ -439,6 +447,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             p_qdq_amax=resolved.p_qdq_amax,
             v_qdq=resolved.v_qdq,
             v_qdq_amax=resolved.v_qdq_amax,
+            softmax_mode=resolved.softmax_mode,
             quant_active=resolved.quant_active,
             dense_fallback=native_forward,
         )
@@ -612,6 +621,7 @@ def _flashinfer_forward(
         "p_qdq_amax": resolved.p_qdq_amax,
         "v_qdq": resolved.v_qdq,
         "v_qdq_amax": resolved.v_qdq_amax,
+        "softmax_mode": resolved.softmax_mode,
         "quant_active": resolved.quant_active,
         "dense_fallback": dense_fallback,
         "prepare_modelopt": prepare_modelopt,
