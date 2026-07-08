@@ -4,8 +4,8 @@ description: >-
   Use when the user asks to "quantize a model", "run PTQ", "post-training
   quantization", "NVFP4 quantization", "FP8 quantization", "INT8
   quantization", "INT4 AWQ", "quantize LLM", "quantize MoE", "quantize VLM",
-  or needs to produce a quantized HuggingFace or TensorRT-LLM checkpoint from a
-  pretrained model using ModelOpt. Do NOT use for multi-candidate recipe
+  or needs to produce a quantized HuggingFace checkpoint from a pretrained
+  model using ModelOpt. Do NOT use for multi-candidate recipe
   exploration or optimization (use quant-recipe-search).
 ---
 
