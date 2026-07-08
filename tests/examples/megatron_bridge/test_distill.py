@@ -60,7 +60,7 @@ def test_distill_and_convert(tmp_path: Path, num_gpus):
     assert not (validation_exports / "iter_0000001").exists()
 
 
-def test_distill_validate_only(tmp_path: Path, num_gpus):
+def test_distill_validate_only(tmp_path: Path, num_gpus, capfd):
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
     training_data_path = _create_megatron_dataset(tmp_path, "training", teacher_hf_path)
     validation_data_path = _create_megatron_dataset(tmp_path, "validation", teacher_hf_path)
@@ -95,6 +95,15 @@ def test_distill_validate_only(tmp_path: Path, num_gpus):
     )
     run_example_command(cmd_parts, example_path="megatron_bridge")
 
+    # capfd captures stdout and stderr from the torchrun subprocess.
+    captured = capfd.readouterr()
+    output = captured.out + captured.err
+    assert "validation loss at iteration 0 on validation set" in output
+    assert "total loss value:" in output
+    assert "lm loss value:" in output
+    assert "target validation loss at iteration 0" in output
+    assert "target total loss validation:" in output
+    assert "target lm loss validation:" in output
     assert (validation_exports / "iter_0000000/config.json").exists()
     assert not (output_dir / "checkpoints/iter_0000001").exists()
 
