@@ -89,15 +89,15 @@ def test_graph_converter_init(simple_model, use_standalone_type_inference):
 
 
 def test_convert_preserves_cast_chain_graph_output(tmp_path):
-    x = helper.make_tensor_value_info("in0", TensorProto.DOUBLE, [2])
+    x = helper.make_tensor_value_info("in0", TensorProto.FLOAT, [2])
     y = helper.make_tensor_value_info("t2", TensorProto.FLOAT, [2])
-    cast_to_double = helper.make_node(
-        "Cast", ["in0"], ["t1"], name="cast_to_double", to=TensorProto.DOUBLE
+    cast_to_float16 = helper.make_node(
+        "Cast", ["in0"], ["t1"], name="cast_to_float16", to=TensorProto.FLOAT16
     )
     cast_to_float = helper.make_node(
         "Cast", ["t1"], ["t2"], name="cast_to_float", to=TensorProto.FLOAT
     )
-    graph = helper.make_graph([cast_to_double, cast_to_float], "g", [x], [y])
+    graph = helper.make_graph([cast_to_float16, cast_to_float], "g", [x], [y])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
     model.ir_version = 10
     onnx.checker.check_model(model)
