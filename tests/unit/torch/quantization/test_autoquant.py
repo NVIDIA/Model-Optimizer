@@ -26,6 +26,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
+    _get_module_weight_numel,
     get_auto_quantize_cost_model,
     infer_active_moe_expert_ratio,
 )
@@ -33,6 +34,7 @@ from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
     QuantRecipe,
     QuantRecipeHparam,
+    _AutoQuantizeBaseSearcher,
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
@@ -171,26 +173,37 @@ def test_quant_recipe_hparam_zero_cost_weight():
     assert hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG)) == pytest.approx(0.0)
 
 
+def test_quant_recipe_hparam_cost_weight_and_effective_bits_compose():
+    """cost_weight (active_moe) and effective_bits stack multiplicatively in get_cost."""
+    model_test = mtq.quantize(torch.nn.Linear(4, 16), mtq.NVFP4_DEFAULT_CFG)
+    numel = model_test.weight.numel()
+    hparam = QuantRecipeHparam(
+        [QuantRecipe(mtq.NVFP4_DEFAULT_CFG)],
+        quant_modules=[model_test],
+        quant_module_names=["layers.0.mlp.experts.0.down_proj"],
+        cost_weight=0.03125,
+    )
+
+    # NVFP4's library-default effective_bits (4.5, from configs/numerics/nvfp4) stacks with cost_weight:
+    # numel * cost_weight * (effective_bits / 16).
+    assert hparam.get_cost(QuantRecipe(mtq.NVFP4_DEFAULT_CFG)) == pytest.approx(
+        numel * 0.03125 * (4.5 / 16)
+    )
+    # A recipe-level effective_bits override (8.0) wins over the library default and still stacks.
+    override = QuantRecipe({**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 8.0}, name="NVFP4_8B")
+    assert hparam.get_cost(override) == pytest.approx(numel * 0.03125 * 0.5)
+
+
 def test_auto_quantize_cost_model_excludes_module_name_patterns():
-    visual = torch.nn.Linear(4, 16)
-    mtp = torch.nn.Linear(4, 16)
-    lm_head = torch.nn.Linear(4, 16)
     cost_model = get_auto_quantize_cost_model("weight")
     cost_constraints = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*", "*vision_tower*", "*mtp*"]}
 
-    total_weight_size = cost_model.total_weight_size(
-        [
-            ("model.visual.blocks.0.attn.qkv", visual),
-            ("model.mtp.layers.0.mlp", mtp),
-            ("lm_head", lm_head),
-        ],
-        is_auto_quantize_module=lambda module: True,
-        cost_constraints=cost_constraints,
-    )
-
-    assert total_weight_size == pytest.approx(lm_head.weight.numel())
+    # Modules whose name matches an excluded pattern contribute zero cost weight.
     assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
     assert cost_model.module_cost_weight(["model.mtp.layers.0.mlp"], cost_constraints) == 0
+    # Non-excluded modules keep full weight.
+    assert cost_model.module_cost_weight(["lm_head"], cost_constraints) == 1.0
+    # A group is only excluded when *all* of its module names match; a mixed group is not.
     assert (
         cost_model.module_cost_weight(
             ["model.visual.blocks.0.attn.qkv", "lm_head"], cost_constraints
@@ -203,24 +216,19 @@ def test_active_moe_cost_model_counts_fused_experts_without_weight():
     fused_experts = torch.nn.Module()
     fused_experts.gate_up_proj = torch.nn.Parameter(torch.empty(2, 3, 5))
     fused_experts.down_proj = torch.nn.Parameter(torch.empty(2, 5, 3))
-    visual = torch.nn.Linear(4, 16)
     cost_model = get_auto_quantize_cost_model("active_moe")
+    cost_constraints = {
+        "active_moe_expert_ratio": 0.25,
+        EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
+    }
 
-    total_weight_size = cost_model.total_weight_size(
-        [
-            ("layers.0.mlp.experts", fused_experts),
-            ("model.visual.blocks.0.attn.qkv", visual),
-        ],
-        is_auto_quantize_module=lambda module: True,
-        cost_constraints={
-            "active_moe_expert_ratio": 0.25,
-            EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
-        },
+    # Fused experts expose no `.weight`; their size is summed across all parameters.
+    assert _get_module_weight_numel(fused_experts) == (
+        fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()
     )
-
-    assert total_weight_size == pytest.approx(
-        (fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()) * 0.25
-    )
+    # Routed MoE experts are scaled by the active-expert ratio; excluded modules drop to zero.
+    assert cost_model.module_cost_weight(["layers.0.mlp.experts"], cost_constraints) == 0.25
+    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
 
 
 @pytest.mark.parametrize("num_experts_attr", ["num_experts", "num_local_experts"])
@@ -486,30 +494,64 @@ def test_data_parallel_auto_quantize(skip_on_windows):
     spawn_multiprocess_job(2, _test_data_parallel_auto_quantize, backend="gloo")
 
 
+def test_auto_quantize_budget_uses_no_quant_candidate_cost(monkeypatch):
+    class _BudgetCaptureSearcher(AutoQuantizeGradientSearcher):
+        def run_search_with_stats(self, max_weight_size, verbose=False):
+            self.max_weight_size = max_weight_size
+            return {}, True
+
+    def _raise_local_total_weight_size(modules):
+        pytest.fail("run_search should derive total weight size from candidate costs")
+
+    monkeypatch.setattr(
+        _AutoQuantizeBaseSearcher,
+        "_get_total_weight_size",
+        staticmethod(_raise_local_total_weight_size),
+    )
+
+    searcher = _BudgetCaptureSearcher()
+    searcher.reset_search()
+    searcher.model = torch.nn.Module()
+    searcher.config = {"verbose": False}
+    searcher.constraints = {"effective_bits": 8.0}
+    searcher.candidate_stats = {
+        "local_expert.quant_recipe": {
+            "formats": [QuantRecipe(mtq.NVFP4_DEFAULT_CFG), QuantRecipe(None)],
+            "scores": [1.0, 0.0],
+            "costs": [25.0, 100.0],
+        }
+    }
+
+    searcher.run_search()
+
+    assert searcher.max_weight_size == 50.0
+
+
 def test_estimate_quant_compression():
+    # NVFP4 weight/input carry effective_bits=4.5 from configs/numerics/nvfp4 -> 4.5/16 = 0.28125.
     nvfp4_affine_kv_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AFFINE_KV_CFG)
-    assert estimate_quant_compression(nvfp4_affine_kv_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_affine_kv_cfg) == 0.28125
 
     nvfp4_awq_clip_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_CLIP_CFG)
-    assert estimate_quant_compression(nvfp4_awq_clip_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_clip_cfg) == 0.28125
 
     nvfp4_awq_full_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_FULL_CFG)
-    assert estimate_quant_compression(nvfp4_awq_full_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_full_cfg) == 0.28125
 
     nvfp4_awq_lite_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_LITE_CFG)
-    assert estimate_quant_compression(nvfp4_awq_lite_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_lite_cfg) == 0.28125
 
     nvfp4_default_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG)
-    assert estimate_quant_compression(nvfp4_default_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_default_cfg) == 0.28125
 
     nvfp4_kv_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_KV_CFG)
-    assert estimate_quant_compression(nvfp4_kv_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_kv_cfg) == 0.28125
 
     nvfp4_kv_rotate_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_KV_ROTATE_CFG)
-    assert estimate_quant_compression(nvfp4_kv_rotate_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_kv_rotate_cfg) == 0.28125
 
     nvfp4_svdquant_default_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_SVDQUANT_DEFAULT_CFG)
-    assert estimate_quant_compression(nvfp4_svdquant_default_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_svdquant_default_cfg) == 0.28125
 
     int8_default_cfg = mtq.config.QuantizeConfig(**mtq.INT8_DEFAULT_CFG)
     assert estimate_quant_compression(int8_default_cfg) == 0.5
@@ -554,6 +596,82 @@ def test_estimate_quant_compression():
 
     fp8_affine_kv_cfg = mtq.config.QuantizeConfig(**mtq.FP8_AFFINE_KV_CFG)
     assert estimate_quant_compression(fp8_affine_kv_cfg) == 0.5
+
+
+def test_estimate_quant_compression_effective_bits_override():
+    """Recipe-level ``QuantizeConfig.effective_bits`` overrides the per-entry library default."""
+    # NVFP4 weight carries effective_bits=4.5 from configs/numerics/nvfp4 (per-entry default).
+    nvfp4_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG)
+    assert nvfp4_cfg.effective_bits is None  # no recipe-level override
+    assert estimate_quant_compression(nvfp4_cfg) == 4.5 / 16.0  # per-entry library default
+
+    # A recipe-level QuantizeConfig.effective_bits override wins over the per-entry default.
+    nvfp4_cfg_overridden = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=8.0)
+    assert estimate_quant_compression(nvfp4_cfg_overridden) == 8.0 / 16.0
+
+    # Override can also represent a higher cost (e.g., conservative for a sensitive recipe).
+    nvfp4_cfg_high = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=16.0)
+    assert estimate_quant_compression(nvfp4_cfg_high) == 1.0
+
+    # Out-of-range values are rejected by the Pydantic validator.
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=0.0)
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=17.0)
+
+
+def test_estimate_quant_compression_per_entry_effective_bits():
+    """Per-entry ``effective_bits`` overrides the heuristic; recipe-level wins over it; min across entries."""
+    # num_bits=(2,1) -> heuristic 0.25, but per-entry library default is 4.5.
+    cfg = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+        ],
+        algorithm="max",
+    )
+    assert cfg.effective_bits is None
+    assert estimate_quant_compression(cfg) == 4.5 / 16.0
+
+    # Recipe-level override (layer 1) wins over the per-entry value (layer 2).
+    cfg_recipe_override = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+        ],
+        algorithm="max",
+        effective_bits=8.0,
+    )
+    assert estimate_quant_compression(cfg_recipe_override) == 8.0 / 16.0
+
+    # min across entries: weight 4.5/16 = 0.28125 vs heuristic fp8 input 0.5 -> 0.28125.
+    cfg_mixed = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3)}},
+        ],
+        algorithm="max",
+    )
+    assert estimate_quant_compression(cfg_mixed) == 4.5 / 16.0
+
+    # Per-entry out-of-range is rejected by the QuantizerAttributeConfig validator.
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(
+            quant_cfg=[
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": (2, 1), "effective_bits": 20.0},
+                },
+            ],
+            algorithm="max",
+        )
 
 
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])

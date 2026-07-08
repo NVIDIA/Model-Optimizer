@@ -194,6 +194,29 @@ class _QuantAttention(QuantModule):
             p_qdq_amax=p_qdq_amax,
         )
 
+    def _eager_p_qdq_attention(
+        self, original_attention_interface, query_states, key_states, value_states, **kwargs
+    ):
+        """Apply ``p_bmm_quantizer`` to the softmax output via an eager wrapper.
+
+        For attention outside the causal-only Triton kernel's envelope (e.g. ViT's
+        non-causal attention). Swapping ``F.softmax`` for a quantized version keeps
+        the quantizer in the traced graph so ONNX / Torch-TRT export emits Q/DQ
+        around the softmax probabilities. Requires an eager attention
+        implementation; SDPA-fused softmax (computed inside the C++ kernel) is
+        unaffected.
+        """
+        _pq = self.p_bmm_quantizer
+        _orig_softmax = torch.nn.functional.softmax
+
+        def _quantized_softmax(*s_args, **s_kwargs):
+            return _pq(_orig_softmax(*s_args, **s_kwargs))
+
+        with replace_function(torch.nn.functional, "softmax", _quantized_softmax):
+            return original_attention_interface(
+                self, query_states, key_states, value_states, **kwargs
+            )
+
     @staticmethod
     def _quantized_attention(
         original_attention_interface,
@@ -216,6 +239,13 @@ class _QuantAttention(QuantModule):
             # positional argument after q/k/v; everything else is a kwarg.
             if args:
                 kwargs["attention_mask"] = args[0]
+            # The built-in Triton P kernel is causal-only. Non-causal attention
+            # (e.g. ViT) applies p_bmm_quantizer through an eager softmax wrapper
+            # that stays export-traceable for ONNX / Torch-TRT instead.
+            if kwargs.get("is_causal") is False or getattr(self, "is_causal", True) is False:
+                return self._eager_p_qdq_attention(
+                    original_attention_interface, query_states, key_states, value_states, **kwargs
+                )
             return self._triton_qdq_attention(
                 p_qdq, query_states, key_states, value_states, **kwargs
             )
@@ -1061,31 +1091,17 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                 yield weight[idx], q
 
     def fold_weight(self, keep_attrs: bool = False):
-        """Fold per-expert weight quantizers into the fused 3-D weights.
+        """Bake each per-expert weight quantizer into its slice of the fused 3-D weight.
 
-        The base ``fold_weight`` only handles singular ``*_weight_quantizer``
-        attributes. Fused experts use ``nn.ModuleList`` of per-expert quantizers
-        (``<first_proj>_weight_quantizers``, ``down_proj_weight_quantizers``),
-        which would otherwise be skipped, leaving ``_amax`` on every quantizer.
+        The base ``fold_weight`` only handles singular ``*_weight_quantizer`` attributes and
+        would skip the ``nn.ModuleList`` of per-expert quantizers used here. The per-expert
+        ``(weight_slice, quantizer)`` pairs are the same ones :meth:`iter_weights_for_calibration`
+        yields, so we reuse it; each fake-quant quantizer's quantization and rotation are folded
+        in and disabled, and calibration buffers are dropped unless ``keep_attrs``.
         """
-        for weight_name, quantizers_name in (
-            (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
-            ("down_proj", "down_proj_weight_quantizers"),
-        ):
-            weight = getattr(self, weight_name, None)
-            quantizers = getattr(self, quantizers_name, None)
-            if weight is None or quantizers is None:
-                continue
-            for idx, q in enumerate(quantizers):
-                if not (isinstance(q, TensorQuantizer) and q.fake_quant):
-                    continue
-                slice_ = weight.data[idx]
-                slice_.copy_(q(slice_.float()).to(weight.dtype))
-                q.disable()
-                if not keep_attrs:
-                    for attr_name in ("_pre_quant_scale", "_amax"):
-                        if hasattr(q, attr_name):
-                            delattr(q, attr_name)
+        for weight_slice, q in self.iter_weights_for_calibration():
+            if isinstance(q, TensorQuantizer) and q.fake_quant:
+                self._fold_weight_quantizer(q, (weight_slice,), keep_attrs)
 
 
 class _QuantNonGatedFusedExperts(_QuantFusedExperts):

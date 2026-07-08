@@ -286,9 +286,29 @@ class RotateConfig(ModeloptBaseConfig):
     for transform details.
     """
 
-    enable: bool = False
-    rotate_fp32: bool = False
-    block_size: int | None = None
+    enable: bool = ModeloptField(
+        default=False,
+        title="Enable input rotation.",
+        description="If True, applies a normalized Hadamard transform before quantization.",
+    )
+    mode: Literal["rotate", "rotate_back"] = ModeloptField(
+        default="rotate",
+        title="Rotation mode.",
+        description=(
+            "Use 'rotate' for input rotation only, or 'rotate_back' to apply the transform "
+            "again after fake quantization."
+        ),
+    )
+    rotate_fp32: bool = ModeloptField(
+        default=False,
+        title="Run rotation in float32.",
+        description="If True, computes the rotation in float32 before casting back to the input dtype.",
+    )
+    block_size: int | None = ModeloptField(
+        default=None,
+        title="Rotation block size.",
+        description="Positive block size for block-wise rotation, or None to rotate the full input.",
+    )
 
     @field_validator("block_size", mode="before")
     @classmethod
@@ -323,12 +343,28 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         #. String specifying the quantization format. This is current used only for custom backends.""",
     )
 
+    effective_bits: float | None = ModeloptField(
+        default=None,
+        title="Effective bits per element (autoquant cost).",
+        description=(
+            "Per-format effective bits for the autoquant cost model; overrides the "
+            "``num_bits`` heuristic for this entry (e.g. NVFP4 = 4.5). Must be in (0, 16]."
+        ),
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
+
     @model_validator(mode="before")
     @classmethod
     def validate_config(cls, values):
         """Validate quantizer config."""
 
-        def _validate_recursive(value):
+        def _validate_recursive(value, field_name=None):
             """Recursively validate config structure."""
             if value is None:
                 return
@@ -337,14 +373,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
                 for item in value:
                     _validate_recursive(item)
             elif isinstance(value, dict):
+                if field_name == "rotate":
+                    return
                 if len(value) == 1 and "enable" in value and value["enable"] is True:
                     raise ValueError(
                         "Invalid quantizer config: Cannot specify only {'enable': True}. "
                         "Additional parameters are required when enabling quantization."
                     )
                 # Recurse into nested dicts
-                for v in value.values():
-                    _validate_recursive(v)
+                for k, v in value.items():
+                    _validate_recursive(v, k)
 
         _validate_recursive(values)
         return values
@@ -1104,6 +1142,18 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    skip_layers: list[str] | None = ModeloptField(
+        default=None,
+        title="Module-name wildcard patterns excluded from the SVDQuant algorithm",
+        description=(
+            "Quantized linears whose module name matches any of these fnmatch-style wildcard "
+            "patterns (e.g. ``'*.attn.add_q_proj'``) keep their quantizer config but skip the "
+            "SVDQuant algorithm entirely: no AWQ smoothing (``pre_quant_scale``) and no "
+            "low-rank branch, leaving their weights unchanged. They are max-calibrated "
+            "instead, i.e. quantized like a plain max recipe."
+        ),
+    )
+
 
 class GPTQCalibConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
@@ -1316,6 +1366,22 @@ class QuantizeConfig(ModeloptBaseConfig):
         "for more details.",
         validate_default=True,
     )
+
+    effective_bits: float | None = ModeloptField(
+        default=None,
+        title="Effective bits per element (autoquant cost override)",
+        description=(
+            "Recipe-level override for the autoquant cost model; replaces the per-entry "
+            "``num_bits`` heuristic for the whole config. Must be in (0, 16]."
+        ),
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
 
     @field_validator("quant_cfg", mode="before")
     @classmethod

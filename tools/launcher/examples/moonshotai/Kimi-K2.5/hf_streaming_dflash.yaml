@@ -6,8 +6,10 @@
 #
 # data.mode=streaming sets dflash_offline so the DFlash module consumes streamed
 # hidden states instead of running the fake base.
-# Capture ids = [2,16,31,45,59,60] (kimi_k25/deepseek_v3, 61 layers): 5 DFlash
-# target layers + base 60. n_captured = num_target_layers + 1.
+# Capture ids = [2,16,31,45,59,61] (kimi_k25/deepseek_v3, 61 layers): 5 DFlash
+# target layers + true final layer 61. n_captured = num_target_layers + 1.
+# (61 = true final hidden; requires a vLLM with the aux-capture fix vllm#46788.
+#  Without it use 60 — the 2nd-to-last layer — which caps acceptance length.)
 #
 # answer_only_loss=true: Kimi ships only a slow tokenizer, so it can't derive the
 # assistant mask the standard way (return_assistant_tokens_mask needs a fast
@@ -72,7 +74,7 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       # No spaces in values: nemo_run emits `export FOO=value` unquoted.
-      - EAGLE_CAPTURE_IDS: "[2,16,31,45,59,60]"
+      - EAGLE_CAPTURE_IDS: "[2,16,31,45,59,61]"
       - SERVE_TP: "4"
       # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
       - STREAMING_NUM_WORKERS: "1"

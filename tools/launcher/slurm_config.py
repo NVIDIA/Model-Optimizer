@@ -48,7 +48,9 @@ class SlurmConfig:
     requeue: bool = False
     nodes: int = 1
     ntasks_per_node: int = 1
-    gpus_per_node: int = 1
+    # None means omit GPU GRES entirely. Some clusters expose GPU nodes without
+    # Slurm GRES, so requesting --gpus-per-node would make valid jobs fail.
+    gpus_per_node: Optional[int] = 1
     time: str = "04:00:00"
     mem: str = "0"
     local: bool = False
@@ -68,7 +70,7 @@ def slurm_factory(
     qos: Optional[str] = os.environ.get("SLURM_QOS"),
     nodes: int = 1,
     ntasks_per_node: int = 1,
-    gpus_per_node: int = 1,
+    gpus_per_node: Optional[int] = 1,
     container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8",
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt",
     container_mounts: list[str] = [

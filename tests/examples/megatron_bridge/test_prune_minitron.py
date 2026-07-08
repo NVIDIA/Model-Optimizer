@@ -112,6 +112,7 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
         ),
     ],
 )
+@pytest.mark.timeout(360)  # slow on 2-gpu nightly runs
 def test_prune_minitron_vlm(tmp_path, num_gpus, create_teacher):
     # >= 4 layers per PP stage so depth is prunable and stays balanced; max_position_embeddings
     # >= image tokens + text so the image-text calibration sequence is not truncated.

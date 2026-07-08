@@ -61,7 +61,10 @@ class PipelineManager:
         """
         pipeline_cls = MODEL_PIPELINE[model_type]
         if pipeline_cls is None:
-            raise ValueError(f"Model type {model_type.value} does not use diffusers pipelines.")
+            raise ValueError(
+                f"Model type {model_type.value} is not supported by the installed diffusers "
+                "version; upgrade diffusers to a release that provides its pipeline."
+            )
         model_id = (
             MODEL_REGISTRY[model_type] if override_model_path is None else override_model_path
         )
@@ -100,7 +103,9 @@ class PipelineManager:
             pipeline_cls = MODEL_PIPELINE[self.config.model_type]
             if pipeline_cls is None:
                 raise ValueError(
-                    f"Model type {self.config.model_type.value} does not use diffusers pipelines."
+                    f"Model type {self.config.model_type.value} is not supported by the "
+                    "installed diffusers version; upgrade diffusers to a release that "
+                    "provides its pipeline."
                 )
             self.pipe = pipeline_cls.from_pretrained(
                 self.config.model_path,
