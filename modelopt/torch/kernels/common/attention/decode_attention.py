@@ -32,6 +32,10 @@ from modelopt.torch.kernels.common.attention.triton_fa import (
     _load_paged_v_tile,
 )
 from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4, _v_qdq_nvfp4
+from modelopt.torch.kernels.quantization.attention.softmax_fakequant import (
+    ex2_fp16,
+    resolve_softmax_mode,
+)
 
 __all__ = ["attention_decode"]
 
@@ -74,6 +78,7 @@ def _decode_split_kernel(
     PAGE_SIZE: tl.constexpr,
     max_blocks_per_seq,
     NUM_KV_SPLITS: tl.constexpr,
+    MIXED_FP16: tl.constexpr,
     P_QDQ: tl.constexpr,
     V_QDQ: tl.constexpr,
     V_CACHE_QUANTIZED: tl.constexpr,
@@ -131,9 +136,13 @@ def _decode_split_kernel(
         scores = tl.where(kv_valid, scores, -float("inf"))
         tile_max = tl.max(scores, axis=0)
         new_max = tl.maximum(running_max, tile_max)
-        p = tl.math.exp2(scores - new_max)
+        if MIXED_FP16:
+            p = ex2_fp16(scores - new_max)
+            correction = ex2_fp16(running_max - new_max)
+        else:
+            p = tl.math.exp2(scores - new_max)
+            correction = tl.math.exp2(running_max - new_max)
         p = tl.where(kv_valid, p, 0.0)
-        correction = tl.math.exp2(running_max - new_max)
         running_sum = running_sum * correction + tl.sum(p, axis=0)
         acc *= correction
 
@@ -257,6 +266,7 @@ def attention_decode(
     b_seq_len_k: torch.Tensor,
     *,
     softmax_scale: float | None = None,
+    softmax_mode: str = "fp32",
     page_size: int = 16,
     num_kv_splits: int = _DEFAULT_KV_SPLITS,
     p_qdq: str | None = None,
@@ -274,7 +284,13 @@ def attention_decode(
     in the cache; only the pristine partial group is then quantized on read.
     P QDQ intentionally follows the split-local online-softmax schedule; changing
     ``num_kv_splits`` can therefore change quantized results.
+
+    ``softmax_mode="mixed_fp16"`` evaluates split-local probabilities and
+    running-max corrections with native FP16 exponentiation while retaining
+    FP32 denominator state and accumulators. Split-state combination remains
+    FP32. The default ``"fp32"`` preserves the existing behavior.
     """
+    mixed_fp16 = resolve_softmax_mode(softmax_mode)
     if q.ndim != 3:
         raise ValueError(f"q must have shape [batch, heads, head_dim], got {tuple(q.shape)}")
     if page_size != k_cache.shape[1] or page_size != v_cache.shape[1]:
@@ -337,6 +353,7 @@ def attention_decode(
             PAGE_SIZE=page_size,
             max_blocks_per_seq=block_table.shape[1],
             NUM_KV_SPLITS=num_kv_splits,
+            MIXED_FP16=mixed_fp16,
             P_QDQ=p_qdq == "nvfp4",
             V_QDQ=v_qdq == "nvfp4",
             V_CACHE_QUANTIZED=v_cache_quantized,

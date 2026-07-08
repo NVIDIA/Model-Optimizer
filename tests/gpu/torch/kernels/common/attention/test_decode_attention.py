@@ -81,6 +81,27 @@ def _nvfp4_qdq_reference(x, global_scale=1.0 / (6.0 * 448.0)):
     return torch.where(scales == 0, 0.0, quantized).reshape_as(x)
 
 
+def _softmax_exp2(x, softmax_mode):
+    if softmax_mode == "mixed_fp16":
+        return torch.exp2(x.half()).float()
+    assert softmax_mode == "fp32"
+    return torch.exp2(x)
+
+
+def _combine_split_states(split_max, split_sum, split_acc, softmax_mode):
+    running_max = torch.tensor(-float("inf"), device=split_max.device)
+    running_sum = torch.tensor(0.0, device=split_max.device)
+    acc = torch.zeros_like(split_acc[0])
+    for split_idx in range(split_max.shape[0]):
+        new_max = torch.maximum(running_max, split_max[split_idx])
+        correction = _softmax_exp2(running_max - new_max, softmax_mode)
+        split_correction = _softmax_exp2(split_max[split_idx] - new_max, softmax_mode)
+        acc = acc * correction + split_acc[split_idx] * split_correction
+        running_sum = running_sum * correction + split_sum[split_idx] * split_correction
+        running_max = new_max
+    return acc / running_sum
+
+
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
 @pytest.mark.parametrize("num_kv_splits", [1, 32])
 def test_split_k_varlen_gqa_matches_dense(num_kv_splits):
@@ -203,46 +224,73 @@ def test_p_quantizes_model_dtype_input_but_accumulates_fp32():
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + Triton")
 @requires_native_e4m3
-def test_p_qdq_matches_fixed_split_local_oracle():
+@pytest.mark.parametrize("softmax_mode", ["fp32", "mixed_fp16"])
+def test_p_qdq_matches_fixed_split_local_oracle(softmax_mode):
     """The production 32-split schedule quantizes split-local unnormalized P."""
-    seq_len, head_dim, num_splits = 4096, 16, 32
+    seq_len, head_dim, num_splits = 8192, 16, 32
+    block_n = 128
     scale = head_dim**-0.5
     q = torch.zeros(1, 1, head_dim, device="cuda", dtype=torch.float32)
-    q[..., 0] = 1.0
+    q[..., 0] = 1.0 / (scale * 1.4426950408889634)
     k = torch.zeros(1, 1, seq_len, head_dim, device="cuda", dtype=torch.bfloat16)
-    k[..., 0] = torch.linspace(-8.0, 8.0, seq_len, device="cuda", dtype=torch.bfloat16)
-    torch.manual_seed(19)
-    v = torch.randn_like(k)
+    token_idx = torch.arange(seq_len, device="cuda")
+    token_split = token_idx // (2 * block_n)
+    tile_phase = (token_idx // block_n) % 2
+    score_pattern = -0.25 * ((token_idx % block_n) % 3) + 0.25 * tile_phase + 0.25 * token_split
+    k[0, 0, :, 0] = score_pattern.to(torch.bfloat16)
+    v = torch.zeros_like(k)
+    # Channel 0 isolates the split-local correction; channel 1 nearly cancels only
+    # under the intended FP32 combine, making combine precision observable.
+    v[0, 0, :, 0] = torch.where(tile_phase == 0, 256.0, -215.0).to(torch.bfloat16)
+    v[0, 0, :, 1] = torch.where(token_split == num_splits - 1, -5.25, 1.0).to(torch.bfloat16)
     k_cache, v_cache, block_table = _paged_cache(k, v, (seq_len,))
     seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
 
+    common = {
+        "softmax_scale": scale,
+        "num_kv_splits": num_splits,
+        "p_qdq": "nvfp4",
+    }
     output = attention_decode(
-        q,
-        k_cache,
-        v_cache,
-        block_table,
-        seq_lens,
-        softmax_scale=scale,
-        num_kv_splits=num_splits,
-        p_qdq="nvfp4",
+        q, k_cache, v_cache, block_table, seq_lens, softmax_mode=softmax_mode, **common
     )
+    if softmax_mode == "mixed_fp16":
+        fp32_output = attention_decode(
+            q, k_cache, v_cache, block_table, seq_lens, softmax_mode="fp32", **common
+        )
+        assert not torch.equal(output.to(k.dtype), fp32_output.to(k.dtype))
 
     scores = torch.matmul(k[0, 0].float(), q[0, 0]) * (scale * 1.4426950408889634)
-    split_scores = scores.reshape(num_splits, -1)
-    split_max = split_scores.amax(dim=1)
-    p = torch.exp2(split_scores - split_max[:, None])
-    p_qdq = _nvfp4_qdq_reference(p.to(torch.bfloat16).float())
-    split_acc = torch.einsum("sk,skd->sd", p_qdq, v[0, 0].float().reshape(num_splits, -1, head_dim))
-    running_max = torch.tensor(-float("inf"), device="cuda")
-    running_sum = torch.tensor(0.0, device="cuda")
-    acc = torch.zeros(head_dim, device="cuda")
+    split_scores = scores.reshape(num_splits, 2, block_n)
+    split_values = v[0, 0].float().reshape(num_splits, 2, block_n, head_dim)
+    split_max = []
+    split_sum = []
+    split_acc = []
     for split_idx in range(num_splits):
-        new_max = torch.maximum(running_max, split_max[split_idx])
-        correction = torch.exp2(running_max - new_max)
-        split_correction = torch.exp2(split_max[split_idx] - new_max)
-        acc = acc * correction + split_acc[split_idx] * split_correction
-        running_sum = running_sum * correction + p[split_idx].sum() * split_correction
-        running_max = new_max
-    reference = acc / running_sum
+        running_max = torch.tensor(-float("inf"), device="cuda")
+        running_sum = torch.tensor(0.0, device="cuda")
+        local_acc = torch.zeros(head_dim, device="cuda")
+        for tile_idx in range(2):
+            tile_scores = split_scores[split_idx, tile_idx]
+            new_max = torch.maximum(running_max, tile_scores.amax())
+            p = _softmax_exp2(tile_scores - new_max, softmax_mode)
+            correction = _softmax_exp2(running_max - new_max, softmax_mode)
+            running_sum = running_sum * correction + p.sum()
+            local_acc *= correction
+            p_qdq = _nvfp4_qdq_reference(p.to(torch.bfloat16).float())
+            local_acc += (p_qdq[:, None] * split_values[split_idx, tile_idx]).sum(dim=0)
+            running_max = new_max
+        split_max.append(running_max)
+        split_sum.append(running_sum)
+        split_acc.append(local_acc)
+    split_max = torch.stack(split_max)
+    split_sum = torch.stack(split_sum)
+    split_acc = torch.stack(split_acc)
+    reference = _combine_split_states(split_max, split_sum, split_acc, "fp32")
+    if softmax_mode == "mixed_fp16":
+        mixed_combine_reference = _combine_split_states(
+            split_max, split_sum, split_acc, "mixed_fp16"
+        )
+        assert reference.to(k.dtype)[1] != mixed_combine_reference.to(k.dtype)[1]
 
     torch.testing.assert_close(output[0, 0], reference, rtol=5e-5, atol=5e-5)
