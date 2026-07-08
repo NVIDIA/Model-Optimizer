@@ -875,9 +875,11 @@ class PrecisionConverter:
                     init.name for init in self.model.graph.initializer
                 }
                 if is_fp_cast and not input_from_initializer:
-                    # Keep cast nodes that are necessary producers of network outputs
-                    if any(node.input[0] == out.name for out in self.model.graph.output) and any(
-                        node.output[0] == out.name for out in self.model.graph.output
+                    # Keep cast nodes that are necessary producers of network outputs.
+                    if any(
+                        node.output[0] == out.name
+                        and cast_to_type == out.type.tensor_type.elem_type
+                        for out in self.model.graph.output
                     ):
                         continue
                     nodes_to_remove.append(node)

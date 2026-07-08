@@ -20,6 +20,7 @@ from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
+from modelopt.onnx.autocast.convert import convert_to_mixed_precision
 from modelopt.onnx.autocast.logging_config import configure_logging
 from modelopt.onnx.autocast.precisionconverter import PrecisionConverter
 
@@ -85,6 +86,37 @@ def test_graph_converter_init(simple_model, use_standalone_type_inference):
     assert converter.value_info_map == value_info_map
     assert converter.initializer_map == initializer_map
     assert converter.keep_io_types
+
+
+def test_convert_preserves_cast_chain_graph_output(tmp_path):
+    x = helper.make_tensor_value_info("in0", TensorProto.DOUBLE, [2])
+    y = helper.make_tensor_value_info("t2", TensorProto.FLOAT, [2])
+    cast_to_double = helper.make_node(
+        "Cast", ["in0"], ["t1"], name="cast_to_double", to=TensorProto.DOUBLE
+    )
+    cast_to_float = helper.make_node(
+        "Cast", ["t1"], ["t2"], name="cast_to_float", to=TensorProto.FLOAT
+    )
+    graph = helper.make_graph([cast_to_double, cast_to_float], "g", [x], [y])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model_path = tmp_path / "cast_chain_output.onnx"
+    onnx.save(model, model_path)
+
+    converted_model = convert_to_mixed_precision(
+        onnx_path=str(model_path), low_precision_type="fp16", providers=["cpu"]
+    )
+
+    onnx.checker.check_model(converted_model)
+    output_producers = [
+        node
+        for node in converted_model.graph.node
+        if converted_model.graph.output[0].name in node.output
+    ]
+    assert len(output_producers) == 1
+    assert output_producers[0].op_type == "Cast"
 
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
