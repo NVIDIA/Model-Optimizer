@@ -17,6 +17,7 @@ import itertools
 import os
 import subprocess
 import sys
+import tempfile
 import traceback
 
 import pytest
@@ -149,7 +150,6 @@ def _run_deploy_via_subprocess(
     eagle3_one_model: bool,
 ) -> None:
     """Run deploy in a subprocess and print its stdout/stderr so pytest capture=tee-sys captures to DB."""
-    import tempfile
     tests_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     project_root = os.path.dirname(tests_dir)
     env = {
@@ -325,6 +325,7 @@ class ModelDeployer:
                 **base_kw,
             )
 
+        # Deferred import: transformers is a heavy optional dependency not always present.
         from transformers import AutoTokenizer
 
         tokenizer_model = self.base_model if "eagle" in self.model_id.lower() else self.model_id
@@ -375,12 +376,15 @@ class ModelDeployer:
             quantization_method = "modelopt"
             if "fp4" in self.model_id.lower():
                 quantization_method = "modelopt_fp4"
+            # DeepSeek-V4 FlashMLA requires fp8 kv-cache explicitly
+            kv_cache_dtype = "fp8" if "deepseek-v4" in self.model_id.lower() else "auto"
             llm = LLM(
                 model=self.model_id,
                 quantization=quantization_method,
                 tensor_parallel_size=self.tensor_parallel_size,
                 trust_remote_code=True,
                 max_model_len=4096,
+                kv_cache_dtype=kv_cache_dtype,
             )
         sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
         conversations = [[{"role": "user", "content": p}] for p in COMMON_PROMPTS]
@@ -453,6 +457,7 @@ class ModelDeployer:
                 trust_remote_code=True,
                 context_length=4096,
             )
+        # Deferred import: transformers is a heavy optional dependency not always present.
         from transformers import AutoTokenizer
 
         tokenizer_model = self.base_model if "eagle" in self.model_id.lower() else self.model_id
@@ -474,7 +479,12 @@ class ModelDeployer:
             f"Expected {len(COMMON_PROMPTS)} outputs, got {len(outputs)}"
         )
         for i, output in enumerate(outputs):
-            generated_text = output["text"] if isinstance(output, dict) else str(output)
+            if isinstance(output, dict):
+                generated_text = output["text"]
+            elif isinstance(output, str):
+                generated_text = output
+            else:
+                raise TypeError(f"Output {i} has unexpected type {type(output)}: {output!r}")
             assert isinstance(generated_text, str), f"Output {i} text is not a string"
             assert generated_text.strip(), f"Output {i} generated empty text"
             print(f"Model: {self.model_id}")
