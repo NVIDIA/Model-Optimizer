@@ -16,6 +16,7 @@
 """Focused tests for the fixed-recipe quant+sparse vLLM worker."""
 
 import importlib.util
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +38,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
 )
 
 _WORKER_PATH = Path(__file__).parents[5] / "examples/vllm_serve/sparse_attn_worker.py"
+_LAUNCHER_PATH = Path(__file__).parents[5] / "examples/vllm_serve/vllm_serve_sparse_attn.py"
 
 
 def _load_worker_module():
@@ -49,6 +51,13 @@ def _load_worker_module():
 
 
 worker_module = _load_worker_module()
+
+
+def _load_launcher_module(name="shared_attention_launcher_quant_test"):
+    spec = importlib.util.spec_from_file_location(name, _LAUNCHER_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_quant_policy_rejects_old_vllm(monkeypatch):
@@ -97,8 +106,18 @@ def _patch_conversion(monkeypatch):
 
 
 @pytest.mark.parametrize("impl_cls", [FlashAttentionImpl, FlashInferImpl])
-def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch, impl_cls):
+@pytest.mark.parametrize(
+    ("softmax_env", "expected_softmax_mode"),
+    [(None, "fp32"), (" MiXeD_FP16 ", "mixed_fp16")],
+)
+def test_install_converts_only_attention_and_configures_fixed_recipe(
+    monkeypatch, impl_cls, softmax_env, expected_softmax_mode
+):
     _patch_conversion(monkeypatch)
+    if softmax_env is None:
+        monkeypatch.delenv("MODELOPT_ATTN_SOFTMAX_MODE", raising=False)
+    else:
+        monkeypatch.setenv("MODELOPT_ATTN_SOFTMAX_MODE", softmax_env)
     attention = _attention(impl_cls=impl_cls)
     linear = nn.Linear(4, 4)
     model = nn.ModuleDict({"attn": attention, "linear": linear})
@@ -129,9 +148,71 @@ def test_install_converts_only_attention_and_configures_fixed_recipe(monkeypatch
         "p_qdq_amax": 1.0,
         "v_qdq": "nvfp4",
         "v_qdq_amax": 6.0 * 448.0,
+        "softmax_mode": expected_softmax_mode,
     }
     assert model["linear"] is linear
     assert state.model_runner.cascade_attn_enabled is False
+
+
+def test_invalid_softmax_mode_is_rejected_before_quant_mutation(monkeypatch):
+    _patch_conversion(monkeypatch)
+    monkeypatch.setenv("MODELOPT_ATTN_SOFTMAX_MODE", " fp64 ")
+    attention = _attention()
+    model = nn.ModuleDict({"attn": attention})
+    state = _worker(model)
+    original_impl = attention.impl
+
+    with pytest.raises(ValueError) as exc:
+        worker_module._install_attention(state, quantize=True)
+
+    assert "MODELOPT_ATTN_SOFTMAX_MODE" in str(exc.value)
+    assert " fp64 " in str(exc.value)
+    assert model["attn"] is attention
+    assert type(model["attn"]) is quant_plugin.vllm_attention.Attention
+    assert attention.impl is original_impl
+    assert state.model_runner.cascade_attn_enabled is True
+
+
+@pytest.mark.parametrize(
+    "available_module",
+    [
+        pytest.param("vllm.executor.ray_distributed_executor", id="legacy"),
+        pytest.param("vllm.v1.executor.ray_distributed_executor", id="v1"),
+        pytest.param(None, id="env-fallback"),
+    ],
+)
+def test_launcher_propagates_softmax_mode_to_ray_workers(monkeypatch, available_module):
+    ray_modules = (
+        "vllm.executor.ray_distributed_executor",
+        "vllm.v1.executor.ray_distributed_executor",
+    )
+    softmax_env = "MODELOPT_ATTN_SOFTMAX_MODE"
+    extra_env_var = "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"
+    existing_env = "EXISTING_ENV"
+    monkeypatch.setenv(extra_env_var, existing_env)
+    executor = SimpleNamespace(ADDITIONAL_ENV_VARS={"EXISTING_CLASS_VAR"})
+    real_import_module = importlib.import_module
+    attempted_ray_modules = []
+
+    def import_module(name, package=None):
+        if name not in ray_modules:
+            return real_import_module(name, package)
+        attempted_ray_modules.append(name)
+        if name == available_module:
+            return SimpleNamespace(RayDistributedExecutor=executor)
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+
+    _load_launcher_module(f"shared_attention_launcher_quant_test_{available_module}")
+
+    expected_attempts = ray_modules[:1] if available_module == ray_modules[0] else ray_modules
+    assert tuple(attempted_ray_modules) == expected_attempts
+    if available_module is not None:
+        assert {"EXISTING_CLASS_VAR", softmax_env} == executor.ADDITIONAL_ENV_VARS
+        assert os.environ[extra_env_var] == existing_env
+    else:
+        assert set(os.environ[extra_env_var].split(",")) == {existing_env, softmax_env}
 
 
 def test_validation_of_all_layouts_precedes_mutation(monkeypatch):

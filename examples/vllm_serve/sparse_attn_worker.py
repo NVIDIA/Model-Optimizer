@@ -16,6 +16,7 @@
 """Custom vLLM workers for checkpoint-driven sparse and fixed-NVFP4 attention."""
 
 import importlib
+import os
 from collections import Counter
 from functools import cache
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ else:
 
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
+from modelopt.torch.kernels.quantization.attention.softmax_fakequant import SOFTMAX_MODES
 from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config import (
     load_from_checkpoint_metadata,
     match_sparse_config,
@@ -47,6 +49,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
 
 __all__ = ["SparseAttnWorker", "QuantSparseAttnWorker"]  # noqa: RUF022
 
+MODELOPT_ATTN_SOFTMAX_MODE = "MODELOPT_ATTN_SOFTMAX_MODE"
 _NVFP4_CFG = {
     "num_bits": (2, 1),
     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -112,6 +115,16 @@ def _quant_api():
     import vllm
 
     return _load_quant_api(vllm.__version__)
+
+
+def _softmax_mode_from_env() -> str:
+    raw_mode = os.environ.get(MODELOPT_ATTN_SOFTMAX_MODE, "fp32")
+    mode = raw_mode.strip().lower()
+    if mode not in SOFTMAX_MODES:
+        raise ValueError(
+            f"{MODELOPT_ATTN_SOFTMAX_MODE} must be one of {sorted(SOFTMAX_MODES)}, got {raw_mode!r}"
+        )
+    return mode
 
 
 def _cudagraph_mode(worker, api):
@@ -288,7 +301,7 @@ def _install_sparse_plans(plans) -> None:
     )
 
 
-def _install_quant_plans(worker, plans) -> None:
+def _install_quant_plans(worker, plans, *, softmax_mode: str) -> None:
     api = _quant_api()
     for plan in plans:
         module = plan.module
@@ -305,6 +318,7 @@ def _install_quant_plans(worker, plans) -> None:
             "p_qdq_amax": p_qdq_amax,
             "v_qdq": v_qdq,
             "v_qdq_amax": v_qdq_amax,
+            "softmax_mode": softmax_mode,
         }
         module.impl = plan.new_impl
         module._query_quant_in_kernel = True
@@ -316,7 +330,8 @@ def _install_quant_plans(worker, plans) -> None:
 
 def _install_attention(worker, *, quantize: bool) -> None:
     if quantize:
-        _install_quant_plans(worker, _quant_plans(worker))
+        softmax_mode = _softmax_mode_from_env()
+        _install_quant_plans(worker, _quant_plans(worker), softmax_mode=softmax_mode)
     else:
         plans = _sparse_plans(worker)
         if plans is not None:
