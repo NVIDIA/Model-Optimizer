@@ -650,6 +650,9 @@ def megatron_preprocess_data(
             final_enc_len += enc_len
             all_prefixes.extend(prefixes)
 
+    if max_tokens is not None and final_enc_len >= max_tokens:
+        print(f"\n>>> Early stopping: {max_tokens=} achieved with {final_enc_len} tokens.")
+
     elapsed = (time.time() - overall_start) / 60
     print(
         f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}"
