@@ -86,8 +86,9 @@ down to one billion tokens while preserving its source weights:
 > approximate buffer shuffle.
 
 ```yaml
+# Nemotron 3 models share this tokenizer, so the tokenized blend can be reused across the family.
 tokenizer: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-output_dir: /path/to/nemotron_3_nano_30b_distillation_blend_1b
+output_dir: /path/to/nemotron_3_distillation_blend_1b
 # Optional; omit this field to prepare every source in full.
 target_tokens: 1000000000
 sources:
