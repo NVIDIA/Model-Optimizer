@@ -223,6 +223,12 @@ class QuantRecipe(CustomHPType):
         self.compression = estimate_quant_compression(self.config)
 
         self._str_repr: str = f"{name}(effective-bits: {self.compression * 16})"
+        self._config_signature = self.config.model_dump_json()
+
+    @property
+    def checkpoint_signature(self) -> str:
+        """Return the canonical identity used for ordering and checkpoint validation."""
+        return getattr(self, "_config_signature", self.config.model_dump_json())
 
     @staticmethod
     def get_auto_name_for_config(quant_cfg: str | dict[str, Any] | None) -> str | None:
@@ -248,14 +254,19 @@ class QuantRecipe(CustomHPType):
         return self._str_repr
 
     def __lt__(self, other: "QuantRecipe"):
-        return self.compression < other.compression
+        return (self.compression, self.checkpoint_signature) < (
+            other.compression,
+            other.checkpoint_signature,
+        )
 
     def __eq__(self, other: object):
-        assert isinstance(other, QuantRecipe)
-        return self._str_repr == other._str_repr
+        return (
+            isinstance(other, QuantRecipe)
+            and self.checkpoint_signature == other.checkpoint_signature
+        )
 
     def __hash__(self) -> int:
-        return hash(self._str_repr)
+        return hash(self.checkpoint_signature)
 
     @staticmethod
     def disable_folding_pqs_to_weights():
@@ -329,10 +340,12 @@ class QuantRecipeHparam(Hparam):
         # (``*_input_quantizer`` + ``*_weight_quantizers`` ModuleList) — see
         # ``_get_quantizer_attrs``. Both layouts share the same snapshot dict
         # shape so ``active.setter`` swaps the right child modules.
-        self._all_quantizer_choices = {quant_recipe: {} for quant_recipe in self.choices}
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        calibration_recipes = sorted({*self.choices, no_quant_recipe})
+        self._all_quantizer_choices = {quant_recipe: {} for quant_recipe in calibration_recipes}
 
         quant_recipe: QuantRecipe
-        for quant_recipe in self.choices:
+        for quant_recipe in calibration_recipes:
             for quant_module in self.quant_modules:
                 attr_names = _get_quantizer_attrs(quant_module)
                 for attr_name in attr_names:
@@ -369,15 +382,30 @@ class QuantRecipeHparam(Hparam):
     def active(self, val: HPType | None):
         """Set the active value with a sanity check for choices and dynamic hparams."""
         val = self.original if val is None else val
+        assert isinstance(val, QuantRecipe)
         assert val in self._choices, f"val = {val}, choices = {self.choices}"
         if self.is_configurable:
             self._active = val
         else:
             assert self._active == val
 
-        for nn_module, quantizer_choices in self._all_quantizer_choices[val].items():
+        self._apply_quantizer_choice(val)
+
+    def _apply_quantizer_choice(self, recipe: QuantRecipe) -> None:
+        for nn_module, quantizer_choices in self._all_quantizer_choices[recipe].items():
             for quantizer_attr_name, quantizer in quantizer_choices.items():
                 setattr(nn_module, quantizer_attr_name, quantizer)
+
+    def set_calibration_recipe(self, recipe: QuantRecipe) -> None:
+        """Enable ``recipe`` for this calibration pass or isolate the group."""
+        calibration_recipe = recipe if recipe in self.choices else QuantRecipe(quant_cfg=None)
+        self._apply_quantizer_choice(calibration_recipe)
+
+    def restore_active_quantizers(self) -> None:
+        """Restore quantizer objects corresponding to the solver-visible active recipe."""
+        active = self.active
+        assert isinstance(active, QuantRecipe)
+        self._apply_quantizer_choice(active)
 
     @property
     def importance(self) -> dict:
@@ -473,7 +501,7 @@ def _module_search_space_signature(module_search_spaces) -> tuple:
     return tuple(
         (
             tuple(search_space["module_name_patterns"]),
-            tuple(str(recipe) for recipe in search_space["quant_recipes"]),
+            tuple(sorted(recipe.checkpoint_signature for recipe in search_space["quant_recipes"])),
             search_space["allow_no_quant"],
         )
         for search_space in module_search_spaces
@@ -887,7 +915,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         restored_module_search_space_signature = getattr(
             self, "module_search_space_signature", None
         )
-        if self.candidate_stats and (
+        has_restored_calibration_or_scores = bool(self.quantizer_states or self.candidate_stats)
+        if has_restored_calibration_or_scores and (
             (restored_module_search_space_signature is None and module_search_space_signature)
             or (
                 restored_module_search_space_signature is not None
@@ -924,60 +953,64 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe
         calibrated_new = False
-        for recipe in search_recipes:
-            if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
-                continue
-
-            no_quant_recipe = QuantRecipe(quant_cfg=None)
-            for name, hparam in named_hparams(self.model, configurable=True):
-                if not isinstance(hparam, QuantRecipeHparam):
+        quant_recipe_hparams = [
+            hparam
+            for _, hparam in named_hparams(self.model, unique=True)
+            if isinstance(hparam, QuantRecipeHparam)
+        ]
+        try:
+            for recipe in search_recipes:
+                if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
                     continue
-                hparam.active = no_quant_recipe
-                if recipe in hparam.choices:
-                    hparam.active = recipe
 
-            if recipe in self.quantizer_states:
-                saved = self.quantizer_states[recipe]
-                # config is unused by restore_quantizer_state
-                restore_quantizer_state(
-                    self.model, QuantizeConfig(), {"quantizer_state": saved["metadata"]}
-                )
-                set_quantizer_state_dict(self.model, saved["state_dict"])
-                if self.config["verbose"]:
-                    print_rank_0(f"AutoQuantize: Restored calibration for {recipe}")
-                continue
+                for hparam in quant_recipe_hparams:
+                    hparam.set_calibration_recipe(recipe)
 
-            # Lets reduce the number of calibration steps for AWQ since it takes longer
-            num_calib_steps = (
-                self.config["num_calib_steps"]
-                if "awq" not in str(recipe.config.algorithm)
-                else max(1, self.config["num_calib_steps"] // 4)
-            )
+                if recipe in self.quantizer_states:
+                    saved = self.quantizer_states[recipe]
+                    # config is unused by restore_quantizer_state
+                    restore_quantizer_state(
+                        self.model, QuantizeConfig(), {"quantizer_state": saved["metadata"]}
+                    )
+                    set_quantizer_state_dict(self.model, saved["state_dict"])
+                    if self.config["verbose"]:
+                        print_rank_0(f"AutoQuantize: Restored calibration for {recipe}")
+                    continue
 
-            def forward_loop(model):
-                self._run_func(
-                    self.config["forward_step"],
-                    num_iters=num_calib_steps,
-                    desc=f"Calibrating for {recipe}",
+                # Lets reduce the number of calibration steps for AWQ since it takes longer
+                num_calib_steps = (
+                    self.config["num_calib_steps"]
+                    if "awq" not in str(recipe.config.algorithm)
+                    else max(1, self.config["num_calib_steps"] // 4)
                 )
 
-            calibrate(
-                self.model,
-                algorithm=recipe.config.algorithm,
-                forward_loop=forward_loop,
-            )
-            # Calibrate adds a new mode to the model. Since auto_quantize mixes the quantization recipes
-            # across layers, lets not save this new mode in the modelopt state.
-            # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
-            ModeloptStateManager(self.model).state_dict().pop()
-            metadata: dict = {}
-            # config is unused by update_quantize_metadata
-            update_quantize_metadata(self.model, QuantizeConfig(), metadata)
-            self.quantizer_states[recipe] = {
-                "metadata": metadata["quantizer_state"],
-                "state_dict": get_quantizer_state_dict(self.model),
-            }
-            calibrated_new = True
+                def forward_loop(model):
+                    self._run_func(
+                        self.config["forward_step"],
+                        num_iters=num_calib_steps,
+                        desc=f"Calibrating for {recipe}",
+                    )
+
+                calibrate(
+                    self.model,
+                    algorithm=recipe.config.algorithm,
+                    forward_loop=forward_loop,
+                )
+                # Calibrate adds a new mode to the model. Since auto_quantize mixes the quantization recipes
+                # across layers, lets not save this new mode in the modelopt state.
+                # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
+                ModeloptStateManager(self.model).state_dict().pop()
+                metadata: dict = {}
+                # config is unused by update_quantize_metadata
+                update_quantize_metadata(self.model, QuantizeConfig(), metadata)
+                self.quantizer_states[recipe] = {
+                    "metadata": metadata["quantizer_state"],
+                    "state_dict": get_quantizer_state_dict(self.model),
+                }
+                calibrated_new = True
+        finally:
+            for hparam in quant_recipe_hparams:
+                hparam.restore_active_quantizers()
 
         if calibrated_new:
             self.save_search_checkpoint(verbose=self.config["verbose"])
