@@ -15,6 +15,7 @@
 
 """Calibration utilities."""
 
+import fnmatch
 import math
 import time
 import warnings
@@ -1771,6 +1772,7 @@ def svdquant(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
     lowrank: int = 32,
+    skip_layers: list[str] | None = None,
     **kwargs,
 ):
     """Lite version of SVDQuant.
@@ -1783,6 +1785,9 @@ def svdquant(
     See :class:`SVDQuantConfig <modelopt.torch.quantization.config.SVDQuantConfig>` for
     details on the remaining arguments.
     """
+
+    def is_skipped(name):
+        return any(fnmatch.fnmatch(name, pattern) for pattern in skip_layers or [])
 
     def postprocess(module, name):
         print_rank_0(f"SVD {name}")
@@ -1797,11 +1802,37 @@ def svdquant(
         module.input_quantizer.reset_amax()
 
     create_and_replace_svdquant_linear_on_the_fly(model=model)
+
+    # Modules matching `skip_layers` opt out of the SVDQuant algorithm but stay
+    # quantized: temporarily disable their quantizers so awq_lite neither smooths
+    # their weights nor attaches a pre_quant_scale, then re-enable them so the
+    # final max calibration collects their amax like a plain max recipe.
+    skipped_quantizers = []
+    if skip_layers:
+        for name, module in model.named_modules():
+            if (
+                is_quantized_linear(module)
+                and module.weight_quantizer.is_enabled
+                and is_skipped(name)
+            ):
+                print_rank_0(f"SVDQuant skips {name}; quantizing with max calibration.")
+                for quantizer in (module.weight_quantizer, module.input_quantizer):
+                    if quantizer.is_enabled:
+                        quantizer.disable()
+                        skipped_quantizers.append(quantizer)
+
     awq(model, forward_loop, "awq_lite", **kwargs)
+
+    for quantizer in skipped_quantizers:
+        quantizer.enable()
 
     name_to_module = dict(model.named_modules())
     for name, module in name_to_module.items():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+        if (
+            is_quantized_linear(module)
+            and module.weight_quantizer.is_enabled
+            and not is_skipped(name)
+        ):
             with enable_weight_access_and_writeback(module, model, name_to_module):
                 postprocess(module, name)
     max_calibrate(model, forward_loop)

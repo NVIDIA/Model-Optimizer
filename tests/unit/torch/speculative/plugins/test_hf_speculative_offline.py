@@ -209,6 +209,7 @@ def test_offline_dataset_len_and_getitem(tmp_path):
         "attention_mask",
         "loss_mask",
         "labels",
+        "base_hidden_prenorm",
     }
     assert item["input_ids"].shape == (SEQ_LEN,)
     assert item["attention_mask"].shape == (SEQ_LEN,)

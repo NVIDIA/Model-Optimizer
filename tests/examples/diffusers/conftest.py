@@ -35,9 +35,11 @@ def tiny_wan22_path(tmp_path_factory):
 def tiny_qwen_image_path(tmp_path_factory):
     """Create a tiny Qwen-Image pipeline and return its path (built once per session).
 
-    SKETCH fixture for the recipe-level DMD2 e2e (``test_fastgen_recipe_e2e.py``).
-    See ``create_tiny_qwen_image_pipeline_dir`` for caveats — notably the tiny
-    Qwen2.5-VL text encoder, which needs in-container validation.
+    Used by the diffusers Qwen export tests and the recipe-level DMD2 e2e
+    (``test_fastgen_recipe_e2e.py``). The pipeline is built fully offline by
+    ``create_tiny_qwen_image_pipeline_dir`` (inline tiny Qwen2.5-VL text encoder +
+    local byte-level tokenizer); it skips only when the diffusers Qwen classes are
+    unavailable.
     """
     try:
         from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir

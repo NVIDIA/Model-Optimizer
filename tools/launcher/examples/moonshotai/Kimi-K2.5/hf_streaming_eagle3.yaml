@@ -3,8 +3,9 @@
 # Requires GB200: native NVFP4 + 192 GB/GPU fits the ~551 GB model at TP=4 on one node.
 # node 0 = vllm serve (TP=4), node 1 = EAGLE3 trainer (fake base); 4 GPUs each.
 #
-# Capture ids: deepseek_v3 arch, 61 layers, indexed by layer input (0..60);
-# [2,30,58] aux + [60] base (final layer not capturable).
+# Capture ids: deepseek_v3 arch, 61 layers; [2,30,58] aux + [61] true final layer.
+# (61 = true final hidden; requires a vLLM with the aux-capture fix vllm#46788.
+#  Without it use 60 — the 2nd-to-last layer — which caps acceptance length.)
 #
 # Run ON the cluster login node (paramiko can't reach the cluster through its login proxy):
 #   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
@@ -58,7 +59,7 @@ pipeline:
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       # No spaces: nemo_run emits `export FOO=value` unquoted.
-      - EAGLE_CAPTURE_IDS: "[2,30,58,60]"
+      - EAGLE_CAPTURE_IDS: "[2,30,58,61]"
       - SERVE_TP: "4"
       # Per-rank in-flight fetches; keep low so the cold NVFP4-MoE serve isn't flooded past its execute-model timeout (kills EngineCore).
       - STREAMING_NUM_WORKERS: "1"
