@@ -170,7 +170,8 @@ if __name__ == '__main__':
             mpirun,
             "--allow-run-as-root",
             "--oversubscribe",
-            "-n", "1",
+            "-n",
+            "1",
             sys.executable,
         ]
     else:
