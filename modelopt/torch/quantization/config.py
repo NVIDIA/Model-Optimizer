@@ -155,7 +155,14 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -1013,6 +1020,9 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
+ScaleCalibConfig = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
+
+
 class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
     """The config for ``smoothquant`` algorithm (SmoothQuant).
 
@@ -1264,7 +1274,7 @@ class LSQConfig(QuantizeAlgorithmConfig):
         ),
     )
 
-    scale_algorithm: dict | None = ModeloptField(
+    scale_algorithm: ScaleCalibConfig | None = ModeloptField(
         default=None,
         title="Scale calibration algorithm to run first.",
         description=(
@@ -1273,6 +1283,13 @@ class LSQConfig(QuantizeAlgorithmConfig):
             "Defaults to {'method': 'mse'} if None."
         ),
     )
+
+    @field_serializer("scale_algorithm")
+    def _serialize_scale_algorithm(self, value: ScaleCalibConfig | None):
+        """Preserve the sparse public dict shape accepted by this field."""
+        if value is None:
+            return None
+        return {"method": value.method, **value.model_dump(exclude={"method"}, exclude_unset=True)}
 
     @model_validator(mode="after")
     def _validate_tied_amax(self):

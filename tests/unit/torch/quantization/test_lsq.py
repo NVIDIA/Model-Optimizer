@@ -16,14 +16,20 @@
 """CPU unit tests for the LSQ algorithm using INT4 quantization."""
 
 import types
-from unittest.mock import Mock
+from unittest.mock import Mock, create_autospec
 
 import pytest
 import torch
 from torch import nn
 
+import modelopt.torch.quantization.model_calib as model_calib_module
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
-from modelopt.torch.quantization.config import LSQConfig
+from modelopt.torch.quantization.config import (
+    LocalHessianCalibConfig,
+    LSQConfig,
+    MaxCalibConfig,
+    MseCalibConfig,
+)
 from modelopt.torch.quantization.model_calib import lsq
 from modelopt.torch.quantization.nn import QuantLinear
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
@@ -93,6 +99,37 @@ class TestLSQConfig:
         assert cfg.tied_amax is False
         assert cfg.quantize_pre_scale is True
         assert cfg.scale_algorithm is None
+
+    @pytest.mark.parametrize(
+        ("method", "config_type"),
+        [
+            ("max", MaxCalibConfig),
+            ("mse", MseCalibConfig),
+            ("local_hessian", LocalHessianCalibConfig),
+        ],
+    )
+    def test_scale_algorithm(self, method, config_type):
+        cfg = LSQConfig(scale_algorithm={"method": method})
+        assert isinstance(cfg.scale_algorithm, config_type)
+
+    def test_unsupported_scale_algorithm(self):
+        with pytest.raises(ValueError):
+            LSQConfig(scale_algorithm={"method": "smoothquant"})
+
+    def test_scale_algorithm_preserves_sparse_dict(self, monkeypatch):
+        cfg = LSQConfig(scale_algorithm={"method": "mse", "fp8_scale_sweep": True})
+        assert cfg.model_dump()["scale_algorithm"] == {
+            "method": "mse",
+            "fp8_scale_sweep": True,
+        }
+
+        calibrate = create_autospec(model_calib_module.mse_calibrate)
+        monkeypatch.setattr(model_calib_module, "mse_calibrate", calibrate)
+        model = Mock()
+        model_calib_module._run_scale_calibration(
+            model, None, cfg.scale_algorithm, caller_name="lsq"
+        )
+        calibrate.assert_called_once_with(model, forward_loop=None, fp8_scale_sweep=True)
 
     @pytest.mark.parametrize(
         ("learnable_amax", "tied_amax"),

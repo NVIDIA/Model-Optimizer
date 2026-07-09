@@ -30,6 +30,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
@@ -2096,6 +2097,8 @@ def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
     supported = ("mse", "local_hessian", "max")
     assert method in supported, f"{caller_name}: method must be one of {supported}, got '{method}'"
 
+    if isinstance(scale_algorithm, ModeloptBaseConfig):
+        scale_algorithm = scale_algorithm.model_dump(exclude_unset=True)
     algo_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
     calib_funcs = {
         "mse": mse_calibrate,
