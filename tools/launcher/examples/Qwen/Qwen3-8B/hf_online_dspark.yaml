@@ -1,0 +1,84 @@
+# DSpark online speculative decoding training for Qwen3-8B.
+#
+# DSpark = the DFlash backbone + a lightweight sequential (Markov) head + a
+# confidence head. The Markov head adds a prefix-dependent transition bias to the
+# backbone base logits, inducing a causal block distribution (semi-autoregressive
+# generation); the confidence head predicts per-position acceptance. Trained with
+# a 3-term loss: ce_alpha*CE + l1_alpha*TVD + conf_alpha*confidence_BCE (weights in
+# dspark.yaml). It reuses the DFlash online mode/pipeline (same training script);
+# only the recipe changes (dflash.yaml -> dspark.yaml, which sets
+# projector_type=dspark, the confidence head and the loss weights).
+#
+# 2-step pipeline:
+#   task_0: Online DSpark training (8 GPU) -> exports a drafter under output_dir
+#   task_1: vLLM smoke test with DSpark speculative decoding (measures the real
+#           semi-AR acceptance length)
+#
+# NOTE ON AR EVAL: unlike the DFlash example there is no HF AR-eval step here.
+# dspark.yaml keeps estimate_ar=false because the training-time eval runs the
+# DFlash backbone only (the Markov head is not applied), so an AR number would
+# reflect the backbone alone, not the trained DSpark model. Measure acceptance
+# via the vLLM smoke test (below) or the offline specdec_bench harness instead.
+#
+# The draft dims, block_size, mask token and loss weights all come from
+# dspark.yaml (Qwen3-tuned defaults); only the commonly-tuned data/schedule fields
+# are overridden below. dflash_block_size=16 is the semi-AR generation block
+# (training_seq_len must be divisible by it).
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dspark.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dspark.yaml --yes
+
+job_name: Qwen3-8B_DSpark_online
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  # Step 1: Online DSpark training (reuses the DFlash online training script;
+  # only the --config recipe differs).
+  task_0:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-100K-openai.jsonl
+      - data.chat_template=examples/Qwen/Qwen3-8B/chat_template_train.jinja
+      - training.output_dir=/scratchspace/dspark_bs16
+      - training.per_device_train_batch_size=1
+      - training.num_train_epochs=1
+      - training.training_seq_len=4096
+      - training.save_steps=5000
+      - training.logging_steps=100
+      - training.disable_tqdm=true
+      - training.answer_only_loss=true
+      # Semi-AR generation block (recipe default 16; must divide training_seq_len).
+      - dflash.dflash_block_size=16
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=7
+      # Qwen3 has no native mask token; 151669 is an unused id (recipe default).
+      - dflash.dflash_mask_token_id=151669
+      - dflash.dflash_architecture_config.num_hidden_layers=5
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+
+  # Step 2: vLLM smoke test (uses the exported drafter from training).
+  # Requires a vLLM image with DSpark support (method="dspark"). num_speculative_tokens
+  # is the number of draft tokens verified per step and can be tuned up to
+  # dflash_block_size (16); 7 mirrors the DFlash example as a conservative start.
+  task_1:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_CKPT_DIR: /scratchspace/dspark_bs16
+      - SPEC_METHOD: "dspark"
+      - NUM_SPEC_TOKENS: "7"
+      - MIN_ACCEPTANCE_LENGTH: "1.4"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: "vllm/vllm-openai:nightly"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
