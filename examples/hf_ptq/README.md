@@ -382,12 +382,16 @@ The recipe quantizes the less accuracy-sensitive layers with the more aggressive
 keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
 `constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `score_size`,
-`disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
-accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via
-`$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+`module_search_spaces` (optional per-module candidate overrides), `disabled_layers` (excluded from
+the search), and `cost_excluded_layers` (kept out of the bit-budget accounting — e.g. VL vision
+towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
+`modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
-bf16 (no quantization) is always an implicit per-layer choice, so `candidate_formats` need only list
-the quantized options — a single format (e.g. `[fp8]`) gives a `{fp8, bf16}` per-layer search.
+bf16 (no quantization) is an implicit per-layer choice for the top-level `candidate_formats`, so a
+single format (e.g. `[fp8]`) gives a `{fp8, bf16}` per-layer search. A `module_search_spaces` rule can
+set `allow_no_quant: false` to exclude bf16 from the solver choices for matching modules. A rule with
+one candidate format then fixes those modules to that format while retaining their uncompressed
+weight in the effective-bit denominator and their selected-format cost in the numerator.
 
 For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
 `general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
