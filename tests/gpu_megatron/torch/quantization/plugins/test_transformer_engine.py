@@ -43,7 +43,38 @@ class TELinear(nn.Module):
         return torch.randn(2, 16)
 
 
-@pytest.mark.parametrize("model_cls", [TELinear])
+class TEGroupedLinear(nn.Module):
+    """Exercises `_QuantTEGroupedLinear`, used by MoE expert grouped GEMMs."""
+
+    num_gemms = 3
+
+    def __init__(self):
+        super().__init__()
+        self.net = te.pytorch.GroupedLinear(self.num_gemms, 16, 32)
+
+    def forward(self, x):
+        m_splits = [x.shape[0] // self.num_gemms] * self.num_gemms
+        return self.net(x, m_splits)
+
+    def get_input(self):
+        return torch.randn(self.num_gemms * 2, 16)
+
+
+# AWQ-lite and SmoothQuant calibration (model_calib.py's `AWQLiteHelper` and its
+# SmoothQuant counterpart) read `module.weight` directly. `_QuantTEGroupedLinear`
+# deletes `self.weight` and stores per-expert weights as `weight0..weightN` (see
+# `iter_weights_for_calibration`), so these algorithms don't support GroupedLinear yet.
+# That's a separate, pre-existing gap from the TE-signature-compat fix this test
+# module otherwise covers - skip rather than silently expanding scope here.
+_AWQ_SMOOTHQUANT_CFGS = [
+    mtq.W4A8_AWQ_BETA_CFG,
+    mtq.INT8_SMOOTHQUANT_CFG,
+    mtq.INT4_AWQ_CFG,
+    mtq.NVFP4_AWQ_LITE_CFG,
+]
+
+
+@pytest.mark.parametrize("model_cls", [TELinear, TEGroupedLinear])
 @pytest.mark.parametrize(
     "config",
     [
@@ -61,6 +92,9 @@ class TELinear(nn.Module):
 )
 def test_quantize(model_cls, config):
     """Test quantize function can run without problems."""
+    if model_cls is TEGroupedLinear and config in _AWQ_SMOOTHQUANT_CFGS:
+        pytest.skip("AWQ-lite/SmoothQuant calibration doesn't support GroupedLinear yet")
+
     if (
         config
         in [

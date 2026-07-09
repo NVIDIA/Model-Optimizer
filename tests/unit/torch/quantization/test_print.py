@@ -33,6 +33,13 @@ class TestPrint:
         test_quantizer = TensorQuantizer()
         print(test_quantizer)
 
+    def test_constant_amax_tensor_quantizer_repr(self):
+        test_quantizer = TensorQuantizer(
+            QuantizerAttributeConfig(num_bits=(4, 3), use_constant_amax=True)
+        )
+
+        assert "amax=4.48e+02(const)" in repr(test_quantizer)
+
     def test_disabled_tensor_quantizer_repr_shows_enabled_state(self):
         test_quantizer = TensorQuantizer(
             QuantizerAttributeConfig(
