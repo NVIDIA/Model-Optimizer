@@ -727,14 +727,7 @@ class PrecisionConverter:
                 if init.data_type not in ONNX_TYPES or init.data_type == target_type.onnx_type:
                     continue
 
-                from_type = (
-                    self.high_precision_type
-                    if init.data_type == self.high_precision_type.onnx_type
-                    else self.low_precision_type
-                    if init.data_type == self.low_precision_type.onnx_type
-                    else None
-                )
-
+                from_type = self._precision_type_from_onnx_type(init.data_type)
                 if from_type is None:
                     logger.debug(
                         f"Skipping subgraph initializer {init.name} with unsupported type {init.data_type}"

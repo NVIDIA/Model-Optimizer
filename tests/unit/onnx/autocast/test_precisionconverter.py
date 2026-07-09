@@ -1696,6 +1696,45 @@ def test_if_subgraph_initializer_conversion(
         )
 
 
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_bf16_if_subgraph_conversion_accepts_fp16_initializers(
+    model_with_if_subgraph, use_standalone_type_inference
+):
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_subgraph
+    for node in model.graph.node:
+        if node.op_type != "If":
+            continue
+        for attr in node.attribute:
+            if attr.name not in ("then_branch", "else_branch"):
+                continue
+            for init in attr.g.initializer:
+                init.CopyFrom(
+                    numpy_helper.from_array(
+                        numpy_helper.to_array(init).astype(np.float16), init.name
+                    )
+                )
+
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(
+        model, use_standalone_type_inference
+    )
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=False,
+        low_precision_type="bf16",
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+
+    converted_model = converter.convert(high_precision_nodes=[], low_precision_nodes=["if_node"])
+
+    if_node = next(n for n in converted_model.graph.node if n.op_type == "If")
+    for attr in if_node.attribute:
+        if attr.name in ("then_branch", "else_branch"):
+            assert all(init.data_type == TensorProto.BFLOAT16 for init in attr.g.initializer)
+
+
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
 @pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_if_subgraph_mixed_precision_boundary(
