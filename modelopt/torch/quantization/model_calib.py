@@ -63,7 +63,6 @@ from .utils import (
     is_quantized_row_parallel_linear,
     persistent_materialization,
     promote_nvfp4_static_quantizers,
-    reduce_amax,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -140,16 +139,48 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
         )
 
 
+def _promote_integer_static_weight_quantizers(model: nn.Module) -> None:
+    """Promote calibrated integer static-block weight quantizers for LSQ."""
+    candidate_ids = {
+        id(module)
+        for module in model.modules()
+        if isinstance(module, TensorQuantizer)
+        and module.is_enabled
+        and module.is_static_block_quant
+        and isinstance(module._num_bits, int)
+        and getattr(module, "_amax", None) is not None
+    }
+    if not candidate_ids:
+        return
+
+    name_to_module = dict(model.named_modules())
+    seen_modules: set[int] = set()
+    for module in name_to_module.values():
+        if id(module) in seen_modules or not isinstance(module, QuantModule):
+            continue
+        seen_modules.add(id(module))
+        with enable_weight_access_and_writeback(module, model, name_to_module):
+            for _, quantizer in module.iter_weights_for_calibration():
+                if id(quantizer) not in candidate_ids:
+                    continue
+                StaticBlockScaleQuantizer.from_tensor_quantizer(quantizer)
+                candidate_ids.remove(id(quantizer))
+        if not candidate_ids:
+            return
+
+
 def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) -> None:
-    """Finalize quantization from the attached shared state: aggregate, promote, verify.
+    """Finalize calibrated static quantizers and attached shared state.
 
     Aggregates each fusible group's shared weight ``global_amax`` and promotes it onto the
     member NVFP4-static quantizers, so siblings read the unified value instead of their own
-    ``_amax``; under the default patterns, verifies the name groups were actually synced.
+    ``_amax``. Promotes integer static-block weight quantizers after their ``_amax`` is final.
+    Under the default patterns, verifies the name groups were actually synced.
     Call once ``_amax`` is final: single-process, or after the distributed amax sync.
     """
     SharedWeightGlobalAmaxState.populate(model)
     promote_nvfp4_static_quantizers(model)
+    _promote_integer_static_weight_quantizers(model)
     # Under the default patterns, verify the fusible name groups were actually synced.
     if weight_patterns == list(SHARED_PATTERNS):
         _check_grouped_weight_global_amax_synced(model)
@@ -2066,30 +2097,8 @@ def _is_quantized_block_scale(quantizer: StaticBlockScaleQuantizer) -> bool:
     return scale_bits == (4, 3)
 
 
-def _convert_to_static_block_quantizers(model: nn.Module):
-    """Convert eligible TensorQuantizers to StaticBlockScaleQuantizer."""
-    for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer) and not module._disabled:
-            if not hasattr(module, "_amax") or module._amax is None:
-                continue
-            is_static_block_scale = (
-                module.is_static_block_quant
-                and module._block_sizes is not None
-                and (
-                    (module._num_bits == (2, 1) and module._block_sizes.get("scale_bits") == (4, 3))
-                    or isinstance(module._num_bits, int)
-                )
-            )
-            if is_static_block_scale:
-                if _is_quantized_block_scale(module):
-                    global_amax = reduce_amax(module._amax.clone().detach(), axis=None)
-                else:
-                    global_amax = None
-                StaticBlockScaleQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
-
-
 def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
-    """Run calibration and convert to StaticBlockScaleQuantizer if needed."""
+    """Run scale calibration."""
     if scale_algorithm is None:
         scale_algorithm = {"method": "mse"}
 
@@ -2120,9 +2129,6 @@ def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
         )
         algo_kwargs = {k: v for k, v in algo_kwargs.items() if k in accepted}
     calib_func(model, forward_loop=forward_loop, **algo_kwargs)
-
-    if method == "max":
-        _convert_to_static_block_quantizers(model)
 
 
 def _compute_block_amax(quantizer):

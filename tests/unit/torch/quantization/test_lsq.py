@@ -29,8 +29,9 @@ from modelopt.torch.quantization.config import (
     LSQConfig,
     MaxCalibConfig,
     MseCalibConfig,
+    QuantizerAttributeConfig,
 )
-from modelopt.torch.quantization.model_calib import lsq
+from modelopt.torch.quantization.model_calib import lsq, max_calibrate
 from modelopt.torch.quantization.nn import QuantLinear
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _FP8_E4M3_MIN_POSITIVE,
@@ -323,6 +324,24 @@ class TestLSQWeightIteration:
         assert shared_quantizer._lsq
         assert shared_quantizer.enable_lsq.call_count == 1
         assert module.weight_quantizer is module.proj_weight_quantizer
+
+    @pytest.mark.parametrize("distributed_sync", [False, True])
+    def test_max_calibrate_promotes_static_int_quantizer(self, distributed_sync):
+        module = QuantLinear(16, 8, bias=False)
+        config = QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 16, "type": "static"})
+        module.weight_quantizer.set_from_attribute_config(config)
+        module.input_quantizer.set_from_attribute_config(config)
+
+        max_calibrate(
+            module,
+            forward_loop=lambda model: model(torch.randn(2, 16)),
+            distributed_sync=distributed_sync,
+        )
+
+        assert isinstance(module.weight_quantizer, StaticBlockScaleQuantizer)
+        assert module.weight_quantizer.export_amax() is not None
+        assert not isinstance(module.input_quantizer, StaticBlockScaleQuantizer)
+        assert module.input_quantizer.amax is not None
 
 
 class TestIntCastSTE:
