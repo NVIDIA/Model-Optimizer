@@ -1160,9 +1160,9 @@ def _smoothquant_postprocess(module: nn.Module, alpha: float):
 def _smooth_fixed_alpha(model: nn.Module, forward_loop: ForwardLoop, alpha: float):
     """Single-pass SmoothQuant-style smoothing at a fixed migration strength.
 
-    Unlike :func:`smoothquant`, this applies to any quantizer format. Used by SVDQuant's
-    fixed-``alpha`` mode, where the SVD low-rank branch absorbs the weight outliers created
-    by the migration, so no per-layer alpha search is needed.
+    Unlike :func:`smoothquant`, this applies to any quantizer format. It is SVDQuant's
+    calibration: the SVD low-rank branch absorbs the weight outliers created by the
+    migration, so no per-layer alpha search is needed.
     """
     for name, module in model.named_modules():
         if (
@@ -1823,10 +1823,15 @@ def svdquant(
     forward_loop: ForwardLoop | None = None,
     lowrank: int = 32,
     skip_layers: list[str] | None = None,
-    alpha: float | None = None,
+    alpha: float = 1.0,
     **kwargs,
 ):
     """Lite version of SVDQuant.
+
+    Calibration is a fixed SmoothQuant-style outlier migration (strength ``alpha``,
+    default 1.0 = migrate fully to the weights) followed by the SVD low-rank
+    decomposition that absorbs the migrated outliers, then max calibration of the
+    residual — two forward-loop passes total.
 
     Args:
         model: Model to be calibrated.
@@ -1855,9 +1860,10 @@ def svdquant(
     create_and_replace_svdquant_linear_on_the_fly(model=model)
 
     # Modules matching `skip_layers` opt out of the SVDQuant algorithm but stay
-    # quantized: temporarily disable their quantizers so awq_lite neither smooths
-    # their weights nor attaches a pre_quant_scale, then re-enable them so the
-    # final max calibration collects their amax like a plain max recipe.
+    # quantized: temporarily disable their quantizers so the smoothing pass
+    # neither smooths their weights nor attaches a pre_quant_scale, then
+    # re-enable them so the final max calibration collects their amax like a
+    # plain max recipe.
     skipped_quantizers = []
     if skip_layers:
         for name, module in model.named_modules():
@@ -1872,15 +1878,10 @@ def svdquant(
                         quantizer.disable()
                         skipped_quantizers.append(quantizer)
 
-    if alpha is not None:
-        # Fixed migration strength: one SmoothQuant-style stats pass instead of
-        # AWQ-Lite's cache + candidate-search passes. The search's objective
-        # (plain weight-quant output MSE, activations unquantized) predates the
-        # SVD residual anyway; with a low-rank absorber, aggressive fixed
-        # migration (alpha ~ 1.0) follows the SVDQuant paper.
-        _smooth_fixed_alpha(model, forward_loop, alpha)
-    else:
-        awq(model, forward_loop, "awq_lite", **kwargs)
+    # Fixed migration strength: one SmoothQuant-style stats pass. With the SVD
+    # low-rank branch absorbing the migrated weight outliers, no per-layer
+    # search is needed (alpha ~ 1.0 follows the SVDQuant paper).
+    _smooth_fixed_alpha(model, forward_loop, alpha)
 
     for quantizer in skipped_quantizers:
         quantizer.enable()

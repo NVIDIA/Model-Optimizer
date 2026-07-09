@@ -224,7 +224,6 @@ class Quantizer:
             self.config.algo.value,
             alpha=self.config.alpha,
             lowrank=self.config.lowrank,
-            svdquant_alpha=self.config.svdquant_alpha,
             skip_layers=svdquant_skip_layers,
         )
         self.logger.info(f"Quant config {quant_config}")
@@ -557,19 +556,17 @@ def create_argument_parser() -> argparse.ArgumentParser:
         choices=[c.value for c in CollectMethod],
         help="Calibration collection method, works for INT8, not including smoothquant",
     )
-    quant_group.add_argument("--alpha", type=float, default=1.0, help="SmoothQuant alpha parameter")
-    quant_group.add_argument("--lowrank", type=int, default=32, help="SVDQuant lowrank parameter")
     quant_group.add_argument(
-        "--svdquant-alpha",
+        "--alpha",
         type=float,
-        default=None,
+        default=1.0,
         help=(
-            "Fixed SVDQuant migration strength in [0, 1]; skips the AWQ-Lite alpha search "
-            "(one SmoothQuant-style stats pass instead). 1.0 migrates outliers fully from "
-            "activations to weights, letting the SVD low-rank branch absorb them. "
-            "Default: None (AWQ-Lite search)."
+            "SmoothQuant/SVDQuant migration strength in [0, 1]. For SVDQuant, 1.0 (default) "
+            "migrates outliers fully from activations to weights, letting the SVD low-rank "
+            "branch absorb them."
         ),
     )
+    quant_group.add_argument("--lowrank", type=int, default=32, help="SVDQuant lowrank parameter")
     quant_group.add_argument(
         "--quantize-mha", action="store_true", help="Quantizing MHA into FP8 if its True"
     )
@@ -674,7 +671,6 @@ def main() -> None:
             collect_method=CollectMethod(args.collect_method),
             alpha=args.alpha,
             lowrank=args.lowrank,
-            svdquant_alpha=args.svdquant_alpha,
             quantize_mha=args.quantize_mha,
             compress=args.compress,
             block_size=args.block_size,

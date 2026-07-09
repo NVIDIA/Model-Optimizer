@@ -419,14 +419,14 @@ def test_svdquant_lora_weights():
             assert lora_residual.shape == module.weight.shape
 
 
-def test_svdquant_fixed_alpha_skips_search():
-    """SVDQuant with a fixed migration strength: one SmoothQuant-style stats pass
-    (no AWQ-Lite alpha-search pass), scales following the SmoothQuant formula."""
+def test_svdquant_smoothquant_calibration():
+    """SVDQuant calibrates with a single SmoothQuant-style stats pass (no AWQ-Lite
+    search pass), migrating fully to the weights by default (alpha=1.0)."""
     torch.manual_seed(0)
     model = _SimpleMLP(64, 64, 64, 64)
 
     quant_config = mtq.INT8_SMOOTHQUANT_CFG.copy()
-    quant_config["algorithm"] = {"method": "svdquant", "lowrank": 8, "alpha": 1.0}
+    quant_config["algorithm"] = {"method": "svdquant", "lowrank": 8}
 
     x = torch.randn(2, 64, 64)
     calls: list[int] = []
@@ -437,12 +437,12 @@ def test_svdquant_fixed_alpha_skips_search():
 
     mtq.quantize(model, quant_config, counting_loop)
 
-    # Fixed alpha needs one stats pass + the final max-calibrate pass; the
-    # AWQ-Lite candidate-search pass (a third forward loop) is skipped.
+    # One SmoothQuant-style stats pass + the final max-calibrate pass. There is
+    # no AWQ-Lite candidate-search pass (a third forward loop) in SVDQuant.
     assert len(calls) == 2
 
-    # alpha=1.0 migrates fully to the weights: pre_quant_scale = 1 / act_amax
-    # (SmoothQuant convention), so the smoothed activations are flat.
+    # The default alpha=1.0 migrates fully to the weights: pre_quant_scale =
+    # 1 / act_amax (SmoothQuant convention), so the smoothed activations are flat.
     first_linear = model.net[0]
     act_amax = x.abs().amax(dim=(0, 1)).float()
     expected = (1.0 / act_amax).clamp(min=1e-4, max=1e4)

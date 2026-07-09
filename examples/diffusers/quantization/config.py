@@ -41,11 +41,11 @@ def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **
     elif quant_algo == "svdquant":
         if "lowrank" in kwargs:
             algo_cfg["lowrank"] = kwargs["lowrank"]
-        # Fixed migration strength: skip the AWQ-Lite alpha search and smooth
-        # SmoothQuant-style at this alpha before the SVD.
-        if kwargs.get("svdquant_alpha") is not None:
-            algo_cfg["alpha"] = kwargs["svdquant_alpha"]
-        # Layers excluded from the SVDQuant algorithm (no AWQ smoothing, no
+        # SmoothQuant-style migration strength applied before the SVD
+        # (1.0 = migrate outliers fully to the weights).
+        if "alpha" in kwargs:
+            algo_cfg["alpha"] = kwargs["alpha"]
+        # Layers excluded from the SVDQuant algorithm (no smoothing, no
         # low-rank branch); they stay quantized with plain max calibration.
         if kwargs.get("skip_layers"):
             algo_cfg["skip_layers"] = kwargs["skip_layers"]
