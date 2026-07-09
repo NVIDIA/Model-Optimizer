@@ -41,7 +41,9 @@ jobs:
         include:
           - example: gpu
             timeout: 60
-            container_image: nvcr.io/nvidia/pytorch:26.06-py3
+            # Pinned to 26.05: benchmark.py uses trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH,
+            # which newer TensorRT (26.06) removed. Bump once the source is updated for TensorRT 10.
+            container_image: nvcr.io/nvidia/pytorch:26.05-py3
           - example: gpu_megatron
             timeout: 60
             container_image: nvcr.io/nvidia/nemo:26.06
