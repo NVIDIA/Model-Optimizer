@@ -28,17 +28,20 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.algorithms as quant_algorithms
 from modelopt.torch.opt.searcher import LPS
 from modelopt.torch.quantization._auto_quantize_cost import (
+    EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     get_auto_quantize_cost_model,
     infer_active_moe_expert_ratio,
     normalize_auto_quantize_constraints,
 )
 from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
+    AutoQuantizeKLDivSearcher,
     QuantRecipe,
     QuantRecipeHparam,
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
 from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributedProcessGroup
@@ -260,12 +263,27 @@ class _QwenStyleFusedExperts(torch.nn.Module):
         self.down_proj = torch.nn.Parameter(torch.randn(2, 32, 32))
         self.act_fn = torch.nn.SiLU()
 
+    def forward(self, hidden_states):
+        output = torch.zeros_like(hidden_states)
+        for expert_idx in range(self.num_experts):
+            gate_up = torch.nn.functional.linear(hidden_states, self.gate_up_proj[expert_idx])
+            gate, up = gate_up.chunk(2, dim=-1)
+            intermediate = up * self.act_fn(gate)
+            output += torch.nn.functional.linear(intermediate, self.down_proj[expert_idx])
+        return output
+
 
 class _QwenStyleFusedExpertsModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.mlp = torch.nn.Module()
         self.mlp.experts = _QuantFusedExperts.convert(_QwenStyleFusedExperts())
+
+    def forward(self, hidden_states):
+        return self.mlp.experts(hidden_states)
+
+    def get_input(self):
+        return torch.randn(1, 4, 32)
 
 
 @pytest.mark.parametrize(
@@ -345,11 +363,12 @@ def test_quant_recipe_hparam_zero_cost_weight():
     assert hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG)) == pytest.approx(0.0)
 
 
-def test_auto_quantize_cost_model_excludes_default_module_name_patterns():
+def test_auto_quantize_cost_model_excludes_explicit_module_name_patterns():
     visual = torch.nn.Linear(4, 16)
     mtp = torch.nn.Linear(4, 16)
     lm_head = torch.nn.Linear(4, 16)
     cost_model = get_auto_quantize_cost_model("weight")
+    cost_constraints = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*", "*vision_tower*", "*mtp*"]}
 
     total_weight_size = cost_model.total_weight_size(
         [
@@ -358,13 +377,32 @@ def test_auto_quantize_cost_model_excludes_default_module_name_patterns():
             ("lm_head", lm_head),
         ],
         is_auto_quantize_module=lambda module: True,
-        cost_constraints={},
+        cost_constraints=cost_constraints,
     )
 
     assert total_weight_size == pytest.approx(lm_head.weight.numel())
-    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], {}) == 0
-    assert cost_model.module_cost_weight(["model.mtp.layers.0.mlp"], {}) == 0
-    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv", "lm_head"], {}) == 1.0
+    assert cost_model.module_cost_weight(
+        ["model.visual.blocks.0.attn.qkv"], cost_constraints
+    ) == pytest.approx(0.0)
+    assert cost_model.module_cost_weight(
+        ["model.mtp.layers.0.mlp"], cost_constraints
+    ) == pytest.approx(0.0)
+    assert cost_model.module_cost_weight(
+        ["model.visual.blocks.0.attn.qkv", "lm_head"], cost_constraints
+    ) == pytest.approx(1.0)
+
+
+def test_auto_quantize_cost_model_counts_visual_modules_by_default():
+    visual = torch.nn.Linear(4, 16)
+    cost_model = get_auto_quantize_cost_model("weight")
+
+    total_weight_size = cost_model.total_weight_size(
+        [("visual.blocks.0.attn.qkv", visual)],
+        is_auto_quantize_module=lambda module: True,
+        cost_constraints={},
+    )
+
+    assert total_weight_size == pytest.approx(visual.weight.numel())
 
 
 def test_active_moe_cost_model_counts_fused_experts_without_weight():
@@ -380,7 +418,10 @@ def test_active_moe_cost_model_counts_fused_experts_without_weight():
             ("model.visual.blocks.0.attn.qkv", visual),
         ],
         is_auto_quantize_module=lambda module: True,
-        cost_constraints={"active_moe_expert_ratio": 0.25},
+        cost_constraints={
+            "active_moe_expert_ratio": 0.25,
+            EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
+        },
     )
 
     assert total_weight_size == pytest.approx(
@@ -527,6 +568,25 @@ def test_auto_quantize_hidden_recon_disables_and_restores_use_cache():
         num_calib_steps=2,
         num_score_steps=2,
         method="hidden_recon",
+    )
+
+    assert model.config.use_cache is True
+    assert False in model.use_cache_seen
+
+
+def test_auto_quantize_gradient_disables_and_restores_use_cache():
+    model = _CacheDefaultModel()
+
+    mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        method="gradient",
     )
 
     assert model.config.use_cache is True
@@ -708,6 +768,25 @@ def test_auto_quantize_per_element_score_model_restored_state_fallback():
     ) == pytest.approx([0.25, 1.0])
 
 
+def test_auto_quantize_persists_objective_constraints_for_replay():
+    model = SimpleLinear()
+
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0, "score_model": "per_element"},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    assert search_state["best"]["constraints"]["score_model"] == "per_element"
+    replay = mtq.get_auto_quantize_candidate_packets(search_state)
+    assert replay["constraints"]["score_model"] == "per_element"
+
+
 def test_auto_quantize_per_active_score_model():
     model = torch.nn.Linear(4, 16)
     constraints = normalize_auto_quantize_constraints(
@@ -782,6 +861,28 @@ def test_auto_quantize_response_risk_category_layer_penalty_not_global():
         },
         "model.layers.0.linear_attn/layer.quant_recipe",
     ) == pytest.approx([0.0, 2.0])
+
+
+def test_auto_quantize_response_risk_matches_root_level_layers():
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.constraints = {
+        "effective_bits": 4.8,
+        "response_risk": {
+            "entries": [{"category": "linear_attn", "layer": "0", "format": "FP8", "risk": "2.0"}]
+        },
+    }
+
+    scores = searcher._candidate_scores_for_search(
+        {
+            "formats": [QuantRecipe(None), QuantRecipe("FP8_DEFAULT_CFG")],
+            "scores": [0.0, 0.0],
+            "costs": [2.0, 1.0],
+            "module_names": ["layers.0.linear_attn.out_proj"],
+        },
+        "layers.0.linear_attn/layer.quant_recipe",
+    )
+
+    assert scores == pytest.approx([0.0, 2.0])
 
 
 @pytest.mark.parametrize(
@@ -1004,6 +1105,25 @@ def test_auto_quantize_candidate_rerank_validation():
         normalize_auto_quantize_constraints(
             model, {"effective_bits": 4.8, "candidate_rerank": {"top_k": 0}}
         )
+
+
+def test_auto_quantize_candidate_signature_keeps_exact_recipe_identity():
+    signatures = {
+        quant_algorithms._auto_quantize_candidate_signature(
+            {"layer.quant_recipe": {"format": QuantRecipe(recipe)}}
+        )
+        for recipe in (
+            "FP8_DEFAULT_CFG",
+            "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
+            "W4A8_MXFP4_FP8_CFG",
+        )
+    }
+
+    assert len(signatures) == 3
+    assert (
+        quant_algorithms._auto_quantize_recipe_name(QuantRecipe("W4A8_MXFP4_FP8_CFG"))
+        == "W4A8_MXFP4_FP8"
+    )
 
 
 def test_auto_quantize_candidate_packets_do_not_change_best_recipe():
@@ -1325,6 +1445,47 @@ def test_auto_quantize_explicit_cost_lower_bound():
         normalize_auto_quantize_constraints(model, {"effective_bits": 4.8, "cost_lower_bound": 1.1})
 
 
+def test_auto_quantize_kl_div_rejects_cost_lower_bound():
+    searcher = AutoQuantizeKLDivSearcher()
+    searcher.constraints = {"effective_bits": 16.0, "cost_lower_bound": 0.9}
+    searcher.candidate_stats = {}
+
+    with pytest.raises(ValueError, match="cost_lower_bound is not supported"):
+        searcher.run_search_with_stats(1.0)
+
+
+def test_auto_quantize_kl_div_rejects_candidate_rerank():
+    searcher = AutoQuantizeKLDivSearcher()
+    searcher.constraints = {
+        "effective_bits": 8.0,
+        "candidate_rerank": {"enabled": True, "top_k": 2},
+    }
+    searcher.candidate_stats = {}
+
+    with pytest.raises(ValueError, match="candidate_rerank is not supported"):
+        searcher.run_search_with_stats(1.0)
+
+
+@pytest.mark.parametrize(
+    ("unsupported_constraint", "message"),
+    [
+        ({"cost_lower_bound": 0.9}, "cost_lower_bound is not supported"),
+        (
+            {"candidate_rerank": {"enabled": True, "top_k": 2}},
+            "candidate_rerank is not supported",
+        ),
+    ],
+)
+def test_auto_quantize_kl_div_rejects_unsupported_controls_early(unsupported_constraint, message):
+    with pytest.raises(ValueError, match=message):
+        mtq.auto_quantize(
+            torch.nn.Linear(4, 4),
+            constraints={"effective_bits": 8.0, **unsupported_constraint},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            method="kl_div",
+        )
+
+
 # use this config to test custom quantization config
 INT8_CUSTOM_QUANT_TEST_CFG = {
     "quant_cfg": [
@@ -1508,6 +1669,42 @@ def test_auto_quantize_scores_fused_routed_experts_at_parent_mlp():
     assert set(hparam.quant_modules) == {model.mlp.experts}
     assert set(hparam.quant_module_names) == {"mlp.experts"}
     assert set(hparam.score_modules) == {model.mlp}
+
+
+def test_get_auto_quantize_config_replays_fused_expert_quantizers():
+    model = _QwenStyleFusedExpertsModel()
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.model = model
+    searcher.config = {"cost": {}}
+    searcher._cost_model = get_auto_quantize_cost_model("weight")
+    searcher.candidate_stats = {}
+    searcher._score_component_records_by_hparam = {}
+
+    fp8_recipe = QuantRecipe(mtq.FP8_DEFAULT_CFG)
+    searcher.insert_hparams_after_merge_rules(model, [fp8_recipe])
+    searcher.initialize_candidate_stats()
+
+    hparam_name, candidate_stat = next(iter(searcher.candidate_stats.items()))
+    assert candidate_stat["quantizer_attrs"]["mlp.experts"] == [
+        "gate_up_proj_input_quantizer",
+        "gate_up_proj_weight_quantizer",
+        "down_proj_input_quantizer",
+        "down_proj_weight_quantizer",
+    ]
+    search_state = {
+        "best": {"recipe": {hparam_name: fp8_recipe}},
+        "candidate_stats": searcher.candidate_stats,
+    }
+
+    config = mtq.get_auto_quantize_config(search_state)
+    fresh_model = _QwenStyleFusedExpertsModel()
+    set_quantizer_by_cfg(fresh_model, config["quant_cfg"])
+
+    experts = fresh_model.mlp.experts
+    assert experts.gate_up_proj_input_quantizer.is_enabled
+    assert experts.down_proj_input_quantizer.is_enabled
+    assert all(quantizer.is_enabled for quantizer in experts.gate_up_proj_weight_quantizers)
+    assert all(quantizer.is_enabled for quantizer in experts.down_proj_weight_quantizers)
 
 
 def test_auto_quantize_scores_attention_projection_groups_at_attention_output():
@@ -1977,6 +2174,48 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
                 )
 
 
+def test_auto_quantize_checkpoint_resume_clears_stale_objective_metadata(tmp_path):
+    checkpoint_path = str(tmp_path / "autoquant_stale_metadata_checkpoint.pth")
+    model_1 = SimpleLinear()
+    _, first_state = mtq.auto_quantize(
+        model_1,
+        constraints={
+            "effective_bits": 6.0,
+            "response_risk": {"entries": []},
+            "candidate_rerank": {"enabled": True, "top_k": 2},
+        },
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model_1.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        checkpoint=checkpoint_path,
+    )
+
+    assert "candidate_packets" in first_state["best"]
+    assert "response_risk_source" in first_state["best"]
+    assert "candidate_rerank_source" in first_state["best"]
+
+    model_2 = SimpleLinear()
+    _, resumed_state = mtq.auto_quantize(
+        model_2,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model_2.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        checkpoint=checkpoint_path,
+    )
+
+    assert "candidate_packets" not in resumed_state["best"]
+    assert "response_risk_source" not in resumed_state["best"]
+    assert "candidate_rerank_source" not in resumed_state["best"]
+    assert resumed_state["best"]["constraints"]["score_model"] == "raw"
+
+
 def test_auto_quantize_checkpoint_rejects_grouping_scheme_mismatch(tmp_path):
     """Test that restored candidate stats are not reused with a different grouping scheme."""
     checkpoint_path = str(tmp_path / "autoquant_grouping_checkpoint.pth")
@@ -2233,6 +2472,59 @@ def test_get_auto_quantize_candidate_packets_replays_search_state():
     assert replay["candidate_packets"][0]["rerank_rank"] == 0
     assert "family_format_counts" in replay["candidate_packets"][0]
     assert "hparam_family_format_counts" in replay["candidate_packets"][0]
+
+
+def test_get_auto_quantize_candidate_packets_replays_saved_score_model():
+    fp8 = QuantRecipe("FP8_DEFAULT_CFG")
+    bf16 = QuantRecipe(None)
+    first_hparam = "layers.0.linear_attn.quant_recipe"
+    second_hparam = "layers.1.linear_attn.quant_recipe"
+    search_state = {
+        "method": "gradient",
+        "candidate_stats": {
+            first_hparam: {
+                "formats": [fp8, bf16],
+                "scores": [2.0, 0.0],
+                "costs": [1.0, 2.0],
+                "element_costs": [100.0, 200.0],
+                "module_names": ["layers.0.linear_attn.out_proj"],
+            },
+            second_hparam: {
+                "formats": [fp8, bf16],
+                "scores": [1.0, 0.0],
+                "costs": [1.0, 2.0],
+                "element_costs": [1.0, 2.0],
+                "module_names": ["layers.1.linear_attn.out_proj"],
+            },
+        },
+        "cost_denominator": 4.0,
+        "cost_model": "weight",
+        "cost": {},
+        "best": {
+            "constraints": {
+                "effective_bits": 12.0,
+                "cost_lower_bound": 1.0,
+                "score_model": "per_element",
+            }
+        },
+    }
+
+    replay = mtq.get_auto_quantize_candidate_packets(search_state)
+
+    assert replay["constraints"]["score_model"] == "per_element"
+    assert replay["candidate_packets"][0]["recipe"][first_hparam] == fp8
+    assert replay["candidate_packets"][0]["recipe"][second_hparam] == bf16
+
+
+def test_get_auto_quantize_candidate_packets_rejects_kl_div_state():
+    with pytest.raises(ValueError, match="does not support method='kl_div'"):
+        mtq.get_auto_quantize_candidate_packets(
+            {
+                "method": "kl_div",
+                "candidate_stats": {},
+                "best": {"constraints": {"effective_bits": 8.0}},
+            }
+        )
 
 
 def test_get_auto_quantize_candidate_packets_applies_signature_rerank():

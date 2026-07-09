@@ -89,6 +89,10 @@ _FUSED_EXPERTS_QUANTIZER_ATTRS = (
     "down_proj_input_quantizer",
     "down_proj_weight_quantizers",
 )
+_FUSED_EXPERTS_CONFIG_QUANTIZER_ATTRS = tuple(
+    attr.removesuffix("s") if attr.endswith("_quantizers") else attr
+    for attr in _FUSED_EXPERTS_QUANTIZER_ATTRS
+)
 
 
 def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
@@ -100,6 +104,19 @@ def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
     """
     if _is_fused_experts_module(module):
         return _FUSED_EXPERTS_QUANTIZER_ATTRS
+    return _STD_QUANTIZER_ATTRS
+
+
+def _get_config_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
+    """Return config-facing quantizer names for a quantized module.
+
+    Fused expert weight quantizers live in ``ModuleList`` attributes with plural
+    names, but quantizer config matching normalizes each child to the singular
+    name. Persist those singular names so a searched recipe can be replayed on a
+    fresh model.
+    """
+    if _is_fused_experts_module(module):
+        return _FUSED_EXPERTS_CONFIG_QUANTIZER_ATTRS
     return _STD_QUANTIZER_ATTRS
 
 
@@ -431,7 +448,7 @@ _LINEAR_ATTN_SCORE_RE = re.compile(
     r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj)$"
 )
 _FUSED_ROUTED_EXPERTS_RE = re.compile(r"^((?:.*\.)?mlp)\.experts$")
-_LAYER_INDEX_RE = re.compile(r"\.layers\.(\d+)\.")
+_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 _AUTO_QUANTIZE_RESPONSE_RISK_CATEGORY_ALIASES = {
     "linear_attn": {"linear_attn_layer"},
     "self_attn": {"self_attn_layer"},
@@ -529,13 +546,30 @@ def _auto_quantize_recipe_name(recipe: Any) -> str:
     upper = text.upper()
     if "NONE" in upper:
         return "BF16"
-    if "FP8" in upper:
-        return "FP8"
     if "W4A16" in upper and "NVFP4" in upper:
         return "W4A16_NVFP4"
+    if "W4A8" in upper and "MXFP4" in upper and "FP8" in upper:
+        return "W4A8_MXFP4_FP8"
+    if "W4A8" in upper and "NVFP4" in upper and "FP8" in upper:
+        return "W4A8_NVFP4_FP8"
     if "NVFP4" in upper:
         return "NVFP4"
+    if "FP8" in upper:
+        return "FP8"
     return text.replace("\n", " ")
+
+
+def _auto_quantize_recipe_identity(recipe: Any) -> str:
+    """Return an exact, stable-enough identity for packet signatures."""
+    if isinstance(recipe, QuantRecipe):
+        return "\n".join(
+            (
+                str(recipe),
+                f"algorithm={recipe.config.algorithm!r}",
+                f"quant_cfg={recipe.config.quant_cfg!r}",
+            )
+        )
+    return str(recipe)
 
 
 def _auto_quantize_candidate_signature(recipe_info: dict[str, dict[str, Any]]) -> str:
@@ -544,7 +578,7 @@ def _auto_quantize_candidate_signature(recipe_info: dict[str, dict[str, Any]]) -
         digest.update(hparam_name.encode("utf-8"))
         digest.update(b"\t")
         digest.update(
-            _auto_quantize_recipe_name(recipe_info[hparam_name]["format"]).encode("utf-8")
+            _auto_quantize_recipe_identity(recipe_info[hparam_name]["format"]).encode("utf-8")
         )
         digest.update(b"\n")
     return digest.hexdigest()
@@ -1231,6 +1265,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             stats["costs"] = costs
             stats["element_costs"] = element_costs
             stats["module_names"] = hparam.quant_module_names
+            nonstandard_quantizer_attrs = {}
+            for module_name in hparam.quant_module_names:
+                quantizer_attrs = _get_config_quantizer_attrs(self.model.get_submodule(module_name))
+                if quantizer_attrs != _STD_QUANTIZER_ATTRS:
+                    nonstandard_quantizer_attrs[module_name] = list(quantizer_attrs)
+            if nonstandard_quantizer_attrs:
+                stats["quantizer_attrs"] = nonstandard_quantizer_attrs
+            else:
+                stats.pop("quantizer_attrs", None)
             stats["cost_weight"] = hparam.cost_weight
             for component_key in (name, str(hparam.name), f"{hparam.name}.quant_recipe"):
                 score_components = self._score_component_records_by_hparam.get(component_key)
@@ -1735,6 +1778,12 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         # Run the search with stats to get the best recipe and whether the constraints are satisfied
         best_recipe_info, is_satisfied = self.run_search_with_stats(max_weight_size, verbose)
+        for stale_key in (
+            "candidate_packets",
+            "response_risk_source",
+            "candidate_rerank_source",
+        ):
+            self.best.pop(stale_key, None)
         self.best["is_satisfied"] = is_satisfied
         if getattr(self, "last_candidate_packets", None):
             candidate_rerank = self.constraints.get("candidate_rerank") or {}
@@ -1770,7 +1819,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             effective_bits_from_search = (best_constraints / total_weight_size) * 16
 
         self.best["recipe"] = best_recipe
-        self.best["constraints"] = {"effective_bits": effective_bits_from_search}
+        self.best["constraints"] = {
+            **self.constraints,
+            "effective_bits": effective_bits_from_search,
+        }
         self.best["score"] = best_scores
         response_risk = self.constraints.get("response_risk")
         if isinstance(response_risk, dict):
@@ -2225,8 +2277,12 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                 is_param_grad_enabled = grad_enabled_candidate
                 break
 
-        with grad_checkpointing_ctxt(self.model) if grad_checkpointing_ctxt else nullcontext():
-            self._estimate_auto_quantize_scores(is_param_grad_enabled)
+        use_cache_originals = _set_model_use_cache(self.model, False)
+        try:
+            with grad_checkpointing_ctxt(self.model) if grad_checkpointing_ctxt else nullcontext():
+                self._estimate_auto_quantize_scores(is_param_grad_enabled)
+        finally:
+            _restore_model_use_cache(use_cache_originals)
 
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Linear Programming Solve for gradient based auto_quantize.
@@ -2650,6 +2706,18 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 
         We use binary search to minimize the max(per-layer score) while meeting the constraint.
         """
+        candidate_rerank = getattr(self, "constraints", {}).get("candidate_rerank") or {}
+        if candidate_rerank.get("enabled", False):
+            raise ValueError(
+                "candidate_rerank is not supported for method='kl_div'; "
+                "use gradient/hidden_recon or omit candidate_rerank."
+            )
+        if getattr(self, "constraints", {}).get("cost_lower_bound") is not None:
+            raise ValueError(
+                "cost_lower_bound is not supported for method='kl_div'; "
+                "use gradient/hidden_recon or omit cost_lower_bound."
+            )
+
         # Collect all sensitivity scores to determine initial threshold bounds
         all_scores = [
             score
@@ -2701,7 +2769,6 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
                 }
                 total_weight_size += costs[selected_idx]
 
-            # Check if we meet the constraint
             meets_constraint = total_weight_size <= max_weight_size
 
             if verbose:
@@ -2720,7 +2787,6 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
             # Update threshold for next iteration
             threshold = (lower_bound + upper_bound) / 2.0
 
-        # Final check if constraint is satisfied
         is_satisfied = total_weight_size <= max_weight_size
 
         if verbose:
@@ -2782,22 +2848,34 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         for pattern in _as_list(search_state.get("disabled_layers"))
     )
     per_module_entries: list[dict] = []
-    _per_module_attrs = ("input_quantizer", "weight_quantizer", "output_quantizer")
+    _per_module_attrs = (*_STD_QUANTIZER_ATTRS, *_FUSED_EXPERTS_CONFIG_QUANTIZER_ATTRS)
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}
 
     for hparam_name, recipe in best_recipe.items():
         if recipe == QuantRecipe(quant_cfg=None):
             continue
-        module_names = search_state["candidate_stats"][hparam_name]["module_names"]
+        candidate_stat = search_state["candidate_stats"][hparam_name]
+        module_names = candidate_stat["module_names"]
+        quantizer_attrs_by_module = candidate_stat.get("quantizer_attrs", {})
         for module_name in module_names:
-            for quantizer_attr in _per_module_attrs:
+            quantizer_attrs = quantizer_attrs_by_module.get(module_name)
+            if quantizer_attrs is None:
+                quantizer_attrs = (
+                    _FUSED_EXPERTS_CONFIG_QUANTIZER_ATTRS
+                    if module_name.endswith(".experts") or module_name == "experts"
+                    else _STD_QUANTIZER_ATTRS
+                )
+            for quantizer_attr in quantizer_attrs:
                 matched_cfg, matched_enable = _match_quantizer_cfg(
                     recipe.config.quant_cfg, quantizer_attr
                 )
                 if matched_enable is not None:
+                    quantizer_name = (
+                        f"{module_name}.{quantizer_attr}" if module_name else quantizer_attr
+                    )
                     entry: dict[str, Any] = {
-                        "quantizer_name": f"{module_name}.{quantizer_attr}",
+                        "quantizer_name": quantizer_name,
                         "enable": matched_enable,
                     }
                     if matched_cfg is not None:
@@ -2832,7 +2910,8 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
 
 
 def _get_search_replay_constraints(search_state, constraints):
-    constraints = dict(constraints or search_state.get("best", {}).get("constraints", {}))
+    saved_constraints = dict(search_state.get("best", {}).get("constraints", {}))
+    constraints = saved_constraints if constraints is None else {**saved_constraints, **constraints}
     if "effective_bits" not in constraints:
         raise ValueError(
             "constraints must contain 'effective_bits' when replaying an AutoQuantize search_state."
@@ -2905,6 +2984,11 @@ def get_auto_quantize_candidate_packets(
     """
     if top_k <= 0:
         raise ValueError(f"top_k must be positive, got {top_k}.")
+    if search_state.get("method") == "kl_div":
+        raise ValueError(
+            "get_auto_quantize_candidate_packets does not support method='kl_div' because "
+            "KL-divergence search does not enumerate LP candidate packets."
+        )
 
     constraints = _get_search_replay_constraints(search_state, constraints)
     candidate_rerank = dict(constraints.get("candidate_rerank") or {})

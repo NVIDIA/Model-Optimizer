@@ -321,8 +321,10 @@ def auto_quantize(
             of bits for the quantized model and defaults to 4.8. ``cost_model`` selects the metric
             used for the effective-bits constraint and currently supports ``"weight"`` (default)
             and ``"active_moe"``. Additional cost-model parameters are provided through the nested
-            ``cost`` dict. ``score_model`` controls how sensitivity scores are normalized before
-            solving. ``response_risk`` may provide an external, measured response-risk table with
+            ``cost`` dict, including explicit ``excluded_module_name_patterns`` when a caller omits
+            non-search components such as a VLM vision tower. ``score_model`` controls how
+            sensitivity scores are normalized before solving. ``response_risk`` may provide an
+            external, measured response-risk table with
             ``source_path`` or inline ``entries``; supported rows include ``hparam,format,risk``
             and ``category,layer,format,risk``. These penalties are added to the search objective
             and are intended for validation-derived triage signals, not hard recipe masks.
@@ -591,6 +593,18 @@ def auto_quantize(
     elif method in {"hidden_recon", "parent_recon"}:
         searcher = AutoQuantizeHiddenReconSearcher()
     elif method == "kl_div":
+        kl_constraints = constraints or {}
+        if kl_constraints.get("cost_lower_bound") is not None:
+            raise ValueError(
+                "cost_lower_bound is not supported for method='kl_div'; "
+                "use gradient/hidden_recon or omit cost_lower_bound."
+            )
+        candidate_rerank = kl_constraints.get("candidate_rerank") or {}
+        if candidate_rerank.get("enabled", False):
+            raise ValueError(
+                "candidate_rerank is not supported for method='kl_div'; "
+                "use gradient/hidden_recon or omit candidate_rerank."
+            )
         searcher = AutoQuantizeKLDivSearcher()
     else:
         raise ValueError(

@@ -69,6 +69,7 @@ from modelopt.torch.export import (
     save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
+from modelopt.torch.quantization._auto_quantize_cost import EXCLUDED_MODULE_NAME_PATTERNS_KEY
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -163,6 +164,11 @@ def get_auto_quantize_disabled_layers(model) -> list[str]:
     if is_multimodal_model(model):
         disabled_layers.extend(p for p in _VLM_AUTOQ_DISABLED_LAYERS if p not in disabled_layers)
     return disabled_layers
+
+
+def get_auto_quantize_cost_excluded_patterns(model) -> list[str]:
+    """Return non-language VLM patterns excluded from AutoQuantize cost accounting."""
+    return list(_VLM_AUTOQ_DISABLED_LAYERS) if is_multimodal_model(model) else []
 
 
 def extract_and_prepare_language_model_from_vl(full_model):
@@ -536,6 +542,9 @@ def auto_quantize(
     auto_quantize_cost = {}
     if args.auto_quantize_active_moe_expert_ratio is not None:
         auto_quantize_cost["active_moe_expert_ratio"] = args.auto_quantize_active_moe_expert_ratio
+    cost_excluded_patterns = get_auto_quantize_cost_excluded_patterns(language_model)
+    if cost_excluded_patterns:
+        auto_quantize_cost[EXCLUDED_MODULE_NAME_PATTERNS_KEY] = cost_excluded_patterns
     if auto_quantize_cost:
         auto_quantize_constraints["cost"] = auto_quantize_cost
     if args.auto_quantize_cost_lower_bound is not None:
