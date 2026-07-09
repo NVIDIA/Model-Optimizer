@@ -14,6 +14,8 @@
 # limitations under the License.
 """Tune distillation data-blend weights with DoGE and Megatron-Bridge.
 
+DoGE paper: https://arxiv.org/abs/2310.15393
+
 The planned outputs under ``--output_dir`` are DoGE distillation checkpoints,
 ``doge_weights.jsonl`` containing the weight trajectory, and
 ``learned_data_blend.txt`` containing the learned fixed blend.
@@ -25,7 +27,7 @@ import argparse
 from pathlib import Path
 
 
-class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter):
     pass
 
 
@@ -59,15 +61,6 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=_HelpFormatter,
-        epilog="""
-Each WEIGHT PATH pair in --data_paths is an independently tunable DoGE source.
-The initial weights are normalized. For example:
-
-  --data_paths 0.1 /data/train_wikitext_text_document \\
-      0.45 /data/train_math_text_document 0.45 /data/train_stem_text_document \\
-  --target_data_paths 0.5 /data/heldout_wikitext_text_document \\
-      0.25 /data/heldout_math_text_document 0.25 /data/heldout_stem_text_document
-""",
     )
 
     model = parser.add_argument_group("model")
@@ -81,7 +74,12 @@ The initial weights are normalized. For example:
         nargs="+",
         required=True,
         metavar="VALUE",
-        help="Tunable training sources and their initial weights as WEIGHT PATH pairs",
+        help=(
+            "Tunable training sources as WEIGHT PATH pairs.\n"
+            "Each pair is an independently tunable DoGE source; initial weights are normalized.\n"
+            "Example:\n"
+            "  --data_paths 0.1 /data/wikitext 0.45 /data/math 0.45 /data/stem"
+        ),
     )
     data.add_argument(
         "--target_data_paths",
@@ -89,7 +87,10 @@ The initial weights are normalized. For example:
         required=True,
         metavar="VALUE",
         help=(
-            "Fixed held-out target objective as WEIGHT PATH pairs; sources may differ from training"
+            "Fixed held-out target objective as WEIGHT PATH pairs.\n"
+            "Sources may differ from the training sources.\n"
+            "Example:\n"
+            "  --target_data_paths 0.6 /data/reasoning 0.4 /data/knowledge"
         ),
     )
     data.add_argument("--data_path_to_cache", help="Directory for Megatron dataset indices")
