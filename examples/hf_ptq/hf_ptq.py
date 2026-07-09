@@ -347,6 +347,8 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
         "method": aq_config.auto_quantize_method,
+        "quant_grouping_scheme": aq_config.quant_grouping_scheme,
+        "score_boundary": aq_config.score_boundary,
         "score_size": aq_config.score_size,
     }
 
@@ -383,9 +385,12 @@ def _auto_quantize_config_from_cli(args: argparse.Namespace):
             effective_bits=args.auto_quantize_bits,
             cost_model=args.auto_quantize_cost_model,
             cost=cost,
+            score_model=args.auto_quantize_score_model,
         ),
         candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES[q]) for q in args.qformat.split(",")],
         auto_quantize_method=args.auto_quantize_method,
+        quant_grouping_scheme=args.auto_quantize_grouping_scheme,
+        score_boundary=args.auto_quantize_score_boundary,
         score_size=args.auto_quantize_score_size,
         disabled_layers=disabled_layers,
         cost_excluded_layers=cost_excluded_layers,
@@ -439,7 +444,7 @@ def auto_quantize(
         def loss_func(output, data):
             return output.loss
 
-    if inputs["method"] == "gradient":
+    if inputs["method"] in {"gradient", "group_recon"}:
 
         def forward_step(model, batch):
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
@@ -457,7 +462,8 @@ def auto_quantize(
 
     else:
         raise ValueError(
-            f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
+            f"Invalid auto_quantize method: {inputs['method']}. "
+            "Must be 'gradient', 'group_recon', or 'kl_div'"
         )
 
     language_model, _ = mtq.auto_quantize(
@@ -465,13 +471,15 @@ def auto_quantize(
         constraints=inputs["constraints"],
         data_loader=calib_dataloader,
         forward_step=forward_step,
-        loss_func=loss_func,
+        loss_func=loss_func if inputs["method"] == "gradient" else None,
         quantization_formats=inputs["quantization_formats"],
         num_calib_steps=len(calib_dataloader),
         num_score_steps=min(len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)),
         verbose=True,
         disabled_layers=inputs["disabled_layers"],
         method=inputs["method"],
+        quant_grouping_scheme=inputs["quant_grouping_scheme"],
+        score_boundary=inputs["score_boundary"],
         checkpoint=args.auto_quantize_checkpoint,
     )
 
@@ -1476,7 +1484,7 @@ def parse_args() -> argparse.Namespace:
         "--auto_quantize_method",
         type=str,
         default="gradient",
-        choices=["gradient", "kl_div"],
+        choices=["gradient", "group_recon", "kl_div"],
         help="[Deprecated: use an AutoQuantize --recipe] Sensitivity scoring method.",
     )
     parser.add_argument(
@@ -1484,6 +1492,32 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=128,
         help="[Deprecated: use an AutoQuantize --recipe] Number of samples for sensitivity scoring.",
+    )
+    parser.add_argument(
+        "--auto_quantize_score_model",
+        type=str,
+        default="raw",
+        choices=["raw", "per_element"],
+        help="[Deprecated: use an AutoQuantize --recipe] Selector score model.",
+    )
+    parser.add_argument(
+        "--auto_quantize_score_boundary",
+        type=str,
+        default=None,
+        choices=["local", "group"],
+        help="[Deprecated: use an AutoQuantize --recipe] Sensitivity score boundary.",
+    )
+    parser.add_argument(
+        "--auto_quantize_grouping_scheme",
+        type=str,
+        default="runtime_fused",
+        choices=[
+            "runtime_fused",
+            "runtime_fused+linear_attn_layer",
+            "runtime_fused+self_attn_layer",
+            "runtime_fused+linear_attn_layer+self_attn_layer",
+        ],
+        help="[Deprecated: use an AutoQuantize --recipe] Quantization decision grouping.",
     )
     parser.add_argument(
         "--auto_quantize_cost_model",
