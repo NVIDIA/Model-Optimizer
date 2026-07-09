@@ -513,7 +513,6 @@ def test_minimax(command):
     ],
     ids=idfn,
 )
-@pytest.mark.timeout(3600)
 def test_llama_nemotron(command):
     command.run()
 
@@ -658,7 +657,6 @@ def test_eagle(command):
     ],
     ids=idfn,
 )
-@pytest.mark.timeout(14400)
 def test_nvidia_nemotron_3_ultra_550b_a55b_nvfp4(command):
     command.run()
 
@@ -729,7 +727,6 @@ def test_diffusiongemma_26b_a4b_it_nvfp4(command):
     ],
     ids=idfn,
 )
-@pytest.mark.timeout(7200)
 def test_nemotron(command):
     command.run()
 
@@ -745,6 +742,5 @@ def test_nemotron(command):
     ],
     ids=idfn,
 )
-@pytest.mark.timeout(14400)
 def test_nvidia_nemotron_3_ultra_550b_a55b_bf16(command):
     command.run()
