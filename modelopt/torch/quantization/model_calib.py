@@ -16,7 +16,6 @@
 """Calibration utilities."""
 
 import fnmatch
-import inspect
 import math
 import time
 import warnings
@@ -318,7 +317,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
-                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                if isinstance(child, TensorQuantizer | SequentialQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
@@ -337,7 +336,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child_name, child in module.named_children():
-                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                if isinstance(child, TensorQuantizer | SequentialQuantizer):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
@@ -2051,38 +2050,22 @@ def gptq(
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
 
 
-def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
+def _run_scale_calibration(model, forward_loop, scale_algorithm):
     """Run scale calibration."""
     if scale_algorithm is None:
         scale_algorithm = {"method": "mse"}
 
-    method = scale_algorithm.get("method")
-    supported = ("mse", "local_hessian", "max")
-    assert method in supported, f"{caller_name}: method must be one of {supported}, got '{method}'"
-
     if isinstance(scale_algorithm, ModeloptBaseConfig):
         scale_algorithm = scale_algorithm.model_dump(exclude_unset=True)
+
+    method = scale_algorithm.get("method")
     algo_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
     calib_funcs = {
         "mse": mse_calibrate,
         "local_hessian": local_hessian_calibrate,
         "max": max_calibrate,
     }
-    calib_func = calib_funcs[method]
-    accepted = {
-        name
-        for name, p in inspect.signature(calib_func).parameters.items()
-        if p.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-    }
-    ignored = sorted(k for k in algo_kwargs if k not in accepted)
-    if ignored:
-        warnings.warn(
-            f"{caller_name}: scale_algorithm kwargs {ignored} are not supported by "
-            f"'{method}' calibration and will be ignored.",
-            stacklevel=2,
-        )
-        algo_kwargs = {k: v for k, v in algo_kwargs.items() if k in accepted}
-    calib_func(model, forward_loop=forward_loop, **algo_kwargs)
+    calib_funcs[method](model, forward_loop=forward_loop, **algo_kwargs)
 
 
 @torch.no_grad()
@@ -2111,7 +2094,7 @@ def lsq(
         tied_amax: If True, pre and post share a single tensor.
         quantize_pre_scale: If False, skip FP8 quantization for the LSQ pre scale.
     """
-    _run_scale_calibration(model, forward_loop, scale_algorithm, "lsq")
+    _run_scale_calibration(model, forward_loop, scale_algorithm)
 
     name_to_module = dict(model.named_modules())
     seen_modules: set[int] = set()
