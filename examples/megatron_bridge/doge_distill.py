@@ -27,10 +27,6 @@ import argparse
 from pathlib import Path
 
 
-class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter):
-    pass
-
-
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -45,23 +41,9 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def _validate_data_paths(parser: argparse.ArgumentParser, values: list[str], argument: str) -> None:
-    if len(values) < 2 or len(values) % 2:
-        parser.error(f"{argument} requires one or more WEIGHT PATH pairs")
-    try:
-        weights = [float(value) for value in values[::2]]
-    except ValueError:
-        parser.error(f"{argument} weights must be numbers")
-    if any(weight <= 0 for weight in weights):
-        parser.error(f"{argument} weights must be positive")
-
-
 def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the DoGE distillation command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=_HelpFormatter,
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
 
     model = parser.add_argument_group("model")
     model.add_argument("--student_hf_path", required=True, help="Student Hugging Face model")
@@ -162,12 +144,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Learning rate for exponentiated blend-weight updates",
     )
-    args = parser.parse_args(argv)
-    _validate_data_paths(parser, args.data_paths, "--data_paths")
-    _validate_data_paths(parser, args.target_data_paths, "--target_data_paths")
-    if args.lr_warmup_iters < 0:
-        parser.error("--lr_warmup_iters must be non-negative")
-    return args
+    return parser.parse_args(argv)
 
 
 def main(args: argparse.Namespace) -> None:
