@@ -183,7 +183,7 @@ if __name__ == '__main__':
             tmp_path = f.name
         try:
             result = subprocess.run(
-                cmd + [tmp_path],
+                [*cmd, tmp_path],
                 cwd=tests_dir,
                 env=env,
                 stdout=subprocess.PIPE,
