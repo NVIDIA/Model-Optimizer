@@ -49,6 +49,7 @@ jobs:
       timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
 
   ##### TensorRT-LLM Example Tests (pr/non-pr split: non-pr runs extra eval examples) #####
   trtllm-pr:
@@ -65,6 +66,7 @@ jobs:
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-1
+      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
 
   trtllm-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
@@ -79,6 +81,7 @@ jobs:
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
+      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
 
   ##### Megatron Example Tests #####
   megatron:
@@ -92,6 +95,7 @@ jobs:
       timeout_minutes: 60
       pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), ',megatron_bridge,') }}
 
   ##### ONNX/TensorRT Example Tests #####
   onnx:
@@ -109,6 +113,7 @@ jobs:
       timeout_minutes: 45
       pip_install_extras: "[onnx,hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
 
   ##### Required Check for PR #####
   example-pr-required-check:
