@@ -51,7 +51,7 @@ docker run \
 > **Working with MoE Vision-Language Models (e.g. Qwen3.5-VL-MoE)?** The `nemo:26.06` container's Megatron-Bridge lacks the MoE expert weight mappings these models need (dense VLMs such as Gemma3-VL and Qwen3-VL work as-is). Until the `nemo:26.08` container is released, mount the latest [Megatron-Bridge `main`](https://github.com/NVIDIA-NeMo/Megatron-Bridge) source over the pre-installed copy by adding this to the `docker run` command above:
 >
 > ```bash
-> -v /path/to/Megatron-Bridge/src/megatron/bridge:/opt/Megatron-Bridge/src/megatron/bridge
+> -v ${MEGATRON_BRIDGE_DIR}:/opt/Megatron-Bridge
 > ```
 
 You also need to login with your HuggingFace token to download gated datasets / models.

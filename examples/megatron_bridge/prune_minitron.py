@@ -72,6 +72,11 @@ from modelopt.torch.utils.plugins.megatron_calibration import (
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
 from modelopt.torch.utils.vlm_dataset_utils import get_supported_vlm_datasets
 
+# isort: off
+# Register Megatron-Bridge model-specific NAS/pruning plugins here to avoid a circular import
+import modelopt.torch.nas.plugins.mbridge  # noqa: F401
+# isort: on
+
 # Default calibration datasets when --calib_dataset_name is not set
 DEFAULT_TEXT_CALIB_DATASET = "nemotron-post-training-dataset-v2"
 DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"

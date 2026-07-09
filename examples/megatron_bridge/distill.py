@@ -210,11 +210,6 @@ def main(args: argparse.Namespace):
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
-    is_vlm = hasattr(
-        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
-        "vision_config",
-    )
-
     # Build student and teacher model providers
     def _build_model_provider(hf_path, load_weights=True):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
@@ -222,8 +217,7 @@ def main(args: argparse.Namespace):
 
         # Override parallelism / training settings
         provider.tensor_model_parallel_size = args.tp_size
-        # TODO: re-enable VLM SP from the nemo:26.08 container (fixed upstream by Megatron-LM#5628)
-        provider.sequence_parallel = args.tp_size > 1 and not is_vlm
+        provider.sequence_parallel = args.tp_size > 1
         provider.pipeline_model_parallel_size = args.pp_size
         provider.pipeline_dtype = torch.bfloat16
         provider.context_parallel_size = args.cp_size
@@ -255,6 +249,11 @@ def main(args: argparse.Namespace):
 
     kd_config = ModelOptDistillConfig(
         skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
+    )
+
+    is_vlm = hasattr(
+        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
+        "vision_config",
     )
 
     if is_vlm:

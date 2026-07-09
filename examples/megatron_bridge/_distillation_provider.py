@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Minimal extension of Megatron-Bridge's ``DistillationProvider``.
+"""Minimal extension of Megatron-Bridge's ``DistillationProvider`` for nemo:26.06 and older containers.
 
 Adds two things over the stock provider: (1) the KD conversion runs in a post-weight-load pre-wrap hook
 instead of in ``provide()``, and (2) a ``distill_submodule`` option to distill only a submodule (e.g. a
@@ -23,6 +23,8 @@ subclass, without mutating the stock class) so the example works on the current 
 TODO: Remove this module and import ``convert_to_distillation_provider`` directly from
 ``megatron.bridge.models.distillation_provider`` once we require the nemo:26.08 container (Megatron-Bridge#4707).
 """
+
+import inspect
 
 from megatron.bridge.models.distillation_provider import (
     convert_to_distillation_provider as _base_convert_to_distillation_provider,
@@ -65,7 +67,7 @@ def _convert_hook(self, model_chunks):
     return [kd_model]
 
 
-def convert_to_distillation_provider(
+def _shim_convert_to_distillation_provider(
     student_provider, teacher_provider, kd_config=None, *, distill_submodule=None
 ):
     """Like ``megatron.bridge``'s ``convert_to_distillation_provider`` but defers the KD conversion to a
@@ -95,3 +97,12 @@ def convert_to_distillation_provider(
     hooks = [*getattr(provider, "_pre_wrap_hooks", []), provider._convert_hook]
     object.__setattr__(provider, "_pre_wrap_hooks", hooks)
     return provider
+
+
+# Prefer Megatron-Bridge's native implementation when it supports submodule distillation; otherwise
+# fall back to the local back-port for older containers.
+convert_to_distillation_provider = (
+    _base_convert_to_distillation_provider
+    if "distill_submodule" in inspect.signature(_base_convert_to_distillation_provider).parameters
+    else _shim_convert_to_distillation_provider
+)

@@ -23,5 +23,7 @@ with import_plugin("megatron"):
     from .megatron import *
     from .megatron_model_stats import *
 
-with import_plugin("megatron.bridge"):
-    from .mbridge import *
+# NOTE: Megatron-Bridge plugin is intentionally NOT auto-imported here to avoid a circular import.
+# It is imported from the pruning entrypoint (examples/megatron_bridge/prune_minitron.py)
+# with import_plugin("megatron.bridge"):
+#     from .mbridge import *
