@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Value-operand NVFP4 helpers for flash attention."""
+"""NVFP4 operand helpers for the attention ``P @ V`` matmul (BMM2).
+
+P and V share the low-level ``nvfp4_scalar_qdq`` primitive, but retain thin
+operand-specific wrappers because their layouts and amax reductions differ.
+P is nonnegative with layout ``[M, K]``; V is signed with layout ``[K, N]``.
+Both use block-16 scaling along the BMM2 contraction axis.
+"""
 
 import math
 
@@ -26,6 +32,33 @@ from modelopt.torch.kernels.quantization.common.nvfp4_quant import nvfp4_scalar_
 __all__ = ["fake_quant_v_onwrite"]
 
 _BLOCK_N = 16
+
+
+@triton.jit
+def _p_qdq_nvfp4(
+    p,
+    global_scale,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """NVFP4 fake quant-dequant of softmax probabilities.
+
+    Two-level scaling per the NVFP4 recipe: E2M1 elements with one FP8 E4M3
+    scale per 16 contiguous elements along the key dimension (the contraction
+    axis of ``P @ V``), and a per-tensor ``global_scale`` (runtime scalar,
+    ``amax / (6 * 448)``; ``attention()`` derives it from ``p_qdq_amax``,
+    which defaults to 1, the theoretical upper bound of P's amax).
+
+    ``p >= 0``, so the block amax is a plain max (no ``abs``), and
+    ``nvfp4_scalar_qdq`` guards the degenerate all-zero blocks of fully
+    masked or padded positions.
+    """
+    tl.static_assert(BLOCK_N % 16 == 0, "BLOCK_N must be divisible by 16 for NVFP4")
+
+    grouped = tl.reshape(p, (BLOCK_M, BLOCK_N // 16, 16))
+    block_amax = tl.expand_dims(tl.max(grouped, axis=2), 2)  # p >= 0, so max == amax
+    q = nvfp4_scalar_qdq(grouped, block_amax, global_scale, 16)
+    return tl.reshape(q, (BLOCK_M, BLOCK_N))
 
 
 @triton.jit

@@ -27,7 +27,7 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention, triton_fa
-    from modelopt.torch.kernels.quantization.attention.v_qdq import fake_quant_v_onwrite
+    from modelopt.torch.kernels.quantization.attention.bmm2_qdq import fake_quant_v_onwrite
 
 NATIVE_E4M3_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (8, 9)
 requires_native_e4m3 = pytest.mark.skipif(

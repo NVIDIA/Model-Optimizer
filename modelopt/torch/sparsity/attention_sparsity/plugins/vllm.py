@@ -44,7 +44,7 @@ from modelopt.torch.kernels.common.attention.decode_attention import (
     attention_decode as triton_decode_attention,
 )
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
-from modelopt.torch.kernels.quantization.attention.v_qdq import fake_quant_v_onwrite
+from modelopt.torch.kernels.quantization.attention.bmm2_qdq import fake_quant_v_onwrite
 
 
 def _target_sparse_ratio_for_phase(target_sparse_ratio, phase: str) -> float:
