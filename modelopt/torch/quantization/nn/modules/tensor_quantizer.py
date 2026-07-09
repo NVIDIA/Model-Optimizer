@@ -1209,6 +1209,8 @@ class TensorQuantizer(nn.Module):
         """
         if self.is_mx_format:
             return "None"
+        if self._use_constant_amax:
+            return f"{torch.finfo(torch.float8_e4m3fn).max:{fmt}}(const)"
         if not hasattr(self, "_amax"):
             return "dynamic"
         if self._amax is None:

@@ -124,6 +124,73 @@ _MAMBA = (
     + _D_INNER  # internal RMSNorm
 )  # 72 + 4 + 16 + 60 + 6 + 4 = 162
 
+# GatedDeltaNet (linear-attention) sublayer, e.g. Qwen3-Next / Qwen3.5:
+#   in_proj:  H * (2*key_dim + 2*val_dim + 2*LNV)  +  input_layernorm: H
+#   conv1d (depthwise, no bias):  (2*key_dim + val_dim) * conv_kernel
+#   scalars:  A_log + dt_bias  -> 2 * LNV
+#   gated RMSNorm over value head dim: LVD  +  out_proj: val_dim * H
+_LNK, _LKD = 2, 2  # linear_num_key_heads, linear_key_head_dim
+_LNV, _LVD = 2, 2  # linear_num_value_heads, linear_value_head_dim
+_LCK = 4  # linear_conv_kernel_dim
+_KEY_DIM = _LNK * _LKD  # 4
+_VAL_DIM = _LNV * _LVD  # 4
+_GDN = (
+    _H * (2 * _KEY_DIM + 2 * _VAL_DIM + 2 * _LNV)  # in_proj weight: 4 * 20 = 80
+    + _LN  # input_layernorm
+    + (2 * _KEY_DIM + _VAL_DIM) * _LCK  # conv1d: 12 * 4 = 48
+    + 2 * _LNV  # A_log + dt_bias
+    + _LVD  # gated RMSNorm (value head dim)
+    + _VAL_DIM * _H  # out_proj: 4 * 4 = 16
+)  # 80 + 4 + 48 + 4 + 2 + 16 = 154
+
+_GDN_OVERRIDES = {
+    "experimental_attention_variant": "gated_delta_net",
+    "linear_attention_freq": 4,
+    "linear_num_key_heads": _LNK,
+    "linear_key_head_dim": _LKD,
+    "linear_num_value_heads": _LNV,
+    "linear_value_head_dim": _LVD,
+    "linear_conv_kernel_dim": _LCK,
+}
+
+# Multi-Latent Attention (MLA) sublayer, e.g. DeepSeek:
+#   input_layernorm: H
+#   q:  q_down (q_lora*H) + q RMSNorm (q_lora) + q_up (nh*(qk_head+qk_rope)*q_lora)
+#   kv: kv_down ((kv_lora+qk_rope)*H) + kv RMSNorm (kv_lora) + kv_up (nh*(qk_head+v_head)*kv_lora)
+#   o_proj: nh*v_head*H
+_QLORA, _KVLORA = 3, 2  # q_lora_rank, kv_lora_rank
+_QKH, _QKR, _VH = 2, 2, 2  # qk_head_dim, qk_pos_emb_head_dim, v_head_dim
+_QHD = _QKH + _QKR  # q head dim = 4
+_MLA = (
+    _LN  # input_layernorm
+    + _QLORA * _H  # q_down_proj: 3*4 = 12
+    + _QLORA  # q RMSNorm
+    + _NH * _QHD * _QLORA  # q_up_proj: 2*4*3 = 24
+    + (_KVLORA + _QKR) * _H  # kv_down_proj: 4*4 = 16
+    + _KVLORA  # kv RMSNorm
+    + _NH * (_QKH + _VH) * _KVLORA  # kv_up_proj: 2*4*2 = 16
+    + _NH * _VH * _H  # o_proj: 2*2*4 = 16
+)  # 4 + 12 + 3 + 24 + 16 + 2 + 16 + 16 = 93
+
+_MLA_OVERRIDES = {
+    "multi_latent_attention": True,
+    "q_lora_rank": _QLORA,
+    "kv_lora_rank": _KVLORA,
+    "qk_head_dim": _QKH,
+    "qk_pos_emb_head_dim": _QKR,
+    "v_head_dim": _VH,
+}
+
+# Latent MoE (e.g. Nemotron-3-Super): shared hidden<->latent projections, routed experts run in
+# the latent dim; router + shared expert stay on hidden_size.
+_MOE_LATENT = 3  # moe_latent_size
+_LATENT_PROJ = (
+    _H * _MOE_LATENT + _MOE_LATENT * _H
+)  # fc1_latent_proj + fc2_latent_proj = 12 + 12 = 24
+_MOE_PER_EXP_LATENT = _MOE_LATENT * _MOE_FFN + _MOE_FFN * _MOE_LATENT  # 3*8 + 8*3 = 48
+_MOE_LATENT_TOTAL = _MOE_ALWAYS + _LATENT_PROJ + _NE * _MOE_PER_EXP_LATENT  # 12 + 24 + 2*48 = 132
+_MOE_LATENT_ACTIVE = _MOE_ALWAYS + _LATENT_PROJ + _TOPK * _MOE_PER_EXP_LATENT  # 12 + 24 + 48 = 84
+
 
 # ---------------------------------------------------------------------------
 # Formula tests (no GPU required)
@@ -211,6 +278,39 @@ class TestMcoreParamCountFormulas:
         total, active = mcore_param_count(_BASE_CFG, _V, num_layers=4, moe_layer_freq=2)
         assert total == _BASE_UNTIED + 4 * _ATTN + 2 * _MOE_TOTAL + 2 * _DENSE_MLP
         assert active == _BASE_UNTIED + 4 * _ATTN + 2 * _MOE_ACTIVE + 2 * _DENSE_MLP
+
+    def test_gated_delta_net_layers(self):
+        # GatedDeltaNet hybrid (Qwen3-Next / Qwen3.5): every linear_attention_freq-th layer keeps
+        # full attention, the rest use GDN linear attention. freq=4, num_layers=4 -> layers 0,1,2 GDN,
+        # layer 3 full attention (dense MLP throughout).
+        total, _ = mcore_param_count(
+            _BASE_CFG, _V, num_layers=4, num_moe_experts=None, **_GDN_OVERRIDES
+        )
+        assert total == _BASE_UNTIED + 3 * (_GDN + _DENSE_MLP) + (_ATTN + _DENSE_MLP)
+
+    def test_gated_delta_net_differs_from_plain_attention(self):
+        # Without the variant flag, the same layers are counted as plain attention (no GDN dispatch).
+        gdn, _ = mcore_param_count(
+            _BASE_CFG, _V, num_layers=4, num_moe_experts=None, **_GDN_OVERRIDES
+        )
+        plain, _ = mcore_param_count(_BASE_CFG, _V, num_layers=4, num_moe_experts=None)
+        assert plain == _BASE_UNTIED + 4 * (_ATTN + _DENSE_MLP)
+        assert gdn - plain == 3 * (_GDN - _ATTN)  # 3 GDN layers replace 3 attention layers
+
+    def test_multi_latent_attention_layers(self):
+        # MLA (DeepSeek): every attention sublayer uses the low-rank q/kv projections instead of QKV.
+        total, _ = mcore_param_count(
+            _BASE_CFG, _V, num_layers=2, num_moe_experts=None, **_MLA_OVERRIDES
+        )
+        assert total == _BASE_UNTIED + 2 * (_MLA + _DENSE_MLP)
+
+    def test_latent_moe_layer_total_and_active(self):
+        # Latent MoE: shared hidden<->latent projections + routed experts in the latent dim.
+        total, active = mcore_param_count(
+            _BASE_CFG, _V, hybrid_layer_pattern="E", moe_latent_size=_MOE_LATENT
+        )
+        assert total == _BASE_UNTIED + _MOE_LATENT_TOTAL
+        assert active == _BASE_UNTIED + _MOE_LATENT_ACTIVE
 
 
 # ---------------------------------------------------------------------------
