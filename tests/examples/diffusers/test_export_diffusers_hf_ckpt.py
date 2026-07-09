@@ -175,13 +175,13 @@ def _module_prefixes(keys: set[str], suffix: str) -> set[str]:
     return {k[: -len(suffix)] for k in keys if k.endswith(suffix)}
 
 
-def _block_indices(prefixes: set[str]) -> set[int]:
-    """transformer_blocks indices referenced by a set of module prefixes."""
+def _block_indices(prefixes: set[str], block_re: str = r"transformer_blocks\.(\d+)\.") -> set[int]:
+    """Block indices referenced by a set of module prefixes."""
     import re
 
     indices = set()
     for prefix in prefixes:
-        match = re.search(r"transformer_blocks\.(\d+)\.", prefix)
+        match = re.search(block_re, prefix)
         if match:
             indices.add(int(match.group(1)))
     return indices
@@ -310,12 +310,34 @@ def test_qwen_image_hf_ckpt_export(
             assert any(k.endswith(".weight_scale_2") for k in keys)
 
 
+# Tiny Wan 2.2 fixture has 8 blocks; the recipe excludes the first 3 and last 3,
+# so only blocks 3 and 4 are quantized.
+_WAN22_QUANTIZED_BLOCKS = {3, 4}
+_WAN22_LORA_RANK = 8
+_WAN22_BLOCK_RE = r"^blocks\.(\d+)\."
+# Wan has no svdquant_skip_layers: every quantized linear in a block (self-attn,
+# cross-attn, FFN) keeps the full SVDQuant recipe (low-rank branch + pre_quant_scale).
+_WAN22_SVDQUANT_PROMOTED_SUFFIXES = (
+    ".attn1.to_q",
+    ".attn1.to_k",
+    ".attn1.to_v",
+    ".attn1.to_out.0",
+    ".attn2.to_q",
+    ".attn2.to_k",
+    ".attn2.to_v",
+    ".attn2.to_out.0",
+    ".ffn.net.0.proj",
+    ".ffn.net.2",
+)
+
+
 class Wan22HfExportModel(NamedTuple):
     model: str
     backbone: str | None
     format_type: str
     quant_algo: str
     collect_method: str
+    lowrank: int | None = None
 
     def _suffix(self) -> str:
         stem = self.model.replace("wan2.2-t2v-", "")
@@ -359,6 +381,8 @@ class Wan22HfExportModel(NamedTuple):
         ]
         if self.backbone is not None:
             cmd_args.extend(["--backbone", self.backbone])
+        if self.lowrank is not None:
+            cmd_args.extend(["--lowrank", str(self.lowrank)])
         run_example_command(cmd_args, "diffusers/quantization")
         return hf_ckpt_dir
 
@@ -371,10 +395,17 @@ class Wan22HfExportModel(NamedTuple):
             Wan22HfExportModel("wan2.2-t2v-14b", None, "fp8", "max", "default"),
             marks=minimum_sm(89),
         ),
+        pytest.param(
+            Wan22HfExportModel(
+                "wan2.2-t2v-14b", None, "fp4", "svdquant", "default", lowrank=_WAN22_LORA_RANK
+            ),
+            marks=minimum_sm(89),
+        ),
     ],
     ids=[
         "wan22_14b_transformer_int8_smoothquant",
         "wan22_14b_transformer_fp8_max",
+        "wan22_14b_nvfp4_svdquant",
     ],
 )
 def test_wan22_hf_ckpt_export(
@@ -389,3 +420,70 @@ def test_wan22_hf_ckpt_export(
 
     weight_files = list(hf_ckpt_dir.rglob("*.safetensors")) + list(hf_ckpt_dir.rglob("*.bin"))
     assert len(weight_files) > 0, f"No weight files (.safetensors or .bin) found in {hf_ckpt_dir}"
+
+    if wan_model.quant_algo != "svdquant":
+        return
+
+    from safetensors import safe_open
+
+    # Wan 2.2 A14B is a two-expert pipeline (high-noise `transformer` +
+    # low-noise `transformer_2`); the default backbone recipe quantizes both.
+    for expert in ("transformer", "transformer_2"):
+        expert_dir = hf_ckpt_dir / expert
+        config_path = expert_dir / "config.json"
+        assert config_path.exists(), f"no {expert}/config.json in {hf_ckpt_dir}"
+        quant_config = json.loads(config_path.read_text()).get("quantization_config")
+        assert quant_config is not None, f"{expert}: missing quantization_config"
+        assert quant_config.get("quant_method") == "modelopt"
+        assert quant_config.get("quant_algo") == "NVFP4_SVD"
+        group = next(iter(quant_config.get("config_groups", {}).values()), {})
+        assert group.get("lora_rank") == _WAN22_LORA_RANK
+        assert group.get("pre_quant_scale") is True
+        assert quant_config.get("ignore"), f"{expert}: expected excluded modules in 'ignore'"
+
+        keys: set[str] = set()
+        lora_tensors: dict[str, object] = {}
+        safetensors_files = sorted(expert_dir.rglob("*.safetensors"))
+        assert safetensors_files, f"no safetensors in {expert_dir}"
+        for path in safetensors_files:
+            with safe_open(str(path), framework="pt") as handle:
+                for key in handle.keys():  # noqa: SIM118 - safe_open is not iterable
+                    keys.add(key)
+                    if key.endswith((".svdquant_lora_a", ".svdquant_lora_b")):
+                        lora_tensors[key] = handle.get_tensor(key)
+
+        # No live quantizer state should leak into the exported checkpoint.
+        assert not any("weight_quantizer" in k for k in keys), f"{expert}: quantizer keys leaked"
+        assert not any("input_quantizer._amax" in k for k in keys)
+
+        # Recipe: only the middle `blocks` are quantized — first-3/last-3 are
+        # excluded, and nothing outside `blocks`.
+        weight_scale_prefixes = _module_prefixes(keys, ".weight_scale")
+        assert weight_scale_prefixes, f"{expert}: no quantized linears found in export"
+        assert all(p.startswith("blocks.") for p in weight_scale_prefixes), (
+            f"{expert}: a non-blocks module was quantized: {weight_scale_prefixes}"
+        )
+        assert _block_indices(weight_scale_prefixes, _WAN22_BLOCK_RE) == _WAN22_QUANTIZED_BLOCKS, (
+            f"{expert}: expected only blocks {_WAN22_QUANTIZED_BLOCKS} quantized"
+        )
+
+        # Every quantized linear keeps the full SVDQuant recipe (no skip patterns):
+        # low-rank factors + pre_quant_scale on self-attn, cross-attn, and FFN.
+        expected_promoted = {
+            f"blocks.{block}{suffix}"
+            for block in _WAN22_QUANTIZED_BLOCKS
+            for suffix in _WAN22_SVDQUANT_PROMOTED_SUFFIXES
+        }
+        a_prefixes = _module_prefixes(keys, ".svdquant_lora_a")
+        b_prefixes = _module_prefixes(keys, ".svdquant_lora_b")
+        pqs_prefixes = _module_prefixes(keys, ".pre_quant_scale")
+        assert a_prefixes == b_prefixes == pqs_prefixes == expected_promoted
+        assert weight_scale_prefixes == expected_promoted
+        # Rank-consistent shapes; lora_a=[rank, in], lora_b=[out, rank], rank == --lowrank.
+        for key, tensor in lora_tensors.items():
+            if key.endswith(".svdquant_lora_a"):
+                assert tensor.shape[0] == _WAN22_LORA_RANK
+            else:
+                assert tensor.shape[1] == _WAN22_LORA_RANK
+        # NVFP4 secondary scales are present.
+        assert any(k.endswith(".weight_scale_2") for k in keys), f"{expert}: missing weight_scale_2"

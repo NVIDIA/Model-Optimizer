@@ -204,6 +204,23 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
     },
     ModelType.WAN22_T2V_14b: {
         **_WAN_BASE_CONFIG,
+        # Wan 2.2 A14B is a two-expert pipeline: the high-noise expert
+        # (``transformer``, t >= boundary) and the low-noise expert
+        # (``transformer_2``). A deployable checkpoint quantizes both;
+        # ``transformer`` goes first so the low-noise expert calibrates against
+        # the already-quantized high-noise expert, matching deployment.
+        "backbone": ["transformer", "transformer_2"],
+        # Pre-calibration form of ``filter_func_wan_video``: quantize only the
+        # linears under ``blocks``, excluding the first/last 3 of the 40 blocks
+        # (everything outside ``blocks`` -- patch_embedding, condition_embedder,
+        # proj_out -- stays in original precision). Applied before calibration
+        # via ``build_block_range_quant_cfg`` so SVDQuant never mutates the
+        # excluded blocks' weights. Not applied to VAE backbones (no ``blocks``).
+        "block_range": {
+            "exclude_first_n": 3,
+            "exclude_last_n": 3,
+            "block_module": "blocks",
+        },
         "from_pretrained_extra_args": {
             "boundary_ratio": 0.875,
         },
