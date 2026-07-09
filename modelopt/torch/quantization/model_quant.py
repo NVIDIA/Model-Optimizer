@@ -283,6 +283,7 @@ def auto_quantize(
     verbose: bool = False,
     method: str = "gradient",
     checkpoint: str | None = None,
+    module_search_spaces: list[dict[str, Any]] | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
@@ -446,6 +447,14 @@ def auto_quantize(
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
+        module_search_spaces: Optional module-specific candidate overrides. Each entry contains
+            ``module_name_patterns`` (one or more glob patterns), ``quantization_formats``, and
+            optional ``allow_no_quant`` (default True). A matching entry replaces the global
+            candidate set for that runtime-grouped decision. Setting ``allow_no_quant=False``
+            keeps BF16/no-quant as an internal sensitivity and cost baseline but prevents the
+            solver from selecting it. A single candidate with ``allow_no_quant=False`` fixes the
+            matching module group to that format while retaining its cost in the effective-bits
+            constraint.
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -493,23 +502,76 @@ def auto_quantize(
         might not be readily deployable to TensorRT-LLM yet.
 
     """
-    processed_quantization_formats = []
-    for i, quant_cfg in enumerate(quantization_formats):
-        if quant_cfg is None:
-            continue
 
-        name = QuantRecipe.get_auto_name_for_config(quant_cfg)
-        if name is None:
-            name = f"CUSTOM_{i}"
-            warnings.warn(
-                f"Received custom quantization formats for search, auto_quantize results may not be optimal. "
-                f"This config will be displayed as {name}"
-            )
-        processed_quantization_formats.append((quant_cfg, name))
+    def _process_quantization_formats(formats, custom_name_prefix):
+        processed = []
+        for i, quant_cfg in enumerate(formats):
+            if quant_cfg is None:
+                continue
+
+            name = QuantRecipe.get_auto_name_for_config(quant_cfg)
+            if name is None:
+                name = f"{custom_name_prefix}_{i}"
+                warnings.warn(
+                    "Received custom quantization formats for search, auto_quantize results may "
+                    f"not be optimal. This config will be displayed as {name}"
+                )
+            processed.append((quant_cfg, name))
+        return processed
+
+    processed_quantization_formats = _process_quantization_formats(quantization_formats, "CUSTOM")
 
     assert len(processed_quantization_formats) > 0, "`quantization_formats` should not be empty"
 
-    for quant_cfg, name in processed_quantization_formats:
+    processed_module_search_spaces = []
+    for idx, search_space in enumerate(module_search_spaces or []):
+        if not isinstance(search_space, dict):
+            raise TypeError("Each module_search_spaces entry must be a dict.")
+        unknown_keys = set(search_space) - {
+            "module_name_patterns",
+            "quantization_formats",
+            "allow_no_quant",
+        }
+        if unknown_keys:
+            raise ValueError(f"Unsupported module_search_spaces keys: {sorted(unknown_keys)}")
+        patterns = search_space.get("module_name_patterns")
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        if (
+            not isinstance(patterns, list)
+            or not patterns
+            or not all(isinstance(pattern, str) for pattern in patterns)
+        ):
+            raise ValueError(
+                "module_search_spaces.module_name_patterns must be a non-empty string list."
+            )
+        formats = _process_quantization_formats(
+            search_space.get("quantization_formats") or [], f"CUSTOM_MODULE_{idx}"
+        )
+        if not formats:
+            raise ValueError(
+                "module_search_spaces.quantization_formats must contain at least one format."
+            )
+        allow_no_quant = search_space.get("allow_no_quant", True)
+        if not isinstance(allow_no_quant, bool):
+            raise TypeError("module_search_spaces.allow_no_quant must be a bool.")
+        processed_module_search_spaces.append(
+            {
+                "module_name_patterns": patterns,
+                "quantization_formats": formats,
+                "allow_no_quant": allow_no_quant,
+            }
+        )
+
+    all_processed_formats = [
+        *processed_quantization_formats,
+        *(
+            quant_format
+            for search_space in processed_module_search_spaces
+            for quant_format in search_space["quantization_formats"]
+        ),
+    ]
+    for quant_cfg, name in all_processed_formats:
         algo = QuantRecipe(quant_cfg, name=name).config.algorithm
         algo_method = algo["method"] if isinstance(algo, dict) else algo
         if algo_method not in _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
@@ -534,6 +596,7 @@ def auto_quantize(
     )
     search_config = {
         "quantization_formats": processed_quantization_formats,
+        "module_search_spaces": processed_module_search_spaces,
         "data_loader": data_loader,
         "forward_step": forward_step,
         "loss_func": loss_func,

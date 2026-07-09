@@ -303,6 +303,25 @@ def _match_candidate_to_preset(fmt) -> tuple[str | None, dict]:
     return None, fmt.model_dump()
 
 
+def _mtq_candidate_formats(formats) -> list[dict]:
+    """Translate recipe candidate formats to export-compatible mtq configs."""
+    quantization_formats = []
+    for fmt in formats:
+        preset_name, quant_cfg = _match_candidate_to_preset(fmt)
+        if preset_name is not None and preset_name not in _AUTO_QUANTIZE_QFORMATS:
+            raise ValueError(
+                f"AutoQuantize candidate_formats entry '{preset_name}' is not supported for "
+                "unified checkpoint export. Use an export-compatible format."
+            )
+        if preset_name is None:
+            warnings.warn(
+                "An AutoQuantize candidate_formats entry matches no shipped preset; its export "
+                "compatibility cannot be verified. Ensure it is safe for HF checkpoint export."
+            )
+        quantization_formats.append(quant_cfg)
+    return quantization_formats
+
+
 def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -> dict:
     """Map a resolved AutoQuantizeConfig to mtq.auto_quantize inputs.
 
@@ -327,23 +346,19 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
     # Translate each candidate to its mtq preset dict and, in the same pass, guard export
     # compatibility (fails fast, before the expensive search). Custom configs matching no shipped
     # preset can't be verified, so warn rather than block.
-    quantization_formats = []
-    for fmt in aq_config.candidate_formats:
-        preset_name, quant_cfg = _match_candidate_to_preset(fmt)
-        if preset_name is not None and preset_name not in _AUTO_QUANTIZE_QFORMATS:
-            raise ValueError(
-                f"AutoQuantize candidate_formats entry '{preset_name}' is not supported for "
-                "unified checkpoint export. Use an export-compatible format."
-            )
-        if preset_name is None:
-            warnings.warn(
-                "An AutoQuantize candidate_formats entry matches no shipped preset; its export "
-                "compatibility cannot be verified. Ensure it is safe for HF checkpoint export."
-            )
-        quantization_formats.append(quant_cfg)
+    quantization_formats = _mtq_candidate_formats(aq_config.candidate_formats)
+    module_search_spaces = [
+        {
+            "module_name_patterns": search_space.module_name_patterns,
+            "quantization_formats": _mtq_candidate_formats(search_space.candidate_formats),
+            "allow_no_quant": search_space.allow_no_quant,
+        }
+        for search_space in aq_config.module_search_spaces
+    ]
     return {
         "constraints": constraints,
         "quantization_formats": quantization_formats,
+        "module_search_spaces": module_search_spaces,
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
         "method": aq_config.auto_quantize_method,
@@ -467,6 +482,7 @@ def auto_quantize(
         forward_step=forward_step,
         loss_func=loss_func,
         quantization_formats=inputs["quantization_formats"],
+        module_search_spaces=inputs["module_search_spaces"],
         num_calib_steps=len(calib_dataloader),
         num_score_steps=min(len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)),
         verbose=True,

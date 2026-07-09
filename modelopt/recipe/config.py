@@ -38,6 +38,7 @@ __all__ = [
     "AutoQuantizeConfig",
     "AutoQuantizeConstraints",
     "AutoQuantizeCost",
+    "AutoQuantizeModuleSearchSpace",
     "ModelOptAutoQuantizeRecipe",
     "ModelOptDFlashRecipe",
     "ModelOptEagleRecipe",
@@ -191,6 +192,46 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         return v
 
 
+class AutoQuantizeModuleSearchSpace(ModeloptBaseConfig):
+    """Candidate formats selectable for modules matching one or more name patterns."""
+
+    module_name_patterns: LayerPatternList = ModeloptField(
+        default=[],
+        title="Module name patterns",
+        description="Glob patterns matched against quantizable module names. A grouped AutoQuantize "
+        "decision must match a rule for every module in the group or for none of them.",
+        validate_default=True,
+    )
+    candidate_formats: list[QuantizeConfig] = ModeloptField(
+        default=[],
+        title="Module candidate quantization formats",
+        description="Formats selectable for matching modules. These override the top-level "
+        "candidate_formats for the matching AutoQuantize decision group.",
+        validate_default=True,
+    )
+    allow_no_quant: bool = ModeloptField(
+        default=True,
+        title="Allow no-quant selection",
+        description="Whether BF16/no-quant is selectable for matching modules. AutoQuantize keeps "
+        "an internal no-quant baseline for sensitivity scoring and cost normalization even when "
+        "this is false.",
+    )
+
+    @field_validator("module_name_patterns")
+    @classmethod
+    def _at_least_one_module_pattern(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("module_search_spaces requires at least 1 module_name_pattern")
+        return v
+
+    @field_validator("candidate_formats")
+    @classmethod
+    def _at_least_one_module_candidate(cls, v: list[QuantizeConfig]) -> list[QuantizeConfig]:
+        if not v:
+            raise ValueError("module_search_spaces requires at least 1 candidate_format")
+        return v
+
+
 class AutoQuantizeConfig(ModeloptBaseConfig):
     """Schema for the ``auto_quantize`` block of an AutoQuantize recipe."""
 
@@ -205,6 +246,12 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         "required — bf16/no-quant is always an implicit additional choice, so a single format "
         "(e.g. [fp8]) yields a {fp8, bf16} per-layer search.",
         validate_default=True,
+    )
+    module_search_spaces: list[AutoQuantizeModuleSearchSpace] = ModeloptField(
+        default=[],
+        title="Module-specific search spaces",
+        description="Optional per-module overrides for candidate formats and BF16/no-quant "
+        "selectability. Matching is performed after runtime-fusion grouping.",
     )
     auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
         default="gradient",

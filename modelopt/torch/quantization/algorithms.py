@@ -294,9 +294,19 @@ class QuantRecipeHparam(Hparam):
         name: str | None = None,
         quant_module_names: list[str] | None = None,
         cost_weight: float = 1.0,
+        allow_no_quant: bool = True,
     ) -> None:
-        """Initializes Hparam with original value and choices."""
-        choices = sorted({*(choices or []), QuantRecipe(quant_cfg=None)})
+        """Initializes Hparam with internal scoring choices and solver selectability."""
+        candidate_choices = sorted(set(choices or []))
+        # A one-format rule with no-quant disallowed is genuinely fixed: keep that
+        # format active while other groups are scored. Multi-format rules retain an
+        # internal no-quant reference for sensitivity estimation, then filter it out
+        # before LP selection.
+        choices = (
+            candidate_choices
+            if not allow_no_quant and len(candidate_choices) == 1
+            else sorted({*candidate_choices, QuantRecipe(quant_cfg=None)})
+        )
         super().__init__(choices, original=choices[0])
 
         self.name = name
@@ -307,6 +317,7 @@ class QuantRecipeHparam(Hparam):
         }
         assert cost_weight >= 0.0, "cost_weight must be non-negative."
         self.cost_weight = cost_weight
+        self.allow_no_quant = allow_no_quant
 
         self.quant_modules = list(set(quant_modules or []))
         self.score_modules = list(set(score_modules or self.quant_modules))
@@ -440,7 +451,7 @@ class QuantRecipeHparam(Hparam):
     @property
     def attrs(self) -> list[str]:
         """Return the attributes of the hparam for repr."""
-        return ["name", "cost_weight", *super().attrs]
+        return ["name", "cost_weight", "allow_no_quant", *super().attrs]
 
 
 _LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
@@ -455,6 +466,18 @@ def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
 def _linear_attn_ba_group_key(_model, name: str) -> str | None:
     m = _LINEAR_ATTN_BA_RE.match(name)
     return f"{m.group(1)}/ba" if m else None
+
+
+def _module_search_space_signature(module_search_spaces) -> tuple:
+    """Return a checkpoint-stable description of module-specific candidate spaces."""
+    return tuple(
+        (
+            tuple(search_space["module_name_patterns"]),
+            tuple(str(recipe) for recipe in search_space["quant_recipes"]),
+            search_space["allow_no_quant"],
+        )
+        for search_space in module_search_spaces
+    )
 
 
 class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
@@ -496,6 +519,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         """Get the default config for the searcher."""
         return {
             "quantization_formats": ["NVFP4_DEFAULT_CFG", "FP8_DEFAULT_CFG"],
+            "module_search_spaces": [],
             "data_loader": None,
             "num_calib_steps": 512,
             "num_score_steps": 128,
@@ -517,6 +541,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost": {},
             "active_moe_expert_ratio": None,
             "cost_denominator": None,
+            "module_search_space_signature": None,
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
@@ -626,7 +651,49 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
             return quant_module
 
-    def insert_hparams_after_merge_rules(self, model, quant_recipes, disabled_layers=None):
+    def _normalize_module_search_spaces(self, module_search_spaces):
+        """Convert processed API search spaces to QuantRecipe-based rules."""
+        return [
+            {
+                "module_name_patterns": tuple(search_space["module_name_patterns"]),
+                "quant_recipes": self._get_search_recipes(search_space["quantization_formats"]),
+                "allow_no_quant": search_space["allow_no_quant"],
+            }
+            for search_space in module_search_spaces
+        ]
+
+    @staticmethod
+    def _match_module_search_space(quant_module_names, module_search_spaces):
+        """Return the unique rule that fully covers a runtime-grouped decision."""
+        matched_search_spaces = []
+        for search_space in module_search_spaces:
+            matches = [
+                any(
+                    fnmatch.fnmatch(module_name, pattern)
+                    for pattern in search_space["module_name_patterns"]
+                )
+                for module_name in quant_module_names
+            ]
+            if not any(matches):
+                continue
+            if not all(matches):
+                raise ValueError(
+                    "A module_search_spaces rule partially matches runtime-grouped modules "
+                    f"{quant_module_names}. Update its module_name_patterns so the rule covers "
+                    "the entire group or none of it."
+                )
+            matched_search_spaces.append(search_space)
+
+        if len(matched_search_spaces) > 1:
+            raise ValueError(
+                "Multiple module_search_spaces rules match runtime-grouped modules "
+                f"{quant_module_names}. Make the module_name_patterns disjoint."
+            )
+        return matched_search_spaces[0] if matched_search_spaces else None
+
+    def insert_hparams_after_merge_rules(
+        self, model, quant_recipes, disabled_layers=None, module_search_spaces=None
+    ):
         """Restrict the search space using the merge rules and insert the hparams for the model."""
         # TRTLLM fuses linear layers such as q_proj, k_proj, v_proj into same layer
         # Hence we need to restrict the search space so that all these layers share the same recipe
@@ -686,7 +753,18 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 quant_module_names, self.config["cost"]
             )
 
-            _quant_recipes = None if disabled else quant_recipes
+            search_space = self._match_module_search_space(
+                quant_module_names, module_search_spaces or []
+            )
+            if disabled:
+                _quant_recipes = None
+                allow_no_quant = True
+            elif search_space is not None:
+                _quant_recipes = search_space["quant_recipes"]
+                allow_no_quant = search_space["allow_no_quant"]
+            else:
+                _quant_recipes = quant_recipes
+                allow_no_quant = True
             hparam = QuantRecipeHparam(
                 _quant_recipes,
                 quant_modules=quant_modules,
@@ -694,6 +772,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 name=str(group_key),
                 quant_module_names=quant_module_names,
                 cost_weight=cost_weight,
+                allow_no_quant=allow_no_quant,
             )
 
             for module in quant_modules:
@@ -721,6 +800,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def initialize_candidate_stats(self):
         """Initialize the candidate stats for the model."""
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
         for name, hparam in named_hparams(self.model, unique=True):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
@@ -728,6 +808,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             formats, scores, costs = [], [], []
             prev_score = float("inf")
             for recipe in hparam.choices:
+                if recipe == no_quant_recipe and not hparam.allow_no_quant:
+                    continue
                 formats.append(recipe)
 
                 score = hparam.get_score(recipe)  # type: ignore [arg-type]
@@ -744,6 +826,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
+            self.candidate_stats[name]["allow_no_quant"] = hparam.allow_no_quant
+            # Keep the no-quant cost as denominator metadata even when no-quant is not
+            # solver-selectable for this hparam. Fixed formats must remain in the cost model.
+            self.candidate_stats[name]["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
 
     def _run_func(self, func, num_iters=1, desc=""):
         for i, data in tqdm(
@@ -794,11 +880,44 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.disabled_layers = self.config["disabled_layers"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
 
-        search_recipes = self._get_search_recipes(self.config["quantization_formats"])
+        module_search_spaces = self._normalize_module_search_spaces(
+            self.config["module_search_spaces"]
+        )
+        module_search_space_signature = _module_search_space_signature(module_search_spaces)
+        restored_module_search_space_signature = getattr(
+            self, "module_search_space_signature", None
+        )
+        if self.candidate_stats and (
+            (restored_module_search_space_signature is None and module_search_space_signature)
+            or (
+                restored_module_search_space_signature is not None
+                and restored_module_search_space_signature != module_search_space_signature
+            )
+        ):
+            raise ValueError(
+                "Checkpoint module_search_spaces do not match the current search config. "
+                "Use a different checkpoint path."
+            )
+        self.module_search_space_signature = module_search_space_signature
+
+        default_search_recipes = self._get_search_recipes(self.config["quantization_formats"])
+        search_recipes = sorted(
+            {
+                *default_search_recipes,
+                *(
+                    recipe
+                    for search_space in module_search_spaces
+                    for recipe in search_space["quant_recipes"]
+                ),
+            }
+        )
         self._verify_constraint(search_recipes)
         self._cost_model = cost_model
         self.insert_hparams_after_merge_rules(
-            self.model, search_recipes, self.config["disabled_layers"]
+            self.model,
+            default_search_recipes,
+            self.config["disabled_layers"],
+            module_search_spaces,
         )
 
         QuantRecipe.disable_folding_pqs_to_weights()
@@ -809,10 +928,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
                 continue
 
+            no_quant_recipe = QuantRecipe(quant_cfg=None)
             for name, hparam in named_hparams(self.model, configurable=True):
                 if not isinstance(hparam, QuantRecipeHparam):
                     continue
-                hparam.active = recipe
+                hparam.active = no_quant_recipe
+                if recipe in hparam.choices:
+                    hparam.active = recipe
 
             if recipe in self.quantizer_states:
                 saved = self.quantizer_states[recipe]
@@ -891,6 +1013,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         no_quant_recipe = QuantRecipe(quant_cfg=None)
         total_weight_size = 0
         for candidate_stat in candidate_stats.values():
+            if "uncompressed_cost" in candidate_stat:
+                total_weight_size += candidate_stat["uncompressed_cost"]
+                continue
             no_quant_idx = candidate_stat["formats"].index(no_quant_recipe)
             total_weight_size += candidate_stat["costs"][no_quant_idx]
         return total_weight_size
@@ -1618,7 +1743,7 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
     compression = effective_bits / 16.0
     candidate_stats = search_state["candidate_stats"]
     total_weight_size = search_state.get("cost_denominator") or sum(
-        s["costs"][-1] for s in candidate_stats.values()
+        s.get("uncompressed_cost", max(s["costs"])) for s in candidate_stats.values()
     )
     max_weight_size = total_weight_size * compression
     method = search_state["method"]

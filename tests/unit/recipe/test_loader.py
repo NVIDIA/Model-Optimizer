@@ -1727,6 +1727,7 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert aq.constraints.cost_model == "weight"
     assert aq.constraints.cost is None
     assert len(aq.candidate_formats) == 2
+    assert aq.module_search_spaces == []
 
 
 def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
@@ -1811,6 +1812,26 @@ def test_load_recipe_autoquantize_builtin_active_moe():
     assert aq.kv_cache is None
     # No per-candidate override; NVFP4 cost (4.5) comes from configs/numerics/nvfp4.
     assert all(c.effective_bits is None for c in aq.candidate_formats)
+
+
+def test_load_recipe_autoquantize_module_search_spaces():
+    """Qwen module rules resolve imported formats and no-quant selectability."""
+    recipe = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+    )
+    aq = recipe.auto_quantize
+    assert len(aq.module_search_spaces) == 2
+    routed, searched = aq.module_search_spaces
+    assert routed.module_name_patterns == ["*mlp.experts*", "*mixer.experts*"]
+    assert len(routed.candidate_formats) == 1
+    assert routed.allow_no_quant is False
+    assert searched.module_name_patterns == [
+        "*mlp.shared_expert*",
+        "*linear_attn*",
+        "*self_attn*",
+    ]
+    assert len(searched.candidate_formats) == 2
+    assert searched.allow_no_quant is False
 
 
 @pytest.mark.parametrize(

@@ -269,6 +269,99 @@ def test_auto_quantize_active_moe_cost_model(num_experts_attr):
     assert all("active_costs" not in stats for stats in search_history["candidate_stats"].values())
 
 
+def test_auto_quantize_module_search_spaces_keep_fixed_routed_experts_costed():
+    """A one-format routed rule is fixed in the LP but retained in active-MoE cost."""
+    model = _AutoQuantMoeModel()
+    int4_recipe = QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    int8_recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+    no_quant_recipe = QuantRecipe(None)
+
+    searched_model, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0, "cost_model": "active_moe"},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp.experts*"],
+                "quantization_formats": [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
+                "allow_no_quant": False,
+            },
+            {
+                "module_name_patterns": ["*mlp.shared_expert*"],
+                "quantization_formats": [
+                    mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                    mtq.INT8_DEFAULT_CFG,
+                ],
+                "allow_no_quant": False,
+            },
+        ],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    stats = search_history["candidate_stats"]
+    routed = next(
+        candidate
+        for candidate in stats.values()
+        if any("mlp.experts" in name for name in candidate["module_names"])
+    )
+    shared = next(
+        candidate
+        for candidate in stats.values()
+        if any("mlp.shared_expert" in name for name in candidate["module_names"])
+    )
+
+    assert routed["formats"] == [int4_recipe]
+    assert routed["allow_no_quant"] is False
+    assert routed["cost_weight"] == pytest.approx(0.25)
+    assert routed["costs"] == pytest.approx([routed["uncompressed_cost"] * 0.25])
+    assert no_quant_recipe not in routed["formats"]
+    assert shared["formats"] == [int4_recipe, int8_recipe]
+    assert shared["allow_no_quant"] is False
+    assert no_quant_recipe not in shared["formats"]
+    assert search_history["cost_denominator"] == pytest.approx(
+        sum(candidate["uncompressed_cost"] for candidate in stats.values())
+    )
+    routed_best = [
+        recipe
+        for name, recipe in search_history["best"]["recipe"].items()
+        if any("mlp.experts" in module for module in stats[name]["module_names"])
+    ]
+    assert routed_best and all(recipe == int4_recipe for recipe in routed_best)
+    routed_hparam = searched_model.mlp.experts[0].gate_proj.get_hparam("quant_recipe")
+    assert not routed_hparam.is_configurable
+    assert routed_hparam.active == int4_recipe
+
+
+def test_auto_quantize_module_search_space_cannot_split_runtime_group():
+    model = TransformerBlock()
+
+    with pytest.raises(ValueError, match="partially matches runtime-grouped modules"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*q_proj"],
+                    "quantization_formats": [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+
 def test_active_moe_ratio_requires_single_config_object():
     model = torch.nn.Module()
     model.config = SimpleNamespace(

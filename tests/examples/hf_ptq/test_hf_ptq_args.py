@@ -57,6 +57,7 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
     assert inputs["score_size"] == 128
+    assert inputs["module_search_spaces"] == []
     # disabled_layers come straight from the recipe (no model introspection).
     assert inputs["disabled_layers"] == aq.disabled_layers
     assert "*output_layer*" in inputs["disabled_layers"]
@@ -85,6 +86,32 @@ def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
     # The two exclusions are independent: cost-excluded patterns are also disabled here, but the
     # roles (cost-accounting vs search) are tracked separately.
     assert "*visual*" in inputs["disabled_layers"]
+
+
+def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
+    """Module-specific recipe candidates map to public mtq.auto_quantize inputs."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    aq = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+    ).auto_quantize
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    routed, searched = inputs["module_search_spaces"]
+    assert routed["module_name_patterns"] == ["*mlp.experts*", "*mixer.experts*"]
+    assert routed["quantization_formats"] == [QUANT_CFG_CHOICES["w4a16_nvfp4"]]
+    assert routed["allow_no_quant"] is False
+    assert searched["module_name_patterns"] == [
+        "*mlp.shared_expert*",
+        "*linear_attn*",
+        "*self_attn*",
+    ]
+    assert searched["quantization_formats"] == [
+        QUANT_CFG_CHOICES["w4a16_nvfp4"],
+        QUANT_CFG_CHOICES["fp8"],
+    ]
+    assert searched["allow_no_quant"] is False
 
 
 def test_autoquant_rejects_non_export_safe_candidate(monkeypatch):
