@@ -36,7 +36,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
 )
-from modelopt.torch.utils import print_rank_0, same_device_as, warn_rank_0
+from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.distributed import is_initialized as dist_is_initialized
 from modelopt.torch.utils.distributed import size as dist_size
@@ -2088,15 +2088,6 @@ def gptq(
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
 
 
-def _is_quantized_block_scale(quantizer: StaticBlockScaleQuantizer) -> bool:
-    if quantizer._block_sizes is None:
-        return False
-    scale_bits = quantizer._block_sizes.get("scale_bits", None)
-    if scale_bits is None:
-        return False
-    return scale_bits == (4, 3)
-
-
 def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
     """Run scale calibration."""
     if scale_algorithm is None:
@@ -2129,46 +2120,6 @@ def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
         )
         algo_kwargs = {k: v for k, v in algo_kwargs.items() if k in accepted}
     calib_func(model, forward_loop=forward_loop, **algo_kwargs)
-
-
-def _compute_block_amax(quantizer):
-    """Compute per-block amax and per-tensor scale from a StaticBlockScaleQuantizer.
-
-    Returns (per_block_amax, per_tensor_scale, quantize_scales).
-    """
-    from .nn.modules.tensor_quantizer import _FP8_E4M3_MIN_POSITIVE, _amax_to_scale
-    from .tensor_quant import scaled_e4m3
-
-    amax = quantizer._amax.float()
-    max_representable = quantizer._quant_max_bound
-    quantize_scales = _is_quantized_block_scale(quantizer)
-    per_tensor_scale = None
-
-    with same_device_as(amax):
-        if quantize_scales:
-            global_amax = quantizer._global_amax.float()
-            per_tensor_scale = _amax_to_scale(global_amax, max_representable)
-            per_block_scale = scaled_e4m3(
-                _amax_to_scale(
-                    amax,
-                    max_representable,
-                    min_value=_FP8_E4M3_MIN_POSITIVE * per_tensor_scale.view(-1),
-                ),
-                per_tensor_scale,
-                None,
-                4,
-                3,
-            )
-        else:
-            per_block_scale = _amax_to_scale(amax, max_representable)
-
-    per_block_amax = per_block_scale * max_representable
-    return per_block_amax, per_tensor_scale, quantize_scales
-
-
-def _compute_lsq_params(quantizer):
-    """Compute amax and scale-quantization params for LSQ."""
-    return _compute_block_amax(quantizer)
 
 
 @torch.no_grad()
@@ -2215,15 +2166,9 @@ def lsq(
                     quantizer, "_amax"
                 ):
                     continue
-                amax, per_tensor_scale, quantize_scales = _compute_lsq_params(quantizer)
-                amax = amax.to(weight.dtype)
-                if per_tensor_scale is not None:
-                    per_tensor_scale = per_tensor_scale.to(weight.dtype)
                 quantizer.enable_lsq(
-                    amax,
-                    per_tensor_scale,
-                    quantize_scales,
                     learnable_amax=learnable_amax,
                     tied_amax=tied_amax,
                     quantize_pre_scale=quantize_pre_scale,
+                    dtype=weight.dtype,
                 )

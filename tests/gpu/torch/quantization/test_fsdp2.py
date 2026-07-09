@@ -154,9 +154,9 @@ class _LSQBf16Linear(nn.Module):
         tq.register_buffer("_amax", torch.ones(dim, dtype=torch.bfloat16))
         self.weight_quantizer = StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
         self.weight_quantizer.enable_lsq(
-            torch.ones(dim, dtype=torch.bfloat16),
             quantize_scales=False,
             learnable_amax=["pre", "post"],
+            dtype=torch.bfloat16,
         )
 
     def forward(self, inputs):

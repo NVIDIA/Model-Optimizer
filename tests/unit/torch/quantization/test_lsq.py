@@ -37,8 +37,10 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _FP8_E4M3_MIN_POSITIVE,
     StaticBlockScaleQuantizer,
     TensorQuantizer,
+    _amax_to_scale,
 )
 from modelopt.torch.quantization.tensor_quant import int_cast_ste
+from modelopt.torch.quantization.utils.shared_input import SharedWeightGlobalAmaxState
 
 
 def _make_int4_static_quantizer():
@@ -169,8 +171,7 @@ class TestEnableLSQ:
 
     def test_post_only_learnable(self):
         q = self._make_quantizer()
-        amax = torch.ones(8) * 3.0
-        q.enable_lsq(amax, quantize_scales=False, learnable_amax=["post"], tied_amax=False)
+        q.enable_lsq(quantize_scales=False, learnable_amax=["post"], tied_amax=False)
         assert q._lsq is True
         assert isinstance(q._amax_post, nn.Parameter)
         assert q._amax_post.requires_grad is True
@@ -179,23 +180,20 @@ class TestEnableLSQ:
 
     def test_pre_only_learnable(self):
         q = self._make_quantizer()
-        amax = torch.ones(8) * 3.0
-        q.enable_lsq(amax, quantize_scales=False, learnable_amax=["pre"], tied_amax=False)
+        q.enable_lsq(quantize_scales=False, learnable_amax=["pre"], tied_amax=False)
         assert isinstance(q._amax_pre, nn.Parameter)
         assert q._amax_pre.requires_grad is True
         assert not isinstance(q._amax_post, nn.Parameter)
 
     def test_both_learnable(self):
         q = self._make_quantizer()
-        amax = torch.ones(8) * 3.0
-        q.enable_lsq(amax, quantize_scales=False, learnable_amax=["pre", "post"], tied_amax=False)
+        q.enable_lsq(quantize_scales=False, learnable_amax=["pre", "post"], tied_amax=False)
         assert isinstance(q._amax_pre, nn.Parameter)
         assert isinstance(q._amax_post, nn.Parameter)
 
     def test_tied_both_learnable(self):
         q = self._make_quantizer()
-        amax = torch.ones(8) * 3.0
-        q.enable_lsq(amax, quantize_scales=False, learnable_amax=["pre", "post"], tied_amax=True)
+        q.enable_lsq(quantize_scales=False, learnable_amax=["pre", "post"], tied_amax=True)
         assert q._tied_amax is True
         assert isinstance(q._amax_post, nn.Parameter)
         assert not hasattr(q, "_amax_pre")
@@ -203,33 +201,37 @@ class TestEnableLSQ:
 
     def test_frozen(self):
         q = self._make_quantizer()
-        amax = torch.ones(8) * 3.0
-        q.enable_lsq(amax, quantize_scales=False, learnable_amax=[], tied_amax=False)
+        q.enable_lsq(quantize_scales=False, learnable_amax=[], tied_amax=False)
         assert not isinstance(q._amax_post, nn.Parameter)
         assert not isinstance(q._amax_pre, nn.Parameter)
 
     def test_old_amax_deleted(self):
         q = self._make_quantizer()
         assert hasattr(q, "_amax")
-        q.enable_lsq(torch.ones(8), quantize_scales=False)
+        q.enable_lsq(quantize_scales=False)
         assert not hasattr(q, "_amax")
 
     def test_can_skip_pre_scale_quantization(self):
         q = self._make_quantizer()
         q.enable_lsq(
-            torch.ones(8),
             quantize_scales=False,
             quantize_pre_scale=False,
         )
         assert q._quantize_pre_scale is False
 
+    def test_quantize_scales_without_global_amax_raises(self):
+        q = self._make_quantizer()
+        assert q.global_amax is None
+        with pytest.raises(AssertionError, match="global_amax"):
+            q.enable_lsq(quantize_scales=True)
+
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_learnable_amax_uses_input_dtype(self, dtype):
         q = self._make_quantizer()
         q.enable_lsq(
-            torch.ones(8, dtype=dtype),
             quantize_scales=False,
             learnable_amax=["pre", "post"],
+            dtype=dtype,
         )
 
         assert q._amax_pre.dtype == dtype
@@ -238,7 +240,6 @@ class TestEnableLSQ:
     def test_dtype_cast_updates_learnable_amax_dtype(self):
         q = self._make_quantizer()
         q.enable_lsq(
-            torch.ones(8),
             quantize_scales=False,
             learnable_amax=["pre", "post"],
         )
@@ -258,7 +259,6 @@ class TestEnableLSQ:
         module.weight = nn.Parameter(torch.ones(8, 16, dtype=torch.bfloat16))
         module.weight_quantizer = self._make_quantizer()
         module.weight_quantizer.enable_lsq(
-            torch.ones(8),
             quantize_scales=False,
             learnable_amax=["pre", "post"],
         )
@@ -375,12 +375,9 @@ class TestFakeQuantizeLSQ:
         tq._disabled = False
         tq._block_sizes = {-1: 16}
         tq._pass_through_bwd = True
-        tq.register_buffer("_amax", torch.ones(4))
+        tq.register_buffer("_amax", torch.ones(4) * 3.5)
         sbsq = StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
-        amax = torch.ones(4) * 3.5
-        sbsq.enable_lsq(
-            amax, quantize_scales=False, learnable_amax=learnable_amax, tied_amax=tied_amax
-        )
+        sbsq.enable_lsq(quantize_scales=False, learnable_amax=learnable_amax, tied_amax=tied_amax)
         return sbsq
 
     def test_output_shape(self):
@@ -424,39 +421,96 @@ class TestFakeQuantizeLSQ:
         q = self._make_lsq_quantizer()
         q._quantize_scales = True
         q._quantize_pre_scale = False
-        q.register_buffer("_per_tensor_scale", torch.tensor(1.0))
-        calls = []
+        # per_tensor_scale of 1.0: INT4 _quant_max_bound is 7.0, so scale = global_amax / 7.
+        q.global_amax = torch.tensor(float(q._quant_max_bound))
+        quantize_flags = []
+        orig_block_scale = q._block_scale_from_amax
 
-        def spy_maybe_quantize_scale(scale_raw):
-            calls.append(scale_raw)
-            return scale_raw
+        def spy_block_scale(amax, quantize):
+            quantize_flags.append(quantize)
+            return orig_block_scale(amax, quantize)
 
-        monkeypatch.setattr(q, "_maybe_quantize_scale", spy_maybe_quantize_scale)
+        monkeypatch.setattr(q, "_block_scale_from_amax", spy_block_scale)
 
         out = q._fake_quantize(torch.randn(4, 16))
 
         assert out.shape == (4, 16)
-        assert len(calls) == 1
+        # post scale is FP8-quantized, pre scale is not (quantize_pre_scale=False).
+        assert quantize_flags == [True, False]
 
     def test_skip_pre_scale_quantization_uses_raw_scale_floor(self, monkeypatch):
         q = self._make_lsq_quantizer()
         q._quantize_scales = True
         q._quantize_pre_scale = False
-        q.register_buffer("_per_tensor_scale", torch.tensor(1.0))
+        q.global_amax = torch.tensor(float(q._quant_max_bound))
         min_values = []
 
-        def fake_amax_to_scale(amax, maxbound, min_value=None):
-            min_values.append(min_value)
+        def fake_amax_to_scale(amax, maxbound, min_value=1e-8):
+            # Only record the per-block (shape-4) scale calls, not per_tensor_scale.
+            if amax.numel() == 4:
+                min_values.append(min_value)
             return torch.ones_like(amax)
 
         monkeypatch.setattr(
             "modelopt.torch.quantization.nn.modules.tensor_quantizer._amax_to_scale",
             fake_amax_to_scale,
         )
-        monkeypatch.setattr(q, "_maybe_quantize_scale", lambda scale_raw: scale_raw)
 
         out = q._fake_quantize(torch.randn(4, 16))
 
         assert out.shape == (4, 16)
         assert torch.equal(min_values[0], torch.tensor([_FP8_E4M3_MIN_POSITIVE]))
         assert min_values[1] == 1e-8
+
+
+class TestLSQSharedGlobalAmax:
+    """Regression: LSQ must honor the shared/tied weight global_amax invariant.
+
+    A q/k/v-style fusible group ties ``_global_amax`` to a single shared buffer object.
+    Since LSQ derives ``per_tensor_scale`` from ``global_amax`` at runtime (no snapshot),
+    an in-place update of the shared buffer (e.g. export unification) must propagate to
+    every member. Uses INT4 (FP8-quantized scales) members so the forward runs on CPU;
+    the shared-buffer mechanism under test is format-agnostic.
+    """
+
+    def _make_member(self, amax_value=2.0):
+        tq = TensorQuantizer()
+        tq._num_bits = 4
+        tq._unsigned = False
+        tq._narrow_range = True
+        tq._disabled = False
+        tq._block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
+        tq._pass_through_bwd = True
+        tq.register_buffer("_amax", torch.ones(4) * amax_value)
+        return StaticBlockScaleQuantizer.from_tensor_quantizer(tq)
+
+    def _make_tied_lsq_group(self, global_amax=3.0, n_members=3):
+        members = [self._make_member(amax_value=2.0) for _ in range(n_members)]
+        state = SharedWeightGlobalAmaxState()
+        state.global_amax = torch.tensor(float(global_amax))
+        for member in members:
+            assert state.tie_member_quantizer(member)
+        # All members must alias the single shared buffer object.
+        assert all(m._global_amax is members[0]._global_amax for m in members)
+        for member in members:
+            member.enable_lsq(quantize_scales=True)
+        return members
+
+    def test_per_tensor_scale_tracks_shared_update(self):
+        members = self._make_tied_lsq_group(global_amax=3.0)
+        new_value = 5.0
+        # Mutate the shared buffer in place, mimicking export unification.
+        members[0]._global_amax.data.fill_(new_value)
+
+        for member in members:
+            expected = _amax_to_scale(torch.tensor(new_value), member._quant_max_bound)
+            assert torch.allclose(member.per_tensor_scale, expected)
+
+    def test_members_produce_identical_output_after_shared_update(self):
+        members = self._make_tied_lsq_group(global_amax=3.0)
+        members[0]._global_amax.data.fill_(5.0)
+
+        x = torch.randn(4, 16)
+        outputs = [member._fake_quantize(x) for member in members]
+        for out in outputs[1:]:
+            assert torch.equal(out, outputs[0])

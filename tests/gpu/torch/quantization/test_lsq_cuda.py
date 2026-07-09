@@ -168,11 +168,9 @@ def test_lsq_fp4_fake_quantize_differentiable():
         tq, global_amax=torch.tensor(1.0, device=device)
     )
 
-    amax = torch.ones(4, device=device) * 3.0
-    per_tensor_scale = torch.tensor(1.0 / 6.0, device=device)
+    # global_amax=1.0 with NVFP4 _quant_max_bound=6.0 yields per_tensor_scale = 1/6.
+    sbsq.amax = torch.ones(4, device=device) * 3.0
     sbsq.enable_lsq(
-        amax,
-        per_tensor_scale=per_tensor_scale,
         quantize_scales=True,
         learnable_amax=["post"],
     )
