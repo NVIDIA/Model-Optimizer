@@ -153,7 +153,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 import re
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, TypeAlias
 
 from pydantic import (
     AliasChoices,
@@ -1210,6 +1210,8 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
             )
         return self
 
+_ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
+
 
 class LSQConfig(QuantizeAlgorithmConfig):
     """Config for LSQ (Learnt Scale Quantization) and Dual-LSQ algorithms.
@@ -1241,7 +1243,7 @@ class LSQConfig(QuantizeAlgorithmConfig):
     while preserving the existing post-scale quantization behavior.
     """
 
-    ScaleCalibConfig: ClassVar = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
+    ScaleCalibConfig: ClassVar[Any] = _ScaleCalibConfig
 
     method: Literal["lsq"] = ModeloptField("lsq")
 
@@ -1273,7 +1275,7 @@ class LSQConfig(QuantizeAlgorithmConfig):
         ),
     )
 
-    scale_algorithm: ScaleCalibConfig | None = ModeloptField(
+    scale_algorithm: _ScaleCalibConfig | None = ModeloptField(
         default=None,
         title="Scale calibration algorithm to run first.",
         description=(
@@ -1284,7 +1286,7 @@ class LSQConfig(QuantizeAlgorithmConfig):
     )
 
     @field_serializer("scale_algorithm")
-    def _serialize_scale_algorithm(self, value: ScaleCalibConfig | None):
+    def _serialize_scale_algorithm(self, value: _ScaleCalibConfig | None):
         """Preserve the sparse public dict shape accepted by this field."""
         if value is None:
             return None

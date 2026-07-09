@@ -129,9 +129,7 @@ class TestLSQConfig:
         calibrate = create_autospec(model_calib_module.mse_calibrate)
         monkeypatch.setattr(model_calib_module, "mse_calibrate", calibrate)
         model = Mock()
-        model_calib_module._run_scale_calibration(
-            model, None, cfg.scale_algorithm, caller_name="lsq"
-        )
+        model_calib_module._run_scale_calibration(model, None, cfg.scale_algorithm)
         calibrate.assert_called_once_with(model, forward_loop=None, fp8_scale_sweep=True)
 
     @pytest.mark.parametrize(
