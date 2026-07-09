@@ -37,6 +37,8 @@ jobs:
   run-test:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
     container:
       image: ${{ inputs.docker_image }}
       options: --shm-size=2gb # TRT-LLM tests on 2-GPU runner needs more shared memory

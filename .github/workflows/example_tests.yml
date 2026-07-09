@@ -14,6 +14,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref || github.sha }}
   cancel-in-progress: true
 
+# Each job's `allow_failure` reads the repo variable ALLOW_FAILURE_EXAMPLE_TESTS:
+# a comma-separated list of example names whose test failures should be non-blocking, e.g. "torch_trt,llm_qat"
+
 jobs:
   pr-gate:
     uses: ./.github/workflows/_pr_gate.yml
@@ -42,6 +45,8 @@ jobs:
           - example: speculative_decoding
             docker_image: "26.01"
     uses: ./.github/workflows/_example_tests_runner.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.05' }}-py3"
@@ -60,6 +65,8 @@ jobs:
       matrix:
         example: [hf_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc19"
@@ -75,6 +82,8 @@ jobs:
       matrix:
         example: [llm_eval, hf_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc19"
@@ -88,6 +97,8 @@ jobs:
     needs: [pr-gate]
     if: needs.pr-gate.outputs.any_changed == 'true'
     uses: ./.github/workflows/_example_tests_runner.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/nemo:26.06"
@@ -106,6 +117,8 @@ jobs:
       matrix:
         example: [diffusers, torch_onnx, torch_trt]
     uses: ./.github/workflows/_example_tests_runner.yml
+    permissions:
+      contents: read
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/tensorrt:26.05-py3"

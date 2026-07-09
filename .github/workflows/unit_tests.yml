@@ -86,6 +86,8 @@ jobs:
     needs: [linux, check-file-changes]
     runs-on: windows-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
