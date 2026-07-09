@@ -153,7 +153,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 import re
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import (
     AliasChoices,
@@ -1020,9 +1020,6 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
-ScaleCalibConfig = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
-
-
 class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
     """The config for ``smoothquant`` algorithm (SmoothQuant).
 
@@ -1243,6 +1240,8 @@ class LSQConfig(QuantizeAlgorithmConfig):
     ``quantize_pre_scale=False`` leaves the pre-quantization scale unquantized
     while preserving the existing post-scale quantization behavior.
     """
+
+    ScaleCalibConfig: ClassVar = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
 
     method: Literal["lsq"] = ModeloptField("lsq")
 
