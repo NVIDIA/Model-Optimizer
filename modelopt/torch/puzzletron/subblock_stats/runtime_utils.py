@@ -49,6 +49,11 @@ class RuntimeConfig:
     prefill_seq_len: int
     generation_seq_len: int
     batch_size: int
+    data_parallel_size: int
+    tensor_parallel_size: int
+    prefill_context_parallel_size: int
+    decode_context_parallel_size: int
+    enable_expert_parallel: bool
     num_iters: int
     num_warmup_iters: int
     # Fraction of total GPU memory vLLM may use. Kept well below the default

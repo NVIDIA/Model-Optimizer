@@ -79,10 +79,17 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         str(runtime_config.num_iters),
         "--max-num-seqs",
         "1",
+        "--data-parallel-size",
+        str(runtime_config.data_parallel_size),
+        "--prefill-context-parallel-size",
+        str(runtime_config.prefill_context_parallel_size),
+        "--decode-context-parallel-size",
+        str(runtime_config.decode_context_parallel_size),
+        "--enable-expert-parallel"
+        if runtime_config.enable_expert_parallel
+        else "--no-enable-expert-parallel",
         "--tensor-parallel-size",
-        "1",
-        "--pipeline-parallel-size",
-        "1",
+        str(runtime_config.tensor_parallel_size),
         "--distributed-executor-backend",
         "external_launcher",
         # Cap GPU memory so vLLM's startup free-memory check passes while the
@@ -101,7 +108,7 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
             check=True,
             capture_output=True,
             text=True,
-            timeout=1800,  # 30 minutes
+            timeout=3600,  # 1 hour
         )  # nosec B603
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("vLLM latency benchmark timed out") from exc
