@@ -31,8 +31,7 @@ from modelopt.torch.kernels.common.attention.triton_fa import (
     _load_paged_k_tile,
     _load_paged_v_tile,
 )
-from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4
-from modelopt.torch.kernels.quantization.attention.v_qdq import _v_qdq_nvfp4
+from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4, _v_qdq_nvfp4
 
 __all__ = ["attention_decode"]
 

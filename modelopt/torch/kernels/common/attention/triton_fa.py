@@ -62,8 +62,8 @@ def _load_sparsity_helpers() -> None:
 def _load_qdq_helpers() -> None:
     global _qdq_fp8, _p_qdq_nvfp4, _v_qdq_nvfp4
     if _qdq_fp8 is None:
-        from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4 as _p_nvfp4
-        from modelopt.torch.kernels.quantization.attention.v_qdq import _v_qdq_nvfp4 as _v_nvfp4
+        from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4 as _p_nvfp4
+        from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _v_qdq_nvfp4 as _v_nvfp4
         from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _fp8
 
         _qdq_fp8 = _fp8
