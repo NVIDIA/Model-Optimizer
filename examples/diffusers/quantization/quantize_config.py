@@ -77,6 +77,8 @@ class QuantizationConfig:
     collect_method: CollectMethod = CollectMethod.DEFAULT
     alpha: float = 1.0  # SmoothQuant alpha
     lowrank: int = 32  # SVDQuant lowrank
+    # Fixed SVDQuant migration strength; None keeps the AWQ-Lite alpha search.
+    svdquant_alpha: float | None = None
     quantize_mha: bool = False
     compress: bool = False
     block_size: int = 16  # NVFP4 block size

@@ -1154,6 +1154,22 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    alpha: float | None = ModeloptField(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        title="Fixed SmoothQuant-style migration strength (skips the AWQ-Lite search)",
+        description=(
+            "When set, the AWQ-Lite alpha search (an extra forward pass with one quantized "
+            "GEMM per alpha candidate per linear) is skipped. Instead, per-channel activation "
+            "amax is collected in a single pass and SmoothQuant-style smoothing "
+            "``scale = w_amax^(1-alpha) / act_amax^alpha`` is applied before the SVD. "
+            "``alpha=1.0`` migrates outliers fully from activations to weights (flat "
+            "activations), letting the SVD low-rank branch absorb them, as in the SVDQuant "
+            "paper. ``None`` (default) keeps the AWQ-Lite output-MSE search."
+        ),
+    )
+
 
 class GPTQCalibConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.

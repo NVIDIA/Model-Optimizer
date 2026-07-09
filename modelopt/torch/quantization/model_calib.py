@@ -1097,34 +1097,6 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
 
     max_calibrate(model, forward_loop)
 
-    def postprocess(module):
-        # It is important to keep scaling math in fp32 to be numerically safe
-        act_amax = module.input_quantizer.amax.float()
-        weight_scale = module.weight.abs().amax(dim=0, keepdim=True)
-        device, dtype = module.weight.device, module.weight.dtype
-
-        parallel_group = module.parallel_state.tensor_parallel_group
-        if is_quantized_column_parallel_linear(module) and parallel_group.is_initialized():
-            dist.all_reduce(act_amax, op=dist.ReduceOp.MAX, group=parallel_group.group)
-            dist.all_reduce(weight_scale, op=dist.ReduceOp.MAX, group=parallel_group.group)
-
-        scale_a = (weight_scale.pow(1 - alpha) / act_amax.pow(alpha)).squeeze()
-
-        # Now that activation per-channel amax have been collected, use per-tensor quantization for activation
-        # TODO: make this a buffer after we support only heterogeneous checkpointing for MCore
-        module.input_quantizer._amax_for_smoothing = act_amax.cpu()
-        module.input_quantizer.reset_amax()
-        module.input_quantizer.axis = None
-        module.input_quantizer.amax = act_amax.amax().to(dtype=dtype, device=device)
-
-        # Some channel could have 0 amax which causes scale_a to overflow. Explicitly mask them out here
-        epsilon = 1.0 / (1 << 31)
-        if scale_a.min() <= epsilon:
-            zero_mask = act_amax <= epsilon
-            scale_a[zero_mask] = 1
-        scale_a = scale_a.clamp(min=1e-4, max=1e4)
-        apply_pre_quant_scale_and_smooth(module, scale_a)
-
     name_to_module = dict(model.named_modules())
     smoothed_modules = 0
     for name, module in name_to_module.items():
@@ -1144,10 +1116,88 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
             )
 
             with enable_weight_access_and_writeback(module, model, name_to_module):
-                postprocess(module)
+                _smoothquant_postprocess(module, alpha)
 
             smoothed_modules += 1
     print_rank_0(f"Smoothed {smoothed_modules} modules")
+
+
+def _smoothquant_postprocess(module: nn.Module, alpha: float):
+    """Apply SmoothQuant smoothing to one quantized linear from collected per-channel act amax.
+
+    Computes ``scale = w_amax^(1-alpha) / act_amax^alpha``, restores the input quantizer to
+    per-tensor amax, and folds the scales via :func:`apply_pre_quant_scale_and_smooth`.
+    """
+    # It is important to keep scaling math in fp32 to be numerically safe
+    act_amax = module.input_quantizer.amax.float()
+    weight_scale = module.weight.abs().amax(dim=0, keepdim=True)
+    device, dtype = module.weight.device, module.weight.dtype
+
+    parallel_group = module.parallel_state.tensor_parallel_group
+    if is_quantized_column_parallel_linear(module) and parallel_group.is_initialized():
+        dist.all_reduce(act_amax, op=dist.ReduceOp.MAX, group=parallel_group.group)
+        dist.all_reduce(weight_scale, op=dist.ReduceOp.MAX, group=parallel_group.group)
+
+    scale_a = (weight_scale.pow(1 - alpha) / act_amax.pow(alpha)).squeeze()
+
+    # Now that activation per-channel amax have been collected, use per-tensor quantization for activation
+    # TODO: make this a buffer after we support only heterogeneous checkpointing for MCore
+    module.input_quantizer._amax_for_smoothing = act_amax.cpu()
+    module.input_quantizer.reset_amax()
+    module.input_quantizer.axis = None
+    module.input_quantizer.amax = act_amax.amax().to(dtype=dtype, device=device)
+
+    # Some channel could have 0 amax which causes scale_a to overflow. Explicitly mask them out here
+    epsilon = 1.0 / (1 << 31)
+    if scale_a.min() <= epsilon:
+        zero_mask = act_amax <= epsilon
+        scale_a[zero_mask] = 1
+    scale_a = scale_a.clamp(min=1e-4, max=1e4)
+    apply_pre_quant_scale_and_smooth(module, scale_a)
+
+
+@torch.no_grad()
+def _smooth_fixed_alpha(model: nn.Module, forward_loop: ForwardLoop, alpha: float):
+    """Single-pass SmoothQuant-style smoothing at a fixed migration strength.
+
+    Unlike :func:`smoothquant`, this applies to any quantizer format. Used by SVDQuant's
+    fixed-``alpha`` mode, where the SVD low-rank branch absorbs the weight outliers created
+    by the migration, so no per-layer alpha search is needed.
+    """
+    for name, module in model.named_modules():
+        if (
+            is_quantized_linear(module)
+            and module.input_quantizer.is_enabled
+            and module.input_quantizer.axis is None
+        ):
+            module.input_quantizer.axis = -1
+
+    max_calibrate(model, forward_loop)
+
+    name_to_module = dict(model.named_modules())
+    smoothed_modules = 0
+    for name, module in name_to_module.items():
+        if (
+            is_quantized_linear(module)
+            and module.weight_quantizer.is_enabled
+            and module.input_quantizer.is_enabled
+        ):
+            if not hasattr(module.input_quantizer, "_amax"):
+                warnings.warn(f"{name} is not calibrated, skip smoothing")
+                continue
+            if module.input_quantizer.axis != -1:
+                warnings.warn(f"Only per-channel smoothing is supported, skip {name}")
+                continue
+
+            assert module.input_quantizer._amax.numel() > 1, (
+                f"Error: {name} has only one channel to smooth"
+            )
+
+            with enable_weight_access_and_writeback(module, model, name_to_module):
+                _smoothquant_postprocess(module, alpha)
+
+            smoothed_modules += 1
+    print_rank_0(f"Smoothed {smoothed_modules} modules (fixed alpha={alpha})")
 
 
 def awq(
@@ -1773,6 +1823,7 @@ def svdquant(
     forward_loop: ForwardLoop | None = None,
     lowrank: int = 32,
     skip_layers: list[str] | None = None,
+    alpha: float | None = None,
     **kwargs,
 ):
     """Lite version of SVDQuant.
@@ -1821,7 +1872,15 @@ def svdquant(
                         quantizer.disable()
                         skipped_quantizers.append(quantizer)
 
-    awq(model, forward_loop, "awq_lite", **kwargs)
+    if alpha is not None:
+        # Fixed migration strength: one SmoothQuant-style stats pass instead of
+        # AWQ-Lite's cache + candidate-search passes. The search's objective
+        # (plain weight-quant output MSE, activations unquantized) predates the
+        # SVD residual anyway; with a low-rank absorber, aggressive fixed
+        # migration (alpha ~ 1.0) follows the SVDQuant paper.
+        _smooth_fixed_alpha(model, forward_loop, alpha)
+    else:
+        awq(model, forward_loop, "awq_lite", **kwargs)
 
     for quantizer in skipped_quantizers:
         quantizer.enable()

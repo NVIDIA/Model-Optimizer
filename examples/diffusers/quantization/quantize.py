@@ -224,6 +224,7 @@ class Quantizer:
             self.config.algo.value,
             alpha=self.config.alpha,
             lowrank=self.config.lowrank,
+            svdquant_alpha=self.config.svdquant_alpha,
             skip_layers=svdquant_skip_layers,
         )
         self.logger.info(f"Quant config {quant_config}")
@@ -559,6 +560,17 @@ def create_argument_parser() -> argparse.ArgumentParser:
     quant_group.add_argument("--alpha", type=float, default=1.0, help="SmoothQuant alpha parameter")
     quant_group.add_argument("--lowrank", type=int, default=32, help="SVDQuant lowrank parameter")
     quant_group.add_argument(
+        "--svdquant-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Fixed SVDQuant migration strength in [0, 1]; skips the AWQ-Lite alpha search "
+            "(one SmoothQuant-style stats pass instead). 1.0 migrates outliers fully from "
+            "activations to weights, letting the SVD low-rank branch absorb them. "
+            "Default: None (AWQ-Lite search)."
+        ),
+    )
+    quant_group.add_argument(
         "--quantize-mha", action="store_true", help="Quantizing MHA into FP8 if its True"
     )
     quant_group.add_argument(
@@ -662,6 +674,7 @@ def main() -> None:
             collect_method=CollectMethod(args.collect_method),
             alpha=args.alpha,
             lowrank=args.lowrank,
+            svdquant_alpha=args.svdquant_alpha,
             quantize_mha=args.quantize_mha,
             compress=args.compress,
             block_size=args.block_size,
