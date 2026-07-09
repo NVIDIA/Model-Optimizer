@@ -28,6 +28,7 @@ from modelopt.torch.quantization.model_calib import (
     max_calibrate,
 )
 from modelopt.torch.quantization.nn import QuantLinear, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 
 class TensorQuantizerTester:
@@ -293,8 +294,6 @@ class TensorQuantizerTester:
 
     def test_constant_amax_nvfp4_input_scale(self):
         """For NVFP4, constant_amax=2688 (= E2M1_MAX * E4M3_MAX) exports input_scale == 1.0."""
-        from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
-
         tq = TensorQuantizer(
             QuantizerAttributeConfig(
                 num_bits=(2, 1),
@@ -338,6 +337,11 @@ class TensorQuantizerTester:
             QuantizerAttributeConfig(num_bits=(2, 1), constant_amax=-1.0)
         with pytest.raises(Exception, match="constant_amax must be a positive value"):
             QuantizerAttributeConfig(num_bits=(2, 1), constant_amax=0.0)
+
+    def test_constant_amax_mutually_exclusive_with_use_constant_amax(self):
+        """use_constant_amax and constant_amax cannot both be set."""
+        with pytest.raises(Exception, match="mutually exclusive"):
+            QuantizerAttributeConfig(num_bits=8, use_constant_amax=True, constant_amax=2688.0)
 
     def test_modelopt_state(self):
         # Test loading of amax from ref to test

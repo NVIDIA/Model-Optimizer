@@ -694,6 +694,20 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         assert v is None or v > 0, "constant_amax must be a positive value."
         return v
 
+    @model_validator(mode="after")
+    def validate_constant_amax_modes(self):
+        """Forbid combining ``use_constant_amax`` and ``constant_amax``.
+
+        Both pin the amax but disagree on the value: ``use_constant_amax`` uses the FP8 E4M3
+        range (448.0) for the fake-quant forward and registers no ``_amax`` buffer, while
+        ``constant_amax`` pins ``_amax`` to its configured value for both forward and export.
+        Setting both would make the simulated and exported scales silently diverge.
+        """
+        assert not (self.use_constant_amax and self.constant_amax is not None), (
+            "use_constant_amax and constant_amax are mutually exclusive; set only one."
+        )
+        return self
+
 
 class LayerwiseConfig(ModeloptBaseConfig):
     """Nested config for layer-by-layer calibration behavior."""
