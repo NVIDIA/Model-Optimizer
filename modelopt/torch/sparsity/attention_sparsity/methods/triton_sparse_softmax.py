@@ -18,6 +18,11 @@
 from contextlib import contextmanager
 
 from .registry import SparseAttentionMethod, register_sparse_method
+from .triton_skip_softmax import (
+    _clear_triton_backend_config,
+    _diffusers_backend_context,
+    _set_triton_backend_config,
+)
 
 
 @register_sparse_method("triton_sparse_softmax")
@@ -50,18 +55,41 @@ class TritonSparseSoftmaxMethod(SparseAttentionMethod):
         """Method name identifier."""
         return "triton_sparse_softmax"
 
+    def get_threshold_info(self) -> dict:
+        """Return fixed N:M pattern info for display/debugging."""
+        return {
+            "type": "fixed",
+            "pattern": f"{self.sparsity_n}:{self.sparsity_m}",
+            "dense_sink_tokens": self.dense_sink_tokens,
+            "dense_recent_tokens": self.dense_recent_tokens,
+        }
+
     # calculate_sparsity and apply_sparsity use base class defaults
     # (no-op mask and NotImplementedError) — sparsity is fused into the Triton kernel.
 
     def get_sparse_context(self, module):
-        """Return context manager that activates N:M sparse softmax during forward."""
+        """Return context manager that activates N:M sparse softmax during forward.
+
+        Sets ``module._apply_sparse_nm`` for the HF (modelopt_triton) backend,
+        which reads the N:M parameters from this method instance, and pushes the
+        parameters to the diffusers/LTX Triton backends via their thread-local
+        configs (those backends have no module handle at dispatch time).
+        """
 
         @contextmanager
         def _sparse_nm_context():
             module._apply_sparse_nm = True
-            try:
-                yield
-            finally:
-                module._apply_sparse_nm = False
+            _set_triton_backend_config(
+                sparsity_n=self.sparsity_n,
+                sparsity_m=self.sparsity_m,
+                dense_sink_tokens=self.dense_sink_tokens,
+                dense_recent_tokens=self.dense_recent_tokens,
+            )
+            with _diffusers_backend_context():
+                try:
+                    yield
+                finally:
+                    module._apply_sparse_nm = False
+                    _clear_triton_backend_config()
 
         return _sparse_nm_context()

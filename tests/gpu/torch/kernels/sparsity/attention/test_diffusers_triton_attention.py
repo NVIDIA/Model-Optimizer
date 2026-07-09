@@ -90,6 +90,42 @@ class TestDiffusersTritonAttention:
         out = diffusers_mod._diffusers_triton_attention(q, k, v)
         assert out.shape == q.shape
 
+    def test_sparse_nm_differs_from_dense(self):
+        q, k, v = self._make_qkv(seq_q=256, seq_k=256)
+        out_dense = diffusers_mod._diffusers_triton_attention(q, k, v)
+        diffusers_mod.set_triton_skip_softmax_config(sparsity_n=2, sparsity_m=4)
+        out_sparse = diffusers_mod._diffusers_triton_attention(q, k, v)
+        assert out_sparse.shape == q.shape
+        assert not torch.isnan(out_sparse).any()
+        assert not torch.allclose(out_sparse, out_dense, atol=1e-3)
+
+    def test_sparse_nm_matches_core_kernel(self):
+        """The dispatch forwards N:M params to the core kernel unchanged."""
+        b, seq, h, d = 2, 256, 4, 64
+        q, k, v = self._make_qkv(b=b, seq_q=seq, seq_k=seq, h=h, d=d)
+        diffusers_mod.set_triton_skip_softmax_config(sparsity_n=2, sparsity_m=4)
+        out = diffusers_mod._diffusers_triton_attention(q, k, v)
+
+        from modelopt.torch.kernels.common.attention import attention
+
+        locs = torch.arange(b, device="cuda", dtype=torch.int32) * seq
+        lens = torch.full((b,), seq, device="cuda", dtype=torch.int32)
+        ref = attention(
+            q.reshape(b * seq, h, d).contiguous(),
+            k.reshape(b * seq, h, d).contiguous(),
+            v.reshape(b * seq, h, d).contiguous(),
+            locs,
+            lens,
+            seq,
+            is_causal=False,
+            softmax_scale=1.0 / d**0.5,
+            sparsity_n=2,
+            sparsity_m=4,
+            dense_sink_tokens=0,
+            dense_recent_tokens=0,
+        ).view(b, seq, h, d)
+        assert torch.equal(out, ref)
+
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 class TestLTXTritonAttention:
@@ -135,6 +171,15 @@ class TestLTXTritonAttention:
         q, k, v = self._make_qkv(seq_q=128, seq_k=256)
         out = ltx_mod._ltx_triton_attention(q, k, v, heads=4)
         assert out.shape == q.shape
+
+    def test_sparse_nm_differs_from_dense(self):
+        q, k, v = self._make_qkv(seq_q=256, seq_k=256)
+        out_dense = ltx_mod._ltx_triton_attention(q, k, v, heads=4)
+        ltx_mod.set_ltx_triton_context(active=True, sparsity_n=2, sparsity_m=4)
+        out_sparse = ltx_mod._ltx_triton_attention(q, k, v, heads=4)
+        assert out_sparse.shape == q.shape
+        assert not torch.isnan(out_sparse).any()
+        assert not torch.allclose(out_sparse, out_dense, atol=1e-3)
 
     def test_calibration_mode(self):
         ltx_mod.set_ltx_triton_context(
