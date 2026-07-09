@@ -121,7 +121,10 @@ jobs:
       contents: read
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt:26.06-py3"
+      # Pinned to 26.05 (TensorRT 10): torch-tensorrt is capped at <2.13 (== 2.12.1),
+      # which needs libnvinfer.so.10; newer tensorrt containers drop it. Bump only once
+      # a torch-tensorrt build for the newer TensorRT is available.
+      docker_image: "nvcr.io/nvidia/tensorrt:26.05-py3"
       example: ${{ matrix.example }}
       timeout_minutes: 45
       pip_install_extras: "[onnx,hf,dev-test]"
