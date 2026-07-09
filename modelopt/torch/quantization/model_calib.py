@@ -44,13 +44,7 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 
 from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import (
-    NVFP4StaticQuantizer,
-    QuantModule,
-    SequentialQuantizer,
-    StaticBlockScaleQuantizer,
-    TensorQuantizer,
-)
+from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
 from .utils import (
     SHARED_PATTERNS,
     SharedWeightGlobalAmaxState,
@@ -62,7 +56,7 @@ from .utils import (
     is_quantized_linear,
     is_quantized_row_parallel_linear,
     persistent_materialization,
-    promote_nvfp4_static_quantizers,
+    promote_static_block_weight_quantizers,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
 
@@ -85,7 +79,7 @@ def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
 def _is_calibrated_nvfp4_static(q) -> bool:
     """True iff ``q`` is an enabled NVFP4-static weight quantizer with ``_amax`` set."""
     return (
-        isinstance(q, NVFP4StaticQuantizer)
+        isinstance(q, StaticBlockScaleQuantizer)
         and not q._disabled
         and q.is_nvfp4_static
         and getattr(q, "_amax", None) is not None
@@ -139,48 +133,17 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
         )
 
 
-def _promote_integer_static_weight_quantizers(model: nn.Module) -> None:
-    """Promote calibrated integer static-block weight quantizers for LSQ."""
-    candidate_ids = {
-        id(module)
-        for module in model.modules()
-        if isinstance(module, TensorQuantizer)
-        and module.is_enabled
-        and module.is_static_block_quant
-        and isinstance(module._num_bits, int)
-        and getattr(module, "_amax", None) is not None
-    }
-    if not candidate_ids:
-        return
-
-    name_to_module = dict(model.named_modules())
-    seen_modules: set[int] = set()
-    for module in name_to_module.values():
-        if id(module) in seen_modules or not isinstance(module, QuantModule):
-            continue
-        seen_modules.add(id(module))
-        with enable_weight_access_and_writeback(module, model, name_to_module):
-            for _, quantizer in module.iter_weights_for_calibration():
-                if id(quantizer) not in candidate_ids:
-                    continue
-                StaticBlockScaleQuantizer.from_tensor_quantizer(quantizer)
-                candidate_ids.remove(id(quantizer))
-        if not candidate_ids:
-            return
-
-
 def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) -> None:
     """Finalize calibrated static quantizers and attached shared state.
 
     Aggregates each fusible group's shared weight ``global_amax`` and promotes it onto the
     member NVFP4-static quantizers, so siblings read the unified value instead of their own
-    ``_amax``. Promotes integer static-block weight quantizers after their ``_amax`` is final.
-    Under the default patterns, verifies the name groups were actually synced.
-    Call once ``_amax`` is final: single-process, or after the distributed amax sync.
+    ``_amax``. Promotes static-block weight quantizers after their ``_amax`` is final. Under
+    the default patterns, verifies the name groups were actually synced. Call once ``_amax``
+    is final: single-process, or after the distributed amax sync.
     """
     SharedWeightGlobalAmaxState.populate(model)
-    promote_nvfp4_static_quantizers(model)
-    _promote_integer_static_weight_quantizers(model)
+    promote_static_block_weight_quantizers(model)
     # Under the default patterns, verify the fusible name groups were actually synced.
     if weight_patterns == list(SHARED_PATTERNS):
         _check_grouped_weight_global_amax_synced(model)
@@ -2026,7 +1989,7 @@ def gptq(
     Per-module steps:
 
     1. ``max_calibrate`` to set amax values from the current activations.
-    2. Promote eligible quantizers to ``NVFP4StaticQuantizer`` (two-level scaling).
+    2. Promote eligible quantizers to ``StaticBlockScaleQuantizer`` (two-level scaling).
     3. Collect per-linear-layer Hessian matrices via forward hooks.
     4. Blockwise weight updates using the inverse Hessian to compensate for
        rounding error (the core GPTQ column-wise update).
