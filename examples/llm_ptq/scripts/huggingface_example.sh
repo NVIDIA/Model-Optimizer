@@ -98,6 +98,22 @@ if [ -n "$AUTO_QUANTIZE_SCORE_SIZE" ]; then
     PTQ_ARGS+=" --auto_quantize_score_size=$AUTO_QUANTIZE_SCORE_SIZE "
 fi
 
+if [ -n "$AUTO_QUANTIZE_DATA_SIGNATURE" ]; then
+    PTQ_ARGS+=" --auto_quantize_data_signature=$AUTO_QUANTIZE_DATA_SIGNATURE "
+fi
+
+if [ -n "$AUTO_QUANTIZE_SCORE_COMPONENT_TRACKING" ]; then
+    PTQ_ARGS+=" --auto_quantize_score_component_tracking=$AUTO_QUANTIZE_SCORE_COMPONENT_TRACKING "
+fi
+
+if [ -n "$AUTO_QUANTIZE_HIDDEN_RECON_SCORE_WINDOWS" ]; then
+    PTQ_ARGS+=" --auto_quantize_hidden_recon_score_windows=$AUTO_QUANTIZE_HIDDEN_RECON_SCORE_WINDOWS "
+fi
+
+if [ -n "$AUTO_QUANTIZE_HIDDEN_RECON_SCORE_REDUCE" ]; then
+    PTQ_ARGS+=" --auto_quantize_hidden_recon_score_reduce=$AUTO_QUANTIZE_HIDDEN_RECON_SCORE_REDUCE "
+fi
+
 # Automatically generate auto_quantize checkpoint path if not provided
 if [ -n "$AUTO_QUANTIZE_BITS" ] && [ -z "$AUTO_QUANTIZE_CHECKPOINT" ]; then
     # Create a descriptive checkpoint name based on model and quantization settings

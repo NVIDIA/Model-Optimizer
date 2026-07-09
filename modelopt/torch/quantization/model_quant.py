@@ -36,7 +36,15 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.utils import atomic_print
 
-from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
+from .algorithms import (
+    AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED,
+    AUTO_QUANTIZE_SCORE_COMPONENT_TRACKING_NONE,
+    AutoQuantizeGradientSearcher,
+    AutoQuantizeHiddenReconSearcher,
+    AutoQuantizeKLDivSearcher,
+    QuantRecipe,
+)
+from .algorithms import get_auto_quantize_candidate_packets as _get_auto_quantize_candidate_packets
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
@@ -50,6 +58,7 @@ __all__ = [
     "disable_quantizer",
     "enable_quantizer",
     "fold_weight",
+    "get_auto_quantize_candidate_packets",
     "get_auto_quantize_config",
     "postprocess_amax",
     "print_quant_summary",
@@ -274,6 +283,7 @@ def auto_quantize(
         mtq.FP8_DEFAULT_CFG,
     ],
     data_loader: Iterable | None = None,
+    score_data_loader: Iterable | None = None,
     forward_step: Callable[[nn.Module, Any], Any | torch.Tensor] | None = None,
     loss_func: Callable[[Any, Any], torch.Tensor] | None = None,
     forward_backward_step: Callable[[nn.Module, Any], Any] | None = None,
@@ -283,12 +293,18 @@ def auto_quantize(
     verbose: bool = False,
     method: str = "gradient",
     checkpoint: str | None = None,
+    data_signature: Any | None = None,
+    quant_grouping_scheme: str = AUTO_QUANTIZE_GROUPING_SCHEME_RUNTIME_FUSED,
+    score_component_tracking: str = AUTO_QUANTIZE_SCORE_COMPONENT_TRACKING_NONE,
+    hidden_recon_score_windows: str | list[str] | tuple[str, ...] | None = None,
+    hidden_recon_score_reduce: str = "mean",
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
     ``auto_quantize`` uses sensitivity scores to rank the per-layer quantization formats and search
-    for the best quantization formats per-layer. The sensitivity score can be computed using gradient-based
-    methods (default) or KL divergence loss, controlled by the ``method`` parameter.
+    for the best quantization formats per-layer. The sensitivity score can be computed using
+    gradient-based methods (default), parent hidden-state reconstruction, or KL divergence loss,
+    controlled by the ``method`` parameter.
 
     Internally this API runs two main phases:
 
@@ -305,7 +321,15 @@ def auto_quantize(
             of bits for the quantized model and defaults to 4.8. ``cost_model`` selects the metric
             used for the effective-bits constraint and currently supports ``"weight"`` (default)
             and ``"active_moe"``. Additional cost-model parameters are provided through the nested
-            ``cost`` dict.
+            ``cost`` dict. ``score_model`` controls how sensitivity scores are normalized before
+            solving. ``response_risk`` may provide an external, measured response-risk table with
+            ``source_path`` or inline ``entries``; supported rows include ``hparam,format,risk``
+            and ``category,layer,format,risk``. These penalties are added to the search objective
+            and are intended for validation-derived triage signals, not hard recipe masks.
+            ``candidate_rerank`` can request extra LP candidate packets for offline
+            metadata/validation triage. If it also provides a packet-level score table keyed by
+            candidate ``signature``, those packets are reranked after LP enumeration without
+            changing the underlying per-option AutoQuant scores.
 
             Here is an example for valid ``effective_bits`` argument:
 
@@ -319,6 +343,24 @@ def auto_quantize(
                     "effective_bits": 4.8,
                     "cost_model": "active_moe",
                     "cost": {"active_moe_expert_ratio": 0.25},
+                }
+
+                # Add measured validation risk without hard-coding a module mask
+                constraints = {
+                    "effective_bits": 6.0,
+                    "score_model": "per_element",
+                    "candidate_rerank": {
+                        "enabled": True,
+                        "top_k": 8,
+                        "source_path": "autoq_candidate_rerank.tsv",
+                        "score_field": "rerank_score",
+                    },
+                    "response_risk": {
+                        "source_path": "autoq_response_risk.tsv",
+                        "risk_metric": "aggregate_parser_on_response_risk",
+                        "scale": 1.0,
+                        "provenance": "heldout_parser_on_validation",
+                    },
                 }
 
         quantization_formats: A list of quantization format config dictionaries or string names to search for.
@@ -373,8 +415,11 @@ def auto_quantize(
                 # This will search for the best per-layer quantization from FP8, W4A8_AWQ_BETA_CFG or No quantization
                 quantization_formats = [mtq.FP8_DEFAULT_CFG, mtq.W4A8_AWQ_BETA_CFG]
 
-        data_loader: An iterator that yields data that is to be used for calibrating quantized layers and estimating
-            ``auto_quantize`` scores.
+        data_loader: An iterator that yields data that is to be used for calibrating quantized layers and, unless
+            ``score_data_loader`` is provided, estimating ``auto_quantize`` scores.
+        score_data_loader: Optional iterator used only for estimating ``auto_quantize`` scores. This is useful for
+            diagnostics where calibration should use a larger batch size but gradient score estimation should use
+            smaller microbatches to avoid changing the score objective with dataloader batch grouping.
         forward_step: A callable that takes the model and a batch of data from ``data_loader`` as input, forwards
             the data through the model and returns the model output.
             This is a required argument.
@@ -437,12 +482,36 @@ def auto_quantize(
         verbose: If True, prints the search progress/intermediate results.
         method: Method to use for estimating sensitivity loss. Higher loss indicates greater sensitivity
             to quantization. Options are ``"gradient"`` (default; uses gradient-based loss estimation,
-            linear programming search, and requires ``loss_func`` or ``forward_backward_step``) and
+            linear programming search, and requires ``loss_func`` or ``forward_backward_step``),
+            ``"hidden_recon"`` / ``"parent_recon"`` (uses normalized score-module hidden-state
+            reconstruction, linear programming search, and only requires ``forward_step``), and
             ``"kl_div"`` (uses KL divergence between unquantized and quantized outputs, relies on
             threshold-based binary search, and only requires ``forward_step`` returning logits).
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
+        data_signature: (Optional) User-provided calibration/scoring data identity for checkpoint
+            compatibility. Include dataset path or revision, split, sequence length, sample order,
+            source mix, and content hash when available. If ``candidate_stats`` are restored from
+            ``checkpoint`` and this value changes, ``auto_quantize`` raises instead of reusing stale
+            scores. This is recommended for long-code, multi-source, or generated calibration sets
+            where two loaders may have the same type and length but different content.
+        quant_grouping_scheme: (Optional) Grouping scheme for AutoQuantize hparam search.
+            The default ``"runtime_fused"`` keeps existing deployment-fusion grouping rules.
+            ``"runtime_fused+linear_attn_layer"`` additionally groups deployable
+            ``linear_attn`` qkv/z/out projections per layer. ``"runtime_fused+self_attn_layer"``
+            additionally groups self-attention q/k/v/o projections per layer. The combined
+            ``"runtime_fused+linear_attn_layer+self_attn_layer"`` applies both.
+        score_component_tracking: (Optional) Diagnostic score-component tracking mode. The
+            default ``"none"`` keeps the existing search state. ``"batch"`` stores per
+            score-batch/source score contributions under each ``candidate_stats`` entry so
+            source-balanced or worst-source objectives can be studied from fresh AutoQuant states.
+        hidden_recon_score_windows: (Optional) Score windows used by ``"hidden_recon"`` /
+            ``"parent_recon"``. The default ``None`` is equivalent to ``"full"``. A comma-separated
+            string or list can include ``"full"`` and tail windows such as ``"last:1024"`` or
+            ``"tail:2048"``. Tail windows score along the sequence dimension of parent outputs.
+        hidden_recon_score_reduce: (Optional) How to combine multiple hidden-reconstruction
+            score windows for the LP objective. Supported values are ``"mean"`` and ``"max"``.
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -519,10 +588,15 @@ def auto_quantize(
     # Select the appropriate searcher based on method
     if method == "gradient":
         searcher = AutoQuantizeGradientSearcher()
+    elif method in {"hidden_recon", "parent_recon"}:
+        searcher = AutoQuantizeHiddenReconSearcher()
     elif method == "kl_div":
         searcher = AutoQuantizeKLDivSearcher()
     else:
-        raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
+        raise ValueError(
+            f"Invalid method: {method}. "
+            "Valid options are 'gradient', 'hidden_recon', 'parent_recon', or 'kl_div'."
+        )
 
     model = apply_mode(
         model,
@@ -532,6 +606,7 @@ def auto_quantize(
     search_config = {
         "quantization_formats": processed_quantization_formats,
         "data_loader": data_loader,
+        "score_data_loader": score_data_loader,
         "forward_step": forward_step,
         "loss_func": loss_func,
         "forward_backward_step": forward_backward_step,
@@ -540,6 +615,11 @@ def auto_quantize(
         "disabled_layers": disabled_layers,
         "verbose": verbose,
         "checkpoint": checkpoint,
+        "data_signature": data_signature,
+        "quant_grouping_scheme": quant_grouping_scheme,
+        "score_component_tracking": score_component_tracking,
+        "hidden_recon_score_windows": hidden_recon_score_windows or ["full"],
+        "hidden_recon_score_reduce": hidden_recon_score_reduce,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
@@ -583,6 +663,28 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             # fresh_model = mtq.quantize(fresh_model, config, forward_loop=calibrate_loop)
     """
     return _get_auto_quantize_config(search_state, constraints, verbose=verbose)
+
+
+def get_auto_quantize_candidate_packets(
+    search_state, constraints=None, top_k: int = 1, verbose=False
+):
+    """Replay an AutoQuantize search_state and return top-k candidate packets.
+
+    Args:
+        search_state: The state dict returned by :func:`auto_quantize`.
+        constraints: Optional dict with ``effective_bits`` and optional replay controls such as
+            ``score_model``, ``response_risk``, and ``candidate_rerank``.
+        top_k: Number of LP candidate packets to enumerate with no-good cuts.
+        verbose: If True, prints search progress.
+
+    Returns:
+        A dict containing ``candidate_packets`` plus replay metadata. Packets default to
+        ``launch_authority="no"`` and are intended for metadata gates or triage, not final
+        benchmark promotion.
+    """
+    return _get_auto_quantize_candidate_packets(
+        search_state, constraints=constraints, top_k=top_k, verbose=verbose
+    )
 
 
 def disable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):

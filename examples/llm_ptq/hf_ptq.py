@@ -15,6 +15,8 @@
 
 import argparse
 import copy
+import hashlib
+import json
 import math
 import random
 import time
@@ -311,10 +313,129 @@ def make_calib_dataloader(
     return calib_dataloader, first_text_speech_dataset
 
 
+def _json_or_string(value: str) -> Any:
+    """Parse JSON CLI values when possible, otherwise keep the original string."""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _path_metadata_signature(path_value: str) -> dict[str, Any] | None:
+    """Return cheap local-path identity for calibration data, if the value is a path."""
+    path = Path(path_value).expanduser()
+    if not path.exists():
+        return None
+
+    signature: dict[str, Any] = {"path": path_value, "resolved": str(path.resolve())}
+    if path.is_file():
+        stat = path.stat()
+        signature.update({"type": "file", "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+        # Full hashing is useful for small generated JSONL calibration sets but can be too
+        # expensive for large checkpoints or sharded datasets.
+        if stat.st_size <= 64 * 1024 * 1024:
+            digest = hashlib.sha256()
+            with path.open("rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            signature["sha256"] = digest.hexdigest()
+        return signature
+
+    if path.is_dir():
+        entries = []
+        for child in sorted(path.iterdir(), key=lambda p: p.name)[:2048]:
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
+            entries.append(
+                {
+                    "name": child.name,
+                    "type": "dir" if child.is_dir() else "file",
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            )
+        signature.update(
+            {
+                "type": "dir",
+                "sampled_entries": len(entries),
+                "entries_sha256": hashlib.sha256(
+                    json.dumps(entries, sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        return signature
+
+    return signature
+
+
+def _build_auto_quantize_data_signature(
+    args: argparse.Namespace,
+    calib_dataloader: DataLoader,
+    score_dataloader: DataLoader,
+    auto_quantize_method: str,
+    auto_quantize_score_size: int,
+) -> Any:
+    """Build data provenance used to reject stale restored AutoQuant scores."""
+    if args.auto_quantize_data_signature is not None:
+        return _json_or_string(args.auto_quantize_data_signature)
+
+    dataset_names = list(args.dataset) if args.dataset is not None else None
+    dataset_path_signatures = []
+    for dataset_name in dataset_names or []:
+        path_signature = _path_metadata_signature(str(dataset_name))
+        if path_signature is not None:
+            dataset_path_signatures.append(path_signature)
+
+    specdec_signature = (
+        _path_metadata_signature(args.specdec_offline_dataset)
+        if args.specdec_offline_dataset is not None
+        else None
+    )
+    score_batch_size = getattr(args, "auto_quantize_score_batch_size", None) or args.batch_size
+    num_score_steps = min(
+        len(score_dataloader), max(math.ceil(auto_quantize_score_size / score_batch_size), 1)
+    )
+
+    signature = {
+        "schema_version": 1,
+        "dataset": dataset_names,
+        "dataset_path_signatures": dataset_path_signatures,
+        "specdec_offline_dataset": specdec_signature,
+        "calib_size": list(args.calib_size),
+        "calib_seq": args.calib_seq,
+        "batch_size": args.batch_size,
+        "calib_batches": len(calib_dataloader),
+        "score_size": auto_quantize_score_size,
+        "score_batches": num_score_steps,
+        "auto_quantize_method": auto_quantize_method,
+        "include_labels": args.auto_quantize_bits is not None
+        and auto_quantize_method == "gradient",
+        "calib_with_images": args.calib_with_images,
+        "dataloader_type": type(calib_dataloader).__qualname__,
+        "sampler_type": type(getattr(calib_dataloader, "sampler", None)).__qualname__
+        if hasattr(calib_dataloader, "sampler")
+        else None,
+    }
+    if getattr(args, "auto_quantize_score_batch_size", None) is not None:
+        signature.update(
+            {
+                "score_batch_size": score_batch_size,
+                "score_dataloader_type": type(score_dataloader).__qualname__,
+                "score_sampler_type": type(getattr(score_dataloader, "sampler", None)).__qualname__
+                if hasattr(score_dataloader, "sampler")
+                else None,
+            }
+        )
+    return signature
+
+
 def auto_quantize(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
     calib_dataloader: DataLoader,
+    score_dataloader: DataLoader | None = None,
     auto_quantize_method="gradient",
     auto_quantize_score_size=128,
     auto_quantize_checkpoint=None,
@@ -385,7 +506,7 @@ def auto_quantize(
         def loss_func(output, data):
             return output.loss
 
-    if auto_quantize_method == "gradient":
+    if auto_quantize_method in {"gradient", "hidden_recon", "parent_recon"}:
 
         def forward_step(model, batch):
             inputs = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
@@ -403,12 +524,14 @@ def auto_quantize(
 
     else:
         raise ValueError(
-            f"Invalid auto_quantize_method: {auto_quantize_method}. Must be 'gradient' or 'kl_div'"
+            f"Invalid auto_quantize_method: {auto_quantize_method}. "
+            "Must be 'gradient', 'hidden_recon', 'parent_recon', or 'kl_div'"
         )
 
     auto_quantize_constraints = {
         "effective_bits": args.auto_quantize_bits,
         "cost_model": args.auto_quantize_cost_model,
+        "score_model": args.auto_quantize_score_model,
     }
     auto_quantize_cost = {}
     if args.auto_quantize_active_moe_expert_ratio is not None:
@@ -417,11 +540,48 @@ def auto_quantize(
         auto_quantize_constraints["cost"] = auto_quantize_cost
     if args.auto_quantize_cost_lower_bound is not None:
         auto_quantize_constraints["cost_lower_bound"] = args.auto_quantize_cost_lower_bound
+    if args.auto_quantize_response_risk_source is not None:
+        response_risk = {
+            "source_path": args.auto_quantize_response_risk_source,
+            "scale": args.auto_quantize_response_risk_scale,
+            "provenance": "hf_ptq_cli_response_risk_source",
+        }
+        if args.auto_quantize_response_risk_metric is not None:
+            response_risk["risk_metric"] = args.auto_quantize_response_risk_metric
+        auto_quantize_constraints["response_risk"] = response_risk
+    if args.auto_quantize_candidate_rerank_top_k is not None:
+        candidate_rerank = {
+            "enabled": True,
+            "top_k": args.auto_quantize_candidate_rerank_top_k,
+            "launch_authority_default": args.auto_quantize_candidate_rerank_launch_authority_default,
+            "scale": args.auto_quantize_candidate_rerank_scale,
+            "id_field": args.auto_quantize_candidate_rerank_id_field,
+            "score_field": args.auto_quantize_candidate_rerank_score_field,
+            "provenance": "hf_ptq_cli_candidate_rerank",
+        }
+        if args.auto_quantize_candidate_rerank_source is not None:
+            candidate_rerank["source_path"] = args.auto_quantize_candidate_rerank_source
+        auto_quantize_constraints["candidate_rerank"] = candidate_rerank
+
+    if score_dataloader is None:
+        score_dataloader = calib_dataloader
+    score_batch_size = args.auto_quantize_score_batch_size or args.batch_size
+    auto_quantize_data_signature = _build_auto_quantize_data_signature(
+        args,
+        calib_dataloader,
+        score_dataloader,
+        auto_quantize_method,
+        auto_quantize_score_size,
+    )
+    print(
+        f"AutoQuantize data_signature: {json.dumps(auto_quantize_data_signature, sort_keys=True)}"
+    )
 
     language_model, _ = mtq.auto_quantize(
         language_model,
         constraints=auto_quantize_constraints,
         data_loader=calib_dataloader,
+        score_data_loader=score_dataloader,
         forward_step=forward_step,
         loss_func=loss_func,  # Only used for gradient-based method
         # TRTLLM only support one quantization format or None (do not quantize, internally supported)
@@ -429,12 +589,17 @@ def auto_quantize(
         num_calib_steps=len(calib_dataloader),
         # AutoQuantize scoring is the costly phase; allow smaller sample counts than calibration.
         num_score_steps=min(
-            len(calib_dataloader), max(math.ceil(auto_quantize_score_size / args.batch_size), 1)
+            len(score_dataloader), max(math.ceil(auto_quantize_score_size / score_batch_size), 1)
         ),
         verbose=True,
         disabled_layers=get_auto_quantize_disabled_layers(language_model),
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
+        data_signature=auto_quantize_data_signature,
+        quant_grouping_scheme=args.auto_quantize_grouping_scheme,
+        score_component_tracking=args.auto_quantize_score_component_tracking,
+        hidden_recon_score_windows=args.auto_quantize_hidden_recon_score_windows,
+        hidden_recon_score_reduce=args.auto_quantize_hidden_recon_score_reduce,
     )
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
@@ -1100,6 +1265,21 @@ def quantize_main(
         assert len(args.qformat.split(",")) > 1, (
             "Auto quantization needs multiple quantization format."
         )
+        score_dataloader = None
+        if args.auto_quantize_score_batch_size is not None:
+            if args.auto_quantize_score_batch_size <= 0:
+                raise ValueError("--auto_quantize_score_batch_size must be positive when provided.")
+            if args.auto_quantize_score_batch_size != args.batch_size:
+                score_args = copy.copy(args)
+                score_args.batch_size = args.auto_quantize_score_batch_size
+                score_dataloader, _ = make_calib_dataloader(
+                    score_args, full_model, processor, tokenizer, device, model_type
+                )
+                print(
+                    "Use auto_quantize score batch_size "
+                    f"{args.auto_quantize_score_batch_size} "
+                    f"({len(score_dataloader)} score batches available)"
+                )
 
         # For VL models, autoquant must walk submodules of the OUTER CausalLM
         # (which carries lm_head and the LM-head forward path) — otherwise
@@ -1112,6 +1292,7 @@ def quantize_main(
             args,
             full_model,
             calib_dataloader,
+            score_dataloader=score_dataloader,
             auto_quantize_method=args.auto_quantize_method,
             auto_quantize_score_size=args.auto_quantize_score_size,
             auto_quantize_checkpoint=args.auto_quantize_checkpoint,
@@ -1401,11 +1582,12 @@ def parse_args() -> argparse.Namespace:
         "--auto_quantize_method",
         type=str,
         default="gradient",
-        choices=["gradient", "kl_div"],
+        choices=["gradient", "hidden_recon", "parent_recon", "kl_div"],
         help=(
             "Method for auto_quantize sensitivity analysis. 'gradient' uses gradient-based method "
-            "(requires labels in dataset). 'kl_div' uses KL divergence between original and "
-            "quantized model outputs (no labels required). Default: 'gradient'"
+            "(requires labels in dataset). 'hidden_recon'/'parent_recon' use normalized parent "
+            "hidden-state reconstruction (no labels required). 'kl_div' uses KL divergence between "
+            "original and quantized model outputs (no labels required). Default: 'gradient'"
         ),
     )
     parser.add_argument(
@@ -1419,12 +1601,35 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--auto_quantize_score_batch_size",
+        type=int,
+        default=None,
+        help=(
+            "Optional batch size used only for AutoQuant score estimation. When unset, scoring uses "
+            "--batch_size just like calibration. Setting this to 1 is a diagnostic for gradient "
+            "AutoQuant batch-size sensitivity: calibration can use a larger batch, while scoring "
+            "uses per-sample microbatches and the same non-shuffled sample order."
+        ),
+    )
+    parser.add_argument(
         "--auto_quantize_checkpoint",
         type=str,
         default=None,
         help=(
             "Path to checkpoint file for saving/restoring auto_quantize search state "
             "(sensitivity scores, costs, etc.). Only used when auto_quantize_bits is specified."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_data_signature",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON or string identity for AutoQuant calibration/scoring data. "
+            "When omitted, hf_ptq derives a signature from dataset, calibration size, sequence "
+            "length, batch size, score size, dataloader type, and local dataset path metadata. "
+            "Set this for generated or multi-source calibration sets to include a content or "
+            "sample-order hash."
         ),
     )
     parser.add_argument(
@@ -1436,6 +1641,72 @@ def parse_args() -> argparse.Namespace:
             "Cost model for auto_quantize effective-bits accounting. 'weight' counts all "
             "quantizable weights equally. 'active_moe' scales routed MoE expert weights by "
             "--auto_quantize_active_moe_expert_ratio, or infers top_k/num_experts from model config."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_score_model",
+        type=str,
+        default="raw",
+        choices=["raw", "per_element", "per_active", "active_weighted"],
+        help=(
+            "Score model for AutoQuantize search. 'raw' minimizes the existing per-layer "
+            "sensitivity score. 'per_element' divides each candidate score by its "
+            "unweighted element cost before solving, while keeping the normal effective-bits "
+            "cost constraint. 'per_active' divides each candidate score by its active "
+            "cost before solving. 'active_weighted' multiplies each candidate score by "
+            "the module active-cost weight before solving, while keeping the normal "
+            "effective-bits cost constraint."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_grouping_scheme",
+        type=str,
+        default="runtime_fused",
+        choices=[
+            "runtime_fused",
+            "runtime_fused+linear_attn_layer",
+            "runtime_fused+self_attn_layer",
+            "runtime_fused+linear_attn_layer+self_attn_layer",
+        ],
+        help=(
+            "AutoQuant hparam grouping scheme. 'runtime_fused' keeps default deployment-fusion "
+            "groups. The linear/self attention layer variants are automatic functional grouping "
+            "modes that let the solver choose one format per compatible attention family; they "
+            "do not force FP8/BF16 formats."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_score_component_tracking",
+        type=str,
+        default="none",
+        choices=["none", "batch"],
+        help=(
+            "Diagnostic AutoQuant score-component tracking. The default 'none' preserves "
+            "the existing search state. 'batch' records per score-batch/source contributions "
+            "in candidate_stats for source-balanced or worst-source analysis; it does not "
+            "change the selected recipe by itself."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_hidden_recon_score_windows",
+        type=str,
+        default="full",
+        help=(
+            "Comma-separated score windows for hidden_recon/parent_recon AutoQuant scoring. "
+            "Use 'full' for the default full parent-output score, or tail windows such as "
+            "'last:1024'/'tail:2048' to emphasize long-context tail drift. Multiple windows "
+            "are combined by --auto_quantize_hidden_recon_score_reduce."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_hidden_recon_score_reduce",
+        type=str,
+        default="mean",
+        choices=["mean", "max"],
+        help=(
+            "How to combine multiple hidden_recon/parent_recon score windows for the "
+            "AutoQuant LP objective. 'max' is a worst-window diagnostic for long-context "
+            "tail drift; default 'mean' preserves the existing full-window behavior."
         ),
     )
     parser.add_argument(
@@ -1456,8 +1727,93 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional lower-bound ratio for the AutoQuant cost constraint. For example, "
-            "0.99 asks the solver to search within 99% of the target effective-bits budget "
+            "0.99 asks the solver to search within 99%% of the target effective-bits budget "
             "instead of accepting any cheaper solution below the upper bound."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_response_risk_source",
+        type=str,
+        default=None,
+        help=(
+            "Optional TSV response-risk source for AutoQuantize objective penalties. "
+            "Supported row schemas include hparam,format,risk and category,layer,format,risk. "
+            "This is validation-derived objective evidence, not a hard recipe mask."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_response_risk_metric",
+        type=str,
+        default=None,
+        help=(
+            "Optional risk_metric filter for --auto_quantize_response_risk_source. By default "
+            "all risk metrics are loaded. If set, rows with a different non-empty risk_metric "
+            "are ignored; rows with no risk_metric remain valid."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_response_risk_scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Non-negative multiplier applied to risks loaded from "
+            "--auto_quantize_response_risk_source before adding them to the AutoQuantize objective."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_candidate_rerank_top_k",
+        type=int,
+        default=None,
+        help=(
+            "Optional number of AutoQuant candidate packets to enumerate with LP no-good cuts. "
+            "This is a no-launch candidate inspection/rerank mechanism; omit it to keep the "
+            "normal single-best AutoQuant path."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_candidate_rerank_source",
+        type=str,
+        default=None,
+        help=(
+            "Optional TSV packet-rerank source keyed by candidate signature. Used only with "
+            "--auto_quantize_candidate_rerank_top_k. This can adjust the ordering of enumerated "
+            "candidate packets, but it does not make screen or metadata evidence final."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_candidate_rerank_id_field",
+        type=str,
+        default="signature",
+        help=(
+            "Column name in --auto_quantize_candidate_rerank_source that identifies the candidate "
+            "packet. Defaults to 'signature'."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_candidate_rerank_score_field",
+        type=str,
+        default="rerank_score",
+        help=(
+            "Column name in --auto_quantize_candidate_rerank_source that stores packet-level "
+            "rerank score adjustments. Defaults to 'rerank_score'."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_candidate_rerank_scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Non-negative multiplier applied to packet-level rerank scores loaded from "
+            "--auto_quantize_candidate_rerank_source."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_candidate_rerank_launch_authority_default",
+        type=str,
+        default="no",
+        help=(
+            "Launch-authority label attached to enumerated AutoQuant candidate packets. The "
+            "default is 'no' because metadata and screen evidence are not final promotion authority."
         ),
     )
     parser.add_argument(
@@ -1501,6 +1857,38 @@ def parse_args() -> argparse.Namespace:
         0.0 < args.auto_quantize_cost_lower_bound <= 1.0
     ):
         parser.error("--auto_quantize_cost_lower_bound must be in the range (0.0, 1.0].")
+    if args.auto_quantize_score_batch_size is not None and args.auto_quantize_score_batch_size <= 0:
+        parser.error("--auto_quantize_score_batch_size must be positive.")
+    if args.auto_quantize_response_risk_scale < 0.0:
+        parser.error("--auto_quantize_response_risk_scale must be non-negative.")
+    if (
+        args.auto_quantize_response_risk_metric is not None
+        and not args.auto_quantize_response_risk_metric
+    ):
+        parser.error("--auto_quantize_response_risk_metric cannot be empty.")
+    if (
+        args.auto_quantize_candidate_rerank_top_k is not None
+        and args.auto_quantize_candidate_rerank_top_k <= 0
+    ):
+        parser.error("--auto_quantize_candidate_rerank_top_k must be positive.")
+    if args.auto_quantize_data_signature is not None and not args.auto_quantize_data_signature:
+        parser.error("--auto_quantize_data_signature cannot be empty.")
+    if (
+        args.auto_quantize_candidate_rerank_source is not None
+        and args.auto_quantize_candidate_rerank_top_k is None
+    ):
+        parser.error(
+            "--auto_quantize_candidate_rerank_source requires "
+            "--auto_quantize_candidate_rerank_top_k."
+        )
+    if args.auto_quantize_candidate_rerank_scale < 0.0:
+        parser.error("--auto_quantize_candidate_rerank_scale must be non-negative.")
+    if not args.auto_quantize_candidate_rerank_id_field:
+        parser.error("--auto_quantize_candidate_rerank_id_field cannot be empty.")
+    if not args.auto_quantize_candidate_rerank_score_field:
+        parser.error("--auto_quantize_candidate_rerank_score_field cannot be empty.")
+    if not args.auto_quantize_candidate_rerank_launch_authority_default:
+        parser.error("--auto_quantize_candidate_rerank_launch_authority_default cannot be empty.")
     if (
         args.auto_quantize_cost_model == "weight"
         and args.auto_quantize_active_moe_expert_ratio is not None

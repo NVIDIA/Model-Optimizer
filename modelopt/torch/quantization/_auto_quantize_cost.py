@@ -27,7 +27,43 @@ import torch.nn as nn
 DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS: Final = 4.8
 
 AUTO_QUANTIZE_CONSTRAINT_KEYS: Final = frozenset(
-    {"effective_bits", "cost_model", "cost", "cost_lower_bound"}
+    {
+        "effective_bits",
+        "cost_model",
+        "cost",
+        "cost_lower_bound",
+        "score_model",
+        "response_risk",
+        "candidate_rerank",
+    }
+)
+AUTO_QUANTIZE_SCORE_MODEL_RAW: Final = "raw"
+AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT: Final = "per_element"
+AUTO_QUANTIZE_SCORE_MODEL_PER_ACTIVE: Final = "per_active"
+AUTO_QUANTIZE_SCORE_MODEL_ACTIVE_WEIGHTED: Final = "active_weighted"
+AUTO_QUANTIZE_SCORE_MODELS: Final = frozenset(
+    {
+        AUTO_QUANTIZE_SCORE_MODEL_RAW,
+        AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT,
+        AUTO_QUANTIZE_SCORE_MODEL_PER_ACTIVE,
+        AUTO_QUANTIZE_SCORE_MODEL_ACTIVE_WEIGHTED,
+    }
+)
+AUTO_QUANTIZE_RESPONSE_RISK_KEYS: Final = frozenset(
+    {"source_path", "entries", "scale", "risk_metric", "provenance"}
+)
+AUTO_QUANTIZE_CANDIDATE_RERANK_KEYS: Final = frozenset(
+    {
+        "enabled",
+        "top_k",
+        "launch_authority_default",
+        "source_path",
+        "entries",
+        "id_field",
+        "score_field",
+        "scale",
+        "provenance",
+    }
 )
 ACTIVE_MOE_EXPERT_RATIO_KEY: Final = "active_moe_expert_ratio"
 COST_MODEL_WEIGHT: Final = "weight"
@@ -233,9 +269,102 @@ def normalize_auto_quantize_constraints(
     if unexpected_constraint_keys:
         raise ValueError(
             f"Unsupported auto_quantize constraints: {unexpected_constraint_keys}. "
-            "Supported constraints are 'effective_bits', 'cost_model', 'cost', and "
-            "'cost_lower_bound'."
+            "Supported constraints are 'effective_bits', 'cost_model', 'cost', "
+            "'cost_lower_bound', 'score_model', 'response_risk', and 'candidate_rerank'."
         )
+
+    score_model = constraints.get("score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW)
+    if score_model not in AUTO_QUANTIZE_SCORE_MODELS:
+        raise ValueError(
+            f"constraints['score_model'] must be one of {sorted(AUTO_QUANTIZE_SCORE_MODELS)}."
+        )
+    constraints["score_model"] = score_model
+
+    response_risk = constraints.get("response_risk")
+    if response_risk is not None:
+        if not isinstance(response_risk, dict):
+            raise TypeError("constraints['response_risk'] must be a dict when provided.")
+        unexpected_response_risk_keys = set(response_risk) - AUTO_QUANTIZE_RESPONSE_RISK_KEYS
+        if unexpected_response_risk_keys:
+            raise ValueError(
+                f"Unsupported auto_quantize response_risk keys: {unexpected_response_risk_keys}. "
+                f"Supported keys are {sorted(AUTO_QUANTIZE_RESPONSE_RISK_KEYS)}."
+            )
+        source_path = response_risk.get("source_path")
+        entries = response_risk.get("entries")
+        if source_path is not None and not isinstance(source_path, str):
+            raise TypeError("constraints['response_risk']['source_path'] must be a string.")
+        if entries is not None and not isinstance(entries, list):
+            raise TypeError("constraints['response_risk']['entries'] must be a list of dicts.")
+        if source_path is None and entries is None:
+            raise ValueError("constraints['response_risk'] requires 'source_path' or 'entries'.")
+        scale = response_risk.get("scale", 1.0)
+        if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale < 0.0:
+            raise ValueError("constraints['response_risk']['scale'] must be a non-negative number.")
+        risk_metric = response_risk.get("risk_metric")
+        if risk_metric is not None and not isinstance(risk_metric, str):
+            raise TypeError("constraints['response_risk']['risk_metric'] must be a string.")
+        provenance = response_risk.get("provenance")
+        if provenance is not None and not isinstance(provenance, str):
+            raise TypeError("constraints['response_risk']['provenance'] must be a string.")
+        constraints["response_risk"] = {
+            **response_risk,
+            "scale": float(scale),
+        }
+
+    candidate_rerank = constraints.get("candidate_rerank")
+    if candidate_rerank is not None:
+        if not isinstance(candidate_rerank, dict):
+            raise TypeError("constraints['candidate_rerank'] must be a dict when provided.")
+        unexpected_candidate_rerank_keys = (
+            set(candidate_rerank) - AUTO_QUANTIZE_CANDIDATE_RERANK_KEYS
+        )
+        if unexpected_candidate_rerank_keys:
+            raise ValueError(
+                "Unsupported auto_quantize candidate_rerank keys: "
+                f"{unexpected_candidate_rerank_keys}. Supported keys are "
+                f"{sorted(AUTO_QUANTIZE_CANDIDATE_RERANK_KEYS)}."
+            )
+        enabled = candidate_rerank.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise TypeError("constraints['candidate_rerank']['enabled'] must be a bool.")
+        top_k = candidate_rerank.get("top_k", 1)
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
+            raise ValueError("constraints['candidate_rerank']['top_k'] must be a positive int.")
+        launch_authority_default = candidate_rerank.get("launch_authority_default", "no")
+        if not isinstance(launch_authority_default, str):
+            raise TypeError(
+                "constraints['candidate_rerank']['launch_authority_default'] must be a string."
+            )
+        source_path = candidate_rerank.get("source_path")
+        entries = candidate_rerank.get("entries")
+        if source_path is not None and not isinstance(source_path, str):
+            raise TypeError("constraints['candidate_rerank']['source_path'] must be a string.")
+        if entries is not None and not isinstance(entries, list):
+            raise TypeError("constraints['candidate_rerank']['entries'] must be a list of dicts.")
+        id_field = candidate_rerank.get("id_field", "signature")
+        if not isinstance(id_field, str):
+            raise TypeError("constraints['candidate_rerank']['id_field'] must be a string.")
+        score_field = candidate_rerank.get("score_field", "rerank_score")
+        if not isinstance(score_field, str):
+            raise TypeError("constraints['candidate_rerank']['score_field'] must be a string.")
+        scale = candidate_rerank.get("scale", 1.0)
+        if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale < 0.0:
+            raise ValueError(
+                "constraints['candidate_rerank']['scale'] must be a non-negative number."
+            )
+        provenance = candidate_rerank.get("provenance")
+        if provenance is not None and not isinstance(provenance, str):
+            raise TypeError("constraints['candidate_rerank']['provenance'] must be a string.")
+        constraints["candidate_rerank"] = {
+            **candidate_rerank,
+            "enabled": enabled,
+            "top_k": top_k,
+            "launch_authority_default": launch_authority_default,
+            "id_field": id_field,
+            "score_field": score_field,
+            "scale": float(scale),
+        }
 
     cost_lower_bound = constraints.get("cost_lower_bound")
     if cost_lower_bound is not None:

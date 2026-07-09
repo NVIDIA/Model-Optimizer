@@ -334,12 +334,59 @@ class LPS:
         self.name = name
         self.constraints = constraints
         self.constraints_to_candidate_costs = constraints_to_candidate_costs
-        self.candidate_scores = candidate_scores
+        self.candidate_scores = self._normalize_candidate_scores(
+            self._sanitize_candidate_scores(candidate_scores, objective_type)
+        )
         self.objective_type = pulp.LpMinimize if objective_type == "minimize" else pulp.LpMaximize
         self.solver = pulp.PULP_CBC_CMD(msg=verbose)
 
         self.num_layers = len(self.candidate_scores)
         self.num_candidates_per_layer = list(map(len, self.candidate_scores))
+
+    @staticmethod
+    def _sanitize_candidate_scores(
+        candidate_scores: list[list[float]], objective_type: str
+    ) -> list[list[float]]:
+        """Replace non-finite objective coefficients before PuLP builds the LP."""
+        sanitized_scores = []
+        for layer_id, layer_scores in enumerate(candidate_scores):
+            scores = np.asarray(layer_scores, dtype=np.float64)
+            finite_mask = np.isfinite(scores)
+            if finite_mask.all():
+                sanitized_scores.append(layer_scores)
+                continue
+
+            finite_abs = np.abs(scores[finite_mask])
+            replacement = max(float(finite_abs.max()) if finite_abs.size else 0.0, 1.0) * 1.0e6
+            if objective_type == "maximize":
+                replacement = -replacement
+            warn_rank_0(
+                f"Replacing {int((~finite_mask).sum())} non-finite search score(s) in "
+                f"layer {layer_id} with penalty {replacement:g} before LP solve."
+            )
+            sanitized_scores.append(np.where(finite_mask, scores, replacement).tolist())
+        return sanitized_scores
+
+    @staticmethod
+    def _normalize_candidate_scores(candidate_scores: list[list[float]]) -> list[list[float]]:
+        """Rescale objective coefficients for numerical stability.
+
+        Score transforms such as sensitivity-per-element can produce very small
+        coefficients. CBC may then treat the objective as numerically insignificant
+        and return an arbitrary feasible solution. Multiplying all objective
+        coefficients by the same positive constant preserves the LP optimum while
+        keeping coefficients in a solver-friendly range.
+        """
+        max_abs = max(
+            (abs(float(score)) for layer_scores in candidate_scores for score in layer_scores),
+            default=0.0,
+        )
+        if max_abs == 0.0:
+            return candidate_scores
+        return [
+            (np.asarray(layer_scores, dtype=np.float64) / max_abs).tolist()
+            for layer_scores in candidate_scores
+        ]
 
     def _build_selection_vars(self) -> list[list[pulp.LpVariable]]:
         vars = []
@@ -394,15 +441,164 @@ class LPS:
             selections: A list of selected candidate indices per layer.
             status: Status of the solver.
         """
-        selection_vars = self._build_selection_vars()
+        solutions = self.solve_top_k(1)
+        if not solutions:
+            return [], "Infeasible"
+        return solutions[0]
 
-        problem = self._build_objective_problem(selection_vars)
+    def _add_constraints_to_problem(
+        self,
+        problem: pulp.LpProblem,
+        selection_vars: list[list[pulp.LpVariable]],
+        no_good_cuts: list[list[int]] | None = None,
+    ) -> None:
         for one_hot_constraint in self._build_one_hot_constraints(selection_vars):
             problem += one_hot_constraint
         for budget_constraint in self._build_budget_constraints(selection_vars):
             problem += budget_constraint
+        for cut_id, previous_selection in enumerate(no_good_cuts or []):
+            problem += (
+                sum(
+                    selection_vars[layer_id][candidate_id]
+                    for layer_id, candidate_id in enumerate(previous_selection)
+                )
+                <= self.num_layers - 1,
+                f"no_good_{cut_id}",
+            )
 
-        problem.solve(self.solver)
+    @staticmethod
+    def _selection_from_vars(selection_vars: list[list[pulp.LpVariable]]) -> list[int]:
+        selections = []
+        for layer_vars in selection_vars:
+            values = [float(z.varValue) if z.varValue is not None else 0.0 for z in layer_vars]
+            selections.append(int(np.argmax(values)))
+        return selections
 
-        selections = [np.argmax([z.varValue for z in layer_vars]) for layer_vars in selection_vars]
-        return selections, pulp.LpStatus[problem.status]
+    def _layer_has_single_effective_choice(self, layer_id: int) -> bool:
+        """Return True if all choices are equivalent for objective and constraints."""
+        if self.num_candidates_per_layer[layer_id] <= 1:
+            return True
+
+        scores = np.asarray(self.candidate_scores[layer_id], dtype=np.float64)
+        if np.ptp(scores) > 1.0e-12:
+            return False
+
+        for candidate_costs_list in self.constraints_to_candidate_costs.values():
+            costs = np.asarray(candidate_costs_list[layer_id], dtype=np.float64)
+            if np.ptp(costs) > 1.0e-12:
+                return False
+        return True
+
+    def _fixed_selection_and_variable_layers(self) -> tuple[list[int], list[int]]:
+        fixed_selection = []
+        variable_layer_ids = []
+        for layer_id in range(self.num_layers):
+            if self._layer_has_single_effective_choice(layer_id):
+                fixed_selection.append(0)
+            else:
+                fixed_selection.append(-1)
+                variable_layer_ids.append(layer_id)
+        return fixed_selection, variable_layer_ids
+
+    def _selection_satisfies_budget(self, selection: list[int]) -> bool:
+        for constraint_name, candidate_costs_list in self.constraints_to_candidate_costs.items():
+            cost = sum(
+                candidate_costs_list[layer_id][candidate_id]
+                for layer_id, candidate_id in enumerate(selection)
+            )
+            if isinstance(self.constraints[constraint_name], tuple):
+                lower_bound, upper_bound = self.constraints[constraint_name]  # type: ignore[misc]
+            else:
+                lower_bound, upper_bound = None, self.constraints[constraint_name]
+            if upper_bound is not None and cost > upper_bound + 1.0e-9:
+                return False
+            if lower_bound is not None and cost < lower_bound - 1.0e-9:
+                return False
+        return True
+
+    def solve_top_k(self, k: int) -> list[tuple[list[int], str]]:
+        """Run the solver and enumerate up to ``k`` distinct feasible solutions.
+
+        After each optimal solve, a no-good cut excludes the exact selected
+        candidate tuple and the LP is solved again. The existing ``__call__``
+        path uses ``k=1``, so this only broadens callers that explicitly ask for
+        neighboring candidate packets.
+        """
+        if k <= 0:
+            raise ValueError("k must be positive.")
+
+        solutions: list[tuple[list[int], str]] = []
+        fixed_selection, variable_layer_ids = self._fixed_selection_and_variable_layers()
+        if not variable_layer_ids:
+            selection = [max(candidate_id, 0) for candidate_id in fixed_selection]
+            status = "Optimal" if self._selection_satisfies_budget(selection) else "Infeasible"
+            return [(selection, status)]
+
+        no_good_cuts: list[list[int]] = []
+        for _ in range(k):
+            selection_vars = [
+                [
+                    pulp.LpVariable(f"z{layer_id}_{ci}", lowBound=0, upBound=1, cat=pulp.LpBinary)
+                    for ci in range(self.num_candidates_per_layer[layer_id])
+                ]
+                for layer_id in variable_layer_ids
+            ]
+            problem = pulp.LpProblem(name=self.name, sense=self.objective_type)
+            problem += (
+                sum(
+                    z * self.candidate_scores[layer_id][candidate_id]
+                    for layer_id, layer_vars in zip(variable_layer_ids, selection_vars)
+                    for candidate_id, z in enumerate(layer_vars)
+                ),
+                "L",
+            )
+            for layer_vars in selection_vars:
+                problem += sum(layer_vars) == 1
+            for (
+                constraint_name,
+                candidate_costs_list,
+            ) in self.constraints_to_candidate_costs.items():
+                fixed_cost = sum(
+                    candidate_costs_list[layer_id][candidate_id]
+                    for layer_id, candidate_id in enumerate(fixed_selection)
+                    if candidate_id >= 0
+                )
+                cost = fixed_cost + sum(
+                    z * candidate_costs_list[layer_id][candidate_id]
+                    for layer_id, layer_vars in zip(variable_layer_ids, selection_vars)
+                    for candidate_id, z in enumerate(layer_vars)
+                )
+                if isinstance(self.constraints[constraint_name], tuple):
+                    lower_bound, upper_bound = self.constraints[constraint_name]  # type: ignore[misc]
+                else:
+                    lower_bound, upper_bound = None, self.constraints[constraint_name]
+                if upper_bound is not None:
+                    problem += cost <= upper_bound
+                if lower_bound is not None:
+                    problem += cost >= lower_bound
+            for cut_id, previous_selection in enumerate(no_good_cuts):
+                problem += (
+                    sum(
+                        selection_vars[layer_pos][previous_selection[layer_id]]
+                        for layer_pos, layer_id in enumerate(variable_layer_ids)
+                    )
+                    <= len(variable_layer_ids) - 1,
+                    f"no_good_{cut_id}",
+                )
+
+            problem.solve(self.solver)
+            status = pulp.LpStatus[problem.status]
+            if status != "Optimal":
+                if not solutions:
+                    selection = [max(candidate_id, 0) for candidate_id in fixed_selection]
+                    solutions.append((selection, status))
+                break
+
+            selections = list(fixed_selection)
+            for layer_id, layer_vars in zip(variable_layer_ids, selection_vars):
+                values = [float(z.varValue) if z.varValue is not None else 0.0 for z in layer_vars]
+                selections[layer_id] = int(np.argmax(values))
+            solutions.append((selections, status))
+            no_good_cuts.append(selections)
+
+        return solutions
