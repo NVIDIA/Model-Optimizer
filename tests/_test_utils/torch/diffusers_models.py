@@ -222,8 +222,11 @@ def get_tiny_wan22_vae(**config_kwargs):
 def create_tiny_wan22_pipeline_dir(tmp_path: Path) -> Path:
     """Create and save a tiny Wan 2.2 (14B-style) pipeline to a directory.
 
-    Uses the same tiny config as diffusers' own Wan 2.2 tests:
-    - Transformer: 2 heads, 12 head_dim, 2 layers (hidden_dim=24)
+    Scaled down from diffusers' own tiny Wan 2.2 test config:
+    - Transformer: 4 heads, 12 head_dim (hidden_dim=48, divisible by the NVFP4
+      block size of 16; head_dim stays 12 so the RoPE axis split 4/4/4 remains
+      even); ``num_layers=8`` so the first-3/last-3 block-range recipe (which
+      needs >= 8 blocks) leaves blocks {3, 4} quantized
     - VAE: base_dim=3, z_dim=16
     - Text encoder: hf-internal-testing/tiny-random-t5 (hidden_size=32)
     - Dual transformer (14B style) with boundary_ratio=0.875
@@ -237,10 +240,10 @@ def create_tiny_wan22_pipeline_dir(tmp_path: Path) -> Path:
     vae = get_tiny_wan22_vae()
 
     torch.manual_seed(0)
-    transformer = get_tiny_wan22_transformer()
+    transformer = get_tiny_wan22_transformer(num_layers=8, num_attention_heads=4)
 
     torch.manual_seed(0)
-    transformer_2 = get_tiny_wan22_transformer()
+    transformer_2 = get_tiny_wan22_transformer(num_layers=8, num_attention_heads=4)
 
     scheduler = UniPCMultistepScheduler(
         prediction_type="flow_prediction", use_flow_sigmas=True, flow_shift=3.0

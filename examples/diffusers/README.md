@@ -116,6 +116,28 @@ python quantize.py \
     --hf-ckpt-dir ./hf_ckpt
 ```
 
+#### Wan 2.2 T2V A14B NVFP4 SVDQuant [Script](./quantization/quantize.py)
+
+Wan 2.2 T2V A14B is a two-expert pipeline (high-noise `transformer` + low-noise
+`transformer_2`); with `--model wan2.2-t2v-14b` both experts are quantized by
+default, `transformer` first so the low-noise expert calibrates against the
+already-quantized high-noise expert. The recipe quantizes only the linears under
+`blocks`, keeping the **first 3 and last 3** of the 40 blocks (and everything
+outside `blocks`: text encoder, VAE, embedders, `proj_out`, ...) in original
+precision. The exclusion is applied **before calibration** so that for SVDQuant
+the excluded blocks' weights stay bit-identical to the original. Every quantized
+linear keeps the full SVDQuant recipe (AWQ `pre_quant_scale` + low-rank
+`svdquant_lora_a/b`).
+
+```sh
+python quantize.py \
+    --model wan2.2-t2v-14b \
+    --model-dtype BFloat16 --trt-high-precision-dtype BFloat16 \
+    --format fp4 --quant-algo svdquant --lowrank {32|64|128} \
+    --batch-size 1 --calib-size 16 --n-steps 20 \
+    --hf-ckpt-dir ./hf_ckpt
+```
+
 #### Wan 2.2 VAE NVFP4 (Conv3D Implicit GEMM)
 
 The Wan 2.2 VAE (`AutoencoderKLWan`, shared between the 5B and 14B pipelines) is built from 3D convolutions. When quantizing the VAE with NVFP4, the `Conv3d` layers are automatically dispatched through a custom BF16 WMMA implicit-GEMM kernel with fused FP4 activation quantization. Requires SM80+ (Ampere or newer). See [`modelopt/torch/kernels/quantization/conv/README.md`](../../modelopt/torch/kernels/quantization/conv/README.md) for kernel details.

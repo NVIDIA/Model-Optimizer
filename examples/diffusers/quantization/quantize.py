@@ -108,12 +108,18 @@ class Quantizer:
         self.model_config = model_config
         self.logger = logger
 
-    def get_quant_config(self, n_steps: int, backbone: torch.nn.Module) -> Any:
+    def get_quant_config(
+        self, n_steps: int, backbone: torch.nn.Module, backbone_name: str = "transformer"
+    ) -> Any:
         """
         Build quantization configuration based on format.
 
         Args:
             n_steps: Number of denoising steps
+            backbone: Backbone module the config is built for
+            backbone_name: Name of the backbone in the pipeline; VAE-type
+                backbones ("vae", "video_decoder") skip the transformer-block
+                recipe below.
 
         Returns:
             Quantization configuration object
@@ -168,12 +174,19 @@ class Quantizer:
                 }
             )
 
-        # Apply the transformer-block-range recipe (e.g. Qwen-Image) BEFORE
-        # calibration. This restricts quantization to `transformer_blocks` and
-        # excludes the first/last N blocks. It must run before calibration so that
-        # SVDQuant does not mutate the weights of the excluded blocks. The recipe
-        # is format-agnostic (applies to FP8/NVFP4/SVDQuant alike).
+        # Apply the transformer-block-range recipe (e.g. Qwen-Image, Wan 2.2)
+        # BEFORE calibration. This restricts quantization to the transformer's
+        # block list and excludes the first/last N blocks. It must run before
+        # calibration so that SVDQuant does not mutate the weights of the
+        # excluded blocks. The recipe is format-agnostic (applies to
+        # FP8/NVFP4/SVDQuant alike) but transformer-only: VAE backbones have no
+        # block list and keep their dedicated recipe (e.g. Wan `--backbone vae`).
         block_range = MODEL_DEFAULTS.get(self.model_config.model_type, {}).get("block_range")
+        if block_range is not None and backbone_name in ("vae", "video_decoder"):
+            self.logger.info(
+                f"Skipping transformer-block-range recipe for VAE backbone '{backbone_name}'."
+            )
+            block_range = None
         if block_range is not None:
             recipe_rules = build_block_range_quant_cfg(
                 backbone,
@@ -543,7 +556,16 @@ def create_argument_parser() -> argparse.ArgumentParser:
         choices=[c.value for c in CollectMethod],
         help="Calibration collection method, works for INT8, not including smoothquant",
     )
-    quant_group.add_argument("--alpha", type=float, default=1.0, help="SmoothQuant alpha parameter")
+    quant_group.add_argument(
+        "--alpha",
+        type=float,
+        default=1.0,
+        help=(
+            "SmoothQuant/SVDQuant migration strength in [0, 1]. For SVDQuant, 1.0 (default) "
+            "migrates outliers fully from activations to weights, letting the SVD low-rank "
+            "branch absorb them."
+        ),
+    )
     quant_group.add_argument("--lowrank", type=int, default=32, help="SVDQuant lowrank parameter")
     quant_group.add_argument(
         "--quantize-mha", action="store_true", help="Quantizing MHA into FP8 if its True"
@@ -611,7 +633,12 @@ def main() -> None:
 
     model_type = ModelType(args.model)
     if args.backbone is None:
-        args.backbone = [MODEL_DEFAULTS[model_type]["backbone"]]
+        # Model defaults may name a single backbone or several (e.g. Wan 2.2
+        # A14B's two experts).
+        default_backbone = MODEL_DEFAULTS[model_type]["backbone"]
+        args.backbone = (
+            [default_backbone] if isinstance(default_backbone, str) else list(default_backbone)
+        )
     s = time.time()
 
     model_dtype = {"default": DataType(args.model_dtype).torch_dtype}
@@ -696,7 +723,9 @@ def main() -> None:
 
             for backbone_name, backbone in pipeline_manager.iter_backbones():
                 logger.info(f"Quantizing backbone: {backbone_name}")
-                backbone_quant_config = quantizer.get_quant_config(calib_config.n_steps, backbone)
+                backbone_quant_config = quantizer.get_quant_config(
+                    calib_config.n_steps, backbone, backbone_name=backbone_name
+                )
 
                 # Calibration runs the full pipeline (not just `mod`), so the
                 # closure intentionally ignores the backbone argument.

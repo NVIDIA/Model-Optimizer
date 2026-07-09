@@ -1154,6 +1154,20 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    alpha: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        title="SmoothQuant-style migration strength",
+        description=(
+            "Per-channel activation amax is collected in a single pass and SmoothQuant-style "
+            "smoothing ``scale = w_amax^(1-alpha) / act_amax^alpha`` is applied before the "
+            "SVD. The default ``alpha=1.0`` migrates outliers fully from activations to "
+            "weights (flat activations), letting the SVD low-rank branch absorb them, as in "
+            "the SVDQuant paper."
+        ),
+    )
+
 
 class GPTQCalibConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
