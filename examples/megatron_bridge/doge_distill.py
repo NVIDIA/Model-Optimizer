@@ -336,22 +336,22 @@ class DoGEForwardStep:
 
     def __init__(
         self,
-        updater: DoGEWeightUpdater,
-        blend_weights: dict[str, float],
-        target_blend_weights: dict[str, float],
+        data_paths: list[str],
+        target_data_paths: list[str],
+        meta_lr: float,
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
 
         Args:
-            updater: DoGE weight updater for the training datasets listed in ``--data_paths``.
-            blend_weights: Initial normalized blend weights for those training datasets, keyed by
-                dataset name or path.
-            target_blend_weights: Fixed normalized DoGE target-objective weights keyed by dataset
-                name or path.
+            data_paths: Initial training-data blend in Megatron WEIGHT PATH format. The weights
+                are normalized into ``self.blend_weights`` and updated during DoGE.
+            target_data_paths: Fixed target-objective blend in Megatron WEIGHT PATH format. The
+                weights are normalized into ``self.target_blend_weights`` and are not updated.
+            meta_lr: Learning rate for exponentiated blend-weight updates.
         """
-        self.updater = updater
-        self.blend_weights = blend_weights.copy()
-        self.target_blend_weights = target_blend_weights.copy()
+        self.updater = DoGEWeightUpdater(meta_lr=meta_lr)
+        self.blend_weights = _normalize_data_path_weights(data_paths)
+        self.target_blend_weights = _normalize_data_path_weights(target_data_paths)
         self.doge_data_iterators: DoGEDataIterators | None = None
 
     def _build_doge_data_iterators(self, state: GlobalState, model: GPTModel) -> DoGEDataIterators:
@@ -380,13 +380,10 @@ class DoGEForwardStep:
 
 def main(args: argparse.Namespace) -> None:
     """Build the DoGE forward step and pass it to the Megatron-Bridge training loop."""
-    initial_blend_weights = _normalize_data_path_weights(args.data_paths)
-    target_blend_weights = _normalize_data_path_weights(args.target_data_paths)
-    updater = DoGEWeightUpdater(meta_lr=args.doge_meta_lr)
     forward_step = DoGEForwardStep(
-        updater=updater,
-        blend_weights=initial_blend_weights,
-        target_blend_weights=target_blend_weights,
+        data_paths=args.data_paths,
+        target_data_paths=args.target_data_paths,
+        meta_lr=args.doge_meta_lr,
     )
 
     print("Initial DoGE blend weights:")
