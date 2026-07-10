@@ -21,10 +21,16 @@ The planned outputs under ``--output_dir`` are DoGE distillation checkpoints,
 ``learned_data_blend.txt`` containing the learned fixed blend.
 """
 
-from __future__ import annotations
-
 import argparse
+from collections.abc import Iterable
+from functools import partial
 from pathlib import Path
+
+import torch
+from megatron.bridge.training.state import GlobalState
+from megatron.core.models.gpt import GPTModel
+
+from modelopt.torch.distill.doge import DoGEWeightUpdater
 
 
 def _positive_int(value: str) -> int:
@@ -145,6 +151,35 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Learning rate for exponentiated blend-weight updates",
     )
     return parser.parse_args(argv)
+
+
+class DoGEForwardStep:
+    """Callable forward-step placeholder to pass into Megatron-Bridge ``pretrain``."""
+
+    def __init__(self, updater: DoGEWeightUpdater, weights: dict[str, float]) -> None:
+        """Initialize the callable state used by Megatron-Bridge ``pretrain``.
+
+        Args:
+            updater: DoGE weight updater for the training datasets listed in ``--data_paths``.
+            weights: Initial normalized blend weights for those training datasets, keyed by dataset
+                name or path.
+        """
+        self.updater = updater
+        self.weights = weights.copy()
+
+    def __call__(
+        self,
+        state: GlobalState,
+        data_iterator: Iterable,
+        model: GPTModel,
+        return_schedule_plan: bool = False,
+    ) -> tuple[torch.Tensor, partial]:
+        """Run as Megatron-Bridge ``pretrain`` forward step for one DoGE iteration.
+
+        Returns the ``(output_tensor, loss_function)`` pair expected by Megatron-Bridge
+        after the DoGE implementation computes updated blend weights for the training datasets.
+        """
+        raise NotImplementedError("DoGE forward step is not implemented yet.")
 
 
 def main(args: argparse.Namespace) -> None:
