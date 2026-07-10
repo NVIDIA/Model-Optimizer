@@ -22,14 +22,35 @@ The planned outputs under ``--output_dir`` are DoGE distillation checkpoints,
 """
 
 import argparse
+import os
 from collections.abc import Iterable
 from functools import partial
 from pathlib import Path
 
 import torch
+from megatron.bridge import AutoBridge
+from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
+from megatron.bridge.recipes.utils.optimizer_utils import (
+    distributed_fused_adam_with_cosine_annealing,
+)
+from megatron.bridge.training.config import (
+    CheckpointConfig,
+    ConfigContainer,
+    GPTDatasetConfig,
+    LoggerConfig,
+    MockGPTDatasetConfig,
+    RNGConfig,
+    TokenizerConfig,
+    TrainingConfig,
+)
+from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
+from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.state import GlobalState
+from megatron.core.datasets.utils import get_blend_from_list
+from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.models.gpt import GPTModel
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.distill.doge import DoGEWeightUpdater
 
 
@@ -82,6 +103,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     data.add_argument("--data_path_to_cache", help="Directory for Megatron dataset indices")
+    data.add_argument("--use_mock_data", action="store_true", help="Use mock data for smoke tests")
 
     parallelism = parser.add_argument_group("parallelism")
     parallelism.add_argument(
@@ -166,6 +188,100 @@ def _normalize_data_path_weights(data_paths: list[str]) -> dict[str, float]:
     return {path: weight / total_weight for path, weight in blend_weights.items()}
 
 
+def _build_model_provider(args: argparse.Namespace, hf_path: str):
+    bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
+    provider = bridge.to_megatron_provider(load_weights=True)
+
+    provider.tensor_model_parallel_size = args.tp_size
+    provider.sequence_parallel = args.tp_size > 1
+    provider.pipeline_model_parallel_size = args.pp_size
+    provider.pipeline_dtype = torch.bfloat16
+    provider.context_parallel_size = args.cp_size
+    provider.expert_model_parallel_size = args.ep_size
+    provider.expert_tensor_parallel_size = 1
+    provider.seq_length = args.seq_length
+    return provider
+
+
+def _build_config(args: argparse.Namespace):
+    student_provider = _build_model_provider(args, args.student_hf_path)
+    teacher_provider = _build_model_provider(args, args.teacher_hf_path)
+    distill_provider = convert_to_distillation_provider(
+        student_provider,
+        teacher_provider,
+        ModelOptDistillConfig(skip_lm_loss=True, kd_loss_scale=1.0),
+    )
+    optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
+        lr_warmup_iters=args.lr_warmup_iters,
+        max_lr=args.lr,
+        min_lr=args.min_lr,
+        adam_beta2=0.95,
+    )
+    dataset_kwargs = {
+        "seq_length": args.seq_length,
+        "path_to_cache": args.data_path_to_cache,
+        "random_seed": args.seed,
+        "reset_attention_mask": False,
+        "reset_position_ids": False,
+        "eod_mask_loss": False,
+        "num_dataset_builder_threads": 1,
+        "data_sharding": True,
+        "dataloader_type": "single",
+        "skip_getting_attention_mask_from_dataset": True,
+    }
+    if args.use_mock_data:
+        dataset_config = MockGPTDatasetConfig(**dataset_kwargs)
+    else:
+        dataset_config = GPTDatasetConfig(
+            blend=get_blend_from_list(args.data_paths),
+            split="99,1,0",
+            **dataset_kwargs,
+        )
+    checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
+    return ConfigContainer(
+        model=distill_provider,
+        train=TrainingConfig(
+            train_iters=args.train_iters,
+            eval_interval=args.eval_interval,
+            eval_iters=args.eval_iters,
+            global_batch_size=args.gbs,
+            micro_batch_size=args.mbs,
+            manual_gc=True,
+            manual_gc_interval=100,
+        ),
+        optimizer=optimizer_config,
+        scheduler=scheduler_config,
+        ddp=DistributedDataParallelConfig(
+            check_for_nan_in_grad=True,
+            grad_reduce_in_fp32=True,
+            overlap_grad_reduce=True,
+            overlap_param_gather=True,
+            average_in_collective=True,
+            use_distributed_optimizer=True,
+        ),
+        dataset=dataset_config,
+        logger=LoggerConfig(
+            log_interval=args.log_interval,
+            tensorboard_dir=os.path.join(args.output_dir, "tb_logs"),
+            log_timers_to_tensorboard=True,
+        ),
+        tokenizer=TokenizerConfig(
+            tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+        ),
+        checkpoint=CheckpointConfig(
+            save_interval=args.eval_interval,
+            save=checkpoint_dir,
+            load=checkpoint_dir,
+            most_recent_k=5,
+            ckpt_format="torch_dist",
+            async_save=True,
+            fully_parallel_save=True,
+        ),
+        rng=RNGConfig(seed=args.seed),
+        mixed_precision="bf16_mixed",
+    )
+
+
 class DoGEForwardStep:
     """Callable forward-step placeholder to pass into Megatron-Bridge ``pretrain``."""
 
@@ -196,7 +312,7 @@ class DoGEForwardStep:
 
 
 def main(args: argparse.Namespace) -> None:
-    """Report that the DoGE distillation workflow has not been implemented yet."""
+    """Build the DoGE forward step and pass it to the Megatron-Bridge training loop."""
     initial_blend_weights = _normalize_data_path_weights(args.data_paths)
     updater = DoGEWeightUpdater(meta_lr=args.doge_meta_lr)
     forward_step = DoGEForwardStep(updater=updater, blend_weights=initial_blend_weights)
@@ -205,11 +321,13 @@ def main(args: argparse.Namespace) -> None:
     for path, weight in forward_step.blend_weights.items():
         print(f"  {weight:.6g} {path}")
 
-    raise SystemExit(
-        "DoGE data-blend weight tuning is not implemented yet. "
-        f"No outputs were written to {args.output_dir}."
-    )
+    pretrain(_build_config(args), forward_step)
 
 
 if __name__ == "__main__":
-    main(get_args())
+    args = get_args()
+    dist.setup()
+    try:
+        main(args)
+    finally:
+        dist.cleanup()
