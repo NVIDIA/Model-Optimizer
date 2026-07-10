@@ -153,19 +153,32 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _normalize_data_path_weights(data_paths: list[str]) -> dict[str, float]:
+    if len(data_paths) % 2 != 0:
+        raise ValueError("--data_paths must contain WEIGHT PATH pairs")
+
+    blend_weights: dict[str, float] = {}
+    for weight_value, path in zip(data_paths[::2], data_paths[1::2], strict=True):
+        weight = _positive_float(weight_value)
+        blend_weights[path] = blend_weights.get(path, 0.0) + weight
+
+    total_weight = sum(blend_weights.values())
+    return {path: weight / total_weight for path, weight in blend_weights.items()}
+
+
 class DoGEForwardStep:
     """Callable forward-step placeholder to pass into Megatron-Bridge ``pretrain``."""
 
-    def __init__(self, updater: DoGEWeightUpdater, weights: dict[str, float]) -> None:
+    def __init__(self, updater: DoGEWeightUpdater, blend_weights: dict[str, float]) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
 
         Args:
             updater: DoGE weight updater for the training datasets listed in ``--data_paths``.
-            weights: Initial normalized blend weights for those training datasets, keyed by dataset
-                name or path.
+            blend_weights: Initial normalized blend weights for those training datasets, keyed by
+                dataset name or path.
         """
         self.updater = updater
-        self.weights = weights.copy()
+        self.blend_weights = blend_weights.copy()
 
     def __call__(
         self,
@@ -184,6 +197,14 @@ class DoGEForwardStep:
 
 def main(args: argparse.Namespace) -> None:
     """Report that the DoGE distillation workflow has not been implemented yet."""
+    initial_blend_weights = _normalize_data_path_weights(args.data_paths)
+    updater = DoGEWeightUpdater(meta_lr=args.doge_meta_lr)
+    forward_step = DoGEForwardStep(updater=updater, blend_weights=initial_blend_weights)
+
+    print("Initial DoGE blend weights:")
+    for path, weight in forward_step.blend_weights.items():
+        print(f"  {weight:.6g} {path}")
+
     raise SystemExit(
         "DoGE data-blend weight tuning is not implemented yet. "
         f"No outputs were written to {args.output_dir}."
