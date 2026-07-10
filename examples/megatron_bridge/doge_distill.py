@@ -18,14 +18,19 @@ DoGE paper: https://arxiv.org/abs/2310.15393
 """
 
 import argparse
+import contextlib
 import os
 from collections.abc import Iterable
+from dataclasses import fields
 from functools import partial
 from pathlib import Path
 
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
+from megatron.bridge.models.distillation_provider import (
+    DistillationProvider,
+    convert_to_distillation_provider,
+)
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
@@ -49,6 +54,38 @@ from megatron.core.models.gpt import GPTModel
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.distill.doge import DoGEWeightUpdater
+
+with contextlib.suppress(ModuleNotFoundError):
+    import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
+
+
+def _patched_to_cfg_dict(self):
+    """Patch DistillationProvider config serialization for heterogeneous students.
+
+    TODO: Remove once Megatron-Bridge serializes heterogeneous distillation providers correctly.
+    """
+    from megatron.bridge.training.utils.config_utils import _ConfigContainerBase
+
+    result = {"_target_": f"{self._super_class.__module__}.{self._super_class.__qualname__}"}
+    excluded_fields = {"teacher", "kd_config"}
+    for field in fields(self._super_class):
+        if field.name.startswith("_") or field.name in excluded_fields:
+            continue
+        if hasattr(self, field.name):
+            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
+                getattr(self, field.name)
+            )
+    for field in fields(self):
+        if field.name.startswith("_") or field.name in excluded_fields:
+            continue
+        if field.name not in result:
+            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
+                getattr(self, field.name)
+            )
+    return result
+
+
+DistillationProvider.to_cfg_dict = _patched_to_cfg_dict
 
 
 def _positive_int(value: str) -> int:
