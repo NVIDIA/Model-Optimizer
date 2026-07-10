@@ -225,8 +225,13 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _normalize_data_path_weights(data_paths: list[str]) -> dict[str, float]:
+    """Normalize a Megatron WEIGHT PATH list into weights keyed by dataset path.
+
+    For example, ``["2", "/data/a", "1", "/data/b"]`` becomes
+    ``{"/data/a": 2 / 3, "/data/b": 1 / 3}``.
+    """
     if len(data_paths) % 2 != 0:
-        raise ValueError("--data_paths must contain WEIGHT PATH pairs")
+        raise ValueError("data path list must contain WEIGHT PATH pairs")
 
     blend_weights: dict[str, float] = {}
     for weight_value, path in zip(data_paths[::2], data_paths[1::2], strict=True):
@@ -350,8 +355,10 @@ class DoGEForwardStep:
             meta_lr: Learning rate for exponentiated blend-weight updates.
         """
         self.updater = DoGEWeightUpdater(meta_lr=meta_lr)
-        self.blend_weights = _normalize_data_path_weights(data_paths)
-        self.target_blend_weights = _normalize_data_path_weights(target_data_paths)
+        self.blend_weights: dict[str, float] = _normalize_data_path_weights(data_paths)
+        self.target_blend_weights: dict[str, float] = _normalize_data_path_weights(
+            target_data_paths
+        )
         self.doge_data_iterators: DoGEDataIterators | None = None
 
     def _build_doge_data_iterators(self, state: GlobalState, model: GPTModel) -> DoGEDataIterators:
