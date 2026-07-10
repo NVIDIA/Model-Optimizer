@@ -201,6 +201,7 @@ class TensorQuantizer(nn.Module):
             self.amax = amax
 
         self._use_constant_amax = False
+        self._constant_amax = None
         self.set_from_attribute_config(quant_attribute_cfg)
 
         self._if_quant = if_quant
@@ -243,6 +244,13 @@ class TensorQuantizer(nn.Module):
                     self._calibrator._axis = None
             return val
 
+        def _constant_amax_setter(val):
+            if val is not None:
+                # Pin amax to the constant on the _amax buffer so it is used by both the
+                # fake-quant forward pass and export; calibration is skipped in model_calib.
+                self.amax = float(val)
+            return val
+
         # Some attributes need custom handling.
         # By default, attributes from config are mapped to a name ``f"_{attribute}"``
         _custom_setters: dict[str, tuple[str, Callable]] = {
@@ -254,6 +262,7 @@ class TensorQuantizer(nn.Module):
             "backend": ("backend", lambda val: val),
             "backend_extra_args": ("backend_extra_args", lambda val: val or {}),
             "use_constant_amax": ("_use_constant_amax", lambda val: val),
+            "constant_amax": ("_constant_amax", _constant_amax_setter),
         }
 
         for attribute, val in attribute_cfg.items():
@@ -669,6 +678,10 @@ class TensorQuantizer(nn.Module):
             return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
         if hasattr(self, "_amax"):
             amax = self._amax
+            # A constant_amax buffer is registered at config time (on CPU) and may not have
+            # followed a later `model.to(device)`; align it with the input device on the fly.
+            if amax.device != inputs.device:
+                amax = amax.to(inputs.device)
         else:
             reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(inputs, self._axis)
             amax = quant_utils.reduce_amax(inputs, axis=reduce_axis, keepdims=True).detach()
