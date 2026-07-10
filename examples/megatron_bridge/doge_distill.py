@@ -370,6 +370,17 @@ class DoGEForwardStep:
         """
         raise NotImplementedError("DoGE data iterator construction is not implemented yet.")
 
+    def _next_doge_batches(
+        self,
+    ) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, torch.Tensor]]:
+        """Return raw Megatron GPT batches for DoGE source and target losses.
+
+        Source batches are keyed by the same dataset paths as ``self.blend_weights``. Each batch is
+        the raw dictionary returned by the Megatron data iterator, typically containing tensors such
+        as ``tokens``, ``labels``, ``loss_mask``, ``attention_mask``, and ``position_ids``.
+        """
+        raise NotImplementedError("DoGE batch sampling is not implemented yet.")
+
     def __call__(
         self,
         state: GlobalState,
