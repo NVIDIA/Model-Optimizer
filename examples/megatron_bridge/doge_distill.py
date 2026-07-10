@@ -21,7 +21,7 @@ import argparse
 import contextlib
 import os
 from collections.abc import Iterable
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from functools import partial
 from pathlib import Path
 
@@ -86,6 +86,19 @@ def _patched_to_cfg_dict(self):
 
 
 DistillationProvider.to_cfg_dict = _patched_to_cfg_dict
+
+
+@dataclass
+class DoGEDataIterators:
+    """Data iterators required by one DoGE step.
+
+    Attributes:
+        source_iterators: One iterator per tunable training dataset path from ``--data_paths``.
+        target_iterator: Iterator over the fixed target objective.
+    """
+
+    source_iterators: dict[str, Iterable]
+    target_iterator: Iterable
 
 
 def _positive_int(value: str) -> int:
@@ -321,16 +334,34 @@ def _build_config(args: argparse.Namespace):
 class DoGEForwardStep:
     """Callable forward-step placeholder to pass into Megatron-Bridge ``pretrain``."""
 
-    def __init__(self, updater: DoGEWeightUpdater, blend_weights: dict[str, float]) -> None:
+    def __init__(
+        self,
+        updater: DoGEWeightUpdater,
+        blend_weights: dict[str, float],
+        target_blend_weights: dict[str, float],
+    ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
 
         Args:
             updater: DoGE weight updater for the training datasets listed in ``--data_paths``.
             blend_weights: Initial normalized blend weights for those training datasets, keyed by
                 dataset name or path.
+            target_blend_weights: Fixed normalized DoGE target-objective weights keyed by dataset
+                name or path.
         """
         self.updater = updater
         self.blend_weights = blend_weights.copy()
+        self.target_blend_weights = target_blend_weights.copy()
+        self.doge_data_iterators: DoGEDataIterators | None = None
+
+    def _build_doge_data_iterators(self, state: GlobalState, model: GPTModel) -> DoGEDataIterators:
+        """Build per-source and target iterators after Megatron-Bridge setup.
+
+        The implementation should reuse Megatron-Bridge/MCore dataset construction with the
+        initialized distributed state, creating one iterator for each training dataset path and one
+        iterator for the target objective.
+        """
+        raise NotImplementedError("DoGE data iterator construction is not implemented yet.")
 
     def __call__(
         self,
@@ -350,8 +381,13 @@ class DoGEForwardStep:
 def main(args: argparse.Namespace) -> None:
     """Build the DoGE forward step and pass it to the Megatron-Bridge training loop."""
     initial_blend_weights = _normalize_data_path_weights(args.data_paths)
+    target_blend_weights = _normalize_data_path_weights(args.target_data_paths)
     updater = DoGEWeightUpdater(meta_lr=args.doge_meta_lr)
-    forward_step = DoGEForwardStep(updater=updater, blend_weights=initial_blend_weights)
+    forward_step = DoGEForwardStep(
+        updater=updater,
+        blend_weights=initial_blend_weights,
+        target_blend_weights=target_blend_weights,
+    )
 
     print("Initial DoGE blend weights:")
     for path, weight in forward_step.blend_weights.items():
