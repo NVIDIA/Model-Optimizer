@@ -41,6 +41,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
 )
 from modelopt.torch.quantization.tensor_quant import int_cast_ste
 from modelopt.torch.quantization.utils.shared_input import SharedWeightGlobalAmaxState
+from modelopt.torch.utils import to_empty_if_meta_device
 
 
 def _make_int4_static_quantizer():
@@ -268,6 +269,16 @@ class TestEnableLSQ:
 
         assert module.weight_quantizer._amax_pre.dtype == torch.bfloat16
         assert module.weight_quantizer._amax_post.dtype == torch.bfloat16
+
+    def test_to_empty_if_meta_device_materializes_static_amax(self):
+        q = self._make_quantizer()
+        q._amax = q._amax.to("meta")
+        q.global_amax = torch.tensor(1.0, device="meta")
+
+        to_empty_if_meta_device(q, device=torch.device("cpu"))
+
+        assert q._amax.device.type == "cpu"
+        assert q.global_amax.device.type == "cpu"
 
 
 class TestLSQWeightIteration:

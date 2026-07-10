@@ -1612,9 +1612,9 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
         module = super()._apply(fn, recurse=recurse)
         self._preserve_amax_in_fp32()
-        if amax is not None:
+        if amax is not None and amax.device.type != "meta":
             self.amax = amax
-        if global_amax is not None:
+        if global_amax is not None and global_amax.device.type != "meta":
             self.global_amax = global_amax
         return module
 

@@ -1210,6 +1210,7 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
             )
         return self
 
+
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
 
 
