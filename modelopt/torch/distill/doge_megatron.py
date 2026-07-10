@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from functools import partial
 
 import torch
-from megatron.bridge.training.gpt_step import forward_step_modelopt
 from megatron.bridge.training.state import GlobalState
 from megatron.core.models.gpt import GPTModel
 
@@ -98,6 +97,21 @@ class DoGEForwardStep:
         """
         raise NotImplementedError("DoGE gradient-alignment scoring is not implemented yet.")
 
+    def _weighted_source_forward_step(
+        self,
+        state: GlobalState,
+        source_batches: dict[str, dict[str, torch.Tensor]],
+        model: GPTModel,
+        return_schedule_plan: bool,
+    ) -> tuple[torch.Tensor, partial]:
+        """Return Megatron's inner-loop weighted source loss.
+
+        This method should compute one source KD loss per batch in ``source_batches`` and combine
+        them using the current ``self.blend_weights``. Megatron-Bridge then backpropagates the
+        returned loss and updates the student with its normal optimizer step.
+        """
+        raise NotImplementedError("DoGE weighted source forward step is not implemented yet.")
+
     def __call__(
         self,
         state: GlobalState,
@@ -107,7 +121,27 @@ class DoGEForwardStep:
     ) -> tuple[torch.Tensor, partial]:
         """Run as Megatron-Bridge ``pretrain`` forward step for one DoGE iteration.
 
-        Returns the ``(output_tensor, loss_function)`` pair expected by Megatron-Bridge
-        after the DoGE implementation computes updated blend weights for the training datasets.
+        The DoGE outer loop updates the training blend weights from source-to-target gradient
+        alignment scores. The inner loop returns the weighted source loss that Megatron-Bridge
+        backpropagates with its normal optimizer step.
         """
-        return forward_step_modelopt(state, data_iterator, model, return_schedule_plan)
+        if self.doge_data_iterators is None:
+            self.doge_data_iterators = self._build_doge_data_iterators(state, model)
+
+        source_batches, target_batch = self._next_doge_batches()
+
+        # Outer loop: use the target batch to score each source batch and update the data-blend
+        # weights. This changes only ``self.blend_weights``, not the student model.
+        scores = self._compute_alignment_scores(source_batches, target_batch, model)
+        self.blend_weights = dict(self.updater.update(self.blend_weights, scores))
+
+        # Inner loop: train the student on source batches mixed with the updated DoGE weights.
+        # Megatron-Bridge backpropagates the returned loss and performs the optimizer step.
+        # TODO: Reuse source gradients from the outer-loop scoring pass to avoid recomputing source
+        # forward/backward work once the PoC no longer relies on Megatron-Bridge's normal loss path.
+        return self._weighted_source_forward_step(
+            state,
+            source_batches,
+            model,
+            return_schedule_plan,
+        )
