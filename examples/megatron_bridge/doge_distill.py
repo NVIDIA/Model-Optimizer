@@ -15,10 +15,6 @@
 """Tune distillation data-blend weights with DoGE and Megatron-Bridge.
 
 DoGE paper: https://arxiv.org/abs/2310.15393
-
-The planned outputs under ``--output_dir`` are DoGE distillation checkpoints,
-``doge_weights.jsonl`` containing the weight trajectory, and
-``learned_data_blend.txt`` containing the learned fixed blend.
 """
 
 import argparse
@@ -97,7 +93,9 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         metavar="VALUE",
         help=(
-            "Fixed held-out target objective as WEIGHT PATH pairs.\n"
+            "Fixed held-out DoGE target objective as WEIGHT PATH pairs.\n"
+            "This does not override Megatron validation data; validation still uses "
+            "--data_paths.\n"
             "Sources may differ from the training sources.\n"
             "Example:\n"
             "  --target_data_paths 0.6 /data/reasoning 0.4 /data/knowledge"
