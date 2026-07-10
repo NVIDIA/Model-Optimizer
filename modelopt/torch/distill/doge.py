@@ -15,9 +15,29 @@
 
 """Data-blend weight update API for DoGE distillation."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
-__all__ = ["DoGEWeightUpdater"]
+__all__ = ["DoGEWeightUpdater", "normalize_data_path_weights"]
+
+
+def normalize_data_path_weights(data_paths: Sequence[str]) -> dict[str, float]:
+    """Normalize a Megatron WEIGHT PATH list into weights keyed by dataset path.
+
+    For example, ``["2", "/data/a", "1", "/data/b"]`` becomes
+    ``{"/data/a": 2 / 3, "/data/b": 1 / 3}``.
+    """
+    if len(data_paths) % 2 != 0:
+        raise ValueError("data path list must contain WEIGHT PATH pairs")
+
+    blend_weights: dict[str, float] = {}
+    for weight_value, path in zip(data_paths[::2], data_paths[1::2], strict=True):
+        weight = float(weight_value)
+        if weight <= 0:
+            raise ValueError(f"blend weights must be positive, got {weight_value!r}")
+        blend_weights[path] = blend_weights.get(path, 0.0) + weight
+
+    total_weight = sum(blend_weights.values())
+    return {path: weight / total_weight for path, weight in blend_weights.items()}
 
 
 class DoGEWeightUpdater:
