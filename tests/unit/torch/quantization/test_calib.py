@@ -23,13 +23,15 @@ import torch.nn as nn
 from _test_utils.torch.quantization.quantize_common import get_awq_config
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.config import MaxCalibConfig, QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
+    _needs_activation_forward_for_max_calib,
     apply_pre_quant_scale_and_smooth,
     disable_pre_quant_scale_and_resmooth,
     layerwise_calibrate,
+    max_calibrate,
 )
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import QuantLinear, TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
@@ -583,3 +585,75 @@ def test_layerwise_calibrate_handles_inter_layer_logic(monkeypatch):
     assert torch.allclose(observed_layer_inputs[1][0], torch.tensor([[2.0, 4.0]]))
     # Layer 2 gets output of layer 1 (prev * mask1 * scale1 = [2,4] * 0.5 * 0.5 = [0.5,1.0])
     assert torch.allclose(observed_layer_inputs[2][0], torch.tensor([[0.5, 1.0]]))
+
+
+def _make_quant_linear(input_cfg, fi=16, fo=8):
+    """QuantLinear with an int8 weight quantizer and a caller-specified input quantizer."""
+    lin = QuantLinear(fi, fo, bias=False)
+    lin.weight_quantizer.set_from_attribute_config(QuantizerAttributeConfig(num_bits=8))
+    lin.input_quantizer.set_from_attribute_config(input_cfg)
+    return lin
+
+
+def test_max_calib_skips_forward_when_all_activations_constant():
+    """constant_amax activation quantizer => no data forward; weights still calibrated."""
+    lin = _make_quant_linear(QuantizerAttributeConfig(num_bits=8, constant_amax=127.0))
+    assert not _needs_activation_forward_for_max_calib(lin)
+
+    calls = []
+
+    def forward_loop(model):
+        calls.append(1)
+        model(torch.randn(4, 16))
+
+    max_calibrate(
+        lin, forward_loop, distributed_sync=False, skip_forward_without_activation_calib=True
+    )
+    assert calls == []  # forward skipped entirely
+    assert hasattr(
+        lin.weight_quantizer, "_amax"
+    )  # weight still calibrated via weight_only_quantize
+    assert float(lin.input_quantizer._amax) == 127.0  # constant amax preserved
+
+
+def test_max_calib_runs_forward_when_activation_needs_data():
+    """A normal (non-constant) input quantizer still triggers the calibration forward."""
+    lin = _make_quant_linear(QuantizerAttributeConfig(num_bits=8))
+    assert _needs_activation_forward_for_max_calib(lin)
+
+    calls = []
+
+    def forward_loop(model):
+        calls.append(1)
+        model(torch.randn(4, 16))
+
+    max_calibrate(
+        lin, forward_loop, distributed_sync=False, skip_forward_without_activation_calib=True
+    )
+    assert calls == [1]
+    assert lin.input_quantizer.amax is not None
+
+
+def test_max_calib_default_does_not_skip_forward():
+    """Default flag is opt-out=False for direct callers: forward always runs (backward compat)."""
+    lin = _make_quant_linear(QuantizerAttributeConfig(num_bits=8, constant_amax=127.0))
+
+    calls = []
+
+    def forward_loop(model):
+        calls.append(1)
+        model(torch.randn(4, 16))
+
+    max_calibrate(lin, forward_loop, distributed_sync=False)  # skip flag defaults to False
+    assert calls == [1]
+
+
+def test_needs_activation_forward_ignores_disabled_and_weight_quantizers():
+    """Disabled activation quantizers (weight-only recipe) need no forward."""
+    lin = _make_quant_linear(QuantizerAttributeConfig(num_bits=8, enable=False))
+    assert not _needs_activation_forward_for_max_calib(lin)
+
+
+def test_max_calib_config_enables_skip_by_default():
+    """The top-level max path opts in via MaxCalibConfig."""
+    assert MaxCalibConfig().skip_forward_without_activation_calib is True

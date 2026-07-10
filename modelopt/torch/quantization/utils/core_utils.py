@@ -647,7 +647,10 @@ def sync_moe_expert_amax(experts, sync_weight_amax=False):
             if name.endswith("weight_quantizer") and module.is_enabled and module.amax is None:
                 weight = expert.state_dict().get(name.replace("weight_quantizer", "weight"))
                 if weight is not None:
-                    max_calibrate(module, lambda m, w=weight: m(w), distributed_sync=False)
+                    # max_calibrate invokes the forward_loop synchronously, so capturing
+                    # ``weight`` by closure (rather than a default arg) is safe and lets mypy
+                    # infer the lambda type.
+                    max_calibrate(module, lambda m: m(weight), distributed_sync=False)
 
 
 @contextmanager

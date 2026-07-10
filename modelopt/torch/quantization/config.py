@@ -939,6 +939,19 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         ),
     )
 
+    skip_forward_without_activation_calib: bool = ModeloptField(
+        default=True,
+        title="Skip the calibration forward when no activation quantizer needs data.",
+        description=(
+            "If True (default), max calibration skips the ``forward_loop`` entirely when no "
+            "enabled quantizer collects data-driven activation statistics — e.g. an "
+            "experts-only recipe whose activation quantizers all use ``constant_amax`` or "
+            "``use_constant_amax``, or dynamic quantization. Weight calibration still runs on "
+            "the weight tensors directly, so results are unchanged; only the wasted forward is "
+            "avoided. Set to False to always run the provided ``forward_loop``."
+        ),
+    )
+
 
 class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
