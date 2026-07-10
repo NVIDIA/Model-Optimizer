@@ -714,16 +714,23 @@ def run_jobs(
                         dependencies=[dependency],
                     )
 
-            exp.run(detach=detach)
+            # Write metadata BEFORE exp.run() so downstream tooling
+            # (tools/wait_for_experiments.sh) can read allow_to_fail even when
+            # submission fails and the experiment ends up UNSUBMITTED. If exp.run()
+            # raises (e.g. sbatch/cli_filter errors at submit), a post-run write
+            # would be skipped and the task counted as a blocking failure despite
+            # allow_to_fail=True.
+            metadata = {
+                "experiment_id": exp._id,
+                "job_name": job_name,
+                "allow_to_fail": job.allow_to_fail,
+                "note": job.note,
+            }
+            metadata_path = os.path.join(
+                "experiments", experiment_title, exp._id, "metadata.json"
+            )
+            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+            with open(metadata_path, "w") as f:
+                json.dump(metadata, f)
 
-        # Write metadata for downstream tools
-        metadata = {
-            "experiment_id": exp._id,
-            "job_name": job_name,
-            "allow_to_fail": job.allow_to_fail,
-            "note": job.note,
-        }
-        metadata_path = os.path.join("experiments", experiment_title, exp._id, "metadata.json")
-        os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f)
+            exp.run(detach=detach)

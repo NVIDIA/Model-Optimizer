@@ -26,6 +26,7 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
 from core import (
     SandboxPipeline,
     SandboxTask0,
@@ -253,6 +254,52 @@ class TestRunJobsDockerPath:
         assert meta["job_name"] == "meta_job"
         assert meta["allow_to_fail"] is True
         assert meta["note"] == "test note"
+
+    @patch("core.run.Experiment")
+    @patch("core.build_docker_executor")
+    def test_metadata_written_even_when_run_raises(self, mock_docker, mock_exp, tmp_path):
+        # Submission can crash (e.g. sbatch/cli_filter errors) leaving the
+        # experiment UNSUBMITTED. metadata.json must still be on disk so
+        # wait_for_experiments can read allow_to_fail and not count the task as a
+        # blocking failure. Regression: the write used to run *after* exp.run(),
+        # so a submit crash skipped it entirely.
+        mock_exp_instance = MagicMock()
+        mock_exp_instance._id = "test_exp_run_fail"
+        mock_exp_instance.__enter__ = MagicMock(return_value=mock_exp_instance)
+        mock_exp_instance.__exit__ = MagicMock(return_value=False)
+        mock_exp_instance.run.side_effect = RuntimeError(
+            "sbatch: error: cli_filter plugin terminated with error"
+        )
+        mock_exp.return_value = mock_exp_instance
+
+        mock_docker.return_value = MagicMock()
+        slurm_env, local_env = get_default_env("cicd")
+
+        t0 = SandboxTask0(script="test.sh", slurm_config=MagicMock())
+        pipeline = SandboxPipeline(task_0=t0, allow_to_fail=True, note="quarantined")
+        job_table = {"crash_job": pipeline}
+
+        with pytest.raises(RuntimeError):
+            run_jobs(
+                job_table=job_table,
+                hf_local="/tmp/hf",
+                user="user",
+                identity=None,
+                job_dir=str(tmp_path),
+                packager=MagicMock(),
+                default_slurm_env=slurm_env,
+                default_local_env=local_env,
+                experiment_title="cicd",
+                base_dir=str(tmp_path),
+            )
+
+        metadata_path = os.path.join(
+            "experiments", "cicd", "test_exp_run_fail", "metadata.json"
+        )
+        assert os.path.exists(metadata_path), "metadata.json must be written before exp.run()"
+        with open(metadata_path) as f:
+            meta = json.load(f)
+        assert meta["allow_to_fail"] is True
 
     @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
