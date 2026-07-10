@@ -1,4 +1,4 @@
-# Skip-Softmax Sparse Attention for Diffusion Models
+# Sparse Attention for Diffusion Models
 
 > [!WARNING]
 > **Third-Party License Notice — LTX-2**
@@ -25,6 +25,12 @@ Two modes are supported:
   Triton calibration kernel, then the target sparsity can be adjusted at runtime
   without recalibration. Log-space fitting (`fit_logspace=True`) is recommended
   for diffusion models where scale_factors span many orders of magnitude.
+
+In addition, **N:M sparse softmax** (`--sparse-nm`, default 2:4) keeps the
+top-N of every M attention scores along the key dimension inside the fused
+Triton kernel. The pattern is fixed — no calibration or threshold needed — and
+guarantees 50% score sparsity (for 2:4) on the sparsified layers. Cross-attention
+and the first/last `--skip-first-last` transformer blocks stay dense.
 
 ## Supported Models
 
@@ -61,6 +67,12 @@ python wan22_skip_softmax.py \
     --model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
     --skip-softmax-threshold 0.61557 --report-avg-sparsity \
     --prompt "A cat playing piano" --output out.mp4
+
+# 2:4 sparse softmax (fixed N:M pattern, no calibration)
+python wan22_skip_softmax.py \
+    --model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
+    --sparse-nm \
+    --prompt "A cat playing piano" --output sparse24.mp4
 ```
 
 `--export-dir` writes a Hugging Face checkpoint with the calibrated

@@ -28,6 +28,65 @@ import torch
 from .registry import SparseAttentionMethod, register_sparse_method
 
 
+@contextmanager
+def _diffusers_backend_context():
+    """Activate the modelopt_triton diffusers backend if registered."""
+    try:
+        from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
+            get_triton_attention_backend,
+        )
+
+        with get_triton_attention_backend():
+            yield
+    except (ImportError, RuntimeError):
+        yield
+
+
+def _set_triton_backend_config(**kwargs):
+    """Set config on the diffusers and LTX Triton backends.
+
+    The HF (modelopt_triton) backend reads its config directly from the
+    method instance during ``triton_attention_forward``, so it needs no
+    separate configuration here.
+    """
+    try:
+        from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
+            set_triton_skip_softmax_config,
+        )
+
+        set_triton_skip_softmax_config(**kwargs)
+    except ImportError:
+        pass
+    try:
+        from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
+            set_ltx_triton_context,
+        )
+
+        set_ltx_triton_context(active=True, **kwargs)
+    except ImportError:
+        pass
+
+
+def _clear_triton_backend_config():
+    """Clear config on the diffusers and LTX Triton backends."""
+    try:
+        from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
+            clear_triton_skip_softmax_config,
+        )
+
+        clear_triton_skip_softmax_config()
+    except ImportError:
+        pass
+    try:
+        from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
+            clear_ltx_triton_context,
+        )
+
+        clear_ltx_triton_context()
+    except ImportError:
+        pass
+
+
 @register_sparse_method("triton_skip_softmax")
 class TritonSkipSoftmaxMethod(SparseAttentionMethod):
     """Skip-softmax tile skipping via the Triton flash attention kernel.
@@ -101,10 +160,10 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         # Priority: calibrated dynamic threshold > static threshold.
         scale_factor = self._get_scale_factor()
         if scale_factor is not None:
-            self._set_triton_backends(scale_factor=scale_factor, **backend_kwargs)
+            _set_triton_backend_config(scale_factor=scale_factor, **backend_kwargs)
         else:
-            self._set_triton_backends(threshold=self.skip_softmax_threshold, **backend_kwargs)
-        with self._get_diffusers_backend_context():
+            _set_triton_backend_config(threshold=self.skip_softmax_threshold, **backend_kwargs)
+        with _diffusers_backend_context():
             try:
                 yield
             finally:
@@ -112,26 +171,26 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
                 if self._measure_sparsity:
                     self._collect_sparsity_counters()
                 module._apply_skip_softmax = False
-                self._clear_triton_backends()
+                _clear_triton_backend_config()
 
     @contextmanager
     def _triton_calibration_context(self, module):
         """Calibration: collect multi-threshold sparsity stats via Triton kernel."""
         module._apply_skip_softmax = True
         # Reset the HF-backend calibration accumulators for this forward pass.
-        # (The diffusers/LTX backends reset their own state in ``_set_triton_backends``.)
+        # (The diffusers/LTX backends reset their own state in ``_set_triton_backend_config``.)
         self._hf_calibration_counters = None
         self._hf_calibration_seq_k = None
         self._hf_calibration_is_decode = False
-        self._set_triton_backends(calibration_mode=True, threshold_trials=self._threshold_trials)
-        with self._get_diffusers_backend_context():
+        _set_triton_backend_config(calibration_mode=True, threshold_trials=self._threshold_trials)
+        with _diffusers_backend_context():
             try:
                 yield
                 # After forward pass, extract counters and build stats
                 self._collect_calibration_stats(module)
             finally:
                 module._apply_skip_softmax = False
-                self._clear_triton_backends()
+                _clear_triton_backend_config()
 
     def _get_scale_factor(self, phase: str = "prefill") -> float | None:
         """Compute the scale_factor for ``phase`` from calibration params, or None.
@@ -182,63 +241,6 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
         if scale_factor is not None and seq_k > 0:
             return scale_factor / seq_k
         return self.skip_softmax_threshold or None
-
-    @staticmethod
-    @contextmanager
-    def _get_diffusers_backend_context():
-        """Activate the modelopt_triton diffusers backend if registered."""
-        try:
-            from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
-                get_triton_attention_backend,
-            )
-
-            with get_triton_attention_backend():
-                yield
-        except (ImportError, RuntimeError):
-            yield
-
-    def _set_triton_backends(self, **kwargs):
-        """Set config on the diffusers and LTX Triton backends.
-
-        The HF (modelopt_triton) backend reads its calibration config directly
-        from this method instance during ``triton_attention_forward``, so it
-        needs no separate configuration here.
-        """
-        try:
-            from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
-                set_triton_skip_softmax_config,
-            )
-
-            set_triton_skip_softmax_config(**kwargs)
-        except ImportError:
-            pass
-        try:
-            from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
-                set_ltx_triton_context,
-            )
-
-            set_ltx_triton_context(active=True, **kwargs)
-        except ImportError:
-            pass
-
-    def _clear_triton_backends(self):
-        """Clear config on the diffusers and LTX Triton backends."""
-        try:
-            from modelopt.torch.kernels.sparsity.attention.diffusers_triton_attention import (
-                clear_triton_skip_softmax_config,
-            )
-
-            clear_triton_skip_softmax_config()
-        except ImportError:
-            pass
-        try:
-            from modelopt.torch.kernels.sparsity.attention.ltx_triton_attention import (
-                clear_ltx_triton_context,
-            )
-
-            clear_ltx_triton_context()
-        except ImportError:
-            pass
 
     def _collect_calibration_stats(self, module):
         """Read Triton calibration counters and store as stats on the module."""

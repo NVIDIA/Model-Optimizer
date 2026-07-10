@@ -82,6 +82,27 @@ class TestThreadLocalContext:
         assert ltx_mod.get_calibration_counters() is None
         assert ltx_mod.get_calibration_seq_k() is None
 
+    def test_set_context_populates_sparse_nm_fields(self, ltx_mod):
+        ltx_mod.set_ltx_triton_context(
+            active=True,
+            sparsity_n=2,
+            sparsity_m=4,
+            dense_sink_tokens=16,
+            dense_recent_tokens=32,
+        )
+        assert ltx_mod._thread_local.sparsity_n == 2
+        assert ltx_mod._thread_local.sparsity_m == 4
+        assert ltx_mod._thread_local.dense_sink_tokens == 16
+        assert ltx_mod._thread_local.dense_recent_tokens == 32
+
+    def test_clear_context_resets_sparse_nm_fields(self, ltx_mod):
+        ltx_mod.set_ltx_triton_context(active=True, sparsity_n=2, sparsity_m=4)
+        ltx_mod.clear_ltx_triton_context()
+        assert ltx_mod._thread_local.sparsity_n == 0
+        assert ltx_mod._thread_local.sparsity_m == 4
+        assert ltx_mod._thread_local.dense_sink_tokens == 0
+        assert ltx_mod._thread_local.dense_recent_tokens == 0
+
 
 class TestRegisterLTXTritonAttention:
     """Test register_ltx_triton_attention patches ltx_core Attention modules."""

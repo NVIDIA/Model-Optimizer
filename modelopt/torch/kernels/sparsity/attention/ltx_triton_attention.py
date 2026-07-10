@@ -41,6 +41,10 @@ def set_ltx_triton_context(
     calibration_mode: bool = False,
     threshold_trials: list[float] | None = None,
     scale_factor: float | None = None,
+    sparsity_n: int = 0,
+    sparsity_m: int = 4,
+    dense_sink_tokens: int = 0,
+    dense_recent_tokens: int = 0,
     **kwargs,
 ) -> None:
     """Set thread-local Triton config for LTX-2 attention."""
@@ -49,6 +53,10 @@ def set_ltx_triton_context(
     _thread_local.calibration_mode = calibration_mode
     _thread_local.threshold_trials = threshold_trials
     _thread_local.scale_factor = scale_factor
+    _thread_local.sparsity_n = sparsity_n
+    _thread_local.sparsity_m = sparsity_m
+    _thread_local.dense_sink_tokens = dense_sink_tokens
+    _thread_local.dense_recent_tokens = dense_recent_tokens
     if not calibration_mode:
         _thread_local.calibration_counters = None
     _thread_local.calibration_seq_k = None
@@ -61,6 +69,10 @@ def clear_ltx_triton_context() -> None:
     _thread_local.calibration_mode = False
     _thread_local.threshold_trials = None
     _thread_local.scale_factor = None
+    _thread_local.sparsity_n = 0
+    _thread_local.sparsity_m = 4
+    _thread_local.dense_sink_tokens = 0
+    _thread_local.dense_recent_tokens = 0
     _thread_local.calibration_counters = None
     _thread_local.calibration_seq_k = None
 
@@ -148,6 +160,14 @@ def _ltx_triton_attention(
         kw["skip_softmax_threshold"] = scale_factor / seq_k
     elif threshold is not None and threshold > 0.0:
         kw["skip_softmax_threshold"] = threshold
+
+    # --- N:M sparse softmax: applied inside the fused kernel ---
+    sparsity_n = getattr(_thread_local, "sparsity_n", 0)
+    if sparsity_n > 0:
+        kw["sparsity_n"] = sparsity_n
+        kw["sparsity_m"] = getattr(_thread_local, "sparsity_m", 4)
+        kw["dense_sink_tokens"] = getattr(_thread_local, "dense_sink_tokens", 0)
+        kw["dense_recent_tokens"] = getattr(_thread_local, "dense_recent_tokens", 0)
 
     from modelopt.torch.kernels.common.attention import attention
 

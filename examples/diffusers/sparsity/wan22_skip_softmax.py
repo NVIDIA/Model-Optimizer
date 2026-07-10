@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Wan 2.2 inference with skip-softmax sparse attention.
+"""Wan 2.2 inference with skip-softmax or N:M sparse attention.
 
-This example applies skip-softmax sparse attention to the Wan 2.2 video
-generation model (text-to-video). Four modes are supported:
+This example applies sparse attention to the Wan 2.2 video generation model
+(text-to-video). Five modes are supported:
 
 1. **Baseline** — pass ``--baseline`` for dense inference (default diffusers backend).
 2. **Triton baseline** — pass ``--triton-baseline`` for dense Triton FA kernel
@@ -25,6 +25,9 @@ generation model (text-to-video). Four modes are supported:
    supply the BLASST lambda threshold. No calibration data is needed.
 4. **Calibrated threshold** — pass ``--calibrate`` to run exponential-model
    calibration (``scale_factor = a * exp(b * target_sparsity)``).
+5. **N:M sparse softmax** — pass ``--sparse-nm`` for structured N:M sparsity
+   (default 2:4: keep the top-2 of every 4 attention scores along the key
+   dimension) applied inside the fused Triton kernel. No calibration needed.
 
 During calibration, ``triton_skip_softmax`` with the Triton calibration kernel
 collects sparsity statistics across multiple threshold trials. The fitted
@@ -47,6 +50,10 @@ Usage::
     # With calibration
     python wan22_skip_softmax.py --calibrate --target-sparsity 0.25 \\
         --report-avg-sparsity --prompt "A cat playing piano" --output out.mp4
+
+    # 2:4 sparse softmax (no calibration needed)
+    python wan22_skip_softmax.py --sparse-nm \\
+        --prompt "A cat playing piano" --output sparse24.mp4
 """
 
 import argparse
@@ -159,6 +166,24 @@ def parse_args() -> argparse.Namespace:
         "Bypasses calibration. Typical range: 1e-6 to 0.5.",
     )
     parser.add_argument(
+        "--sparse-nm",
+        action="store_true",
+        help="Apply N:M sparse softmax inside the fused Triton kernel "
+        "(default 2:4 via --sparsity-n/--sparsity-m). No calibration needed.",
+    )
+    parser.add_argument(
+        "--sparsity-n",
+        type=int,
+        default=2,
+        help="N:M sparsity — keep top-N of every M attention scores (default: 2)",
+    )
+    parser.add_argument(
+        "--sparsity-m",
+        type=int,
+        default=4,
+        help="N:M sparsity — group size, 4 or 8 (default: 4)",
+    )
+    parser.add_argument(
         "--skip-first-last",
         type=int,
         default=2,
@@ -218,7 +243,15 @@ def parse_args() -> argparse.Namespace:
         "sparse attention config (config.json). Only emitted when > 0; not interpreted "
         "at sparsify/calibration time.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.sparse_nm and (args.baseline or args.triton_baseline):
+        parser.error("--sparse-nm cannot be combined with --baseline or --triton-baseline")
+    if args.sparse_nm and (args.calibrate or args.skip_softmax_threshold is not None):
+        parser.error(
+            "--sparse-nm uses a fixed N:M pattern; it cannot be combined with "
+            "--calibrate or --skip-softmax-threshold"
+        )
+    return args
 
 
 def build_pipeline(model_path: str) -> WanPipeline:
@@ -232,29 +265,44 @@ def build_pipeline(model_path: str) -> WanPipeline:
 def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
     """Build sparse attention config from CLI args.
 
-    Two modes:
+    Three modes:
     - **Fixed threshold**: ``--skip-softmax-threshold`` sets
       ``skip_softmax_threshold`` directly — no calibration needed.
     - **Calibrated**: ``--calibrate`` collects multi-threshold sparsity statistics
       via the Triton calibration kernel, then fits an exponential model:
       ``scale_factor = a * exp(b * sparsity)``.
+    - **N:M sparse softmax**: ``--sparse-nm`` keeps the top-N of every M
+      attention scores inside the fused kernel — fixed pattern, no calibration.
+      The dense sink/recent-token bands are causal-LLM heuristics, so they are
+      disabled for bidirectional video attention.
     """
-    attn_cfg: dict = {
-        "method": "triton_skip_softmax",
-        "skip_softmax_threshold": 0.0 if args.triton_baseline else 0.1,
-        "backend": "triton",
-        "is_causal": False,  # Diffusion = bidirectional attention
-        "collect_stats": True,
-        "enable": True,
-    }
+    if args.sparse_nm:
+        attn_cfg: dict = {
+            "method": "triton_sparse_softmax",
+            "sparsity_n": args.sparsity_n,
+            "sparsity_m": args.sparsity_m,
+            "dense_sink_tokens": 0,
+            "dense_recent_tokens": 0,
+            "backend": "triton",
+            "enable": True,
+        }
+    else:
+        attn_cfg = {
+            "method": "triton_skip_softmax",
+            "skip_softmax_threshold": 0.0 if args.triton_baseline else 0.1,
+            "backend": "triton",
+            "is_causal": False,  # Diffusion = bidirectional attention
+            "collect_stats": True,
+            "enable": True,
+        }
 
-    # Fixed threshold bypasses calibration.
-    if args.skip_softmax_threshold is not None:
-        attn_cfg["skip_softmax_threshold"] = args.skip_softmax_threshold
+        # Fixed threshold bypasses calibration.
+        if args.skip_softmax_threshold is not None:
+            attn_cfg["skip_softmax_threshold"] = args.skip_softmax_threshold
 
-    # Opt-in initial-disabled-steps metadata — carried through to the exported config when > 0.
-    if args.initial_disabled_steps > 0:
-        attn_cfg["initial_disabled_steps"] = args.initial_disabled_steps
+        # Opt-in initial-disabled-steps metadata — carried through to the exported config when > 0.
+        if args.initial_disabled_steps > 0:
+            attn_cfg["initial_disabled_steps"] = args.initial_disabled_steps
 
     sparse_cfg: dict = {
         "*.attn1*": attn_cfg,  # Self-attention only
@@ -418,6 +466,7 @@ def main() -> None:
     is_14b = len(transformers) > 1
 
     # ---- Sparsify (unless baseline) ----
+    forward_loop = None
     if args.baseline:
         print("Baseline mode: running dense inference (default diffusers backend)")
     elif args.triton_baseline:
@@ -427,9 +476,17 @@ def main() -> None:
             print(f"Applying Triton backend to {name} ({num_blocks} blocks)...")
             config = build_sparse_config(args, num_blocks=num_blocks)
             mtsa.sparsify(transformer, config, forward_loop=None)
+    elif args.sparse_nm:
+        for name, transformer in transformers:
+            num_blocks = _get_num_blocks(transformer)
+            print(
+                f"Applying {args.sparsity_n}:{args.sparsity_m} sparse softmax "
+                f"to {name} ({num_blocks} blocks)..."
+            )
+            config = build_sparse_config(args, num_blocks=num_blocks)
+            mtsa.sparsify(transformer, config, forward_loop=None)
     else:
         # Build calibration forward loop if needed
-        forward_loop = None
         if args.skip_softmax_threshold is not None:
             print(
                 f"Using fixed skip-softmax threshold: {args.skip_softmax_threshold} "
