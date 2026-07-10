@@ -43,6 +43,7 @@ from megatron.bridge.training.config import (
     TokenizerConfig,
     TrainingConfig,
 )
+from megatron.bridge.training.gpt_step import forward_step_modelopt
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.state import GlobalState
@@ -308,7 +309,7 @@ class DoGEForwardStep:
         Returns the ``(output_tensor, loss_function)`` pair expected by Megatron-Bridge
         after the DoGE implementation computes updated blend weights for the training datasets.
         """
-        raise NotImplementedError("DoGE forward step is not implemented yet.")
+        return forward_step_modelopt(state, data_iterator, model, return_schedule_plan)
 
 
 def main(args: argparse.Namespace) -> None:
