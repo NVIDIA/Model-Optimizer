@@ -455,7 +455,7 @@ class TestFakeQuantizeLSQ:
         min_values = []
 
         def fake_amax_to_scale(amax, maxbound, min_value=1e-8):
-            # Only record the per-block (shape-4) scale calls, not per_tensor_scale.
+            # Only record the per-block (shape-4) scale calls, not global scale derivation.
             if amax.numel() == 4:
                 min_values.append(min_value)
             return torch.ones_like(amax)
@@ -476,7 +476,7 @@ class TestLSQSharedGlobalAmax:
     """Regression: LSQ must honor the shared/tied weight global_amax invariant.
 
     A q/k/v-style fusible group ties ``_global_amax`` to a single shared buffer object.
-    Since LSQ derives ``per_tensor_scale`` from ``global_amax`` at runtime (no snapshot),
+    Since LSQ derives the per-tensor scale from ``global_amax`` at runtime (no snapshot),
     an in-place update of the shared buffer (e.g. export unification) must propagate to
     every member. Uses INT4 (FP8-quantized scales) members so the forward runs on CPU;
     the shared-buffer mechanism under test is format-agnostic.
@@ -505,7 +505,7 @@ class TestLSQSharedGlobalAmax:
             member.enable_lsq(quantize_scales=True)
         return members
 
-    def test_per_tensor_scale_tracks_shared_update(self):
+    def test_block_scale_tracks_shared_update(self):
         members = self._make_tied_lsq_group(global_amax=3.0)
         new_value = 5.0
         # Mutate the shared buffer in place, mimicking export unification.
@@ -513,7 +513,9 @@ class TestLSQSharedGlobalAmax:
 
         for member in members:
             expected = _amax_to_scale(torch.tensor(new_value), member._quant_max_bound)
-            assert torch.allclose(member.per_tensor_scale, expected)
+            scale = member._block_scale_from_amax(member.amax_post, quantize=True)
+            assert scale.shape == member.amax_post.shape
+            assert torch.all(scale >= _FP8_E4M3_MIN_POSITIVE * expected)
 
     def test_members_produce_identical_output_after_shared_update(self):
         members = self._make_tied_lsq_group(global_amax=3.0)

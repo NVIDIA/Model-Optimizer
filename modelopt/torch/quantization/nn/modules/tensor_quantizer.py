@@ -1589,18 +1589,6 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         self._preserve_amax_in_fp32()
 
     @property
-    def per_tensor_scale(self):
-        """Runtime per-tensor scale derived from ``global_amax``.
-
-        Computed on the fly (fp32) rather than snapshotted so that updates to the
-        possibly tied/shared ``global_amax`` (e.g. export unification of a fusible
-        sibling group) are always reflected. Returns None when ``global_amax`` is None.
-        """
-        if self.global_amax is None:
-            return None
-        return _amax_to_scale(self._global_amax, self._quant_max_bound)
-
-    @property
     def has_quantized_block_scale(self):
         """True when per-block scales are FP8 (E4M3) quantized (format-only check)."""
         return self._block_sizes is not None and self._block_sizes.get("scale_bits") == (4, 3)
@@ -1642,8 +1630,8 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         """LSQ mode with configurable learnable/frozen amax tensors.
 
         The per-block amax params are initialized from the calibrated ``_amax``. The
-        per-tensor scale is never materialized; it is derived from ``global_amax`` at
-        runtime (see ``per_tensor_scale``) so shared-group updates are always reflected.
+        per-tensor scale is derived from ``global_amax`` at runtime so shared-group
+        updates are always reflected.
 
         Args:
             quantize_scales: Whether to FP8-quantize per-block scales (NVFP4). When None,
@@ -1696,9 +1684,12 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     def _block_scale_from_amax(self, amax: torch.Tensor, quantize: bool) -> torch.Tensor:
         """Compute the per-block scale from a per-block amax, optionally FP8-quantizing it."""
-        min_value = _FP8_E4M3_MIN_POSITIVE * self.per_tensor_scale.view(-1) if quantize else 1e-8
-        scale = _amax_to_scale(amax, self._quant_max_bound, min_value=min_value)
-        return scaled_e4m3(scale, self.per_tensor_scale, None, 4, 3) if quantize else scale
+        if quantize:
+            per_tensor_scale = _amax_to_scale(self.global_amax, self._quant_max_bound)
+            min_value = _FP8_E4M3_MIN_POSITIVE * per_tensor_scale.view(-1)
+            scale = _amax_to_scale(amax, self._quant_max_bound, min_value=min_value)
+            return scaled_e4m3(scale, per_tensor_scale, None, 4, 3)
+        return _amax_to_scale(amax, self._quant_max_bound, min_value=1e-8)
 
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
@@ -1713,19 +1704,16 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             w_cast = self._cast_ste(quant_input)
             return (w_cast * scale_post.view(-1, 1).to(w_cast.dtype)).to(inputs.dtype)
 
-        if self.amax is not None:
-            if self.is_nvfp4_static:
-                return static_blockwise_fp4_fake_quant(
-                    inputs,
-                    self.amax,
-                    self.global_amax,
-                    True,
-                    fp8_max_for_normalization(self),
-                    inputs.dtype,
-                    self._pass_through_bwd,
-                )
-            else:
-                return super()._fake_quantize(inputs)
+        if self.amax is not None and self.is_nvfp4_static:
+            return static_blockwise_fp4_fake_quant(
+                inputs,
+                self.amax,
+                self.global_amax,
+                True,
+                fp8_max_for_normalization(self),
+                inputs.dtype,
+                self._pass_through_bwd,
+            )
         return super()._fake_quantize(inputs)
 
 
