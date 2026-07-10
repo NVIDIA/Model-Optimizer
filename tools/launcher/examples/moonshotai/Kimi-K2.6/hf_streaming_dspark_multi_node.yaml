@@ -49,7 +49,7 @@ pipeline:
       - model.trust_remote_code=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
-      - training.output_dir=/scratchspace/dflash
+      - training.output_dir=/scratchspace/dspark
       - training.training_seq_len=4096
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
