@@ -22,7 +22,7 @@ imports:
   kv_fp8: configs/ptq/units/kv_fp8
 
 metadata:
-  recipe_type: ptq/qat/qad
+  recipe_type: ptq
   description: >-
     Composes dynamic NVFP4 W4A4 model quantization with FP8 KV-cache quantization for PTQ,
     QAT, and QAD; uses max calibration.

@@ -56,7 +56,7 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
-from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptQuantizeRecipe, load_recipe
+from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.export import (
     export_hf_checkpoint,
@@ -1072,7 +1072,7 @@ def quantize_main(
     if args.recipe is not None:
         print(f"Use recipe {args.recipe} for quantization")
         recipe = load_recipe(args.recipe)
-        if not isinstance(recipe, (ModelOptQuantizeRecipe, ModelOptAutoQuantizeRecipe)):
+        if not isinstance(recipe, (ModelOptPTQRecipe, ModelOptAutoQuantizeRecipe)):
             raise TypeError(
                 f"Expected PTQ or AutoQuantize recipe, but got {type(recipe).__name__} "
                 f"from {args.recipe}"
@@ -1093,7 +1093,7 @@ def quantize_main(
         aq_config = None
 
     def _is_layerwise(obj):
-        if isinstance(obj, ModelOptQuantizeRecipe):
+        if isinstance(obj, ModelOptPTQRecipe):
             return _is_layerwise(obj.quantize.algorithm)
         if isinstance(obj, list):
             return any(_is_layerwise(a) for a in obj)

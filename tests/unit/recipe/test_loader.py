@@ -30,7 +30,7 @@ from modelopt.recipe.config import (
     ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
-    ModelOptQuantizeRecipe,
+    ModelOptPTQRecipe,
     RecipeType,
 )
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
@@ -138,7 +138,7 @@ def test_load_recipe_builtin_with_suffix():
     """load_recipe loads a built-in PTQ recipe given the full YAML path."""
     recipe = load_recipe("general/ptq/fp8_default-kv_fp8.yaml")
     assert recipe.recipe_type == RecipeType.PTQ
-    assert isinstance(recipe, ModelOptQuantizeRecipe)
+    assert isinstance(recipe, ModelOptPTQRecipe)
     assert recipe.quantize
 
 
@@ -159,6 +159,7 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/fp8_default-kv_fp8",
     "general/ptq/fp8_default-kv_fp8_cast",
     "general/ptq/int4_blockwise_weight_only",
+    "general/ptq/nvfp4_default-kv_fp8",
     "general/ptq/nvfp4_default-kv_fp8_cast",
     "general/ptq/nvfp4_default-kv_nvfp4_cast",
     "general/ptq/nvfp4_default-kv_none-gptq",
@@ -180,23 +181,8 @@ def test_load_recipe_all_builtins(recipe_path):
     """Smoke-test: every built-in PTQ recipe loads without error and has quantize."""
     recipe = load_recipe(recipe_path)
     assert recipe.recipe_type == RecipeType.PTQ
-    assert isinstance(recipe, ModelOptQuantizeRecipe)
+    assert isinstance(recipe, ModelOptPTQRecipe)
     assert recipe.quantize
-
-
-def test_load_recipe_builtin_shared_across_ptq_qat_qad():
-    ptq_recipe = load_recipe("general/ptq/nvfp4_default-kv_fp8")
-    qad_recipe = load_recipe("general/qad/nvfp4_default-kv_fp8")
-
-    assert ptq_recipe.recipe_type == RecipeType.PTQ_QAT_QAD
-    assert qad_recipe == ptq_recipe
-
-
-def test_ptq_recipe_deprecated_alias():
-    """ModelOptPTQRecipe is a back-compat alias of ModelOptQuantizeRecipe."""
-    from modelopt.recipe import ModelOptPTQRecipe, ModelOptQuantizeRecipe
-
-    assert ModelOptPTQRecipe is ModelOptQuantizeRecipe
 
 
 def test_nvfp4_weight_only_recipe_disables_vllm_marlin_incompatible_projections():

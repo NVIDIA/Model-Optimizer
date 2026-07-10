@@ -43,7 +43,7 @@ def test_qad_default_nvfp4_recipe_reuses_ptq_recipe():
 
     assert recipe.is_symlink()
     assert recipe.resolve() == CONFIGS_DIR.parent / "ptq" / recipe.name
-    assert load_recipe(recipe).recipe_type.value == "ptq/qat/qad"
+    assert load_recipe(recipe).recipe_type.value == "ptq"
 
 
 @pytest.mark.parametrize(

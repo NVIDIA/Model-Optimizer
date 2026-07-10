@@ -14,7 +14,7 @@
 # limitations under the License.
 
 metadata:
-  recipe_type: qat/qad
+  recipe_type: ptq
   description: >-
     Learns one shared pre-quantization and post-quantization NVFP4 weight scale with MSE
     initialization and FP8 scale sweep; uses dynamic NVFP4 activations and FP8 KV cache.

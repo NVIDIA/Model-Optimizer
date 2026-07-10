@@ -29,7 +29,7 @@ from modelopt.torch.quantization.config import QuantizeConfig
 
 from .config import (
     RECIPE_TYPE_TO_CLASS,
-    ModelOptQuantizeRecipe,
+    ModelOptPTQRecipe,
     ModelOptRecipeBase,
     RecipeMetadataConfig,
     RecipeType,
@@ -42,8 +42,6 @@ __all__ = ["load_config", "load_recipe"]
 # must contain 'quantize'" instead of pydantic's generic missing-field error.
 _REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
     RecipeType.PTQ: "quantize",
-    RecipeType.QAT_QAD: "quantize",
-    RecipeType.PTQ_QAT_QAD: "quantize",
     RecipeType.AUTO_QUANTIZE: "auto_quantize",
     RecipeType.SPECULATIVE_EAGLE: "eagle",
     RecipeType.SPECULATIVE_DFLASH: "dflash",
@@ -226,12 +224,8 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
     metadata_file = _find_recipe_section_file(recipe_dir, "metadata")
     metadata = load_config(metadata_file, schema_type=RecipeMetadataConfig)
 
-    if metadata.recipe_type in {
-        RecipeType.PTQ,
-        RecipeType.QAT_QAD,
-        RecipeType.PTQ_QAT_QAD,
-    }:
+    if metadata.recipe_type == RecipeType.PTQ:
         quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
         quantize_cfg = load_config(quantize_file, schema_type=QuantizeConfig)
-        return ModelOptQuantizeRecipe(metadata=metadata, quantize=quantize_cfg)
+        return ModelOptPTQRecipe(metadata=metadata, quantize=quantize_cfg)
     raise ValueError(f"Unsupported recipe type: {metadata.recipe_type!r}")

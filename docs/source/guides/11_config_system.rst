@@ -529,7 +529,7 @@ the speculative-decoding variants); ``metadata`` is required for all types.
   ``metadata.recipe_type``, picks the matching recipe schema, and calls
   ``load_config(file, schema_type=schema)`` so list-typed ``$import`` resolution
   knows the element types. The returned object is a validated recipe instance
-  (for example a ``ModelOptQuantizeRecipe``).
+  (for example a ``ModelOptPTQRecipe``).
 * A **directory recipe** is a directory containing ``metadata.yml`` /
   ``metadata.yaml`` and ``quantize.yml`` / ``quantize.yaml``. Each file is
   loaded with its own schema (``RecipeMetadataConfig`` and ``QuantizeConfig``,

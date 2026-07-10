@@ -103,10 +103,10 @@ def resolve_quant_cfg_from_args(
 
     recipe_path = getattr(quant_args, "recipe", None)
     if recipe_path:
-        from modelopt.recipe import ModelOptQuantizeRecipe, load_recipe
+        from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 
         recipe = load_recipe(recipe_path)
-        if not isinstance(recipe, ModelOptQuantizeRecipe):
+        if not isinstance(recipe, ModelOptPTQRecipe):
             raise ValueError(
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {recipe_path}"
             )

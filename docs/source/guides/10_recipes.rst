@@ -720,9 +720,8 @@ Recipes are validated at load time using Pydantic models:
    :class:`~modelopt.torch.opt.config.ModeloptBaseConfig` subclass exposing
    ``recipe_type`` and ``description`` as Pydantic fields.
 
-:class:`~modelopt.recipe.config.ModelOptQuantizeRecipe`
-   Quantization recipe (PTQ, QAT/QAD, or both).  Adds a required ``quantize``
-   field typed as
+:class:`~modelopt.recipe.config.ModelOptPTQRecipe`
+   PTQ-specific recipe.  Adds a required ``quantize`` field typed as
    :class:`~modelopt.torch.quantization.config.QuantizeConfig` (also a
    ``ModeloptBaseConfig`` subclass, containing ``quant_cfg`` and ``algorithm``).
 

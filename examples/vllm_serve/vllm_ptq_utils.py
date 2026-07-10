@@ -24,7 +24,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 
 import modelopt.torch.quantization as mtq
-from modelopt.recipe import ModelOptQuantizeRecipe, load_recipe
+from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 
 
 def _create_new_data_cls(data_cls, **kwargs):
@@ -144,7 +144,7 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
 
     if quant_config["recipe_path"]:
         recipe = load_recipe(quant_config["recipe_path"])
-        assert isinstance(recipe, ModelOptQuantizeRecipe), (
+        assert isinstance(recipe, ModelOptPTQRecipe), (
             f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
         )
         quant_cfg = recipe.quantize
