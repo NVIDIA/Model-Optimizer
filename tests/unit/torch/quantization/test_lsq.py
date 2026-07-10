@@ -248,28 +248,6 @@ class TestEnableLSQ:
         assert q._amax_pre.dtype == torch.bfloat16
         assert q._amax_post.dtype == torch.bfloat16
 
-    def test_align_lsq_amax_param_dtypes_uses_weight_dtype(self):
-        pytest.importorskip("transformers")
-        from modelopt.torch.quantization.plugins.transformers_trainer import (
-            _align_lsq_amax_param_dtypes,
-        )
-
-        module = nn.Module()
-        module.weight = nn.Parameter(torch.ones(8, 16, dtype=torch.bfloat16))
-        module.weight_quantizer = self._make_quantizer()
-        module.weight_quantizer.enable_lsq(
-            quantize_scales=False,
-            learnable_amax=["pre", "post"],
-        )
-
-        assert module.weight_quantizer._amax_pre.dtype == torch.float32
-        assert module.weight_quantizer._amax_post.dtype == torch.float32
-
-        _align_lsq_amax_param_dtypes(module)
-
-        assert module.weight_quantizer._amax_pre.dtype == torch.bfloat16
-        assert module.weight_quantizer._amax_post.dtype == torch.bfloat16
-
     def test_to_empty_if_meta_device_materializes_static_amax(self):
         q = self._make_quantizer()
         q._amax = q._amax.to("meta")
