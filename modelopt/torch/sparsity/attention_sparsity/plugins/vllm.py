@@ -200,9 +200,12 @@ def _resolve_forward(
     transform_active = _should_run_modelopt_kernel(getattr(impl, "sparse_kw", None), quant_active)
 
     if getattr(attn_metadata, "use_cascade", False):
-        if transform_active:
+        # Cascade is unimplemented by the ModelOpt kernel. Quantization must not be
+        # silently dropped (it would change numerics), so reject it; a sparse-only
+        # transform is numerically safe to delegate to the native dense path.
+        if transform_active and quant_active:
             raise NotImplementedError(
-                "vLLM cascade attention is incompatible with an active ModelOpt attention transform"
+                "vLLM cascade attention is incompatible with active ModelOpt attention quantization"
             )
         return None
 
@@ -350,6 +353,83 @@ def _forward_modelopt(
     return output
 
 
+def _dispatch_modelopt(
+    impl,
+    *,
+    query: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    num_actual_tokens: int,
+    max_query_len: int,
+    output: torch.Tensor,
+    num_decodes: int,
+    num_prefills: int,
+    num_decode_tokens: int,
+    num_prefill_tokens: int,
+    **common_kw,
+) -> torch.Tensor:
+    """Run the ModelOpt path, splitting mixed decode+prefill batches by phase.
+
+    NVFP4 P-QDQ is schedule-sensitive by design, so a decode result must not
+    depend on whether a prefill request is co-scheduled. When a batch mixes
+    ``q_len==1`` decode rows with ``q_len>1`` (chunked-)prefill rows,
+    ``max_query_len > 1`` and the whole batch would otherwise take the prefill
+    skip-softmax path. Split so each phase runs its own schedule -- decode rows
+    always take the fixed decode path. Both the FlashAttention and FlashInfer
+    adapters share this dispatch.
+    """
+    if not (num_decodes and num_prefills):
+        return _forward_modelopt(
+            impl,
+            query=query,
+            block_table=block_table,
+            seq_lens=seq_lens,
+            cu_seqlens_q=cu_seqlens_q,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=max_query_len,
+            output=output,
+            **common_kw,
+        )
+
+    if num_decode_tokens % num_decodes:
+        raise NotImplementedError("Non-uniform mixed decode is unsupported")
+    if num_decode_tokens + num_prefill_tokens != num_actual_tokens:
+        raise ValueError("Mixed-batch token counts do not match common metadata")
+
+    # Sparse-only launches may have an inactive phase (for example N:M sparsity
+    # is prefill-only). Compute the native result once, then overwrite each
+    # active phase with its ModelOpt result.
+    if not common_kw.get("quant_active", False):
+        common_kw["dense_fallback"]()
+
+    _forward_modelopt(
+        impl,
+        query=query[:num_decode_tokens],
+        block_table=block_table[:num_decodes],
+        seq_lens=seq_lens[:num_decodes],
+        cu_seqlens_q=cu_seqlens_q[: num_decodes + 1],
+        num_actual_tokens=num_decode_tokens,
+        max_query_len=num_decode_tokens // num_decodes,
+        output=output[:num_decode_tokens],
+        **common_kw,
+    )
+    prefill_start = num_decode_tokens
+    prefill_cu_seqlens_q = cu_seqlens_q[num_decodes:] - cu_seqlens_q[num_decodes]
+    _forward_modelopt(
+        impl,
+        query=query[prefill_start : prefill_start + num_prefill_tokens],
+        block_table=block_table[num_decodes : num_decodes + num_prefills],
+        seq_lens=seq_lens[num_decodes : num_decodes + num_prefills],
+        cu_seqlens_q=prefill_cu_seqlens_q,
+        num_actual_tokens=num_prefill_tokens,
+        max_query_len=max_query_len,
+        output=output[prefill_start : prefill_start + num_prefill_tokens],
+        **common_kw,
+    )
+    return output
+
+
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
     """FlashAttention adapter for the compact ModelOpt Triton path."""
 
@@ -396,18 +476,25 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         if attn_metadata is None:
             return output.fill_(0)
 
+        native_result = None
+
         def native_forward():
-            return self._forward_vllm_flash_attn(
-                layer,
-                query,
-                key,
-                value,
-                kv_cache,
-                attn_metadata,
-                output,
-                output_scale,
-                output_block_scale,
-            )
+            # Memoized: a split mixed batch may request the native dense result
+            # for an inactive phase after it was already computed for the batch.
+            nonlocal native_result
+            if native_result is None:
+                native_result = self._forward_vllm_flash_attn(
+                    layer,
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    output,
+                    output_scale,
+                    output_block_scale,
+                )
+            return native_result
 
         resolved = _resolve_forward(
             self,
@@ -421,26 +508,35 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
 
         key_cache, value_cache = kv_cache.unbind(0)
         is_decode_only = attn_metadata.max_query_len <= 1
-        return _forward_modelopt(
+        common_kw = {
+            "layer": layer,
+            "key_cache": key_cache,
+            "value_cache": value_cache,
+            "max_seq_len": attn_metadata.max_seq_len,
+            "is_causal": getattr(attn_metadata, "causal", not is_decode_only),
+            "p_qdq": resolved.p_qdq,
+            "p_qdq_amax": resolved.p_qdq_amax,
+            "v_qdq": resolved.v_qdq,
+            "v_qdq_amax": resolved.v_qdq_amax,
+            "quant_active": resolved.quant_active,
+            "dense_fallback": native_forward,
+        }
+        # Split mixed decode+prefill batches so decode rows never fall into the
+        # schedule-sensitive prefill skip-softmax path (see _dispatch_modelopt).
+        return _dispatch_modelopt(
             self,
-            layer=layer,
             query=query,
-            key_cache=key_cache,
-            value_cache=value_cache,
             block_table=attn_metadata.block_table,
             seq_lens=attn_metadata.seq_lens,
             cu_seqlens_q=attn_metadata.query_start_loc,
             num_actual_tokens=attn_metadata.num_actual_tokens,
             max_query_len=attn_metadata.max_query_len,
-            max_seq_len=attn_metadata.max_seq_len,
-            is_causal=getattr(attn_metadata, "causal", not is_decode_only),
             output=output,
-            p_qdq=resolved.p_qdq,
-            p_qdq_amax=resolved.p_qdq_amax,
-            v_qdq=resolved.v_qdq,
-            v_qdq_amax=resolved.v_qdq_amax,
-            quant_active=resolved.quant_active,
-            dense_fallback=native_forward,
+            num_decodes=getattr(attn_metadata, "num_decodes", 0),
+            num_prefills=getattr(attn_metadata, "num_prefills", 0),
+            num_decode_tokens=getattr(attn_metadata, "num_decode_tokens", 0),
+            num_prefill_tokens=getattr(attn_metadata, "num_prefill_tokens", 0),
+            **common_kw,
         )
 
 
@@ -616,62 +712,21 @@ def _flashinfer_forward(
         "dense_fallback": dense_fallback,
         "prepare_modelopt": prepare_modelopt,
     }
-    num_decodes = getattr(attn_metadata, "num_decodes", 0)
-    num_prefills = getattr(attn_metadata, "num_prefills", 0)
-    if not (num_decodes and num_prefills):
-        return _forward_modelopt(
-            impl,
-            query=query,
-            block_table=attn_metadata._modelopt_block_table,
-            seq_lens=attn_metadata._modelopt_seq_lens,
-            cu_seqlens_q=attn_metadata._modelopt_query_start_loc,
-            num_actual_tokens=attn_metadata._modelopt_num_actual_tokens,
-            max_query_len=max_query_len,
-            output=output,
-            **common_kw,
-        )
-
-    num_decode_tokens = attn_metadata.num_decode_tokens
-    num_prefill_tokens = attn_metadata.num_prefill_tokens
-    if num_decode_tokens % num_decodes:
-        raise NotImplementedError("Non-uniform mixed FlashInfer decode is unsupported")
-    if num_decode_tokens + num_prefill_tokens != attn_metadata._modelopt_num_actual_tokens:
-        raise ValueError("FlashInfer mixed-batch token counts do not match common metadata")
-
-    # Sparse-only launches may have an inactive phase (for example N:M
-    # is prefill-only). Compute the native result once, then overwrite
-    # each active phase with its ModelOpt result.
-    if not resolved.quant_active:
-        dense_fallback()
-
-    block_table = attn_metadata._modelopt_block_table
-    seq_lens = attn_metadata._modelopt_seq_lens
-    cu_seqlens_q = attn_metadata._modelopt_query_start_loc
-    _forward_modelopt(
+    return _dispatch_modelopt(
         impl,
-        query=query[:num_decode_tokens],
-        block_table=block_table[:num_decodes],
-        seq_lens=seq_lens[:num_decodes],
-        cu_seqlens_q=cu_seqlens_q[: num_decodes + 1],
-        num_actual_tokens=num_decode_tokens,
-        max_query_len=num_decode_tokens // num_decodes,
-        output=output[:num_decode_tokens],
-        **common_kw,
-    )
-    prefill_start = num_decode_tokens
-    prefill_cu_seqlens_q = cu_seqlens_q[num_decodes:] - cu_seqlens_q[num_decodes]
-    _forward_modelopt(
-        impl,
-        query=query[prefill_start : prefill_start + num_prefill_tokens],
-        block_table=block_table[num_decodes : num_decodes + num_prefills],
-        seq_lens=seq_lens[num_decodes : num_decodes + num_prefills],
-        cu_seqlens_q=prefill_cu_seqlens_q,
-        num_actual_tokens=num_prefill_tokens,
+        query=query,
+        block_table=attn_metadata._modelopt_block_table,
+        seq_lens=attn_metadata._modelopt_seq_lens,
+        cu_seqlens_q=attn_metadata._modelopt_query_start_loc,
+        num_actual_tokens=attn_metadata._modelopt_num_actual_tokens,
         max_query_len=max_query_len,
-        output=output[prefill_start : prefill_start + num_prefill_tokens],
+        output=output,
+        num_decodes=getattr(attn_metadata, "num_decodes", 0),
+        num_prefills=getattr(attn_metadata, "num_prefills", 0),
+        num_decode_tokens=getattr(attn_metadata, "num_decode_tokens", 0),
+        num_prefill_tokens=getattr(attn_metadata, "num_prefill_tokens", 0),
         **common_kw,
     )
-    return output
 
 
 def get_flashinfer_sparse_impl_cls() -> type:

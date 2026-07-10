@@ -88,8 +88,13 @@ def _load_quant_api(vllm_version: str):
     import torch
     from packaging import version
 
-    if version.parse(vllm_version) < version.parse("0.14.0"):
-        raise RuntimeError("The compact NVFP4 attention worker requires vLLM >= 0.14.0")
+    # vLLM >= 0.15 is required: the ModelOpt kernel bypasses the native
+    # FlashAttentionImpl.forward() and relies on the external do_kv_cache_update
+    # contract to write the current step's K/V before reading the paged cache.
+    # That contract only exists from 0.15; on 0.14 reshape_and_cache_flash ran
+    # inside the native forward we skip, so the cache could be read stale.
+    if version.parse(vllm_version) < version.parse("0.15.0"):
+        raise RuntimeError("The compact NVFP4 attention worker requires vLLM >= 0.15.0")
 
     from vllm.config import compilation
     from vllm.v1.attention import backend
@@ -146,12 +151,40 @@ def _global_errors(worker, api) -> list[str]:
     return errors
 
 
-def _quant_layer_errors(module, api) -> list[str]:
+def _device_capability_error(device) -> str | None:
+    """Reject GPUs below sm_89: the NVFP4 P/V helpers cast block scales through
+    ``tl.float8e4nv``, which requires CUDA compute capability >= 8.9 (Ada/Hopper+).
+    Validate here so unsupported devices fail before any module mutation rather
+    than late during Triton compilation."""
+    import torch
+
+    if device is None or getattr(device, "type", None) != "cuda":
+        return None
+    major, minor = torch.cuda.get_device_capability(device)
+    if (major, minor) < (8, 9):
+        return (
+            f"NVFP4 attention requires CUDA compute capability >= 8.9 (Ada/Hopper+); "
+            f"got sm_{major}{minor}"
+        )
+    return None
+
+
+def _layer_errors(module) -> list[str]:
+    """Per-layer attention semantics the ModelOpt kernel does not implement.
+
+    Shared by the quant and sparse plans: the sparse Triton path makes the same
+    assumptions (regular decoder self-attention, no sliding window / ALiBi /
+    softcap / sinks / fp8 KV / cross-layer KV sharing / mismatched head dims), so
+    accepting any of them would silently change model output.
+    """
     impl = getattr(module, "impl", None)
     errors = []
-    if type(module) is not api.plugin.vllm_attention.Attention:
+    if type(module) is not VLLMAttention:
         errors.append(f"layout {type(module).__name__} is not regular decoder self-attention")
-    if getattr(module, "attn_type", None) != api.backend.AttentionType.DECODER:
+    # vLLM's AttentionType.DECODER is the string constant "decoder"; compare to it
+    # directly so the shared sparse-only path stays independent of quant-only vLLM
+    # imports (vllm.v1.attention.backend).
+    if getattr(module, "attn_type", None) != "decoder":
         errors.append("attn_type must be DECODER")
     head_size = getattr(module, "head_size", None)
     if not isinstance(head_size, int) or head_size % 16:
@@ -229,9 +262,15 @@ def _sparse_plans(worker):
         sparse_kw = _sparse_kwargs(name, sparse_cfg)
         if not sparse_kw:
             continue
+        # Validate the full attention semantics before installing a sparse-only
+        # adapter: the sparse kernel shares the quant path's assumptions, so an
+        # unsupported layer must fail here rather than silently change output.
+        reasons = _layer_errors(module)
         new_impl, error = _select_new_impl(module)
         if error:
-            errors.append(f"{name or '<root>'}: {error}")
+            reasons.append(error)
+        if reasons:
+            errors.extend(f"{name or '<root>'}: {reason}" for reason in reasons)
         else:
             plans.append(_AttentionPlan(module, new_impl, sparse_kw, None, None))
     _raise_unsupported(errors, "sparse attention")
@@ -252,7 +291,7 @@ def _quant_plans(worker):
         if not isinstance(module, api.plugin._ATTENTION_TYPES):
             continue
         attention_count += 1
-        reasons = _quant_layer_errors(module, api)
+        reasons = _layer_errors(module)
         # Prefer the model compute dtype (fp16/bf16); _get_device_dtype's buffer scan
         # can otherwise report fp32 from the attention module's scale buffers.
         device, dtype = api.plugin._get_device_dtype(module)
@@ -262,6 +301,8 @@ def _quant_plans(worker):
             reasons.append("device/dtype could not be resolved")
         elif dtype not in (api.torch.float16, api.torch.bfloat16):
             reasons.append(f"resolved dtype {dtype} must be fp16 or bf16")
+        if capability_error := _device_capability_error(device):
+            reasons.append(capability_error)
         sparse_kw = _sparse_kwargs(name, sparse_cfg)
         if graph_error := _sparse_graph_error(sparse_kw, mode, api):
             reasons.append(graph_error)
@@ -278,10 +319,14 @@ def _quant_plans(worker):
     return tuple(plans)
 
 
-def _install_sparse_plans(plans) -> None:
+def _install_sparse_plans(worker, plans) -> None:
     for plan in plans:
         plan.new_impl.sparse_kw = plan.sparse_kw
         plan.module.impl = plan.new_impl
+    # Disable cascade attention: vLLM may auto-select it on shared-prefix batches,
+    # but the ModelOpt sparse kernel does not implement the cascade path. Mirror
+    # the quant install so an installed sparse layer never hits it at runtime.
+    worker.model_runner.cascade_attn_enabled = False
     installed = dict(Counter(type(plan.new_impl).__name__ for plan in plans))
     print(
         f"[ModelOpt] Sparse attention: replaced impl on {len(plans)} attention layers: {installed}"
@@ -320,7 +365,7 @@ def _install_attention(worker, *, quantize: bool) -> None:
     else:
         plans = _sparse_plans(worker)
         if plans is not None:
-            _install_sparse_plans(plans)
+            _install_sparse_plans(worker, plans)
 
 
 class _ModelOptAttentionWorker(BaseWorker):

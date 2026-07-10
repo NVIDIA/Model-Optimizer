@@ -61,6 +61,10 @@ def _load_worker_module(name="sparse_attn_worker_test"):
 def _bare_attention(worker_module, impl_cls=FlashAttentionImpl):
     module = object.__new__(worker_module.VLLMAttention)
     nn.Module.__init__(module)
+    # Valid regular decoder self-attention: the sparse path now shares the quant
+    # path's per-layer validation, so the mock must pass _layer_errors.
+    module.attn_type = "decoder"
+    module.head_size = 64
     module.impl = object.__new__(impl_cls)
     module.impl.sinks = None
     return module
@@ -71,8 +75,55 @@ def _sparse_worker_state(model):
         model_runner=SimpleNamespace(
             model=model,
             model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+            cascade_attn_enabled=True,
         )
     )
+
+
+def test_sparse_install_disables_cascade(monkeypatch):
+    """An installed sparse layer must not be reached by vLLM's cascade path,
+    which the ModelOpt kernel does not implement."""
+    worker_module = _load_worker_module("sparse_attn_worker_cascade_test")
+    attention = _bare_attention(worker_module)
+    state = _sparse_worker_state(nn.ModuleDict({"attn": attention}))
+    monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: ({}, "test"))
+    monkeypatch.setattr(
+        worker_module,
+        "match_sparse_config",
+        lambda *_: {"enable": True, "sparsity_n": 2, "sparsity_m": 4},
+    )
+
+    worker_module._install_attention(state, quantize=False)
+
+    assert type(attention.impl) is ModelOptSparseAttentionImpl
+    assert state.model_runner.cascade_attn_enabled is False
+
+
+def test_sparse_install_rejects_unsupported_layer(monkeypatch):
+    """The sparse-only path shares the quant per-layer validation and must fail
+    before mutating any layer for semantics the kernel does not implement."""
+    worker_module = _load_worker_module("sparse_attn_worker_validate_test")
+    valid_attention = _bare_attention(worker_module)
+    attention = _bare_attention(worker_module)
+    attention.sliding_window = (128, 128)  # unsupported by the ModelOpt kernel
+    valid_original_impl = valid_attention.impl
+    original_impl = attention.impl
+    state = _sparse_worker_state(
+        nn.ModuleDict({"valid_attn": valid_attention, "invalid_attn": attention})
+    )
+    monkeypatch.setattr(worker_module, "load_from_checkpoint_metadata", lambda _: ({}, "test"))
+    monkeypatch.setattr(
+        worker_module,
+        "match_sparse_config",
+        lambda *_: {"enable": True, "sparsity_n": 2, "sparsity_m": 4},
+    )
+
+    with pytest.raises(NotImplementedError) as exc:
+        worker_module._install_attention(state, quantize=False)
+
+    assert "sliding_window" in str(exc.value)
+    assert valid_attention.impl is valid_original_impl
+    assert attention.impl is original_impl  # no mutation before validation
 
 
 def test_shared_worker_import_does_not_resolve_quant_only_apis(monkeypatch):
@@ -521,6 +572,104 @@ def test_flashinfer_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized
         assert calls["finalize"] == []
 
 
+def _make_flash_attention_impl(*, sparse=False, quantized=False):
+    impl = _clone_sparse_impl(_make_old_impl())
+    impl.sparse_kw = {"sparsity_n": 2, "sparsity_m": 4} if sparse else {}
+    impl.quant_kw = {
+        "p_qdq": "nvfp4" if quantized else None,
+        "p_qdq_amax": 1.0,
+        "v_qdq": "nvfp4" if quantized else None,
+        "v_qdq_amax": 6.0 * 448.0 if quantized else None,
+    }
+    return impl
+
+
+def _flash_attention_mixed_metadata(decode_len=1, prefill_len=17):
+    query_lens = (decode_len, prefill_len)
+    seq_lens = (16, 34)
+    return SimpleNamespace(
+        use_cascade=False,
+        num_actual_tokens=sum(query_lens),
+        max_query_len=max(query_lens),
+        max_seq_len=max(seq_lens),
+        query_start_loc=torch.tensor(list(accumulate(query_lens, initial=0)), dtype=torch.int32),
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        block_table=torch.zeros(len(seq_lens), 3, dtype=torch.int32),
+        causal=True,
+        num_decodes=1,
+        num_prefills=1,
+        num_decode_tokens=decode_len,
+        num_prefill_tokens=prefill_len,
+    )
+
+
+@pytest.mark.parametrize("quantized", [False, True], ids=["sparse-only", "quantized"])
+def test_flash_attention_mixed_batch_splits_decode_and_prefill(monkeypatch, quantized):
+    """FlashAttention must split mixed decode+prefill batches so decode rows take
+    the decode schedule -- NVFP4 P-QDQ is schedule-sensitive, so a decode result
+    must not depend on a co-scheduled prefill (matches the FlashInfer adapter)."""
+    prefill_tokens = 17
+    impl = _make_flash_attention_impl(sparse=True, quantized=quantized)
+    query = torch.zeros(1 + prefill_tokens, 2, 64, dtype=torch.float16)
+    kv_cache = torch.zeros(2, 4, 16, 2, 64, dtype=torch.float16)
+    metadata = _flash_attention_mixed_metadata(decode_len=1, prefill_len=prefill_tokens)
+    layer = SimpleNamespace(
+        _query_quant_in_kernel=quantized,
+        q_bmm_quantizer=lambda value: value,
+    )
+    calls = {"native": [], "decode": [], "prefill": [], "finalize": []}
+
+    def fake_decode(query, *args, **kwargs):
+        calls["decode"].append((query, kwargs))
+        return torch.full_like(query, 5)
+
+    def fake_attention(query, **kwargs):
+        calls["prefill"].append((query, kwargs))
+        return torch.full_like(query, 7)
+
+    def fake_native(*args, **kwargs):
+        calls["native"].append(True)
+        output = kwargs["output"] if "output" in kwargs else args[7]
+        return output.fill_(3)
+
+    monkeypatch.setattr(
+        FlashAttentionImpl,
+        "forward",
+        fake_native,
+    )
+    monkeypatch.setattr(
+        vllm_plugin,
+        "fake_quant_v_onwrite",
+        lambda *args, **kwargs: calls["finalize"].append(kwargs),
+    )
+    monkeypatch.setattr(vllm_plugin, "triton_decode_attention", fake_decode)
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+
+    result = impl.forward(
+        layer, query, query, query, kv_cache, metadata, output=torch.empty_like(query)
+    )
+
+    assert torch.all(result[1:] == 7)
+    assert torch.all(result[:1] == (5 if quantized else 3))
+
+    assert len(calls["prefill"]) == 1
+    prefill_query, prefill_kw = calls["prefill"][0]
+    assert prefill_query.shape[0] == prefill_tokens
+    assert prefill_kw["sparsity_n"] == 2
+    assert prefill_kw["sparsity_m"] == 4
+
+    if quantized:
+        assert calls["native"] == []
+        assert len(calls["decode"]) == 1
+        decode_query, decode_kw = calls["decode"][0]
+        assert decode_query.shape[0] == 1
+        assert decode_kw["p_qdq"] == "nvfp4"
+        assert "sparsity_n" not in decode_kw
+    else:
+        assert calls["native"] == [True]
+        assert calls["decode"] == []
+
+
 def test_flashinfer_invalid_mixed_metadata_has_no_side_effects(monkeypatch):
     impl = _make_flashinfer_impl(sparse=True)
     metadata = _flashinfer_metadata(query_lens=(1, 17), mixed=True)
@@ -537,7 +686,7 @@ def test_flashinfer_invalid_mixed_metadata_has_no_side_effects(monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match="FlashInfer mixed-batch token counts do not match common metadata",
+        match="Mixed-batch token counts do not match common metadata",
     ):
         impl.forward(
             SimpleNamespace(),
@@ -623,11 +772,6 @@ def test_sparse_worker_rejects_unsupported_backend_before_mutation(monkeypatch):
     ("failure", "active", "expected"),
     [
         (
-            "cascade",
-            True,
-            "vLLM cascade attention is incompatible with an active ModelOpt attention transform",
-        ),
-        (
             "metadata",
             True,
             "FlashInfer metadata is missing the ModelOpt attention transform fields: "
@@ -687,6 +831,41 @@ def test_flashinfer_transform_safety_for_unsupported_metadata(
             is output
         )
         assert native_calls == [(impl, metadata)]
+        assert torch.all(output == 9)
+
+
+@pytest.mark.parametrize("quantized", [False, True], ids=["sparse-only", "quantized"])
+def test_flashinfer_cascade_falls_back_for_sparse_only_but_rejects_quant(monkeypatch, quantized):
+    """Cascade is unimplemented by the kernel. A sparse-only transform can safely
+    delegate to the native dense path; quantization must not be silently dropped
+    (it would change numerics), so it is rejected instead."""
+    impl = _make_flashinfer_impl(sparse=True, quantized=quantized)
+    metadata = SimpleNamespace(use_cascade=True)
+    query = torch.zeros(1, 2, 64, dtype=torch.float16)
+    output = torch.empty_like(query)
+    native_calls = []
+
+    def fake_forward(self, *args, **kwargs):
+        native_calls.append(True)
+        out = args[6]
+        out.fill_(9)
+        return out
+
+    monkeypatch.setattr(FlashInferImpl, "forward", fake_forward)
+
+    if quantized:
+        with pytest.raises(NotImplementedError) as exc:
+            impl.forward(None, query, query, query, torch.empty(0), metadata, output=output)
+        assert str(exc.value) == (
+            "vLLM cascade attention is incompatible with active ModelOpt attention quantization"
+        )
+        assert native_calls == []
+    else:
+        assert (
+            impl.forward(None, query, query, query, torch.empty(0), metadata, output=output)
+            is output
+        )
+        assert native_calls == [True]
         assert torch.all(output == 9)
 
 

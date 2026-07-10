@@ -56,7 +56,7 @@ def test_quant_policy_rejects_old_vllm(monkeypatch):
     worker_module._load_quant_api.cache_clear()
 
     try:
-        with pytest.raises(RuntimeError, match=r"vLLM >= 0\.14\.0"):
+        with pytest.raises(RuntimeError, match=r"vLLM >= 0\.15\.0"):
             worker_module._install_attention(SimpleNamespace(), quantize=True)
     finally:
         worker_module._load_quant_api.cache_clear()
