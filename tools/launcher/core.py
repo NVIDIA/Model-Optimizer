@@ -714,23 +714,28 @@ def run_jobs(
                         dependencies=[dependency],
                     )
 
-            # Write metadata BEFORE exp.run() so downstream tooling
-            # (tools/wait_for_experiments.sh) can read allow_to_fail even when
-            # submission fails and the experiment ends up UNSUBMITTED. If exp.run()
-            # raises (e.g. sbatch/cli_filter errors at submit), a post-run write
-            # would be skipped and the task counted as a blocking failure despite
-            # allow_to_fail=True.
-            metadata = {
-                "experiment_id": exp._id,
-                "job_name": job_name,
-                "allow_to_fail": job.allow_to_fail,
-                "note": job.note,
-            }
-            metadata_path = os.path.join(
-                "experiments", experiment_title, exp._id, "metadata.json"
-            )
-            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-            with open(metadata_path, "w") as f:
-                json.dump(metadata, f)
-
-            exp.run(detach=detach)
+            # Persist metadata in a finally so it is written even when exp.run()
+            # raises (submission crash — e.g. sbatch/cli_filter errors — leaving
+            # the experiment UNSUBMITTED). exp.run() creates the experiment dir
+            # before submitting, so it exists here even on a submit failure, and
+            # downstream tooling (tools/wait_for_experiments.sh) can still read
+            # allow_to_fail instead of counting an intentionally-tolerated
+            # (quarantined) task as a blocking failure.
+            #
+            # NB: do NOT write before exp.run() — pre-creating the experiment dir
+            # makes nemo_run's exp.run() raise FileExistsError.
+            try:
+                exp.run(detach=detach)
+            finally:
+                metadata = {
+                    "experiment_id": exp._id,
+                    "job_name": job_name,
+                    "allow_to_fail": job.allow_to_fail,
+                    "note": job.note,
+                }
+                metadata_path = os.path.join(
+                    "experiments", experiment_title, exp._id, "metadata.json"
+                )
+                os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+                with open(metadata_path, "w") as f:
+                    json.dump(metadata, f)
