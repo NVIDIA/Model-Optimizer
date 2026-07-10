@@ -85,6 +85,19 @@ class DoGEForwardStep:
         """
         raise NotImplementedError("DoGE batch sampling is not implemented yet.")
 
+    def _compute_alignment_scores(
+        self,
+        source_batches: dict[str, dict[str, torch.Tensor]],
+        target_batch: dict[str, torch.Tensor],
+        model: GPTModel,
+    ) -> dict[str, float]:
+        """Compute source-to-target gradient-alignment scores for each training source.
+
+        The returned scores are keyed by the same dataset paths as ``source_batches`` and
+        ``self.blend_weights``. Higher scores should increase a source's DoGE blend weight.
+        """
+        raise NotImplementedError("DoGE gradient-alignment scoring is not implemented yet.")
+
     def __call__(
         self,
         state: GlobalState,
