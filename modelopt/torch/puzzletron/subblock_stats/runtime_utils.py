@@ -32,6 +32,7 @@ import torch
 from transformers import AutoTokenizer, LlamaForCausalLM
 
 from ..anymodel.converter import Converter
+from ..anymodel.model_descriptor import ModelDescriptor
 from ..anymodel.models.llama import LlamaModelDescriptor
 from ..tools.logger import mprint
 from ..utils.vllm_adapter import convert_block_configs_to_per_layer_config
@@ -59,10 +60,15 @@ class RuntimeConfig:
     gpu_memory_utilization: float = 0.5
 
 
-def save_model(model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path) -> None:
+def save_model(
+    model: LlamaForCausalLM,
+    tokenizer_path: Path,
+    output_path: Path,
+    descriptor: type[ModelDescriptor] = LlamaModelDescriptor,
+) -> None:
     """Save model weights as AnyModel and copy the tokenizer to ``output_path``."""
     model = model.to(dtype=torch.bfloat16)
-    save_model_as_anymodel(model, output_path, LlamaModelDescriptor)
+    save_model_as_anymodel(model, output_path, descriptor)
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     tokenizer.save_pretrained(output_path)
