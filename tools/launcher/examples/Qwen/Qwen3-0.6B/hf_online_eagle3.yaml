@@ -44,6 +44,10 @@ pipeline:
       - training.disable_tqdm=true
       - training.ar_validate_steps=500000
       - training.num_train_epochs=1
+      # CI: disable torch.compile (recipe default mode="max-autotune") — its
+      # exhaustive Triton bmm autotuning floods the log with benign "out of
+      # resource" errors on the L40 and adds compile overhead for no CI benefit.
+      - eagle.eagle_use_torch_compile=false
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
