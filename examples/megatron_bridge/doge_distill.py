@@ -221,7 +221,7 @@ def _build_model_provider(args: argparse.Namespace, hf_path: str):
     return provider
 
 
-def _build_config(args: argparse.Namespace):
+def _build_config(args: argparse.Namespace) -> ConfigContainer:
     student_provider = _build_model_provider(args, args.student_hf_path)
     teacher_provider = _build_model_provider(args, args.teacher_hf_path)
     distill_provider = convert_to_distillation_provider(

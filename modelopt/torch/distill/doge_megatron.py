@@ -16,16 +16,69 @@
 """Megatron-Bridge DoGE distillation helpers."""
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 
 import torch
+from megatron.bridge.data.loaders import cyclic_iter
+from megatron.bridge.data.samplers import build_pretraining_data_loader
+from megatron.bridge.data.utils import get_dataset_provider
+from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.state import GlobalState
+from megatron.bridge.training.utils.pg_utils import get_pg_collection
+from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.models.gpt import GPTModel
+from megatron.core.rerun_state_machine import RerunDataIterator
 
 from modelopt.torch.distill.doge import DoGEWeightUpdater, normalize_data_path_weights
 
 __all__ = ["DoGEDataIterators", "DoGEForwardStep"]
+
+
+def _build_blend_iterator(
+    config: ConfigContainer, model: GPTModel, data_paths: tuple[str, ...]
+) -> RerunDataIterator:
+    """Build one cyclic iterator from Megatron WEIGHT PATH pairs."""
+    if config.train.global_batch_size != config.train.micro_batch_size:
+        raise NotImplementedError("DoGE data iterators currently require --gbs == --mbs")
+
+    # Derive from the Bridge-initialized dataset config because
+    # megatron.bridge.training.setup.setup() populates runtime fields such as the tokenizer.
+    # DoGE only changes the blend and split.
+    dataset_config = replace(
+        config.dataset,
+        blend=get_blend_from_list(list(data_paths)),
+        blend_per_split=None,
+        split="100,0,0",
+    )
+    dataset_config.finalize()
+
+    num_samples = config.train.train_iters * config.train.global_batch_size
+    # Mirrors the data path used by megatron.bridge.training.pretrain.pretrain(): resolve the
+    # dataset provider with get_dataset_provider(), then build the dataloader after setup() has
+    # initialized distributed state, tokenizer, model, and optimizer.
+    # TODO: Validate parity with megatron.bridge.data.loaders.setup_data_iterators().
+    dataset_provider = get_dataset_provider(dataset_config)
+    train_dataset, _, _ = dataset_provider(
+        [num_samples, 0, 0],
+        dataset_config,
+    )
+    pg_collection = get_pg_collection(model)
+    data_loader = build_pretraining_data_loader(
+        train_dataset,
+        consumed_samples=0,
+        dataloader_type="cyclic",
+        micro_batch_size=config.train.micro_batch_size,
+        num_workers=dataset_config.num_workers,
+        data_sharding=dataset_config.data_sharding,
+        collate_fn=train_dataset.collate_fn if hasattr(train_dataset, "collate_fn") else None,
+        pin_memory=dataset_config.pin_memory,
+        persistent_workers=dataset_config.persistent_workers,
+        data_parallel_rank=torch.distributed.get_rank(group=pg_collection.dp),
+        data_parallel_size=torch.distributed.get_world_size(group=pg_collection.dp),
+        global_batch_size=config.train.global_batch_size,
+    )
+    return RerunDataIterator(iter(cyclic_iter(data_loader)))
 
 
 @dataclass
@@ -59,6 +112,8 @@ class DoGEForwardStep:
                 weights are normalized into ``self.target_blend_weights`` and are not updated.
             meta_lr: Learning rate for exponentiated blend-weight updates.
         """
+        self.data_paths = tuple(data_paths)
+        self.target_data_paths = tuple(target_data_paths)
         self.updater = DoGEWeightUpdater(meta_lr=meta_lr)
         self.blend_weights: dict[str, float] = normalize_data_path_weights(data_paths)
         self.target_blend_weights: dict[str, float] = normalize_data_path_weights(target_data_paths)
