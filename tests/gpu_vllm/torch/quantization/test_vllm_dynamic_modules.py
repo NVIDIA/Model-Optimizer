@@ -52,6 +52,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     _QuantFusedMoEBase,
     _QuantVLLMAttention,
     _VLLMParallelLinear,
+    configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
 
@@ -106,6 +107,68 @@ def test_attention_setup_keeps_qkv_only_checkpoint_surface(monkeypatch):
     attention.modelopt_post_restore()
     assert not hasattr(attention.k_bmm_quantizer, "_amax")
     assert not hasattr(attention.v_bmm_quantizer, "_amax")
+
+
+def test_configure_vllm_nvfp4_attention_quantizers_is_attention_scoped(monkeypatch):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    attention = object.__new__(vllm_plugin.vllm_attention.Attention)
+    torch.nn.Module.__init__(attention)
+    linear = torch.nn.Linear(4, 4)
+    attention.unrelated_linear = linear
+    original_linear_type = type(linear)
+
+    converted = configure_vllm_nvfp4_attention_quantizers(
+        attention, device="cpu", dtype=torch.bfloat16
+    )
+
+    assert converted is attention
+    assert isinstance(converted, _QuantVLLMAttention)
+    assert converted.device == torch.device("cpu")
+    assert converted.dtype == torch.bfloat16
+    assert type(linear) is original_linear_type
+    for name in ("q", "k", "p", "v"):
+        quantizer = getattr(converted, f"{name}_bmm_quantizer")
+        assert quantizer.is_enabled
+        assert quantizer.is_nvfp4_dynamic
+        assert quantizer.block_sizes[-1] == 16
+    assert not hasattr(converted.q_bmm_quantizer, "_amax")
+    assert not hasattr(converted.p_bmm_quantizer, "_amax")
+    assert converted.k_bmm_quantizer._amax == 6.0 * 448.0
+    assert converted.v_bmm_quantizer._amax == 6.0 * 448.0
+    assert not hasattr(converted, "_query_quant_in_kernel")
+    assert not hasattr(converted, "_value_quant_in_kernel")
+
+
+def test_configure_vllm_nvfp4_attention_quantizers_preserves_and_moves_amax(monkeypatch):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    attention = object.__new__(vllm_plugin.vllm_attention.Attention)
+    torch.nn.Module.__init__(attention)
+    converted = configure_vllm_nvfp4_attention_quantizers(
+        attention, device="cpu", dtype=torch.float16
+    )
+    for name, value in zip(("q", "k", "p", "v"), (13.0, 17.0, 23.0, 19.0), strict=True):
+        getattr(converted, f"{name}_bmm_quantizer").amax = torch.tensor(value)
+    reconfigured = configure_vllm_nvfp4_attention_quantizers(
+        converted, device="cpu", dtype=torch.float16
+    )
+
+    assert reconfigured is converted
+    assert converted.q_bmm_quantizer._amax == 13.0
+    assert converted.k_bmm_quantizer._amax == 17.0
+    assert converted.p_bmm_quantizer._amax == 23.0
+    assert converted.v_bmm_quantizer._amax == 19.0
+
+    configure_vllm_nvfp4_attention_quantizers(converted, device="meta", dtype=torch.float16)
+    for name in ("q", "k", "p", "v"):
+        assert getattr(converted, f"{name}_bmm_quantizer")._amax.device.type == "meta"
 
 
 def test_quant_vllm_attention_forward_skips_only_in_kernel_qv_quantization():

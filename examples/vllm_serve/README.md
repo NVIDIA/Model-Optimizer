@@ -5,7 +5,7 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
 The general fakequant example is tested with vLLM 0.9.0 and 0.19.1. The compact
-NVFP4 attention worker documented below requires vLLM 0.14.0 or newer.
+NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
 ## Prepare environment
 
@@ -115,9 +115,19 @@ Workflow:
    python vllm_serve_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
    ```
 
-If the checkpoint has no `sparse_attention_config`, the worker logs a message and passes through — vLLM runs unchanged. Whole-model fakequant flows remain handled by `vllm_serve_fakequant.py`; the compact attention-only path is below.
+If the checkpoint has no `sparse_attention_config`, the sparse-only installer passes through and vLLM runs unchanged. Whole-model fakequant flows remain handled by `vllm_serve_fakequant.py`; the compact attention-only path is below.
 
-Both explicit serving policies live in `sparse_attn_worker.py`: `SparseAttnWorker` is checkpoint-driven sparse-only, while `QuantSparseAttnWorker` uses fixed NVFP4 Q/K/P/V plus optional checkpoint sparsity. The launcher keeps `SparseAttnWorker` as its default.
+The reusable serving policies live in `modelopt/torch/sparsity/attention_sparsity/plugins/vllm_runtime.py`. `install_vllm_sparse_attention_from_checkpoint` installs checkpoint-driven sparse-only attention, while `install_vllm_nvfp4_attention` installs fixed NVFP4 Q/K/P/V with optional checkpoint sparsity. Both validate every selected layer before publishing any replacement implementation and return a `VllmAttentionInstallReport` with the installed layer names and backend counts.
+
+`sparse_attn_worker.py` only invokes these APIs after vLLM loads the model. It retains `SparseAttnWorker` as the launcher's default and provides `QuantSparseAttnWorker` for the compact NVFP4 policy. Other vLLM integrations can invoke the same library APIs directly:
+
+```python
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm_runtime import (
+    install_vllm_nvfp4_attention,
+)
+
+report = install_vllm_nvfp4_attention(model_runner, sparse_cfg="checkpoint")
+```
 
 Limitations:
 
@@ -126,7 +136,7 @@ Limitations:
 
 ### Compact NVFP4 attention worker
 
-vLLM 0.14.0 or newer is checked when `QuantSparseAttnWorker` is selected. Importing or using `SparseAttnWorker` does not resolve quant-only APIs.
+vLLM 0.15.0 or newer is required when either worker activates a ModelOpt attention transform. Importing `SparseAttnWorker`, or using it with no checkpoint sparse metadata, does not resolve quant-only APIs.
 
 Use the same launcher with the compact worker. By default, vLLM selects the backend for the model and platform; NemotronH on Blackwell selects FlashInfer:
 
@@ -136,9 +146,9 @@ python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
   --worker-cls sparse_attn_worker.QuantSparseAttnWorker
 ```
 
-The worker supports both FlashInfer and FlashAttention and prints the installed adapter counts. Pass `--attention-backend FLASHINFER` or `--attention-backend FLASH_ATTN` only when an explicit override is needed.
+The installer supports both FlashInfer and FlashAttention, and the worker prints the installed adapter counts. Pass `--attention-backend FLASHINFER` or `--attention-backend FLASH_ATTN` only when an explicit override is needed.
 
-This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant recipe to Q/K/P/V. Q is dynamic, K/V use global scale 1.0, and P uses amax 1.0; calibrated attention amax restore is not part of this fixed path. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
+This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant format to Q/K/P/V. Q is dynamic; missing K/V scales default to global scale 1.0, and P defaults to amax 1.0. Existing scalar attention amax values are preserved, but this path does not calibrate or restore them itself. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
 
 Decode uses a fixed 32-split, 128-key-tile schedule. P QDQ consumes split-local,
 unnormalized online-softmax probabilities, so changing that schedule can change

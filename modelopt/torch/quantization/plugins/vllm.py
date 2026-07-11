@@ -28,8 +28,25 @@ import vllm.model_executor.layers.linear as vllm_linear
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
 from ...utils.distributed import ParallelState
+from ..conversion import set_quantizer_by_cfg
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from .custom import CUSTOM_MODEL_PLUGINS
+
+_NVFP4_ATTENTION_QUANTIZER_CFG = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+}
+_VLLM_NVFP4_ATTENTION_QUANT_CFG = [
+    {"quantizer_name": "*_bmm_quantizer", "enable": False},
+    *(
+        {
+            "quantizer_name": f"*{name}_bmm_quantizer",
+            "cfg": _NVFP4_ATTENTION_QUANTIZER_CFG,
+            "enable": True,
+        }
+        for name in ("q", "k", "p", "v")
+    ),
+]
 
 
 def _import_attention_module():
@@ -205,6 +222,45 @@ def _set_vllm_attention_kv_default_amax(module, device: torch.device) -> None:
         ):
             continue
         quantizer.amax = torch.tensor(6.0 * 448.0, device=device, dtype=torch.float32)
+
+
+def configure_vllm_nvfp4_attention_quantizers(
+    module: torch.nn.Module,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype,
+) -> torch.nn.Module:
+    """Configure one vLLM Attention module for fused NVFP4 fake quantization.
+
+    This attention-scoped entry point avoids recursively converting vLLM Linear and MoE
+    modules. It configures only quantizer state; the caller remains responsible for installing
+    the fused attention implementation and enabling its in-kernel Q/V carriers.
+
+    Args:
+        module: A vLLM ``Attention`` module to convert and configure in place.
+        device: Device on which the attention quantizer state should reside.
+        dtype: Model compute dtype associated with the attention module.
+
+    Returns:
+        The supplied module, converted in place to ``_QuantVLLMAttention``.
+    """
+    if not isinstance(module, vllm_attention.Attention):
+        raise TypeError(f"Expected vLLM Attention, got {type(module).__name__}")
+    if not isinstance(dtype, torch.dtype):
+        raise TypeError(f"Expected torch.dtype, got {type(dtype).__name__}")
+
+    device = torch.device(device)
+    module.device, module.dtype = device, dtype
+    if not isinstance(module, _QuantVLLMAttention):
+        module = QuantModuleRegistry.convert(module)
+    if not hasattr(module, "p_bmm_quantizer"):
+        module.p_bmm_quantizer = TensorQuantizer()
+
+    set_quantizer_by_cfg(module, _VLLM_NVFP4_ATTENTION_QUANT_CFG)
+    for name in ("q", "k", "p", "v"):
+        getattr(module, f"{name}_bmm_quantizer").to(device=device)
+    _set_vllm_attention_kv_default_amax(module, device)
+    return module
 
 
 def _vllm_attention_modelopt_post_restore(self) -> None:
