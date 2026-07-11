@@ -17,6 +17,7 @@
 
 from collections.abc import Iterator
 from copy import copy
+from dataclasses import dataclass
 
 import torch
 from megatron.bridge.data.loaders import cyclic_iter
@@ -31,7 +32,12 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.rerun_state_machine import RerunDataIterator
 from megatron.core.utils import get_model_config
 
-__all__ = ["_GPTBatch", "_build_blend_iterator", "_get_doge_batch"]
+__all__ = [
+    "DoGEDataIterators",
+    "_GPTBatch",
+    "_build_doge_data_iterators",
+    "_next_doge_batches",
+]
 
 _GPTBatch = tuple[
     torch.Tensor,  # tokens
@@ -41,6 +47,19 @@ _GPTBatch = tuple[
     torch.Tensor,  # position_ids
     dict[str, object] | None,  # packed_sequence_metadata
 ]
+
+
+@dataclass
+class DoGEDataIterators:
+    """Data iterators required by one DoGE step.
+
+    Attributes:
+        source_iterators: One iterator per tunable training dataset path from ``--data_paths``.
+        target_iterator: Iterator over the fixed target objective.
+    """
+
+    source_iterators: dict[str, Iterator]
+    target_iterator: Iterator
 
 
 def _build_blend_iterator(
@@ -94,6 +113,28 @@ def _build_blend_iterator(
     return RerunDataIterator(iter(cyclic_iter(data_loader)))
 
 
+def _build_doge_data_iterators(
+    config: ConfigContainer,
+    model: GPTModel,
+    blend_weights: dict[str, float],
+    target_data_paths: tuple[str, ...],
+) -> DoGEDataIterators:
+    """Build per-source and target iterators after Megatron-Bridge setup.
+
+    The implementation reuses Megatron-Bridge/MCore dataset construction with the initialized
+    distributed state, creating one iterator for each training dataset path and one iterator for
+    the target objective.
+    """
+    if config.model.pipeline_model_parallel_size != 1:
+        raise NotImplementedError("DoGE distillation PoC currently supports only --pp_size 1.")
+
+    source_iterators = {
+        path: _build_blend_iterator(config, model, ("1.0", path)) for path in blend_weights
+    }
+    target_iterator = _build_blend_iterator(config, model, target_data_paths)
+    return DoGEDataIterators(source_iterators=source_iterators, target_iterator=target_iterator)
+
+
 def _get_doge_batch(state: GlobalState, model: GPTModel, data_iterator: Iterator) -> _GPTBatch:
     """Return the next Megatron-Bridge GPT batch from a DoGE iterator."""
     # Mirrors megatron.bridge.training.gpt_step._forward_step_common(), which calls get_batch()
@@ -134,3 +175,20 @@ def _get_doge_batch(state: GlobalState, model: GPTModel, data_iterator: Iterator
             "cu_seqlens_unpadded_argmin": cu_seqlens_unpadded_argmin,
         }
     return tokens, labels, loss_mask, attention_mask, position_ids, packed_sequence_metadata
+
+
+def _next_doge_batches(
+    state: GlobalState, model: GPTModel, data_iterators: DoGEDataIterators
+) -> tuple[dict[str, _GPTBatch], _GPTBatch]:
+    """Return Megatron GPT batches for DoGE source and target losses.
+
+    Source batches are keyed by the same dataset paths as ``data_iterators.source_iterators``.
+    Batch construction uses the same ``get_batch`` path as Megatron-Bridge GPT training, including
+    CUDA transfer, pipeline-stage filtering, and context-parallel partitioning.
+    """
+    source_batches = {
+        path: _get_doge_batch(state, model, iterator)
+        for path, iterator in data_iterators.source_iterators.items()
+    }
+    target_batch = _get_doge_batch(state, model, data_iterators.target_iterator)
+    return source_batches, target_batch

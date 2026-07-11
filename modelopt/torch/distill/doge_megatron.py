@@ -15,8 +15,7 @@
 
 """Megatron-Bridge DoGE distillation helpers."""
 
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Iterable
 from functools import partial
 
 import torch
@@ -25,26 +24,14 @@ from megatron.core.models.gpt import GPTModel
 
 from modelopt.torch.distill.doge import DoGEWeightUpdater, normalize_data_path_weights
 from modelopt.torch.distill.doge_megatron_data import (
-    _build_blend_iterator,
-    _get_doge_batch,
+    DoGEDataIterators,
+    _build_doge_data_iterators,
     _GPTBatch,
+    _next_doge_batches,
 )
 from modelopt.torch.distill.doge_megatron_loss import _weighted_source_forward_step
 
-__all__ = ["DoGEDataIterators", "DoGEForwardStep"]
-
-
-@dataclass
-class DoGEDataIterators:
-    """Data iterators required by one DoGE step.
-
-    Attributes:
-        source_iterators: One iterator per tunable training dataset path from ``--data_paths``.
-        target_iterator: Iterator over the fixed target objective.
-    """
-
-    source_iterators: dict[str, Iterator]
-    target_iterator: Iterator
+__all__ = ["DoGEForwardStep"]
 
 
 class DoGEForwardStep:
@@ -71,42 +58,6 @@ class DoGEForwardStep:
         self.blend_weights: dict[str, float] = normalize_data_path_weights(data_paths)
         self.target_blend_weights: dict[str, float] = normalize_data_path_weights(target_data_paths)
         self.doge_data_iterators: DoGEDataIterators | None = None
-
-    def _build_doge_data_iterators(self, state: GlobalState, model: GPTModel) -> DoGEDataIterators:
-        """Build per-source and target iterators after Megatron-Bridge setup.
-
-        The implementation should reuse Megatron-Bridge/MCore dataset construction with the
-        initialized distributed state, creating one iterator for each training dataset path and one
-        iterator for the target objective.
-        """
-        if state.cfg.model.pipeline_model_parallel_size != 1:
-            raise NotImplementedError("DoGE distillation PoC currently supports only --pp_size 1.")
-
-        source_iterators = {
-            path: _build_blend_iterator(state.cfg, model, ("1.0", path))
-            for path in self.blend_weights
-        }
-        target_iterator = _build_blend_iterator(state.cfg, model, self.target_data_paths)
-        return DoGEDataIterators(source_iterators=source_iterators, target_iterator=target_iterator)
-
-    def _next_doge_batches(
-        self, state: GlobalState, model: GPTModel
-    ) -> tuple[dict[str, _GPTBatch], _GPTBatch]:
-        """Return Megatron GPT batches for DoGE source and target losses.
-
-        Source batches are keyed by the same dataset paths as ``self.blend_weights``. Batch
-        construction uses the same ``get_batch`` path as Megatron-Bridge GPT training, including
-        CUDA transfer, pipeline-stage filtering, and context-parallel partitioning.
-        """
-        if self.doge_data_iterators is None:
-            raise RuntimeError("DoGE data iterators must be built before sampling batches.")
-
-        source_batches = {
-            path: _get_doge_batch(state, model, iterator)
-            for path, iterator in self.doge_data_iterators.source_iterators.items()
-        }
-        target_batch = _get_doge_batch(state, model, self.doge_data_iterators.target_iterator)
-        return source_batches, target_batch
 
     def _compute_alignment_scores(
         self,
@@ -137,9 +88,14 @@ class DoGEForwardStep:
         backpropagates with its normal optimizer step.
         """
         if self.doge_data_iterators is None:
-            self.doge_data_iterators = self._build_doge_data_iterators(state, model)
+            self.doge_data_iterators = _build_doge_data_iterators(
+                state.cfg,
+                model,
+                self.blend_weights,
+                self.target_data_paths,
+            )
 
-        source_batches, target_batch = self._next_doge_batches(state, model)
+        source_batches, target_batch = _next_doge_batches(state, model, self.doge_data_iterators)
 
         # Outer loop: use the target batch to score each source batch and update the data-blend
         # weights. This changes only ``self.blend_weights``, not the student model.
