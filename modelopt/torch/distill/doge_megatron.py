@@ -15,7 +15,7 @@
 
 """Megatron-Bridge DoGE distillation helpers."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from functools import partial
 
@@ -90,8 +90,8 @@ class DoGEDataIterators:
         target_iterator: Iterator over the fixed target objective.
     """
 
-    source_iterators: dict[str, Iterable]
-    target_iterator: Iterable
+    source_iterators: dict[str, Iterator]
+    target_iterator: Iterator
 
 
 class DoGEForwardStep:
@@ -137,7 +137,19 @@ class DoGEForwardStep:
         the raw dictionary returned by the Megatron data iterator, typically containing tensors such
         as ``tokens``, ``labels``, ``loss_mask``, ``attention_mask``, and ``position_ids``.
         """
-        raise NotImplementedError("DoGE batch sampling is not implemented yet.")
+        if self.doge_data_iterators is None:
+            raise RuntimeError("DoGE data iterators must be built before sampling batches.")
+
+        # Mirrors the raw ``next(data_iterator)`` call in
+        # megatron.bridge.training.gpt_step.get_batch_from_iterator(). TODO: when implementing
+        # DoGE losses, reuse Bridge's batch processing for CUDA transfer, pipeline-stage filtering,
+        # and context-parallel partitioning instead of manually interpreting these raw batches.
+        source_batches = {
+            path: next(iterator)
+            for path, iterator in self.doge_data_iterators.source_iterators.items()
+        }
+        target_batch = next(self.doge_data_iterators.target_iterator)
+        return source_batches, target_batch
 
     def _compute_alignment_scores(
         self,
