@@ -126,7 +126,12 @@ class DoGEForwardStep:
         initialized distributed state, creating one iterator for each training dataset path and one
         iterator for the target objective.
         """
-        raise NotImplementedError("DoGE data iterator construction is not implemented yet.")
+        source_iterators = {
+            path: _build_blend_iterator(state.cfg, model, ("1.0", path))
+            for path in self.blend_weights
+        }
+        target_iterator = _build_blend_iterator(state.cfg, model, self.target_data_paths)
+        return DoGEDataIterators(source_iterators=source_iterators, target_iterator=target_iterator)
 
     def _next_doge_batches(
         self,
