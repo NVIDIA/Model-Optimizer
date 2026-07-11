@@ -25,15 +25,26 @@ from megatron.bridge.data.loaders import cyclic_iter
 from megatron.bridge.data.samplers import build_pretraining_data_loader
 from megatron.bridge.data.utils import get_dataset_provider
 from megatron.bridge.training.config import ConfigContainer
+from megatron.bridge.training.gpt_step import _model_chunk_vp_stage, get_batch
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.models.gpt import GPTModel
 from megatron.core.rerun_state_machine import RerunDataIterator
+from megatron.core.utils import get_model_config
 
 from modelopt.torch.distill.doge import DoGEWeightUpdater, normalize_data_path_weights
 
 __all__ = ["DoGEDataIterators", "DoGEForwardStep"]
+
+_GPTBatch = tuple[
+    torch.Tensor,  # tokens
+    torch.Tensor,  # labels
+    torch.Tensor,  # loss_mask
+    torch.Tensor | None,  # attention_mask
+    torch.Tensor,  # position_ids
+    dict[str, object] | None,  # packed_sequence_metadata
+]
 
 
 def _build_blend_iterator(
@@ -85,6 +96,21 @@ def _build_blend_iterator(
         global_batch_size=config.train.global_batch_size,
     )
     return RerunDataIterator(iter(cyclic_iter(data_loader)))
+
+
+def _get_doge_batch(state: GlobalState, model: GPTModel, data_iterator: Iterator) -> _GPTBatch:
+    """Return the next Megatron-Bridge GPT batch from a DoGE iterator."""
+    # Mirrors megatron.bridge.training.gpt_step._forward_step_common(), which calls get_batch()
+    # before the model forward pass.
+    model_config = get_model_config(model)
+    use_mtp = (getattr(model_config, "mtp_num_layers", None) or 0) > 0
+    return get_batch(
+        data_iterator,
+        state.cfg,
+        use_mtp,
+        pg_collection=get_pg_collection(model),
+        vp_stage=_model_chunk_vp_stage(model),
+    )
 
 
 @dataclass
@@ -140,32 +166,28 @@ class DoGEForwardStep:
         return DoGEDataIterators(source_iterators=source_iterators, target_iterator=target_iterator)
 
     def _next_doge_batches(
-        self,
-    ) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, torch.Tensor]]:
-        """Return raw Megatron GPT batches for DoGE source and target losses.
+        self, state: GlobalState, model: GPTModel
+    ) -> tuple[dict[str, _GPTBatch], _GPTBatch]:
+        """Return Megatron GPT batches for DoGE source and target losses.
 
-        Source batches are keyed by the same dataset paths as ``self.blend_weights``. Each batch is
-        the raw dictionary returned by the Megatron data iterator, typically containing tensors such
-        as ``tokens``, ``labels``, ``loss_mask``, ``attention_mask``, and ``position_ids``.
+        Source batches are keyed by the same dataset paths as ``self.blend_weights``. Batch
+        construction uses the same ``get_batch`` path as Megatron-Bridge GPT training, including
+        CUDA transfer, pipeline-stage filtering, and context-parallel partitioning.
         """
         if self.doge_data_iterators is None:
             raise RuntimeError("DoGE data iterators must be built before sampling batches.")
 
-        # Mirrors the raw ``next(data_iterator)`` call in
-        # megatron.bridge.training.gpt_step.get_batch_from_iterator(). TODO: when implementing
-        # DoGE losses, reuse Bridge's batch processing for CUDA transfer, pipeline-stage filtering,
-        # and context-parallel partitioning instead of manually interpreting these raw batches.
         source_batches = {
-            path: next(iterator)
+            path: _get_doge_batch(state, model, iterator)
             for path, iterator in self.doge_data_iterators.source_iterators.items()
         }
-        target_batch = next(self.doge_data_iterators.target_iterator)
+        target_batch = _get_doge_batch(state, model, self.doge_data_iterators.target_iterator)
         return source_batches, target_batch
 
     def _compute_alignment_scores(
         self,
-        source_batches: dict[str, dict[str, torch.Tensor]],
-        target_batch: dict[str, torch.Tensor],
+        source_batches: dict[str, _GPTBatch],
+        target_batch: _GPTBatch,
         model: GPTModel,
     ) -> dict[str, float]:
         """Compute source-to-target gradient-alignment scores for each training source.
@@ -178,7 +200,7 @@ class DoGEForwardStep:
     def _weighted_source_forward_step(
         self,
         state: GlobalState,
-        source_batches: dict[str, dict[str, torch.Tensor]],
+        source_batches: dict[str, _GPTBatch],
         model: GPTModel,
         return_schedule_plan: bool,
     ) -> tuple[torch.Tensor, partial]:
@@ -206,7 +228,7 @@ class DoGEForwardStep:
         if self.doge_data_iterators is None:
             self.doge_data_iterators = self._build_doge_data_iterators(state, model)
 
-        source_batches, target_batch = self._next_doge_batches()
+        source_batches, target_batch = self._next_doge_batches(state, model)
 
         # Outer loop: use the target batch to score each source batch and update the data-blend
         # weights. This changes only ``self.blend_weights``, not the student model.
