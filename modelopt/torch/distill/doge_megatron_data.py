@@ -23,7 +23,7 @@ from megatron.bridge.data.loaders import cyclic_iter
 from megatron.bridge.data.samplers import build_pretraining_data_loader
 from megatron.bridge.data.utils import get_dataset_provider
 from megatron.bridge.training.config import ConfigContainer
-from megatron.bridge.training.gpt_step import _model_chunk_vp_stage, get_batch
+from megatron.bridge.training.gpt_step import get_batch
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 from megatron.core.datasets.utils import get_blend_from_list
@@ -100,10 +100,37 @@ def _get_doge_batch(state: GlobalState, model: GPTModel, data_iterator: Iterator
     # before the model forward pass.
     model_config = get_model_config(model)
     use_mtp = (getattr(model_config, "mtp_num_layers", None) or 0) > 0
-    return get_batch(
+    batch = get_batch(
         data_iterator,
         state.cfg,
         use_mtp,
         pg_collection=get_pg_collection(model),
-        vp_stage=_model_chunk_vp_stage(model),
     )
+    # TODO: Drop this compatibility shim once the minimum Megatron-Bridge version is fixed.
+    # NeMo 26.02/26.06 containers return packed-sequence fields separately, while newer Bridge main
+    # returns a single packed_sequence_metadata object.
+    if len(batch) == 6:
+        return batch
+
+    (
+        tokens,
+        labels,
+        loss_mask,
+        attention_mask,
+        position_ids,
+        cu_seqlens,
+        cu_seqlens_argmin,
+        max_seqlen,
+        cu_seqlens_unpadded,
+        cu_seqlens_unpadded_argmin,
+    ) = batch
+    packed_sequence_metadata = None
+    if cu_seqlens is not None:
+        packed_sequence_metadata = {
+            "cu_seqlens": cu_seqlens,
+            "cu_seqlens_argmin": cu_seqlens_argmin,
+            "max_seqlen": max_seqlen,
+            "cu_seqlens_unpadded": cu_seqlens_unpadded,
+            "cu_seqlens_unpadded_argmin": cu_seqlens_unpadded_argmin,
+        }
+    return tokens, labels, loss_mask, attention_mask, position_ids, packed_sequence_metadata

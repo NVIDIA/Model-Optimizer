@@ -166,7 +166,9 @@ class DoGEForwardStep:
         The returned scores are keyed by the same dataset paths as ``source_batches`` and
         ``self.blend_weights``. Higher scores should increase a source's DoGE blend weight.
         """
-        raise NotImplementedError("DoGE gradient-alignment scoring is not implemented yet.")
+        # PoC bootstrap: keep blend weights fixed while validating DoGE data iteration and weighted
+        # source-loss plumbing. Real source-target gradient alignment will replace this.
+        return dict.fromkeys(source_batches, 0.0)
 
     def _weighted_source_forward_step(
         self,
@@ -192,7 +194,7 @@ class DoGEForwardStep:
             )
 
         total_loss = None
-        total_num_tokens = None
+        loss_num_tokens = None
         total_report: dict[str, torch.Tensor] = {}
 
         for path, batch in source_batches.items():
@@ -207,21 +209,25 @@ class DoGEForwardStep:
             )
             source_loss, source_num_tokens, source_report = loss_function(output)
             weight = self.blend_weights[path]
-            weighted_loss = weight * source_loss
-            weighted_num_tokens = weight * source_num_tokens
+            # Convert each source loss to a per-token average before weighting. ``clamp`` avoids
+            # divide-by-zero if a batch has no valid loss tokens.
+            weighted_loss = weight * source_loss / torch.clamp(source_num_tokens, min=1)
+            weighted_report_tokens = weight * source_num_tokens
 
             total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
-            total_num_tokens = (
-                weighted_num_tokens
-                if total_num_tokens is None
-                else total_num_tokens + weighted_num_tokens
+            # Megatron-Core expects integer-like token counts when aggregating the returned loss.
+            # Since ``total_loss`` is already normalized above, return a denominator of one with the
+            # same shape/device/dtype as ``source_num_tokens`` instead of a weighted float token
+            # count. Real token counts are still preserved in ``total_report`` for logging.
+            loss_num_tokens = (
+                torch.ones_like(source_num_tokens) if loss_num_tokens is None else loss_num_tokens
             )
             # Match the report format consumed by Megatron-Bridge train_step(), which expects each
             # metric value to contain ``[loss_numerator, num_tokens]`` and reduces it as
             # ``sum(loss_numerator) / sum(num_tokens)`` for logging.
             for name, value in source_report.items():
                 weighted_value = torch.cat(
-                    [(weight * value[0]).view(1), (weight * value[1]).view(1)]
+                    [(weight * value[0]).view(1), weighted_report_tokens.view(1)]
                 )
                 total_report[name] = (
                     weighted_value
@@ -229,13 +235,13 @@ class DoGEForwardStep:
                     else total_report[name] + weighted_value
                 )
 
-        if total_loss is None or total_num_tokens is None:
+        if total_loss is None or loss_num_tokens is None:
             raise RuntimeError("DoGE weighted source loss requires at least one source batch.")
 
         # Bridge requires an ``output_tensor`` plus a loss function. The real weighted KD loss is
         # already computed above, so the scalar ``total_loss`` is also used as the ignored dummy
         # output tensor. This is only valid for the current non-pipeline-parallel PoC.
-        return total_loss, partial(_weighted_loss, total_loss, total_num_tokens, total_report)
+        return total_loss, partial(_weighted_loss, total_loss, loss_num_tokens, total_report)
 
     def __call__(
         self,
