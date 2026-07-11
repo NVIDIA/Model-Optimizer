@@ -1,4 +1,4 @@
-# EAGLE3 offline speculative decoding pipeline for Qwen3-8B.
+# EAGLE3 offline speculative decoding pipeline for Qwen3-0.6B.
 #
 # 4-step pipeline:
 #   task_0: Data synthesis — query TRT-LLM server to generate prompt samples
@@ -27,8 +27,8 @@ pipeline:
     script: common/tensorrt_llm/query.sh
     args:
       - --model <<global_vars.hf_model>>
-      - --tp_size 8
-      - --ep_size 8
+      - --tp_size 1
+      - --ep_size 1
       - --max_num_tokens 32000
       - --port 8000
       - --host 0.0.0.0
@@ -36,12 +36,13 @@ pipeline:
       - --
       - --data /hf-local/modelopt/Speculative-Decoding-Prompt-Samples
       - --save /scratchspace/data
+      - --num-samples 128
     environment:
       - HF_LOCAL: /hf-local
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 8
+      ntasks_per_node: 1
       gpus_per_node: 1
       container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
 
@@ -52,14 +53,14 @@ pipeline:
       - --input-data /scratchspace/data
       - --output-dir /scratchspace/offline_hidden_states
       - --max-seq-len 8192
-      - --tp 8
-      - --moe-ep 8
+      - --tp 1
+      - --moe-ep 1
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 8
+      ntasks_per_node: 1
       gpus_per_node: 1
       container: nvcr.io/nvidia/tensorrt-llm/release:1.2.0
 
@@ -89,7 +90,7 @@ pipeline:
       - --draft_length 3
       - --output_length 4096
       - --engine VLLM
-      - --tp_size 8
+      - --tp_size 1
       - --ep_size 1
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
