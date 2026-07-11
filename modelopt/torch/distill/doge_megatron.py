@@ -16,7 +16,8 @@
 """Megatron-Bridge DoGE distillation helpers."""
 
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, replace
+from copy import copy
+from dataclasses import dataclass
 from functools import partial
 
 import torch
@@ -45,12 +46,17 @@ def _build_blend_iterator(
     # Derive from the Bridge-initialized dataset config because
     # megatron.bridge.training.setup.setup() populates runtime fields such as the tokenizer.
     # DoGE only changes the blend and split.
-    dataset_config = replace(
-        config.dataset,
-        blend=get_blend_from_list(list(data_paths)),
-        blend_per_split=None,
-        split="100,0,0",
-    )
+    dataset_config = copy(config.dataset)
+    if getattr(dataset_config, "mock", False):
+        # MockGPTDatasetConfig intentionally ignores source paths. Each DoGE mock iterator is an
+        # independent mock stream with the same settings; this validates iterator plumbing, not
+        # source-specific data selection.
+        pass
+    else:
+        dataset_config.blend = get_blend_from_list(list(data_paths))
+        dataset_config.blend_per_split = None
+        dataset_config.data_path = None
+    dataset_config.split = "100,0,0"
     dataset_config.finalize()
 
     num_samples = config.train.train_iters * config.train.global_batch_size
