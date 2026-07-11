@@ -20,8 +20,11 @@ from dataclasses import dataclass
 from functools import partial
 
 import torch
+from megatron.bridge.training.gpt_step import _create_loss_function_modelopt
 from megatron.bridge.training.state import GlobalState
+from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
 from megatron.core.models.gpt import GPTModel
+from megatron.core.utils import get_model_config
 
 from modelopt.torch.distill.doge import DoGEWeightUpdater, normalize_data_path_weights
 from modelopt.torch.distill.doge_megatron_data import (
@@ -44,6 +47,51 @@ class DoGEDataIterators:
 
     source_iterators: dict[str, Iterator]
     target_iterator: Iterator
+
+
+def _forward_batch(batch: _GPTBatch, model: GPTModel) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run a Megatron GPT forward pass from an already-prepared DoGE batch.
+
+    Mirrors the forward half of ``megatron.bridge.training.gpt_step._forward_step_common()``,
+    but uses a DoGE batch that was already sampled from a source-specific iterator.
+    """
+    tokens, labels, loss_mask, attention_mask, position_ids, packed_seq_metadata = batch
+    config = get_model_config(model)
+    forward_args = {
+        "input_ids": tokens,
+        "position_ids": position_ids,
+        "attention_mask": attention_mask,
+        "labels": labels,
+    }
+    if packed_seq_metadata is not None:
+        if getattr(config, "is_hybrid_model", False):
+            if tokens is not None:
+                packed_seq_metadata["total_tokens"] = tokens.size(1)
+            elif labels is not None:
+                packed_seq_metadata["total_tokens"] = labels.size(1)
+            else:
+                packed_seq_metadata["total_tokens"] = getattr(config, "seq_length", None)
+        forward_args["packed_seq_params"] = get_packed_seq_params(packed_seq_metadata)
+
+    return model(**forward_args), loss_mask
+
+
+def _weighted_loss(
+    loss: torch.Tensor,
+    num_tokens: torch.Tensor,
+    report: dict[str, torch.Tensor],
+    _output_tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+    """Adapt the precomputed weighted DoGE loss to Megatron-Bridge's loss API.
+
+    Megatron-Bridge forward steps return ``(output_tensor, loss_function)`` and later call
+    ``loss_function(output_tensor)``. DoGE computes KD losses immediately after each source
+    forward, so this function ignores ``output_tensor`` and returns the already-combined
+    ``(loss, num_tokens, report)`` tuple expected by the training loop. The caller passes
+    ``loss`` itself as the dummy ``output_tensor`` because returning ``None`` would be a more
+    fragile violation of the tensor-valued forward-step contract.
+    """
+    return loss, num_tokens, report
 
 
 class DoGEForwardStep:
@@ -78,6 +126,9 @@ class DoGEForwardStep:
         initialized distributed state, creating one iterator for each training dataset path and one
         iterator for the target objective.
         """
+        if state.cfg.model.pipeline_model_parallel_size != 1:
+            raise NotImplementedError("DoGE distillation PoC currently supports only --pp_size 1.")
+
         source_iterators = {
             path: _build_blend_iterator(state.cfg, model, ("1.0", path))
             for path in self.blend_weights
@@ -129,8 +180,62 @@ class DoGEForwardStep:
         This method should compute one source KD loss per batch in ``source_batches`` and combine
         them using the current ``self.blend_weights``. Megatron-Bridge then backpropagates the
         returned loss and updates the student with its normal optimizer step.
+
+        DoGE runs one forward pass per training source. The ModelOpt ``DistillationModel`` wrapper
+        stores teacher/student activations from its latest forward pass on the wrapped modules, so
+        each source's KD loss must be computed immediately after that source forward. Otherwise,
+        the next source forward would overwrite the activations needed by ``compute_kd_loss``.
         """
-        raise NotImplementedError("DoGE weighted source forward step is not implemented yet.")
+        if return_schedule_plan:
+            raise NotImplementedError(
+                "DoGE weighted source forward step does not support schedule plans yet."
+            )
+
+        total_loss = None
+        total_num_tokens = None
+        total_report: dict[str, torch.Tensor] = {}
+
+        for path, batch in source_batches.items():
+            output, loss_mask = _forward_batch(batch, model)
+            # Same ModelOpt KD loss builder used by
+            # megatron.bridge.training.gpt_step.forward_step_modelopt().
+            loss_function = _create_loss_function_modelopt(
+                loss_mask,
+                model,
+                check_for_nan_in_loss=state.cfg.rerun_state_machine.check_for_nan_in_loss,
+                check_for_spiky_loss=state.cfg.rerun_state_machine.check_for_spiky_loss,
+            )
+            source_loss, source_num_tokens, source_report = loss_function(output)
+            weight = self.blend_weights[path]
+            weighted_loss = weight * source_loss
+            weighted_num_tokens = weight * source_num_tokens
+
+            total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
+            total_num_tokens = (
+                weighted_num_tokens
+                if total_num_tokens is None
+                else total_num_tokens + weighted_num_tokens
+            )
+            # Match the report format consumed by Megatron-Bridge train_step(), which expects each
+            # metric value to contain ``[loss_numerator, num_tokens]`` and reduces it as
+            # ``sum(loss_numerator) / sum(num_tokens)`` for logging.
+            for name, value in source_report.items():
+                weighted_value = torch.cat(
+                    [(weight * value[0]).view(1), (weight * value[1]).view(1)]
+                )
+                total_report[name] = (
+                    weighted_value
+                    if name not in total_report
+                    else total_report[name] + weighted_value
+                )
+
+        if total_loss is None or total_num_tokens is None:
+            raise RuntimeError("DoGE weighted source loss requires at least one source batch.")
+
+        # Bridge requires an ``output_tensor`` plus a loss function. The real weighted KD loss is
+        # already computed above, so the scalar ``total_loss`` is also used as the ignored dummy
+        # output tensor. This is only valid for the current non-pipeline-parallel PoC.
+        return total_loss, partial(_weighted_loss, total_loss, total_num_tokens, total_report)
 
     def __call__(
         self,
