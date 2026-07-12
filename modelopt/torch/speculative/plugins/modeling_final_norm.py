@@ -22,6 +22,8 @@ to keep the fake base lightweight, and map base ``model_type`` → norm type so 
 only when we know which one the model uses.
 """
 
+from collections.abc import Callable
+
 import torch
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
@@ -41,11 +43,37 @@ class _FinalRMSNorm(LlamaRMSNorm):
         self.to(dtype)
 
 
+class _FinalGemmaRMSNorm(torch.nn.Module):
+    """Gemma-style RMSNorm: fp32 normalize, scale by ``(1 + weight)``, multiply-then-cast.
+
+    Mirrors MiniMax M3's ``MiniMaxM3VLRMSNorm`` (``use_gemma_norm=True`` configs): the stored
+    ``weight`` is a zero-centered delta, the effective scale is ``1 + weight``, and the multiply
+    happens in fp32 BEFORE casting back (``(x_hat * (1 + w)).type_as(x)``), unlike LlamaRMSNorm's
+    cast-then-multiply. Reusing ``_FinalRMSNorm`` here would silently drop the ``+1`` and corrupt
+    the reconstructed logits. ``weight`` is loaded from the base checkpoint.
+    """
+
+    def __init__(self, hidden_size, eps=1e-6, dtype=torch.bfloat16):
+        super().__init__()
+        self.eps = eps
+        self.weight = torch.nn.Parameter(torch.zeros(hidden_size, dtype=dtype))
+
+    def forward(self, x):
+        output = x.float()
+        output = output * torch.rsqrt(output.pow(2).mean(-1, keepdim=True) + self.eps)
+        output = output * (1.0 + self.weight.float())
+        return output.type_as(x)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.eps}"
+
+
 # Registry of self-implemented final-norm variants. We deliberately reimplement these
 # (rather than importing the base model's actual module) to keep FakeBaseModel lightweight.
 # Only a small, explicit set is supported; add a class here when a new type is needed.
-_FINAL_NORM_CLASSES = {
+_FINAL_NORM_CLASSES: dict[str, Callable[..., torch.nn.Module]] = {
     "rmsnorm": _FinalRMSNorm,
+    "gemma_rmsnorm": _FinalGemmaRMSNorm,
 }
 
 # Base ``model_type`` → final-norm type. ONLY listed models get a norm — applying the wrong or
@@ -62,17 +90,26 @@ _FINAL_NORM_TYPE_BY_MODEL_TYPE: dict[str, str] = {
     "deepseek_v3": "rmsnorm",
     "kimi_k2": "rmsnorm",  # Kimi-K2 / K2-Thinking (DeepSeek-V3 arch) report model_type "kimi_k2"
     "kimi_k25": "rmsnorm",  # Kimi-K2.5 / K2.6 / K2.7 all report model_type "kimi_k25"
+    "minimax_m3_vl_text": "rmsnorm",  # overridden to gemma_rmsnorm via use_gemma_norm below
     # gpt_oss intentionally DISABLED: GptOssRMSNorm uses an fp32 weight + multiply-then-cast,
     # unlike _FinalRMSNorm's bf16 weight, so reusing it would silently bias reconstructed logits.
     # Re-enable once a gpt_oss-style class (fp32 weight, multiply-then-cast) is in _FINAL_NORM_CLASSES.
 }
 
 
-def _select_final_norm_type(model_type: str | None) -> str | None:
+def _select_final_norm_type(model_type: str | None, base_cfg=None) -> str | None:
     """Return the final-norm type for a base ``model_type``, or ``None`` if unknown.
 
     ``None`` means we don't know the model's final norm, so FakeBaseModel builds no norm.
+
+    ``base_cfg`` (the resolved text config, optional) takes precedence over the model_type
+    table when it carries an explicit ``use_gemma_norm=True`` flag: only MiniMax M2.x/M3 set
+    it, and their ``model_type`` is unreliable — MiniMax's VL remote code coerces a
+    model_type-less ``text_config`` to Mixtral (whose table entry is plain ``rmsnorm``), so
+    keying off model_type alone would silently apply the wrong norm flavor.
     """
+    if base_cfg is not None and getattr(base_cfg, "use_gemma_norm", False):
+        return "gemma_rmsnorm"
     return _FINAL_NORM_TYPE_BY_MODEL_TYPE.get(model_type or "")
 
 
