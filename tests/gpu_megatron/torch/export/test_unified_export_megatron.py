@@ -570,8 +570,8 @@ def _make_exporter_for_grouped_mlp() -> GPTModelExporter:
 
 
 def test_grouped_mlp_slicing_maps_local_to_global_expert_ids():
-    """EP>1 fix: local expert IDs must be remapped to global via module.local_expert_indices,
-    otherwise every EP rank would write experts.0..N-1 and collide on the writer's state_dict.
+    """EP>1 fix: without global remapping, every EP rank would write experts.0..N-1 and
+    collide on the writer's state_dict.
     """
     exporter = _make_exporter_for_grouped_mlp()
     # Simulate EP rank 2 of an EP=4 job: this rank owns global experts 4 and 5.
@@ -586,18 +586,43 @@ def test_grouped_mlp_slicing_maps_local_to_global_expert_ids():
     assert "experts.1.gate_up_proj.weight" not in exporter._state_dict
 
 
-def test_grouped_mlp_slicing_raises_on_missing_expert_weight():
-    """Corrupted module.state_dict (weight{i} missing) must raise ValueError on the local rank."""
+def test_grouped_mlp_slicing_normalizes_tensor_local_expert_indices():
+    """local_expert_indices may arrive as a torch.Tensor (Megatron path). It must be
+    normalized to list[int] -- a naive `bool(tensor)` on a multi-element tensor raises.
+    """
     exporter = _make_exporter_for_grouped_mlp()
-    module = _FakeTEGroupedMLP(num_gemms=2)
-    module.state_dict = lambda: {"weight0": module.weight0}  # drop weight1
+    module = _FakeTEGroupedMLP(
+        num_gemms=2, local_expert_indices=torch.tensor([6, 7], dtype=torch.long)
+    )
 
-    with pytest.raises(ValueError, match="missing expert weights"):
+    exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    assert "experts.6.gate_up_proj.weight" in exporter._state_dict
+    assert "experts.7.gate_up_proj.weight" in exporter._state_dict
+
+
+def test_grouped_mlp_slicing_collects_all_missing_expert_weights():
+    """New collect-then-raise behavior: the error message must name every missing
+    weight{i}, not just the first one hit.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(num_gemms=3)
+    # Drop weight0 AND weight2; only weight1 remains.
+    module.state_dict = lambda: {"weight1": module.weight1}
+
+    with pytest.raises(ValueError) as exc_info:
         exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    msg = str(exc_info.value)
+    assert "weight0" in msg and "weight2" in msg, (
+        f"error should list all missing weights, got: {msg}"
+    )
 
 
 def test_is_sidecar_writer_rank_pins_to_dp0_ep0(monkeypatch):
-    """DP>1 fix: only the DP0/EP0 rank among is_last_stage_main_rank writes sidecar files."""
+    """DP>1 fix predicate: only the DP0/EP0 rank among is_last_stage_main_rank writes
+    sidecar files. Guards the predicate used at three sites in save_pretrained.
+    """
     import modelopt.torch.export.unified_export_megatron as uem
 
     # is_last_stage_main_rank=False is never a writer, regardless of DP/EP.

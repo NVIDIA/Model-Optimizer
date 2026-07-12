@@ -266,12 +266,7 @@ class GPTModelExporter:
 
     @staticmethod
     def _is_sidecar_writer_rank(is_last_stage_main_rank: bool) -> bool:
-        """The one rank that writes sidecar/config files.
-
-        Multiple ranks may satisfy ``is_last_stage_main_rank`` at DP>1 or EP>1;
-        pinning to DP0/EP0 ensures a single writer so peers never observe a
-        partial read-modify-write on save_directory.
-        """
+        """True only for the DP0/EP0 last-stage-main rank (single writer for save_directory)."""
         return (
             is_last_stage_main_rank
             and get_data_parallel_rank() == 0
@@ -298,8 +293,6 @@ class GPTModelExporter:
         # We use the last PP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
         is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
-        # At DP>1 or EP>1 several ranks satisfy is_last_stage_main_rank; further
-        # pinning to DP0/EP0 ensures exactly one writer for sidecar/config files.
         is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
 
         # Main export process
@@ -321,9 +314,6 @@ class GPTModelExporter:
 
         if is_last_stage_main_rank:
             if is_writer_rank:
-                # Local dir source: copy every non-safetensors file (tokenizer, *.py, README).
-                # Hub-ID source: snapshot_download the *.py sidecars (tokenizer via
-                # AutoTokenizer below). modelopt-owned files are overwritten below.
                 if self._hf_pretrained_model_name is not None:
                     if os.path.isdir(self._hf_pretrained_model_name):
                         copy_non_safetensor_files_from_ckpt(
@@ -362,8 +352,7 @@ class GPTModelExporter:
                 except (OSError, ValueError, ImportError):
                     pass
 
-            # MTP load mutates this rank's layer_state_dicts (per-rank state) so it
-            # must run on every last-stage main rank, not just the writer.
+            # MTP load mutates per-rank layer_state_dicts, so it runs on every last-stage main rank.
             mtp_state_dict = self._get_mtp_state_dict()
             if len(mtp_state_dict) > 0:
                 layer_state_dicts[self.model.config.num_layers].update(mtp_state_dict)
@@ -374,8 +363,6 @@ class GPTModelExporter:
         # kv_cache_dtype is only set on attention-owning ranks; writer rank may not be one.
         gathered_kv_cache_dtype = self._gather_kv_cache_dtype()
 
-        # _hf_quant_config stays empty on non-writer ranks, which makes the
-        # config.json gate below a natural no-op on them.
         if is_writer_rank and quantization is not None:
             if combined_layer_config_dict:
                 quantization_config = process_layer_quant_config(combined_layer_config_dict)
@@ -419,12 +406,9 @@ class GPTModelExporter:
                 )
                 layer_state_dicts[first_layer_key].update(vision_state_dict)
 
-        # Barrier to ensure the export_dir has been created (also opens the
-        # bracket for the single-writer config.json read-modify-write below).
+        # Bracket the writer's config.json read-modify-write with barriers so peers
+        # never observe a truncated file (also ensures export_dir exists).
         torch.distributed.barrier()
-
-        # Newer VLLM expects config.json with hf_quant_config. Close the bracket
-        # after the write so peers never see a truncated file mid-write.
         config_json_file = save_directory + "/config.json"
         if is_writer_rank and self._hf_quant_config and os.path.exists(config_json_file):
             with open(config_json_file) as f:
@@ -1060,13 +1044,11 @@ class GPTModelExporter:
                 self._state_dict[up_proj_key] = val.detach().clone()
 
     def _grouped_mlp_slicing(self, module, prefix, parallel_config=None):
-        """Export TEGroupedMLP weights, one HF-style per-expert entry per local expert.
+        """Export TEGroupedMLP weight0..weight{N-1} as one HF-style entry per expert.
 
-        TEGroupedMLP stores weights as weight0..weight{N-1}, one per local expert. At EP>1
-        each rank only owns a slice, so local ids are mapped to global via
-        ``module.local_expert_indices`` (fallback: Megatron contiguous ``[ep_rank*N, ...]``)
-        and the resulting per-expert state is ``all_gather_object``-ed across the EP group.
-        All EP ranks MUST enter this method for the same layer in lockstep or the gather hangs.
+        At EP>1, local ids are mapped to global via ``module.local_expert_indices``
+        and per-expert state is ``all_gather_object``-ed across the EP group. All EP ranks
+        MUST enter this method for the same layer in lockstep or the gather hangs.
 
         Reverse of _grouped_mlp_merging in the importer.
         """
@@ -1095,9 +1077,8 @@ class GPTModelExporter:
         )
         ep_rank = get_expert_model_parallel_rank() if torch.distributed.is_initialized() else 0
 
-        # Prefer module.local_expert_indices; fall back to Megatron's contiguous layout
-        # [ep_rank*N, (ep_rank+1)*N - 1]. Normalize to list[int] -- Megatron may expose
-        # this as a tensor and `bool(tensor)` on a multi-element tensor would raise.
+        # Prefer module.local_expert_indices; fall back to Megatron's contiguous layout.
+        # Normalize to list[int] since Megatron may expose this as a torch.Tensor.
         indices = getattr(module, "local_expert_indices", None)
         if indices is None and getattr(module, "experts", None) is not None:
             indices = getattr(module.experts, "local_expert_indices", None)
@@ -1138,8 +1119,7 @@ class GPTModelExporter:
         elif local_missing:
             raise ValueError(f"TEGroupedMLP missing expert weights: {local_missing}")
 
-        # Scales / aux values are shared across local experts -- move to CPU once
-        # so the gather payload doesn't repeatedly clone GPU tensors.
+        # Move shared scales/aux to CPU once so the gather payload avoids GPU clones.
         weight_scale_cpu = weight_scale.detach().cpu().clone() if weight_scale is not None else None
         weight_scale_2_cpu = (
             weight_scale_2.detach().cpu().clone() if weight_scale_2 is not None else None
@@ -1148,11 +1128,9 @@ class GPTModelExporter:
             k: v.detach().cpu().clone() for k, v in name_to_value.items() if k != "output_scale"
         }
 
-        # Record per-layer quant config for ALL global experts on every rank -- the
-        # writer's _per_layer_quant_config is serialized into hf_quant_config.json and
-        # would otherwise be missing (EP-1)/EP of the routed experts. Within one
-        # TEGroupedMLP layer all experts share qformat/block_size (one quantizer
-        # pattern matches `*mixer.experts.*`), so local values apply globally.
+        # Record quant config for ALL global experts on every rank; otherwise the writer's
+        # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
+        # a TEGroupedMLP layer share qformat/block_size, so local values apply globally.
         num_total_experts = num_experts * ep_size
         for global_id in range(num_total_experts):
             self._record_layer_quant_config(prefix.format(global_id) + ".", qformat, block_size)
