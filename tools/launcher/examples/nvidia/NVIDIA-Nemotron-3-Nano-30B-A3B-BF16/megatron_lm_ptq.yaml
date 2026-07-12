@@ -61,11 +61,9 @@ pipeline:
       _factory_: "slurm_factory"
       container: nvcr.io/nvidia/nemo:26.04
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
-      partition: batch
       nodes: 1
       ntasks_per_node: 4
       gpus_per_node: 4
-      time: "04:00:00"
 
   task_1:
     script: common/megatron_lm/export/export.sh
@@ -81,11 +79,9 @@ pipeline:
       _factory_: "slurm_factory"
       container: nvcr.io/nvidia/nemo:26.04
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
-      partition: batch
       nodes: 1
       ntasks_per_node: 4
       gpus_per_node: 4
-      time: "02:00:00"
 
   # vLLM generation test: serve the exported HF NVFP4 ckpt and answer 8
   # GPQA-style questions. Inspect responses under /cicd/vllm/<model>/.
@@ -103,8 +99,6 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       container: vllm/vllm-openai:v0.21.0
-      partition: batch
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 4
-      time: "01:00:00"
