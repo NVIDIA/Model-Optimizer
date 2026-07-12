@@ -23,6 +23,8 @@ from ..tools.logger import mprint
 
 __all__ = ["process_and_save_dataset"]
 
+PREBUILT_KD_DATASET = "nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2"
+
 
 def process_and_save_dataset(
     dataset_name: str,
@@ -40,6 +42,15 @@ def process_and_save_dataset(
             )
             return
 
+    # The prebuilt dataset is already filtered and split — skip the 136 GB download.
+    if dataset_name == PREBUILT_KD_DATASET:
+        ds_dict = datasets.load_dataset(dataset_name)
+        os.makedirs(output_dir, exist_ok=True)
+        ds_dict.save_to_disk(output_dir)
+        mprint(f"Dataset splits:\n{ds_dict}")
+        mprint(f"Saved processed datasets to {output_dir}")
+        return
+
     ds = datasets.load_dataset(dataset_name, split=split)
     ds = datasets.concatenate_datasets(ds)
     # Filter out samples with reasoning = on
@@ -52,7 +63,7 @@ def process_and_save_dataset(
     ds_dict = datasets.DatasetDict(
         {
             "train": ds_split["train"],
-            "valid": ds_split["test"],
+            "validation": ds_split["test"],
         }
     )
     # Save locally

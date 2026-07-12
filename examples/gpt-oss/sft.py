@@ -70,7 +70,7 @@ def main(script_args, training_args, model_args, quant_args):
     # ------------------------
     model_kwargs = {
         "revision": model_args.model_revision,
-        "trust_remote_code": model_args.trust_remote_code,
+        "trust_remote_code": getattr(model_args, "trust_remote_code", False),
         "attn_implementation": model_args.attn_implementation,
         "dtype": getattr(model_args, "dtype", "bfloat16"),
         "use_cache": not training_args.gradient_checkpointing,

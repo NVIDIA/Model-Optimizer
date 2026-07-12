@@ -32,7 +32,6 @@ from megatron.bridge.models.transformer_config import (
     HeterogeneousTransformerConfig,
     TransformerConfig,
 )
-from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.core.models.gpt.heterogeneous.heterogeneous_layer_specs import (
     get_gpt_heterogeneous_layer_spec,
 )
@@ -43,9 +42,14 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 if not hasattr(TransformerConfig, "get_config_for_layer"):
     TransformerConfig.get_config_for_layer = lambda self, layer_number: self
 
-__all__ = ["heterogeneous_layer_spec", "GenericHeterogeneousProvider", "HeterogeneousBridgeMixin"]
+try:  # nemo:26.04.01 onwards needs this fix
+    from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 
-register_allowed_target_prefix("modelopt.")
+    register_allowed_target_prefix("modelopt.")
+except ImportError:
+    pass
+
+__all__ = ["heterogeneous_layer_spec", "GenericHeterogeneousProvider", "HeterogeneousBridgeMixin"]
 
 
 def heterogeneous_layer_spec(config) -> ModuleSpec:

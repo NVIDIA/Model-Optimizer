@@ -24,9 +24,16 @@ import torch
 import triton
 import triton.language as tl
 
-from .nvfp4_quant import nvfp4_scalar_quant
+from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
 
-__all__ = ["compute_fp4_scales", "fp4_dequantize", "static_blockwise_fp4_fake_quant"]
+from ..common.nvfp4_quant import nvfp4_scalar_quant
+
+__all__ = [
+    "compute_fp4_scales",
+    "fp4_dequantize",
+    "static_blockwise_fp4_cast",
+    "static_blockwise_fp4_fake_quant",
+]
 
 
 _TORCH_TO_TL_DTYPE = {
@@ -211,6 +218,7 @@ def compute_fp4_scales(
     amax: torch.Tensor,
     global_amax: torch.Tensor | None = None,
     quantize_block_scales: bool = True,
+    fp8_max_for_normalization: float = E4M3_MAX,
 ) -> torch.Tensor:
     """Compute per-block FP4 scales from amax values.
 
@@ -220,6 +228,8 @@ def compute_fp4_scales(
         amax: Per-block amax values (any shape).
         global_amax: Global amax for FP8 two-level scaling. Computed from *amax* if None.
         quantize_block_scales: If True, quantize scales to FP8 E4M3.
+        fp8_max_for_normalization: FP8 max value used to normalize per-block scales
+            before FP8 quantization (default 448.0; use 256.0 for NVFP4 4/6 mode).
 
     Returns:
         Per-block scales (same shape as *amax*), float32.
@@ -235,7 +245,7 @@ def compute_fp4_scales(
             global_amax = reduce_amax(amax, axis=None, keepdims=False, squeeze_scalar=True)
 
         global_amax = global_amax.float()
-        scale_fp8_quant_amax = global_amax / 6.0
+        scale_fp8_quant_amax = global_amax * (E4M3_MAX / fp8_max_for_normalization) / 6.0
         scale = scaled_e4m3_impl(scale, scale_fp8_quant_amax)
 
     return scale
@@ -246,6 +256,7 @@ def static_blockwise_fp4_fake_quant(
     amax: torch.Tensor,
     global_amax: torch.Tensor | None = None,
     quantize_block_scales: bool = True,
+    fp8_max_for_normalization: float = E4M3_MAX,
     out_dtype: torch.dtype | None = None,
 ):
     """Static blockwise FP4 fake quantization using Triton kernel.
@@ -261,6 +272,8 @@ def static_blockwise_fp4_fake_quant(
             consumes it as a flat 1-D buffer of length ``NUM_FP4_BLOCKS``.
         global_amax: FP32 scalar global amax. If provided, used to compute scale_fp8_quant_amax.
         quantize_block_scales: If True, quantize block scales to FP8.
+        fp8_max_for_normalization: FP8 max value used to normalize per-block scales
+            before FP8 quantization (default 448.0; use 256.0 for NVFP4 4/6 mode).
         out_dtype: Output dtype. Defaults to x.dtype if None.
     """
     original_shape = x.shape
@@ -275,7 +288,12 @@ def static_blockwise_fp4_fake_quant(
     if out_dtype is None:
         out_dtype = x.dtype
 
-    scale = compute_fp4_scales(amax, global_amax, quantize_block_scales)
+    scale = compute_fp4_scales(
+        amax,
+        global_amax,
+        quantize_block_scales,
+        fp8_max_for_normalization=fp8_max_for_normalization,
+    )
 
     x_flat = x.contiguous().view(-1)
     y_flat = torch.empty_like(x_flat, dtype=out_dtype)
@@ -296,3 +314,87 @@ def static_blockwise_fp4_fake_quant(
         )
 
     return y_flat.view(original_shape)
+
+
+@triton.jit
+def static_blockwise_fp4_cast_kernel(
+    x_ptr,  # [NUM_ELEMENTS] flattened pre-scaled input
+    y_ptr,  # [NUM_ELEMENTS] flattened output
+    NUM_ELEMENTS,
+    TILE_SIZE: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    """Round pre-scaled values to nearest FP4 representable value (no scale)."""
+    pid = tl.program_id(axis=0)
+    offset = pid * TILE_SIZE + tl.arange(0, TILE_SIZE)
+    mask = offset < NUM_ELEMENTS
+
+    x = tl.load(x_ptr + offset, mask=mask).to(tl.float32)
+    x_abs = tl.abs(x)
+
+    # FP4 E2M1 representable values: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+    q_val = tl.where(
+        x_abs <= 0.25,
+        0.0,
+        tl.where(
+            x_abs < 0.75,
+            0.5,
+            tl.where(
+                x_abs <= 1.25,
+                1.0,
+                tl.where(
+                    x_abs < 1.75,
+                    1.5,
+                    tl.where(
+                        x_abs <= 2.5,
+                        2.0,
+                        tl.where(
+                            x_abs < 3.5,
+                            3.0,
+                            tl.where(x_abs <= 5.0, 4.0, 6.0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    y = tl.where(x >= 0, q_val, -q_val)
+    tl.store(y_ptr + offset, y.to(OUT_DTYPE), mask=mask)
+
+
+def static_blockwise_fp4_cast(
+    x: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Round pre-scaled values to nearest FP4 E2M1 representable value.
+
+    Unlike ``static_blockwise_fp4_fake_quant``, this does **not** apply any
+    scale -- the caller is responsible for pre-dividing by scale_pre and
+    post-multiplying by scale_post (as in LSQ).
+
+    Args:
+        x: Input tensor (any shape) on CUDA.
+        out_dtype: Output dtype. Defaults to x.dtype.
+    """
+    if out_dtype is None:
+        out_dtype = x.dtype
+
+    x_flat = x.contiguous().view(-1)
+    y_flat = torch.empty_like(x_flat, dtype=out_dtype)
+    NUM_ELEMENTS = x_flat.numel()
+    TILE_SIZE = 1024
+
+    tl_out_dtype = _torch_dtype_to_tl(out_dtype)
+    grid = ((NUM_ELEMENTS + TILE_SIZE - 1) // TILE_SIZE,)
+
+    with torch.cuda.device(x.device):
+        static_blockwise_fp4_cast_kernel[grid](
+            x_flat,
+            y_flat,
+            NUM_ELEMENTS,
+            TILE_SIZE=TILE_SIZE,
+            OUT_DTYPE=tl_out_dtype,
+        )
+
+    return y_flat.view_as(x)

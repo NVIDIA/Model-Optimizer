@@ -69,7 +69,7 @@ def test_megatron_preprocess_data_with_hf_dataset(tmp_path, hf_dataset, hf_split
         json_keys=json_keys,
         append_eod=True,
         max_sequence_length=32,
-        workers=4,
+        workers=1,
     )
 
     jsonl_files = sorted(tmp_path.glob("**/*.jsonl"))

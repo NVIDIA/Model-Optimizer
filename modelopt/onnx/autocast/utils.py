@@ -28,6 +28,7 @@ from collections.abc import Callable
 import onnx
 
 import modelopt.onnx.utils as onnx_utils
+from modelopt.onnx.autocast.logging_config import logger
 from modelopt.onnx.utils import get_opset_version
 
 
@@ -113,6 +114,53 @@ def walk_subgraphs_recursive(
             elif attr.type == onnx.AttributeProto.GRAPHS:
                 for subgraph in attr.graphs:
                     walk_subgraphs_recursive(subgraph, callback, parent_node=node, is_subgraph=True)
+
+
+def clear_types_and_shapes_recursive(
+    graph: onnx.GraphProto, clear_shapes: bool = True, is_subgraph: bool = False
+) -> None:
+    """Recursively clear type/shape information for a graph and all its subgraphs.
+
+    Resets intermediate (``value_info``) and output tensor types to ``UNDEFINED`` and, when
+    ``clear_shapes`` is True, replaces concrete dims with a symbolic ``"unk"`` so a subsequent
+    :func:`modelopt.onnx.utils.infer_types` re-derives them from the operator graph. For subgraphs,
+    input types/shapes are cleared too so they propagate from the parent graph. This does not change
+    tensor *rank*, so it cannot repair a stale rank (see ``_reconcile_stale_output_shapes``).
+
+    Args:
+        graph: The ONNX graph to clear types and shapes for.
+        clear_shapes: If True, also clear shapes (False keeps shapes for type-only inference).
+        is_subgraph: Whether this is a subgraph (True) or the main graph (False).
+    """
+
+    def _clear(value_info: onnx.ValueInfoProto, clear_shape: bool) -> None:
+        value_info.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+        if clear_shape:
+            for dim in value_info.type.tensor_type.shape.dim:
+                if dim.dim_value:
+                    dim.dim_param = "unk"
+
+    def _clear_callback(g: onnx.GraphProto, parent: onnx.NodeProto, is_sub: bool) -> None:
+        logger.debug(f"Clearing types/shapes in {'subgraph' if is_sub else 'main graph'}: {g.name}")
+
+        if is_sub:
+            # Subgraph inputs are cleared so they propagate from the parent graph.
+            for inp in g.input:
+                if inp.type.HasField("tensor_type"):
+                    _clear(inp, clear_shapes)
+            # Only clear value_info for intermediates produced within this subgraph.
+            subgraph_outputs = {out for node in g.node for out in node.output}
+            for vi in g.value_info:
+                if vi.name in subgraph_outputs:
+                    _clear(vi, clear_shapes)
+        else:
+            for vi in g.value_info:
+                _clear(vi, clear_shape=True)
+
+        for out in g.output:
+            _clear(out, clear_shapes)
+
+    walk_subgraphs_recursive(graph, _clear_callback, is_subgraph=is_subgraph)
 
 
 def get_op_types_not_supported_in_low_precision(

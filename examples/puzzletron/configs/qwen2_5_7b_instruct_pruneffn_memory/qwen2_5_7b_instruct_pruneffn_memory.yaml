@@ -6,7 +6,7 @@ defaults:
 input_hf_model_path: /workspace/hf_models/Qwen/Qwen2.5-7B-Instruct
 
 # Dataset path for pruning and NAS scoring
-dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
+dataset_path: /workspace/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2
 
 # Working directory for compression outputs
 puzzle_dir: /workspace/puzzle_dir

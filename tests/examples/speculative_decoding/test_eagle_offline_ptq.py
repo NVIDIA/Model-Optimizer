@@ -132,7 +132,7 @@ def test_offline_ptq(offline_ptq_dirs):
             "--export_path",
             str(offline_ptq_dirs["ptq_export"]),
         ],
-        "llm_ptq",
+        "hf_ptq",
     )
 
     # Verify the exported checkpoint exists and has the expected EAGLE keys

@@ -7,24 +7,40 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 3. **[Distillation](#3-distillation)** — recovering accuracy via Megatron-Bridge knowledge distillation
 4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
 5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/megatron_bridge/quantize.py` script
-6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
+6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison across BF16 and FP8 on a single H100
 
 ## Results
 
-![Benchmark Recovery During Knowledge Distillation](figures/learning_curves.png)
+![Benchmark Recovery (BF16) During Knowledge Distillation](figures/learning_curves.png)
 
-| Model | MMLU Pro | GPQA Diamond | LiveCodeBench v6 | AIME 2025 | IFBench | SciCode (Subtask) | Average |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Pruned 22B/A3.0B (no distillation) | 47.1 | 33.5 | 27.4 | 15.5 | 36.9 | 12.1 | 28.8 |
-| Distill @ 2.5B tokens (100 iters at 8K SeqLen) | 73.3 | 63.7 | 55.3 | 77.6 | 59.1 | 25.1 | 59.0 |
-| Distill @ 20B tokens (800 iters at 8K SeqLen) | 74.8 | 66.0 | 62.3 | 79.6 | 65.4 | 26.1 | 62.4 |
-| Distill @ 40B tokens (1600 iters at 8K SeqLen) | 76.4 | 67.2 | 62.3 | 79.8 | 66.0 | 26.6 | 63.1 |
-| Distill @ 60B tokens (2400 iters at 8K SeqLen) | 76.1 | 68.1 | 63.6 | 78.8 | 67.3 | 27.0 | 63.5 |
-| Distill @ 80B tokens (3200 iters at 8K SeqLen) | 76.5 | 69.1 | 63.9 | 80.7 | 66.5 | 29.0 | 64.3 |
-| Distill @ 82.5B tokens (+100 iters at 32K SeqLen) | 76.2 | 69.8 | 64.8 | 87.0 | 68.2 | 27.0 | 65.5 |
-| Distill @ 100B tokens (+800 iters at 32K SeqLen) - **BF16** | 76.6 | 69.6 | 66.1 | 87.3 | 68.9 | 28.4 | 66.2 |
-| Distill @ 100B tokens + **FP8 Quantize** | 76.7 | 70.7 | 65.5 | 87.3 | 69.0 | 28.5 | 66.3 |
-| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.0 | 70.3 | 67.9 | 87.1 | 69.1 | 31.8 | 67.4 |
+<b>Main results</b> — all models evaluated with the same [setup](#4-evaluation). Values are `mean ± std_dev` across repeats:
+
+| Model | MMLU Pro | GPQA Diamond | GPQA Diamond (w. tools) | LiveCodeBench v6 | AIME 2025 | AIME 2025 (w. tools) | IFBench | SciCode (Subtask) | Average |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **Pruned 22B/A3.0B + Distilled — 100B tokens (BF16)** | 76.7 | 68.9 ± 2.5 | 71.4 ± 2.1 | 65.1 ± 1.0 | 86.4 ± 3.7 | 97.2 ± 3.3 | 69.2 | 28.8 ± 1.7 | 70.5 |
+| &nbsp;&nbsp;↳ **FP8** (quantized from BF16) | 75.9 | 71.1 ± 1.4 | 70.4 ± 1.1 | 64.8 ± 0.9 | 87.0 ± 4.2 | 95.1 ± 4.8 | 68.2 | 28.7 ± 2.5 | 70.2 |
+| **Official Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B)** | 78.2 | 70.3 ± 1.7 | 74.2 ± 1.9 | 68.9 ± 0.9 | 86.8 ± 4.4 | 97.7 ± 3.3 | 69.2 | 31.8 ± 1.2 | 72.1 |
+
+<details>
+<summary><b>Full results</b> — pruning baseline and full distillation trajectory (click to expand)</summary>
+
+| Model | MMLU Pro | GPQA Diamond | GPQA Diamond (w. tools) | LiveCodeBench v6 | AIME 2025 | AIME 2025 (w. tools) | IFBench | SciCode (Subtask) | Average |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Pruned 22B/A3.0B (no distillation) | 47.8 | 33.5 ± 2.3 | 34.2 ± 3.0 | 26.7 ± 1.3 | 15.1 ± 3.8 | 17.8 ± 5.5 | 39.9 | 13.1 ± 1.8 | 28.5 |
+| Distill @ 2.5B tokens (100 iters at 8K SeqLen) | 73.0 | 62.2 ± 1.4 | 62.0 ± 2.1 | 58.4 ± 1.9 | 79.7 ± 5.4 | 90.0 ± 5.8 | 59.9 | 21.3 ± 2.5 | 63.3 |
+| Distill @ 20B tokens (800 iters at 8K SeqLen) | 74.9 | 66.0 ± 2.1 | 68.0 ± 1.8 | 62.5 ± 0.9 | 78.6 ± 3.8 | 88.3 ± 5.2 | 67.0 | 25.2 ± 2.3 | 66.3 |
+| Distill @ 40B tokens (1600 iters at 8K SeqLen) | 75.6 | 67.2 ± 2.2 | 69.1 ± 2.2 | 62.4 ± 1.0 | 79.0 ± 3.9 | 92.5 ± 4.3 | 66.8 | 27.4 ± 1.3 | 67.5 |
+| Distill @ 60B tokens (2400 iters at 8K SeqLen) | 76.0 | 68.4 ± 2.0 | 70.1 ± 2.0 | 64.3 ± 1.5 | 79.6 ± 4.5 | 92.0 ± 4.2 | 67.6 | 28.4 ± 2.2 | 68.3 |
+| Distill @ 80B tokens (3200 iters at 8K SeqLen) | 76.7 | 68.7 ± 3.1 | 68.2 ± 1.8 | 63.9 ± 0.9 | 81.6 ± 6.0 | 93.4 ± 4.6 | 69.0 | 28.5 ± 2.7 | 68.8 |
+| Distill @ 82.5B tokens (+100 iters at 32K SeqLen) | 76.6 | 70.0 ± 0.9 | 70.1 ± 1.6 | 65.4 ± 1.0 | 86.8 ± 4.5 | 96.7 ± 3.5 | 68.9 | 27.9 ± 2.7 | 70.3 |
+| Distill @ 100B tokens (+800 iters at 32K SeqLen) - **BF16** | 76.7 | 68.9 ± 2.5 | 71.4 ± 2.1 | 65.1 ± 1.0 | 86.4 ± 3.7 | 97.2 ± 3.3 | 69.2 | 28.8 ± 1.7 | 70.5 |
+| Distill @ 100B tokens + **FP8 Quantize** | 75.9 | 71.1 ± 1.4 | 70.4 ± 1.1 | 64.8 ± 0.9 | 87.0 ± 4.2 | 95.1 ± 4.8 | 68.2 | 28.7 ± 2.5 | 70.2 |
+| Nemotron-3-Nano-30B-A3B-BF16 (official, 31.6B/A3.6B) | 78.2 | 70.3 ± 1.7 | 74.2 ± 1.9 | 68.9 ± 0.9 | 86.8 ± 4.4 | 97.7 ± 3.3 | 69.2 | 31.8 ± 1.2 | 72.1 |
+
+</details>
+
+> [!NOTE]
+> Some of these benchmarks are very noisy with a large per-run spread (e.g. AIME, which has only 30 problems, and SciCode), so small differences are not always meaningful. For a more reliable comparison, use a larger `num_repeats` in practice.
 
 ### vLLM Throughput (single H100, ISL=32768, OSL=1024)
 
@@ -102,13 +118,13 @@ DATA_BLEND=" \
 
 #### General Guidelines
 
-The optimal blend is 30% pretraining and 70% post-training data. Exact proportions may vary depending on the benchmarks you care about. The blend above was designed to maximize recovery on popular General Knowledge, Reasoning, Instruction Following, and Tool Calling benchmarks. The key design decisions were:
+The optimal blend is 30% pretraining and 70% post-training data. Exact proportions may vary depending on the benchmarks you care about. The blend above was designed to maximize recovery on popular General Knowledge, Reasoning, Coding, and Instruction Following benchmarks. The key design decisions were:
 
 - **30% pretraining data** closes the MMLU gap that arises from training exclusively on reasoning-heavy post-training data. The General split (20%) is upweighted specifically to recover general knowledge recall.
 - **Math (27%)** is the largest post-training category because AIME and MMLU Pro respond strongly to more math reasoning tokens. We use a mix of `Nemotron-Math-v2` and `Nemotron-SFT-Math-v3` for higher quality math reasoning signal with full reasoning traces.
 - **Science (13%)** uses `Nemotron-Post-Training-Dataset-v1 / stem` as the primary source for volume and GPQA stability, with small allocations to `Nemotron-Science-v1` MCQ/RQA subsets for format alignment with GPQA's multiple-choice structure.
 - **Instruction following (5%)** saturates quickly so a small allocation is sufficient.
-- **Tool calling (5%)** uses `Nemotron-Agentic-v1 / tool_calling`. Our evals run with `--enable-auto-tool-choice`, so the student needs explicit exposure to function-call schemas; this helps SciCode (heavy Python tool use) and GPQA Diamond (which can benefit from calculator tools).
+- **Tool calling (5%)** uses `Nemotron-Agentic-v1 / tool_calling`. Our GPQA and AIME evals enable a Python sandbox tool (`--enable-auto-tool-choice`), so the student needs explicit exposure to function-call schemas to use it; this helps GPQA Diamond and AIME 2025 (which can offload quantitative steps to the tool).
 
 This blend intentionally omits capabilities not targeted in this experiment (e.g. multilingual, SWE). Depending on what benchmarks matter for your use case, you can substitute or add datasets from the [Nemotron Post-Training v3 collection](https://huggingface.co/collections/nvidia/nemotron-post-training-v3), for example:
 
@@ -126,40 +142,41 @@ When adding new datasets, reduce weights of lower-priority categories proportion
 
 Here we prune the [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) HuggingFace checkpoint from 31.6B/A3.6B to 3.0B active parameters. The output is a pruned HuggingFace checkpoint that feeds into the distillation step.
 
-Run on **1 node with 8x H100** (~1 hour)
+Run on **1 node with 8x H100** (~30 mins)
 
 <details>
 <summary>Pruning command (click to expand)</summary>
 
 ```bash
 torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
-  --pp_size 8 \
   --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
   --trust_remote_code \
-  --prune_target_params 28e9 \
-  --prune_target_active_params 3e9 \
-  --hparams_to_skip num_attention_heads \
-  --seq_length 8192 \
-  --output_hf_path /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B \
-  --top_k 20 \
-  --max_depth_pruning 0.15 \
-  --max_width_pruning 0.30 \
-  --prune_score_func mmlu_10pct_bs32 \
+  --pp_size 8 \
   --num_layers_in_first_pipeline_stage 5 \
-  --num_layers_in_last_pipeline_stage 5
+  --num_layers_in_last_pipeline_stage 5 \
+  --calib_batch_size 8 \
+  --seq_length 8192 \
+  --prune_target_active_params 3e9 \
+  --prune_target_params 24e9 \
+  --prune_score_func mmlu_10pct_bs32 \
+  --max_width_pruning 0.30 \
+  --max_depth_pruning 0.15 \
+  --hparams_to_skip num_attention_heads \
+  --top_k 10 \
+  --output_hf_path /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B
 ```
 
 Non-default arguments:
 
-- `--hparams_to_skip num_attention_heads` (default: none) — attention heads pruning is harder to recover, hence skipped
-- `--seq_length 8192` (default: 4096) — dataset has longer sequences
-- `--prune_target_active_params 3e9` — MoE-specific; the **primary** pruning constraint — targets active params rather than total params, which is what matters for MoE inference cost
-- `--prune_target_params 28e9` — upper bound on total params only; the actual pruned model total can range anywhere from ~20B to 28B depending on which architecture wins — see pruning logs below for the top 20 candidates. You may also skip this argument all together for simplicity.
-- `--top_k 20` (default: 10) — larger candidate pool for better architecture search
-- `--max_depth_pruning 0.15` (default: 0.20) — tighter constraint since candidates with 42–46 layers universally fail for this model
-- `--max_width_pruning 0.30` (default: 0.40) — tighter constraint to prevent head_dim≤48 and hidden=2048 dead zones
-- `--prune_score_func mmlu_10pct_bs32` (default: `mmlu_10pct_bs1`) — batch_size=32 for ~3–4× faster candidate scoring
 - `--num_layers_in_first_pipeline_stage 5 --num_layers_in_last_pipeline_stage 5` — Uneven pipeline parallelism since 52 layers is not divisible by 8 GPUs
+- `--calib_batch_size 8` (default: 1) — faster calibration with larger batch size using more memory.
+- `--seq_length 8192` (default: 4096) — more tokens for better MoE calibration
+- `--prune_target_active_params 3e9` — MoE-specific; the **primary** pruning constraint — targets active params rather than total params, which is what matters for MoE inference cost
+- `--prune_target_params 24e9` — upper bound on total params only; the actual pruned model total can range anywhere from ~19B to 24B depending on which architecture wins — see pruning logs below for the top 10 candidates. You may also skip this argument all together for simplicity.
+- `--prune_score_func mmlu_10pct_bs32` (default: `mmlu_10pct_bs1`) — batch_size=32 for ~3–4× faster candidate scoring
+- `--max_width_pruning 0.30` (default: 0.40) — tighter constraint to prevent head_dim≤48 and hidden=2048 dead zones
+- `--max_depth_pruning 0.15` (default: 0.20) — tighter constraint since candidates with 42–46 layers universally fail for this model
+- `--hparams_to_skip num_attention_heads` (default: none) — attention heads pruning is harder to recover, hence skipped
 
 **NOTE**: The tighter search space constraints here (`--max_depth_pruning`, `--max_width_pruning`) are specific to Nemotron hybrid models (Mamba + Attention + MoE). Unlike standard transformers which expose only layers/hidden/attention/FFN dimensions, these models add Mamba-specific dimensions (`mamba_num_heads`, `mamba_head_dim`) and MoE dimensions (`num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`), making the combined search space much larger. The default 40%/20% bounds cast too wide a net and waste compute on dead-zone architectures.
 
@@ -167,14 +184,14 @@ See [ABLATIONS.md](ABLATIONS.md#pruning) for the full architecture search analys
 </details>
 
 <details>
-<summary>Pruning logs (top 20 candidates, best subnet, layer patterns) (click to expand)</summary>
+<summary>Pruning logs (top 10 candidates, best subnet, layer patterns) (click to expand)</summary>
 
 ```text
-╭──────────────────────────────────────────────────── Original Model Stats ─────────────────────────────────────────────────────╮
-│ Total Parameters                              31.58B                                                                          │
-│ Active Parameters                             3.58B                                                                           │
-│ Memory (BF16, seq_length=8192, batch_size=1)  weights: 60230.1 MB, kv_cache: 48.0 MB, mamba_state: 23.8 MB, Total: 60301.9 MB │
-╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────── Original Model Stats ──────────────────────────────────────────────────────╮
+│ Total Parameters                              31.58B                                                                            │
+│ Active Parameters                             3.58B                                                                             │
+│ Memory (BF16, seq_length=8192, batch_size=8)  weights: 60230.1 MB, kv_cache: 384.0 MB, mamba_state: 190.5 MB, Total: 60804.6 MB │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
                               Search Space
                    (≤30% width / ≤15% depth pruning)
@@ -192,50 +209,30 @@ See [ABLATIONS.md](ABLATIONS.md#pruning) for the full architecture search analys
 │ Search space size                   │ 10800                          │
 └─────────────────────────────────────┴────────────────────────────────┘
 
-Top 20 Candidates with Scores
+                                                                 Top 10 Candidates with Scores
 ┏━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┓
 ┃  # ┃ export_config                                                                                                         ┃ active_params ┃ params ┃  score ┃
 ┡━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━┩
-│  1 │ {'num_layers': 46, 'hidden_size': 2560, 'mamba_num_heads': 56, 'mamba_head_dim': 64, 'num_moe_experts': 120,          │         3.00B │ 27.06B │ 0.3399 │
-│    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│  2 │ {'num_layers': 48, 'hidden_size': 2560, 'mamba_num_heads': 56, 'mamba_head_dim': 56, 'num_moe_experts': 112,          │         3.00B │ 25.37B │ 0.4650 │
-│    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│  3 │ {'num_layers': 46, 'hidden_size': 2560, 'mamba_num_heads': 64, 'mamba_head_dim': 56, 'num_moe_experts': 112,          │         3.00B │ 25.37B │ 0.2343 │
-│    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│  4 │ {'num_layers': 52, 'hidden_size': 2688, 'mamba_num_heads': 56, 'mamba_head_dim': 48, 'num_moe_experts': 96,           │         3.00B │ 20.09B │ 0.2552 │
+│  1 │ {'num_layers': 52, 'hidden_size': 2688, 'mamba_num_heads': 56, 'mamba_head_dim': 48, 'num_moe_experts': 96,           │         3.00B │ 20.09B │ 0.2811 │
 │    │ 'moe_ffn_hidden_size': 1536, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│  5 │ {'num_layers': 52, 'hidden_size': 2688, 'mamba_num_heads': 48, 'mamba_head_dim': 56, 'num_moe_experts': 104,          │         3.00B │ 21.61B │ 0.2601 │
+│  2 │ {'num_layers': 52, 'hidden_size': 2688, 'mamba_num_heads': 48, 'mamba_head_dim': 56, 'num_moe_experts': 104,          │         3.00B │ 21.61B │ 0.2622 │
 │    │ 'moe_ffn_hidden_size': 1536, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│  6 │ {'num_layers': 52, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 64, 'num_moe_experts': 96,           │         3.00B │ 19.28B │ 0.3762 │
+│  3 │ {'num_layers': 52, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 64, 'num_moe_experts': 96,           │         3.00B │ 19.28B │ 0.4098 │
 │    │ 'moe_ffn_hidden_size': 1536, 'moe_shared_expert_intermediate_size': 3712}                                             │               │        │        │
-│  7 │ {'num_layers': 52, 'hidden_size': 2304, 'mamba_num_heads': 64, 'mamba_head_dim': 64, 'num_moe_experts': 104,          │         3.00B │ 22.28B │ 0.4783 │
+│  4 │ {'num_layers': 52, 'hidden_size': 2304, 'mamba_num_heads': 64, 'mamba_head_dim': 64, 'num_moe_experts': 104,          │         3.00B │ 22.28B │ 0.4993 │
 │    │ 'moe_ffn_hidden_size': 1856, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│  8 │ {'num_layers': 52, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 48, 'num_moe_experts': 96,           │         3.00B │ 21.99B │ 0.2420 │
+│  5 │ {'num_layers': 52, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 48, 'num_moe_experts': 96,           │         3.00B │ 21.99B │ 0.2559 │
 │    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3328}                                             │               │        │        │
-│  9 │ {'num_layers': 50, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 48, 'num_moe_experts': 112,          │         3.00B │ 25.37B │ 0.2399 │
-│    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3712}                                             │               │        │        │
-│ 10 │ {'num_layers': 50, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 48, 'num_moe_experts': 112,          │         3.00B │ 26.17B │ 0.2601 │
-│    │ 'moe_ffn_hidden_size': 1856, 'moe_shared_expert_intermediate_size': 3328}                                             │               │        │        │
-│ 11 │ {'num_layers': 46, 'hidden_size': 2560, 'mamba_num_heads': 56, 'mamba_head_dim': 64, 'num_moe_experts': 112,          │         3.00B │ 25.37B │ 0.2503 │
+│  6 │ {'num_layers': 48, 'hidden_size': 2560, 'mamba_num_heads': 56, 'mamba_head_dim': 56, 'num_moe_experts': 104,          │         3.00B │ 23.68B │ 0.4566 │
 │    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│ 12 │ {'num_layers': 48, 'hidden_size': 2560, 'mamba_num_heads': 56, 'mamba_head_dim': 56, 'num_moe_experts': 104,          │         3.00B │ 23.68B │ 0.4329 │
+│  7 │ {'num_layers': 46, 'hidden_size': 2560, 'mamba_num_heads': 64, 'mamba_head_dim': 56, 'num_moe_experts': 104,          │         3.00B │ 23.68B │ 0.2371 │
 │    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│ 13 │ {'num_layers': 46, 'hidden_size': 2688, 'mamba_num_heads': 64, 'mamba_head_dim': 64, 'num_moe_experts': 128,          │         3.00B │ 26.17B │ 0.2587 │
-│    │ 'moe_ffn_hidden_size': 1536, 'moe_shared_expert_intermediate_size': 2816}                                             │               │        │        │
-│ 14 │ {'num_layers': 46, 'hidden_size': 2560, 'mamba_num_heads': 64, 'mamba_head_dim': 56, 'num_moe_experts': 104,          │         3.00B │ 23.68B │ 0.2336 │
-│    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│ 15 │ {'num_layers': 52, 'hidden_size': 2688, 'mamba_num_heads': 48, 'mamba_head_dim': 56, 'num_moe_experts': 96,           │         3.00B │ 20.09B │ 0.2559 │
+│  8 │ {'num_layers': 52, 'hidden_size': 2688, 'mamba_num_heads': 48, 'mamba_head_dim': 56, 'num_moe_experts': 96,           │         3.00B │ 20.09B │ 0.2601 │
 │    │ 'moe_ffn_hidden_size': 1536, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│ 16 │ {'num_layers': 52, 'hidden_size': 2304, 'mamba_num_heads': 64, 'mamba_head_dim': 64, 'num_moe_experts': 96,           │         3.00B │ 20.70B │ 0.4608 │
+│  9 │ {'num_layers': 52, 'hidden_size': 2304, 'mamba_num_heads': 64, 'mamba_head_dim': 64, 'num_moe_experts': 96,           │         3.00B │ 20.70B │ 0.4734 │
 │    │ 'moe_ffn_hidden_size': 1856, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
-│ 17 │ {'num_layers': 50, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 48, 'num_moe_experts': 104,          │         3.00B │ 23.68B │ 0.2455 │
+│ 10 │ {'num_layers': 50, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 48, 'num_moe_experts': 104,          │         3.00B │ 23.68B │ 0.2699 │
 │    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3712}                                             │               │        │        │
-│ 18 │ {'num_layers': 50, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 48, 'num_moe_experts': 104,          │         3.00B │ 24.42B │ 0.2503 │
-│    │ 'moe_ffn_hidden_size': 1856, 'moe_shared_expert_intermediate_size': 3328}                                             │               │        │        │
-│ 19 │ {'num_layers': 48, 'hidden_size': 2560, 'mamba_num_heads': 48, 'mamba_head_dim': 48, 'num_moe_experts': 120,          │         3.00B │ 27.92B │ 0.2587 │
-│    │ 'moe_ffn_hidden_size': 1856, 'moe_shared_expert_intermediate_size': 3712}                                             │               │        │        │
-│ 20 │ {'num_layers': 46, 'hidden_size': 2560, 'mamba_num_heads': 56, 'mamba_head_dim': 64, 'num_moe_experts': 104,          │         3.00B │ 23.68B │ 0.2469 │
-│    │ 'moe_ffn_hidden_size': 1792, 'moe_shared_expert_intermediate_size': 3072}                                             │               │        │        │
 └────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴───────────────┴────────┴────────┘
 
 ╭──────────────────────────────────────────────────────────────────────── Best Subnet ─────────────────────────────────────────────────────────────────────────╮
@@ -243,17 +240,17 @@ Top 20 Candidates with Scores
 │                'moe_shared_expert_intermediate_size': 3072}                                                                                                  │
 │ active_params  3.00B                                                                                                                                         │
 │ params         22.28B                                                                                                                                        │
-│ score          0.4783                                                                                                                                        │
+│ score          0.4993                                                                                                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 Original hybrid_layer_pattern: MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME
 Pruned hybrid_layer_pattern:   MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME
 
-╭───────────────────────────────────────────────────── Pruned Model Stats ──────────────────────────────────────────────────────╮
-│ Total Parameters                              22.28B                                                                          │
-│ Active Parameters                             3.00B                                                                           │
-│ Memory (BF16, seq_length=8192, batch_size=1)  weights: 42489.7 MB, kv_cache: 48.0 MB, mamba_state: 23.8 MB, Total: 42561.6 MB │
-╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────── Pruned Model Stats ───────────────────────────────────────────────────────╮
+│ Total Parameters                              22.28B                                                                            │
+│ Active Parameters                             3.00B                                                                             │
+│ Memory (BF16, seq_length=8192, batch_size=8)  weights: 42489.7 MB, kv_cache: 384.0 MB, mamba_state: 190.5 MB, Total: 43064.2 MB │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 </details>
@@ -328,7 +325,8 @@ Phase 2 starts as a separate run from a fresh HuggingFace student checkpoint, so
 python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
     --hf-model /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B \
     --megatron-path /path/to/distill_output_phase1_8k/checkpoints/iter_0003200 \
-    --hf-path /path/to/distill_output_phase1_8k/checkpoints/hf_iter_0003200
+    --hf-path /path/to/distill_output_phase1_8k/checkpoints/hf_iter_0003200 \
+    --trust-remote-code
 ```
 
 </details>
@@ -385,11 +383,41 @@ For multi-node Slurm runs, see the [Megatron-Bridge README](../../README.md#slur
 > [!NOTE]
 > This is pure SFT-style distillation — no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
 
+#### 3d. Convert Phase 2 final checkpoint to HuggingFace format
+
+We use the same conversion script to convert the Phase 2 final checkpoint to HuggingFace format.
+
+<details>
+<summary>Checkpoint conversion command (click to expand)</summary>
+
+> NOTE: Below command only works for non-quantized checkpoints. For quantized checkpoints, we use the `export.py` script in Section 5 to directly export the quantized checkpoint to Unified HF format for deployment.
+
+```bash
+python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
+    --hf-model /path/to/Nemotron-3-Nano-30B-A3B-Pruned-A3.0B \
+    --megatron-path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800 \
+    --hf-path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
+    --trust-remote-code
+```
+
+</details>
+
 ---
 
 ### 4. Evaluation
 
 The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job (with tool calling enabled via `--enable-auto-tool-choice --tool-call-parser qwen3_coder`) and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
+
+**Tasks and exact metric names reported in the results table:**
+
+| Benchmark | Library | num_repeats | Metric name |
+| --- | --- | --- | --- |
+| MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
+| GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
+| LiveCodeBench v6 | NeMo Evaluator | 4 | `livecodebench_pass_at_1_avg-of-4_accuracy` |
+| AIME 2025 | NeMo Evaluator | 32 | `aime25_pass_at_1_avg-of-32_symbolic_correct` |
+| IFBench | NeMo Evaluator | 8 | `ifbench_pass_at_1_avg-of-8_average_score` |
+| SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |
 
 <details>
 <summary>Evaluation launch steps (click to expand)</summary>
@@ -400,9 +428,9 @@ Before running, update the following fields in the `nemo_evaluator.yaml` file or
 - `execution.account` — your Slurm account
 - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
 
-The yaml is set up for a **BF16** checkpoint. For **FP8** checkpoints, also apply the quantization-specific vLLM deployment settings documented at the top of `nemo_evaluator.yaml`:
+The yaml is set up for a **BF16** checkpoint. For **FP8** or **NVFP4** checkpoints, also apply the quantization-specific vLLM deployment settings documented at the top of `nemo_evaluator.yaml`:
 - append `--kv-cache-dtype fp8` to `deployment.extra_args`
-- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8` plus `VLLM_FLASHINFER_MOE_BACKEND: throughput`)
+- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8` for FP8 / `VLLM_USE_FLASHINFER_MOE_FP4` for NVFP4, plus `VLLM_FLASHINFER_MOE_BACKEND: throughput`)
 
 ```bash
 pip install "nemo-evaluator-launcher[all]==0.1.82"
@@ -427,17 +455,6 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 
 </details>
 
-**Tasks and exact metric names reported in the results table:**
-
-| Benchmark | Library | num_repeats | Metric name |
-| --- | --- | --- | --- |
-| MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
-| GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
-| LiveCodeBench v6 | NeMo Evaluator | 4 | `livecodebench_pass_at_1_avg-of-4_accuracy` |
-| AIME 2025 | NeMo Evaluator | 32 | `aime25_pass_at_1_avg-of-32_symbolic_correct` |
-| IFBench | NeMo Evaluator | 8 | `ifbench_pass_at_1_avg-of-8_average_score` |
-| SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |
-
 For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVIDIA-NeMo/evaluator) and [documentation](https://docs.nvidia.com/nemo/evaluator/latest/).
 
 ---
@@ -451,7 +468,7 @@ Similar to the official [Nemotron-3-Nano-30B-A3B-FP8](https://huggingface.co/nvi
 This is done with the `MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py), which you select by passing `--quant_cfg MAMBA_MOE_FP8_CONSERVATIVE_CFG` below. For a faster model at the cost of a larger accuracy drop, you can use `MAMBA_MOE_FP8_AGGRESSIVE_CFG` instead.
 
 > [!NOTE]
-> You can also quantize to NVFP4 using `--quant_cfg MAMBA_MOE_NVFP4_CONSERVATIVE_CFG` or `MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` (faster, more accuracy drop), which may require further distillation (QAD) to recover accuracy and a Blackwell GPU for deployment.
+> You can also quantize to NVFP4 using `--quant_cfg MAMBA_MOE_NVFP4_CONSERVATIVE_CFG` or `MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` (faster, more accuracy drop). NVFP4 typically needs further [Quantization Aware Distillation (QAD)](../../README.md#quantization-aware-distillation-qad) to recover accuracy, plus a Blackwell GPU for deployment.
 
 Quantization is a two-step flow: `quantize.py` calibrates and saves a Megatron checkpoint, then `export.py` converts it to a deployable HuggingFace checkpoint (the unified HF exporter loads at TP=1, so pipeline parallelism is used to shard across GPUs). Both steps take a few minutes on 8x H100.
 
@@ -466,8 +483,8 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quanti
     --trust_remote_code \
     --tp_size 8 \
     --quant_cfg MAMBA_MOE_FP8_CONSERVATIVE_CFG \
-    --calib_batch_size 32 \
-    --seq_length 512 \
+    --calib_batch_size 4 \
+    --seq_length 8192 \
     --export_megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_fp8_megatron \
     --skip_generate
 ```
@@ -502,7 +519,7 @@ The exported HuggingFace checkpoint is directly deployable with [vLLM](https://g
 > ```
 
 > [!TIP]
-> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also — just apply the FP8 deployment tweaks documented at the top of the yaml.
+> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also — just apply the FP8/NVFP4 deployment tweaks documented at the top of the yaml. To evaluate an NVFP4 checkpoint, you need a Blackwell GPU.
 
 See FP8 vs BF16 results in the [Results](#results) section above.
 

@@ -1,5 +1,26 @@
+# Adapted from https://github.com/sgl-project/SpecForge/blob/8ea5ca6/specforge/core/dflash.py
+# Copyright (c) 2025 sgl-project
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -67,11 +88,65 @@ from .modeling_dflash import (  # noqa: F401
     DFlashModule,
     build_target_layer_ids,
 )
-from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
+from .modeling_fakebase import (
+    _BASE_MODEL_PATHS,
+    _EMBED_TOKENS_PATHS,
+    _FINAL_NORM_PATHS,
+    _LM_HEAD_PATHS,
+)
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["HFDFlashModel"]
+
+
+def _dpace_position_weights(
+    confidences: torch.Tensor, alpha: float, valid_mask: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Compute detached D-PACE per-position weights from draft confidences.
+
+    Derived from D-PACE (arXiv:2605.18810). The paper factorizes the per-position
+    weight (Fig. 2 / Eq. 8) into a *cumulative confidence* times a *continuation
+    value*, which is equivalently the suffix sum of the cumulative confidences::
+
+        C_j = prod_{i<=j} q~_i                 # cumulative confidence (Eq. 8)
+        w_j = sum_{m>=j} C_m                    # = C_j * continuation value f~_j
+
+    Each confidence is asymmetrically smoothed toward 1 (Eq. 7)::
+
+        q~_i = (1 - alpha) * q_i + alpha,   alpha in (0, 1],
+
+    so the floor ``q~_i >= alpha`` keeps every cumulative product (hence every
+    weight) strictly positive. We evaluate the suffix sum from its definition as
+    ``total - exclusive_prefix_sum`` of ``C`` rather than reversing the tensor.
+    Positions with ``valid_mask == 0`` are multiplicative no-ops in ``C`` and
+    contribute nothing to the sum, matching the per-token loss mask. Weights are
+    detached (Eq. 9): they reweight the cross-entropy without adding gradient.
+
+    Args:
+        confidences: ``[..., L]`` draft confidence ``q_i = exp(-CE_i)`` per position.
+        alpha: smoothing factor in (0, 1]; raises if outside that range.
+        valid_mask: optional ``[..., L]`` 0/1 mask; ``None`` treats all positions valid.
+
+    Returns:
+        Detached weights with the same shape and dtype as ``confidences``.
+    """
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError(f"dflash_dpace_alpha must be in (0, 1], got {alpha}")
+
+    with torch.no_grad():
+        smoothed = alpha + (1.0 - alpha) * confidences.float()  # Eq. 7
+        if valid_mask is not None:
+            keep = valid_mask.to(torch.bool)
+            smoothed = torch.where(keep, smoothed, torch.ones_like(smoothed))
+        cum_conf = torch.cumprod(smoothed, dim=-1)  # Eq. 8 cumulative confidence C_j
+        if valid_mask is not None:
+            cum_conf = cum_conf * keep.to(cum_conf.dtype)
+        # Suffix sum w_j = sum_{m>=j} C_m, written as total minus the exclusive
+        # prefix sum so no axis reversal is needed (Eq. 8).
+        inclusive = torch.cumsum(cum_conf, dim=-1)
+        weights = inclusive[..., -1:] - inclusive + cum_conf
+        return weights.to(dtype=confidences.dtype)
 
 
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -89,6 +164,16 @@ class HFDFlashModel(DFlashModel):
     @property
     def _base_model_lm_head(self):
         return self.get_submodule(self.base_model_lm_head_path)
+
+    @property
+    def _base_model_norm(self):
+        """Base model's final pre-lm_head RMSNorm, or None if none was located.
+
+        Applied before lm_head in the offline/streaming distillation path only when the
+        producer captured a pre-norm hidden (base_hidden_prenorm), to reconstruct true logits.
+        """
+        path = getattr(self, "base_model_norm_path", None)
+        return self.get_submodule(path) if path else None
 
     @property
     def _base_llm_config(self):
@@ -118,6 +203,16 @@ class HFDFlashModel(DFlashModel):
                     continue
             else:
                 raise ValueError(f"Part {name} not found in model")
+        # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
+        # un-normed final hidden collect by vllm.
+        self.base_model_norm_path = None
+        for path in _FINAL_NORM_PATHS:
+            try:
+                assert isinstance(self.get_submodule(path), torch.nn.Module)
+                self.base_model_norm_path = path
+                break
+            except Exception:
+                continue
 
     def modify(self, config):
         """Initialize DFlash draft module."""
@@ -132,25 +227,44 @@ class HFDFlashModel(DFlashModel):
         self.dflash_config.hidden_size = base_config.hidden_size
         self.dflash_config.vocab_size = base_config.vocab_size
 
-        # Inherit architecture settings from base model when not specified by user.
-        # Static defaults (hidden_act, attention_bias, etc.) are in dflash/default_config.py.
-        # NOTE: rope_scaling is intentionally excluded. DFlash draft uses Qwen3
-        # RotaryEmbedding which only supports standard RoPE. Inheriting M-RoPE
-        # config from multimodal models (e.g. Qwen3.5) would be incorrect.
-        _base_model_attrs = [
+        # Inherit architecture settings from base model when not specified by user
+        # (setdefault). Static defaults (hidden_act, attention_bias, etc.) are in
+        # dflash/default_config.py.
+        _setdefault_attrs = [
             "max_position_embeddings",
             "intermediate_size",
             "num_attention_heads",
             "num_key_value_heads",
-            "rope_theta",
-            "rope_type",
-            "rope_interleaved",
             "rms_norm_eps",
         ]
-        for attr in _base_model_attrs:
+        for attr in _setdefault_attrs:
             if not hasattr(self.dflash_config, attr) or getattr(self.dflash_config, attr) is None:
                 if hasattr(base_config, attr):
                     setattr(self.dflash_config, attr, getattr(base_config, attr))
+
+        # RoPE base settings are ENFORCED to match the base model (not setdefault): the
+        # DFlash draft injects the target's KV into every layer, so its RoPE base must
+        # match the target's for the injected positions to align — and the exporter writes
+        # the base model's rope_theta. Letting dflash_architecture_config override these
+        # would make training (draft rope) and inference (base rope) disagree, so we
+        # overwrite any user value and warn. (rope_scaling is intentionally NOT inherited:
+        # DFlash uses standard Qwen3 RotaryEmbedding; the long-context YaRN scaling is
+        # added only at export via dflash_export_rope_scaling.)
+        for attr in ("rope_theta", "rope_type", "rope_interleaved"):
+            if not hasattr(base_config, attr):
+                continue
+            base_val = getattr(base_config, attr)
+            user_val = getattr(self.dflash_config, attr, None)
+            if user_val is not None and user_val != base_val:
+                logger.warning(
+                    "DFlash: ignoring dflash_architecture_config.%s=%r and enforcing the "
+                    "base model's value %r — the draft injects the target's KV, so its RoPE "
+                    "base must match the target's.",
+                    attr,
+                    user_val,
+                    base_val,
+                )
+            setattr(self.dflash_config, attr, base_val)
 
         self.dflash_config.head_dim = getattr(
             self.dflash_config,
@@ -180,7 +294,9 @@ class HFDFlashModel(DFlashModel):
 
         self._find_base_model_parts()
 
-        self.dflash_module = DFlashModule(self.dflash_config)
+        # Factory hook: subclasses (e.g. Domino) override to build an augmented
+        # draft module while reusing all of DFlash's modify() setup.
+        self.dflash_module = self._build_draft_module(self.dflash_config)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
         if self.dflash_offline:
@@ -196,6 +312,10 @@ class HFDFlashModel(DFlashModel):
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
+
+    def _build_draft_module(self, dflash_config):
+        """Build the draft module. Subclasses override to use an augmented module."""
+        return DFlashModule(dflash_config)
 
     def get_exporter(self):
         """Get the exporter for the DFlash draft model."""
@@ -276,9 +396,16 @@ class HFDFlashModel(DFlashModel):
         return torch.cat([ctx_pos, draft_pos], dim=1)
 
     def _build_draft_attention_mask(
-        self, seq_len, anchor_positions, block_keep_mask, n_blocks, dtype, device
+        self, seq_len, anchor_positions, block_keep_mask, n_blocks, dtype, device, window=None
     ):
-        """Build SDPA attention mask: context (causal) + draft (bidirectional within block)."""
+        """Build SDPA attention mask: context (causal) + draft (bidirectional within block).
+
+        When ``window`` is not None, all layers use non-causal sliding-window attention
+        (MiMo-style): each draft query only sees context positions within ``window`` tokens
+        before its own position. Block-internal attention stays bidirectional and is left
+        un-windowed (the config enforces ``window >= block_size``, so a full block always
+        fits inside the window and windowing it would be a no-op).
+        """
         bsz = anchor_positions.shape[0]
         block_size = self.dflash_block_size
         q_len = n_blocks * block_size
@@ -292,6 +419,12 @@ class HFDFlashModel(DFlashModel):
 
         # Context: kv < S and kv < anchor
         mask_ctx = (kv_indices < seq_len) & (kv_indices < anchor_exp)
+
+        # Sliding window on the context: keep only context kv whose real position is within
+        # `window` tokens before the query's real position (anchor + position-in-block).
+        if window is not None:
+            q_real_pos = anchor_exp + (q_indices % block_size)  # [B, 1, q_len, 1]
+            mask_ctx = mask_ctx & (kv_indices > q_real_pos - window)
         # Draft: kv >= S and same block
         is_draft = kv_indices >= seq_len
         kv_block_ids = (kv_indices - seq_len) // block_size
@@ -304,6 +437,29 @@ class HFDFlashModel(DFlashModel):
         # Convert bool mask to float additive mask for SDPA
         attn_mask = torch.zeros(bsz, 1, q_len, kv_len, device=device, dtype=dtype)
         attn_mask.masked_fill_(~final_mask, torch.finfo(dtype).min)
+        return attn_mask
+
+    def _build_generate_swa_mask(self, ctx_len, bsz, dtype, device):
+        """Generation-time SWA mask [B, 1, block_size, ctx_len + block_size], or None.
+
+        Returns None with full attention (KV cache with no mask): all positions attend
+        freely to context and each other within the block. With sliding-window attention,
+        each block query only sees context within ``dflash_swa_window_size`` tokens before
+        its real position (ctx_len + position-in-block), matching training and vLLM
+        inference; block kv stays fully visible (bidirectional / un-windowed).
+        """
+        if self.dflash_swa_window_size is None:
+            return None
+        window = self.dflash_swa_window_size
+        block_size = self.dflash_block_size
+        kv_len = ctx_len + block_size
+        kv_idx = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
+        q_real_pos = torch.arange(ctx_len, ctx_len + block_size, device=device).view(1, 1, -1, 1)
+        is_ctx = kv_idx < ctx_len
+        # Context kv kept iff within the window; block kv (>= ctx_len) always visible.
+        keep = (~is_ctx) | (kv_idx > q_real_pos - window)
+        attn_mask = torch.zeros(bsz, 1, block_size, kv_len, device=device, dtype=dtype)
+        attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
         return attn_mask
 
     def _compute_loss(
@@ -349,14 +505,40 @@ class HFDFlashModel(DFlashModel):
 
         binary_eval_mask = weight_mask.view(-1)
 
-        # Optional loss decay
-        if self.dflash_loss_decay_factor > 0:
+        flat_logits = logits.view(-1, logits.size(-1))
+        flat_targets = target_ids.view(-1)
+
+        # Non-KD loss is per-token cross-entropy; compute it once (grad enabled) so the
+        # D-PACE confidences below can reuse it instead of a second CE pass. The KD path
+        # (base_logits is not None) optimizes KL, so its confidences need a dedicated
+        # no_grad CE pass.
+        loss_per_token = None
+        if base_logits is None:
+            loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+
+        # Block-position loss weighting: dynamic D-PACE weights or static exponential decay.
+        if self.dflash_loss_objective == "dpace" and block_size > 1:
+            # Draft confidence q_i = exp(-CE) on the target-selected token, over the
+            # predicted positions (slot 0 is the given anchor, already masked above).
+            # Weights are detached (paper Eq.9), so this adds the documented ~2.3%
+            # training overhead without altering the cross-entropy gradient.
+            with torch.no_grad():
+                conf_ce = (
+                    loss_per_token.detach()
+                    if loss_per_token is not None
+                    else F.cross_entropy(flat_logits, flat_targets, reduction="none")
+                ).view(bsz, n_blocks, block_size)
+                confidences = torch.exp(-conf_ce[..., 1:].float())
+                dpace = torch.ones_like(weight_mask)
+                dpace[..., 1:] = _dpace_position_weights(
+                    confidences, self.dflash_dpace_alpha, valid_mask=weight_mask[..., 1:]
+                )
+            weight_mask = weight_mask * dpace
+        elif self.dflash_loss_decay_factor > 0:
             k = torch.arange(block_size, device=device).view(1, 1, -1)
             decay = torch.exp(-(k - 1).clamp(min=0).float() / self.dflash_loss_decay_factor)
             weight_mask = weight_mask * decay
 
-        flat_logits = logits.view(-1, logits.size(-1))
-        flat_targets = target_ids.view(-1)
         flat_weights = weight_mask.view(-1)
         valid_count = flat_weights.sum() + 1e-6
 
@@ -375,7 +557,6 @@ class HFDFlashModel(DFlashModel):
                 kd_loss = -(target_soft * draft_logsoft).sum(dim=-1)
                 loss = (kd_loss * flat_weights).sum() / valid_count
             else:
-                loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
                 loss = (loss_per_token * flat_weights).sum() / valid_count
 
             with torch.no_grad():
@@ -446,13 +627,15 @@ class HFDFlashModel(DFlashModel):
         # 1. Run base model → extract target hidden states
         if self.dflash_offline:
             assert "base_model_outputs" in kwargs
-            base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
-            if base_outputs.logits is None and self.dflash_self_logit_distillation:
-                # Compute logits from last-layer hidden states for KD loss.
-                # base_model_hidden_states is required on this path — fail fast
-                # with KeyError rather than lm_head(None).
-                out_hiddens = kwargs["base_model_outputs"]["base_model_hidden_states"]
-                base_outputs.logits = self._base_model_lm_head(out_hiddens)
+            # For self-logit-distillation, from_offline_dict reconstructs base logits from the
+            # captured hidden (final norm re-applied as needed) when the producer didn't supply
+            # them, and raises if anything needed for that is missing.
+            base_outputs = DFlashBaseModelOutput.from_offline_dict(
+                kwargs["base_model_outputs"],
+                self._base_model_norm,
+                self._base_model_lm_head,
+                need_logits=self.dflash_self_logit_distillation,
+            )
             target_hidden = base_outputs.target_hidden
         else:
             # TODO: For co-training the base model, remove no_grad and eval() switch.
@@ -501,7 +684,13 @@ class HFDFlashModel(DFlashModel):
         )
         full_pos = self._build_position_ids(seq_len, anchor_positions, device)
         attn_mask = self._build_draft_attention_mask(
-            seq_len, anchor_positions, block_keep_mask, n_blocks, target_hidden.dtype, device
+            seq_len,
+            anchor_positions,
+            block_keep_mask,
+            n_blocks,
+            target_hidden.dtype,
+            device,
+            window=self.dflash_swa_window_size,
         )
 
         # 5. Draft forward
@@ -629,16 +818,14 @@ class HFDFlashModel(DFlashModel):
         block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
-        # No attention mask at inference
-        # which uses KV cache with no mask. All positions attend freely to
-        # context and each other within the block.
+        attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
 
         # Draft forward
         draft_hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
             position_ids=pos_ids,
-            attention_mask=None,
+            attention_mask=attn_mask,
         )
 
         # Logits on positions 1..block_size-1 (skip anchor at position 0)

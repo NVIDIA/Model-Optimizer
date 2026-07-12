@@ -570,7 +570,7 @@ Some example scripts accept a ``--recipe`` flag.  For instance, the PTQ example:
 
 .. code-block:: bash
 
-   python examples/llm_ptq/hf_ptq.py \
+   python examples/hf_ptq/hf_ptq.py \
        --model Qwen/Qwen3-8B \
        --recipe general/ptq/fp8_default-kv_fp8_cast \
        --export_path build/fp8 \

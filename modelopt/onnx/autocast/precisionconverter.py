@@ -255,7 +255,9 @@ class PrecisionConverter:
             self.model = self._propagate_types_shapes_custom_ops(self.model)
         else:
             # Clear type/shape information for intermediates and outputs (including subgraphs)
-            self._clear_types_and_shapes_recursive(self.model.graph)
+            utils.clear_types_and_shapes_recursive(
+                self.model.graph, clear_shapes=not self.use_standalone_type_inference
+            )
             # Populate type information with inferred types
             self.model = onnx_utils.infer_types(
                 self.model, self.use_standalone_type_inference, strict_mode=True, check_type=False
@@ -283,66 +285,6 @@ class PrecisionConverter:
         for vi in self.model.graph.value_info:
             if vi.type.tensor_type.elem_type == onnx.TensorProto.UNDEFINED:
                 vi.type.tensor_type.elem_type = self.low_precision_type.onnx_type
-
-    def _clear_types_and_shapes_recursive(
-        self, graph: onnx.GraphProto, is_subgraph: bool = False
-    ) -> None:
-        """Recursively clear type/shape information for a graph and all its subgraphs.
-
-        If use_standalone_type_inference is True, we clear only types, not shapes.
-        For subgraphs, input types/shapes are cleared, so that the input types/shapes are propagated
-        from the main graph.
-
-        Args:
-            graph: The ONNX graph to clear types and shapes for.
-            is_subgraph: Whether this is a subgraph (True) or the main graph (False).
-        """
-
-        def _clear_callback(g: onnx.GraphProto, parent: onnx.NodeProto, is_sub: bool) -> None:
-            logger.debug(
-                f"Clearing types/shapes in {'subgraph' if is_sub else 'main graph'}: {g.name}"
-            )
-
-            # Clear type/shape information for inputs (only for subgraphs, not main graph inputs)
-            if is_sub:
-                for inp in g.input:
-                    if inp.type.HasField("tensor_type"):
-                        inp.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        if not self.use_standalone_type_inference:
-                            for idx, d in enumerate(inp.type.tensor_type.shape.dim):
-                                if d.dim_value:
-                                    inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
-
-            if is_sub:
-                # Identify which tensors are produced by nodes in this subgraph
-                subgraph_outputs = set()
-                for node in g.node:
-                    subgraph_outputs.update(node.output)
-
-                # Clear value_info only for intermediates produced by nodes in this subgraph
-                for vi in g.value_info:
-                    if vi.name in subgraph_outputs:
-                        vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        if not self.use_standalone_type_inference:
-                            for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                                if d.dim_value:
-                                    vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
-            else:
-                for vi in g.value_info:
-                    vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                    for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                        if d.dim_value:
-                            vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
-
-            # Clear outputs for both main graph and subgraphs
-            for out in g.output:
-                out.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                if not self.use_standalone_type_inference:
-                    for idx, d in enumerate(out.type.tensor_type.shape.dim):
-                        if d.dim_value:
-                            out.type.tensor_type.shape.dim[idx].dim_param = "unk"
-
-        utils.walk_subgraphs_recursive(graph, _clear_callback, is_subgraph=is_subgraph)
 
     def _propagate_types_shapes_custom_ops(self, model):
         """Propagate types and shapes after insertion of 'Cast' nodes or other graph modifications."""
@@ -679,7 +621,6 @@ class PrecisionConverter:
                         f"Convert initializer {init_name} to "
                         f"{self.low_precision_type.str_short}, only used by low precision nodes"
                     )
-                    from_type = self.high_precision_type
                     to_type = self.low_precision_type
                 elif len(tracker.high_precision_nodes) > 0:
                     logger.debug(
@@ -687,12 +628,16 @@ class PrecisionConverter:
                         f"{self.high_precision_type.str_short}, "
                         "only used by high precision nodes"
                     )
-                    from_type = self.low_precision_type
                     to_type = self.high_precision_type
                 else:
                     raise ValueError(
                         f"Unexpected: initializer {init_name} is not used by any "
                         "nodes and is not a float"
+                    )
+                from_type = self._precision_type_from_onnx_type(init.data_type)
+                if from_type is None:
+                    raise ValueError(
+                        f"Unexpected: initializer {init_name} is not a supported float"
                     )
 
                 new_init = self._cast_initializer(
@@ -782,14 +727,7 @@ class PrecisionConverter:
                 if init.data_type not in ONNX_TYPES or init.data_type == target_type.onnx_type:
                     continue
 
-                from_type = (
-                    self.high_precision_type
-                    if init.data_type == self.high_precision_type.onnx_type
-                    else self.low_precision_type
-                    if init.data_type == self.low_precision_type.onnx_type
-                    else None
-                )
-
+                from_type = self._precision_type_from_onnx_type(init.data_type)
                 if from_type is None:
                     logger.debug(
                         f"Skipping subgraph initializer {init.name} with unsupported type {init.data_type}"
@@ -800,6 +738,10 @@ class PrecisionConverter:
                 init.CopyFrom(new_init)
 
         utils.walk_subgraphs_recursive(self.model.graph, _convert_subgraph_callback)
+
+    def _precision_type_from_onnx_type(self, onnx_type: int) -> PrecisionTypes | None:
+        """Return the converter precision metadata for a supported ONNX float type."""
+        return next((p for p in PRECISION_MAP.values() if p.onnx_type == onnx_type), None)
 
     def _convert_initializer_data(
         self,
@@ -820,15 +762,19 @@ class PrecisionConverter:
         Returns:
             onnx.TensorProto: The converted initializer.
         """
-        np_array = numpy_helper.to_array(init)
+        np_array = (
+            onnx_utils.read_f16_tensor_as_fp32(init)
+            if self._is_bf16(from_type)
+            else numpy_helper.to_array(init)
+        )
 
         # Handle bfloat16 conversion
-        if self._is_bf16(to_type) and self._is_fp32(from_type):
+        if self._is_bf16(to_type):
             new_init = onnx.TensorProto()
             new_init.dims.extend(np_array.shape)
             new_init.name = init.name
             new_init.data_type = onnx.TensorProto.BFLOAT16
-            bf16_bytes = np_array.astype(ml_dtypes.bfloat16).view(np.uint16)
+            bf16_bytes = np_array.astype(np.float32).astype(ml_dtypes.bfloat16).view(np.uint16)
             new_init.raw_data = bf16_bytes.tobytes()
         else:
             assert to_type.numpy_type is not None
@@ -1243,10 +1189,10 @@ class PrecisionConverter:
                 converted_type = tensor.type.tensor_type.elem_type
 
                 if converted_type != original_type:
-                    # There's one allowed exception: FP32 I/O converted to the selected low precision type with
-                    # keep_io_types=False
+                    # There's one allowed exception: floating point I/O converted to the selected low
+                    # precision type with keep_io_types=False.
                     if (
-                        original_type == onnx.TensorProto.FLOAT
+                        original_type in ONNX_TYPES
                         and converted_type == self.low_precision_type.onnx_type
                         and not self.keep_io_types
                     ):

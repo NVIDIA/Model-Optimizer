@@ -42,12 +42,13 @@
 
 import torch
 from datasets import load_dataset
+from megatron.core import parallel_state as mpu
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer
 
 from .. import distributed as dist
 from .. import print_rank_0
-from .megatron_generate import megatron_prefill
+from .megatron_generate import cp_gather_logits, cp_split_sequence, megatron_prefill
 
 __all__ = ["megatron_mmlu"]
 
@@ -67,6 +68,10 @@ def megatron_mmlu(
     Instead of autoregressively generating tokens, a single prefill forward pass is run per
     batch and the answer is selected as argmax over the four choice token logits at the last
     prompt position. This is the same approach used by lm-evaluation-harness.
+
+    Supports TP, PP, SP, CP, EP, DP, and combinations thereof (via :func:`megatron_prefill`); under
+    CP the per-rank logits are gathered back to the full sequence for last-token scoring, and under
+    DP whole batches are sharded across ranks and the per-subject counts are all-reduced.
 
     Args:
         model: The model to evaluate.
@@ -146,8 +151,19 @@ def megatron_mmlu(
     sorted_encoded = [encoded[i] for i in order]
     sorted_lengths = [lengths[i] for i in order]
 
+    cp_size = mpu.get_context_parallel_world_size()
+    cp_group = mpu.get_context_parallel_group()
+
+    # Shard whole batches across data-parallel ranks (each rank evaluates every ``dp_size``-th
+    # batch); per-subject counts are all-reduced over the DP group below. ``with_context_parallel``
+    # defaults to False so CP peers in the same DP group evaluate the same batches.
+    dp_size = mpu.get_data_parallel_world_size()
+    dp_rank = mpu.get_data_parallel_rank()
+    dp_group = mpu.get_data_parallel_group()
+
     # Run inference in global batches.
     predictions: list[str] = [""] * len(encoded)
+    evaluated = [False] * len(encoded)
     n_batches = (len(sorted_encoded) + batch_size - 1) // batch_size
     pbar = tqdm(
         range(0, len(sorted_encoded), batch_size),
@@ -156,41 +172,69 @@ def megatron_mmlu(
         unit="batch",
         disable=not dist.is_master(),
     )
-    for batch_start in pbar:
+    for batch_idx, batch_start in enumerate(pbar):
+        # Data-parallel sharding: each DP rank evaluates only its assigned batches.
+        if batch_idx % dp_size != dp_rank:
+            continue
         batch_enc = sorted_encoded[batch_start : batch_start + batch_size]
         batch_len = sorted_lengths[batch_start : batch_start + batch_size]
         max_len = max(batch_len)
 
-        # Right-pad to max_len; causal mask means the last real token is unaffected by padding.
-        padded = torch.zeros(len(batch_enc), max_len, dtype=torch.long)
+        # Right-pad to padded_len (causal mask leaves the last real token unaffected); round up to a
+        # multiple of 2 * cp_size so it can be CP-partitioned.
+        padded_len = max_len
+        if cp_size > 1:
+            multiple = 2 * cp_size
+            padded_len = ((max_len + multiple - 1) // multiple) * multiple
+        padded = torch.zeros(len(batch_enc), padded_len, dtype=torch.long)
         for i, (e, seq_len) in enumerate(zip(batch_enc, batch_len)):
             padded[i, :seq_len] = e
 
-        logits = megatron_prefill(model, padded.cuda())  # [B, max_len, vocab]
+        if cp_size > 1:
+            # Split across CP ranks, prefill locally, then gather logits back to the full sequence
+            # so the per-example last-token indexing below is unchanged.
+            local_ids, local_position_ids = cp_split_sequence(padded.cuda(), cp_group)
+            local_logits = megatron_prefill(model, local_ids, position_ids=local_position_ids)
+            logits = cp_gather_logits(local_logits, cp_group, padded_len)  # [B, padded_len, vocab]
+        else:
+            logits = megatron_prefill(model, padded.cuda())  # [B, padded_len, vocab]
 
         for i, seq_len in enumerate(batch_len):
             answer_logits = logits[i, seq_len - 1, choice_ids]
             predictions[order[batch_start + i]] = _CHOICES[answer_logits.argmax().item()]
+            evaluated[order[batch_start + i]] = True
 
         examples_done = min(batch_start + batch_size, len(sorted_encoded))
         pbar.set_postfix(examples=f"{examples_done}/{len(sorted_encoded)}")
 
-    # Compute per-subject accuracy and overall average.
-    subject_correct: dict[str, list[bool]] = {}
-    for pred, label, subj in zip(predictions, all_labels, all_subjects_seen):
-        subject_correct.setdefault(subj, []).append(pred == label)
+    # Accumulate per-subject correct/total over the examples THIS rank evaluated, then all-reduce
+    # over the DP group so every rank ends with the full-dataset counts.
+    subjects = sorted(set(all_subjects_seen))
+    subj_idx = {s: i for i, s in enumerate(subjects)}
+    correct_t = torch.zeros(len(subjects), dtype=torch.long, device="cuda")
+    total_t = torch.zeros(len(subjects), dtype=torch.long, device="cuda")
+    for pred, label, subj, ev in zip(predictions, all_labels, all_subjects_seen, evaluated):
+        if not ev:
+            continue
+        total_t[subj_idx[subj]] += 1
+        correct_t[subj_idx[subj]] += pred == label
+    if dp_size > 1:
+        torch.distributed.all_reduce(correct_t, group=dp_group)
+        torch.distributed.all_reduce(total_t, group=dp_group)
 
-    all_correct = [pred == label for pred, label in zip(predictions, all_labels)]
-    n_total = len(all_correct)
-    avg = sum(all_correct) / n_total
+    avg = (correct_t.sum() / total_t.sum()).item()
 
     print_rank_0("{:48} | (ACC) | Count/Total".format("Subject"))
     print_rank_0("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11))
-    for subj in sorted(subject_correct):
-        correct = subject_correct[subj]
-        n = len(correct)
-        print_rank_0(f"{subj:48} | {sum(correct) / n:.3f} | {sum(correct):5}/{n:5}")
+    for subj in subjects:
+        n = total_t[subj_idx[subj]].item()
+        c = correct_t[subj_idx[subj]].item()
+        print_rank_0(f"{subj:48} | {c / n:.3f} | {c:5}/{n:5}")
     print_rank_0("{:48} | {:5} | {:11}".format("-" * 48, "-" * 5, "-" * 11))
-    print_rank_0("{:48} | {:.3f} | {:5}/{:5}".format("average", avg, sum(all_correct), n_total))
+    print_rank_0(
+        "{:48} | {:.3f} | {:5}/{:5}".format(
+            "average", avg, int(correct_t.sum().item()), int(total_t.sum().item())
+        )
+    )
 
     return avg

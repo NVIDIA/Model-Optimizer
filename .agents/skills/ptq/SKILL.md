@@ -1,11 +1,20 @@
 ---
 name: ptq
-description: This skill should be used when the user asks to "quantize a model", "run PTQ", "post-training quantization", "NVFP4 quantization", "FP8 quantization", "INT8 quantization", "INT4 AWQ", "quantize LLM", "quantize MoE", "quantize VLM", or needs to produce a quantized HuggingFace or TensorRT-LLM checkpoint from a pretrained model using ModelOpt.
+description: >-
+  Use when the user asks to "quantize a model", "run PTQ", "post-training
+  quantization", "NVFP4 quantization", "FP8 quantization", "INT8
+  quantization", "INT4 AWQ", "quantize LLM", "quantize MoE", "quantize VLM",
+  or needs to produce a quantized HuggingFace checkpoint from a pretrained
+  model using ModelOpt. Do NOT use for multi-candidate recipe
+  exploration or optimization (use quant-recipe-search).
 ---
 
 # ModelOpt Post-Training Quantization
 
-Produce a quantized checkpoint from a pretrained model. **Read `examples/llm_ptq/README.md` first** — it has the support matrix, CLI flags, and accuracy guidance.
+Produce a quantized checkpoint from a pretrained model. **Read `examples/hf_ptq/README.md` first** — it has the support matrix, CLI flags, and accuracy guidance.
+
+Use `quant-recipe-search` for multi-candidate recipe exploration or
+optimization. Use this skill for each selected recipe's PTQ run.
 
 ## Step 1 — Environment
 
@@ -19,7 +28,7 @@ Read `skills/common/environment-setup.md` and `skills/common/workspace-managemen
 
 ## Step 2 — Is the model supported?
 
-Check the support table in `examples/llm_ptq/README.md` for verified HF models.
+Check the support table in `examples/hf_ptq/README.md` for verified HF models.
 
 - **Listed** → supported, use `hf_ptq.py` (step 4A/4B)
 - **Not listed** → read `references/unsupported-models.md` to determine if `hf_ptq.py` can still work or if a custom script is needed (step 4C)
@@ -53,7 +62,7 @@ ls modelopt_recipes/huggingface/<model_type>/ptq/ 2>/dev/null  # per-arch; <mode
 
 If a model-specific recipe exists, prefer `--recipe <path>` — but **inspect its include/exclude patterns** rather than assuming (e.g. for VLMs, confirm the vision tower is actually excluded).
 
-**If no model-specific recipe**, choose a format based on GPU (details in `examples/llm_ptq/README.md`):
+**If no model-specific recipe**, choose a format based on GPU (details in `examples/hf_ptq/README.md`):
 
 - **Blackwell** (B100/B200/GB200): `nvfp4` variants
 - **Hopper** (H100/H200) or older: `fp8` or `int4_awq`
@@ -75,6 +84,24 @@ If the source checkpoint is already quantized and the requested recipe/config re
 For **listed models** (4A/4B): run full calibration directly (`--calib_size 512`).
 For **unlisted models** (4C): run a smoke test first (`--calib_size 4`), wait for success, then full calibration.
 
+### Recommended calibration datasets
+
+- **Text-only LLM PTQ:** Prefer the representative `nemotron-post-training-v3` blend. `modelopt/torch/utils/dataset_utils.py` expands it to seven registered Nemotron SFT domains. Configure Hugging Face credentials where required.
+
+  ```bash
+  python examples/hf_ptq/hf_ptq.py ... \
+      --dataset nemotron-post-training-v3
+  ```
+
+- **VLM PTQ:** Include image-text calibration with `--calib_with_images`. This path uses `nemotron_vlm_dataset_v2` with the current default subsets `sparsetables`, `plotqa_cot`, and `wiki_en`; `examples/hf_ptq/hf_ptq.py` and `modelopt/torch/utils/vlm_dataset_utils.py` are the source of truth.
+
+  ```bash
+  python examples/hf_ptq/hf_ptq.py ... \
+      --calib_with_images
+  ```
+
+`--dataset` selects text-only calibration and cannot substitute for multimodal examples. Use `--dataset cnn_dailymail` only as a fallback when representative data is unavailable, such as without gated-data access or with only a local public cache.
+
 ### Which path?
 
 ```text
@@ -90,9 +117,9 @@ In README table? ─→ YES ──→ SLURM (local or remote)? ──→ LAUNCHE
 
 ```bash
 pip install --no-build-isolation "nvidia-modelopt[hf]"
-pip install -r examples/llm_ptq/requirements.txt
+pip install -r examples/hf_ptq/requirements.txt
 
-python examples/llm_ptq/hf_ptq.py \
+python examples/hf_ptq/hf_ptq.py \
     --pyt_ckpt_path <model> \
     --qformat <format> \
     --calib_size 512 \
@@ -105,7 +132,7 @@ For remote: use `remote_run` from `remote_exec.sh` (see `skills/common/remote-ex
 
 ### 4B — Launcher: supported model on SLURM or local Docker
 
-Write a YAML config using `common/hf_ptq/hf_ptq.sh`. See `references/launcher-guide.md` for the full template.
+Write a YAML config using `common/hf/ptq.sh`. See `references/launcher-guide.md` for the full template.
 
 ```bash
 cd tools/launcher
@@ -138,17 +165,16 @@ Report the path and size to the user.
 
 ### Post-quantization validation
 
-This is a required gate before any deployment or evaluation submission. Do not submit an eval, start a serving job, or hand off the checkpoint as ready until the gate has passed.
+This is a required gate before any deployment or evaluation submission. Do not submit an eval, start a production serving job, or hand off the checkpoint as ready until the gate, including its serving canary, has passed.
 
-Read `references/checkpoint-validation.md` and perform all three validation groups on the exact checkpoint path that will be deployed/evaluated:
+Read `references/checkpoint-validation.md` and perform all four validation groups on the exact checkpoint path that will be deployed/evaluated:
 
 1. Check output size and estimated bits per weight against the baseline/source checkpoint.
 2. Check quantized-weight coverage against the requested qformat/recipe/config.
 3. Check metadata consistency against the baseline/source model.
+4. Complete the required downstream handoff and serving-readiness validation.
 
-Report the gate result before moving on. The report must include source size, output size, output/source size ratio, layer precision counts (for example NVFP4, FP8, INT4, BF16/unquantized excluded, unexpected unquantized, declaration mismatches), and metadata diffs. If the output/source ratio is >= 1.0 for a compression recipe, if any intended layer group is missing quantization, or if metadata changed unexpectedly, stop and fix the checkpoint or ask the user before proceeding.
-
-**Next steps**: If the user wants to deploy or evaluate the quantized checkpoint, use the **deployment** or **evaluation** skill. The checkpoint workspace carries over. If the model required patches during PTQ (e.g., transformers upgrade), the same fixes will likely be needed at deployment and evaluation time.
+Report the gate result before moving on. Follow the canonical report format and all blocking conditions in `references/checkpoint-validation.md`; do not hand off a checkpoint unless every required check passes.
 
 ## Key API Rules
 
@@ -163,7 +189,7 @@ Report the gate result before moving on. The report must include source size, ou
 
 - **Model-specific dependencies**: Models with `trust_remote_code` may import packages not in the container (e.g., `mamba-ssm` for hybrid Mamba models). See Step 2.5. Use `EXTRA_PIP_DEPS` env var with the launcher, or install manually before running `hf_ptq.py`
 - **Transformers version**: New models may need a newer version of transformers than what's installed. Check `config.json` for `transformers_version`. In containers, beware of `PIP_CONSTRAINT` blocking upgrades — see `references/slurm-setup-ptq.md` for workarounds
-- **Gated datasets**: Some calibration datasets require HF authentication. Ensure `HF_TOKEN` is set in the job environment, or use `--dataset cnn_dailymail` as a non-gated alternative
+- **Gated datasets**: Some calibration datasets require HF authentication. Set `HF_TOKEN` in the job environment. Use `--dataset cnn_dailymail` only as the constrained-environment fallback described in Step 4, not as the preferred calibration set
 - **NFS root_squash + Docker**: See `skills/common/slurm-setup.md` section 5
 
 ## References
@@ -179,7 +205,7 @@ Report the gate result before moving on. The report must include source size, ou
 | `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
 | `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
 | `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, GPU sizing, FSDP2) |
-| `examples/llm_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
+| `examples/hf_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
 | `modelopt/torch/quantization/config.py` | Step 3: format definitions |
 | `modelopt/torch/export/model_utils.py` | Step 4C: TRT-LLM export type mapping |
 | `modelopt_recipes/` | Step 3: pre-built recipes |

@@ -1,0 +1,30 @@
+[project]
+name = "modelopt-mcp"
+version = "0.1.0"
+description = "MCP server exposing ModelOpt launcher operations (submit, status, logs) as typed tools for codex / Claude Code agents"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0",
+    "modelopt-launcher",
+    "pyyaml",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+# Console entry. Codex / Claude Code launch this as a stdio subprocess.
+# See OMNIML-5123 for the design + acceptance criteria.
+modelopt-mcp = "modelopt_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["modelopt_mcp*"]
+
+[tool.uv.sources]
+modelopt-launcher = { path = "../launcher", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

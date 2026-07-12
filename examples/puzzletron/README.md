@@ -43,7 +43,7 @@ python -m pytest tests/gpu/torch/puzzletron/test_puzzletron.py -k "Qwen3-8B"
 
 - For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use a single GPU.
 
-- To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
+- To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Puzzle-KD-Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
 
 ```bash
 hf auth login --token <your token>
@@ -51,15 +51,17 @@ hf auth login --token <your token>
 
 ## Compress the Model
 
-1. Download and prepare the [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
+1. Download and prepare the dataset.
 
-   dataset split: "code", "math", "stem", "chat", excluding reasoning samples (2.62GB)
+   **Default (recommended):** Use the prebuilt [Puzzle-KD-Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2) (~3 GB disk required).
 
    ```bash
    python -m modelopt.torch.puzzletron.dataset.prepare_dataset \
-      --dataset_name nvidia/Nemotron-Post-Training-Dataset-v2 \
-      --output_dir path/to/Nemotron-Post-Training-Dataset-v2
+      --dataset_name nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2 \
+      --output_dir path/to/Puzzle-KD-Nemotron-Post-Training-Dataset-v2
    ```
+
+   > **Note:** Alternatively, you can derive the dataset from the raw [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) by passing `--dataset_name nvidia/Nemotron-Post-Training-Dataset-v2`. This downloads the full raw dataset (~136 GB) before filtering it down to the same ~2.6 GB result. Only do this if you need to reproduce the preprocessing from scratch.
 
 2. Specify the `puzzle_dir`, `input_hf_model_path`, `dataset_path`, `intermediate_size_list`, and `target_memory` arguments in the [llama-3_1-8B_pruneffn_memory.yaml](./configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml) configuration file.
 
@@ -254,18 +256,7 @@ The plot shows how token accuracy changes with different compression rates. High
 
 ## Evaluation
 
-Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly.
-
-```bash
-python examples/llm_eval/lm_eval_hf.py \
-   --model hf \
-   --model_args pretrained=path/to/checkpoint,dtype=bfloat16,parallelize=True \
-   --tasks mmlu \
-   --num_fewshot 5 \
-   --batch_size 4
-```
-
-For a quick smoke test, add `--limit 10`.
+Evaluate AnyModel checkpoints using lm-eval. See the [LM-Eval-Harness section](../llm_eval/README.md#lm-eval-harness) in `examples/llm_eval/README.md` for full instructions, including multi-GPU and Slurm setup.
 
 > **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
 > see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
@@ -285,16 +276,13 @@ See [vLLM documentation](https://docs.vllm.ai/en/latest/getting_started/installa
 
 **NOTE:** This is a temporary workaround pending official vLLM integration. You can track merge status [here](https://github.com/vllm-project/vllm/pull/36512).
 
-Then, add the following to the model's `config.json` file (here we use Llama as an example):
+Then, convert the model's config.json to AnyModel format:
 
-```json
-{
-  ...
-  "architectures": ["AnyModel"],
-  "base_architecture": "LlamaForCausalLM",
-  ...
-}
+```bash
+python -m modelopt.torch.puzzletron.subblock_stats.runtime_utils convert_config_to_vllm_anymodel <model_dir>
 ```
+
+This will create a backup of the original config.json file at `config.bak`.
 
 For new architectures that are not supported by vLLM, you additionally need to add the following to the `config.json` file (using Llama3 as an example):
 

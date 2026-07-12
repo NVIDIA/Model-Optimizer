@@ -35,6 +35,7 @@ metadata:
 quantize:
   algorithm:
     method: max
-    layerwise: false
+    layerwise:
+      enable: false
   quant_cfg:
     - $import: shared_quant_cfg

@@ -555,6 +555,42 @@ def test_bf16_no_clamping_initializers_out_of_range(
     assert np.all(add_init_converted_array == add_init_out_of_range)
 
 
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_bf16_conversion_accepts_fp16_initializer(use_standalone_type_inference):
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [2])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [2])
+    weight = numpy_helper.from_array(np.array([1.0, 2.0], dtype=np.float16), "weight")
+    add = helper.make_node("Add", ["X", "weight"], ["Y"], name="add")
+    graph = helper.make_graph([add], "fp16_init", [x], [y], initializer=[weight])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+    model.ir_version = LATEST_IR_VERSION_SUPPORTED_BY_ORT
+    onnx.checker.check_model(model)
+
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(
+        model, use_standalone_type_inference
+    )
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        low_precision_type="bf16",
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+
+    converted_model = converter.convert(high_precision_nodes=[], low_precision_nodes=["add"])
+
+    converted_weight = next(
+        init for init in converted_model.graph.initializer if init.name == "weight"
+    )
+    assert converted_weight.data_type == TensorProto.BFLOAT16
+    assert converted_model.graph.output[0].type.tensor_type.elem_type == TensorProto.BFLOAT16
+    np.testing.assert_allclose(
+        onnx_utils.read_f16_tensor_as_fp32(converted_weight),
+        np.array([1.0, 2.0], dtype=np.float32),
+    )
+
+
 ####################################################################################################
 # Testing with dynamic shapes, since shape_inference invoked in PrecisionConverter
 ####################################################################################################
@@ -1658,6 +1694,45 @@ def test_if_subgraph_initializer_conversion(
             f"Else branch initializer '{init.name}' should be {expected_init_type}, "
             f"but is {init.data_type}"
         )
+
+
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_bf16_if_subgraph_conversion_accepts_fp16_initializers(
+    model_with_if_subgraph, use_standalone_type_inference
+):
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_subgraph
+    for node in model.graph.node:
+        if node.op_type != "If":
+            continue
+        for attr in node.attribute:
+            if attr.name not in ("then_branch", "else_branch"):
+                continue
+            for init in attr.g.initializer:
+                init.CopyFrom(
+                    numpy_helper.from_array(
+                        numpy_helper.to_array(init).astype(np.float16), init.name
+                    )
+                )
+
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(
+        model, use_standalone_type_inference
+    )
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=False,
+        low_precision_type="bf16",
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+
+    converted_model = converter.convert(high_precision_nodes=[], low_precision_nodes=["if_node"])
+
+    if_node = next(n for n in converted_model.graph.node if n.op_type == "If")
+    for attr in if_node.attribute:
+        if attr.name in ("then_branch", "else_branch"):
+            assert all(init.data_type == TensorProto.BFLOAT16 for init in attr.g.initializer)
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])

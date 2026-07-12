@@ -1,6 +1,6 @@
 # HuggingFace PTQ via huggingface_example.sh
 #
-# Quantizes a HuggingFace model using examples/llm_ptq/scripts/huggingface_example.sh.
+# Quantizes a HuggingFace model using examples/hf_ptq/scripts/huggingface_example.sh.
 # Default: Qwen/Qwen3.5-9B with nvfp4_mlp_only on 8xH200.
 #
 # Usage (Slurm):
@@ -11,14 +11,14 @@
 #   export SLURM_HF_LOCAL=/home/scratch.<user>/hf-local
 #   export HF_TOKEN=<your-hf-token>  # for gated models; auto-injected into all tasks
 #   cd tools/launcher
-#   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml --yes
+#   uv run launch.py --yaml examples/hf_ptq/hf_ptq.yaml --yes
 #
 # Usage (local Docker):
 #   cd tools/launcher
-#   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml hf_local=/mnt/hf-local --yes
+#   uv run launch.py --yaml examples/hf_ptq/hf_ptq.yaml hf_local=/mnt/hf-local --yes
 #
 # Override model/quant via CLI:
-#   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml \
+#   uv run launch.py --yaml examples/hf_ptq/hf_ptq.yaml \
 #       pipeline.global_vars.hf_model=Qwen/Qwen3-8B \
 #       pipeline.task_0.args='[--model,<<global_vars.hf_local>>Qwen/Qwen3-8B,--,--quant,nvfp4]' \
 #       --yes

@@ -1,5 +1,8 @@
 # Ablations: Nemotron-3-Nano-30B-A3B-BF16
 
+> [!NOTE]
+> Every benchmark table in this document is from evaluations run **without** eval-time tool calling (no Python sandbox). The [main README](README.md#results) reports both with-tools and no-tools numbers for GPQA and AIME. Consequently, the gains attributed to the `tool_calling` training data in the [data-blend ablation](#effect-of-data-blend-tool_calling) reflect **training-time** exposure to agentic/function-call reasoning, not tools invoked during evaluation.
+
 ## Pruning
 
 > [!NOTE]
@@ -255,7 +258,7 @@ Per-benchmark difference (Δ = new − old), at matching iter counts during the 
 
 **Summary — new blend is preferred:**
 
-- **GPQA Diamond** is the most consistent winner — positive Δ at every single checkpoint (+1.2/+0.7/+2.7/+0.6/+0.7). The tool_calling allocation helps throughout training, not just at the end. Calculator-tool use is common in GPQA quantitative items.
+- **GPQA Diamond** is the most consistent winner — positive Δ at every single checkpoint (+1.2/+0.7/+2.7/+0.6/+0.7). The tool_calling allocation helps throughout training, not just at the end. Since these evals run **without** eval-time tools, the gain comes from training-time exposure to agentic/function-call reasoning traces transferring to GPQA — not from the model invoking a tool during evaluation.
 - **SciCode** trends positive early (+2.5/+3.6 at 2.5B/20B) but neutral-to-slightly-negative mid-training (-1.7/-2.4 at 40B/60B) and positive again at 80B (+0.3). Even averaged-of-8, SciCode has the largest residual checkpoint-to-checkpoint noise of any benchmark.
 - **AIME 2025** trends positive from 40B onward (+3.0/+1.3/+0.5). The early dip is consistent with the math share dropping from 30%→27%; the model catches up once enough tokens have been seen.
 - **IFBench** is small-positive early (+0.8/+1.8) then dips mid-training (-1.4/-1.1) before recovering to neutral at 80B (0.0). Net roughly flat over training.
@@ -264,7 +267,7 @@ Per-benchmark difference (Δ = new − old), at matching iter counts during the 
 
 ### Effect of long context training
 
-After the 8K-seq-length phase of the old-blend run, training was continued with the same blend but with `seq_length` increased from 8192 to 32768. The longer-context phase is short (200–1000 additional iters) but disproportionately impactful. Numbers below use the old-blend run because it has the longer LC sweep (1000 iters / +25B tokens). The new-blend run's shorter LC phase (+800 iters / +20B tokens, ending at 100B) is in the [main README](README.md) and shows the same qualitative finding (large AIME jump immediately at the start of the LC phase).
+After the 8K-seq-length phase of the old-blend run, training was continued with the same blend but with `seq_length` increased from 8192 to 32768. The longer-context phase is short (200–1000 additional iters) but disproportionately impactful. Numbers below use the old-blend run because it has the longer LC sweep (1000 iters / +25B tokens). The new-blend run's shorter LC phase (+800 iters / +20B tokens, ending at 100B) is in the [main README](README.md) and shows the same qualitative finding (large AIME jump immediately at the start of the LC phase) — though at higher absolute AIME scores there, since the README evals enable tools.
 
 Average is over the 6 reasoning benchmarks (excluding MMLU), matching the main README:
 

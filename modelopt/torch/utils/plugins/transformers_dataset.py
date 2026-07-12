@@ -160,7 +160,12 @@ class LanguageDataCollator:
 
         self._post_process_tokenizer()
         if self.tokenizer.chat_template is None:
-            raise ValueError("No valid chat template!")
+            raise ValueError(
+                "No valid chat template! The tokenizer for this model has no chat_template, "
+                "which is common for base / pretrained checkpoints. Use an instruction-tuned "
+                "model (e.g. a '*-Instruct' variant), or pass a custom chat_template via the "
+                "training config or LanguageDataCollator(chat_template=...)."
+            )
 
         if self.answer_only_loss:
             self._verify_generation_tags()

@@ -204,7 +204,7 @@ def torch_to_tensorrt_llm_checkpoint(
     models = [("decoder", model)]
     is_enc_dec = model_type_is_enc_dec(decoder_type)
     if is_enc_dec:
-        model_lm_head = model.proj_out if decoder_type in ["whisper"] else model.lm_head
+        model_lm_head = model.proj_out if decoder_type == "whisper" else model.lm_head
         # For Encoder-Decoder models, we process the checkpoint separately.
         models = get_enc_dec_models(model, decoder_type)
 
@@ -238,10 +238,10 @@ def torch_to_tensorrt_llm_checkpoint(
             config.enc_dec = component_name
             model_metadata_config["enc_dec"] = component_name
 
-            if decoder_type in ["bart"]:
+            if decoder_type == "bart":
                 # bart does not have final layernorm but has embedding layernorm.
                 has_embedding_layernorm = True
-            elif decoder_type in ["whisper"]:
+            elif decoder_type == "whisper":
                 has_position_embedding = True
 
         # GLM has a different handling of word_embeddings.
@@ -269,7 +269,7 @@ def torch_to_tensorrt_llm_checkpoint(
                     )
                 elif has_position_embedding and config.position_embedding is None:
                     config.position_embedding = build_embedding_config(module)
-                    if decoder_type in ["bart"]:
+                    if decoder_type == "bart":
                         # Special handling for TRTLLM bart model
                         # Huggingface bart-large-cnn offsets embedding ids by 2 (see modeling_bart.py)
                         config.position_embedding.weight = config.position_embedding.weight[2:]
@@ -279,7 +279,7 @@ def torch_to_tensorrt_llm_checkpoint(
                 layers = []
                 for idx, layer in enumerate(module.children()):
                     # Special process due to T5 model structure's specialty
-                    if decoder_type in ["t5"]:
+                    if decoder_type == "t5":
                         layer = layer.layer
                     layer_config = build_decoder_config(
                         layer,
@@ -287,11 +287,11 @@ def torch_to_tensorrt_llm_checkpoint(
                         decoder_type,
                         tp_size=inference_tensor_parallel,
                     )
-                    if decoder_type in ["deci"]:
+                    if decoder_type == "deci":
                         block_config = model_metadata_config["block_configs"][idx]
                         layer_config.block_config = asdict(block_config)
                     # Special process for each decoder layer of Encoder-Decoder Model
-                    if decoder_type in ["t5"]:
+                    if decoder_type == "t5":
                         prepare_t5_decoder_layer(
                             layer_config,
                             model.config,
@@ -322,7 +322,7 @@ def torch_to_tensorrt_llm_checkpoint(
                     # This will update lm_head quantization config according to constraints from TRT-LLM
                     update_lm_head_quantization(config, module, inference_pipeline_parallel)
                     config.lm_head = build_linear_config(module, "column")
-            elif is_conv(module) and decoder_type in ["whisper"]:
+            elif is_conv(module) and decoder_type == "whisper":
                 if config.conv1 is None:
                     config.conv1 = build_conv_config(module)
                 else:
@@ -343,7 +343,7 @@ def torch_to_tensorrt_llm_checkpoint(
         # For the training time PP, not all ranks will have the lm_head layer.
         if config.lm_head is None:
             if is_enc_dec:
-                if decoder_type not in ["whisper"]:
+                if decoder_type != "whisper":
                     config.share_embedding_table = False
                 if model_metadata_config["enc_dec"] == "dec":
                     config.lm_head = build_linear_config(model_lm_head, "column")

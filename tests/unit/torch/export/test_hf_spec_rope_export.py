@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for EAGLE export rope scaling logic in hf_spec_export.py."""
+"""Unit tests for EAGLE/DFlash export rope scaling logic in hf_spec_export.py."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from modelopt.torch.export.plugins.hf_spec_export import EagleExporter
+import torch
+
+from modelopt.torch.export.plugins.hf_spec_export import DFlashExporter, EagleExporter
 
 DEFAULT_ROPE_SCALING = {
     "rope_type": "yarn",
@@ -76,3 +79,63 @@ def test_rope_theta_fallback_from_rope_scaling():
     """rope_theta is populated from rope_scaling when not available as top-level attr."""
     config = _make_exporter(rope_type="default", rope_theta=500000)._export_config()
     assert config["rope_theta"] == 500000
+
+
+# ---------------------------------------------------------------------------
+# DFlash export rope scaling (config-field convergence, mirrors the eagle style)
+# ---------------------------------------------------------------------------
+
+DFLASH_YARN = {
+    "type": "yarn",
+    "factor": 48.0,
+    "original_max_position_embeddings": 4096,
+    "beta_fast": 1.0,
+    "beta_slow": 1.0,
+    "mscale": 1.0,
+    "mscale_all_dim": 1.0,
+}
+
+
+def _make_dflash_exporter(dflash_export_rope_scaling=None, base_rope_theta=5000000.0):
+    base_config = SimpleNamespace(
+        hidden_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        intermediate_size=256,
+        vocab_size=1000,
+        max_position_embeddings=196608,
+        initializer_range=0.02,
+        num_hidden_layers=8,
+        rope_theta=base_rope_theta,
+        torch_dtype=torch.bfloat16,
+    )
+    draft_config = SimpleNamespace(num_hidden_layers=2)
+    model = SimpleNamespace(
+        config=base_config,
+        dflash_config=draft_config,
+        dflash_block_size=8,
+        mask_token_id=999,
+        target_layer_ids=[1, 3, 5, 7],
+        dflash_export_rope_scaling=dflash_export_rope_scaling,
+    )
+    exporter = DFlashExporter.__new__(DFlashExporter)
+    exporter.model = model
+    return exporter
+
+
+def test_dflash_yarn_rope_injected_from_config_field():
+    """YaRN rope_scaling from dflash_export_rope_scaling is injected verbatim."""
+    config = _make_dflash_exporter(dflash_export_rope_scaling=DFLASH_YARN)._export_config()
+    assert config["rope_scaling"] == DFLASH_YARN
+
+
+def test_dflash_rope_not_injected_when_field_empty():
+    """Empty dict (default) disables rope scaling injection."""
+    config = _make_dflash_exporter(dflash_export_rope_scaling={})._export_config()
+    assert config["rope_scaling"] is None
+
+
+def test_dflash_rope_theta_inherits_base():
+    """rope_theta is inherited from the target/base config (draft drafts for the base)."""
+    config = _make_dflash_exporter(base_rope_theta=5000000.0)._export_config()
+    assert config["rope_theta"] == 5000000.0

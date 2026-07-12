@@ -51,6 +51,8 @@ def fake_checkpoint(tmp_path, fake_config):
     tensors = {
         "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
         "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        # model_type "llama" is in the final-norm whitelist, so FakeBaseModel requires the norm.
+        "norm.weight": torch.ones(_HIDDEN_SIZE),
     }
     shard = tmp_path / "model-00001-of-00001.safetensors"
     safetensors.torch.save_file(tensors, shard)
@@ -75,6 +77,7 @@ def test_fakebase_single_file_no_index(tmp_path, fake_config):
     tensors = {
         "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
         "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        "norm.weight": torch.ones(_HIDDEN_SIZE),
     }
     safetensors.torch.save_file(tensors, tmp_path / "model.safetensors")
     model = FakeBaseModel.from_source(str(tmp_path))
@@ -87,7 +90,10 @@ def test_fakebase_tied_embeddings_falls_back_to_embed(tmp_path, fake_config):
     FakeBaseModel must reuse ``embed_tokens`` for both."""
     fake_config.tie_word_embeddings = True
     weight = torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE)
-    safetensors.torch.save_file({"embed_tokens.weight": weight}, tmp_path / "model.safetensors")
+    safetensors.torch.save_file(
+        {"embed_tokens.weight": weight, "norm.weight": torch.ones(_HIDDEN_SIZE)},
+        tmp_path / "model.safetensors",
+    )
     model = FakeBaseModel.from_source(str(tmp_path))
     torch.testing.assert_close(model.lm_head.weight, weight)
     torch.testing.assert_close(model.embed_tokens.weight, weight)

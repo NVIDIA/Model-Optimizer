@@ -31,9 +31,10 @@ quantize:
   algorithm:
     method: mse
     fp8_scale_sweep: true
-    # layerwise=false required for VLMs where the decoder layers are nested under
+    # layerwise.enable=false required for VLMs where the decoder layers are nested under
     # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
-    layerwise: false
+    layerwise:
+      enable: false
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*mlp*weight_quantizer'

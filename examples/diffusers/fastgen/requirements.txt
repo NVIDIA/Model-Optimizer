@@ -2,9 +2,12 @@
 # Torch + diffusers are already pulled in via Model-Optimizer's ``[all]`` extras.
 # The one thing that's NOT shipped with Model-Optimizer is nemo_automodel.
 
-# NeMo AutoModel (parent recipe, dataloader, FSDP2 wrapping).
-# The diffusion extras install diffusers + accelerate with matching pins.
-nemo_automodel[diffusion]
+# NeMo AutoModel (parent recipe, FSDP2 wrapping, and the UNPATCHED upstream helpers that the
+# vendored data/preprocessing code imports: components.datasets.diffusion.{sampler,base_dataset,
+# multi_tier_bucketing,text_to_video_dataset}). The diffusion extras install diffusers +
+# accelerate with matching pins. Bounded to a tested range (0.4.0 == the validated commit);
+# fastgen_data/__init__.py adds a runtime guard with an actionable message if the helpers move.
+nemo_automodel[diffusion]>=0.4.0,<1.0
 
 # Optional but recommended for the smoke logs.
 wandb
