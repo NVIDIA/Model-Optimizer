@@ -484,3 +484,49 @@ def test_sidecar_port_taken_from_response(monkeypatch):
     )
     ds[0]
     assert seen_ports == {advertised_port}
+
+
+# ---------------------------------------------------------------------------
+# answer_only_loss template guard
+# ---------------------------------------------------------------------------
+
+
+def _fast_tokenizer_with_template(template: str, seq: int = 8) -> MagicMock:
+    """Fast-tokenizer mock with a given chat template; returns ids + assistant_masks."""
+    tok = MagicMock()
+    tok.is_fast = True
+    tok.chat_template = template
+    tok.apply_chat_template.return_value = {
+        "input_ids": torch.arange(seq, dtype=torch.long).unsqueeze(0),
+        "assistant_masks": torch.ones(1, seq, dtype=torch.long),
+    }
+    return tok
+
+
+_CONV = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+
+
+def test_answer_only_loss_rejects_template_without_generation_tags():
+    """A fast tokenizer whose template lacks {% generation %} tags fails loudly.
+
+    Without the guard transformers only warns and returns an ALL-ZERO assistant
+    mask -- every sample then trains at zero loss with no other symptom.
+    """
+    tok = _fast_tokenizer_with_template("{{ bos }}{% if add_generation_prompt %}x{% endif %}")
+    with pytest.raises(RuntimeError, match="generation"):
+        hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=True)
+
+
+def test_answer_only_loss_accepts_tagged_template():
+    """Templates carrying {% generation %} (either whitespace-control form) pass."""
+    for tag in ("{% generation %}", "{%- generation -%}"):
+        tok = _fast_tokenizer_with_template("{{ bos }}" + tag + "{{ c }}")
+        ids, mask = hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=True)
+        assert mask.sum() == ids.shape[-1]
+
+
+def test_full_loss_skips_template_guard():
+    """answer_only_loss=False never consults the template (mask is all ones)."""
+    tok = _fast_tokenizer_with_template("{{ bos }}")
+    ids, mask = hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=False)
+    assert mask.sum() == ids.shape[-1]

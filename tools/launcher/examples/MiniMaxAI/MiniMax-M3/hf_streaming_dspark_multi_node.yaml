@@ -1,0 +1,134 @@
+# DSpark streaming speculative-decoding training for MiniMax-M3 (multi-node).
+# DSpark = the DFlash backbone + a lightweight Markov head + a confidence head,
+# generating a causal block semi-autoregressively; see dspark.yaml for the head
+# and loss config. Runs the shared streaming pipeline
+# (common/eagle3/train_eagle_streaming.sh) with the M3-specific base, draft dims,
+# mask token and chat template; trained from scratch. A starting point for
+# reproduction — tune node counts, batch, steps and serve limits for your cluster.
+#
+# MiniMax-M3 specifics this yaml encodes (each was a silent failure mode):
+#   * SERVE_BLOCK_SIZE=128: M3's MSA sparse attention (sparse_block_size=128)
+#     requires KV block 128 or vLLM dies at engine init ("No common block size").
+#   * data.chat_template: M3 ships a FAST tokenizer whose template has no
+#     {% generation %} tags -> assistant_masks come back ALL-ZERO and
+#     answer_only_loss training silently runs at zero loss. The tagged template
+#     copy next to this yaml wraps the assistant turn (think prefix + content +
+#     tool calls + eos) in {% generation %} tags.
+#   * The draft does NOT inherit base GQA/FFN dims (set explicitly below), and
+#     M3's base rope_theta (5e6) is pinned onto the draft.
+#   * EAGLE_CAPTURE_IDS = draft default target_layer_ids+1 (6 aux) + final (60).
+#   * M3 is a VLM wrapper (text_config nested): the base's gemma-style final
+#     norm is selected via the config's use_gemma_norm flag (see
+#     modeling_final_norm.py) — its text_config coerces to a mixtral model_type,
+#     so the model_type table alone would pick the wrong norm.
+#
+# Run ON the cluster login node (paramiko can't reach it through the login proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
+#          SLURM_PARTITION=<multi_node_partition> \
+#          SLURM_HF_LOCAL=<hf_models_dir> \
+#          SLURM_JOB_DIR=<experiments_dir> \
+#          NEMORUN_HOME=$PWD
+#   uv run launch.py --yaml examples/MiniMaxAI/MiniMax-M3/hf_streaming_dspark_multi_node.yaml \
+#          identity=$HOME/.ssh/id_ecdsa detach=True --yes
+#
+# The export lands in /scratchspace/export.
+
+job_name: MiniMax-M3_DSpark_streaming_multi_node
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/MiniMaxAI/MiniMax-M3
+
+  # Build /scratchspace/data/train.jsonl. Point data.data_path at the full
+  # Spec-Decoding-Dataset-v2 corpus to reproduce; eagle_utils also accepts a
+  # directory of *.jsonl shards directly.
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  task_1:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - model.trust_remote_code=true
+      - data.mode=streaming
+      - data.data_path=/scratchspace/data/train.jsonl
+      # M3's own template has no {% generation %} tags; without this tagged copy
+      # answer_only_loss trains on an all-zero mask (see header).
+      - data.chat_template=examples/MiniMaxAI/MiniMax-M3/m3_chat_template_generation.jinja
+      - training.output_dir=/scratchspace/dspark
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
+      - training.per_device_train_batch_size=4
+      - training.gradient_accumulation_steps=1
+      - training.save_steps=1000
+      - training.logging_steps=20
+      - training.learning_rate=1.0e-4
+      - training.warmup_steps=2000
+      - training.answer_only_loss=true
+      # The vLLM serve container has no tensorboard -> trainer init crash.
+      - training.report_to=none
+      # The DSpark draft does NOT inherit the base GQA/FFN dims, so set them
+      # explicitly to match the M3 backbone (else a silently wrong-shape draft).
+      # intermediate_size matches M3's dense FFN (dense_intermediate_size).
+      - dflash.dflash_architecture_config.num_hidden_layers=6
+      - dflash.dflash_architecture_config.num_key_value_heads=8
+      - dflash.dflash_architecture_config.intermediate_size=12288
+      # Pin the base's rope_theta onto the draft (M3 uses 5e6, not the Qwen3
+      # default 1e6; a mismatch trains rope into the weights and caps AL).
+      - dflash.dflash_architecture_config.rope_theta=5000000
+      # Semi-AR generation block (dspark.yaml ships 16; Kimi/M3 runs use 8).
+      - dflash.dflash_block_size=8
+      # M3 has no mask token; vocab 200064, added tokens end at 200060 -> 200063 free.
+      - dflash.dflash_mask_token_id=200063
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # 6 aux capture ids = the draft's default target_layer_ids+1, plus the true
+      # final hidden (60). Requires the aux-capture fix vllm#46788 (in-tree in
+      # recent nightlies); mismatched ids silently skew train vs inference.
+      - EAGLE_CAPTURE_IDS: "[2,13,24,36,47,58,60]"
+      - SERVE_NODES: "4"
+      - SERVE_TP: "8"
+      - STREAMING_NUM_WORKERS: "4"
+      # M3's custom-modeling base needs trust_remote_code at export and serve.
+      - EXPORT_EXTRA_ARGS: "--trust_remote_code"
+      - SERVE_EXTRA_ARGS: "--trust-remote-code"
+      # REQUIRED for M3: MSA sparse attention needs KV block 128 (dedicated knob —
+      # multi-token SERVE_EXTRA_ARGS values are mangled by nemo_run's unquoted
+      # env export, so "--block-size 128" cannot ride it).
+      - SERVE_BLOCK_SIZE: "128"
+      - SERVE_MAX_MODEL_LEN: "4160"
+      - SERVE_MAX_NUM_SEQS: "32"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      - SERVE_READY_TIMEOUT: "3600"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # RDMA transport is UCX (InfiniBand) by default. On AWS EFA, uncomment —
+      # and note UCX SEGFAULTS at agent init on EFA nodes (it detects the EFA
+      # devices), so LIBFABRIC is required there even for single-node runs:
+      # - NIXL_BACKENDS: "LIBFABRIC"
+      # - FI_PROVIDER: "efa"
+      # - NCCL_IB_DISABLE: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 6
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      # vLLM x86_64 build with native MiniMax-M3 support (vllm/models/minimax_m3)
+      # and the aux-capture fix (vllm#46788).
+      container: <vllm-image-with-native-minimax-m3>

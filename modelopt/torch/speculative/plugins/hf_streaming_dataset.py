@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import time
 from typing import TypedDict
 
@@ -105,6 +106,22 @@ def _tokenize_with_loss_mask(
     recovery = None
     if answer_only_loss and not getattr(tokenizer, "is_fast", False):
         recovery = get_loss_mask_recovery(tokenizer)
+    if answer_only_loss and recovery is None:
+        # Fail loudly on a template without {% generation %} tags: transformers only
+        # warns and returns an ALL-ZERO assistant mask, which trains every sample at
+        # zero loss with no other symptom. (The regex matches the tag itself, not the
+        # unrelated `add_generation_prompt` identifier most templates contain.)
+        template = getattr(tokenizer, "chat_template", None) or ""
+        if not re.search(r"\{%-?\s*generation\b", template):
+            raise RuntimeError(
+                "answer_only_loss=True needs assistant masks, but the tokenizer's chat "
+                "template has no {% generation %} tags, so apply_chat_template would "
+                "return an all-zero mask and training would silently run at zero loss. "
+                "Pass a tagged template copy via data.chat_template (see "
+                "examples/MiniMaxAI/MiniMax-M3/m3_chat_template_generation.jinja for a "
+                "worked example), register a loss-mask recovery "
+                "(modelopt.torch.utils.loss_mask), or set answer_only_loss=false."
+            )
     out = tokenizer.apply_chat_template(
         conversations,
         tokenize=True,

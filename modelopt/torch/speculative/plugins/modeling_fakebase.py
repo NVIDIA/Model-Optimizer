@@ -204,7 +204,9 @@ class FakeBaseModel(PreTrainedModel):
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
             rope_theta=getattr(base_cfg, "rope_theta", None),
-            final_norm_type=_select_final_norm_type(getattr(base_cfg, "model_type", None)),
+            final_norm_type=_select_final_norm_type(
+                getattr(base_cfg, "model_type", None), base_cfg
+            ),
         )
         model = cls(config)
         # Load lm_head, embed_tokens, and (for known models) the final norm into the model.
