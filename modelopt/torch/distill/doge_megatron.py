@@ -15,25 +15,27 @@
 
 """Megatron-Bridge DoGE distillation helpers."""
 
+import json
 from collections.abc import Iterable
 from functools import partial
+from pathlib import Path
 
 import torch
-import torch.distributed as dist
 from megatron.bridge.training.state import GlobalState
 from megatron.core.models.gpt import GPTModel
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.distill.doge import DoGEWeightUpdater, normalize_data_path_weights
 from modelopt.torch.distill.doge_megatron_data import (
     DoGEDataIterators,
     _build_doge_data_iterators,
-    _GPTBatch,
     _next_doge_batches,
 )
 from modelopt.torch.distill.doge_megatron_loss import (
-    calc_alignment_gradient_vector,
+    compute_alignment_scores,
     weighted_source_forward_step,
 )
+from modelopt.torch.utils import print_rank_0
 
 __all__ = ["DoGEForwardStep"]
 
@@ -46,6 +48,7 @@ class DoGEForwardStep:
         data_paths: list[str],
         target_data_paths: list[str],
         meta_lr: float,
+        output_dir: str | Path,
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
 
@@ -55,6 +58,7 @@ class DoGEForwardStep:
             target_data_paths: Fixed target-objective blend in Megatron WEIGHT PATH format. The
                 weights are normalized into ``self.target_blend_weights`` and are not updated.
             meta_lr: Learning rate for exponentiated blend-weight updates.
+            output_dir: Directory where DoGE writes the weight trajectory.
         """
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
@@ -62,41 +66,39 @@ class DoGEForwardStep:
         self.blend_weights: dict[str, float] = normalize_data_path_weights(data_paths)
         self.target_blend_weights: dict[str, float] = normalize_data_path_weights(target_data_paths)
         self.doge_data_iterators: DoGEDataIterators | None = None
+        self.trajectory_path = Path(output_dir) / "doge_weights.jsonl"
 
-    def _compute_alignment_scores(
+    def write_trajectory_record(
         self,
-        state: GlobalState,
-        source_batches: dict[str, _GPTBatch],
-        target_batch: _GPTBatch,
-        model: GPTModel,
-    ) -> dict[str, float]:
-        """Compute source-to-target gradient-alignment scores for each training source.
+        iteration: int,
+        alignment_scores: dict[str, float] | None = None,
+        alignment_debug: dict[str, dict[str, float | int]] | None = None,
+    ) -> None:
+        """Write one DoGE weight-trajectory record on rank 0."""
+        if not dist.is_master():
+            return
 
-        The returned scores are keyed by the same dataset paths as ``source_batches`` and
-        ``self.blend_weights``. Higher scores should increase a source's DoGE blend weight.
-        """
-        target_gradient = calc_alignment_gradient_vector(state, target_batch, model)
-        scores = {}
-        for path, batch in source_batches.items():
-            source_gradient = calc_alignment_gradient_vector(state, batch, model)
-            # Compute cosine similarity: dot(source, target) / (norm(source) * norm(target)).
-            # This measures gradient direction instead of raw gradient scale and is in [-1, 1].
-            denominator = source_gradient.norm() * target_gradient.norm()
-            score = (
-                torch.zeros((), dtype=source_gradient.dtype, device=source_gradient.device)
-                if denominator.item() == 0
-                else torch.dot(source_gradient, target_gradient) / denominator
-            )
-            if dist.is_available() and dist.is_initialized():
-                # PoC synchronization: average the scalar score across the default process group so
-                # every rank applies the same DoGE weight update. This is acceptable for the current
-                # Qwen3-8B setup with PP=DP=CP=1 and TP-only sharding. TODO: replace with exact
-                # sharded cosine reduction by summing dot/norm components over the relevant model
-                # parallel group before forming the cosine score.
-                dist.all_reduce(score, op=dist.ReduceOp.SUM)
-                score /= dist.get_world_size()
-            scores[path] = score.item()
-        return scores
+        record = {
+            "iteration": iteration,
+            "alignment_scores": alignment_scores or {},
+            "blend_weights": self.blend_weights,
+        }
+        if alignment_debug is not None:
+            record["alignment_debug"] = alignment_debug
+
+        self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "w" if iteration == 0 else "a"
+        with self.trajectory_path.open(mode, encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+        summary_parts = []
+        for path, weight in self.blend_weights.items():
+            part = f"{Path(path).name} weight={weight:.4f}"
+            if alignment_scores is not None:
+                part += f" alignment={alignment_scores[path]:.4f}"
+            summary_parts.append(part)
+        summary = " | ".join(summary_parts)
+        print_rank_0(f"DoGE iteration {iteration} | {summary}")
 
     def __call__(
         self,
@@ -135,8 +137,11 @@ class DoGEForwardStep:
 
         # Outer loop: use the target batch to score each source batch and update the data-blend
         # weights. This changes only ``self.blend_weights``, not the student model.
-        scores = self._compute_alignment_scores(state, source_batches, target_batch, model)
+        scores, alignment_debug = compute_alignment_scores(
+            state, source_batches, target_batch, model
+        )
         self.blend_weights = dict(self.updater.update(self.blend_weights, scores))
+        self.write_trajectory_record(state.train_state.step + 1, scores, alignment_debug)
 
         # Inner loop: train the student on source batches mixed with the updated DoGE weights.
         # Megatron-Bridge backpropagates the returned loss and performs the optimizer step.

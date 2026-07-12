@@ -306,12 +306,14 @@ def main(args: argparse.Namespace) -> None:
         data_paths=args.data_paths,
         target_data_paths=args.target_data_paths,
         meta_lr=args.doge_meta_lr,
+        output_dir=args.output_dir,
     )
 
     print("Initial DoGE blend weights:")
     for path, weight in forward_step.blend_weights.items():
         print(f"  {weight:.6g} {path}")
 
+    forward_step.write_trajectory_record(0)
     pretrain(_build_config(args), forward_step)
 
 
