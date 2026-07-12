@@ -1,4 +1,4 @@
-# NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 PTQ quantization + MMLU gate + export + vLLM smoke.
+# NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 PTQ quantization + MMLU gate + export.
 # NemotronH-class hybrid Mamba-Transformer MoE. Smallest NemotronH MoE we ship
 # an example for, so it doubles as the fast MoE expert-parallel exerciser.
 #
@@ -12,8 +12,11 @@
 #                      run. Both stages exercise the MoE expert-parallel collective.
 #   task_1 (export):   TP=1 PP=4 EP=1 ETP=1 — pipeline-parallel for the hybrid
 #                      layer stack; writes the HF NVFP4 ckpt to /cicd/export.
-#   task_2 (smoke):    serve the exported NVFP4 ckpt with vLLM (TP=4) and answer
-#                      8 GPQA-style questions. Inspect under /cicd/vllm/<model>/.
+#
+# A vLLM NVFP4 serving smoke is intentionally omitted here: NVFP4 *inference*
+# requires Blackwell (native FP4). On Hopper, vLLM falls back to the Marlin FP4
+# kernel, which rejects this model's tensor dims — see the Super-120B example
+# (B200) for the FP4-serving smoke pattern.
 #
 # No dedicated Nano-30B recipe exists (only Nano-4B / Super-120B / Ultra-550B),
 # so this uses the named NVFP4_DEFAULT_CFG rather than a recipe path.
@@ -34,7 +37,7 @@ job_name: Nemotron-3-Nano-30B-A3B_PTQ
 pipeline:
   skip: false
   allow_to_fail: false
-  note: "PTQ on Nemotron-3-Nano-30B-A3B (NVFP4): quantize + MMLU gate + export + vLLM smoke, 1 node x 4 GPUs"
+  note: "PTQ on Nemotron-3-Nano-30B-A3B (NVFP4): quantize + MMLU gate + export, 1 node x 4 GPUs"
 
   task_0:
     script: common/megatron_lm/quantize/quantize.sh
@@ -81,24 +84,4 @@ pipeline:
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
       ntasks_per_node: 4
-      gpus_per_node: 4
-
-  # vLLM generation test: serve the exported HF NVFP4 ckpt and answer 8
-  # GPQA-style questions. Inspect responses under /cicd/vllm/<model>/.
-  task_2:
-    script: common/vllm/query.sh
-    args:
-      - --model /cicd/export/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_NVFP4_DEFAULT_CFG
-      - --tensor-parallel-size 4
-      - --trust-remote-code
-      - --
-      - --data common/vllm/gpqa_sample.jsonl
-      - --max-tokens 256
-      - --num-shards 1
-      - --save /cicd/vllm/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_NVFP4_DEFAULT_CFG
-    slurm_config:
-      _factory_: "slurm_factory"
-      container: vllm/vllm-openai:v0.21.0
-      nodes: 1
-      ntasks_per_node: 1
       gpus_per_node: 4
