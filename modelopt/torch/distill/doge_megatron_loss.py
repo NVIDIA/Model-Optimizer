@@ -15,6 +15,7 @@
 
 """Megatron-Bridge loss helpers for DoGE distillation."""
 
+import contextlib
 from functools import partial
 
 import torch
@@ -26,7 +27,7 @@ from megatron.core.utils import get_model_config
 
 from modelopt.torch.distill.doge_megatron_data import _GPTBatch
 
-__all__ = ["_weighted_source_forward_step"]
+__all__ = ["calc_alignment_gradient_vector", "weighted_source_forward_step"]
 
 
 def _forward_batch(batch: _GPTBatch, model: GPTModel) -> tuple[torch.Tensor, torch.Tensor]:
@@ -74,7 +75,7 @@ def _weighted_loss(
     return loss, num_tokens, report
 
 
-def _weighted_source_forward_step(
+def weighted_source_forward_step(
     state: GlobalState,
     source_batches: dict[str, _GPTBatch],
     model: GPTModel,
@@ -144,3 +145,90 @@ def _weighted_source_forward_step(
     # already computed above, so the scalar ``total_loss`` is also used as the ignored dummy output
     # tensor. This is only valid for the current non-pipeline-parallel PoC.
     return total_loss, partial(_weighted_loss, total_loss, loss_num_tokens, total_report)
+
+
+# The functions below compute selected-parameter gradients for the DoGE outer loop.
+# They reuse the same Megatron-Bridge GPT forward and ModelOpt KD-loss path as the training loss,
+# but call ``torch.autograd.grad`` for scoring instead of backpropagating the full training loss.
+def _clear_model_grads(model: GPTModel) -> None:
+    """Clear gradients that should not leak into the Megatron optimizer step."""
+    if hasattr(model, "zero_grad_buffer"):
+        # Mirrors Megatron-Bridge ``training.train.train_step()``, which clears DDP gradient
+        # buffers with ``model_chunk.zero_grad_buffer()`` before calling ``optimizer.zero_grad()``.
+        # This is needed because Megatron DDP stores gradients in communication buffers, not only
+        # in ``parameter.grad``.
+        model.zero_grad_buffer()
+    for parameter in model.parameters():
+        parameter.grad = None
+        if hasattr(parameter, "main_grad") and parameter.main_grad is not None:
+            parameter.main_grad.zero_()
+
+
+def _get_alignment_parameters(model: GPTModel) -> list[torch.nn.Parameter]:
+    """Return hardcoded Qwen3-8B final-MLP projection parameters for DoGE scoring."""
+    # TODO: Temporary DoGE PoC selector for Qwen3-8B. DoGE computes source and target KD gradients
+    # on this parameter, compares their directions, and uses the score to update data-blend
+    # weights. Make this configurable before using other models.
+    alignment_param_suffix = "decoder.layers.35.mlp.linear_fc2.weight"
+    parameters = [
+        parameter
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and name.endswith(alignment_param_suffix)
+    ]
+    if not parameters:
+        raise RuntimeError(
+            "DoGE alignment parameter not found: expected a trainable parameter ending with "
+            f"{alignment_param_suffix!r}."
+        )
+    return parameters
+
+
+def calc_alignment_gradient_vector(
+    state: GlobalState,
+    batch: _GPTBatch,
+    model: GPTModel,
+) -> torch.Tensor:
+    """Return a flattened selected-parameter KD gradient vector for one DoGE batch.
+
+    The PoC uses Qwen3-8B's final MLP output projection as a cheap approximation to full-model
+    DoGE gradients. ``torch.autograd.grad`` computes gradients only for that selected parameter and
+    avoids populating optimizer-visible ``.grad`` fields; gradients are still cleared before and
+    after scoring as a safety guard.
+
+    The forward/loss construction mirrors ``megatron.bridge.training.gpt_step.forward_step_modelopt``:
+    run the GPT forward pass, build the ModelOpt KD loss with ``_create_loss_function_modelopt()``,
+    and call the returned loss function. The gradient clearing mirrors
+    ``megatron.bridge.training.train.train_step()``. DoGE differs from Bridge's normal train step by
+    using ``torch.autograd.grad`` on selected parameters for scoring instead of calling backward on
+    the full training loss.
+
+    TODO: This repeats the forward/KD-loss construction used by ``weighted_source_forward_step()``.
+    Refactor the shared loss computation so DoGE scoring and weighted source training use one code
+    path.
+    """
+    _clear_model_grads(model)
+    parameters = _get_alignment_parameters(model)
+    no_sync = model.no_sync() if hasattr(model, "no_sync") else contextlib.nullcontext()
+    with no_sync:
+        output, loss_mask = _forward_batch(batch, model)
+        loss_function = _create_loss_function_modelopt(
+            loss_mask,
+            model,
+            check_for_nan_in_loss=state.cfg.rerun_state_machine.check_for_nan_in_loss,
+            check_for_spiky_loss=state.cfg.rerun_state_machine.check_for_spiky_loss,
+        )
+        loss, num_tokens, _ = loss_function(output)
+        loss = loss / torch.clamp(num_tokens, min=1)
+        gradients = torch.autograd.grad(loss, parameters, allow_unused=True)
+    vector = torch.cat(
+        [
+            torch.zeros_like(parameter, dtype=torch.float32).reshape(-1)
+            if gradient is None
+            else gradient.detach().float().reshape(-1)
+            for parameter, gradient in zip(parameters, gradients)
+        ]
+    )
+    _clear_model_grads(model)
+    # BF16 probe backward can overflow a small number of entries in this large projection layer.
+    # DoGE scoring only needs a direction; zero non-finite entries so they do not poison the score.
+    return torch.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0)

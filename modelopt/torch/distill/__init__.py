@@ -15,6 +15,8 @@
 
 """Distillation API subpackage for torch."""
 
+from modelopt.torch.utils import import_plugin as _import_plugin
+
 from . import mode
 from .config import *
 from .distillation import *
@@ -23,6 +25,9 @@ from .layerwise_distillation_model import *
 from .loss_balancers import *
 from .losses import *
 from .registry import *
+
+with _import_plugin("megatron", verbose=False):
+    from .doge_megatron_loss import *
 
 # isort: off
 # Import plugins last to avoid circular imports
