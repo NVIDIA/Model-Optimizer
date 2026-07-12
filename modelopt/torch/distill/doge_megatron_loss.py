@@ -19,6 +19,7 @@ import contextlib
 from functools import partial
 
 import torch
+import torch.distributed as dist
 from megatron.bridge.training.gpt_step import _create_loss_function_modelopt
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
@@ -27,7 +28,10 @@ from megatron.core.utils import get_model_config
 
 from modelopt.torch.distill.doge_megatron_data import _GPTBatch
 
-__all__ = ["calc_alignment_gradient_vector", "weighted_source_forward_step"]
+__all__ = [
+    "compute_alignment_scores",
+    "weighted_source_forward_step",
+]
 
 
 def _forward_batch(batch: _GPTBatch, model: GPTModel) -> tuple[torch.Tensor, torch.Tensor]:
@@ -193,7 +197,7 @@ def _read_parameter_gradient(parameter: torch.nn.Parameter) -> torch.Tensor:
     return gradient.detach().float().reshape(-1)
 
 
-def calc_alignment_gradient_vector(
+def _calc_alignment_gradient_vector(
     state: GlobalState,
     batch: _GPTBatch,
     model: GPTModel,
@@ -235,3 +239,85 @@ def calc_alignment_gradient_vector(
     # BF16 probe backward can overflow a small number of entries in this large projection layer.
     # DoGE scoring only needs a direction; zero non-finite entries so they do not poison the score.
     return torch.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _calc_alignment_score(
+    source_gradient: torch.Tensor, target_gradient: torch.Tensor
+) -> tuple[float, dict[str, float]]:
+    """Return one DoGE source-to-target alignment score.
+
+    Args:
+        source_gradient: Flattened selected-parameter KD gradient for one training source.
+        target_gradient: Flattened selected-parameter KD gradient for the target objective.
+
+    Returns:
+        A cosine-similarity score and debug values used to compute it. Higher scores mean the
+        source gradient points more toward the target gradient and should increase that source's
+        blend weight.
+
+    The gradients are scaled before dot/norm computation only for numeric stability. Cosine
+    similarity is unchanged by dividing both vectors by the same positive scale.
+    """
+    scale = torch.maximum(source_gradient.abs().max(), target_gradient.abs().max())
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(scale, op=dist.ReduceOp.MAX)
+    scaled_source_gradient = source_gradient / scale if scale.item() != 0 else source_gradient
+    scaled_target_gradient = target_gradient / scale if scale.item() != 0 else target_gradient
+
+    # Compute a global cosine similarity:
+    # dot(source, target) / (norm(source) * norm(target)).
+    # Reduce dot/norm components before forming the cosine so TP-sharded parameter slices
+    # contribute to one score instead of averaging per-rank local cosines.
+    score_components = torch.stack(
+        [
+            torch.dot(scaled_source_gradient, scaled_target_gradient),
+            torch.dot(scaled_source_gradient, scaled_source_gradient),
+            torch.dot(scaled_target_gradient, scaled_target_gradient),
+        ]
+    )
+    if dist.is_available() and dist.is_initialized():
+        # PoC synchronization: with the current Qwen3-8B setup PP=DP=CP=1 and the default
+        # group is TP-only. TODO: reduce over the exact model-parallel group when adding
+        # support for other parallelism layouts.
+        dist.all_reduce(score_components, op=dist.ReduceOp.SUM)
+    source_norm = torch.sqrt(score_components[1])
+    target_norm = torch.sqrt(score_components[2])
+    denominator = source_norm * target_norm
+    score = (
+        torch.zeros((), dtype=source_gradient.dtype, device=source_gradient.device)
+        if denominator.item() == 0
+        else score_components[0] / denominator
+    )
+    return score.item(), {
+        "dot": score_components[0].item(),
+        "source_norm": source_norm.item(),
+        "target_norm": target_norm.item(),
+    }
+
+
+def compute_alignment_scores(
+    state: GlobalState,
+    source_batches: dict[str, _GPTBatch],
+    target_batch: _GPTBatch,
+    model: GPTModel,
+) -> tuple[dict[str, float], dict[str, dict[str, float | int]]]:
+    """Compute source-to-target gradient-alignment scores for DoGE weight updates.
+
+    Scores are keyed by the same dataset paths as ``source_batches``. Higher scores should increase
+    a source's DoGE blend weight. The debug dictionary records the reduced cosine-similarity
+    components used to compute each score.
+    """
+    target_gradient = _calc_alignment_gradient_vector(state, target_batch, model)
+    target_token_sum = int(target_batch[0].sum().item())
+    scores = {}
+    alignment_debug = {}
+    for path, batch in source_batches.items():
+        source_gradient = _calc_alignment_gradient_vector(state, batch, model)
+        score, debug = _calc_alignment_score(source_gradient, target_gradient)
+        scores[path] = score
+        alignment_debug[path] = {
+            "source_token_sum": int(batch[0].sum().item()),
+            "target_token_sum": target_token_sum,
+            **debug,
+        }
+    return scores, alignment_debug
