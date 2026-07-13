@@ -396,9 +396,16 @@ class HFDFlashModel(DFlashModel):
         return torch.cat([ctx_pos, draft_pos], dim=1)
 
     def _build_draft_attention_mask(
-        self, seq_len, anchor_positions, block_keep_mask, n_blocks, dtype, device
+        self, seq_len, anchor_positions, block_keep_mask, n_blocks, dtype, device, window=None
     ):
-        """Build SDPA attention mask: context (causal) + draft (bidirectional within block)."""
+        """Build SDPA attention mask: context (causal) + draft (bidirectional within block).
+
+        When ``window`` is not None, all layers use non-causal sliding-window attention
+        (MiMo-style): each draft query only sees context positions within ``window`` tokens
+        before its own position. Block-internal attention stays bidirectional and is left
+        un-windowed (the config enforces ``window >= block_size``, so a full block always
+        fits inside the window and windowing it would be a no-op).
+        """
         bsz = anchor_positions.shape[0]
         block_size = self.dflash_block_size
         q_len = n_blocks * block_size
@@ -412,6 +419,12 @@ class HFDFlashModel(DFlashModel):
 
         # Context: kv < S and kv < anchor
         mask_ctx = (kv_indices < seq_len) & (kv_indices < anchor_exp)
+
+        # Sliding window on the context: keep only context kv whose real position is within
+        # `window` tokens before the query's real position (anchor + position-in-block).
+        if window is not None:
+            q_real_pos = anchor_exp + (q_indices % block_size)  # [B, 1, q_len, 1]
+            mask_ctx = mask_ctx & (kv_indices > q_real_pos - window)
         # Draft: kv >= S and same block
         is_draft = kv_indices >= seq_len
         kv_block_ids = (kv_indices - seq_len) // block_size
@@ -424,6 +437,29 @@ class HFDFlashModel(DFlashModel):
         # Convert bool mask to float additive mask for SDPA
         attn_mask = torch.zeros(bsz, 1, q_len, kv_len, device=device, dtype=dtype)
         attn_mask.masked_fill_(~final_mask, torch.finfo(dtype).min)
+        return attn_mask
+
+    def _build_generate_swa_mask(self, ctx_len, bsz, dtype, device):
+        """Generation-time SWA mask [B, 1, block_size, ctx_len + block_size], or None.
+
+        Returns None with full attention (KV cache with no mask): all positions attend
+        freely to context and each other within the block. With sliding-window attention,
+        each block query only sees context within ``dflash_swa_window_size`` tokens before
+        its real position (ctx_len + position-in-block), matching training and vLLM
+        inference; block kv stays fully visible (bidirectional / un-windowed).
+        """
+        if self.dflash_swa_window_size is None:
+            return None
+        window = self.dflash_swa_window_size
+        block_size = self.dflash_block_size
+        kv_len = ctx_len + block_size
+        kv_idx = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
+        q_real_pos = torch.arange(ctx_len, ctx_len + block_size, device=device).view(1, 1, -1, 1)
+        is_ctx = kv_idx < ctx_len
+        # Context kv kept iff within the window; block kv (>= ctx_len) always visible.
+        keep = (~is_ctx) | (kv_idx > q_real_pos - window)
+        attn_mask = torch.zeros(bsz, 1, block_size, kv_len, device=device, dtype=dtype)
+        attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
         return attn_mask
 
     def _compute_loss(
@@ -648,7 +684,13 @@ class HFDFlashModel(DFlashModel):
         )
         full_pos = self._build_position_ids(seq_len, anchor_positions, device)
         attn_mask = self._build_draft_attention_mask(
-            seq_len, anchor_positions, block_keep_mask, n_blocks, target_hidden.dtype, device
+            seq_len,
+            anchor_positions,
+            block_keep_mask,
+            n_blocks,
+            target_hidden.dtype,
+            device,
+            window=self.dflash_swa_window_size,
         )
 
         # 5. Draft forward
@@ -776,16 +818,14 @@ class HFDFlashModel(DFlashModel):
         block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
-        # No attention mask at inference
-        # which uses KV cache with no mask. All positions attend freely to
-        # context and each other within the block.
+        attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
 
         # Draft forward
         draft_hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
             position_ids=pos_ids,
-            attention_mask=None,
+            attention_mask=attn_mask,
         )
 
         # Logits on positions 1..block_size-1 (skip anchor at position 0)

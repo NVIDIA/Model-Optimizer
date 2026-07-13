@@ -69,6 +69,9 @@ Keep the search space explicit. A candidate recipe is a tuple across these axes:
   recipes, AutoQuant selection, or a hybrid of AutoQuant plus manual overrides.
 - **Module family:** attention, MLP, MoE experts, routers/gates, embeddings,
   `lm_head`, adapters, vision encoders, and model-specific modules.
+- **Layer position:** first/last transformer-layer counts or explicit ordinal
+  ranges to keep in BF16. First 3-4 and last 1-2 layers are common starting
+  candidate ranges, not defaults.
 - **Runtime fusion constraints:** modules fused by the inference library must
   use compatible quantization. Examples: vLLM Qwen `linear_attn.in_proj_qkvz`
   and fused MoE expert projections such as gate/up (`w1`/`w3`).
@@ -103,18 +106,29 @@ Do not collapse the search to one dimension such as numeric format only. Read
    - Add at least one manual or sensitivity-guided candidate so AutoQuant can be
      compared against controlled ablations and there is a fallback if AutoQuant
      misses the best frontier or hits runtime constraints.
+   - When sensitivity or model behavior implicates boundary layers, add a
+     controlled first-layer, last-layer, or combined BF16 exclusion candidate.
+     Do not preserve boundary layers without testing the trade-off.
 
 4. **Generate candidates**
    - Delegate checkpoint generation and PTQ validation to `ptq`.
    - Change one major axis at a time: format, calibration algorithm, module
-     selection, granularity, exclusions, or calibration data.
+     family, layer position, granularity, or calibration data.
    - Use AutoQuant for broad candidate generation and sensitivity reports; use
      manual recipes for controlled module-family ablations and overrides.
+   - Resolve positional ordinals against the model's transformer block sequence.
+     For manual recipes, add those blocks to the recipe exclusions. For
+     AutoQuant or hybrid candidates, pass positional exclusions into the
+     selected implementation when supported; otherwise apply a manual override
+     to its result and record the limitation.
 
 5. **Gate before scaling**
    - Validate checkpoint coverage and metadata.
    - Reject or rewrite recipes that mix quantization algorithms inside a fused
      runtime group.
+   - Ensure positional exclusions preserve complete fused runtime groups, then
+     evaluate the candidate against the same BF16 baseline and acceptance
+     criteria as every other recipe.
    - If the checkpoint is valid but serving fails due to runtime support, do not
      reject the recipe immediately. Delegate to `deployment` / `debug` for small
      patches or flags, then rerun a pipe-clean check.
@@ -126,7 +140,8 @@ Do not collapse the search to one dimension such as numeric format only. Read
 3. Rerun noisy or near-threshold results before labeling a regression.
 4. Decide the next candidate:
    - Accuracy drop: protect or ablate sensitive module families, try MSE/GPTQ,
-     or use AutoQuant sensitivity to choose overrides.
+     use AutoQuant sensitivity to choose overrides, or test first/last-layer
+     BF16 exclusions when evidence points to boundary sensitivity.
    - Poor performance/cost: quantize the next high-cost active family, adjust
      active-cost objective, or try a more aggressive format.
    - AutoQuant underperforms manual recipes: inspect sensitivity reports,
@@ -136,12 +151,13 @@ Do not collapse the search to one dimension such as numeric format only. Read
      support from checkpoint quality.
    - Repeated AutoQuant recipes: inspect achieved bits and recipe hashes, then
      adjust constraints before launching a larger sweep.
-5. Promote only when `compare-results` shows the candidate is comparable to the
-   baseline and satisfies the user-defined goal.
+5. Promote only when `compare-results` shows no failed external sanity check,
+   the candidate is comparable to the validated measured baseline, and the
+   user-defined goal is met. An externally unverified baseline is non-blocking.
 
 Maintain a recipe portfolio table with recipe name, objective, active-cost
 estimate, calibration notes, checkpoint path, eval/log references, accuracy,
-verbosity, and decision.
+verbosity, positional exclusions, and decision.
 
 ## References
 

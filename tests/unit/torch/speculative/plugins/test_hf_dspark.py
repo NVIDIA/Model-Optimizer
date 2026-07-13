@@ -203,6 +203,62 @@ class TestDSparkForward:
             )
 
 
+class TestDSparkSwa:
+    """DSpark honors dflash_swa_window_size (regression: the window was silently ignored)."""
+
+    def _make_swa_model(self, window=6):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dspark_config()
+        config["dflash_swa_window_size"] = window
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    def test_forward_passes_window_to_mask(self, monkeypatch):
+        """The training forward builds the draft mask with the configured window."""
+        model = self._make_swa_model(window=6)
+        model.train()
+        torch.manual_seed(0)
+        input_ids = torch.randint(1, model.dflash_config.vocab_size, (2, SEQ_LEN))
+
+        windows = []
+        orig = model._build_draft_attention_mask
+
+        def spy(*args, **kwargs):
+            windows.append(kwargs.get("window"))
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(model, "_build_draft_attention_mask", spy)
+        out = model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            labels=input_ids.clone(),
+        )
+        assert out.loss.dim() == 0
+        assert windows == [6]
+
+    def test_generate_applies_windowed_mask(self, monkeypatch):
+        """pseudo_speculative_generate builds (and runs with) the generation-time SWA mask."""
+        model = self._make_swa_model(window=6)
+        model.eval()
+        torch.manual_seed(0)
+        input_ids = torch.randint(1, model.dflash_config.vocab_size, (1, SEQ_LEN))
+
+        masks = []
+        orig = model._build_generate_swa_mask
+
+        def spy(*args, **kwargs):
+            mask = orig(*args, **kwargs)
+            masks.append(mask)
+            return mask
+
+        monkeypatch.setattr(model, "_build_generate_swa_mask", spy)
+        base_token, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=3)
+        assert len(masks) == 1 and masks[0] is not None
+        assert masks[0].shape == (1, 1, BLOCK_SIZE, SEQ_LEN + BLOCK_SIZE)
+        assert base_token.shape == (1, 1)
+        assert draft_tokens.shape == (1, 3)
+
+
 class TestDSparkExporter:
     """Test the DSpark checkpoint export format (z-lab-compatible layout)."""
 

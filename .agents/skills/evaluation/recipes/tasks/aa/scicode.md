@@ -17,6 +17,8 @@ harvesting requirements beyond the task YAML fragment.
   multi-step prompts can exceed 32K). The example template's default of
   `--max-model-len 131072` satisfies this and is preferred — do not lower
   it unless you have a memory reason to.
+- **Parallelism:** set task-level `parallelism: 8` exactly. Use the same value
+  for baseline and candidate.
 
 ## YAML Fragment
 
@@ -28,13 +30,12 @@ Use this inside the top-level `evaluation.tasks` list:
   nemo_evaluator_config:
     config:
       params:
+        parallelism: 8
         extra:
           args: ++prompt_config=eval/scicode/default ++with_background=true
-          num_repeats: 8
+          num_repeats: 1
 ```
 
 ## Score Extraction from mlflow
 
-Result (0-100): `scicode_pass_at_1_avg-of-N_subtask_accuracy`
-
-N is the repeat count.  If the repeat count is unknown, use the highest available `avg-of-N`.
+Result (0-100): `scicode_pass_at_1_avg-of-1_subtask_accuracy`

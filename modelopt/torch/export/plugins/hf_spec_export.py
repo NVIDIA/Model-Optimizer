@@ -399,6 +399,21 @@ class DFlashExporter(SpeculativeDecodingExporter):
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
 
+        # Sliding-window attention: all draft layers use non-causal SWA (MiMo-style). vLLM's
+        # _resolve_layer_attention reads dflash_config.use_swa + swa_window_size; with
+        # layer_types left all "full_attention" it applies a non-causal sliding window to
+        # every draft layer (window from swa_window_size / top-level sliding_window).
+        swa_window = getattr(self.model, "dflash_swa_window_size", None)
+        if swa_window is not None:
+            config["sliding_window"] = swa_window
+            config["dflash_config"].update(
+                {
+                    "use_swa": True,
+                    "swa_window_size": swa_window,
+                    "causal": False,
+                }
+            )
+
         # Inject the export-time YaRN rope_scaling from the dflash_export_rope_scaling
         # config field (empty dict disables). Mirrors eagle's eagle_export_rope_scaling.
         export_rope_scaling = getattr(self.model, "dflash_export_rope_scaling", None)

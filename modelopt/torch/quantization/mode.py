@@ -39,6 +39,7 @@ from .config import (
     CompressConfig,
     GPTQCalibConfig,
     LocalHessianCalibConfig,
+    LSQConfig,
     MaxCalibConfig,
     MseCalibConfig,
     QuantizeAlgoCfgType,
@@ -62,6 +63,7 @@ from .model_calib import (
     gptq,
     layerwise_calibrate,
     local_hessian_calibrate,
+    lsq,
     max_calibrate,
     mse_calibrate,
     smoothquant,
@@ -531,3 +533,15 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+@CalibrateModeRegistry.register_mode
+class LSQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for LSQ (Learned Scale Quantization) algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LSQConfig
+
+    _calib_func = lsq
