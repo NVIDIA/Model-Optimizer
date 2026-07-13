@@ -260,9 +260,14 @@ def _needs_activation_forward_for_max_calib(model: nn.Module) -> bool:
     Weight quantizers are calibrated directly on the weight tensors by
     :func:`weight_only_quantize`, so they never need the data forward. Activation-side
     quantizers (input/output/BMM) need it only when they collect data-driven statistics:
-    i.e. they are enabled, have a calibrator, and are neither dynamic nor pinned to a constant
-    amax (``use_constant_amax`` / ``constant_amax``). Constant-amax quantizers also skip bias
-    calibration in :func:`finish_stats_collection`, so they never require the forward either.
+    i.e. they are enabled, have a calibrator, and are none of
+
+    - dynamic (top-level ``type: dynamic``), which computes amax on the fly;
+    - MX formats (MXFP4/MXFP8), whose per-block E8M0 scales are dynamic and which carry no
+      per-tensor amax (``is_mx_format`` makes ``amax`` always ``None``);
+    - pinned to a constant amax (``use_constant_amax`` / ``constant_amax``). Constant-amax
+      quantizers also skip bias calibration in :func:`finish_stats_collection`, so they never
+      require the forward either.
 
     When this returns False (e.g. an experts-only recipe whose activation quantizers all use
     ``constant_amax``), the calibration forward can be skipped entirely and only weight
@@ -277,6 +282,7 @@ def _needs_activation_forward_for_max_calib(model: nn.Module) -> bool:
             continue
         if (
             module._dynamic
+            or module.is_mx_format
             or module._use_constant_amax
             or getattr(module, "_constant_amax", None) is not None
         ):

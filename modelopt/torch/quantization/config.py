@@ -940,15 +940,19 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
     skip_forward_without_activation_calib: bool = ModeloptField(
-        default=True,
+        default=False,
         title="Skip the calibration forward when no activation quantizer needs data.",
         description=(
-            "If True (default), max calibration skips the ``forward_loop`` entirely when no "
-            "enabled quantizer collects data-driven activation statistics — e.g. an "
-            "experts-only recipe whose activation quantizers all use ``constant_amax`` or "
-            "``use_constant_amax``, or dynamic quantization. Weight calibration still runs on "
-            "the weight tensors directly, so results are unchanged; only the wasted forward is "
-            "avoided. Set to False to always run the provided ``forward_loop``."
+            "If True, max calibration skips the ``forward_loop`` entirely when no enabled "
+            "quantizer collects data-driven activation statistics — e.g. an experts-only recipe "
+            "whose activation quantizers all use ``constant_amax`` / ``use_constant_amax``, "
+            "dynamic, or MX (MXFP4/MXFP8) quantization. Weight calibration still runs on the "
+            "weight tensors directly, so the quantized weights are unchanged; only the wasted "
+            "forward is avoided. "
+            "Opt-in (default False) because the provided ``forward_loop`` can carry side "
+            "effects the caller relies on — most notably materializing sharded parameters under "
+            "DeepSpeed ZeRO-3 — so enable it per-recipe when the calibration data is known to be "
+            "unnecessary."
         ),
     )
 

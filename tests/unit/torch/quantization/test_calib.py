@@ -654,6 +654,27 @@ def test_needs_activation_forward_ignores_disabled_and_weight_quantizers():
     assert not _needs_activation_forward_for_max_calib(lin)
 
 
-def test_max_calib_config_enables_skip_by_default():
-    """The top-level max path opts in via MaxCalibConfig."""
-    assert MaxCalibConfig().skip_forward_without_activation_calib is True
+def test_needs_activation_forward_ignores_mx_and_dynamic_quantizers():
+    """MX (block-dynamic E8M0, no per-tensor amax) and dynamic activations need no forward."""
+    # MXFP8: block-dynamic with E8M0 scales; top-level ``_dynamic`` is False, so it must be
+    # excluded via ``is_mx_format`` rather than the ``_dynamic`` check.
+    mx = _make_quant_linear(
+        QuantizerAttributeConfig(
+            num_bits=(4, 3), block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+        )
+    )
+    assert mx.input_quantizer.is_mx_format
+    assert not mx.input_quantizer._dynamic
+    assert not _needs_activation_forward_for_max_calib(mx)
+
+    # Top-level dynamic activation quantization also needs no calibration forward.
+    dyn = _make_quant_linear(QuantizerAttributeConfig(num_bits=8, type="dynamic"))
+    assert not _needs_activation_forward_for_max_calib(dyn)
+
+
+def test_max_calib_config_skip_is_opt_in():
+    """The flag is opt-in (default False) so it does not change behavior for direct callers."""
+    assert MaxCalibConfig().skip_forward_without_activation_calib is False
+    assert MaxCalibConfig(
+        skip_forward_without_activation_calib=True
+    ).skip_forward_without_activation_calib

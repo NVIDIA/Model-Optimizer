@@ -41,6 +41,10 @@ quantize:
     # layerwise=false required for VLMs where the decoder layers are nested under
     # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
     layerwise: false
+    # Every quantized activation quantizer here is either constant_amax (experts/block-sparse
+    # inputs) or use_constant_amax (KV cast), so no data-driven activation stats are collected.
+    # Skip the calibration forward and do weight-only calibration instead.
+    skip_forward_without_activation_calib: true
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*.experts.*weight_quantizer'
