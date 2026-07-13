@@ -21,6 +21,7 @@ from functools import partial
 from pathlib import Path
 
 import torch
+from megatron.bridge.training.gpt_step import forward_step_modelopt
 from megatron.bridge.training.state import GlobalState
 from megatron.core.models.gpt import GPTModel
 
@@ -123,6 +124,15 @@ class DoGEForwardStep:
         alignment scores. The inner loop returns the weighted source loss that Megatron-Bridge
         backpropagates with its normal optimizer step.
         """
+        if not model.training:
+            # Megatron-Bridge reuses the forward step for validation under no-grad/eval mode.
+            # DoGE scoring requires gradients, so validation should use Bridge's validation
+            # iterator instead of DoGE's per-source training iterators. This reports the fixed
+            # validation split derived from the initial --data_paths, not the DoGE target objective.
+            # TODO: Add a DoGE-specific validation schedule where target validation is the primary
+            # metric and this initial-blend validation is either renamed or skipped.
+            return forward_step_modelopt(state, data_iterator, model, return_schedule_plan)
+
         if self.doge_data_iterators is None:
             self.doge_data_iterators = _build_doge_data_iterators(
                 state.cfg,
@@ -132,18 +142,6 @@ class DoGEForwardStep:
             )
 
         source_batches, target_batch = _next_doge_batches(state, model, self.doge_data_iterators)
-
-        if not model.training:
-            # Megatron-Bridge reuses the forward step for validation under no-grad/eval mode.
-            # DoGE scoring requires gradients, so validation reports the current weighted blend
-            # without updating DoGE weights.
-            return weighted_source_forward_step(
-                state,
-                source_batches,
-                model,
-                self.blend_weights,
-                return_schedule_plan,
-            )
 
         # Outer loop: use the target batch to score each source batch and update the data-blend
         # weights. This changes only ``self.blend_weights``, not the student model.
