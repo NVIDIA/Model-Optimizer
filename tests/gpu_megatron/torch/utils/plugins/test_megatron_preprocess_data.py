@@ -107,10 +107,10 @@ def test_megatron_preprocess_data_hf_split_stops_at_max_tokens(tmp_path):
     assert limited_size < full_size
 
 
-def test_megatron_preprocess_data_hf_splits_resume_uses_cached_token_count(tmp_path):
+def test_megatron_preprocess_data_hf_split_resume_uses_cached_token_count(tmp_path):
     args = {
-        "hf_dataset": "Salesforce/wikitext",
-        "hf_name": "wikitext-2-raw-v1",
+        "hf_dataset": "nanotron/minipile_100_samples",
+        "hf_split": "train",
         "hf_max_samples_per_split": 1,
         "hf_streaming": True,
         "max_tokens": 100,
