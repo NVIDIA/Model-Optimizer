@@ -578,9 +578,6 @@ def quantize(
             "Per node calibration is only supported for int8 and fp8 quantization modes"
         )
 
-    if input_shapes_profile is None and model_id:
-        input_shapes_profile = create_input_shapes_profile(model_id, calibration_eps)
-
     # quantize_static creates a shape-inferred copy at the input model's directory
     # Needs to check if we have write permission to this directory
     assert onnx_path.endswith((".onnx", ".pb"))
