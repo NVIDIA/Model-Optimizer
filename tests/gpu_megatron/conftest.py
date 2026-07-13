@@ -17,22 +17,17 @@ import contextlib
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
-from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
 import modelopt.torch.utils.distributed as dist
 
 
 @pytest.fixture(scope="session")
-def tiny_qwen3_path(tmp_path_factory):
-    return str(
-        create_tiny_qwen3_dir(
-            tmp_path_factory.mktemp("tiny_qwen3"),
-            with_tokenizer=True,
-            hidden_size=512,
-            intermediate_size=512,
-        )
-    )
+def tiny_tokenizer_path(tmp_path_factory):
+    tokenizer_path = tmp_path_factory.mktemp("tiny_tokenizer")
+    get_tiny_tokenizer().save_pretrained(tokenizer_path)
+    return str(tokenizer_path)
 
 
 apex_destroy = None

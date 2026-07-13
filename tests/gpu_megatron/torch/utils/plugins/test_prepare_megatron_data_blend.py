@@ -26,11 +26,11 @@ from modelopt.torch.utils.plugins.prepare_megatron_data_blend import main
 
 
 def _setup_test(
-    tiny_qwen3_path: str, tmp_path: Path, monkeypatch, target_tokens: int | None
+    tiny_tokenizer_path: str, tmp_path: Path, monkeypatch, target_tokens: int | None
 ) -> tuple[Path, Path, Mock]:
     output_dir = tmp_path / "tokenized"
     config = {
-        "tokenizer": tiny_qwen3_path,
+        "tokenizer": tiny_tokenizer_path,
         "output_dir": str(output_dir),
         "sources": [
             {
@@ -73,10 +73,10 @@ def _setup_test(
 
 @pytest.mark.parametrize("target_tokens", [1_000, None], ids=["token-budget", "all-data"])
 def test_prepare_megatron_data_blend_with_split_and_files_sources(
-    tiny_qwen3_path: str, tmp_path: Path, monkeypatch, target_tokens: int | None
+    tiny_tokenizer_path: str, tmp_path: Path, monkeypatch, target_tokens: int | None
 ):
     output_dir, config_path, download = _setup_test(
-        tiny_qwen3_path, tmp_path, monkeypatch, target_tokens
+        tiny_tokenizer_path, tmp_path, monkeypatch, target_tokens
     )
 
     # Run in-process so the CLI entry point uses the mocked NVIDIA download.
