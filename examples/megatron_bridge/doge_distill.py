@@ -24,6 +24,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import torch
+from distill_callbacks import _TargetValidationCallback
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.distillation_provider import (
     DistillationProvider,
@@ -126,9 +127,8 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="VALUE",
         help=(
             "Fixed held-out DoGE target objective as WEIGHT PATH pairs.\n"
-            "This does not override Megatron validation data; validation still uses "
-            "--data_paths.\n"
-            "Sources may differ from the training sources.\n"
+            "Used for DoGE weight updates and periodic target validation. Sources may differ "
+            "from the training sources.\n"
             "Example:\n"
             "  --target_data_paths 0.6 /data/reasoning 0.4 /data/knowledge"
         ),
@@ -314,7 +314,11 @@ def main(args: argparse.Namespace) -> None:
         print(f"  {weight:.6g} {path}")
 
     forward_step.write_trajectory_record(0)
-    pretrain(_build_config(args), forward_step)
+    callbacks = []
+    # Target validation does not work with mock data.
+    if not args.use_mock_data:
+        callbacks.append(_TargetValidationCallback(get_blend_from_list(args.target_data_paths)))
+    pretrain(_build_config(args), forward_step, callbacks=callbacks)
 
 
 if __name__ == "__main__":
