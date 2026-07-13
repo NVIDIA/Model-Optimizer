@@ -167,10 +167,16 @@ How the quantization scales are searched. The default (no suffix) is `max`.
   (= E2M1_MAX × E4M3_MAX = 6 × 448) via `constant_amax`, so the exported NVFP4
   `input_scale` is exactly **1.0** and those quantizers skip activation
   calibration entirely (no forward statistics collected). Weights are still
-  max-calibrated, and the per-block E4M3 activation scales remain dynamic. Use
-  it when the deployment stack expects a unit expert `input_scale` (e.g. NVFP4
-  expert kernels that assume `input_scale == 1.0`) or to take expert activation
-  calibration out of the picture.
+  max-calibrated (computed directly from the weight tensors, no data needed),
+  and the per-block E4M3 activation scales remain dynamic. Because nothing in
+  the recipe needs a calibration forward pass — expert activations are pinned,
+  weight amax comes from the weights, and the KV cast uses a constant amax —
+  it **may work out of the box for very large LLMs** (hundreds of billions of
+  parameters and up), where running calibration PTQ is difficult on a
+  resource-limited setup. Also reach for it when the deployment stack expects
+  a unit expert `input_scale` (e.g. NVFP4 expert kernels that assume
+  `input_scale == 1.0`) or to take expert activation calibration out of the
+  picture.
 - **`gptq`** (`nvfp4_default-kv_none-gptq`) — GPTQ layerwise calibration of the
   weight scales; writes layerwise checkpoints. GPTQ is best established for
   **INT4 weight-only** quantization; its effectiveness on **NVFP4** weight
