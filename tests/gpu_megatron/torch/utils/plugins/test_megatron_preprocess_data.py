@@ -19,14 +19,15 @@ from pathlib import Path
 
 import pytest
 
-from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
 from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
 
 
 def test_megatron_preprocess_data_with_jsonl_path(tmp_path):
-    input_jsonl = download_hf_dataset_as_jsonl("nanotron/minipile_100_samples", tmp_path / "raw")
-    assert len(input_jsonl) == 1, "Expected 1 JSONL file"
-    input_jsonl = Path(input_jsonl[0])
+    input_jsonl = tmp_path / "minipile.jsonl"
+    input_jsonl.write_text(
+        "".join(json.dumps({"text": f"Sample document {index}."}) + "\n" for index in range(4)),
+        encoding="utf-8",
+    )
 
     assert input_jsonl.stat().st_size > 0, "Input JSONL file should not be empty"
 

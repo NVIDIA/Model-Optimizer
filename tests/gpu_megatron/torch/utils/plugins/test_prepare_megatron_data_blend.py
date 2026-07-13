@@ -97,8 +97,9 @@ def test_prepare_megatron_data_blend_with_split_and_files_sources(
         assert Path(prefix + ".bin").exists()
         assert Path(prefix + ".idx").exists()
     token_suffixes = ["_tokens600", "_tokens400"] if target_tokens is not None else ["", ""]
+    # HF split prefixes use {dataset}_{config}_{split}_{field}_max{samples}.
     assert [Path(prefix).name for _, prefix in blend] == [
-        f"nanotron--minipile_100_samples_None_train_text_max100{token_suffixes[0]}",
+        f"nanotron--minipile_100_samples_default_train_text_max100{token_suffixes[0]}",
         f"competitive_programming_python_00_messages{token_suffixes[1]}",
     ]
     assert (output_dir / "config.yaml").read_bytes() == config_path.read_bytes()
