@@ -95,19 +95,19 @@ sources:
   - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
     config: Nemotron-SFT-Code
     split: train
-    max_samples: 10000000
+    max_samples: 10_000_000
     content_field: text
     weight: 5
   - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
     config: Nemotron-SFT-General
     split: train
-    max_samples: 10000000
+    max_samples: 10_000_000
     content_field: text
     weight: 20
   - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
     config: Nemotron-SFT-MATH
     split: train
-    max_samples: 10000000
+    max_samples: 10_000_000
     content_field: text
     weight: 5
   - hf_dataset: nvidia/Nemotron-Math-v2
@@ -132,7 +132,7 @@ sources:
   - hf_dataset: nvidia/Nemotron-Post-Training-Dataset-v1
     config: default
     split: stem
-    max_samples: 5000000
+    max_samples: 5_000_000
     content_field: messages
     weight: 8
   - hf_dataset: nvidia/Nemotron-Science-v1
