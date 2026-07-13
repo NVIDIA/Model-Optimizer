@@ -456,10 +456,48 @@ def create_input_shapes_profile(
     """
     from transformers import AutoConfig
 
-    config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
-    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
-    num_kv_heads = getattr(config, "num_key_value_heads", config.num_attention_heads)
-    num_layers = config.num_hidden_layers
+    def empty_profiles() -> list[dict[str, str]]:
+        return [{} for _ in calibration_eps]
+
+    def warn_and_return_empty(reason: str) -> list[dict[str, str]]:
+        logger.warning(
+            f"Could not create input shape profiles from model_id={model_id!r}: {reason}. "
+            "Falling back to empty input shape profiles. Some TensorRT/NvTensorRtRtx EP "
+            "versions can infer shapes automatically; if session creation fails, pass "
+            "input_shapes_profile manually."
+        )
+        return empty_profiles()
+
+    def get_config_attr(config, aliases: list[str], field_name: str):
+        for alias in aliases:
+            value = getattr(config, alias, None)
+            if value is not None:
+                return value
+        raise ValueError(
+            f"missing required config field for {field_name}; tried aliases: {', '.join(aliases)}"
+        )
+
+    try:
+        config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    except Exception as exc:
+        return warn_and_return_empty(str(exc))
+
+    try:
+        num_attention_heads = get_config_attr(
+            config, ["num_attention_heads", "n_head", "num_heads"], "num_attention_heads"
+        )
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            hidden_size = get_config_attr(
+                config, ["hidden_size", "n_embd", "d_model"], "hidden_size"
+            )
+            head_dim = hidden_size // num_attention_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", None) or num_attention_heads
+        num_layers = get_config_attr(
+            config, ["num_hidden_layers", "n_layer", "num_layers"], "num_hidden_layers"
+        )
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError) as exc:
+        return warn_and_return_empty(str(exc))
 
     def make_shapes(batch_size: int, seq_len: int, past_seq_len: int) -> str:
         shapes = [f"input_ids:{batch_size}x{seq_len}", f"attention_mask:{batch_size}x{seq_len}"]

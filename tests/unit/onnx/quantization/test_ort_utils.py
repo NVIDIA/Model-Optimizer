@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import sys
 import types
 
@@ -54,6 +55,78 @@ def test_create_input_shapes_profile_forwards_trust_remote_code(monkeypatch):
     assert default_profiles[0]["nv_profile_min_shapes"].startswith("input_ids:1x1")
     assert default_profiles[1] == {}
     assert trusted_profiles[0]["nv_profile_opt_shapes"].startswith("input_ids:1x512")
+
+
+def test_create_input_shapes_profile_returns_empty_for_bad_model_id(monkeypatch, caplog):
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            raise OSError(f"cannot load {model_id}")
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", types.SimpleNamespace(AutoConfig=FakeAutoConfig)
+    )
+    caplog.set_level(logging.WARNING, logger="modelopt.onnx")
+
+    profiles = create_input_shapes_profile("bad-model", ["NvTensorRtRtx", "cpu"])
+
+    assert profiles == [{}, {}]
+    assert "bad-model" in caplog.text
+    assert "input_shapes_profile manually" in caplog.text
+
+
+def test_create_input_shapes_profile_uses_common_config_aliases(monkeypatch):
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            return types.SimpleNamespace(n_embd=96, n_head=6, n_layer=2)
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", types.SimpleNamespace(AutoConfig=FakeAutoConfig)
+    )
+
+    profiles = create_input_shapes_profile("gpt-style-config", ["NvTensorRtRtx"])
+
+    assert "past_key_values.1.key:1x6x0x16" in profiles[0]["nv_profile_min_shapes"]
+    assert "past_key_values.1.value:1x6x512x16" in profiles[0]["nv_profile_opt_shapes"]
+
+
+def test_create_input_shapes_profile_head_dim_does_not_require_hidden_size(monkeypatch):
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            return types.SimpleNamespace(
+                head_dim=32,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                num_hidden_layers=1,
+            )
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", types.SimpleNamespace(AutoConfig=FakeAutoConfig)
+    )
+
+    profiles = create_input_shapes_profile("head-dim-config", ["trt"])
+
+    assert "past_key_values.0.key:1x2x0x32" in profiles[0]["trt_profile_min_shapes"]
+
+
+def test_create_input_shapes_profile_returns_empty_for_missing_config_key(monkeypatch, caplog):
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            return types.SimpleNamespace(num_attention_heads=4, num_hidden_layers=1)
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", types.SimpleNamespace(AutoConfig=FakeAutoConfig)
+    )
+    caplog.set_level(logging.WARNING, logger="modelopt.onnx")
+
+    profiles = create_input_shapes_profile("missing-hidden-size", ["NvTensorRtRtx"])
+
+    assert profiles == [{}]
+    assert "missing-hidden-size" in caplog.text
+    assert "hidden_size" in caplog.text
 
 
 def test_prepare_ep_list_keeps_profiles_aligned_when_ep_is_disabled(monkeypatch):
