@@ -24,7 +24,7 @@ from typing import Any, cast
 import huggingface_hub
 import yaml
 
-from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
+from .megatron_preprocess_data import megatron_preprocess_data
 
 __all__ = ["prepare_megatron_data_blend"]
 
