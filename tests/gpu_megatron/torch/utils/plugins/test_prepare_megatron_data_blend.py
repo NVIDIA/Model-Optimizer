@@ -51,7 +51,7 @@ def _setup_test(
     config_path = tmp_path / "config.yaml"
     config_yaml = yaml.safe_dump(config)
     if target_tokens is not None:
-        config_yaml += "target_tokens: 1_000\n"
+        config_yaml += f"target_tokens: {target_tokens:_}\n"
     config_path.write_text(config_yaml, encoding="utf-8")
     jsonl_path = tmp_path / "competitive_programming_python_00.jsonl"
     conversation = {
