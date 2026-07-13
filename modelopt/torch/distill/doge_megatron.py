@@ -73,6 +73,8 @@ class DoGEForwardStep:
         iteration: int,
         alignment_scores: dict[str, float] | None = None,
         alignment_debug: dict[str, dict[str, float | int]] | None = None,
+        source_probe_kd_loss: dict[str, float] | None = None,
+        target_probe_kd_loss: float | None = None,
     ) -> None:
         """Write one DoGE weight-trajectory record on rank 0."""
         if not dist.is_master():
@@ -85,6 +87,10 @@ class DoGEForwardStep:
         }
         if alignment_debug is not None:
             record["alignment_debug"] = alignment_debug
+        if source_probe_kd_loss is not None:
+            record["source_probe_kd_loss"] = source_probe_kd_loss
+        if target_probe_kd_loss is not None:
+            record["target_probe_kd_loss"] = target_probe_kd_loss
 
         self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
         mode = "w" if iteration == 0 else "a"
@@ -96,8 +102,12 @@ class DoGEForwardStep:
             part = f"{Path(path).name} weight={weight:.4f}"
             if alignment_scores is not None:
                 part += f" alignment={alignment_scores[path]:.4f}"
+            if source_probe_kd_loss is not None:
+                part += f" probe_kd={source_probe_kd_loss[path]:.4f}"
             summary_parts.append(part)
         summary = " | ".join(summary_parts)
+        if target_probe_kd_loss is not None:
+            summary += f" | target_probe_kd={target_probe_kd_loss:.4f}"
         print_rank_0(f"DoGE iteration {iteration} | {summary}")
 
     def __call__(
@@ -137,11 +147,17 @@ class DoGEForwardStep:
 
         # Outer loop: use the target batch to score each source batch and update the data-blend
         # weights. This changes only ``self.blend_weights``, not the student model.
-        scores, alignment_debug = compute_alignment_scores(
-            state, source_batches, target_batch, model
+        scores, alignment_debug, source_probe_kd_loss, target_probe_kd_loss = (
+            compute_alignment_scores(state, source_batches, target_batch, model)
         )
         self.blend_weights = dict(self.updater.update(self.blend_weights, scores))
-        self.write_trajectory_record(state.train_state.step + 1, scores, alignment_debug)
+        self.write_trajectory_record(
+            state.train_state.step + 1,
+            scores,
+            alignment_debug,
+            source_probe_kd_loss,
+            target_probe_kd_loss,
+        )
 
         # Inner loop: train the student on source batches mixed with the updated DoGE weights.
         # Megatron-Bridge backpropagates the returned loss and performs the optimizer step.

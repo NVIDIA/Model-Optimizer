@@ -201,8 +201,8 @@ def _calc_alignment_gradient_vector(
     state: GlobalState,
     batch: _GPTBatch,
     model: GPTModel,
-) -> torch.Tensor:
-    """Return a flattened selected-parameter KD gradient vector for one DoGE batch.
+) -> tuple[torch.Tensor, float]:
+    """Return a selected-parameter KD gradient vector and normalized KD loss.
 
     The PoC uses Qwen3-8B's final MLP output projection as an approximation to full-model DoGE
     gradients. The probe uses normal backward and then reads the selected parameter's Megatron grad
@@ -232,13 +232,30 @@ def _calc_alignment_gradient_vector(
             check_for_spiky_loss=state.cfg.rerun_state_machine.check_for_spiky_loss,
         )
         loss, num_tokens, _ = loss_function(output)
-        loss = loss / torch.clamp(num_tokens, min=1)
-        loss.backward()
+        normalized_loss = loss / torch.clamp(num_tokens, min=1)
+        normalized_loss.backward()
+    probe_loss = _reduce_probe_loss(loss, num_tokens)
     vector = torch.cat([_read_parameter_gradient(parameter) for parameter in parameters])
     _clear_model_grads(model)
     # BF16 probe backward can overflow a small number of entries in this large projection layer.
     # DoGE scoring only needs a direction; zero non-finite entries so they do not poison the score.
-    return torch.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0)
+    return torch.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0), probe_loss
+
+
+def _reduce_probe_loss(loss: torch.Tensor, num_tokens: torch.Tensor) -> float:
+    """Return the globally normalized KD loss for one DoGE probe batch."""
+    components = torch.stack(
+        [
+            loss.detach().float().reshape(()),
+            num_tokens.detach().float().reshape(()),
+        ]
+    )
+    if dist.is_available() and dist.is_initialized():
+        # PoC synchronization matches alignment-score reduction. With the current setup PP=DP=CP=1
+        # and the default group is TP-only. TODO: reduce over exact model/data-parallel groups when
+        # adding support for other parallelism layouts.
+        dist.all_reduce(components, op=dist.ReduceOp.SUM)
+    return (components[0] / torch.clamp(components[1], min=1)).item()
 
 
 def _calc_alignment_score(
@@ -300,24 +317,29 @@ def compute_alignment_scores(
     source_batches: dict[str, _GPTBatch],
     target_batch: _GPTBatch,
     model: GPTModel,
-) -> tuple[dict[str, float], dict[str, dict[str, float | int]]]:
+) -> tuple[dict[str, float], dict[str, dict[str, float | int]], dict[str, float], float]:
     """Compute source-to-target gradient-alignment scores for DoGE weight updates.
 
     Scores are keyed by the same dataset paths as ``source_batches``. Higher scores should increase
     a source's DoGE blend weight. The debug dictionary records the reduced cosine-similarity
-    components used to compute each score.
+    components used to compute each score. Probe KD losses are one-batch diagnostics from the same
+    batches used for alignment scoring.
     """
-    target_gradient = _calc_alignment_gradient_vector(state, target_batch, model)
+    target_gradient, target_probe_kd_loss = _calc_alignment_gradient_vector(
+        state, target_batch, model
+    )
     target_token_sum = int(target_batch[0].sum().item())
     scores = {}
     alignment_debug = {}
+    source_probe_kd_loss = {}
     for path, batch in source_batches.items():
-        source_gradient = _calc_alignment_gradient_vector(state, batch, model)
+        source_gradient, probe_loss = _calc_alignment_gradient_vector(state, batch, model)
         score, debug = _calc_alignment_score(source_gradient, target_gradient)
         scores[path] = score
+        source_probe_kd_loss[path] = probe_loss
         alignment_debug[path] = {
             "source_token_sum": int(batch[0].sum().item()),
             "target_token_sum": target_token_sum,
             **debug,
         }
-    return scores, alignment_debug
+    return scores, alignment_debug, source_probe_kd_loss, target_probe_kd_loss
