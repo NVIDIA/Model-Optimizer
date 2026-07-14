@@ -92,7 +92,7 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         "--tensor-parallel-size",
         str(runtime_config.tensor_parallel_size),
         "--distributed-executor-backend",
-        "mp", #"external_launcher",
+        "mp",  # "external_launcher",
         # Cap GPU memory so vLLM's startup free-memory check passes while the
         # parent puzzletron process is co-resident on the same GPU.
         "--gpu-memory-utilization",
