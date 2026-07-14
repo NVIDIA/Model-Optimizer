@@ -1,4 +1,17 @@
 /* Scoped announcement styles for the Sphinx RTD theme. */
+
+#announcements > h1,
+#announcements > p,
+#announcements > .announcement-toolbar,
+#announcements > .announcement-grid,
+#announcements > .announcement-empty,
+#announcements > .announcement-pager,
+#announcements > .toctree-wrapper {
+  max-width: 860px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .announcement-toolbar {
   border: 1px solid #d6d8dc;
   border-radius: 4px;
