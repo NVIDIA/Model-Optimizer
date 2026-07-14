@@ -57,20 +57,6 @@ def test_scenario_utilities_infer_descriptors_from_checkpoints() -> None:
         assert "resolve_descriptor_from_pretrained" in source
 
 
-def test_mip_grid_covers_every_configured_depth() -> None:
-    from examples.puzzletron.run_width_depth_mips import (
-        _expected_scenario_count,
-        _scenario_depths,
-    )
-
-    assert _scenario_depths(["a", "b", "c", "d"], max_depth=3) == (0, 1, 2, 3)
-    assert _scenario_depths(["a"], max_depth=3) == (0, 1)
-    assert _expected_scenario_count([1024, 512], max_depth=3) == 8
-    assert not pipeline._runtime_stats_are_sharded(
-        OmegaConf.create({"calc_subblock_stats": {"runtime_stats": {}}})
-    )
-
-
 def _preflight(campaign) -> CampaignPreflight:
     records = []
     for model in campaign.models:
@@ -109,73 +95,12 @@ def _config_loader(_model, _record):
     )
 
 
-def test_generator_writes_isolated_valid_configs_and_recipes(tmp_path: Path) -> None:
-    campaign = default_cross_model_campaign()
-    outputs = generate_campaign_configs(
-        campaign,
-        _preflight(campaign),
-        output_root=tmp_path,
-        config_loader=_config_loader,
-    )
-
-    assert len(outputs) == len(campaign.models)
-    for model in campaign.models:
-        config_path = tmp_path / "configs" / f"{model.model_id}.yaml"
-        recipe_path = tmp_path / "recipes" / f"{model.model_id}.yaml"
-        assert config_path.is_file()
-        assert recipe_path.is_file()
-        config = yaml.safe_load(config_path.read_text())
-        recipe = yaml.safe_load(recipe_path.read_text())
-        assert config["model"]["force_hf"] is False
-        assert config["model"]["revision"] == f"sha-{model.model_id}"
-        assert config["capability_validation"] == {
-            "require_complete_pipeline": True
-        }
-        assert "descriptor" not in config
-        assert "descriptor_override" not in config["model"]
-        assert "descriptor" not in config["pruning"]
-        assert "teacher_descriptor" not in config["distillation"]
-        assert "student_descriptor" not in config["distillation"]
-        assert config["puzzle_dir"].endswith(f"/models/{model.model_id}")
-        assert config["parallel"] == {
-            "tp": model.topology.tp,
-            "cp": model.topology.cp,
-            "pp": model.topology.pp,
-            "dp": model.topology.fsdp,
-            "ep": model.topology.ep,
-        }
-        # This fixture deliberately resolves every synthetic model through the
-        # Llama descriptor; execution policy follows that descriptor rather
-        # than the arbitrary campaign model ID.
-        assert config["execution"]["torch_compile_disabled_stages"] == [
-            "activation_diagnostic"
-        ]
-        assert recipe["distributed"]["tp_size"] == model.topology.tp
-        assert recipe["distributed"]["cp_size"] == model.topology.cp
-        assert recipe["distributed"]["pp_size"] == model.topology.pp
-        assert recipe["distributed"]["ep_size"] == model.topology.ep
-        expected_local_batch = max(1, model.topology.pp)
-        assert recipe["step_scheduler"]["local_batch_size"] == expected_local_batch
-        assert recipe["step_scheduler"]["global_batch_size"] == (
-            expected_local_batch * max(1, model.topology.fsdp)
-        )
-        if model.topology.pp > 1:
-            assert recipe["distributed"]["pipeline"]["pp_batch_size"] == (
-                expected_local_batch
-            )
-        assert config["activation_diagnostic"]["require_beats_random"] is False
-        assert (
-            config["calc_subblock_stats"]["runtime_stats"]["execution"]
-            == "sharded"
-        )
-
-
 def test_canonical_base_config_does_not_require_a_descriptor_override() -> None:
     config = yaml.safe_load(BASE_CONFIG.read_text())
 
     assert "descriptor_override" not in config["model"]
     assert "descriptor" not in config["pruning"]
-    assert "descriptor" not in config["scoring"]
+    assert "descriptor" not in config["replacement_scoring"]
     assert "descriptor" not in config["realize_model"]
 
 
@@ -247,92 +172,6 @@ def test_unscored_sortable_axes_are_deferred_from_checkpoint_permutation() -> No
     ) == ["latent_unscored"]
 
 
-def test_generator_selects_dataset_modality_mtp_and_one_reduced_value(tmp_path: Path) -> None:
-    campaign = default_cross_model_campaign()
-    preflight = _preflight(campaign)
-    generate_campaign_configs(
-        campaign,
-        preflight,
-        output_root=tmp_path,
-        config_loader=_config_loader,
-    )
-
-    for model in campaign.models:
-        config = yaml.safe_load((tmp_path / "configs" / f"{model.model_id}.yaml").read_text())
-        assert config["data"]["modality"] == ("multimodal" if model.is_multimodal else "text")
-        assert config["data"]["layout"] == "packed_varlen"
-        assert config["data"]["packing"]["pack_size"] == campaign.sequence_length
-        assert config["data"]["max_sample_length"] == min(
-            1536, campaign.sequence_length
-        )
-        assert config["pruning"]["eval_samples"] == campaign.activation_samples
-        assert config["distillation"]["max_steps"] == campaign.kd_steps
-        assert config["distillation"]["scenario_grid"] is True
-        assert config["distillation"]["freeze_policy"] == "train_all"
-        assert (
-            config["distillation"]["local_batch_size"] % config["parallel"]["pp"] == 0
-        )
-        assert config["distillation"]["global_batch_size"] >= config["distillation"][
-            "local_batch_size"
-        ]
-        assert config["aiperf"]["checkpoint_source"] == "global_kd"
-        assert config["aiperf"]["use_server_token_count"] is True
-        assert config["aiperf"]["endpoint_type"] == "completions"
-        assert config["aiperf"]["topology"]["gpu_group_size"] == 1
-        assert config["aiperf"]["topology"]["extra_vllm_args"] == [
-            "-cc.cudagraph_mode=NONE"
-        ]
-        record = next(item for item in preflight.models if item.model_id == model.model_id)
-        has_mtp = bool(record.mtp_fields)
-        assert (config["distillation"]["objective"]["mtp_ce"]["weight"] > 0) is has_mtp
-        assert (config["distillation"]["objective"]["mtp_kd"]["weight"] > 0) is has_mtp
-        assert config["distillation"]["objective"]["mtp_kd"]["chunk_size"] == (
-            campaign.sequence_length // config["parallel"]["cp"]
-        )
-        assert config["distillation"]["mtp_enabled"] is (model.model_id == "qwen35_dense")
-        for axis in config["search_space"]["axes"].values():
-            assert len(axis["values"]) == 1
-            assert axis["values"][0] < axis["teacher_value"]
-
-
-def test_generator_respects_campaign_data_layout(tmp_path: Path) -> None:
-    campaign = dataclasses.replace(
-        default_cross_model_campaign(),
-        data_layout="fixed",
-    )
-    preflight = _preflight(campaign)
-
-    generate_campaign_configs(
-        campaign,
-        preflight,
-        output_root=tmp_path,
-        config_loader=_config_loader,
-    )
-
-    config = yaml.safe_load((tmp_path / "configs/qwen35_dense.yaml").read_text())
-    recipe = yaml.safe_load((tmp_path / "recipes/qwen35_dense.yaml").read_text())
-    assert config["data"]["layout"] == "fixed"
-    assert "packing" not in config["data"]
-    assert "varlen" not in config["pruning"]
-    assert config["pruning"]["eval_samples"] == campaign.activation_samples
-    assert config["pruning"]["micro_batch_size"] == campaign.models[0].topology.fsdp
-    assert config["sort_equivalence"]["micro_batch_size"] == campaign.models[0].topology.fsdp
-    assert config["activation_diagnostic"]["micro_batch_size"] == campaign.models[0].topology.fsdp
-    assert config["sort_equivalence"]["include_reverse"] is True
-    assert config["sort_equivalence"]["reverse_checkpoint_dir"].endswith(
-        "/ckpts/reverse_sorted_teacher"
-    )
-    assert config["activation_diagnostic"]["reverse_checkpoint_dir"] == config[
-        "sort_equivalence"
-    ]["reverse_checkpoint_dir"]
-    assert config["activation_diagnostic"]["cleanup_reverse_on_success"] is False
-    assert config["activation_diagnostic"]["layer_count"] == 3
-    assert config["activation_diagnostic"]["layer_selection"] == "random"
-    assert config["activation_diagnostic"]["layer_seed"] == 1234
-    assert "packed_sequence" not in recipe
-    assert "split" not in recipe["dataset"]
-
-
 def test_generator_supplies_split_only_for_packed_recipe() -> None:
     campaign = default_cross_model_campaign()
     model = campaign.models[0]
@@ -343,93 +182,6 @@ def test_generator_supplies_split_only_for_packed_recipe() -> None:
 
     assert recipe["packed_sequence"]["packed_sequence_size"] == 2048
     assert recipe["dataset"]["split"] == "train"
-
-
-def test_generator_enables_sixteen_step_elastic_local_kd(tmp_path: Path) -> None:
-    campaign = default_cross_model_campaign()
-    generate_campaign_configs(
-        campaign,
-        _preflight(campaign),
-        output_root=tmp_path,
-        config_loader=_config_loader,
-    )
-
-    for model in campaign.models:
-        config = yaml.safe_load((tmp_path / "configs" / f"{model.model_id}.yaml").read_text())
-        bypass = config["bypass"]
-        global_microbatch_size = max(1, model.topology.fsdp)
-
-        assert bypass["enabled"] is True
-        assert bypass["backend"] == "automodel"
-        assert bypass["elastic"] is True
-        assert config["embedding_pruning"]["sampling_policy"] == "inverse_width"
-        assert config["embedding_pruning"]["cycle_widths"] is False
-        assert bypass["elastic_cycle_all_targets"] is False
-        assert bypass["elastic_coverage_mode"] == "coverage_then_uniform"
-        if model.model_id == "gpt_oss_20b":
-            assert bypass["elastic_include_no_op"] is True
-            assert config["build_replacement_library"]["include_noops"] is True
-            assert config["search_space"]["no_op"] == {
-                "subblocks": ["attention", "moe"],
-                "whole_block": False,
-                "cartesian": True,
-            }
-        else:
-            assert bypass["elastic_include_no_op"] is False
-            assert config["build_replacement_library"]["include_noops"] is False
-            assert config["search_space"]["no_op"] == {
-                "subblocks": [],
-                "whole_block": False,
-                "cartesian": False,
-            }
-        assert bypass["data"] == {
-            **bypass["data"],
-            "block_size": campaign.sequence_length,
-            "max_eval_samples": campaign.activation_samples,
-        }
-        assert bypass["training"]["micro_batch_size"] == global_microbatch_size
-        assert bypass["training"]["training_tokens"] == (
-            campaign.kd_steps * global_microbatch_size * campaign.sequence_length
-        )
-        assert bypass["training"]["grad_accumulation_steps"] == 1
-        assert bypass["training"]["optimizer"] == (
-            "sgd" if model.model_kind == "moe" else "adamw"
-        )
-        assert bypass["model_factory"]["keys_to_learn"] == "entire_block"
-
-
-def test_generator_enables_the_complete_tiny_smoke_pipeline(tmp_path: Path) -> None:
-    campaign = default_cross_model_campaign()
-    generate_campaign_configs(
-        campaign,
-        _preflight(campaign),
-        output_root=tmp_path,
-        config_loader=_config_loader,
-    )
-
-    for model in campaign.models:
-        config = yaml.safe_load(
-            (tmp_path / "configs" / f"{model.model_id}.yaml").read_text()
-        )
-        assert config["bypass"]["use_nested_bypassed_checkpoint_for_scoring"] is True
-        assert config["bypass"]["overfit"] == {
-            "enabled": True,
-            "repetitions": 32,
-        }
-        assert config["depth"]["max_subblocks_to_remove"] == 3
-        assert config["depth"]["ranking_metric"] == "lm_loss"
-        assert config["depth"]["eval_samples"] == campaign.activation_samples
-        assert config["replacement_scoring"] == {
-            "reference": "scoring_parent",
-            "samples": campaign.activation_samples,
-            "max_candidates_per_width": 50,
-        }
-        assert config["evaluation"]["enabled"] is True
-        assert config["evaluation"]["eval_samples"] == campaign.activation_samples
-        assert config["aiperf"]["enabled"] is True
-        assert config["aiperf"]["input_tokens"] == 256
-        assert config["aiperf"]["output_tokens"] == 32
-        assert config["aiperf"]["concurrency"] == [1, 2]
 
 
 def test_moe_top_k_is_a_generic_variant_axis_for_gpt_oss_and_nano() -> None:

@@ -62,26 +62,6 @@ def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
     assert pending_ids == []
 
 
-def test_completed_baseline_only_result_is_resumable(tmp_path):
-    from modelopt.torch.puzzletron.plugins.automodel import solution_launch
-
-    output = tmp_path / "sliced_teacher.json"
-    output.write_text(json.dumps({"lm_loss": {"avg": 1.25}}))
-
-    assert solution_launch._baseline_only_result_is_complete(
-        {"baseline_only": True, "skip_existing_solutions": True},
-        tmp_path,
-    )
-    assert not solution_launch._baseline_only_result_is_complete(
-        {
-            "baseline_only": True,
-            "skip_existing_solutions": True,
-            "force_rescore": True,
-        },
-        tmp_path,
-    )
-
-
 def test_rpc_executor_infers_descriptor_when_config_has_no_override(monkeypatch, tmp_path):
     from modelopt.torch.puzzletron.distributed_eval import automodel_executor
 

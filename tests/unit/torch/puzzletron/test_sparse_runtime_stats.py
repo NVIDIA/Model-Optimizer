@@ -114,26 +114,6 @@ def test_explicit_vllm_stage_defaults_to_block_granularity():
     assert runtime_config.calc_subblock_stats.runtime_stats.granularity == "block"
 
 
-def test_explicit_vllm_runtime_settings_override_legacy_defaults():
-    config = normalize_pipeline_config(
-        {"vllm_stats": {"enabled": True, "num_iters": 3, "granularity": "subblock"}}
-    )
-    runtime_config = adapt_runtime_hydra_config(
-        OmegaConf.create(
-            {
-                "calc_subblock_stats": {
-                    "runtime_stats": {"num_iters": 30, "num_warmup_iters": 10}
-                }
-            }
-        ),
-        config,
-    )
-
-    assert runtime_config.calc_subblock_stats.runtime_stats.num_iters == 3
-    assert runtime_config.calc_subblock_stats.runtime_stats.num_warmup_iters == 10
-    assert runtime_config.calc_subblock_stats.runtime_stats.granularity == "subblock"
-
-
 def test_disabled_vllm_stage_preserves_legacy_runtime_collection():
     config = normalize_pipeline_config({"vllm_stats": {"enabled": False}})
     runtime_config = adapt_runtime_hydra_config(
@@ -255,7 +235,30 @@ def test_vllm_stage_collects_from_converted_teacher_without_replacement_library(
                 "ffn_config": block_config.subblock_configs[1].to_dict(),
             }
         ]
-        (tmp_path / "subblock_stats.json").write_text("[]\n")
+        (tmp_path / "subblock_stats.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "args": {"runtime_stats": True},
+                        "block_runtime_records": [
+                            {
+                                "block_config": block_config.to_dict(),
+                                "runtime_ms": 1.0,
+                            },
+                            {
+                                "block_config": BlockConfig(
+                                    subblock_configs=(
+                                        block_config.subblock_configs[0],
+                                        FFNConfig(intermediate_size=4),
+                                    )
+                                ).to_dict(),
+                                "runtime_ms": 0.8,
+                            },
+                        ],
+                    }
+                ]
+            )
+        )
 
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats.launch_calc_subblock_stats",

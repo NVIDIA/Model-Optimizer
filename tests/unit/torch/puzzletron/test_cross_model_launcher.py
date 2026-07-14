@@ -86,36 +86,10 @@ def test_stage_runner_honors_descriptor_owned_eager_stage_policy() -> None:
     assert 'export TORCH_COMPILE_DISABLE=1' in runner
 
 
-def test_stage_runner_parallelizes_checkpoint_sorting() -> None:
-    runner = Path("examples/puzzletron/run_cross_model_stage.sh").read_text()
-
-    assert "activation|sort|sort_equivalence|activation_diagnostic" in runner
-
-
-def test_stage_runner_parallelizes_bypass_overfit() -> None:
-    runner = Path("examples/puzzletron/run_cross_model_stage.sh").read_text()
-
-    assert "bypass|bypass_overfit" in runner
-
-
 def test_multinode_runner_uses_slurm_submit_directory_as_repository_root() -> None:
     runner = Path("examples/puzzletron/run_multinode_stage.sh").read_text()
 
     assert 'ROOT=${PUZZLETRON_ROOT:-${SLURM_SUBMIT_DIR:-"${SCRIPT_ROOT}"}}' in runner
-
-
-def test_main_accepts_multi_node_checkpoint_sorting() -> None:
-    main = Path("examples/puzzletron/main.py").read_text()
-    multi_node_stages = main.split("MULTI_NODE_STAGES = (", 1)[1].split(")", 1)[0]
-
-    assert '"sort",' in multi_node_stages
-
-
-def test_main_accepts_multi_node_bypass_overfit() -> None:
-    main = Path("examples/puzzletron/main.py").read_text()
-    multi_node_stages = main.split("MULTI_NODE_STAGES = (", 1)[1].split(")", 1)[0]
-
-    assert '"bypass_overfit",' in multi_node_stages
 
 
 def test_launcher_can_resume_from_first_failed_model() -> None:

@@ -13,18 +13,21 @@ from modelopt.torch.puzzletron.stages.future import (
 
 
 def test_downstream_selection_defaults_and_validates_candidate_counts():
-    normalized = normalize_pipeline_config({"aiperf": {}, "distillation": {}})
+    normalized = normalize_pipeline_config({"aiperf": {}, "global_distillation": {}})
 
     assert normalized["aiperf"]["num_best_to_eval"] == 1
-    assert normalized["distillation"]["num_best_to_distill"] == 1
+    assert normalized["global_distillation"]["num_best_to_distill"] == 1
 
     with pytest.raises(ValueError, match=r"aiperf.num_best_to_eval must be a positive integer"):
         normalize_pipeline_config({"aiperf": {"num_best_to_eval": 0}})
 
     with pytest.raises(
-        ValueError, match=r"distillation.num_best_to_distill must be a positive integer"
+        ValueError,
+        match=r"global_distillation.num_best_to_distill must be a positive integer",
     ):
-        normalize_pipeline_config({"distillation": {"num_best_to_distill": True}})
+        normalize_pipeline_config(
+            {"global_distillation": {"num_best_to_distill": True}}
+        )
 
 
 def test_evaluated_candidate_selection_is_deterministic_and_merges_reasons():

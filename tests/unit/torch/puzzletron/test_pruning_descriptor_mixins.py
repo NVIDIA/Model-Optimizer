@@ -56,6 +56,7 @@ def test_nemotron_h_descriptor_exposes_expert_removal_and_kv_heads_mixins():
 
     assert set(mixins) == {
         "experts_removal",
+        "ffn_intermediate",
         "kv_heads",
         "moe_experts",
         "moe_expert_removal",

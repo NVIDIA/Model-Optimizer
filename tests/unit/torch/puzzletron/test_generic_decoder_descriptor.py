@@ -248,6 +248,7 @@ def test_contract_capabilities_are_component_owned() -> None:
         "moe_experts",
         "moe_expert_intermediate",
         "moe_shared_expert_intermediate",
+        "moe_top_k",
     }
     assert not dense.parallelism.ep
     assert moe.parallelism.ep

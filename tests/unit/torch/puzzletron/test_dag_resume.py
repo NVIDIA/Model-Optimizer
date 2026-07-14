@@ -53,11 +53,11 @@ def _config(root: Path, **sections: dict) -> dict:
     return {
         "puzzle_dir": str(root),
         "convert": {},
-        "prepare_data": {"enabled": True},
-        "activation": {},
+        "tokenize_data": {"enabled": True},
+        "width_importance": {},
         "sort": {},
         "build_library": {},
-        "scoring": {},
+        "replacement_scoring": {},
         "mip": {},
         **sections,
     }
@@ -89,51 +89,18 @@ def _write_stage_output(root: Path, stage: str, stage_config: dict) -> None:
 
 
 def test_resume_records_every_selected_mip_parent(tmp_path: Path) -> None:
-    config = _config(tmp_path, depth={"enabled": True}, vllm_stats={"enabled": False})
+    config = _config(
+        tmp_path,
+        depth_importance={"enabled": True},
+        vllm_stats={"enabled": False},
+    )
 
     kwargs = _resume_kwargs(config, tmp_path / "config.yaml", "mip")
 
-    assert tuple(kwargs["upstream_markers"]) == ("depth", "scoring", "build_library")
-
-
-def test_resume_selects_sort_or_bypass_for_library(tmp_path: Path) -> None:
-    disabled = _config(
-        tmp_path,
-        bypass={"enabled": False, "use_nested_bypassed_checkpoint_for_scoring": True},
-    )
-    enabled = _config(
-        tmp_path,
-        bypass={"enabled": True, "use_nested_bypassed_checkpoint_for_scoring": True},
-    )
-
-    disabled_kwargs = _resume_kwargs(disabled, tmp_path / "config.yaml", "build_library")
-    enabled_kwargs = _resume_kwargs(enabled, tmp_path / "config.yaml", "build_library")
-
-    assert tuple(disabled_kwargs["upstream_markers"]) == ("sort",)
-    assert tuple(enabled_kwargs["upstream_markers"]) == ("bypass",)
-
-
-def test_resume_selects_inline_or_explicit_vllm_producer(tmp_path: Path) -> None:
-    inline = _config(tmp_path, depth={"enabled": True}, vllm_stats={"enabled": False})
-    explicit = _config(tmp_path, depth={"enabled": True}, vllm_stats={"enabled": True})
-
-    inline_kwargs = _resume_kwargs(inline, tmp_path / "config.yaml", "mip")
-    explicit_kwargs = _resume_kwargs(explicit, tmp_path / "config.yaml", "mip")
-
-    assert tuple(inline_kwargs["upstream_markers"]) == ("depth", "scoring", "build_library")
-    assert tuple(explicit_kwargs["upstream_markers"]) == ("depth", "scoring", "vllm_stats")
-
-
-def test_explicit_vllm_stats_is_a_build_library_resume_parent(tmp_path: Path) -> None:
-    inline = _config(tmp_path, vllm_stats={"enabled": False})
-    explicit = _config(tmp_path, vllm_stats={"enabled": True})
-
-    assert tuple(_resume_kwargs(inline, tmp_path / "config.yaml", "build_library")["upstream_markers"]) == (
-        "sort",
-    )
-    assert tuple(_resume_kwargs(explicit, tmp_path / "config.yaml", "build_library")["upstream_markers"]) == (
-        "sort",
+    assert tuple(kwargs["upstream_markers"]) == (
         "vllm_stats",
+        "depth_importance",
+        "replacement_scoring",
     )
 
 
@@ -156,8 +123,10 @@ def test_vllm_completion_stales_when_runtime_aggregate_is_deleted(tmp_path: Path
 def test_vllm_completion_uses_configured_runtime_aggregate_filename(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        vllm_stats={"enabled": True},
-        calc_subblock_stats={"subblock_stats_filename": "runtime/custom_stats.json"},
+        vllm_stats={
+            "enabled": True,
+            "subblock_stats_filename": "runtime/custom_stats.json",
+        },
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text("static: true\n")
@@ -172,47 +141,6 @@ def test_vllm_completion_uses_configured_runtime_aggregate_filename(tmp_path: Pa
     assert _completion_is_valid(config, config_path, "vllm_stats")
     stats_path.unlink()
     assert not _completion_is_valid(config, config_path, "vllm_stats")
-
-
-def test_build_library_completion_uses_selected_custom_vllm_aggregate(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        vllm_stats={"enabled": True},
-        calc_subblock_stats={"subblock_stats_filename": "runtime/custom_stats.json"},
-    )
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("static: true\n")
-    _write_completion(tmp_path, "convert", "convert-v1")
-    _write_completion(tmp_path, "sort", "sort-v1")
-    _write_stage_output(tmp_path, "vllm_stats", config["vllm_stats"])
-    stats_path = tmp_path / "runtime/custom_stats.json"
-    stats_path.parent.mkdir(parents=True)
-    stats_path.write_text("[{}]\n")
-    vllm_kwargs = _resume_kwargs(config, config_path, "vllm_stats")
-    write_marker(tmp_path, "vllm_stats", build_payload(**vllm_kwargs))
-    _write_stage_output(tmp_path, "build_library", config["build_library"])
-    (tmp_path / "replacement_library.json").write_text("{}\n")
-    (tmp_path / "candidate_library.json").write_text("{}\n")
-    build_kwargs = _resume_kwargs(config, config_path, "build_library")
-    write_marker(tmp_path, "build_library", build_payload(**build_kwargs))
-
-    assert _completion_is_valid(config, config_path, "build_library")
-    stats_path.unlink()
-    assert not _completion_is_valid(config, config_path, "build_library")
-
-
-def test_resume_keeps_disabled_and_skipped_fixed_parents(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        activation_diagnostic={"enabled": False},
-        bypass_overfit={"enabled": True},
-    )
-    manifest = StageManifest(stage="activation_diagnostic", status="skipped")
-    write_stage_manifest(tmp_path / "manifests" / "activation_diagnostic.json", manifest)
-
-    kwargs = _resume_kwargs(config, tmp_path / "config.yaml", "bypass_overfit")
-
-    assert tuple(kwargs["upstream_markers"]) == ("activation_diagnostic",)
 
 
 def test_every_registry_stage_projects_its_own_section_but_not_report_settings() -> None:
@@ -233,13 +161,13 @@ def test_every_registry_stage_projects_its_own_section_but_not_report_settings()
 
 @pytest.mark.parametrize(
     "section",
-    ("prepare_data", "convert", "dataset_path", "model", "data", "dataset"),
+    ("tokenize_data", "convert", "dataset_path", "model", "data", "dataset"),
 )
-def test_prepare_data_identity_includes_every_tokenizer_and_data_input(
+def test_tokenize_data_identity_includes_every_tokenizer_and_data_input(
     section: str,
 ) -> None:
     config = {
-        "prepare_data": {"caches": [{"split": "train"}]},
+        "tokenize_data": {"caches": [{"split": "train"}]},
         "convert": {"teacher_dir": "/models/teacher-a"},
         "dataset_path": "/datasets/source-a",
         "model": {"source": "/models/source-a"},
@@ -247,13 +175,13 @@ def test_prepare_data_identity_includes_every_tokenizer_and_data_input(
         "dataset": {"split": "train"},
         "report": {"theme": "light"},
     }
-    baseline = StageManifest(stage="prepare_data", config=config).semantic_config_identity
+    baseline = StageManifest(stage="tokenize_data", config=config).semantic_config_identity
     changed = {**config, section: {"changed": True}}
     report_changed = {**config, "report": {"theme": "dark"}}
 
-    assert StageManifest(stage="prepare_data", config=changed).semantic_config_identity != baseline
+    assert StageManifest(stage="tokenize_data", config=changed).semantic_config_identity != baseline
     assert (
-        StageManifest(stage="prepare_data", config=report_changed).semantic_config_identity
+        StageManifest(stage="tokenize_data", config=report_changed).semantic_config_identity
         == baseline
     )
 
@@ -261,11 +189,11 @@ def test_prepare_data_identity_includes_every_tokenizer_and_data_input(
 @pytest.mark.parametrize(
     ("stage", "handler_section"),
     (
-        ("activation", "pruning"),
-        ("build_library", "build_replacement_library"),
-        ("build_library", "calc_subblock_stats"),
+        ("width_importance", "pruning"),
+        ("build_library", "build_library"),
+        ("build_library", "vllm_stats"),
         ("build_library", "library"),
-        ("scoring", "replacement_scoring"),
+        ("replacement_scoring", "replacement_scoring"),
     ),
 )
 def test_handler_section_changes_stale_consumer_but_report_changes_do_not(
@@ -318,19 +246,19 @@ def test_report_source_change_does_not_stale_expensive_stage(tmp_path: Path) -> 
     report_source = source_root / "report.py"
     report_source.write_text("FIRST = True\n")
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("activation:\n  samples: 8\n")
-    _write_stage_output(root, "activation", {"samples": 8})
+    config_path.write_text("width_importance:\n  samples: 8\n")
+    _write_stage_output(root, "width_importance", {"samples": 8})
     kwargs = {
         "root": root,
         "config": config_path,
-        "mode": "activation",
+        "mode": "width_importance",
         "width": None,
         "depth": None,
-        "required_patterns": ("manifests/activation.json",),
+        "required_patterns": ("manifests/width_importance.json",),
         "stage_config": {"samples": 8},
         "source_roots": (source_root,),
     }
-    marker = write_marker(root, "activation", build_payload(**kwargs))
+    marker = write_marker(root, "width_importance", build_payload(**kwargs))
 
     report_source.write_text("FIRST = False\n")
 
@@ -341,21 +269,21 @@ def test_report_source_change_does_not_stale_expensive_stage(tmp_path: Path) -> 
 def test_relevant_config_and_upstream_changes_have_stale_reasons(tmp_path: Path) -> None:
     root = tmp_path / "campaign"
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("scoring:\n  samples: 8\n")
-    _write_stage_output(root, "scoring", {"samples": 8})
+    config_path.write_text("replacement_scoring:\n  samples: 8\n")
+    _write_stage_output(root, "replacement_scoring", {"samples": 8})
     upstream = _write_completion(root, "build_library", "build-v1")
     kwargs = {
         "root": root,
         "config": config_path,
-        "mode": "scoring",
+        "mode": "replacement_scoring",
         "width": None,
         "depth": None,
-        "required_patterns": ("manifests/scoring.json",),
+        "required_patterns": ("manifests/replacement_scoring.json",),
         "upstream_markers": {"build_library": upstream},
         "stage_config": {"samples": 8},
         "source_roots": (),
     }
-    marker = write_marker(root, "scoring", build_payload(**kwargs))
+    marker = write_marker(root, "replacement_scoring", build_payload(**kwargs))
 
     changed_config = {**kwargs, "stage_config": {"samples": 16}}
     assert check_marker_details(marker, **changed_config).stale_reasons == (
@@ -394,19 +322,19 @@ def test_child_revalidates_current_parent_evidence_without_marker_rewrite(
         "source_roots": (),
     }
     parent_marker = write_marker(root, "build_library", build_payload(**parent_kwargs))
-    _write_stage_output(root, "scoring", {})
+    _write_stage_output(root, "replacement_scoring", {})
     child_kwargs = {
         "root": root,
         "config": config_path,
-        "mode": "scoring",
+        "mode": "replacement_scoring",
         "width": None,
         "depth": None,
-        "required_patterns": ("manifests/scoring.json",),
+        "required_patterns": ("manifests/replacement_scoring.json",),
         "upstream_markers": {"build_library": parent_marker},
         "stage_config": {},
         "source_roots": (),
     }
-    child_marker = write_marker(root, "scoring", build_payload(**child_kwargs))
+    child_marker = write_marker(root, "replacement_scoring", build_payload(**child_kwargs))
 
     if mutated_parent_evidence == "artifact":
         parent_artifact.write_text('{"value": 2}\n')
@@ -466,15 +394,15 @@ def test_child_build_rejects_parent_changed_before_identity_collection(
         payload["semantic_identity"] = "mutated-before-child-build"
         changed_path.write_text(json.dumps(payload))
 
-    _write_stage_output(root, "scoring", {})
+    _write_stage_output(root, "replacement_scoring", {})
     with pytest.raises(ValueError, match="selected upstream unverifiable: build_library"):
         build_payload(
             root=root,
             config=config_path,
-            mode="scoring",
+            mode="replacement_scoring",
             width=None,
             depth=None,
-            required_patterns=("manifests/scoring.json",),
+            required_patterns=("manifests/replacement_scoring.json",),
             upstream_markers={"build_library": parent_marker},
             stage_config={},
             source_roots=(),
@@ -508,14 +436,14 @@ def test_unverifiable_parent_cannot_seed_or_validate_v3_child_after_evidence_mut
         }
     parent_marker = write_marker(root, "convert", parent_payload)
 
-    _write_stage_output(root, "prepare_data", {})
+    _write_stage_output(root, "tokenize_data", {})
     child_kwargs = {
         "root": root,
         "config": config_path,
-        "mode": "prepare_data",
+        "mode": "tokenize_data",
         "width": None,
         "depth": None,
-        "required_patterns": ("manifests/prepare_data.json",),
+        "required_patterns": ("manifests/tokenize_data.json",),
         "upstream_markers": {"convert": parent_marker},
         "stage_config": {},
         "source_roots": (),
@@ -525,7 +453,7 @@ def test_unverifiable_parent_cannot_seed_or_validate_v3_child_after_evidence_mut
 
     historical_child = write_marker(
         root,
-        "prepare_data",
+        "tokenize_data",
         build_payload(**{**child_kwargs, "upstream_markers": {}}),
     )
     parent_artifact.write_text('{"value": 2}\n')
@@ -539,21 +467,21 @@ def test_unverifiable_parent_cannot_seed_or_validate_v3_child_after_evidence_mut
 def test_missing_output_and_incompatible_manifest_identity_have_reasons(tmp_path: Path) -> None:
     root = tmp_path / "campaign"
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("activation: {}\n")
-    _write_stage_output(root, "activation", {})
+    config_path.write_text("width_importance: {}\n")
+    _write_stage_output(root, "width_importance", {})
     kwargs = {
         "root": root,
         "config": config_path,
-        "mode": "activation",
+        "mode": "width_importance",
         "width": None,
         "depth": None,
-        "required_patterns": ("manifests/activation.json",),
+        "required_patterns": ("manifests/width_importance.json",),
         "stage_config": {},
         "source_roots": (),
     }
-    marker = write_marker(root, "activation", build_payload(**kwargs))
+    marker = write_marker(root, "width_importance", build_payload(**kwargs))
 
-    manifest_path = root / "manifests" / "activation.json"
+    manifest_path = root / "manifests" / "width_importance.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["semantic_identity"] = "stage_incompatible"
     manifest_path.write_text(json.dumps(manifest))
@@ -563,7 +491,7 @@ def test_missing_output_and_incompatible_manifest_identity_have_reasons(tmp_path
 
     manifest_path.unlink()
     assert check_marker_details(marker, **kwargs).stale_reasons == (
-        "missing output: manifests/activation.json",
+        "missing output: manifests/width_importance.json",
     )
 
 

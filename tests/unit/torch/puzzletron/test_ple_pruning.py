@@ -127,6 +127,8 @@ def test_local_kd_cycles_cartesian_hidden_and_ple_widths(monkeypatch) -> None:
     recipe._ple_widths = (3, 2)
     recipe._ple_width_counts = {3: 0, 2: 0}
     recipe._hidden_widths = (8, 4)
+    recipe._logical_dp_size = 1
+    recipe._logical_dp_lane = 0
     recipe.dist_env = SimpleNamespace(device=torch.device("cpu"))
     monkeypatch.setattr(torch.distributed, "broadcast", lambda tensor, src: tensor)
 

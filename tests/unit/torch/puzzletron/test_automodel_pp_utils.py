@@ -18,6 +18,7 @@ def test_mrope_position_ids_chunk_on_batch_dimension():
             "attention_mask": torch.ones(2, 1024, dtype=torch.long),
             "metadata": "replicated",
         },
+        batch_size=2,
     )
 
     assert isinstance(schedule._kwargs_chunk_spec["position_ids"], TensorChunkSpec)
@@ -26,10 +27,11 @@ def test_mrope_position_ids_chunk_on_batch_dimension():
     assert isinstance(schedule._kwargs_chunk_spec["metadata"], _Replicate)
 
 
-def test_non_mrope_batches_use_default_pipeline_chunking():
+def test_non_mrope_position_ids_chunk_on_batch_dimension():
     schedule = SimpleNamespace(_kwargs_chunk_spec={"stale": object()})
     set_pp_vlm_chunk_specs(
         schedule,
         {"position_ids": torch.zeros(2, 1024, dtype=torch.long)},
     )
-    assert schedule._kwargs_chunk_spec is None
+    assert isinstance(schedule._kwargs_chunk_spec["position_ids"], TensorChunkSpec)
+    assert schedule._kwargs_chunk_spec["position_ids"].split_dim == 0

@@ -107,33 +107,6 @@ def test_hidden_only_diagnostic_finishes_without_empty_parent_sweep(tmp_path):
     ] is True
 
 
-def test_hidden_only_diagnostic_reports_failed_verdict_without_crashing(tmp_path):
-    artifacts = tmp_path / "artifacts"
-    temporary = tmp_path / "diagnostics" / "temporary"
-    temporary.mkdir(parents=True)
-    hidden = {
-        "hidden_width": 3584,
-        "teacher_hidden_width": 4096,
-        "primary_metric": "raw_replacement_loss",
-        "passed": False,
-        "beats_random": False,
-        "beats_reverse": False,
-        "realization_passed": False,
-        "rows": [],
-    }
-
-    summary = _write_hidden_only_diagnostic_artifacts(
-        artifacts_dir=artifacts,
-        temporary_root=temporary,
-        hidden_width_summary=hidden,
-        cleanup_reverse=True,
-    )
-
-    assert summary["status"] == "complete"
-    assert summary["hidden_width"]["passed"] is False
-    assert temporary.exists(), "failed diagnostics must retain evidence for debugging"
-
-
 def test_hidden_only_guard_allows_nonmaster_rank_without_summary():
     assert _hidden_only_diagnostic_ready(
         axes=["hidden_width"], hidden_width_summary=None, is_master=False

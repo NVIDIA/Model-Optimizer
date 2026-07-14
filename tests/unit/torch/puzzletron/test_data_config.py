@@ -73,18 +73,18 @@ def test_pipeline_boundary_rejects_stage_local_legacy_varlen():
         )
 
 
-def test_pipeline_defaults_sort_equivalence_to_include_reverse():
+def test_pipeline_defaults_sort_sanity_to_include_reverse():
     canonical = normalize_pipeline_config({})
 
-    assert canonical["sort_equivalence"]["include_reverse"] is True
+    assert canonical["sort_sanity"]["include_reverse"] is True
 
 
 def test_pipeline_preserves_explicit_reverse_sort_opt_out():
     canonical = normalize_pipeline_config(
-        {"sort_equivalence": {"include_reverse": False}}
+        {"sort_sanity": {"include_reverse": False}}
     )
 
-    assert canonical["sort_equivalence"]["include_reverse"] is False
+    assert canonical["sort_sanity"]["include_reverse"] is False
 
 
 def test_runtime_adapter_derives_legacy_loader_fields_from_canonical_data():

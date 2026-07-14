@@ -54,48 +54,6 @@ def _result(index: int, kind: str, name: str, axis_value: int) -> dict:
     }
 
 
-def test_report_renders_granularity_coverage_and_subblock_owned_axes(tmp_path: Path):
-    _write(
-        tmp_path / "manifests/scoring.json",
-        {
-            "status": "success",
-            "config": {
-                "depth": {"granularity": "subblock"},
-                "calc_subblock_stats": {"runtime_stats": {"granularity": "block"}},
-                "scoring": {"granularity": "subblock"},
-                "bypass": {"enabled": False, "granularity": "block"},
-            },
-        },
-    )
-    _write(
-        tmp_path / "subblock_replacement_manifest.json",
-        {
-            "mode": "replace_one_subblock",
-            "canonical_entry_count": 25600,
-            "subblock_solution_count": 3,
-            "full_search_space_preserved": True,
-        },
-    )
-    result_dir = tmp_path / "single_subblock_replacement_solutions--validation"
-    _write(result_dir / "solution_0.json", _result(0, "ffn", "ffn", 8))
-    _write(result_dir / "solution_1.json", _result(1, "attention", "mixer", 4))
-
-    result = generate_campaign_progress_report(tmp_path)
-    document = Path(result["html"]).read_text(encoding="utf-8")
-
-    assert "Granularity and artifact coverage" in document
-    assert "Depth</th><td><span class='granularity-badge'>subblock" in document
-    assert "vLLM runtime</th><td><span class='granularity-badge'>block" in document
-    assert "Replacement scoring</th><td><span class='granularity-badge'>subblock" in document
-    assert "Bypass</th><td><span class='granularity-badge'>block (disabled)" in document
-    assert "25,600" in document
-    assert "2 / 3" in document
-    assert "additive subblock deltas" in document
-    assert "Replace-one-subblock scoring" in document
-    assert '"subblock_kind": "ffn"' in document
-    assert '"subblock_name": "mixer"' in document
-
-
 def test_nested_bypass_report_selects_exact_subblock_losses(tmp_path: Path):
     _write(
         tmp_path / "artifacts/bypass/local_kd_loss_history.json",

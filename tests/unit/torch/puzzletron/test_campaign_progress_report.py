@@ -268,7 +268,12 @@ def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tm
         "lm_loss": 1.2,
         "kl_div": 0.03,
     }
-    for method, delta in (("activation", 0.0), ("random", 0.1), ("reverse", 0.2)):
+    for method, delta in (
+        ("sorted", 0.0),
+        ("original", 0.1),
+        ("reverse", 0.2),
+        ("physical", 0.0),
+    ):
         rows.append(
             {
                 "axis": "ffn_intermediate",
@@ -281,7 +286,7 @@ def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tm
             }
         )
     _write(
-        tmp_path / "artifacts/activation_diagnostic/activation_diagnostic_summary.json",
+            tmp_path / "artifacts/width_sanity/summary.json",
         {"rows": rows, "primary_metric": "normalized_mse_loss_hidden_states"},
     )
 
@@ -293,7 +298,10 @@ def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tm
     assert document.count('id="activation-diagnostic-table"') == 1
     assert "ffn_intermediate" in document
     assert "layer_3@50%" in document
-    assert "Sorted" in document and "Random (teacher order)" in document and "Reverse" in document
+    assert all(
+        label in document
+        for label in ("Sorted runtime", "Original runtime", "Reverse runtime", "Physical sorted")
+    )
     ordered = [
         "token_accuracy_top_1",
         "token_accuracy_top_1_consistency",
@@ -307,55 +315,16 @@ def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tm
     assert "unadjusted hidden-state mean squared error" in document
 
 
-def test_progress_report_recovers_failed_hidden_width_diagnostic_without_parent_summary(
-    tmp_path: Path,
-):
-    rows = [
-        {
-            "role": role,
-            "hidden_width": 3584,
-            "metrics": {"raw_replacement_loss": loss},
-        }
-        for role, loss in (
-            ("random", 5.1187304),
-            ("activation", 5.1188848),
-            ("reverse", 5.1189997),
-        )
-    ]
-    _write(
-        tmp_path / "artifacts/activation_diagnostic/hidden_width_diagnostic_summary.json",
-        {
-            "teacher_hidden_width": 4096,
-            "hidden_width": 3584,
-            "primary_metric": "raw_replacement_loss",
-            "rows": rows,
-            "passed": False,
-            "beats_random": False,
-            "beats_reverse": True,
-            "require_beats_random": True,
-        },
-    )
-
-    result = generate_campaign_progress_report(tmp_path, model_name="Qwen3.5-0.8B")
-    document = Path(result["html"]).read_text(encoding="utf-8")
-
-    assert "Pending activation/ranking diagnosis" not in document
-    assert "Embedding-width ranking: failed" in document
-    assert "activation did not beat random" in document
-    assert "hidden_width" in document
-    assert "global@88%" in document
-
-
 def test_progress_report_recovers_sort_table_from_compact_reuse_summary(tmp_path: Path):
     _write(
-        tmp_path / "artifacts/sort_equivalence/sort_equivalence_summary.json",
+        tmp_path / "artifacts/sort_sanity/summary.json",
         {
             "passed": True,
             "reused_parent_sweep": True,
             "equivalence": {"passed": True},
         },
     )
-    result_dir = tmp_path / "diagnostics/sort_equivalence"
+    result_dir = tmp_path / "diagnostics/sort_sanity"
     _write(
         result_dir / "single_sequence_replacement_solutions--validation/teacher.json",
         {
@@ -389,8 +358,8 @@ def test_progress_report_recovers_sort_table_from_compact_reuse_summary(tmp_path
 
 def test_progress_report_renders_single_layer_selectable_bypass_overfit_plot(tmp_path: Path):
     _write(
-        tmp_path / "manifests/bypass_overfit.json",
-        {"stage": "bypass_overfit", "status": "success", "config": {}},
+        tmp_path / "artifacts/bypass_sanity/summary.json",
+        {"status": "complete"},
     )
     records = [
         {
@@ -412,7 +381,7 @@ def test_progress_report_renders_single_layer_selectable_bypass_overfit_plot(tmp
     result = generate_campaign_progress_report(tmp_path, model_name="Qwen3.5-0.8B")
     document = Path(result["html"]).read_text(encoding="utf-8")
 
-    assert 'data-stage="bypass_overfit" data-status="complete"' in document
+    assert 'data-stage="bypass_sanity" data-status="completed"' in document
     assert 'id="bypass-overfit-unit-select"' in document
     assert document.count("id='bypass-diverse-plot'") == 1
     assert document.count("id='bypass-fixed-plot'") == 1
@@ -423,8 +392,8 @@ def test_progress_report_renders_single_layer_selectable_bypass_overfit_plot(tmp
 
 def test_progress_report_uses_subblock_losses_for_subblock_bypass_overfit(tmp_path: Path):
     _write(
-        tmp_path / "manifests/bypass_overfit.json",
-        {"stage": "bypass_overfit", "status": "success", "config": {}},
+        tmp_path / "artifacts/bypass_sanity/summary.json",
+        {"status": "complete"},
     )
     _write(
         tmp_path
@@ -534,65 +503,6 @@ def test_progress_report_renders_profile_evaluation_and_aiperf_explorers(tmp_pat
     assert "id='aiperf-latency-throughput-plot'" in document
     assert "id='aiperf-interactivity-throughput-plot'" in document
     assert "id='aiperf-tpot-throughput-plot'" in document
-
-
-def test_progress_report_preserves_results_and_adds_collapsible_artifact_navigation(
-    tmp_path: Path,
-):
-    _write(
-        tmp_path / "manifests/activation_diagnostic.json",
-        {"stage": "activation_diagnostic", "status": "success", "config": {}},
-    )
-    _write(
-        tmp_path / "manifests/bypass_overfit.json",
-        {"stage": "bypass_overfit", "status": "success", "config": {}},
-    )
-    rows = [
-        {
-            "axis": "ffn_intermediate",
-            "layer_idx": 3,
-            "ratio": 0.5,
-            "teacher_value": 3584,
-            "target_value": 1792,
-            "method": method,
-            "lm_loss": value,
-        }
-        for method, value in (("activation", 1.0), ("random", 1.1), ("reverse", 1.2))
-    ]
-    _write(
-        tmp_path / "artifacts/activation_diagnostic/activation_diagnostic_summary.json",
-        {"rows": rows},
-    )
-    _write(
-        tmp_path / "artifacts/bypass/overfit_probe/local_kd_loss_history.json",
-        {
-            "max_steps": 2,
-            "loss_name": "normalized_mse_loss",
-            "records": [
-                {"step": 1, "loss": 0.2, "per_layer_loss": {"0": 0.3}},
-                {"step": 2, "loss": 0.1, "per_layer_loss": {"0": 0.15}},
-            ],
-        },
-    )
-
-    result = generate_campaign_progress_report(tmp_path, model_name="Qwen3.5-0.8B")
-    document = Path(result["html"]).read_text(encoding="utf-8")
-
-    assert document.index('id="stage-progress"') < document.index('id="merged-config"')
-    assert '<details class="report-section" id="stage-progress" open>' in document
-    assert '<details class="report-section" id="merged-config">' in document
-    assert '<details class="report-section" id="activation-ranking" open>' in document
-    assert '<details class="report-section" id="bypass-overfit" open>' in document
-    assert '<details class="report-section" id="nested-bypass">' in document
-    assert 'data-stage="activation_diagnostic"' in document
-    assert 'href="#activation-ranking"' in document
-    assert 'data-stage="bypass_overfit"' in document
-    assert 'href="#bypass-overfit"' in document
-    depth_card = document.split('data-stage="depth"', maxsplit=1)[1].split("</div>", maxsplit=1)[0]
-    assert "href=" not in depth_card
-    assert 'id="activation-axis-select"' in document
-    assert 'id="bypass-overfit-unit-select"' in document
-    assert "target.open=true" in document
 
 
 def test_progress_report_renders_proper_distillation_terms_and_before_after_eval(

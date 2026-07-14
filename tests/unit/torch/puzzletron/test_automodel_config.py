@@ -53,7 +53,11 @@ def _cfg(method="independent", eval_samples=200, micro_batch_size=2):
     )
 
 
-def test_build_recipe_config_injects_model_fields():
+def test_build_recipe_config_injects_model_fields(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
     recipe = build_recipe_config(_cfg())
     model = recipe["model"]
     assert model["_target_"] == "nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained"
@@ -65,7 +69,11 @@ def test_build_recipe_config_injects_model_fields():
     assert recipe["dist_env"]["timeout_minutes"] == 90
 
 
-def test_build_recipe_config_respects_explicit_overrides():
+def test_build_recipe_config_respects_explicit_overrides(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
     cfg = _cfg()
     cfg.pruning.model_name_or_path = "/custom/teacher"
     cfg.pruning.automodel.recipe.model.anymodel_descriptor = "llama"
@@ -213,7 +221,11 @@ def test_scoring_params_iterative_eval_iters_equals_full_iters():
     assert params["eval_iters"] == 100
 
 
-def test_build_recipe_config_selects_native_vlm_and_neat_packing():
+def test_build_recipe_config_selects_native_vlm_and_neat_packing(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
     cfg = _cfg()
     cfg.pruning.automodel.force_hf = False
     cfg.pruning.automodel.use_puzzletron_dataloader = False

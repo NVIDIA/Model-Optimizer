@@ -401,9 +401,9 @@ def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
         observed["manifest_config"] = manifest.config
         observed["resolution"] = manifest.inputs["descriptor_resolution"]
         return StageResult(
-            stage="activation",
+            stage="width_importance",
             status="success",
-            manifest_path=tmp_path / "activation.json",
+            manifest_path=tmp_path / "width_importance.json",
             message="ok",
         )
 
@@ -414,7 +414,11 @@ def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
         "search_space": {"axes": {}},
     }
 
-    run_stage(input_config, "activation", handlers={"activation": handler})
+    run_stage(
+        input_config,
+        "width_importance",
+        handlers={"width_importance": handler},
+    )
 
     assert observed["runtime_descriptor"] == "llama"
     assert "_runtime" not in observed["manifest_config"]

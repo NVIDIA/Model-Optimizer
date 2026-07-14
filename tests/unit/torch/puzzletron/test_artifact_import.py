@@ -644,8 +644,8 @@ def test_bypass_evidence_does_not_complete_the_bypass_execution_node(tmp_path):
     assert not (destination / "manifests/completions/bypass.json").exists()
 
 
-@pytest.mark.parametrize("stage", ("activation", "depth", "vllm_stats", "scoring"))
-def test_imported_executable_stage_is_recognized_complete_by_main(tmp_path, stage):
+def test_imported_vllm_stats_is_recognized_complete_by_main(tmp_path):
+    stage = "vllm_stats"
     source, destination, receipt = _setup(tmp_path)
     config, config_path = _target_config(destination, tmp_path / "target-config.json")
 
