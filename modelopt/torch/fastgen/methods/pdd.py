@@ -34,6 +34,7 @@ from torch import nn
 
 from ..config import PDDConfig
 from ..flow_matching import (
+    add_noise,
     fusion_coefficients,
     integrate_interval_velocities,
     make_shifted_flow_grid,
@@ -833,8 +834,7 @@ class PDDPipeline(DistillationPipeline):
         )
         time_n = grid[n]
         broadcast_shape = (batch_size,) + (1,) * (data.ndim - 1)
-        time_n_expanded = time_n.reshape(broadcast_shape)
-        x_n = (1.0 - time_n_expanded) * data_fp32 + time_n_expanded * noise_fp32
+        x_n = add_noise(data_fp32, noise_fp32, time_n)
 
         student_heads = self.adapter.student_all_heads(
             self.student,

@@ -26,6 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from modelopt.torch.fastgen.flow_matching import (
+    add_noise,
     fusion_coefficients,
     integrate_interval_velocities,
     make_shifted_flow_grid,
@@ -38,6 +39,22 @@ def _reference_shifted_grid(grid_size: int, shift: float, max_t: float) -> torch
     unshifted = unshifted.clamp(max=max_t)
     shifted = shift * unshifted / (1.0 + (shift - 1.0) * unshifted)
     return shifted.clamp(max=max_t)
+
+
+def _reference_rf_forward_process(
+    data: torch.Tensor,
+    noise: torch.Tensor,
+    time: torch.Tensor,
+) -> torch.Tensor:
+    """Reproduce FastGen's float64 RF forward process without production helpers."""
+    original_dtype = data.dtype
+    data_64 = data.to(torch.float64)
+    noise_64 = noise.to(torch.float64)
+    time_64 = time.to(torch.float64)
+    while time_64.ndim < data_64.ndim:
+        time_64 = time_64.unsqueeze(-1)
+    state_64 = data_64 * (1.0 - time_64) + noise_64 * time_64
+    return state_64.to(original_dtype)
 
 
 def _reference_integrate(
@@ -190,6 +207,39 @@ def test_production_shifted_grid_matches_independent_oracle():
     direct_fp32 = direct_fp32.clamp(max=upper)
     direct_fp32 = (5.0 * direct_fp32 / (1.0 + 4.0 * direct_fp32)).clamp(max=upper)
     assert torch.count_nonzero(grid != direct_fp32).item() == 52
+
+
+def test_production_rf_forward_process_matches_float64_intermediate_oracle():
+    data = torch.tensor(
+        [[-0.2654421329498291, 0.5161616802215576, -0.7285917401313782]],
+        dtype=torch.float32,
+    )
+    noise = torch.tensor(
+        [[0.3856363296508789, -0.34849217534065247, -0.11881951987743378]],
+        dtype=torch.float32,
+    )
+    grid = make_shifted_flow_grid(128, 5.0, max_t=0.999)
+    time = grid[:1]
+    original = (data.clone(), noise.clone(), time.clone(), grid.clone())
+
+    expected = _reference_rf_forward_process(data, noise, time)
+    actual = add_noise(data, noise, time)
+    stale_direct = (1.0 - time[:, None]) * data + time[:, None] * noise
+
+    assert time.item() == 0.9990000128746033
+    assert torch.equal(
+        stale_direct,
+        torch.tensor([[0.3849852383136749, -0.34762755036354065, -0.11942929029464722]]),
+    )
+    assert torch.equal(
+        expected,
+        torch.tensor([[0.3849852681159973, -0.34762752056121826, -0.11942928284406662]]),
+    )
+    assert not torch.equal(stale_direct, expected)
+    assert torch.equal(actual, expected)
+    assert actual.dtype == torch.float32
+    for value, unchanged in zip((data, noise, time, grid), original):
+        assert torch.equal(value, unchanged)
 
 
 def test_production_grid_promotes_low_precision_requests():

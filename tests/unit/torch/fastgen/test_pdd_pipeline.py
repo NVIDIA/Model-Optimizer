@@ -178,6 +178,62 @@ def _explicit_integrate_per_sample(
     return result
 
 
+def _reference_rf_forward_process(
+    data: torch.Tensor,
+    noise: torch.Tensor,
+    time: torch.Tensor,
+) -> torch.Tensor:
+    """Reproduce the PDD RF input staging without production helpers."""
+    data_64 = data.to(torch.float32).to(torch.float64)
+    noise_64 = noise.to(torch.float32).to(torch.float64)
+    time_64 = time.to(torch.float32).to(torch.float64)
+    while time_64.ndim < data_64.ndim:
+        time_64 = time_64.unsqueeze(-1)
+    return (data_64 * (1.0 - time_64) + noise_64 * time_64).to(torch.float32)
+
+
+def test_student_input_matches_fastgen_float64_forward_process() -> None:
+    pipeline, adapter = _pipeline()
+    data = torch.tensor(
+        [[-0.2654421329498291, 0.5161616802215576, -0.7285917401313782]],
+        dtype=torch.float32,
+    )
+    noise = torch.tensor(
+        [[0.3856363296508789, -0.34849217534065247, -0.11881951987743378]],
+        dtype=torch.float32,
+    )
+    n = torch.tensor([0])
+
+    pipeline.compute_loss(data, noise=noise, n=n, k=torch.tensor([0]))
+
+    time = pipeline.time_grid()[n]
+    expected = _reference_rf_forward_process(data, noise, time)
+    stale_direct = (1.0 - time[:, None]) * data + time[:, None] * noise
+    assert torch.equal(
+        expected,
+        torch.tensor([[0.3849852681159973, -0.34762752056121826, -0.11942928284406662]]),
+    )
+    assert not torch.equal(stale_direct, expected)
+    assert torch.equal(adapter.student_calls[0]["state"], expected)
+    assert torch.equal(adapter.student_calls[0]["time"], time)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
+def test_student_input_normalizes_supported_floating_dtypes_to_float32(dtype) -> None:
+    pipeline, adapter = _pipeline()
+    data = torch.tensor([[0.75, -1.25, 0.125]], dtype=dtype)
+    noise = torch.tensor([[-0.5, 1.5, 2.25]], dtype=dtype)
+    n = torch.tensor([2])
+
+    pipeline.compute_loss(data, noise=noise, n=n, k=torch.tensor([3]))
+
+    time = pipeline.time_grid()[n]
+    expected = _reference_rf_forward_process(data, noise, time)
+    assert adapter.student_calls[0]["state"].dtype == torch.float32
+    assert torch.equal(adapter.student_calls[0]["state"], expected)
+    assert torch.equal(adapter.student_calls[0]["time"], time)
+
+
 def test_euler_loss_matches_analytic_empty_and_tail_reconstruction() -> None:
     pipeline, adapter = _pipeline()
     data = torch.tensor([[1.0, -2.0, 0.5], [-1.5, 0.25, 2.0]])
@@ -196,7 +252,7 @@ def test_euler_loss_matches_analytic_empty_and_tail_reconstruction() -> None:
     )
 
     grid = pipeline.time_grid()
-    x_n = (1 - grid[n, None]) * data + grid[n, None] * noise
+    x_n = _reference_rf_forward_process(data, noise, grid[n])
     heads = pipeline.student.all_heads(x_n)
     x_bar_k = _explicit_integrate_per_sample(x_n, heads, grid, n, k)
     teacher_target = pipeline.teacher(x_bar_k, grid[k])
@@ -224,23 +280,23 @@ def test_euler_loss_matches_analytic_empty_and_tail_reconstruction() -> None:
 
 def test_midpoint_target_uses_exact_final_interval_midpoint() -> None:
     pipeline, adapter = _pipeline(teacher_integrator="midpoint")
-    data = torch.tensor([[1.0, -2.0, 0.5]])
-    noise = torch.tensor([[0.25, 1.5, -0.5]])
-    n = torch.tensor([6])
-    k = torch.tensor([7])
+    data = torch.tensor([[1.0, -2.0, 0.5], [-1.5, 0.25, 2.0]])
+    noise = torch.tensor([[0.25, 1.5, -0.5], [2.0, -1.0, 0.75]])
+    n = torch.tensor([4, 6])
+    k = torch.tensor([6, 7])
 
     loss, _ = pipeline.compute_loss(data, noise=noise, n=n, k=k)
 
     grid = pipeline.time_grid()
-    x_n = (1 - grid[n, None]) * data + grid[n, None] * noise
+    x_n = _reference_rf_forward_process(data, noise, grid[n])
     heads = pipeline.student.all_heads(x_n)
-    x_bar_k = x_n + (grid[7] - grid[6]) * heads[:, 6]
+    x_bar_k = _explicit_integrate_per_sample(x_n, heads, grid, n, k)
     first_velocity = pipeline.teacher(x_bar_k, grid[k])
-    delta = grid[8] - grid[7]
-    midpoint_state = x_bar_k + 0.5 * delta * first_velocity
+    delta = grid[k + 1] - grid[k]
+    midpoint_state = x_bar_k + 0.5 * delta.reshape(2, 1) * first_velocity
     midpoint_time = grid[k] + 0.5 * delta
     midpoint_target = pipeline.teacher(midpoint_state, midpoint_time)
-    expected_loss = (heads[:, 7] - midpoint_target).square().mean()
+    expected_loss = (heads[torch.arange(data.shape[0]), k] - midpoint_target).square().mean()
 
     torch.testing.assert_close(loss, expected_loss)
     assert len(adapter.student_calls) == 1
@@ -262,7 +318,7 @@ def test_selected_head_low_precision_outputs_use_float32_mse() -> None:
     loss, _ = pipeline.compute_loss(data, noise=noise, n=n, k=k)
 
     grid = pipeline.time_grid()
-    x_n = (1 - grid[n, None]) * data + grid[n, None] * noise
+    x_n = _reference_rf_forward_process(data, noise, grid[n])
     selected = pipeline.student.all_heads(x_n)[:, 0].to(torch.bfloat16).float()
     teacher = pipeline.teacher(x_n, grid[k]).to(torch.bfloat16).float()
     expected = (selected - teacher).square().mean()
