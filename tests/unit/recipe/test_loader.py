@@ -34,6 +34,7 @@ from modelopt.recipe.config import (
     RecipeType,
 )
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
+from modelopt.torch.fastgen import PDDConfig, load_pdd_config
 from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
 
@@ -70,6 +71,29 @@ metadata:
   recipe_type: unknown_type
 quantize: {}
 """
+
+
+def test_load_pdd_config_builtin_recipe():
+    """The public PDD loader resolves and validates its built-in recipe."""
+    config = load_pdd_config("general/distillation/pdd_qwen_image")
+
+    assert isinstance(config, PDDConfig)
+    assert config.guidance_scale == 4.0
+    assert config.inference_blocks == [32, 32, 32, 32]
+
+
+def test_load_pdd_config_filesystem_precedes_same_named_builtin(tmp_path, monkeypatch):
+    """An explicit same-named filesystem recipe takes precedence over the built-in."""
+    relative_path = tmp_path / "general" / "distillation" / "pdd_qwen_image.yaml"
+    relative_path.parent.mkdir(parents=True)
+    relative_path.write_text("guidance_scale: 7.0\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    config = load_pdd_config("general/distillation/pdd_qwen_image")
+
+    assert config.guidance_scale == 7.0
+    assert config.inference_blocks == [32, 32, 32, 32]
+
 
 QUANTIZER_ATTRIBUTE_SCHEMA = (
     "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"

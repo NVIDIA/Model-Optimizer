@@ -57,6 +57,11 @@ from . import flow_matching, losses, utils
 from .config import *
 from .ema import *
 from .factory import *
+from .flow_matching import (
+    fusion_coefficients,
+    integrate_interval_velocities,
+    make_shifted_flow_grid,
+)
 from .loader import *
 from .methods.dmd import *
 from .pipeline import *

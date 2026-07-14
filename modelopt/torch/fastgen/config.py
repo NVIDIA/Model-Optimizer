@@ -26,6 +26,7 @@ The default values in :class:`DMDConfig` mirror the FastGen Wan 2.2 5B experimen
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, model_validator
@@ -39,6 +40,7 @@ __all__ = [
     "DMDConfig",
     "DistillationConfig",
     "EMAConfig",
+    "PDDConfig",
     "SampleTimestepConfig",
 ]
 
@@ -218,6 +220,145 @@ class DistillationConfig(ModeloptBaseConfig):
     )
 
 
+class PDDConfig(DistillationConfig):
+    """Hyperparameters for data-dependent Parallel Decoding Distillation (PDD).
+
+    PDD trains one velocity head per interval on a fixed shifted rectified-flow
+    grid. The explicit inference block schedule partitions that same grid; it does
+    not define a second timestep schedule.
+    """
+
+    pred_type: Literal["flow"] = ModeloptField(
+        default="flow",
+        title="Network prediction parameterization",
+        description="PDD is defined for rectified-flow velocity prediction.",
+    )
+    student_sample_type: Literal["ode"] = ModeloptField(
+        default="ode",
+        title="Student sampling mode",
+        description="PDD fused inference follows the fixed rectified-flow ODE grid.",
+    )
+    student_sample_steps: int = ModeloptField(
+        default=4,
+        title="Student inference steps",
+        description="Number of contiguous blocks in ``inference_blocks``.",
+    )
+    grid_size: int = ModeloptField(
+        default=128,
+        title="PDD grid size",
+        description="Number of rectified-flow intervals and student output heads.",
+    )
+    flow_shift: float = ModeloptField(
+        default=5.0,
+        title="Rectified-flow grid shift",
+        description="Shift applied to the fixed decreasing rectified-flow grid.",
+    )
+    block_size_min: int = ModeloptField(
+        default=4,
+        title="Minimum training block alignment",
+        description="Alignment of sampled training start indices and inference blocks.",
+    )
+    block_size_max: int = ModeloptField(
+        default=64,
+        title="Maximum trained block size",
+        description="Largest target span and inference block supported by this training run.",
+    )
+    teacher_integrator: Literal["euler", "midpoint"] = ModeloptField(
+        default="euler",
+        title="Teacher target integrator",
+        description="Integrator used to estimate the teacher mean velocity for an interval.",
+    )
+    inference_blocks: list[int] = Field(
+        default_factory=lambda: [32, 32, 32, 32],
+        title="Fused inference block schedule",
+        description="Contiguous interval counts that partition the complete PDD grid.",
+    )
+    data_free: Literal[False] = ModeloptField(
+        default=False,
+        title="Data-free training",
+        description="Data-free PDD is unsupported; training uses noised real latents.",
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Validate a complete candidate config before changing an initialized field.
+
+        Pydantic's after-model validators otherwise run after assignment and leave the
+        rejected value stored. PDD has cross-field schedule invariants, so attribute
+        and mutable-mapping updates must be transactional.
+        """
+        if name in type(self).model_fields and name in self.__dict__:
+            candidate = self.model_dump()
+            candidate[name] = value
+            type(self).model_validate(candidate)
+        super().__setattr__(name, value)
+
+    @model_validator(mode="after")
+    def _check_pdd(self) -> PDDConfig:
+        if self.grid_size <= 0:
+            raise ValueError(f"grid_size must be > 0, got {self.grid_size}.")
+        if not math.isfinite(self.flow_shift) or self.flow_shift < 1.0:
+            raise ValueError(f"flow_shift must be finite and >= 1, got {self.flow_shift}.")
+        if not 0 < self.block_size_min <= self.block_size_max <= self.grid_size:
+            raise ValueError(
+                "require 0 < block_size_min <= block_size_max <= grid_size, got "
+                f"{self.block_size_min}, {self.block_size_max}, {self.grid_size}."
+            )
+        if self.grid_size % self.block_size_min != 0:
+            raise ValueError(
+                f"grid_size={self.grid_size} must be divisible by "
+                f"block_size_min={self.block_size_min}."
+            )
+        if not self.inference_blocks:
+            raise ValueError("inference_blocks must contain at least one block.")
+        for index, block in enumerate(self.inference_blocks):
+            if block <= 0:
+                raise ValueError(f"inference_blocks[{index}] must be > 0, got {block}.")
+            if block % self.block_size_min != 0:
+                raise ValueError(
+                    f"inference_blocks[{index}]={block} must be aligned to "
+                    f"block_size_min={self.block_size_min}."
+                )
+            if block > self.block_size_max:
+                raise ValueError(
+                    f"inference_blocks[{index}]={block} exceeds "
+                    f"block_size_max={self.block_size_max}."
+                )
+        if sum(self.inference_blocks) != self.grid_size:
+            raise ValueError(
+                f"inference_blocks must sum to grid_size={self.grid_size}, got "
+                f"{sum(self.inference_blocks)}."
+            )
+        if self.student_sample_steps != len(self.inference_blocks):
+            raise ValueError(
+                "student_sample_steps must equal len(inference_blocks), got "
+                f"{self.student_sample_steps} and {len(self.inference_blocks)}."
+            )
+
+        start = 0
+        for index, block in enumerate(self.inference_blocks):
+            if start % self.block_size_min != 0 or start > self.grid_size - self.block_size_min:
+                raise ValueError(
+                    f"inference block {index} starts at {start}, which is not a valid "
+                    f"training start aligned to block_size_min={self.block_size_min}."
+                )
+            start += block
+
+        default_sample_t_cfg = SampleTimestepConfig()
+        if self.sample_t_cfg.model_dump() != default_sample_t_cfg.model_dump():
+            raise ValueError(
+                "sample_t_cfg is unused by PDD and cannot be overridden; PDD samples "
+                "discrete interval indices from its fixed shifted grid."
+            )
+        return self
+
+    @classmethod
+    def from_yaml(cls, config_file: str | Path) -> PDDConfig:
+        """Construct a :class:`PDDConfig` from a filesystem or built-in YAML file."""
+        from .loader import load_pdd_config
+
+        return load_pdd_config(config_file)
+
+
 class DMDConfig(DistillationConfig):
     """Hyperparameters for DMD / DMD2 distribution-matching distillation.
 
@@ -305,8 +446,8 @@ class DMDConfig(DistillationConfig):
         """Construct a :class:`DMDConfig` from a YAML file.
 
         Thin wrapper around :func:`modelopt.torch.fastgen.loader.load_dmd_config`.
-        The resolver searches the built-in ``modelopt_recipes/`` package first, then
-        the filesystem. Suffixes (``.yml`` / ``.yaml``) may be omitted.
+        The resolver searches the filesystem first, then the built-in
+        ``modelopt_recipes/`` package. Suffixes (``.yml`` / ``.yaml``) may be omitted.
         """
         # Imported lazily to avoid a circular import between this module and
         # ``modelopt.torch.fastgen.loader`` (which imports :class:`DMDConfig`).
