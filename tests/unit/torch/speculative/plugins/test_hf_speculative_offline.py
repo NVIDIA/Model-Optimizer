@@ -58,6 +58,40 @@ make_speculative_data_module = _eagle_utils.make_speculative_data_module
 
 
 # ---------------------------------------------------------------------------
+# online VLM data-module wiring
+# ---------------------------------------------------------------------------
+
+
+def test_vlm_data_module_passes_dflash_label_mode(monkeypatch):
+    """VLM batches must use unshifted labels for DFlash and preserve OSL settings."""
+    data_args = argparse.Namespace(
+        mode="online",
+        data_path="unused.jsonl",
+        vlm_processor="dummy-vlm-processor",
+        vlm_img_dir="/images",
+        chat_template=None,
+    )
+    collator = MagicMock()
+    monkeypatch.setattr(_eagle_utils, "ShardedDataset", MagicMock())
+    monkeypatch.setattr(_eagle_utils, "VisionLanguageDataCollator", collator)
+
+    module = make_speculative_data_module(
+        MagicMock(), data_args, train_len=16, answer_only_loss=True, shift_labels=False
+    )
+
+    collator.assert_called_once_with(
+        processor="dummy-vlm-processor",
+        train_len=16,
+        local_image_path="/images",
+        return_labels=True,
+        answer_only_loss=True,
+        shift_labels=False,
+        chat_template=None,
+    )
+    assert module["data_collator"] is collator.return_value
+
+
+# ---------------------------------------------------------------------------
 # sample_size truncation tests
 # ---------------------------------------------------------------------------
 
