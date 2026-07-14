@@ -54,10 +54,12 @@
 }
 
 .announcement-card {
-  border: 1px solid #d6d8dc;
-  border-radius: 4px;
-  padding: 1rem;
-  background: #fff;
+  border-bottom: 1px solid #d6d8dc;
+  padding: 0 0 1rem;
+}
+
+.announcement-card:last-child {
+  border-bottom: 0;
 }
 
 .announcement-card h2 {
