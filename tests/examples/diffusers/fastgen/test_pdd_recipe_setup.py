@@ -103,6 +103,54 @@ def test_remote_model_requires_full_revision_and_non_dp_parallelism_is_rejected(
         resolve_pdd_recipe_config(raw)
 
 
+@pytest.mark.parametrize(
+    ("section", "name", "value", "message"),
+    [
+        ("training", "grad_accumulation_steps", 2, "grad_accumulation_steps=1"),
+        ("training", "max_grad_norm", 0.0, "max_grad_norm must be > 0"),
+        ("training", "validation_every_steps", 0, "validation_every_steps"),
+        ("guidance", "rescale", 1.1, "guidance.rescale must be <= 1"),
+        ("optim", "betas", [0.9, 1.0], "optim.betas values"),
+        ("optim", "eps", 0.0, "optim.eps must be > 0"),
+    ],
+)
+def test_training_config_gates_fail_during_resolution(
+    tmp_path, section, name, value, message
+) -> None:
+    raw = _raw_config(tmp_path)
+    raw.setdefault(section, {})[name] = value
+
+    with pytest.raises(ValueError, match=message):
+        resolve_pdd_recipe_config(raw)
+
+
+def test_restore_requires_enabled_checkpointing(tmp_path) -> None:
+    raw = _raw_config(tmp_path)
+    raw["checkpoint"]["enabled"] = False
+    raw["checkpoint"]["restore_from"] = "LATEST"
+
+    with pytest.raises(ValueError, match="restore_from requires checkpoint.enabled=true"):
+        resolve_pdd_recipe_config(raw)
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("drop_last", False, "drop_last=true"),
+        ("dynamic_batch_size", True, "dynamic_batch_size=false"),
+        ("train_text_encoder", True, "cached text embeddings"),
+    ],
+)
+def test_training_dataloader_modes_are_gated_during_resolution(
+    tmp_path, name, value, message
+) -> None:
+    raw = _raw_config(tmp_path)
+    raw["data"] = {"dataloader": {name: value}}
+
+    with pytest.raises(ValueError, match=message):
+        resolve_pdd_recipe_config(raw)
+
+
 def test_frozen_automodel_distribution_snapshot_is_stable() -> None:
     try:
         version = importlib.metadata.version("nemo_automodel")

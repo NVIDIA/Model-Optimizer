@@ -15,11 +15,15 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from portable_cache import validate_relative_reference
 from torch import nn
 from verify_readonly_automodel import snapshot_installed_distribution
 
-from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDOutputProjection
-from modelopt.torch.fastgen.plugins.qwen_image_pdd import convert_qwen_image_to_pdd
+from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDOutputProjection, PDDPipeline
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+    QwenImagePDDAdapter,
+    convert_qwen_image_to_pdd,
+)
 
 
 @dataclass(frozen=True)
@@ -37,7 +41,33 @@ class PDDCheckpointConfig:
     checkpoint_dir: str = "checkpoints/pdd_qwen_image"
     enabled: bool = True
     model_save_format: str = "torch_save"
+    restore_from: str | None = None
     save_consolidated: bool = False
+
+
+@dataclass(frozen=True)
+class PDDTrainingConfig:
+    """Direct-update and observability settings for the standalone PDD lifecycle."""
+
+    seed: int = 42
+    max_steps: int = 10_000
+    max_grad_norm: float = 1.0
+    zero_grad_warmup_steps: int = 0
+    log_every_steps: int = 10
+    checkpoint_every_steps: int = 1_000
+    validation_every_steps: int = 1_000
+    local_batch_size: int = 1
+    global_batch_size: int | None = None
+    grad_accumulation_steps: int = 1
+    validation_seed: int = 2026
+
+
+@dataclass(frozen=True)
+class PDDGuidanceConfig:
+    """Resolved Qwen packed-CFG norm-rescaling settings."""
+
+    rescale: float = 1.0
+    eps: float = 1e-5
 
 
 @dataclass(frozen=True)
@@ -49,8 +79,15 @@ class PDDRecipeConfig:
     pdd: PDDConfig
     parallel: PDDParallelConfig
     checkpoint: PDDCheckpointConfig
+    training: PDDTrainingConfig
+    guidance: PDDGuidanceConfig
     learning_rate: float
     weight_decay: float
+    adam_betas: tuple[float, float]
+    adam_eps: float
+    all_metadata_index: str
+    train_metadata_index: str
+    validation_metadata_index: str
     device: torch.device
     dtype: torch.dtype
     fuse_qkv_projections: bool
@@ -74,6 +111,16 @@ class PDDSetupArtifacts:
     automodel_snapshot: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class PDDTrainingArtifacts:
+    """Direct-update objects layered on the already-constructed Task-7 setup."""
+
+    pipeline: PDDPipeline
+    trainer: Any
+    scheduler: torch.optim.lr_scheduler.LRScheduler
+    rng: Any
+
+
 def _as_mapping(value: Any, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping, got {type(value).__name__}.")
@@ -90,6 +137,22 @@ def _require_bool(value: Any, *, name: str) -> bool:
     if type(value) is not bool:
         raise TypeError(f"{name} must be bool.")
     return value
+
+
+def _require_int_at_least(value: Any, *, name: str, minimum: int) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}.")
+    return value
+
+
+def _require_finite_real(value: Any, *, name: str, minimum: float | None = None) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{name} must be a real number.")
+    resolved = float(value)
+    if not math.isfinite(resolved) or (minimum is not None and resolved < minimum):
+        qualifier = "finite" if minimum is None else f"finite and >= {minimum}"
+        raise ValueError(f"{name} must be {qualifier}.")
+    return resolved
 
 
 def _resolve_dtype(value: Any) -> torch.dtype:
@@ -118,6 +181,40 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
     fsdp = _as_mapping(raw.get("fsdp", {}), name="fsdp")
     optim = _as_mapping(raw.get("optim", {}), name="optim")
     checkpoint = _as_mapping(raw.get("checkpoint", {}), name="checkpoint")
+    training = _as_mapping(raw.get("training", {}), name="training")
+    guidance = _as_mapping(raw.get("guidance", {}), name="guidance")
+    data = _as_mapping(raw.get("data", {}), name="data")
+    dataloader = _as_mapping(data.get("dataloader", {}), name="data.dataloader")
+
+    target = dataloader.get("_target_")
+    expected_target = "fastgen_data.build_text_to_image_multiresolution_dataloader"
+    if target is not None and target != expected_target:
+        raise ValueError(f"data.dataloader._target_ must be {expected_target!r}.")
+    if _require_bool(dataloader.get("drop_last", True), name="data.dataloader.drop_last") is False:
+        raise ValueError("PDD exact sample accounting requires data.dataloader.drop_last=true.")
+    if _require_bool(
+        dataloader.get("dynamic_batch_size", False),
+        name="data.dataloader.dynamic_batch_size",
+    ):
+        raise ValueError("PDD v1 requires data.dataloader.dynamic_batch_size=false.")
+    if _require_bool(
+        dataloader.get("train_text_encoder", False),
+        name="data.dataloader.train_text_encoder",
+    ):
+        raise ValueError("PDD requires cached text embeddings; train_text_encoder must be false.")
+    _require_bool(dataloader.get("shuffle", True), name="data.dataloader.shuffle")
+    all_metadata_index = validate_relative_reference(
+        data.get("all_metadata_index", "metadata.json"),
+        label="data.all_metadata_index",
+    ).as_posix()
+    train_metadata_index = validate_relative_reference(
+        dataloader.get("metadata_index", "metadata_train.json"),
+        label="data.dataloader.metadata_index",
+    ).as_posix()
+    validation_metadata_index = validate_relative_reference(
+        data.get("validation_metadata_index", "metadata_heldout.json"),
+        label="data.validation_metadata_index",
+    ).as_posix()
 
     _reject_enabled(model.get("transformer_engine_linear"), name="global TE-linear conversion")
     _reject_enabled(model.get("peft"), name="PEFT/LoRA")
@@ -159,6 +256,25 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
         raise ValueError("optim.learning_rate and weight_decay must be finite.")
     if learning_rate <= 0 or weight_decay < 0:
         raise ValueError("optim.learning_rate must be > 0 and weight_decay must be >= 0.")
+    adam_betas_raw = optim.get("betas", [0.9, 0.999])
+    if (
+        not isinstance(adam_betas_raw, list | tuple)
+        or len(adam_betas_raw) != 2
+        or any(
+            isinstance(beta, bool) or not isinstance(beta, int | float) for beta in adam_betas_raw
+        )
+    ):
+        raise TypeError("optim.betas must contain two real numbers.")
+    adam_betas = tuple(float(beta) for beta in adam_betas_raw)
+    if any(not math.isfinite(beta) or not 0.0 <= beta < 1.0 for beta in adam_betas):
+        raise ValueError("optim.betas values must be finite and in [0, 1).")
+    adam_eps = _require_finite_real(
+        optim.get("eps", 1e-8),
+        name="optim.eps",
+        minimum=0.0,
+    )
+    if adam_eps == 0.0:
+        raise ValueError("optim.eps must be > 0.")
 
     dp_size = fsdp.get("dp_size")
     if dp_size is not None and (type(dp_size) is not int or dp_size < 1):
@@ -190,6 +306,81 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
     fuse_qkv_projections = _require_bool(
         model.get("fuse_qkv_projections", False), name="model.fuse_qkv_projections"
     )
+    restore_from = checkpoint.get("restore_from")
+    if restore_from is not None and (not isinstance(restore_from, str) or not restore_from):
+        raise ValueError("checkpoint.restore_from must be null or a non-empty string.")
+    if not checkpoint_enabled and restore_from is not None:
+        raise ValueError("checkpoint.restore_from requires checkpoint.enabled=true.")
+
+    seed = _require_int_at_least(training.get("seed", 42), name="training.seed", minimum=0)
+    max_steps = _require_int_at_least(
+        training.get("max_steps", 10_000), name="training.max_steps", minimum=1
+    )
+    zero_grad_warmup_steps = _require_int_at_least(
+        training.get("zero_grad_warmup_steps", 0),
+        name="training.zero_grad_warmup_steps",
+        minimum=0,
+    )
+    log_every_steps = _require_int_at_least(
+        training.get("log_every_steps", 10),
+        name="training.log_every_steps",
+        minimum=1,
+    )
+    checkpoint_every_steps = _require_int_at_least(
+        training.get("checkpoint_every_steps", 1_000),
+        name="training.checkpoint_every_steps",
+        minimum=1,
+    )
+    validation_every_steps = _require_int_at_least(
+        training.get("validation_every_steps", 1_000),
+        name="training.validation_every_steps",
+        minimum=1,
+    )
+    grad_accumulation_steps = _require_int_at_least(
+        training.get("grad_accumulation_steps", 1),
+        name="training.grad_accumulation_steps",
+        minimum=1,
+    )
+    if grad_accumulation_steps != 1:
+        raise ValueError("PDD v1 exact resume requires training.grad_accumulation_steps=1.")
+    local_batch_size = _require_int_at_least(
+        dataloader.get("batch_size", training.get("local_batch_size", 1)),
+        name="data.dataloader.batch_size",
+        minimum=1,
+    )
+    global_batch_size = training.get("global_batch_size")
+    if global_batch_size is not None:
+        global_batch_size = _require_int_at_least(
+            global_batch_size,
+            name="training.global_batch_size",
+            minimum=1,
+        )
+    validation_seed = _require_int_at_least(
+        training.get("validation_seed", 2026),
+        name="training.validation_seed",
+        minimum=0,
+    )
+    max_grad_norm = _require_finite_real(
+        training.get("max_grad_norm", 1.0),
+        name="training.max_grad_norm",
+        minimum=0.0,
+    )
+    if max_grad_norm == 0.0:
+        raise ValueError("training.max_grad_norm must be > 0.")
+    guidance_rescale = _require_finite_real(
+        guidance.get("rescale", 1.0),
+        name="guidance.rescale",
+        minimum=0.0,
+    )
+    if guidance_rescale > 1.0:
+        raise ValueError("guidance.rescale must be <= 1.")
+    guidance_eps = _require_finite_real(
+        guidance.get("eps", 1e-5),
+        name="guidance.eps",
+        minimum=0.0,
+    )
+    if guidance_eps == 0.0:
+        raise ValueError("guidance.eps must be > 0.")
 
     return PDDRecipeConfig(
         model_id=model_id,
@@ -203,10 +394,30 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
             checkpoint_dir=checkpoint_dir,
             enabled=checkpoint_enabled,
             model_save_format=model_save_format,
+            restore_from=restore_from,
             save_consolidated=save_consolidated,
         ),
+        training=PDDTrainingConfig(
+            seed=seed,
+            max_steps=max_steps,
+            max_grad_norm=max_grad_norm,
+            zero_grad_warmup_steps=zero_grad_warmup_steps,
+            log_every_steps=log_every_steps,
+            checkpoint_every_steps=checkpoint_every_steps,
+            validation_every_steps=validation_every_steps,
+            local_batch_size=local_batch_size,
+            global_batch_size=global_batch_size,
+            grad_accumulation_steps=grad_accumulation_steps,
+            validation_seed=validation_seed,
+        ),
+        guidance=PDDGuidanceConfig(rescale=guidance_rescale, eps=guidance_eps),
         learning_rate=float(learning_rate),
         weight_decay=float(weight_decay),
+        adam_betas=adam_betas,
+        adam_eps=adam_eps,
+        all_metadata_index=all_metadata_index,
+        train_metadata_index=train_metadata_index,
+        validation_metadata_index=validation_metadata_index,
         device=torch.device(model.get("device", "cuda" if torch.cuda.is_available() else "cpu")),
         dtype=_resolve_dtype(model.get("torch_dtype", "bfloat16")),
         fuse_qkv_projections=fuse_qkv_projections,
@@ -331,6 +542,18 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     lifecycle.append("qkv")
 
     world_size = dist.get_world_size()
+    if config.training.global_batch_size is not None:
+        effective_global_batch = (
+            config.training.local_batch_size * world_size * config.training.grad_accumulation_steps
+        )
+        if effective_global_batch != config.training.global_batch_size:
+            raise ValueError(
+                "PDD global batch mismatch: "
+                f"local_batch_size={config.training.local_batch_size} * world_size={world_size} "
+                f"* grad_accumulation_steps={config.training.grad_accumulation_steps} "
+                f"= {effective_global_batch}, configured "
+                f"training.global_batch_size={config.training.global_batch_size}."
+            )
     dp_size = config.parallel.dp_size or world_size
     if dp_size != world_size:
         raise ValueError(
@@ -367,6 +590,14 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         trainable,
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
+        betas=config.adam_betas,
+        eps=config.adam_eps,
+        amsgrad=False,
+        capturable=False,
+        differentiable=False,
+        foreach=False,
+        fused=False,
+        maximize=False,
     )
     optimizer_parameters = [
         parameter for group in optimizer.param_groups for parameter in group["params"]
@@ -411,6 +642,41 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         checkpoint_keys=checkpoint_keys,
         lifecycle=tuple(lifecycle),
         automodel_snapshot=automodel_snapshot,
+    )
+
+
+def build_pdd_training_artifacts(
+    setup: PDDSetupArtifacts,
+    config: PDDRecipeConfig,
+) -> PDDTrainingArtifacts:
+    """Layer the direct-update pipeline, constant-LR scheduler, and ranked RNG on setup."""
+    if not isinstance(setup, PDDSetupArtifacts):
+        raise TypeError("setup must be PDDSetupArtifacts.")
+    if not isinstance(config, PDDRecipeConfig):
+        raise TypeError("config must be PDDRecipeConfig.")
+    from nemo_automodel.components.training.rng import StatefulRNG
+    from pdd_training import PDDTrainer
+
+    adapter = QwenImagePDDAdapter(
+        config.pdd,
+        guidance_rescale=config.guidance.rescale,
+        guidance_eps=config.guidance.eps,
+    )
+    pipeline = PDDPipeline(setup.student, setup.teacher, config.pdd, adapter)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(setup.optimizer, lr_lambda=lambda _: 1.0)
+    rng = StatefulRNG(config.training.seed, ranked=True)
+    trainer = PDDTrainer(
+        pipeline,
+        setup.optimizer,
+        projection=setup.projection,
+        max_grad_norm=config.training.max_grad_norm,
+        warmup_steps=config.training.zero_grad_warmup_steps,
+    )
+    return PDDTrainingArtifacts(
+        pipeline=pipeline,
+        trainer=trainer,
+        scheduler=scheduler,
+        rng=rng,
     )
 
 

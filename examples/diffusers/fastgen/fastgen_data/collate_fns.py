@@ -40,6 +40,7 @@ from nemo_automodel.components.datasets.diffusion.sampler import SequentialBucke
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from .paths import resolve_under_root
+from .replayable_sampler import ReplayableBatchSampler
 from .text_to_image_dataset import TextToImageDataset
 
 __all__ = [
@@ -175,7 +176,10 @@ def build_text_to_image_multiresolution_dataloader(
     prefetch_factor: int = 2,
     negative_prompt_embedding_path: str | None = None,
     selected_indices: Sequence[int] | None = None,
-) -> tuple[StatefulDataLoader, SequentialBucketSampler]:
+    exact_resume: bool = False,
+    sampler_seed: int = 42,
+    loader_seed: int | None = None,
+) -> tuple[StatefulDataLoader, SequentialBucketSampler | ReplayableBatchSampler]:
     """Build the DMD2 text-to-image multiresolution dataloader for ``TrainDiffusionRecipe``.
 
     Args:
@@ -195,6 +199,11 @@ def build_text_to_image_multiresolution_dataloader(
         negative_prompt_embedding_path: Optional ``.pt`` with a static negative-prompt
             embedding, bound into the collate and broadcast to every batch (DMD2 CFG).
         selected_indices: Optional ordered original metadata ordinals to expose.
+        exact_resume: Wrap the deterministic sampler with a committed cursor that is
+            independent of worker prefetch. Required by the PDD lifecycle.
+        sampler_seed: Seed for the released deterministic bucket sampler.
+        loader_seed: Optional dedicated seed for DataLoader worker/base-seed generation. PDD
+            supplies this so recreating an iterator cannot consume its restored training RNG.
 
     Returns:
         ``(StatefulDataLoader, SequentialBucketSampler)``.
@@ -237,17 +246,24 @@ def build_text_to_image_multiresolution_dataloader(
         shuffle_buckets=shuffle,
         shuffle_within_bucket=shuffle,
         dynamic_batch_size=dynamic_batch_size,
+        seed=sampler_seed,
         num_replicas=dp_world_size,
         rank=dp_rank,
     )
+    batch_sampler = ReplayableBatchSampler(sampler) if exact_resume else sampler
+    loader_generator = None
+    if loader_seed is not None:
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(loader_seed + dp_rank)
     dataloader = StatefulDataLoader(
         dataset,
-        batch_sampler=sampler,
+        batch_sampler=batch_sampler,
         collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
         persistent_workers=num_workers > 0,
+        generator=loader_generator,
     )
 
     if dp_rank == 0:
@@ -257,9 +273,9 @@ def build_text_to_image_multiresolution_dataloader(
             effective_root,
             len(dataset),
             dataset.total_num_samples,
-            len(sampler),
+            len(batch_sampler),
             batch_size,
             dp_rank,
             dp_world_size,
         )
-    return dataloader, sampler
+    return dataloader, batch_sampler

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ from portable_cache import (
 )
 
 
-def _validate_payload(root: Path, entry: dict[str, Any]) -> Path:
+def _validate_payload(root: Path, entry: dict[str, Any]) -> tuple[Path, str]:
     payload_path = resolve_cache_asset(root, entry["cache_file"], label="cache_file")
     actual_digest = sha256_file(payload_path)
     if actual_digest != entry["payload_sha256"]:
@@ -47,7 +48,7 @@ def _validate_payload(root: Path, entry: dict[str, Any]) -> Path:
         raise ValueError(f"payload/manifest sample_id mismatch for {entry['cache_file']}")
     if payload.get("source_ref") != entry.get("source_ref"):
         raise ValueError(f"payload/manifest source_ref mismatch for {entry['cache_file']}")
-    return payload_path
+    return payload_path, actual_digest
 
 
 def validate_snapshot(
@@ -133,7 +134,8 @@ def validate_snapshot(
         if all_ids is not None and train_ids | heldout_ids != all_ids:
             raise ValueError("train and heldout split union does not equal the all split")
 
-    payload_files = {_validate_payload(root, entry) for entry in entries_by_id.values()}
+    payload_hashes = dict(_validate_payload(root, entry) for entry in entries_by_id.values())
+    payload_files = set(payload_hashes)
     declared_files.update(payload_files)
 
     if reject_orphans:
@@ -162,11 +164,27 @@ def validate_snapshot(
         if undeclared:
             raise ValueError(f"snapshot contains undeclared files: {undeclared[:5]}")
 
+    declared_hashes = {
+        path.relative_to(root).as_posix(): (
+            payload_hashes[path] if path in payload_hashes else sha256_file(path)
+        )
+        for path in declared_files
+    }
+    snapshot_digest = hashlib.sha256()
+    snapshot_digest.update(b"modelopt-fastgen-cache-snapshot-v1\0")
+    for relative, file_digest in sorted(declared_hashes.items()):
+        snapshot_digest.update(relative.encode())
+        snapshot_digest.update(b"\0")
+        snapshot_digest.update(file_digest.encode())
+        snapshot_digest.update(b"\n")
+
     return {
         "root": str(root),
         "indexes": list(expected_indexes.values()),
         "splits": {name: len(ids) for name, ids in split_ids.items()},
         "unique_payloads": len(payload_files),
+        "declared_files": len(declared_hashes),
+        "snapshot_sha256": snapshot_digest.hexdigest(),
     }
 
 

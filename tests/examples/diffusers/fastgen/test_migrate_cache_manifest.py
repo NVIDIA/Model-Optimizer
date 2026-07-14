@@ -130,8 +130,11 @@ def test_migration_is_path_independent_and_relocatable(tmp_path):
     alice_train = load_portable_metadata(alice_output, "metadata_train.json")[0]["sample_ids"]
     bob_train = load_portable_metadata(bob_output, "metadata_train.json")[0]["sample_ids"]
     assert alice_train == bob_train
-    assert validate_snapshot(alice_output)["splits"] == {"all": 4, "train": 3, "heldout": 1}
-    assert validate_snapshot(bob_output)["splits"] == {"all": 4, "train": 3, "heldout": 1}
+    alice_report = validate_snapshot(alice_output)
+    bob_report = validate_snapshot(bob_output)
+    assert alice_report["splits"] == {"all": 4, "train": 3, "heldout": 1}
+    assert bob_report["splits"] == {"all": 4, "train": 3, "heldout": 1}
+    assert alice_report["snapshot_sha256"] == bob_report["snapshot_sha256"]
 
     cli = subprocess.run(
         [
@@ -162,7 +165,7 @@ def test_migration_is_path_independent_and_relocatable(tmp_path):
     relocated.parent.mkdir()
     shutil.copytree(alice_output, relocated)
     assert _manifest_signature(relocated) == _manifest_signature(alice_output)
-    validate_snapshot(relocated)
+    assert validate_snapshot(relocated)["snapshot_sha256"] == alice_report["snapshot_sha256"]
 
 
 def test_incomplete_pass_one_publishes_nothing(monkeypatch, tmp_path):

@@ -20,7 +20,11 @@ _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
-from fastgen_data import TextToImageDataset, collate_fn_text_to_image
+from fastgen_data import (
+    TextToImageDataset,
+    build_text_to_image_multiresolution_dataloader,
+    collate_fn_text_to_image,
+)
 from portable_cache import (
     DATASET_CACHE_ENV,
     audit_no_absolute_paths,
@@ -156,11 +160,36 @@ def test_relocation_preserves_order_payloads_and_buckets(monkeypatch, tmp_path):
     assert _batch_signature(first_dataset) == _batch_signature(second_dataset)
     assert [entry["sample_id"] for entry in second_dataset.metadata] == splits["train"]
     assert first_dataset.bucket_groups == second_dataset.bucket_groups
+    first_report = validate_snapshot(first)
+    second_report = validate_snapshot(second)
+    assert first_report["snapshot_sha256"] == second_report["snapshot_sha256"]
+    assert first_report["declared_files"] == second_report["declared_files"]
 
     monkeypatch.setenv(DATASET_CACHE_ENV, str(second))
     overridden = TextToImageDataset(str(first), metadata_index="metadata_train.json")
     assert overridden.cache_dir == second.resolve()
     assert _batch_signature(overridden) == _batch_signature(first_dataset)
+
+
+def test_pdd_loader_iterator_does_not_advance_training_rng(monkeypatch, tmp_path):
+    root = tmp_path / "cache"
+    _make_snapshot(root)
+    monkeypatch.delenv(DATASET_CACHE_ENV, raising=False)
+    loader, _ = build_text_to_image_multiresolution_dataloader(
+        cache_dir=str(root),
+        metadata_index="metadata_train.json",
+        batch_size=1,
+        base_resolution=(64, 64),
+        num_workers=0,
+        exact_resume=True,
+        sampler_seed=17,
+        loader_seed=17,
+    )
+    before = torch.get_rng_state().clone()
+
+    next(iter(loader))
+
+    assert torch.equal(torch.get_rng_state(), before)
 
 
 def test_split_filters_before_inherited_bucket_grouping(monkeypatch, tmp_path):
