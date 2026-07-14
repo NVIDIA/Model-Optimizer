@@ -359,6 +359,7 @@ def test_eagle_vllm_dataset_end_to_end(monkeypatch):
         "attention_mask",
         "loss_mask",
         "labels",
+        "base_hidden_prenorm",
     }
     for b in batches:
         assert set(b) == expected_keys

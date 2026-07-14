@@ -157,6 +157,37 @@ class TestDominoForward:
         assert abs(out.loss.item() - out.domino_metrics["final_loss"]) < 1e-4
 
 
+class TestDominoSwa:
+    """Domino honors dflash_swa_window_size (regression: the window was silently ignored)."""
+
+    def test_forward_passes_window_to_mask(self, monkeypatch):
+        """The training forward builds the draft mask with the configured window."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_domino_config()
+        config["dflash_swa_window_size"] = 6
+        mtsp.convert(model, [("dflash", config)])
+        model.train()
+
+        torch.manual_seed(0)
+        input_ids = torch.randint(1, model.dflash_config.vocab_size, (2, SEQ_LEN))
+
+        windows = []
+        orig = model._build_draft_attention_mask
+
+        def spy(*args, **kwargs):
+            windows.append(kwargs.get("window"))
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(model, "_build_draft_attention_mask", spy)
+        out = model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            labels=input_ids.clone(),
+        )
+        assert out.loss.dim() == 0
+        assert windows == [6]
+
+
 class TestLambdaSchedule:
     """Test the lambda_base curriculum schedule."""
 

@@ -962,8 +962,8 @@ def update_quant_cfg_with_kv_cache_quant(
     return quant_cfg
 
 
-def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
-    """Convert eligible TensorQuantizers to NVFP4StaticQuantizer in-place.
+def promote_static_block_weight_quantizers(model: nn.Module) -> int:
+    """Convert eligible static-block weight TensorQuantizers in-place.
 
     After max calibration sets per-block amax values, NVFP4 static quantizers
     need to be promoted so they use the two-level scaling path (global amax +
@@ -973,9 +973,14 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
     ``model``, the promoted quantizer's ``_global_amax`` buffer is tied to that canonical
     state buffer instead of receiving an independent copy.
 
-    Returns the number of quantizers converted.
+    Returns the number of NVFP4 quantizers converted.
     """
-    from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+    from modelopt.torch.quantization.nn import (
+        QuantModule,
+        SequentialQuantizer,
+        StaticBlockScaleQuantizer,
+        TensorQuantizer,
+    )
     from modelopt.torch.quantization.utils.shared_input import (
         SharedWeightGlobalAmaxState,
         iter_shared_quant_states,
@@ -988,33 +993,51 @@ def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
         for state in iter_shared_quant_states(model, SharedWeightGlobalAmaxState)
         for quantizer in state._member_quantizers()
     }
-
     converted = 0
     for _name, module in list(model.named_modules()):
-        if not isinstance(module, TensorQuantizer) or not module.is_enabled:
+        if not isinstance(module, QuantModule):
             continue
-        if not module.is_nvfp4_static:
-            continue
-        amax = module.amax
-        if amax is None:
-            continue
-
-        # Grouped siblings share one canonical global_amax (common FP8 grid); otherwise
-        # fall back to this quantizer's own per-block amax.
-        already_promoted = isinstance(module, NVFP4StaticQuantizer)
-        shared = shared_by_quantizer.get(id(module))
-        if shared is not None and shared.global_amax is not None:
-            NVFP4StaticQuantizer.from_tensor_quantizer(module)
-            shared.tie_member_quantizer(module)
-        else:
-            if shared is not None and not amax.is_meta:
-                raise RuntimeError(
-                    f"{_name}: weight quantizer is in a shared group whose global_amax was not "
-                    "populated before promotion; run populate after calibration so siblings "
-                    "share one scale instead of falling back to their own."
-                )
-            global_amax = reduce_amax(amax.clone().detach(), axis=None)
-            NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
-        if not already_promoted:
-            converted += 1
+        for _, quantizer in module.iter_weights_for_calibration():
+            if isinstance(quantizer, SequentialQuantizer):
+                if len(quantizer) == 0:
+                    continue
+                quantizer = quantizer[0]
+            if not isinstance(quantizer, TensorQuantizer):
+                continue
+            quantizer_id = id(quantizer)
+            if not quantizer.is_enabled or not quantizer.is_static_block_quant:
+                continue
+            amax = quantizer.amax
+            if amax is None:
+                continue
+            if quantizer.is_nvfp4_static:
+                # Grouped siblings share one canonical global_amax (common FP8 grid); otherwise
+                # fall back to this quantizer's own per-block amax.
+                already_promoted = isinstance(quantizer, StaticBlockScaleQuantizer)
+                shared = shared_by_quantizer.get(quantizer_id)
+                if shared is not None and shared.global_amax is not None:
+                    StaticBlockScaleQuantizer.from_tensor_quantizer(quantizer)
+                    shared.tie_member_quantizer(quantizer)
+                else:
+                    if shared is not None and not amax.is_meta:
+                        raise RuntimeError(
+                            f"{_name}: weight quantizer is in a shared group whose global_amax was "
+                            "not populated before promotion; run populate after calibration so "
+                            "siblings share one scale instead of falling back to their own."
+                        )
+                    global_amax = reduce_amax(amax.clone().detach(), axis=None)
+                    StaticBlockScaleQuantizer.from_tensor_quantizer(
+                        quantizer, global_amax=global_amax
+                    )
+                if not already_promoted:
+                    converted += 1
+            elif isinstance(quantizer._num_bits, int):
+                # Integer static-block weights are promoted so LSQ can use
+                # StaticBlockScaleQuantizer.
+                StaticBlockScaleQuantizer.from_tensor_quantizer(quantizer)
     return converted
+
+
+def promote_nvfp4_static_quantizers(model: nn.Module) -> int:
+    """Compatibility wrapper for static-block weight quantizer promotion."""
+    return promote_static_block_weight_quantizers(model)

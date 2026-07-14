@@ -4,9 +4,14 @@ Model optimization research depends on short feedback loops: test a hypothesis c
 reproducibly, and spend full-scale compute only on the most promising experiments. This guide collects practical
 ModelOpt workflows for that iterative research process.
 
-The guide starts with efficient model evaluation and will grow as additional research workflows are documented.
-It complements the feature-specific [examples](../) by connecting them into experimentation strategies rather
-than replacing their detailed instructions.
+Current workflows include:
+
+- [Efficient model evaluation](#efficient-evaluation-with-lm-eval-harness) with smaller benchmark subsets.
+- [Efficient data blend preparation](#prepare-token-budgeted-data-blends) for distillation experiments.
+
+The guide will grow as additional research workflows are documented. It complements the feature-specific
+[examples](../) by connecting them into experimentation strategies rather than replacing their detailed
+instructions.
 
 ## Efficient evaluation with LM-Eval Harness
 
@@ -41,6 +46,13 @@ and should not be reported as final benchmark results.
 
 Add `--log_samples` for paired per-question analysis. When multiple GPUs are available, use data parallelism to
 split samples across model copies; see the [LM-Eval examples](../llm_eval/README.md) for commands.
+
+## Prepare token-budgeted data blends
+
+Preparing complete distillation datasets can consume unnecessary time and storage during early experiments.
+ModelOpt can preserve source weights while preparing only a requested token budget. See
+[Prepare token-budgeted data blends](../dataset/MEGATRON_DATA_PREP.md#prepare-token-budgeted-data-blends) for the
+configuration format, commands, and generated outputs.
 
 ## Planned topics
 

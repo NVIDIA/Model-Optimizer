@@ -156,6 +156,9 @@ class OfflineSupervisedDataset(Dataset):
             "attention_mask": torch.ones_like(offline_data["input_ids"]),
             "loss_mask": loss_mask,
             "labels": labels,
+            # Whether the dumped hidden is pre-(final-)norm (the consumer re-applies the base
+            # norm if so). Read from the dump; default False = post-norm, the prior behavior.
+            "base_hidden_prenorm": bool(offline_data.get("hidden_states_prenorm", False)),
         }
         return ret
 
@@ -195,6 +198,19 @@ class EagleOfflineDataCollator:
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
             for k in ["base_model_hidden_states", "aux_hidden_states"]
         }
+        # Propagate the producer's pre-norm declaration. DFlash honors it to decide whether to
+        # re-apply the base final norm; other heads ignore it. It must be constant across the
+        # batch: a batch is normed as a whole, so mixing pre-norm (True) and post-norm (False)
+        # dumps — e.g. a directory blending pre-PR and pre-norm dumps — would silently feed
+        # un-normed hiddens to lm_head for the minority. Fail loud rather than corrupt the target.
+        if "base_hidden_prenorm" in features[0]:
+            prenorm_flags = {bool(f["base_hidden_prenorm"]) for f in features}
+            if len(prenorm_flags) > 1:
+                raise ValueError(
+                    "base_hidden_prenorm is not constant across the batch "
+                    f"(got {prenorm_flags}); do not mix pre-norm and post-norm dumps."
+                )
+            base_model_outputs["base_hidden_prenorm"] = prenorm_flags.pop()
 
         batch = {
             **base_batch,

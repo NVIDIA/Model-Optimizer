@@ -276,16 +276,13 @@ See [vLLM documentation](https://docs.vllm.ai/en/latest/getting_started/installa
 
 **NOTE:** This is a temporary workaround pending official vLLM integration. You can track merge status [here](https://github.com/vllm-project/vllm/pull/36512).
 
-Then, add the following to the model's `config.json` file (here we use Llama as an example):
+Then, convert the model's config.json to AnyModel format:
 
-```json
-{
-  ...
-  "architectures": ["AnyModel"],
-  "base_architecture": "LlamaForCausalLM",
-  ...
-}
+```bash
+python -m modelopt.torch.puzzletron.subblock_stats.runtime_utils convert_config_to_vllm_anymodel <model_dir>
 ```
+
+This will create a backup of the original config.json file at `config.bak`.
 
 For new architectures that are not supported by vLLM, you additionally need to add the following to the `config.json` file (using Llama3 as an example):
 
