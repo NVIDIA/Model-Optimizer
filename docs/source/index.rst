@@ -32,6 +32,11 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    </div>
 
    <p class="announcement-empty" id="announcement-empty" hidden>No announcements match this search.</p>
+   <nav class="announcement-pager" id="announcement-pager" aria-label="Announcement pages" hidden>
+     <button class="announcement-page-button" id="announcement-prev" type="button">Previous</button>
+     <span class="announcement-page-status" id="announcement-page-status"></span>
+     <button class="announcement-page-button" id="announcement-next" type="button">Next</button>
+   </nav>
 
 .. toctree::
    :hidden:

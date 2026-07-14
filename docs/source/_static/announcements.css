@@ -48,9 +48,9 @@
 
 .announcement-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
-  margin: 1rem 0 2rem;
+  margin: 1rem 0 1.25rem;
 }
 
 .announcement-card {
@@ -92,4 +92,36 @@
 .announcement-empty {
   border-left: 4px solid #76b900;
   padding-left: 0.75rem;
+}
+
+
+.announcement-pager {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  margin: 0 0 2rem;
+}
+
+.announcement-page-button {
+  border: 1px solid #9aa1ad;
+  border-radius: 4px;
+  background: #fff;
+  color: #2f343d;
+  cursor: pointer;
+  padding: 0.35rem 0.7rem;
+}
+
+.announcement-page-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.announcement-page-status {
+  color: #4b5563;
+  font-size: 0.9rem;
+}
+
+.toctree-wrapper.compound:empty {
+  display: none;
 }
