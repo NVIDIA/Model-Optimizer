@@ -80,7 +80,6 @@ MODULE_WITHIN_LAYER_TO_FILE_TYPE = {
     "self_attn": "attention",
     "post_attention_layernorm": "ffn",
     "mlp": "ffn",
-    "parallel_blocks": "multi_block",
 }
 LAYERS_MODULE_NAME = "model.layers"
 
@@ -152,6 +151,32 @@ def load_model_config(
 
 
 _FALLBACK_WARNED_CLASSES: set[str] = set()
+
+
+def _clear_existing_weight_artifacts(checkpoint_dir: Path) -> None:
+    """Remove stale HF weight artifacts before writing a fresh Puzzletron checkpoint.
+
+    Realization copies the teacher directory first to preserve tokenizer and remote-code files.
+    That copy can include hundreds of GB of root ``model-*.safetensors`` shards.  Once we write a
+    new Puzzletron index pointing at ``subblocks_safetensors``, those copied root shards become
+    stale and waste disk; clearing them up front also prevents partially failed saves from mixing
+    old and new weight layouts.
+    """
+    for path in checkpoint_dir.glob("model*.safetensors"):
+        path.unlink(missing_ok=True)
+    for path in checkpoint_dir.glob("pytorch_model*.bin"):
+        path.unlink(missing_ok=True)
+    for name in (
+        SAFE_WEIGHTS_INDEX_NAME,
+        "pytorch_model.bin.index.json",
+        SAFETENSORS_SUBBLOCKS_DIR_NAME,
+        PTH_SUBBLOCKS_DIR_NAME,
+    ):
+        path = checkpoint_dir / name
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def _get_model_class_from_config(config: PretrainedConfig) -> type:
@@ -231,6 +256,8 @@ def save_checkpoint_from_shards(
     checkpoint_dir: Path | str,
     descriptor: "ModelDescriptor",
     extra_state_dict: dict[str, torch.Tensor] | None = None,
+    reference_checkpoint_dir: Path | str | None = None,
+    changed_keys: set[str] | None = None,
 ) -> None:
     """
     Save a checkpoint when the model's weights are sharded across distributed ranks.
@@ -245,13 +272,26 @@ def save_checkpoint_from_shards(
         checkpoint_dir (Path | str): Destination directory for the checkpoint files.
         descriptor (ModelDescriptor): Descriptor used to partition weights into subblocks and build
         the safetensors index.
+        reference_checkpoint_dir: Optional checkpoint with the same descriptor weight grouping.  If
+            provided with ``changed_keys``, unchanged subblock files are hardlinked or symlinked from
+            this checkpoint instead of rewritten.
+        changed_keys: State-dict keys that may differ from the reference checkpoint.
     """
 
     local_sd = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     extra_state_dict = _normalize_extra_state_dict(extra_state_dict)
+    if changed_keys is not None:
+        changed_keys = set(changed_keys)
+        changed_keys.update(extra_state_dict)
     if dist_utils.size() > 1:
         _save_checkpoint_from_distributed_shards(
-            model.config, local_sd, checkpoint_dir, descriptor, extra_state_dict=extra_state_dict
+            model.config,
+            local_sd,
+            checkpoint_dir,
+            descriptor,
+            extra_state_dict=extra_state_dict,
+            reference_checkpoint_dir=reference_checkpoint_dir,
+            changed_keys=changed_keys,
         )
         dist_utils.barrier()
     else:
@@ -266,24 +306,36 @@ def _save_checkpoint_from_distributed_shards(
     checkpoint_dir: Path | str,
     descriptor: "ModelDescriptor",
     extra_state_dict: dict[str, torch.Tensor] | None = None,
+    reference_checkpoint_dir: Path | str | None = None,
+    changed_keys: set[str] | None = None,
 ) -> None:
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
     extra_state_dict = _normalize_extra_state_dict(extra_state_dict)
+    reference_checkpoint_dir = Path(reference_checkpoint_dir) if reference_checkpoint_dir else None
+    changed_keys = set(changed_keys or ())
 
     local_keys = list(local_state_dict.keys())
     gathered_keys: list[list[str] | None] | None = (
         [None] * dist_utils.size() if dist_utils.is_master() else None
     )
     tdist.gather_object(local_keys, gathered_keys, dst=0)
+    local_changed_keys = [key for key in local_keys if key in changed_keys]
+    gathered_changed_keys: list[list[str] | None] | None = (
+        [None] * dist_utils.size() if dist_utils.is_master() else None
+    )
+    tdist.gather_object(local_changed_keys, gathered_changed_keys, dst=0)
 
     owner_by_key = None
     weight_map = None
+    reference_by_filename = None
     setup_err = None
     if dist_utils.is_master():
         try:
             assert gathered_keys is not None
+            assert gathered_changed_keys is not None
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            _clear_existing_weight_artifacts(checkpoint_dir)
             save_model_config(model_config, checkpoint_dir)
 
             # Match the old full_sd.update(rank_order) behavior for duplicate tied
@@ -306,11 +358,23 @@ def _save_checkpoint_from_distributed_shards(
                 layer_names=full_keys,
                 num_hidden_layers=lm_config.num_hidden_layers,
             )
-            weight_map = {
+            base_weight_map = {
                 key: f"subblocks_safetensors/{subblock}.safetensors"
                 for subblock, layer_keys in subblock_keys.items()
                 for key in layer_keys
             }
+            global_changed_keys = {
+                key for rank_keys in gathered_changed_keys if rank_keys for key in rank_keys
+            }
+            global_changed_keys.update(extra_state_dict)
+
+            weight_map, reference_by_filename = _merge_reference_weight_map(
+                reference_checkpoint_dir=reference_checkpoint_dir,
+                base_weight_map=base_weight_map,
+                changed_keys=global_changed_keys,
+                descriptor=descriptor,
+                model_config=model_config,
+            )
             _add_extra_state_dict_to_weight_map(weight_map, extra_state_dict, descriptor)
 
             index = {"metadata": {"format": "pt"}, "weight_map": weight_map}
@@ -320,16 +384,37 @@ def _save_checkpoint_from_distributed_shards(
             setup_err = repr(e)
             owner_by_key = {}
             weight_map = {}
+            reference_by_filename = {}
 
-    payload = [setup_err, owner_by_key, weight_map]
+    payload = [setup_err, owner_by_key, weight_map, reference_by_filename]
     tdist.broadcast_object_list(payload, src=0)
-    setup_err, owner_by_key, weight_map = payload
+    setup_err, owner_by_key, weight_map, reference_by_filename = payload
     if setup_err is not None:
         raise RuntimeError(f"Checkpoint setup failed on rank 0: {setup_err}")
     assert owner_by_key is not None
     assert weight_map is not None
+    assert reference_by_filename is not None
 
     for relative_filename in sorted(set(weight_map.values())):
+        reference_file = reference_by_filename.get(relative_filename)
+        if reference_file:
+            file_err = None
+            if dist_utils.is_master():
+                try:
+                    _reuse_reference_file(
+                        source=Path(reference_file),
+                        destination=checkpoint_dir / relative_filename,
+                    )
+                except Exception as e:
+                    file_err = repr(e)
+            err_box = [file_err]
+            tdist.broadcast_object_list(err_box, src=0)
+            if err_box[0] is not None:
+                raise RuntimeError(
+                    f"Checkpoint reference reuse failed for {relative_filename}: {err_box[0]}"
+                )
+            continue
+
         local_file_tensors = {
             key: tensor.contiguous()
             for key, tensor in local_state_dict.items()
@@ -372,6 +457,96 @@ def _save_checkpoint_from_distributed_shards(
             raise RuntimeError(f"Checkpoint save failed for {relative_filename}: {err_box[0]}")
 
 
+def _merge_reference_weight_map(
+    *,
+    reference_checkpoint_dir: Path | None,
+    base_weight_map: dict[str, str],
+    changed_keys: set[str],
+    descriptor: "ModelDescriptor",
+    model_config: PretrainedConfig,
+) -> tuple[dict[str, str], dict[str, str]]:
+    weight_map = dict(base_weight_map)
+    if reference_checkpoint_dir is None:
+        return weight_map, {}
+
+    reference_weight_map = _load_reference_weight_map(reference_checkpoint_dir)
+    if not reference_weight_map:
+        return weight_map, {}
+
+    reusable: dict[str, str] = {}
+    changed_output_filenames = {
+        base_weight_map[key] for key in changed_keys if key in base_weight_map
+    }
+    for key in list(weight_map):
+        if key in changed_keys:
+            continue
+        reference_filename = _reference_filename_for_key(
+            reference_weight_map=reference_weight_map,
+            model_key=key,
+            descriptor=descriptor,
+            model_config=model_config,
+        )
+        if not reference_filename:
+            continue
+        if reference_filename in changed_output_filenames:
+            continue
+        reference_file = reference_checkpoint_dir / reference_filename
+        if not reference_file.exists():
+            continue
+        weight_map[key] = reference_filename
+        reusable[reference_filename] = str(reference_file)
+    return weight_map, reusable
+
+
+def _reference_filename_for_key(
+    *,
+    reference_weight_map: dict[str, str],
+    model_key: str,
+    descriptor: "ModelDescriptor",
+    model_config: PretrainedConfig,
+) -> str | None:
+    if model_key in reference_weight_map:
+        return reference_weight_map[model_key]
+    try:
+        candidates = descriptor.checkpoint_key_candidates_for_model_key(
+            model_key,
+            model=None,  # type: ignore[arg-type]
+            config=model_config,
+        )
+    except Exception:
+        candidates = (model_key,)
+    for candidate in candidates:
+        if candidate in reference_weight_map:
+            return reference_weight_map[candidate]
+    return None
+
+
+def _load_reference_weight_map(reference_checkpoint_dir: Path) -> dict[str, str]:
+    index_path = reference_checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME
+    if index_path.exists():
+        with open(index_path, encoding="utf-8") as f:
+            data = json.load(f)
+        weight_map = data.get("weight_map", {})
+        if isinstance(weight_map, dict):
+            return {str(key): str(value) for key, value in weight_map.items()}
+
+    single_file = reference_checkpoint_dir / "model.safetensors"
+    if single_file.exists():
+        with safe_open(single_file, framework="pt", device="cpu") as f:
+            return {key: single_file.name for key in f.keys()}
+    return {}
+
+
+def _reuse_reference_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.unlink(missing_ok=True)
+    try:
+        os.link(source, destination)
+    except OSError:
+        relative_source = os.path.relpath(source, start=destination.parent)
+        destination.symlink_to(relative_source)
+
+
 def _save_checkpoint(
     model_config: PretrainedConfig,
     state_dict: dict[str, torch.Tensor],
@@ -384,6 +559,7 @@ def _save_checkpoint(
         checkpoint_dir = Path(checkpoint_dir)
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    _clear_existing_weight_artifacts(checkpoint_dir)
     extra_state_dict = _normalize_extra_state_dict(extra_state_dict)
 
     # Phase 1: Save config
@@ -737,7 +913,11 @@ def _copy_auto_map_code_files(model_config: PretrainedConfig, checkpoint_dir: Pa
 def save_model_config(model_config: PretrainedConfig, checkpoint_dir: Path | str) -> None:
     if hasattr(model_config, "block_configs"):
         model_config.block_configs = [
-            dataclasses.asdict(conf) if dataclasses.is_dataclass(conf) else conf
+            conf.to_dict()
+            if hasattr(conf, "to_dict")
+            else dataclasses.asdict(conf)
+            if dataclasses.is_dataclass(conf)
+            else conf
             for conf in model_config.block_configs
         ]
     model_config.save_pretrained(checkpoint_dir)

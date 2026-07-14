@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 from transformers import PretrainedConfig
 
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig, SubblockConfig
 from ..anymodel.model_descriptor import ModelDescriptor
 from .pruning_mixin import PruningMixIn
 
@@ -37,12 +38,18 @@ __all__ = [
 
 class GQAInitMode(Enum):
     RandomKV = "RandomKV"
-    AverageKV = "AverageKV"
     FirstKV = "FirstKV"
     RandomBlock = "RandomBlock"
     CopyAsIs = "CopyAsIs"
     Degrouping = "Degrouping"
     PruneKVHeads = "PruneKVHeads"
+    # Unified activation-driven attention-head removal to a target (num_query_heads,
+    # num_kv_heads). From the per-QUERY-head contribution score it (1) drops whole KV
+    # groups by their aggregate (summed) score down to num_kv_heads, then (2) keeps the
+    # top-m = num_query_heads/num_kv_heads query heads within each surviving group.
+    # Covers within-group pruning (kv unchanged), whole-group removal (n_heads_in_group
+    # unchanged), and both together. Needs per-layer query-head support.
+    PruneAttentionHeads = "PruneAttentionHeads"
 
 
 class MlpInitMode(Enum):
@@ -65,6 +72,73 @@ class HiddenSizeInitMode(Enum):
     Truncate = "Truncate"
     PruneByChannelRanking = "PruneByChannelRanking"
     CopyAsIs = "CopyAsIs"
+
+
+def _get_typed_subblock(
+    block_config: BlockConfig, kind: str, expected_type: type[SubblockConfig]
+) -> SubblockConfig | None:
+    subblock = block_config.get_subblock(kind)
+    if subblock is None:
+        return None
+    if not isinstance(subblock, expected_type):
+        raise TypeError(
+            f"Expected {expected_type.__name__} for {kind!r}, got {type(subblock).__name__}"
+        )
+    return subblock
+
+
+def _require_typed_subblock(
+    block_config: BlockConfig, kind: str, expected_type: type[SubblockConfig]
+) -> SubblockConfig:
+    subblock = block_config.require_subblock(kind)
+    if not isinstance(subblock, expected_type):
+        raise TypeError(
+            f"Expected {expected_type.__name__} for {kind!r}, got {type(subblock).__name__}"
+        )
+    return subblock
+
+
+def _get_attention_config(block_config: BlockConfig) -> AttentionConfig | None:
+    return _get_typed_subblock(block_config, "attention", AttentionConfig)
+
+
+def _require_attention_config(block_config: BlockConfig) -> AttentionConfig:
+    return _require_typed_subblock(block_config, "attention", AttentionConfig)
+
+
+def _get_ffn_config(block_config: BlockConfig) -> FFNConfig | None:
+    return _get_typed_subblock(block_config, "ffn", FFNConfig)
+
+
+def _get_moe_config(block_config: BlockConfig) -> MoEConfig | None:
+    return _get_typed_subblock(block_config, "moe", MoEConfig)
+
+
+def _require_int(value: int | None, field_name: str) -> int:
+    if value is None:
+        raise ValueError(f"{field_name} must be set in the strict BlockConfig schema")
+    return int(value)
+
+
+def _layer_num_kv_heads(config: PretrainedConfig, layer_idx: int) -> int:
+    block_config = config.block_configs[layer_idx]
+    if isinstance(block_config, dict):
+        block_config = BlockConfig(**block_config)
+    attention_config = _require_attention_config(block_config)
+    return _require_int(attention_config.num_kv_heads, "attention.num_kv_heads")
+
+
+def _layer_intermediate_size(config: PretrainedConfig, layer_idx: int) -> int | None:
+    block_config = config.block_configs[layer_idx]
+    if isinstance(block_config, dict):
+        block_config = BlockConfig(**block_config)
+    ffn_config = _get_ffn_config(block_config)
+    if ffn_config is not None and ffn_config.intermediate_size is not None:
+        return ffn_config.intermediate_size
+    moe_config = _get_moe_config(block_config)
+    if moe_config is not None:
+        return moe_config.expert_intermediate_size
+    return None
 
 
 def _lm_head_dim(config, descriptor: Type[ModelDescriptor]) -> int:
@@ -139,8 +213,8 @@ def _init_mlp_module(
         f"({new_num_layers=}) != ({orig_num_layers=})"
     )
 
-    new_intermediate_size = new_config.block_configs[layer_idx].ffn.intermediate_size
-    original_intermediate_size = original_config.block_configs[layer_idx].ffn.intermediate_size
+    new_intermediate_size = _layer_intermediate_size(new_config, layer_idx)
+    original_intermediate_size = _layer_intermediate_size(original_config, layer_idx)
 
     if mlp_init_mode == MlpInitMode.CopyAsIs:
         assert new_intermediate_size == original_intermediate_size, (
@@ -222,6 +296,24 @@ def _cache_activations_log(mlp_init_config: dict[str, Any]) -> None:
         )
 
 
+def _layer_num_attention_heads(config, layer_idx, descriptor, global_num_q_heads):
+    """Per-layer query-head count from the block config, or the model-global value.
+
+    Supports KV-group removal / within-group query pruning, which set a per-layer
+    ``attention.num_query_heads`` (< global). ``None`` -> the global count.
+    """
+    block_configs = getattr(config, "block_configs", None)
+    if block_configs is not None and 0 <= layer_idx < len(block_configs):
+        block_config = block_configs[layer_idx]
+        if isinstance(block_config, dict):
+            block_config = BlockConfig(**block_config)
+        attn = _get_attention_config(block_config)
+        n = attn.num_query_heads if attn is not None else None
+        if n is not None:
+            return int(n)
+    return int(global_num_q_heads)
+
+
 def _init_attention_weights(
     gqa_init_mode,
     layer_idx,
@@ -245,8 +337,8 @@ def _init_attention_weights(
     )
     num_q_heads = new_lm.num_attention_heads
     # block_configs lives on the outer puzzletron-converted config, not on text_config.
-    num_kv_heads = new_config.block_configs[layer_idx].attention.num_key_value_heads
-    orig_num_kv_heads = original_config.block_configs[layer_idx].attention.num_key_value_heads
+    num_kv_heads = _layer_num_kv_heads(new_config, layer_idx)
+    orig_num_kv_heads = _layer_num_kv_heads(original_config, layer_idx)
 
     # new_w* are typically randomly initialized
     new_wq = new_state_dict[q_key]
@@ -270,7 +362,7 @@ def _init_attention_weights(
 
     if gqa_init_mode in (GQAInitMode.RandomKV, GQAInitMode.RandomBlock):
         wk, wv = new_wk, new_wv
-    elif gqa_init_mode in (GQAInitMode.AverageKV, GQAInitMode.FirstKV):
+    elif gqa_init_mode == GQAInitMode.FirstKV:
         assert orig_num_kv_heads % num_kv_heads == 0, (
             f"({orig_num_kv_heads=}) % ({num_kv_heads=}) != 0"
         )
@@ -279,12 +371,8 @@ def _init_attention_weights(
         wk = wk.view(-1, n_heads_to_aggregate, head_size, dim1)
         wv = wv.view(-1, n_heads_to_aggregate, head_size, dim1)
 
-        if gqa_init_mode == GQAInitMode.AverageKV:
-            wk = wk.mean(dim=1)
-            wv = wv.mean(dim=1)
-        else:
-            wk = wk[:, 0]
-            wv = wv[:, 0]
+        wk = wk[:, 0]
+        wv = wv[:, 0]
     elif gqa_init_mode == GQAInitMode.CopyAsIs:
         assert new_wk.shape == wk.shape, f"({new_wk.shape=}) != ({wk.shape=})"
         assert new_wv.shape == wv.shape, f"({new_wv.shape=}) != ({wv.shape=})"
@@ -364,6 +452,45 @@ def _init_attention_weights(
             wo = wo[:, kv_head_ordering]
             wo[:, zero_out_mask] = 0.0
 
+    elif gqa_init_mode == GQAInitMode.PruneAttentionHeads:
+        # Unified activation-driven removal to (new_num_q, num_kv_heads) from the per-query-head
+        # score: drop whole KV groups by aggregate score, then keep top-m query heads per surviving
+        # group. Covers within-group pruning, whole-group removal, and both at once (e.g. 24q/4kv ->
+        # 15q/3kv = drop 1 group + drop 1 query head per remaining group).
+        assert num_kv_heads <= orig_num_kv_heads, (num_kv_heads, orig_num_kv_heads)
+        orig_n_in_group = num_q_heads // orig_num_kv_heads
+        new_num_q = _layer_num_attention_heads(new_config, layer_idx, descriptor, num_q_heads)
+        m = new_num_q // num_kv_heads
+        assert new_num_q == m * num_kv_heads and m <= orig_n_in_group, (
+            new_num_q,
+            m,
+            num_kv_heads,
+            orig_n_in_group,
+        )
+
+        wk = wk.view(orig_num_kv_heads, head_size, dim1)
+        wv = wv.view(orig_num_kv_heads, head_size, dim1)
+        wq = wq.view(orig_num_kv_heads, orig_n_in_group, head_size, dim1)
+        wo = wo.view(dim1, orig_num_kv_heads, orig_n_in_group, head_size)
+
+        o_proj_module_name = o_key.replace(".weight", "")
+        q_scores = _load_activations_log(mlp_init_config, module_name=o_proj_module_name)
+        q_scores = q_scores.view(orig_num_kv_heads, orig_n_in_group)  # [K, n_in_group]
+
+        # (1) Group selection: aggregate query-head scores -> per-group importance; keep top num_kv.
+        group_scores = q_scores.sum(dim=1)  # [K]
+        keep_groups = torch.sort(
+            torch.argsort(group_scores, descending=True)[:num_kv_heads]
+        ).values
+        wk, wv = wk[keep_groups], wv[keep_groups]
+        wq, wo = wq[keep_groups], wo[:, keep_groups]
+        q_scores = q_scores[keep_groups]  # [num_kv, n_in_group]
+
+        # (2) Within each surviving group, keep the top-m query heads.
+        keep_q = torch.sort(torch.argsort(q_scores, dim=1, descending=True)[:, :m], dim=1).values
+        wq = torch.gather(wq, 1, keep_q[:, :, None, None].expand(-1, -1, head_size, dim1))
+        wo = torch.gather(wo, 2, keep_q[None, :, :, None].expand(dim1, -1, -1, head_size))
+
     else:
         raise ValueError(f"{gqa_init_mode=} not supported")
 
@@ -397,8 +524,8 @@ def _init_attention_biases(
     )
     num_q_heads = new_lm.num_attention_heads
     # block_configs lives on the outer puzzletron-converted config, not on text_config.
-    num_kv_heads = new_config.block_configs[layer_idx].attention.num_key_value_heads
-    orig_num_kv_heads = original_config.block_configs[layer_idx].attention.num_key_value_heads
+    num_kv_heads = _layer_num_kv_heads(new_config, layer_idx)
+    orig_num_kv_heads = _layer_num_kv_heads(original_config, layer_idx)
     n_heads_in_group = num_q_heads // num_kv_heads
     orig_n_heads_in_group = num_q_heads // orig_num_kv_heads
 
@@ -443,7 +570,7 @@ def _init_attention_biases(
         bias_sd["v"] = torch.zeros(
             new_bias_sd["v"].shape, dtype=bias_sd["v"].dtype, device=bias_sd["v"].device
         )
-    elif gqa_init_mode in (GQAInitMode.AverageKV, GQAInitMode.FirstKV) and attention_bias:
+    elif gqa_init_mode == GQAInitMode.FirstKV and attention_bias:
         assert n_heads_in_group % orig_n_heads_in_group == 0, (
             f"({n_heads_in_group=}) % ({orig_n_heads_in_group=}) != 0"
         )
@@ -452,12 +579,8 @@ def _init_attention_biases(
         bias_sd["k"] = bias_sd["k"].view(-1, n_heads_to_aggregate, head_size, dim1)
         bias_sd["v"] = bias_sd["v"].view(-1, n_heads_to_aggregate, head_size, dim1)
 
-        if gqa_init_mode == GQAInitMode.AverageKV:
-            bias_sd["k"] = bias_sd["k"].mean(dim=1)
-            bias_sd["v"] = bias_sd["v"].mean(dim=1)
-        else:
-            bias_sd["k"] = bias_sd["k"][:, 0]
-            bias_sd["v"] = bias_sd["v"][:, 0]
+        bias_sd["k"] = bias_sd["k"][:, 0]
+        bias_sd["v"] = bias_sd["v"][:, 0]
     elif gqa_init_mode == GQAInitMode.CopyAsIs:
         for key in bias_sd.keys():
             assert new_bias_sd[key].shape == bias_sd[key].shape, (
@@ -556,6 +679,33 @@ def _init_attention_biases(
                 ## Matmul backprop: if Y = AB and dY is the gradient of Y, then dA = dY @ B.T and dB = A.T @ dY, so the gradient of the zeroed-out weights depends on the gradient of what multiplies them.
                 bias_sd["o"] = bias_sd["o"][:, kv_head_ordering]
                 bias_sd["o"][:, zero_out_mask] = 0.0
+
+    elif gqa_init_mode == GQAInitMode.PruneAttentionHeads:
+        # Mirror the weight removal: select kept KV groups (k/v/q) and top-m query heads per group
+        # (q). The o_proj bias is an OUTPUT (hidden) bias and is left unchanged — only o_proj's
+        # input columns (weight) are pruned, not its output dim.
+        if attention_bias:
+            orig_n_in = num_q_heads // orig_num_kv_heads
+            new_num_q = _layer_num_attention_heads(new_config, layer_idx, descriptor, num_q_heads)
+            m = new_num_q // num_kv_heads
+            o_proj_module_name = (
+                o_key.rsplit(".", 1)[0] if o_proj_bias else k_key.rsplit(".", 2)[0] + ".o_proj"
+            )
+            q_scores = _load_activations_log(mlp_init_config, module_name=o_proj_module_name)
+            q_scores = q_scores.view(orig_num_kv_heads, orig_n_in)
+            keep_groups = torch.sort(
+                torch.argsort(q_scores.sum(dim=1), descending=True)[:num_kv_heads]
+            ).values
+            for key in ("k", "v"):
+                bias_sd[key] = bias_sd[key].view(orig_num_kv_heads, head_size, dim1)[keep_groups]
+            bq = bias_sd["q"].view(orig_num_kv_heads, orig_n_in, head_size, dim1)[keep_groups]
+            keep_q = torch.sort(
+                torch.argsort(q_scores[keep_groups], dim=1, descending=True)[:, :m], dim=1
+            ).values
+            bias_sd["q"] = torch.gather(
+                bq, 1, keep_q[:, :, None, None].expand(-1, -1, head_size, dim1)
+            )
+        # o bias intentionally unchanged.
 
     else:
         raise ValueError(f"{gqa_init_mode=} not supported")

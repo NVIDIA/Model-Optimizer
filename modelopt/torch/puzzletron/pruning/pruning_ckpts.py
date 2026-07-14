@@ -27,6 +27,7 @@ from typing import Optional
 
 from omegaconf import DictConfig
 
+from ..block_config import BlockConfig, FFNConfig
 from ..anymodel.model_descriptor import ModelDescriptorFactory
 from ..tools.bypassed_training import init_child_from_parent
 from ..tools.checkpoint_utils import load_model_config
@@ -56,7 +57,7 @@ def launch_ffn_intermediates_prune_ckpt(
     cfg: DictConfig, max_save_workers: Optional[int] = None, max_layer_workers: Optional[int] = None
 ):
     for intermediate_size in cfg.pruning.intermediate_size_list:
-        dirname = f"ffn_{intermediate_size}_attn_no_op"
+        dirname = f"ffn_{intermediate_size}-attn_no_op"
 
         if os.path.exists(os.path.join(cfg.puzzle_dir, "ckpts", dirname)):
             mprint(f"Process intermediate_size {intermediate_size} has already been pruned & saved")
@@ -106,23 +107,52 @@ def launch_attn_groups_prune_ckpt(
     )
     num_attention_heads = parent_model_config.num_attention_heads
 
-    for n_heads_in_group in cfg.pruning.n_heads_in_group_list:
-        dirname = f"n_heads_in_group{n_heads_in_group}"
+    # Each target is a (num_query_heads, num_kv_heads) pair. The op is inferred:
+    #   q == teacher q -> initialize fewer KV heads according to gqa_init_mode;
+    #                     override only num_kv_heads.
+    #   q <  teacher q -> activation-driven head removal (PruneAttentionHeads): drop whole groups
+    #                     and/or query heads within groups to reach (q, kv); override both counts.
+    # This covers (24,2)/(24,1) [merge], (20,4) [within-group prune], (18,3) [group removal],
+    # (15,3) [group removal + within-group prune], etc.
+    merge_mode = GQAInitMode(cfg.pruning.gqa_init_mode)
+
+    # Targets are (num_query_heads, num_kv_heads) pairs. Prefer the explicit
+    # attn_heads_list; fall back to attention_groups_list (same [[q,kv]] format, intermediate
+    # naming used by some configs), then n_heads_in_group_list (legacy KV-merge-only format:
+    # single int per KV group, q preserved at teacher value).
+    attn_heads_list = (
+        cfg.pruning.get("attn_heads_list", None)
+        or cfg.pruning.get("attention_groups_list", None)
+    )
+    if attn_heads_list:
+        targets = [(int(q), int(kv)) for q, kv in attn_heads_list]
+    else:
+        targets = [
+            (num_attention_heads, num_attention_heads // int(n))
+            for n in (cfg.pruning.get("n_heads_in_group_list", None) or [])
+        ]
+
+    for q_heads, kv_heads in targets:
+        q_heads, kv_heads = int(q_heads), int(kv_heads)
+        dirname = f"ffn_no_op-attn_{q_heads}q_{kv_heads}kv"
 
         if os.path.exists(os.path.join(cfg.puzzle_dir, "ckpts", dirname)):
-            mprint(f"Process n_heads_in_group {n_heads_in_group} has already been pruned & saved")
+            mprint(f"Process attn {q_heads}q/{kv_heads}kv has already been pruned & saved")
             continue
 
-        mprint("Process n_heads_in_group {}".format(n_heads_in_group))
-        mprint(f"=== STARTING ATTENTION PRUNING FOR n_heads_in_group={n_heads_in_group} ===")
+        is_merge = q_heads == num_attention_heads
+        mprint(f"=== STARTING ATTENTION PRUNING FOR {q_heads}q/{kv_heads}kv "
+               f"({'merge' if is_merge else 'remove'}) ===")
 
-        num_key_value_heads = num_attention_heads // n_heads_in_group
-        model_config_overrides_json = {"attention": [{"num_key_value_heads": num_key_value_heads}]}
+        attn_override = {"num_kv_heads": kv_heads}
+        if not is_merge:
+            attn_override["num_query_heads"] = q_heads
+        model_config_overrides_json = {"attention": [attn_override]}
+        gqa_init_mode = merge_mode if is_merge else GQAInitMode.PruneAttentionHeads
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
         output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
-        # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
@@ -131,7 +161,7 @@ def launch_attn_groups_prune_ckpt(
             parent_checkpoint_dir=cfg.teacher_dir,
             model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
-            gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
+            gqa_init_mode=gqa_init_mode,
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
             mlp_init_config_yaml=mlp_init_config_yaml,
             linear_init_mode=LinearInitMode.FromTeacher,  # dummy default value
@@ -146,7 +176,7 @@ def launch_attn_groups_prune_ckpt(
         os.makedirs(ckpt_path, exist_ok=True)
         os.symlink(output_dir, os.path.join(ckpt_path, dirname))
 
-        mprint(f"=== COMPLETED ATTENTION PRUNING FOR n_heads_in_group={n_heads_in_group} ===")
+        mprint(f"=== COMPLETED ATTENTION PRUNING FOR {q_heads}q/{kv_heads}kv ===")
         mprint(f"Total processing time: {init_child_from_parent_time:.2f} seconds\n")
 
 
@@ -173,8 +203,13 @@ def launch_hidden_dim_prune_ckpt(cfg: DictConfig):
     # Get teacher's FFN configuration
     intermediate_sizes = []
     for block_config in parent_model_config.block_configs:
-        if block_config.ffn.intermediate_size is not None:
-            intermediate_sizes.append(block_config.ffn.intermediate_size)
+        if isinstance(block_config, dict):
+            block_config = BlockConfig(**block_config)
+        ffn_config = block_config.get_subblock("ffn")
+        if ffn_config is not None and not isinstance(ffn_config, FFNConfig):
+            raise TypeError(f"Expected FFNConfig for 'ffn', got {type(ffn_config).__name__}")
+        if ffn_config is not None and ffn_config.intermediate_size is not None:
+            intermediate_sizes.append(ffn_config.intermediate_size)
         else:
             intermediate_sizes.append(None)
 
@@ -249,7 +284,7 @@ def launch_experts_prune_ckpt(
             continue
         mprint(f"Process num_experts {num_experts}")
         mprint(f"=== STARTING EXPERT PRUNING FOR num_experts={num_experts} ===")
-        model_config_overrides_json = {"ffn": [{"moe": {"num_local_experts": num_experts}}]}
+        model_config_overrides_json = {"moe": [{"num_experts": num_experts}]}
 
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
@@ -297,7 +332,7 @@ def launch_moe_ffn_intermediates_prune_ckpt(
 
         model_config_overrides_json = {
             "attention": [{"no_op": True, "llama4": None}],
-            "ffn": [{"moe": {"expert_intermediate_dim": intermediate_size}}],
+            "moe": [{"expert_intermediate_size": intermediate_size}],
         }
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
