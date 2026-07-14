@@ -17,9 +17,18 @@ import contextlib
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
 import modelopt.torch.utils.distributed as dist
+
+
+@pytest.fixture(scope="session")
+def tiny_tokenizer_path(tmp_path_factory):
+    tokenizer_path = tmp_path_factory.mktemp("tiny_tokenizer")
+    get_tiny_tokenizer().save_pretrained(tokenizer_path)
+    return str(tokenizer_path)
+
 
 apex_destroy = None
 with contextlib.suppress(ImportError):
