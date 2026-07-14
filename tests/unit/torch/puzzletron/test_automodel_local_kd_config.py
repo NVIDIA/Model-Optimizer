@@ -1,0 +1,417 @@
+from pathlib import Path
+from types import SimpleNamespace
+
+from omegaconf import OmegaConf
+import pytest
+import torch
+
+from modelopt.torch.puzzletron.plugins.automodel import (
+    local_kd_config,
+    local_kd_launch,
+    local_kd_recipe,
+)
+
+
+def test_local_kd_treats_disabled_data_parallel_axis_as_one(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        local_kd_config,
+        "_load_recipe",
+        lambda _cfg: {
+            "model": {},
+            "distributed": {
+                "dp_size": "none",
+                "ep_size": 2,
+                "pp_size": 2,
+                "cp_size": 1,
+                "pipeline": {},
+            },
+        },
+    )
+    monkeypatch.setattr(local_kd_config, "_teacher_dir", lambda _cfg: tmp_path)
+    monkeypatch.setattr(
+        local_kd_config, "inject_descriptor_model_kwargs", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(local_kd_config, "_inject_canonical_data", lambda *_args: None)
+    monkeypatch.setattr(
+        local_kd_config,
+        "inject_descriptor_pipeline_config",
+        lambda recipe, **_kwargs: recipe,
+    )
+    cfg = OmegaConf.create(
+        {
+            "descriptor": "gpt_oss",
+            "model": {"force_hf": False, "trust_remote_code": True},
+            "data": {"modality": "text"},
+            "bypass": {
+                "automodel": {"recipe_path": "unused.yaml"},
+                "elastic": False,
+                "dtype": "bf16",
+                "experiment_dir": str(tmp_path / "run"),
+                "data": {"block_size": 2048},
+                "training": {
+                    "micro_batch_size": 1,
+                    "grad_accumulation_steps": 1,
+                    "max_steps": 16,
+                    "optimizer": "adamw",
+                    "learning_rate": 1.0e-5,
+                    "weight_decay": 0.0,
+                    "beta1": 0.9,
+                    "beta2": 0.95,
+                },
+            },
+        }
+    )
+
+    recipe = local_kd_config.build_local_kd_recipe_config(cfg)
+
+    assert recipe["step_scheduler"]["global_batch_size"] == 4
+    assert recipe["step_scheduler"]["local_batch_size"] == 2
+    assert recipe["distributed"]["pipeline"]["pp_batch_size"] == 1
+
+
+def test_local_kd_reads_parallel_size_from_canonical_automodel_recipe() -> None:
+    recipe_cfg = OmegaConf.create({"distributed": {"tp_size": 2}})
+
+    assert local_kd_recipe._recipe_parallel_size(recipe_cfg, "tp_size") == 2
+    assert local_kd_recipe._recipe_parallel_size(recipe_cfg, "cp_size") == 1
+
+
+def test_subblock_parameter_cost_is_memoized_by_width_and_config() -> None:
+    subblock = SimpleNamespace(to_dict=lambda: {"kind": "ffn", "width": 16})
+    calls = []
+
+    def calculate(value):
+        calls.append(value)
+        return 123
+
+    cache = {}
+    assert local_kd_recipe._cached_subblock_cost(
+        cache,
+        width=4096,
+        subblock=subblock,
+        calculate=calculate,
+    ) == 123
+    assert local_kd_recipe._cached_subblock_cost(
+        cache,
+        width=4096,
+        subblock=subblock,
+        calculate=calculate,
+    ) == 123
+
+    assert calls == [subblock]
+
+
+def test_local_kd_normalizes_single_and_mapped_metric_loggers() -> None:
+    first = object()
+    second = object()
+
+    assert local_kd_recipe._iter_metric_loggers(first) == (first,)
+    assert local_kd_recipe._iter_metric_loggers({"a": first, "b": second}) == (
+        first,
+        second,
+    )
+    assert local_kd_recipe._iter_metric_loggers(None) == ()
+
+
+def test_disjoint_local_loss_backpropagates_immediately_and_returns_detached_value() -> None:
+    class IdentityScaler:
+        @staticmethod
+        def scale(loss):
+            return loss
+
+    first = torch.tensor(3.0, requires_grad=True)
+    second = torch.tensor(4.0, requires_grad=True)
+
+    first_value = local_kd_recipe._backward_disjoint_loss(
+        (2 * first).square(), grad_scaler=IdentityScaler(), grad_accum=2
+    )
+    second_value = local_kd_recipe._backward_disjoint_loss(
+        (second - 1).square(), grad_scaler=IdentityScaler(), grad_accum=2
+    )
+
+    assert not first_value.requires_grad
+    assert not second_value.requires_grad
+    torch.testing.assert_close(first.grad, torch.tensor(12.0))
+    torch.testing.assert_close(second.grad, torch.tensor(3.0))
+
+
+def test_elastic_local_kd_trend_is_reported_without_incomparable_hard_gate() -> None:
+    records = [
+        {"loss": loss, "hidden_width": width}
+        for loss, width in (
+            (0.0, 2048),
+            (0.05, 1024),
+            (0.01, 2048),
+            (0.05, 1024),
+            (0.03, 2048),
+            (0.06, 1024),
+            (0.02, 2048),
+            (0.06, 1024),
+        )
+    ]
+
+    trend = local_kd_recipe._loss_trend_summary(records, comparable=False)
+
+    assert trend["decreased"] is False
+    assert trend["comparable"] is False
+    assert trend["hard_gate_passed"] is None
+    assert set(trend["per_hidden_width"]) == {"1024", "2048"}
+
+
+def test_diverse_overfit_losses_are_not_treated_as_one_comparable_series() -> None:
+    assert not local_kd_recipe._overfit_loss_records_are_comparable(
+        single_batch_overfit=True,
+        resample_structure=True,
+    )
+    assert local_kd_recipe._overfit_loss_records_are_comparable(
+        single_batch_overfit=True,
+        resample_structure=False,
+    )
+
+
+def test_inverse_width_policy_is_reproducible_and_favors_thinner_width() -> None:
+    first_generator = torch.Generator().manual_seed(17)
+    second_generator = torch.Generator().manual_seed(17)
+    first = [
+        local_kd_recipe._select_hidden_width(
+            (2688, 1344),
+            step=step,
+            cycle=False,
+            policy="inverse_width",
+            generator=first_generator,
+        )
+        for step in range(1, 2001)
+    ]
+    second = [
+        local_kd_recipe._select_hidden_width(
+            (2688, 1344),
+            step=step,
+            cycle=False,
+            policy="inverse_width",
+            generator=second_generator,
+        )
+        for step in range(1, 2001)
+    ]
+
+    assert first == second
+    assert first.count(1344) > first.count(2688)
+
+
+def test_elastic_selection_record_contains_width_layer_candidate_and_axes() -> None:
+    targets = {
+        3: SimpleNamespace(
+            identity=SimpleNamespace(value="candidate-3"),
+            metadata={"slice_axes": {"moe_top_k": 3}},
+        ),
+        1: SimpleNamespace(
+            identity=SimpleNamespace(value="candidate-1"),
+            metadata={"slice_axes": {"kv_groups": 1}},
+        ),
+    }
+
+    record = local_kd_recipe._elastic_selection_record(
+        step=7,
+        hidden_width=1344,
+        targets=targets,
+    )
+
+    assert record == {
+        "step": 7,
+        "hidden_width": 1344,
+        "ple_width": None,
+        "layers": [
+            {
+                "layer_idx": 1,
+                "candidate_id": "candidate-1",
+                "parameter_count": None,
+                "changed_axes": {"kv_groups": 1},
+            },
+            {
+                "layer_idx": 3,
+                "candidate_id": "candidate-3",
+                "parameter_count": None,
+                "changed_axes": {"moe_top_k": 3},
+            },
+        ],
+    }
+
+
+def test_elastic_probe_can_disable_global_checkpoint_publication() -> None:
+    assert local_kd_launch._should_publish_elastic_checkpoint(
+        SimpleNamespace(bypass={"elastic": True})
+    )
+    assert not local_kd_launch._should_publish_elastic_checkpoint(
+        SimpleNamespace(
+            bypass={"elastic": True, "publish_elastic_checkpoint": False}
+        )
+    )
+    assert not local_kd_launch._should_publish_elastic_checkpoint(
+        SimpleNamespace(bypass={"elastic": False})
+    )
+
+
+def test_overfit_probe_repeats_one_batch_without_mutating_main_run() -> None:
+    config = OmegaConf.create(
+        {
+            "bypass": {
+                "experiment_id": "nested-main",
+                "experiment_dir": "/tmp/nested-main",
+                "publish_elastic_checkpoint": True,
+                "find_last_ckpt_for_resume": True,
+                "step_num": 1024,
+                "iter_num": 8192,
+                "token_count": 1073741824,
+                "overfit": {"enabled": True, "repetitions": 32},
+                "training": {"max_steps": 8},
+            }
+        }
+    )
+    config._set_flag("allow_objects", True)
+    config.runtime_pruning_mixin = SimpleNamespace(name="instantiated")
+
+    probe = local_kd_launch._overfit_probe_config(config)
+
+    assert probe.bypass.single_batch_overfit is True
+    assert probe.bypass.single_batch_overfit_steps == 32
+    assert probe.bypass.training.max_steps == 32
+    assert probe.bypass.publish_elastic_checkpoint is False
+    assert probe.bypass.find_last_ckpt_for_resume is False
+    assert probe.bypass.step_num == 1
+    assert probe.bypass.iter_num == 0
+    assert probe.bypass.token_count == 0
+    assert probe.bypass.overfit.enabled is False
+    assert config.bypass.training.max_steps == 8
+    assert config.bypass.publish_elastic_checkpoint is True
+    assert config.bypass.step_num == 1024
+    assert config.bypass.iter_num == 8192
+    assert config.bypass.token_count == 1073741824
+    assert probe.runtime_pruning_mixin.name == "instantiated"
+
+
+def test_overfit_worker_mode_selects_one_configured_mode() -> None:
+    overfit = OmegaConf.create(
+        {"modes": ["smallest_fixed", "diverse_resampled"]}
+    )
+
+    assert local_kd_launch._selected_overfit_probe_modes(
+        overfit, "diverse_resampled"
+    ) == ("diverse_resampled",)
+    assert local_kd_launch._selected_overfit_probe_modes(overfit, None) == (
+        "smallest_fixed",
+        "diverse_resampled",
+    )
+    with pytest.raises(ValueError, match="not configured"):
+        local_kd_launch._selected_overfit_probe_modes(overfit, "unknown")
+
+
+def test_overfit_probe_digest_is_broadcast_from_rank_zero(monkeypatch) -> None:
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 7)
+
+    def broadcast(values, src):
+        assert src == 0
+        assert values == [None]
+        values[0] = "rankzero"
+
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast)
+
+    assert local_kd_launch._distributed_probe_digest("rank-local repr") == "rankzero"
+
+
+def test_bypass_run_location_is_broadcast_from_rank_zero(monkeypatch) -> None:
+    config = OmegaConf.create(
+        {
+            "puzzle_dir": "/tmp/puzzle",
+            "bypass": {"experiment_id": None, "experiment_dir": None},
+        }
+    )
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 7)
+
+    def broadcast(values, src):
+        assert src == 0
+        assert values == [None]
+        values[0] = ("shared-id", "/tmp/puzzle/bypass/bypass_runs/shared-id")
+
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast)
+    monkeypatch.setattr(
+        local_kd_launch,
+        "set_experiment_id",
+        lambda _cfg: pytest.fail("nonzero rank computed the experiment identity"),
+    )
+    monkeypatch.setattr(
+        local_kd_launch,
+        "set_experiment_dir",
+        lambda _cfg: pytest.fail("nonzero rank computed the experiment directory"),
+    )
+    monkeypatch.setattr(
+        local_kd_launch,
+        "_require_distributed_path_consensus",
+        lambda path, purpose: None,
+    )
+
+    local_kd_launch._broadcast_run_location(config)
+
+    assert config.bypass.experiment_id == "shared-id"
+    assert config.bypass.experiment_dir == "/tmp/puzzle/bypass/bypass_runs/shared-id"
+
+
+def test_distributed_path_consensus_rejects_split_checkpoint_roots(monkeypatch) -> None:
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+
+    def gather(values, local):
+        assert local == "/tmp/run-a"
+        values[:] = ["/tmp/run-a", "/tmp/run-b"]
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
+
+    with pytest.raises(RuntimeError, match="checkpoint save.*run-a.*run-b"):
+        local_kd_launch._require_distributed_path_consensus(
+            "/tmp/run-a",
+            "checkpoint save",
+        )
+
+
+def test_overfit_only_runs_probe_without_starting_main_nested_run(monkeypatch) -> None:
+    config = OmegaConf.create(
+        {
+            "bypass": {
+                "experiment_id": "nested-main",
+                "experiment_dir": "/tmp/nested-main",
+                "publish_elastic_checkpoint": True,
+                "find_last_ckpt_for_resume": False,
+                "overfit": {
+                    "enabled": True,
+                    "repetitions": 64,
+                    "only": True,
+                    "learning_rate": 3.0e-4,
+                    "decay_lr": False,
+                    "grad_clip": 10.0,
+                    "selection": "smallest",
+                },
+                "training": {
+                    "max_steps": 8,
+                    "learning_rate": 1.0e-5,
+                    "decay_lr": True,
+                    "grad_clip": 1.0,
+                },
+            }
+        }
+    )
+    config._set_flag("allow_objects", True)
+    observed = []
+    monkeypatch.setattr(local_kd_launch, "_run_one", observed.append)
+
+    local_kd_launch._run_with_optional_overfit(config)
+
+    assert len(observed) == 1
+    assert observed[0].bypass.single_batch_overfit is True
+    assert observed[0].bypass.single_batch_overfit_steps == 64
+    assert observed[0].bypass.training.max_steps == 64
+    assert observed[0].bypass.training.learning_rate == 3.0e-4
+    assert observed[0].bypass.training.decay_lr is False
+    assert observed[0].bypass.training.grad_clip == 10.0
+    assert observed[0].bypass.elastic_fixed_selection == "smallest"
