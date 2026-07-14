@@ -1,0 +1,54 @@
+# Qwen-Image PDD setup skeleton. Task 8 adds the training lifecycle.
+
+model:
+  pretrained_model_name_or_path: Qwen/Qwen-Image
+  revision: 75e0b4be04f60ec59a75f475837eced720f823b6
+  torch_dtype: bfloat16
+  device: cuda
+  transformer_engine_linear: false
+  peft:
+  guidance_embeds: false
+  # Accepted by the composition path, but disabled until the pinned Diffusers Qwen API
+  # performs an effective fusion rather than its current no-op.
+  fuse_qkv_projections: false
+
+pdd:
+  pred_type: flow
+  num_train_timesteps:
+  guidance_scale: 4.0
+  student_sample_steps: 4
+  student_sample_type: ode
+  grid_size: 128
+  flow_shift: 5.0
+  block_size_min: 4
+  block_size_max: 64
+  teacher_integrator: euler
+  inference_blocks: [32, 32, 32, 32]
+  data_free: false
+
+optim:
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+
+fsdp:
+  dp_size:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  ep_size: 1
+  activation_checkpointing: true
+
+data:
+  dataloader:
+    _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
+    cache_dir: data/qwen_image_cache
+    metadata_index: metadata_train.json
+    base_resolution: [1024, 1024]
+    batch_size: 1
+    negative_prompt_embedding_path: negative_prompt_embedding.pt
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: checkpoints/pdd_qwen_image
+  model_save_format: torch_save
+  save_consolidated: false
