@@ -13,12 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Bypass distillation (blockwise local distillation) for the PUZZLE framework.
+"""AutoModel-native block-local distillation for Puzzletron."""
 
-This module implements Stage 1 of the PUZZLE pipeline: training alternative transformer
-block configurations using per-block knowledge distillation from a teacher model.
-"""
 
-from .training_loop import launch_bypass_distillation
+def launch_bypass_distillation(hydra_cfg, num_nodes: int = 1, node_index: int = 0) -> None:
+    """Launch the only supported local-distillation backend."""
+    backend = str(hydra_cfg.bypass.get("backend", "automodel")).lower()
+    if backend != "automodel":
+        raise ValueError(
+            f"Unsupported bypass.backend={backend!r}; AutoModel is the only supported backend"
+        )
+    from ..plugins.automodel.local_kd_launch import launch_local_distillation_automodel
+
+    launch_local_distillation_automodel(
+        hydra_cfg,
+        num_nodes=num_nodes,
+        node_index=node_index,
+    )
 
 __all__ = ["launch_bypass_distillation"]

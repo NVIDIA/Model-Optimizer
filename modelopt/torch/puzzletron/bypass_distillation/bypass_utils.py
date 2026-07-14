@@ -121,13 +121,44 @@ def _slug(value: Any) -> str:
 
 
 def _teacher_dir_identity(cfg: DictConfig) -> str | None:
-    teacher_dir = cfg.get("teacher_dir", None)
+    bypass = cfg.get("bypass", {})
+    if bool(bypass.get("elastic", False)) and cfg.get("puzzle_dir", None) is not None:
+        teacher_dir = Path(str(cfg.puzzle_dir)) / "ckpts" / "sorted_teacher"
+    else:
+        teacher_dir = cfg.get("teacher_dir", None)
     if teacher_dir is None:
         return None
     teacher_dir = str(teacher_dir)
     if "://" in teacher_dir:
         return teacher_dir
     return str(Path(teacher_dir).expanduser())
+
+
+def _checkpoint_fingerprint(checkpoint_dir: str | None) -> str | None:
+    """Fingerprint a local checkpoint without reading multi-GB weight payloads."""
+    if checkpoint_dir is None or "://" in checkpoint_dir:
+        return None
+    checkpoint = Path(checkpoint_dir).expanduser()
+    if not checkpoint.is_dir():
+        return None
+    manifests: dict[str, str] = {}
+    for name in (
+        "config.json",
+        "model.safetensors.index.json",
+        "modelopt_state.json",
+        "sorted_permutations.json",
+    ):
+        path = checkpoint / name
+        if path.is_file():
+            manifests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    weights = []
+    for path in sorted(checkpoint.glob("*.safetensors")):
+        stat = path.stat()
+        weights.append((path.name, stat.st_size))
+    payload = {"manifests": manifests, "weights": weights}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _descriptor_identity(cfg: DictConfig) -> str | None:
@@ -148,13 +179,17 @@ def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
     of them changes the produced checkpoint.
     """
     bypass = _to_plain_container(cfg.bypass)
+    pruning = _to_plain_container(cfg.get("pruning", {}))
     training = bypass.get("training", {})
     data = bypass.get("data", {})
     model = bypass.get("model", {})
     model_factory = bypass.get("model_factory", {})
-    return {
+    teacher_dir = _teacher_dir_identity(cfg)
+    embedding_pruning = _to_plain_container(cfg.get("embedding_pruning", {}))
+    identity = {
         "teacher": {
-            "teacher_dir": _teacher_dir_identity(cfg),
+            "teacher_dir": teacher_dir,
+            "checkpoint_fingerprint": _checkpoint_fingerprint(teacher_dir),
             "descriptor": _descriptor_identity(cfg),
         },
         "model": {
@@ -172,11 +207,13 @@ def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
             "keys_to_learn": _canonical_keys_to_learn(model_factory.get("keys_to_learn")),
         },
         "training": {
+            "optimizer": training.get("optimizer", "adamw"),
             "learning_rate": training.get("learning_rate"),
             "training_tokens": training.get("training_tokens"),
             "micro_batch_size": training.get("micro_batch_size"),
             "grad_accumulation_steps": training.get("grad_accumulation_steps"),
             "weight_decay": training.get("weight_decay"),
+            "momentum": training.get("momentum", 0.0),
             "decay_lr": training.get("decay_lr"),
             "beta1": training.get("beta1"),
             "beta2": training.get("beta2"),
@@ -209,7 +246,34 @@ def get_bypass_run_identity(cfg: DictConfig) -> dict[str, Any]:
         },
         "seed": bypass.get("seed"),
         "dtype": bypass.get("dtype"),
+        "elastic": bypass.get("elastic", False),
+        "elastic_seed": bypass.get("elastic_seed", 42) if bypass.get("elastic", False) else None,
+        "elastic_search": {
+            "sampling_contract_version": 2,
+            # A run produced before the consolidated-checkpoint integrity gate
+            # must not be reused: PP-local exports could be published with
+            # missing ranks even though training itself completed.
+            "checkpoint_publication_contract_version": 2,
+            "include_no_op": bypass.get("elastic_include_no_op", True),
+            "intermediate_size_list": pruning.get("intermediate_size_list", []),
+            "attn_heads_list": pruning.get(
+                "attn_heads_list", pruning.get("attention_groups_list", [])
+            ),
+            "embedding_pruning": {
+                key: embedding_pruning.get(key)
+                for key in ("enabled", "widths", "alignment", "cycle_widths")
+            },
+        }
+        if bypass.get("elastic", False)
+        else None,
     }
+    identity["backend"] = "automodel"
+    top_model = _to_plain_container(cfg.get("model", {}))
+    identity["automodel"] = {
+        "config": _to_plain_container(bypass.get("automodel", {})),
+        "force_hf": top_model.get("force_hf", True),
+    }
+    return identity
 
 
 def get_bypass_config_fingerprint(cfg: DictConfig) -> str:
@@ -243,6 +307,12 @@ def get_bypass_experiment_fingerprint(cfg: DictConfig) -> str:
             ],
         },
     }
+    if identity.get("elastic"):
+        experiment_identity["elastic_seed"] = identity.get("elastic_seed")
+        experiment_identity["elastic_search"] = identity.get("elastic_search")
+    if identity.get("backend") == "automodel":
+        experiment_identity["backend"] = "automodel"
+        experiment_identity["automodel"] = identity.get("automodel")
     payload = json.dumps(experiment_identity, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -269,11 +339,13 @@ def set_experiment_id(cfg: DictConfig) -> None:
 
     if "attention" in overrides:
         attn_override = overrides.attention[0]
-        if (
-            "num_key_value_heads" in attn_override
-            and attn_override["num_key_value_heads"] is not None
-        ):
-            parts.append(f"heads_{attn_override['num_key_value_heads']}")
+        kv = attn_override.get("num_key_value_heads", None)
+        if kv is not None:
+            # Encode both query and KV head counts (q may shrink via head removal). When the
+            # per-layer query count isn't overridden it stays the model-global value, which the
+            # name can't see here, so emit just the kv part in that case.
+            q = attn_override.get("num_attention_heads", None)
+            parts.append(f"attn_{q}q_{kv}kv" if q is not None else f"attn_{kv}kv")
 
     keys_to_learn = _canonical_keys_to_learn(cfg.bypass.model_factory.get("keys_to_learn", None))
     if keys_to_learn is not None and keys_to_learn != ("entire_block",):
@@ -388,6 +460,7 @@ def expected_bypass_runs(cfg: DictConfig) -> list[dict[str, Any]]:
                 "teacher_dir": cfg.get("teacher_dir", None),
                 "dataset_path": cfg.get("dataset_path", None),
                 "descriptor": _descriptor_identity(cfg),
+                "pruning": OmegaConf.to_container(cfg.get("pruning", {}), resolve=True),
                 "bypass": OmegaConf.to_container(cfg.bypass, resolve=True),
             }
         )

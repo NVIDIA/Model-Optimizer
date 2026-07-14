@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for ``_set_keys_to_learn`` in stitched_model_factory.py.
+"""Unit tests for native descriptor-backed bypass parameter selection.
 
 This function is the single source of truth for which subblock parameters get
 trained during a bypass run. Its branches (subblock_ffn / subblock_attention /
@@ -28,7 +28,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.puzzletron.bypass_distillation.stitched_model_factory import _set_keys_to_learn
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, MambaConfig
+from modelopt.torch.puzzletron.bypass_distillation.parameter_selection import set_keys_to_learn
 
 # ---------------------------------------------------------------------------
 # Fixtures: a minimal Llama-shaped model and a Llama-shaped descriptor stub
@@ -119,7 +120,7 @@ def test_dense_subblock_keys_select_expected_parameters():
     ]:
         model = _make_dense_model(num_layers=2)
         descriptor = _make_descriptor(num_layers=2)
-        _set_keys_to_learn(model, descriptor, keys_to_learn)
+        set_keys_to_learn(model, descriptor, keys_to_learn)
         trainable = _trainable_names(model)
 
         for fragment in include_fragments:
@@ -138,10 +139,10 @@ def test_dense_subblock_keys_select_expected_parameters():
 
 
 def _hybrid_block_configs():
-    """Block 0: Mamba. Block 1: GQA. Detected via ``attention.mamba is not None``."""
+    """Block 0 is Mamba and block 1 is grouped-query attention."""
     return [
-        SimpleNamespace(attention=SimpleNamespace(mamba=SimpleNamespace())),  # Mamba
-        SimpleNamespace(attention=SimpleNamespace(mamba=None)),  # GQA
+        BlockConfig(subblock_configs=(MambaConfig(),)),
+        BlockConfig(subblock_configs=(AttentionConfig(num_kv_heads=2),)),
     ]
 
 
@@ -152,7 +153,7 @@ def test_hybrid_subblock_keys_partition_attention_by_block_type():
     ]:
         model = _make_dense_model(num_layers=2)
         descriptor = _make_descriptor(num_layers=2, block_configs=_hybrid_block_configs())
-        _set_keys_to_learn(model, descriptor, keys_to_learn)
+        set_keys_to_learn(model, descriptor, keys_to_learn)
         trainable = _trainable_names(model)
 
         assert any(f"model.layers.{included_block}.self_attn." in n for n in trainable), trainable
@@ -179,7 +180,7 @@ def test_unsupported_keys_to_learn_are_rejected():
         model = _make_dense_model(num_layers=2)
         descriptor = _make_descriptor(num_layers=2)
         with pytest.raises(ValueError, match=match):
-            _set_keys_to_learn(model, descriptor, keys_to_learn)
+            set_keys_to_learn(model, descriptor, keys_to_learn)
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +201,6 @@ def test_subblock_keys_skip_non_floating_point_params():
     model.model.layers[0].self_attn.register_parameter("int_counter", int_param)
     descriptor = _make_descriptor(num_layers=2)
     # Should not raise even though the int param's name matches the attention group.
-    _set_keys_to_learn(model, descriptor, "subblock_attention")
+    set_keys_to_learn(model, descriptor, "subblock_attention")
     # The int counter must remain frozen regardless.
     assert not model.model.layers[0].self_attn.int_counter.requires_grad

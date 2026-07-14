@@ -36,7 +36,7 @@ import math
 import pytest
 from omegaconf import OmegaConf
 
-from modelopt.torch.puzzletron.bypass_distillation.training_loop import _get_lr
+from modelopt.torch.puzzletron.bypass_distillation.schedule import get_learning_rate
 
 
 def _make_cfg(
@@ -69,8 +69,8 @@ def test_degenerate_budget_returns_base_lr():
             lr_decay_steps=lr_decay_steps,
             learning_rate=learning_rate,
         )
-        assert _get_lr(cfg, step=0) == learning_rate
-        assert _get_lr(cfg, step=99) == learning_rate
+        assert get_learning_rate(cfg, step=0) == learning_rate
+        assert get_learning_rate(cfg, step=99) == learning_rate
 
 
 def test_lr_schedule_matches_key_points():
@@ -80,7 +80,7 @@ def test_lr_schedule_matches_key_points():
         (5, 0.5, "warmup midpoint"),
         (10, 1.0, "warmup end"),
     ]:
-        assert _get_lr(cfg, step=step) == pytest.approx(expected), name
+        assert get_learning_rate(cfg, step=step) == pytest.approx(expected), name
 
     cfg = _make_cfg(warmup_steps=10, lr_decay_steps=20, learning_rate=1.0, min_lr=0.0)
     cosine_start = 0.5 * (1.0 + math.cos(math.pi * 0.1))
@@ -92,5 +92,5 @@ def test_lr_schedule_matches_key_points():
         (21, 0.0, "post-decay clamp"),
         (1000, 0.0, "long post-decay clamp"),
     ]:
-        assert _get_lr(cfg, step=step) == pytest.approx(expected), name
-    assert _get_lr(cfg, step=11) < 1.0
+        assert get_learning_rate(cfg, step=step) == pytest.approx(expected), name
+    assert get_learning_rate(cfg, step=11) < 1.0

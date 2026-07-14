@@ -15,15 +15,36 @@
 
 """Unit tests for get_distributed_modules_ownership in bypass_utils.py."""
 
+import os
+
 import pytest
 from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.bypass_distillation.bypass_utils import (
+    _checkpoint_fingerprint,
     get_bypass_config_fingerprint,
+    get_bypass_run_identity,
     get_distributed_modules_ownership,
     get_pipeline_ownership_context,
     set_experiment_id,
 )
+
+
+def test_checkpoint_fingerprint_ignores_weight_file_mtime(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text('{"hidden_size": 16}\n')
+    weight = checkpoint / "model-00001-of-00001.safetensors"
+    weight.write_bytes(b"stable-weight-identity")
+
+    first = _checkpoint_fingerprint(str(checkpoint))
+    stat = weight.stat()
+    os.utime(
+        weight,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000_000),
+    )
+
+    assert _checkpoint_fingerprint(str(checkpoint)) == first
 
 
 def test_distributed_modules_ownership():
@@ -125,7 +146,7 @@ def _experiment_cfg(keys_to_learn):
                 "model_factory": {
                     "factory": "bypass_factory_fn",
                     "block_loss_func": "normalized_mse_loss",
-                    "gqa_init_mode": "AverageKV",
+                    "gqa_init_mode": "FirstKV",
                     "mlp_init_mode": "Truncate",
                     "mlp_init_config": {"activations_log_dir": None},
                     "linear_init_mode": "FromTeacher",
@@ -147,8 +168,8 @@ def test_experiment_id_includes_learning_target_and_fingerprint():
     set_experiment_id(attention_cfg)
     set_experiment_id(ffn_cfg)
 
-    assert attention_cfg.bypass.experiment_id.startswith("bypass_heads_1_attention_")
-    assert ffn_cfg.bypass.experiment_id.startswith("bypass_heads_1_ffn_")
+    assert attention_cfg.bypass.experiment_id.startswith("bypass_attn_1kv_attention_")
+    assert ffn_cfg.bypass.experiment_id.startswith("bypass_attn_1kv_ffn_")
     assert attention_cfg.bypass.experiment_id != ffn_cfg.bypass.experiment_id
 
 
@@ -216,3 +237,66 @@ def test_experiment_id_uses_teacher_source_not_dataset_path():
     cfg_c.teacher_dir = "/tmp/teacher_b"
     set_experiment_id(cfg_c)
     assert cfg_a.bypass.experiment_id != cfg_c.bypass.experiment_id
+
+
+def test_elastic_bypass_identity_tracks_sorted_parent_and_hidden_widths(tmp_path):
+    cfg = _experiment_cfg("entire_block")
+    cfg.puzzle_dir = str(tmp_path / "model")
+    cfg.bypass.elastic = True
+    cfg.bypass.elastic_seed = 42
+    cfg.bypass.elastic_include_no_op = False
+    cfg.embedding_pruning = {
+        "enabled": True,
+        "widths": [1024, 512],
+        "alignment": 128,
+        "cycle_widths": True,
+    }
+    sorted_teacher = tmp_path / "model" / "ckpts" / "sorted_teacher"
+    sorted_teacher.mkdir(parents=True)
+    (sorted_teacher / "config.json").write_text('{"hidden_size": 1024}\n')
+    permutations = sorted_teacher / "sorted_permutations.json"
+    permutations.write_text('{"hidden_width": [0, 1]}\n')
+
+    identity = get_bypass_run_identity(cfg)
+    first = get_bypass_config_fingerprint(cfg)
+
+    assert identity["teacher"]["teacher_dir"] == str(sorted_teacher)
+    assert identity["teacher"]["checkpoint_fingerprint"]
+    assert identity["elastic_search"]["embedding_pruning"] == {
+        "enabled": True,
+        "widths": [1024, 512],
+        "alignment": 128,
+        "cycle_widths": True,
+    }
+
+    permutations.write_text('{"hidden_width": [1, 0]}\n')
+    assert get_bypass_config_fingerprint(cfg) != first
+
+    permutations.write_text('{"hidden_width": [0, 1]}\n')
+    cfg.embedding_pruning.widths = [1024, 768]
+    assert get_bypass_config_fingerprint(cfg) != first
+
+
+def test_elastic_experiment_id_includes_sampling_contract_and_widths(tmp_path):
+    cfg_a = _experiment_cfg("entire_block")
+    cfg_b = _experiment_cfg("entire_block")
+    for cfg in (cfg_a, cfg_b):
+        cfg.puzzle_dir = str(tmp_path / "model")
+        cfg.bypass.elastic = True
+        cfg.bypass.elastic_seed = 42
+        cfg.bypass.elastic_include_no_op = False
+        cfg.embedding_pruning = {
+            "enabled": True,
+            "widths": [1024, 512],
+            "alignment": 128,
+            "cycle_widths": True,
+        }
+    cfg_b.embedding_pruning.widths = [1024, 768]
+
+    identity = get_bypass_run_identity(cfg_a)
+    set_experiment_id(cfg_a)
+    set_experiment_id(cfg_b)
+
+    assert identity["elastic_search"]["sampling_contract_version"] == 2
+    assert identity["elastic_search"]["checkpoint_publication_contract_version"] == 2
+    assert cfg_a.bypass.experiment_id != cfg_b.bypass.experiment_id

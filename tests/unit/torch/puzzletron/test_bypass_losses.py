@@ -18,8 +18,9 @@
 import pytest
 import torch
 
-from modelopt.torch.puzzletron.sewing_kit.utils import (
+from modelopt.torch.puzzletron.bypass_distillation.losses import (
     batched_normalized_mse_loss,
+    normalized_mse_loss,
     vectorwise_normalized_mse_loss,
 )
 from modelopt.torch.puzzletron.utils.parsing import format_stitched_losses
@@ -33,6 +34,21 @@ def test_vectorwise_normalized_mse_loss_matches_batched_last_dim():
     batched = batched_normalized_mse_loss(input_, target, batch_dims=(0, 1))
 
     torch.testing.assert_close(vectorwise, batched)
+
+
+def test_normalized_mse_loss_chunked_scalar_matches_reference_and_gradient():
+    input_ = torch.randn(3, 5, 7, dtype=torch.float32, requires_grad=True)
+    target = torch.randn(3, 5, 7, dtype=torch.float32)
+
+    loss = normalized_mse_loss(input_, target, chunk_numel=11)
+    reference = torch.nn.functional.mse_loss(input_, target) / torch.nn.functional.mse_loss(
+        target, torch.zeros_like(target) + 1e-6
+    )
+
+    torch.testing.assert_close(loss, reference)
+    actual_grad = torch.autograd.grad(loss, input_, retain_graph=True)[0]
+    reference_grad = torch.autograd.grad(reference, input_)[0]
+    torch.testing.assert_close(actual_grad, reference_grad)
 
 
 def test_batched_normalized_mse_loss_matches_manual_relative_l2():
