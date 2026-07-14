@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from safetensors import safe_open
@@ -29,6 +30,19 @@ from transformers import AutoModelForCausalLM
 
 import modelopt.torch.puzzletron as mtpz
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
+from modelopt.torch.puzzletron.stages.convert import (
+    _descriptor_checkpoint_layout_complete,
+    _is_complete_checkpoint,
+)
+
+
+def _weight_map(checkpoint_dir):
+    index_path = checkpoint_dir / "model.safetensors.index.json"
+    if index_path.is_file():
+        return json.loads(index_path.read_text())["weight_map"]
+    weights_path = checkpoint_dir / "model.safetensors"
+    with safe_open(weights_path, framework="pt") as handle:
+        return {key: weights_path.name for key in handle.keys()}
 
 
 def test_convert_anymodel(tmp_path):
@@ -41,6 +55,54 @@ def test_convert_anymodel(tmp_path):
         _ = AutoModelForCausalLM.from_pretrained(output_dir)
 
 
+def test_conversion_resume_rejects_partial_hf_checkpoint_without_block_configs(tmp_path):
+    partial_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+
+    assert not _is_complete_checkpoint(partial_dir, trust_remote_code=False)
+
+
+def test_conversion_resume_rejects_unmigrated_descriptor_checkpoint_layout(tmp_path):
+    checkpoint = tmp_path / "legacy"
+    checkpoint.mkdir()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "language_model.model.embed_tokens.weight": "model.safetensors",
+                    "language_model.lm_head.weight": "model.safetensors",
+                }
+            }
+        )
+    )
+
+    class Descriptor:
+        @staticmethod
+        def generic_decoder_contract(config):
+            return SimpleNamespace(
+                checkpoint_key_rewrites=(
+                    (r"^language_model\.model\.", "model.language_model."),
+                    (r"^language_model\.lm_head\.", "lm_head."),
+                )
+            )
+
+    assert not _descriptor_checkpoint_layout_complete(
+        checkpoint, Descriptor, SimpleNamespace()
+    )
+
+
+def test_conversion_resume_skips_generic_layout_check_when_descriptor_has_no_contract(tmp_path):
+    """Specialized family converters must not be routed through the generic converter."""
+
+    class Descriptor:
+        @staticmethod
+        def generic_decoder_contract(config):
+            return None
+
+    assert _descriptor_checkpoint_layout_complete(
+        tmp_path, Descriptor, SimpleNamespace(block_configs=[])
+    )
+
+
 def test_convert_anymodel_qwen3_5_text_preserves_mtp(tmp_path):
     pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
 
@@ -48,10 +110,8 @@ def test_convert_anymodel_qwen3_5_text_preserves_mtp(tmp_path):
     output_dir = tmp_path / "qwen3_5-anymodel"
     mtpz.anymodel.convert_model(input_dir, output_dir, converter="qwen3_5_text")
 
-    index = json.loads((output_dir / "model.safetensors.index.json").read_text())
-    assert index["weight_map"]["mtp.0.norm.weight"] == "subblocks_safetensors/mtp.safetensors"
-    with safe_open(output_dir / "subblocks_safetensors" / "mtp.safetensors", framework="pt") as f:
-        assert "mtp.0.norm.weight" in list(f.keys())
+    weight_map = _weight_map(output_dir)
+    assert "mtp.0.norm.weight" in weight_map
 
     descriptor = mtpz.anymodel.ModelDescriptorFactory.get("qwen3_5_text")
     with mtpz.anymodel.deci_x_patcher(descriptor):
@@ -74,8 +134,5 @@ def test_convert_anymodel_qwen3_5_vl_sets_text_layer_config(tmp_path):
         "full_attention",
     ]
 
-    index = json.loads((output_dir / "model.safetensors.index.json").read_text())
-    assert any(
-        filename.endswith("vision_encoding.safetensors")
-        for filename in index["weight_map"].values()
-    )
+    weight_map = _weight_map(output_dir)
+    assert any("visual" in key or "vision" in key for key in weight_map)

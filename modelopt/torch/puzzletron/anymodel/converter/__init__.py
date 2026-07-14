@@ -17,3 +17,4 @@
 from .base import *
 from .convert_any_model import *
 from .converter_factory import *
+from .generic_decoder import *

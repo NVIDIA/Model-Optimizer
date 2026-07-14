@@ -16,18 +16,13 @@
 
 import copy
 import fnmatch
-import json
 import os
 import shutil
 from abc import ABC, abstractmethod
-from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
-from safetensors.torch import load_file, save_file
-from tqdm import tqdm
 from transformers import PretrainedConfig
-from transformers.integrations.mxfp4 import convert_moe_packed_tensors
 
 from ...block_config import BlockConfig
 from ...tools.checkpoint_utils_hf import load_model_config, save_model_config
@@ -37,108 +32,7 @@ __all__ = ["Converter"]
 
 
 class Converter(ABC):
-    """Base class for converting HuggingFace models to Puzzletron/AnyModel format."""
-
-    @staticmethod
-    def _get_weight_map(input_dir: Path) -> Dict[str, str]:
-        """Load weight map from checkpoint directory (supports both sharded and single-file models).
-
-        Returns a dict mapping parameter names to their safetensors filenames.
-        """
-        index_path = input_dir / "model.safetensors.index.json"
-        single_file_path = input_dir / "model.safetensors"
-
-        if index_path.exists():
-            # Sharded model
-            with open(index_path, "r") as f:
-                index = json.load(f)
-            return index["weight_map"]
-        elif single_file_path.exists():
-            # Single file model - create a synthetic weight map
-            data = load_file(single_file_path)
-            return {name: "model.safetensors" for name in data.keys()}
-        else:
-            raise FileNotFoundError(
-                f"Neither {index_path} nor {single_file_path} found. Cannot determine model format."
-            )
-
-    @classmethod
-    def convert_model_weights(
-        cls, input_dir: Path, output_dir: Path, descriptor: ModelDescriptor, num_hidden_layers: int
-    ):
-        """Convert model weights to subblock format."""
-        param_to_file = Converter._get_weight_map(input_dir)
-        all_param_names = list(param_to_file.keys())
-
-        # Reverse map: file -> set of params
-        file_to_params = defaultdict(set)
-        for name, file in param_to_file.items():
-            file_to_params[file].add(name)
-
-        passthrough_subblocks = descriptor.get_passthrough_weight_groups(all_param_names)
-        passthrough_param_names = {
-            name for param_names in passthrough_subblocks.values() for name in param_names
-        }
-        model_param_names = [
-            name for name in all_param_names if name not in passthrough_param_names
-        ]
-
-        # Determine subblocks needed
-        subblocks = descriptor.get_weight_groups(
-            model_param_names, num_hidden_layers=num_hidden_layers
-        )
-        subblocks.update(passthrough_subblocks)
-
-        # Output directory
-        out_dir = output_dir / "subblocks_safetensors"
-        os.makedirs(out_dir, exist_ok=True)
-
-        # New weight index
-        new_index = {"metadata": {"format": "pt"}, "weight_map": {}}
-
-        for subblock, param_names in tqdm(subblocks.items(), desc="Processing subblocks"):
-            param_files = set(param_to_file[name] for name in param_names)
-            tensors = {}
-
-            # Load only needed files for this subblock
-            for file in param_files:
-                data = load_file(os.path.join(input_dir, file))
-                for name in param_names:
-                    if param_to_file[name] == file and name in data:
-                        converted_name = cls.convert_weight_name(name)
-                        is_passthrough = name in passthrough_param_names
-                        # Convert MoE packed tensors if quantized is mxfp4 //gpt-oss-20b
-                        if getattr(cls, "quantized", None) == "mxfp4" and not is_passthrough:
-                            if name.endswith("_blocks"):
-                                converted_name = converted_name.replace("_blocks", "")
-                                tensors[converted_name] = convert_moe_packed_tensors(
-                                    data[name],
-                                    data[name.replace("_blocks", "_scales")],
-                                )
-                            elif name.endswith("_scales"):
-                                continue
-                            else:
-                                tensors[converted_name] = data[name]
-                        else:
-                            tensors[converted_name] = data[name]
-
-            # Save this subblock
-            print(f"\n✅ Group: {subblock} ({len(tensors)} layers)")
-            for layer in tensors.keys():
-                print(f"  - {layer}")
-
-            subblock_file = f"{subblock}.safetensors"
-            save_file(tensors, os.path.join(out_dir, subblock_file))
-
-            # Update index
-            for new_name in tensors.keys():
-                new_index["weight_map"][new_name] = f"subblocks_safetensors/{subblock_file}"
-
-        # Save new index file
-        with (output_dir / "model.safetensors.index.json").open("w") as f:
-            json.dump(new_index, f, indent=2)
-
-        print(f"✅ Finished saving subblocks and index to {output_dir}")
+    """Base class for adding AnyModel metadata to HuggingFace checkpoints."""
 
     @classmethod
     def convert_configs_in_dirs(
@@ -148,7 +42,7 @@ class Converter(ABC):
         trust_remote_code: bool = False,
         descriptor: ModelDescriptor | None = None,
     ):
-        """Convert config and add block_configs."""
+        """Attach typed block_configs and save standard HuggingFace config artifacts."""
         config = load_model_config(input_dir, trust_remote_code=trust_remote_code)
 
         block_configs = cls.create_block_configs_from_main_config(config)
@@ -163,21 +57,66 @@ class Converter(ABC):
 
     @staticmethod
     def copy_checkpoint_files(input_dir: Path, output_dir: Path):
-        """Copy checkpoint files except model weights (which will be converted)."""
+        """Materialize a checkpoint while preserving standard HuggingFace weight files.
+
+        Metadata/config files are copied so Puzzletron can rewrite config.json
+        without mutating the source checkpoint. Large weight shards are hardlinked
+        when possible and copied otherwise. This keeps 100B+ smoke conversions
+        fast when the HF cache and run directory share a filesystem, while still
+        producing self-contained checkpoints when they do not.
+        """
         ignore_patterns = [
-            "model-*.safetensors",
-            "model.safetensors",
-            "model.safetensors.index.json",
+            "subblocks",
             "subblocks_safetensors",
         ]
 
-        def ignore_func(dir, files):
-            ignored = set()
-            for pattern in ignore_patterns:
-                ignored.update(fnmatch.filter(files, pattern))
-            return ignored
+        def should_ignore(path: Path) -> bool:
+            rel_parts = path.relative_to(input_dir).parts
+            return any(
+                fnmatch.fnmatch(part, pattern)
+                for part in rel_parts
+                for pattern in ignore_patterns
+            )
 
-        shutil.copytree(str(input_dir), str(output_dir), ignore=ignore_func, dirs_exist_ok=True)
+        def is_weight_file(path: Path) -> bool:
+            return path.name.endswith((".safetensors", ".bin"))
+
+        def materialize_file(src: Path, dst: Path) -> None:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists() or dst.is_symlink():
+                try:
+                    if dst.stat().st_size == src.stat().st_size:
+                        return
+                except OSError:
+                    pass
+                dst.unlink()
+
+            if is_weight_file(src):
+                # HF snapshots often store weights as relative symlinks into a
+                # cache-level blobs/ directory. Never reproduce that relative
+                # symlink in Puzzletron's teacher dir; it points at the wrong
+                # location after conversion. Link/copy the resolved blob.
+                real_src = src.resolve(strict=True)
+                try:
+                    os.link(real_src, dst)
+                    return
+                except OSError:
+                    pass
+                shutil.copy2(real_src, dst)
+                return
+            shutil.copy2(src, dst)
+
+        input_dir = Path(input_dir)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for src in input_dir.rglob("*"):
+            if should_ignore(src):
+                continue
+            dst = output_dir / src.relative_to(input_dir)
+            if src.is_dir():
+                dst.mkdir(parents=True, exist_ok=True)
+            elif src.is_file():
+                materialize_file(src, dst)
 
     @classmethod
     def convert(
@@ -186,7 +125,11 @@ class Converter(ABC):
         input_dir: Path,
         output_dir: Path,
     ):
-        """Convert a HuggingFace model to AnyModel format.
+        """Attach AnyModel block configs to a standard HuggingFace checkpoint.
+
+        The normal conversion path copies the original HF checkpoint files,
+        including safetensors and index files, then writes config artifacts with
+        typed block_configs. It does not reorganize model weights.
 
         Args:
             descriptor: Model descriptor for the model type.
@@ -195,15 +138,8 @@ class Converter(ABC):
         """
         cls.copy_checkpoint_files(input_dir, output_dir)
         trust_remote_code = descriptor.requires_trust_remote_code()
-        config = cls.convert_configs_in_dirs(
+        cls.convert_configs_in_dirs(
             input_dir, output_dir, trust_remote_code=trust_remote_code, descriptor=descriptor
-        )
-        lm_config = descriptor.get_language_model_config(config)
-        cls.convert_model_weights(
-            input_dir,
-            output_dir,
-            descriptor=descriptor,
-            num_hidden_layers=lm_config.num_hidden_layers,
         )
 
     @staticmethod
@@ -212,7 +148,7 @@ class Converter(ABC):
         """Create per-layer BlockConfig list from a HuggingFace model config.
 
         This method extracts layer-specific parameters (e.g., intermediate_size,
-        num_key_value_heads) from the main model config and creates a BlockConfig
+        num_kv_heads) from the main model config and creates a BlockConfig
         for each layer. These BlockConfigs enable layer-specific pruning and
         modifications during the compression pipeline.
 
@@ -220,9 +156,9 @@ class Converter(ABC):
             config: HuggingFace PretrainedConfig (e.g., LlamaConfig, Qwen2Config)
 
         Returns:
-            List of BlockConfig, one per hidden layer. Each BlockConfig contains:
-            - AttentionConfig: attention settings (no_op, num_key_value_heads)
-            - FFNConfig: FFN settings (no_op, intermediate_size)
+            List of BlockConfig, one per hidden layer. Each BlockConfig contains
+            typed subblock_configs, for example AttentionConfig, FFNConfig,
+            MoEConfig, or MambaConfig entries.
 
         Example:
             For a model with uniform layers (e.g., Llama):
@@ -232,26 +168,3 @@ class Converter(ABC):
                 return [BlockConfig(...) for layer_idx in range(num_layers)]
         """
         raise NotImplementedError
-
-    @staticmethod
-    def convert_weight_name(name: str) -> str:
-        """
-        Convert weight names during checkpoint conversion.
-
-        This method can be overridden by subclasses to apply model-specific weight name
-        transformations when converting checkpoints from HuggingFace format to Puzzletron format.
-
-        Default implementation returns the name unchanged (identity function).
-
-        Args:
-            name: Original weight name from HuggingFace checkpoint
-
-        Returns:
-            Converted weight name for Puzzletron format
-
-        Example:
-            For Qwen2.5-VL, this converts:
-            - visual.* → model.visual.*
-            - model.* → model.language_model.*
-        """
-        return name

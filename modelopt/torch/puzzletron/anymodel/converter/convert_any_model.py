@@ -30,14 +30,15 @@ def convert_model(
     output_dir: str,
     converter: Converter | str,
 ):
-    """Convert a HuggingFace model to AnyModel format.
+    """Attach AnyModel metadata to a HuggingFace checkpoint.
 
-    This function converts a HuggingFace checkpoint to the AnyModel format used
-    for compression. The conversion process:
+    This function keeps the standard HuggingFace checkpoint layout used for
+    loading and adds typed block_configs for AnyModel compression. The conversion
+    process:
 
-    1. Copies non-weight files (config, tokenizer, etc.)
+    1. Copies standard checkpoint files, including safetensors and index files
     2. Creates block_configs for each layer
-    3. Reorganizes weights into subblock checkpoints
+    3. Saves HuggingFace config artifacts with the typed block_configs attached
 
     Args:
         input_dir: Path to the input HuggingFace checkpoint directory.

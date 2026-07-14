@@ -72,4 +72,13 @@ class ConverterFactory:
         if isinstance(value, str):
             if value in cls.CLASS_MAPPING:
                 return cls.CLASS_MAPPING[value]
+            from ..model_descriptor import ModelDescriptorFactory
+
+            descriptor = ModelDescriptorFactory.get(value)
+            contract_factory = getattr(descriptor, "generic_decoder_contract", None)
+            if callable(contract_factory) and contract_factory(None) is not None:
+                from .generic_decoder import GenericDecoderConverter
+
+                return GenericDecoderConverter
+            raise KeyError(f"No converter is registered for descriptor {value!r}")
         return value
