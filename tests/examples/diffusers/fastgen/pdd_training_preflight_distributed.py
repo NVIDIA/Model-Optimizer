@@ -67,6 +67,8 @@ def _expect_collective_failure(iterator, sampler: _Sampler, expected: str) -> No
             dtype=torch.float32,
             require_negative_condition=False,
             expected_batch_size=1,
+            expected_latent_channels=3,
+            expected_condition_features=6,
         )
     except RuntimeError as error:
         message = str(error)
@@ -95,6 +97,46 @@ def main() -> None:
             iter([malformed]),
             _Sampler((sample_id,)),
             "missing required keys",
+        )
+        dist.barrier()
+
+        malformed = _batch(sample_id)
+        if rank == 1:
+            malformed["text_embeddings_mask"] = torch.ones(1, 5, dtype=torch.float32)
+        _expect_collective_failure(
+            iter([malformed]),
+            _Sampler((sample_id,)),
+            "mask must use an integer or boolean dtype",
+        )
+        dist.barrier()
+
+        malformed = _batch(sample_id)
+        if rank == 0:
+            malformed["image_latents"] = torch.ones(1, 3, 3, 4)
+        _expect_collective_failure(
+            iter([malformed]),
+            _Sampler((sample_id,)),
+            "positive even spatial dimensions",
+        )
+        dist.barrier()
+
+        malformed = _batch(sample_id)
+        if rank == 1:
+            malformed["image_latents"] = torch.ones(1, 4, 4, 4)
+        _expect_collective_failure(
+            iter([malformed]),
+            _Sampler((sample_id,)),
+            "exactly 3 channels",
+        )
+        dist.barrier()
+
+        malformed = _batch(sample_id)
+        if rank == 0:
+            malformed["text_embeddings"] = torch.ones(1, 5, 7)
+        _expect_collective_failure(
+            iter([malformed]),
+            _Sampler((sample_id,)),
+            "exactly 6 features",
         )
         dist.barrier()
 

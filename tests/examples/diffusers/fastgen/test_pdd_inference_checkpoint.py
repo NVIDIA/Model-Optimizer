@@ -52,11 +52,10 @@ class _TinyQwen(nn.Module):
         encoder_hidden_states,
         encoder_hidden_states_mask,
         img_shapes,
-        txt_seq_lens,
         guidance,
         return_dict,
     ):
-        del img_shapes, txt_seq_lens, guidance, return_dict
+        del img_shapes, guidance, return_dict
         condition = encoder_hidden_states.mean(dim=(1, 2), keepdim=True)
         condition += encoder_hidden_states_mask.sum(dim=1)[:, None, None] / 100
         hidden = torch.tanh(self.backbone(hidden_states))

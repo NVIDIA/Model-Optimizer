@@ -235,8 +235,16 @@ def prepare_qwen_pdd_batch(
     device: torch.device,
     dtype: torch.dtype,
     require_negative_condition: bool,
+    expected_latent_channels: int,
+    expected_condition_features: int,
 ) -> PreparedPDDBatch:
     """Move a portable Qwen cache batch into the PDD adapter contract."""
+    if type(expected_latent_channels) is not int or expected_latent_channels <= 0:
+        raise ValueError("expected_latent_channels must be a positive integer.")
+    if type(expected_condition_features) is not int or expected_condition_features <= 0:
+        raise ValueError("expected_condition_features must be a positive integer.")
+    if not dtype.is_floating_point:
+        raise TypeError("Qwen PDD model dtype must be floating point.")
     if not isinstance(batch, Mapping):
         raise TypeError(f"batch must be a mapping, got {type(batch).__name__}.")
     required = {"image_latents", "text_embeddings", "text_embeddings_mask", "metadata"}
@@ -251,6 +259,18 @@ def prepare_qwen_pdd_batch(
         raise TypeError("Qwen PDD latent, text embedding, and mask values must be tensors.")
     if data.ndim != 4:
         raise ValueError(f"Qwen PDD image_latents must be 4D, got {tuple(data.shape)}.")
+    if not data.dtype.is_floating_point:
+        raise TypeError("Qwen PDD image_latents must use a floating-point dtype.")
+    if data.shape[0] <= 0 or data.shape[1] != expected_latent_channels:
+        raise ValueError(
+            "Qwen PDD image_latents must have a non-empty batch and exactly "
+            f"{expected_latent_channels} channels, got {tuple(data.shape)}."
+        )
+    if data.shape[2] <= 0 or data.shape[3] <= 0 or data.shape[2] % 2 or data.shape[3] % 2:
+        raise ValueError(
+            "Qwen PDD image_latents must have positive even spatial dimensions, got "
+            f"{tuple(data.shape[2:])}."
+        )
     if not isinstance(metadata, Mapping):
         raise TypeError("Qwen PDD batch metadata must be a mapping.")
     sample_ids = metadata.get("sample_ids")
@@ -262,16 +282,43 @@ def prepare_qwen_pdd_batch(
     ):
         raise ValueError("Qwen PDD sample_ids must be non-empty strings matching batch size.")
 
+    def prepare_condition(
+        embeddings: torch.Tensor,
+        attention_mask: torch.Tensor,
+        *,
+        name: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not embeddings.dtype.is_floating_point:
+            raise TypeError(f"{name} embeddings must use a floating-point dtype.")
+        if attention_mask.dtype.is_floating_point or attention_mask.dtype.is_complex:
+            raise TypeError(f"{name} mask must use an integer or boolean dtype.")
+        if embeddings.ndim not in (2, 3):
+            raise ValueError(f"{name} embeddings must be 2D or 3D, got {embeddings.ndim}D.")
+        if attention_mask.ndim not in (1, 2):
+            raise ValueError(f"{name} mask must be 1D or 2D, got {attention_mask.ndim}D.")
+        if embeddings.shape[-2] <= 0 or embeddings.shape[-1] <= 0:
+            raise ValueError(f"{name} embeddings must have non-empty sequence and feature axes.")
+        if embeddings.shape[-1] != expected_condition_features:
+            raise ValueError(
+                f"{name} embeddings must have exactly {expected_condition_features} features."
+            )
+        if attention_mask.shape[-1] != embeddings.shape[-2]:
+            raise ValueError(f"{name} mask sequence length must match its embeddings.")
+        if embeddings.ndim == 3 and embeddings.shape[0] != data.shape[0]:
+            raise ValueError(f"{name} embedding batch size must match image_latents.")
+        if attention_mask.ndim == 2 and attention_mask.shape[0] != data.shape[0]:
+            raise ValueError(f"{name} mask batch size must match image_latents.")
+
+        embeddings = embeddings.to(device=device, dtype=dtype)
+        attention_mask = attention_mask.to(device=device)
+        if embeddings.ndim == 2:
+            embeddings = embeddings.unsqueeze(0).expand(data.shape[0], -1, -1).contiguous()
+        if attention_mask.ndim == 1:
+            attention_mask = attention_mask.unsqueeze(0).expand(data.shape[0], -1).contiguous()
+        return embeddings, attention_mask
+
     data = data.to(device=device, dtype=dtype)
-    text = text.to(device=device, dtype=dtype)
-    mask = mask.to(device=device)
-    if text.ndim == 2:
-        text = text.unsqueeze(0).expand(data.shape[0], -1, -1).contiguous()
-    if mask.ndim == 1:
-        mask = mask.unsqueeze(0).expand(data.shape[0], -1).contiguous()
-    if text.shape[0] != data.shape[0] or mask.shape[0] != data.shape[0]:
-        raise ValueError("Qwen PDD conditioning batch size must match image_latents.")
-    condition = (text, mask)
+    condition = prepare_condition(text, mask, name="Qwen PDD condition")
 
     negative: tuple[torch.Tensor, torch.Tensor] | None = None
     negative_text = batch.get("negative_text_embeddings")
@@ -281,15 +328,11 @@ def prepare_qwen_pdd_batch(
             negative_mask, torch.Tensor
         ):
             raise TypeError("negative Qwen conditioning requires embedding and mask tensors.")
-        negative_text = negative_text.to(device=device, dtype=dtype)
-        negative_mask = negative_mask.to(device=device)
-        if negative_text.ndim == 2:
-            negative_text = negative_text.unsqueeze(0).expand(data.shape[0], -1, -1).contiguous()
-        if negative_mask.ndim == 1:
-            negative_mask = negative_mask.unsqueeze(0).expand(data.shape[0], -1).contiguous()
-        if negative_text.shape[0] != data.shape[0] or negative_mask.shape[0] != data.shape[0]:
-            raise ValueError("negative Qwen conditioning batch size must match image_latents.")
-        negative = (negative_text, negative_mask)
+        negative = prepare_condition(
+            negative_text,
+            negative_mask,
+            name="negative Qwen PDD condition",
+        )
     if require_negative_condition and negative is None:
         raise ValueError("guided Qwen PDD training requires negative prompt conditioning.")
     return PreparedPDDBatch(data, condition, negative, sample_ids, (True,) * len(sample_ids))

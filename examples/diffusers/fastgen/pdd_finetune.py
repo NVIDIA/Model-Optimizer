@@ -209,6 +209,8 @@ def _iter_validation_batches(
     dataloader: Any,
     masks: tuple[tuple[bool, ...], ...],
     config: Any,
+    expected_latent_channels: int,
+    expected_condition_features: int,
 ):
     from pdd_training import prepare_qwen_pdd_batch
 
@@ -219,6 +221,8 @@ def _iter_validation_batches(
             device=config.device,
             dtype=config.dtype,
             require_negative_condition=config.pdd.guidance_scale is not None,
+            expected_latent_channels=expected_latent_channels,
+            expected_condition_features=expected_condition_features,
         )
         yield dataclasses.replace(prepared, valid_mask=valid_mask)
     if count != len(masks):
@@ -271,6 +275,8 @@ def _collective_training_batch(
     dtype: Any,
     require_negative_condition: bool,
     expected_batch_size: int,
+    expected_latent_channels: int,
+    expected_condition_features: int,
 ) -> tuple[Any, tuple[str, ...]] | None:
     """Prepare one rank-local batch, then agree on success before any model call."""
     import torch.distributed as dist
@@ -315,6 +321,8 @@ def _collective_training_batch(
                 device=device,
                 dtype=dtype,
                 require_negative_condition=require_negative_condition,
+                expected_latent_channels=expected_latent_channels,
+                expected_condition_features=expected_condition_features,
             )
             if prepared is None:
                 raise RuntimeError("PDD batch preparation returned no prepared batch.")
@@ -414,6 +422,21 @@ def main() -> None:
         config,
     )
     setup = build_pdd_setup(config)
+    transformer_config = getattr(setup.student, "config", None)
+    if isinstance(transformer_config, Mapping):
+        in_channels = transformer_config.get("in_channels")
+    else:
+        in_channels = getattr(transformer_config, "in_channels", None)
+    if isinstance(transformer_config, Mapping):
+        condition_features = transformer_config.get("joint_attention_dim")
+    else:
+        condition_features = getattr(transformer_config, "joint_attention_dim", None)
+    if type(in_channels) is not int or in_channels <= 0 or in_channels % 4:
+        raise RuntimeError("constructed Qwen transformer has invalid packed in_channels.")
+    if type(condition_features) is not int or condition_features <= 0:
+        raise RuntimeError("constructed Qwen transformer has invalid joint_attention_dim.")
+    expected_latent_channels = in_channels // 4
+    expected_condition_features = condition_features
     training = build_pdd_training_artifacts(setup, config)
     identity = build_pdd_checkpoint_identity(
         metadata=setup.metadata,
@@ -492,6 +515,8 @@ def main() -> None:
                     dtype=config.dtype,
                     require_negative_condition=config.pdd.guidance_scale is not None,
                     expected_batch_size=config.training.local_batch_size,
+                    expected_latent_channels=expected_latent_channels,
+                    expected_condition_features=expected_condition_features,
                 )
                 if next_batch is None:
                     break
@@ -584,6 +609,8 @@ def main() -> None:
                             validation_dataloader,
                             validation_masks,
                             config,
+                            expected_latent_channels,
+                            expected_condition_features,
                         ),
                         validation_assignments,
                         validation_seed=config.training.validation_seed,

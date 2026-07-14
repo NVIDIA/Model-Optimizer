@@ -53,7 +53,6 @@ class _TinyQwenTransformer(nn.Module):
         encoder_hidden_states,
         encoder_hidden_states_mask,
         img_shapes,
-        txt_seq_lens,
         guidance,
         return_dict,
         **kwargs,
@@ -72,7 +71,6 @@ class _TinyQwenTransformer(nn.Module):
                 "encoder_hidden_states": encoder_hidden_states.detach().clone(),
                 "encoder_hidden_states_mask": encoder_hidden_states_mask.detach().clone(),
                 "img_shapes": img_shapes,
-                "txt_seq_lens": txt_seq_lens,
                 "guidance": guidance,
                 "return_dict": return_dict,
                 "kwargs": kwargs,
@@ -119,7 +117,6 @@ def _call_base_packed(
         encoder_hidden_states=embeddings,
         encoder_hidden_states_mask=mask,
         img_shapes=build_img_shapes(state.shape[0], state.shape[2], state.shape[3]),
-        txt_seq_lens=mask.sum(dim=1).to(torch.int32).tolist(),
         guidance=None,
         return_dict=False,
     )[0]
@@ -148,7 +145,7 @@ def test_conversion_is_idempotent_and_every_initialized_head_matches_base() -> N
     assert len(student.calls) == 1
     torch.testing.assert_close(student.calls[0]["timestep"], time)
     assert student.calls[0]["img_shapes"] == [[(1, 2, 2)], [(1, 2, 2)]]
-    assert student.calls[0]["txt_seq_lens"] == [2, 1]
+    assert "txt_seq_lens" not in student.calls[0]["kwargs"]
     assert student.calls[0]["guidance"] is None
 
 
@@ -244,8 +241,7 @@ def test_teacher_cfg_and_packed_token_norm_rescale_match_direct_reference() -> N
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(teacher.calls[0]["encoder_hidden_states"], condition[0])
     torch.testing.assert_close(teacher.calls[1]["encoder_hidden_states"], negative_condition[0])
-    assert teacher.calls[0]["txt_seq_lens"] == [2, 1]
-    assert teacher.calls[1]["txt_seq_lens"] == [1, 3]
+    assert all("txt_seq_lens" not in call["kwargs"] for call in teacher.calls)
     assert all(call["guidance"] is None for call in teacher.calls)
 
 

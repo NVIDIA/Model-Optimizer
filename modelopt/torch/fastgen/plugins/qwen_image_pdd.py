@@ -262,14 +262,12 @@ class QwenImagePDDAdapter:
 
         batch_size, _, height, width = state.shape
         packed_state = pack_latents(state).to(self._model_dtype(model, state.dtype))
-        txt_seq_lens = attention_mask.sum(dim=1).to(torch.int32).tolist()
         output = model(
             hidden_states=packed_state,
             timestep=time,
             encoder_hidden_states=encoder_hidden_states,
             encoder_hidden_states_mask=attention_mask,
             img_shapes=build_img_shapes(batch_size, height, width),
-            txt_seq_lens=txt_seq_lens,
             guidance=None,
             return_dict=False,
             **model_kwargs,

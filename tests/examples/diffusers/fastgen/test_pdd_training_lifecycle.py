@@ -185,6 +185,8 @@ def test_qwen_batch_preparation_preserves_ids_masks_and_negative_condition() -> 
         device=torch.device("cpu"),
         dtype=torch.float32,
         require_negative_condition=True,
+        expected_latent_channels=3,
+        expected_condition_features=6,
     )
 
     assert prepared.sample_ids == ("qwen-a", "qwen-b")
@@ -203,7 +205,48 @@ def test_qwen_batch_preparation_preserves_ids_masks_and_negative_condition() -> 
             device=torch.device("cpu"),
             dtype=torch.float32,
             require_negative_condition=True,
+            expected_latent_channels=3,
+            expected_condition_features=6,
         )
+
+
+def test_qwen_batch_preparation_rejects_every_pre_model_shape_and_dtype_mismatch() -> None:
+    base = {
+        "image_latents": torch.ones(2, 3, 4, 4),
+        "text_embeddings": torch.ones(2, 5, 6),
+        "text_embeddings_mask": torch.ones(2, 5, dtype=torch.long),
+        "negative_text_embeddings": torch.zeros(2, 5, 6),
+        "negative_text_embeddings_mask": torch.ones(2, 5, dtype=torch.bool),
+        "metadata": {"sample_ids": ["qwen-a", "qwen-b"]},
+    }
+    cases = (
+        ("image_latents", torch.ones(2, 3, 4, 4, dtype=torch.long), "floating-point dtype"),
+        ("image_latents", torch.ones(2, 4, 4, 4), "exactly 3 channels"),
+        ("image_latents", torch.ones(2, 3, 3, 4), "positive even spatial dimensions"),
+        ("text_embeddings", torch.ones(2, 5, 6, dtype=torch.long), "floating-point dtype"),
+        ("text_embeddings", torch.ones(2, 5, 7), "exactly 6 features"),
+        ("text_embeddings", torch.ones(2, 5, 6, 1), "must be 2D or 3D"),
+        ("text_embeddings_mask", torch.ones(2, 5), "integer or boolean dtype"),
+        ("text_embeddings_mask", torch.ones(2, 4, dtype=torch.long), "sequence length"),
+        (
+            "negative_text_embeddings_mask",
+            torch.ones(2, 5),
+            "integer or boolean dtype",
+        ),
+    )
+
+    for field, value, message in cases:
+        batch = dict(base)
+        batch[field] = value
+        with pytest.raises((TypeError, ValueError), match=message):
+            prepare_qwen_pdd_batch(
+                batch,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                require_negative_condition=True,
+                expected_latent_channels=3,
+                expected_condition_features=6,
+            )
 
 
 def test_two_direct_updates_have_finite_gradients_updates_and_targeted_coverage() -> None:
