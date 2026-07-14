@@ -64,6 +64,7 @@ from .flow_matching import (
 )
 from .loader import *
 from .methods.dmd import *
+from .methods.pdd import *
 from .pipeline import *
 
 # isort: off
