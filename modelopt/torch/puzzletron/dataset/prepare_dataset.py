@@ -16,7 +16,6 @@
 import os
 
 import datasets
-import fire
 import numpy as np
 
 from ..tools.logger import mprint
@@ -75,4 +74,6 @@ def process_and_save_dataset(
 
 
 if __name__ == "__main__":
-    fire.Fire(process_and_save_dataset)
+    from fire import Fire
+
+    Fire(process_and_save_dataset)
