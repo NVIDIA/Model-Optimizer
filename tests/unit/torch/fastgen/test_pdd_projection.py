@@ -372,6 +372,7 @@ def test_metadata_round_trips_exactly_without_mutating_mapping(layout):
     "changes",
     [
         {"schema_version": True},
+        {"grid_max_t": 1},
         {"flow_shift": 5},
         {"inference_blocks": [32, 32, 32, 32]},
         {"projection_bias": 1},
@@ -395,6 +396,9 @@ def _valid_patch_metadata_payload():
         (lambda data: data.update(schema_version=2), "unsupported.*schema_version"),
         (lambda data: data.update(extra=True), "keys mismatch"),
         (lambda data: data.update({1: "bad"}), "keys must all be strings"),
+        (lambda data: data.pop("grid_max_t"), "keys mismatch"),
+        (lambda data: data.update(grid_max_t=1), "grid_max_t must be a float"),
+        (lambda data: data.update(grid_max_t=0.0), "0 < grid_max_t <= 1"),
         (lambda data: data.update(flow_shift=5), "flow_shift must be a float"),
         (lambda data: data.update(grid_size=124), "inference_blocks must sum"),
         (lambda data: data.update(inference_blocks=(32, 32, 32, 32)), "list of integers"),

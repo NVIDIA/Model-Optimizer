@@ -82,6 +82,7 @@ def test_only_selected_head_and_shared_backbone_receive_gradients() -> None:
     adapter = _GradientAdapter()
     config = PDDConfig(
         grid_size=8,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=2,
         block_size_max=4,

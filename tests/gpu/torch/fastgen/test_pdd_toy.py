@@ -120,6 +120,7 @@ def _build(
 ) -> tuple[_Student, _Teacher, PDDOutputProjection, PDDPipeline, _Adapter]:
     config = PDDConfig(
         grid_size=_GRID_SIZE,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=1,
         block_size_max=_GRID_SIZE,

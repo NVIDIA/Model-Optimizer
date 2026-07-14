@@ -67,26 +67,43 @@ def make_shifted_flow_grid(
     grid_size: int,
     shift: float,
     *,
+    max_t: float,
     device: torch.device | str | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Construct the fixed decreasing shifted rectified-flow grid.
 
-    The returned tensor has ``grid_size + 1`` nodes from exactly 1 to 0. Low
+    Schedule construction and upper clamps use float64, matching FastGen's RF
+    scheduler. The completed grid is cast to the requested PDD math dtype. Low
     precision requests are promoted to float32 so distinct early intervals do not
     collapse for the canonical 128-node, shift-5 schedule.
     """
     if isinstance(grid_size, bool) or not isinstance(grid_size, int) or grid_size <= 0:
         raise ValueError(f"grid_size must be a positive integer, got {grid_size!r}.")
+    if type(max_t) is not float:
+        raise TypeError(f"max_t must be a float, got {max_t!r}.")
+    if not math.isfinite(max_t) or not 0.0 < max_t <= 1.0:
+        raise ValueError(f"max_t must be finite and satisfy 0 < max_t <= 1, got {max_t!r}.")
     if not math.isfinite(shift) or shift < 1.0:
         raise ValueError(f"shift must be finite and >= 1, got {shift!r}.")
 
     math_dtype = _pdd_math_dtype(dtype)
-    unshifted = torch.linspace(1.0, 0.0, grid_size + 1, device=device, dtype=math_dtype)
+    schedule_dtype = torch.float64
+    upper = torch.as_tensor(max_t, device=device, dtype=schedule_dtype)
+    unshifted = torch.linspace(
+        max_t,
+        0.0,
+        grid_size + 1,
+        device=device,
+        dtype=schedule_dtype,
+    )
+    unshifted = torch.minimum(unshifted, upper)
     grid = shift * unshifted / (1.0 + (shift - 1.0) * unshifted)
+    grid = torch.minimum(grid, upper).to(math_dtype)
     torch._assert_async(
         torch.all(torch.diff(grid) < 0),
-        f"shifted grid is not strictly decreasing for grid_size={grid_size}, shift={shift}.",
+        "shifted grid is not strictly decreasing for "
+        f"grid_size={grid_size}, max_t={max_t}, shift={shift}.",
     )
     return grid
 

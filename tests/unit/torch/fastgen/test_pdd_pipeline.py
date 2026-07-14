@@ -141,6 +141,7 @@ class _RecordingAdapter:
 def _config(*, teacher_integrator: str = "euler") -> PDDConfig:
     return PDDConfig(
         grid_size=8,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=2,
         block_size_max=4,
@@ -357,10 +358,10 @@ def test_sampled_indices_stay_on_exact_uniform_support() -> None:
 @pytest.mark.parametrize("blocks", [None, [2, 2, 2, 2]])
 def test_fused_sampler_matches_explicit_block_updates(blocks) -> None:
     pipeline, adapter = _pipeline()
-    initial = torch.tensor([[1.0, -2.0, 0.5], [-0.25, 0.75, 1.5]], dtype=torch.bfloat16)
+    noise = torch.tensor([[1.0, -2.0, 0.5], [-0.25, 0.75, 1.5]], dtype=torch.bfloat16)
 
     actual = pipeline.sample(
-        initial,
+        noise,
         condition="prompt",
         blocks=blocks,
         model_kwargs={"tag": 23},
@@ -368,7 +369,7 @@ def test_fused_sampler_matches_explicit_block_updates(blocks) -> None:
 
     resolved = [4, 4] if blocks is None else blocks
     grid = pipeline.time_grid()
-    expected = initial.float()
+    expected = (noise.to(torch.float64) * pipeline.config.grid_max_t).to(torch.float32)
     start = 0
     for block in resolved:
         end = start + block
@@ -384,11 +385,30 @@ def test_fused_sampler_matches_explicit_block_updates(blocks) -> None:
     for call, block in zip(adapter.fused_calls, resolved):
         end = start + block
         assert (call["start"], call["end"]) == (start, end)
-        torch.testing.assert_close(call["time"], grid[start].expand(initial.shape[0]))
+        torch.testing.assert_close(call["time"], grid[start].expand(noise.shape[0]))
         torch.testing.assert_close(call["grid"], grid)
         assert call["condition"] == "prompt"
         assert call["kwargs"] == {"tag": 23}
         start = end
+
+
+def test_fused_sampler_uses_precast_max_time_once_for_raw_noise() -> None:
+    pipeline, adapter = _pipeline()
+    noise = torch.tensor(
+        [[-0.21963761746883392, -1.409722924232483, 1.8951480388641357]],
+        dtype=torch.float32,
+    )
+
+    pipeline.sample(noise)
+
+    expected = (noise.to(torch.float64) * 0.999).to(torch.float32)
+    from_cast_grid = (noise.to(torch.float64) * pipeline.time_grid()[0].to(torch.float64)).to(
+        torch.float32
+    )
+    double_scaled = (expected.to(torch.float64) * 0.999).to(torch.float32)
+    assert not torch.equal(expected, from_cast_grid)
+    assert not torch.equal(expected, double_scaled)
+    assert torch.equal(adapter.fused_calls[0]["state"], expected)
 
 
 @pytest.mark.parametrize(
@@ -411,7 +431,7 @@ def test_pipeline_rejects_invalid_shapes_dtypes_and_blocks() -> None:
     pipeline, adapter = _pipeline()
     with pytest.raises(TypeError, match="data must be a tensor"):
         pipeline.compute_loss({"state": torch.ones(1, 3)})  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="state must be a tensor"):
+    with pytest.raises(TypeError, match="noise must be a tensor"):
         pipeline.sample({"state": torch.ones(1, 3)})  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="real floating-point"):
         pipeline.compute_loss(torch.ones(1, 3, dtype=torch.int64))

@@ -259,7 +259,7 @@ def main() -> None:
     )
     generator = torch.Generator(device=device).manual_seed(args.seed)
     shape = _latent_shape(pipe, height=args.height, width=args.width)
-    state = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
+    noise = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
 
     transformer_invocations = 0
 
@@ -274,7 +274,7 @@ def main() -> None:
         torch.cuda.synchronize(device)
     started = time.perf_counter()
     try:
-        sampled = sampler.sample(state, condition=condition)
+        sampled = sampler.sample(noise, condition=condition)
     finally:
         hook.remove()
     images = _decode_qwen_latents(pipe, sampled.to(dtype))

@@ -66,6 +66,7 @@ class _TinyQwen(nn.Module):
 def _config(blocks=(32, 32, 32, 32)) -> PDDConfig:
     return PDDConfig(
         grid_size=128,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=4,
         block_size_max=64,
@@ -128,9 +129,9 @@ def _condition():
     return torch.tensor([[[0.2, -0.3], [0.1, 0.4]]]), torch.ones(1, 2, dtype=torch.long)
 
 
-def _sample(model: nn.Module, config: PDDConfig, state: torch.Tensor) -> torch.Tensor:
+def _sample(model: nn.Module, config: PDDConfig, noise: torch.Tensor) -> torch.Tensor:
     pipeline = PDDPipeline(model, nn.Identity(), config, QwenImagePDDAdapter(config))
-    return pipeline.sample(state.clone(), condition=_condition())
+    return pipeline.sample(noise.clone(), condition=_condition())
 
 
 def test_bounded_safe_export_round_trip_and_seeded_schedules(tmp_path, monkeypatch) -> None:
@@ -149,7 +150,7 @@ def test_bounded_safe_export_round_trip_and_seeded_schedules(tmp_path, monkeypat
     for key, tensor in source.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[key], tensor, rtol=0, atol=0)
 
-    state = torch.randn((1, 1, 4, 4), generator=torch.Generator().manual_seed(91))
+    noise = torch.randn((1, 1, 4, 4), generator=torch.Generator().manual_seed(91))
     for schedule, blocks in PDD_INFERENCE_SCHEDULES.items():
         config = pdd_config_from_metadata(
             metadata,
@@ -158,14 +159,38 @@ def test_bounded_safe_export_round_trip_and_seeded_schedules(tmp_path, monkeypat
         )
         source.calls = 0
         restored.calls = 0
-        expected = _sample(source, config, state)
-        actual = _sample(restored, config, state)
+        expected = _sample(source, config, noise)
+        actual = _sample(restored, config, noise)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         assert source.calls == restored.calls == len(blocks)
-        torch.testing.assert_close(_sample(restored, config, state), actual, rtol=0, atol=0)
+        torch.testing.assert_close(_sample(restored, config, noise), actual, rtol=0, atol=0)
 
     with pytest.raises(ValueError, match="block_size_max"):
         pdd_config_from_metadata(metadata, blocks=[128], guidance_scale=4.0)
+
+
+def test_inference_config_preserves_authenticated_nondefault_grid_max_t() -> None:
+    _model, _config_value, metadata = _converted()
+    payload = metadata.to_dict()
+    payload["grid_max_t"] = 1.0
+    boundary_metadata = PDDMetadata.from_dict(payload)
+
+    config = pdd_config_from_metadata(
+        boundary_metadata,
+        schedule="pdd-4",
+        guidance_scale=4.0,
+    )
+
+    assert config.grid_max_t == 1.0
+    assert (
+        PDDPipeline(
+            _TinyQwen(),
+            nn.Identity(),
+            config,
+            QwenImagePDDAdapter(config),
+        ).time_grid()[0]
+        == 1.0
+    )
 
 
 def test_pinned_qwen_none_prompt_mask_is_normalized_for_pdd() -> None:

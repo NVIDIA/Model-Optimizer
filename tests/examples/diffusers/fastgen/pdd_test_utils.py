@@ -117,6 +117,7 @@ def build_toy_lifecycle(
     torch.manual_seed(seed)
     config = PDDConfig(
         grid_size=4,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=1,
         block_size_max=4,

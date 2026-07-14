@@ -32,13 +32,12 @@ from modelopt.torch.fastgen.flow_matching import (
 )
 
 
-def _reference_shifted_grid(grid_size: int, shift: float) -> torch.Tensor:
-    """Build the decreasing shifted rectified-flow grid with scalar arithmetic."""
-    values = []
-    for index in range(grid_size + 1):
-        unshifted = 1.0 - index / grid_size
-        values.append(shift * unshifted / (1.0 + (shift - 1.0) * unshifted))
-    return torch.tensor(values, dtype=torch.float64)
+def _reference_shifted_grid(grid_size: int, shift: float, max_t: float) -> torch.Tensor:
+    """Reproduce the frozen FastGen float64 schedule without production helpers."""
+    unshifted = torch.linspace(max_t, 0.0, grid_size + 1, dtype=torch.float64)
+    unshifted = unshifted.clamp(max=max_t)
+    shifted = shift * unshifted / (1.0 + (shift - 1.0) * unshifted)
+    return shifted.clamp(max=max_t)
 
 
 def _reference_integrate(
@@ -77,12 +76,12 @@ def _reference_fused_parameters(
 
 
 def test_shifted_grid_matches_hand_calculated_values_and_preserves_float32_intervals():
-    grid = _reference_shifted_grid(grid_size=4, shift=5.0)
+    grid = _reference_shifted_grid(grid_size=4, shift=5.0, max_t=1.0)
 
     expected = torch.tensor([1.0, 0.9375, 5.0 / 6.0, 0.625, 0.0], dtype=torch.float64)
     torch.testing.assert_close(grid, expected, rtol=0.0, atol=0.0)
 
-    canonical_grid = _reference_shifted_grid(grid_size=128, shift=5.0)
+    canonical_grid = _reference_shifted_grid(grid_size=128, shift=5.0, max_t=0.999)
     assert torch.all(torch.diff(canonical_grid.to(torch.float32)) < 0)
     assert canonical_grid.to(torch.bfloat16)[1] == 1.0
 
@@ -91,7 +90,7 @@ def test_shifted_grid_matches_hand_calculated_values_and_preserves_float32_inter
 
 
 def test_half_open_integration_uses_only_selected_interval_heads():
-    grid = _reference_shifted_grid(grid_size=4, shift=5.0)
+    grid = _reference_shifted_grid(grid_size=4, shift=5.0, max_t=1.0)
     state = torch.tensor([3.0, -2.0])
     velocities = torch.tensor(
         [
@@ -119,7 +118,7 @@ def test_half_open_integration_uses_only_selected_interval_heads():
 
 
 def test_final_half_open_block_advances_exactly_four_intervals():
-    grid = _reference_shifted_grid(grid_size=8, shift=5.0)
+    grid = _reference_shifted_grid(grid_size=8, shift=5.0, max_t=1.0)
     state = torch.tensor([1.25])
     velocities = torch.ones(8, 1)
 
@@ -130,7 +129,7 @@ def test_final_half_open_block_advances_exactly_four_intervals():
 
 
 def test_fused_projection_matches_weighted_sum_and_explicit_block_update():
-    grid = _reference_shifted_grid(grid_size=4, shift=5.0)
+    grid = _reference_shifted_grid(grid_size=4, shift=5.0, max_t=1.0)
     inputs = torch.tensor([[2.0, -1.0], [-0.5, 3.0]], dtype=torch.float64)
     weight = torch.tensor(
         [
@@ -174,19 +173,27 @@ def test_fused_projection_matches_weighted_sum_and_explicit_block_update():
 
 
 def test_production_shifted_grid_matches_independent_oracle():
-    grid = make_shifted_flow_grid(grid_size=128, shift=5.0)
-    oracle = _reference_shifted_grid(grid_size=128, shift=5.0).to(torch.float32)
+    grid = make_shifted_flow_grid(grid_size=128, shift=5.0, max_t=0.999)
+    oracle = _reference_shifted_grid(grid_size=128, shift=5.0, max_t=0.999).to(torch.float32)
 
     assert grid.dtype == torch.float32
     assert grid.shape == (129,)
-    assert grid[0] == 1.0
+    assert grid[0].item() == 0.9990000128746033
     assert grid[-1] == 0.0
     assert torch.all(torch.diff(grid) < 0)
-    torch.testing.assert_close(grid, oracle, rtol=2e-7, atol=1e-7)
+    torch.testing.assert_close(grid, oracle, rtol=0, atol=0)
+
+    direct_fp32 = torch.linspace(0.999, 0.0, 129, dtype=torch.float32)
+    upper = torch.tensor(0.999, dtype=torch.float32)
+    if upper.item() > 0.999:
+        upper = torch.nextafter(upper, torch.tensor(float("-inf")))
+    direct_fp32 = direct_fp32.clamp(max=upper)
+    direct_fp32 = (5.0 * direct_fp32 / (1.0 + 4.0 * direct_fp32)).clamp(max=upper)
+    assert torch.count_nonzero(grid != direct_fp32).item() == 52
 
 
 def test_production_grid_promotes_low_precision_requests():
-    grid = make_shifted_flow_grid(128, 5.0, dtype=torch.bfloat16)
+    grid = make_shifted_flow_grid(128, 5.0, max_t=0.999, dtype=torch.bfloat16)
 
     assert grid.dtype == torch.float32
     assert torch.all(torch.diff(grid) < 0)
@@ -202,16 +209,37 @@ def test_production_grid_promotes_low_precision_requests():
 )
 def test_production_grid_rejects_invalid_boundaries(grid_size, shift, message):
     with pytest.raises(ValueError, match=message):
-        make_shifted_flow_grid(grid_size, shift)
+        make_shifted_flow_grid(grid_size, shift, max_t=0.999)
+
+
+@pytest.mark.parametrize("max_t", [True, 1, 0])
+def test_production_grid_rejects_non_float_max_t(max_t):
+    with pytest.raises(TypeError, match="max_t must be a float"):
+        make_shifted_flow_grid(4, 5.0, max_t=max_t)
+
+
+@pytest.mark.parametrize("max_t", [float("nan"), float("inf"), float("-inf"), 0.0, -0.1, 1.0001])
+def test_production_grid_rejects_invalid_max_t(max_t):
+    with pytest.raises(ValueError, match="0 < max_t <= 1"):
+        make_shifted_flow_grid(4, 5.0, max_t=max_t)
+
+
+def test_production_grid_requires_explicit_max_t_and_accepts_one():
+    with pytest.raises(TypeError, match="max_t"):
+        make_shifted_flow_grid(4, 5.0)
+
+    grid = make_shifted_flow_grid(4, 5.0, max_t=1.0)
+    assert grid[0] == 1.0
+    assert grid[-1] == 0.0
 
 
 def test_production_grid_rejects_non_floating_dtype():
     with pytest.raises(TypeError, match="floating-point dtype"):
-        make_shifted_flow_grid(128, 5.0, dtype=torch.int64)
+        make_shifted_flow_grid(128, 5.0, max_t=0.999, dtype=torch.int64)
 
 
 def test_production_half_open_integration_matches_independent_oracle_per_sample():
-    grid = make_shifted_flow_grid(4, 5.0, dtype=torch.float64)
+    grid = make_shifted_flow_grid(4, 5.0, max_t=0.999, dtype=torch.float64)
     state = torch.tensor([[3.0, -2.0], [1.0, 4.0]], dtype=torch.bfloat16)
     velocities = torch.tensor(
         [
@@ -236,7 +264,7 @@ def test_production_half_open_integration_matches_independent_oracle_per_sample(
 
 
 def test_production_integration_does_not_consume_excluded_nonfinite_heads():
-    grid = make_shifted_flow_grid(4, 5.0, dtype=torch.float64)
+    grid = make_shifted_flow_grid(4, 5.0, max_t=0.999, dtype=torch.float64)
     state = torch.tensor([[3.0, -2.0]], dtype=torch.float64)
     velocities = torch.tensor(
         [[[torch.nan, torch.nan], [2.0, -1.0], [-3.0, 4.0], [torch.inf, -torch.inf]]],
@@ -251,18 +279,18 @@ def test_production_integration_does_not_consume_excluded_nonfinite_heads():
 
 
 def test_production_integration_promotes_bfloat16_math_to_float32():
-    grid = make_shifted_flow_grid(4, 5.0)
+    grid = make_shifted_flow_grid(4, 5.0, max_t=0.999)
     state = torch.zeros(1, 2, dtype=torch.bfloat16)
     velocities = torch.ones(1, 4, 2, dtype=torch.bfloat16)
 
     result = integrate_interval_velocities(state, velocities, grid, start=0, end=4)
 
     assert result.dtype == torch.float32
-    torch.testing.assert_close(result, torch.full((1, 2), -1.0))
+    torch.testing.assert_close(result, torch.full((1, 2), -0.999))
 
 
 def test_production_integration_rejects_out_of_range_half_open_block():
-    grid = make_shifted_flow_grid(4, 5.0)
+    grid = make_shifted_flow_grid(4, 5.0, max_t=0.999)
     state = torch.zeros(1, 2)
     velocities = torch.ones(1, 4, 2)
 
@@ -271,9 +299,9 @@ def test_production_integration_rejects_out_of_range_half_open_block():
 
 
 def test_production_fusion_coefficients_match_independent_oracle():
-    grid = make_shifted_flow_grid(4, 5.0, dtype=torch.float64)
+    grid = make_shifted_flow_grid(4, 5.0, max_t=0.999, dtype=torch.float64)
     actual = fusion_coefficients(grid, start=1, end=4)
-    oracle_grid = _reference_shifted_grid(4, 5.0)
+    oracle_grid = _reference_shifted_grid(4, 5.0, 0.999)
     expected = torch.stack(
         [
             (oracle_grid[index + 1] - oracle_grid[index]) / (oracle_grid[4] - oracle_grid[1])
@@ -287,13 +315,13 @@ def test_production_fusion_coefficients_match_independent_oracle():
 
 
 def test_production_fusion_coefficients_reject_empty_block():
-    grid = make_shifted_flow_grid(4, 5.0)
+    grid = make_shifted_flow_grid(4, 5.0, max_t=0.999)
     with pytest.raises(ValueError, match="0 <= start < end <= 4"):
         fusion_coefficients(grid, start=2, end=2)
 
 
 def test_production_helpers_do_not_extract_meta_tensor_scalars():
-    grid = make_shifted_flow_grid(4, 5.0, device="meta")
+    grid = make_shifted_flow_grid(4, 5.0, max_t=0.999, device="meta")
     state = torch.empty(2, 3, device="meta")
     velocities = torch.empty(2, 4, 3, device="meta")
 

@@ -139,6 +139,7 @@ class PDDMetadata:
     """Versioned minimum metadata required to reconstruct a PDD projection."""
 
     grid_size: int
+    grid_max_t: float
     flow_shift: float
     block_size_min: int
     block_size_max: int
@@ -158,6 +159,8 @@ class PDDMetadata:
                 f"expected {_METADATA_SCHEMA_VERSION}."
             )
         _require_int(self.grid_size, name="grid_size")
+        if type(self.grid_max_t) is not float:
+            raise ValueError(f"grid_max_t must be a float, got {self.grid_max_t!r}.")
         if type(self.flow_shift) is not float:
             raise ValueError(f"flow_shift must be a float, got {self.flow_shift!r}.")
         _require_int(self.block_size_min, name="block_size_min")
@@ -189,6 +192,7 @@ class PDDMetadata:
 
         PDDConfig(
             grid_size=self.grid_size,
+            grid_max_t=self.grid_max_t,
             flow_shift=self.flow_shift,
             block_size_min=self.block_size_min,
             block_size_max=self.block_size_max,
@@ -213,6 +217,7 @@ class PDDMetadata:
             )
         return cls(
             grid_size=config.grid_size,
+            grid_max_t=config.grid_max_t,
             flow_shift=config.flow_shift,
             block_size_min=config.block_size_min,
             block_size_max=config.block_size_max,
@@ -229,6 +234,7 @@ class PDDMetadata:
         return {
             "schema_version": self.schema_version,
             "grid_size": self.grid_size,
+            "grid_max_t": self.grid_max_t,
             "flow_shift": self.flow_shift,
             "block_size_min": self.block_size_min,
             "block_size_max": self.block_size_max,
@@ -252,6 +258,7 @@ class PDDMetadata:
             {
                 "schema_version",
                 "grid_size",
+                "grid_max_t",
                 "flow_shift",
                 "block_size_min",
                 "block_size_max",
@@ -263,6 +270,8 @@ class PDDMetadata:
             name="PDD metadata",
         )
         schema_version = _require_int(data["schema_version"], name="schema_version")
+        if type(data["grid_max_t"]) is not float:
+            raise ValueError(f"grid_max_t must be a float, got {data['grid_max_t']!r}.")
         if type(data["flow_shift"]) is not float:
             raise ValueError(f"flow_shift must be a float, got {data['flow_shift']!r}.")
         if not isinstance(data["inference_blocks"], list) or any(
@@ -288,6 +297,7 @@ class PDDMetadata:
         return cls(
             schema_version=schema_version,
             grid_size=_require_int(data["grid_size"], name="grid_size"),
+            grid_max_t=data["grid_max_t"],
             flow_shift=data["flow_shift"],
             block_size_min=_require_int(data["block_size_min"], name="block_size_min"),
             block_size_max=_require_int(data["block_size_max"], name="block_size_max"),
@@ -656,6 +666,7 @@ class PDDPipeline(DistillationPipeline):
         return make_shifted_flow_grid(
             self.config.grid_size,
             self.config.flow_shift,
+            max_t=self.config.grid_max_t,
             device=device,
             dtype=torch.float32,
         )
@@ -943,22 +954,22 @@ class PDDPipeline(DistillationPipeline):
     @torch.no_grad()
     def sample(
         self,
-        state: torch.Tensor,
+        noise: torch.Tensor,
         *,
         condition: Any = None,
         blocks: Sequence[int] | None = None,
         model_kwargs: Mapping[str, Any] | None = None,
     ) -> torch.Tensor:
-        """Sample with one fused student call per validated contiguous block."""
-        self._validate_state(state, name="state")
+        """Sample from raw RF noise with one fused call per contiguous block."""
+        self._validate_state(noise, name="noise")
         kwargs = self._model_kwargs(model_kwargs)
         resolved_blocks = self._validate_blocks(blocks)
-        grid = self.time_grid(state.device)
-        current = state.to(torch.float32)
+        grid = self.time_grid(noise.device)
+        current = (noise.to(torch.float64) * self.config.grid_max_t).to(torch.float32)
         start = 0
         for block in resolved_blocks:
             end = start + block
-            time = grid[start].expand(state.shape[0])
+            time = grid[start].expand(noise.shape[0])
             velocity = self.adapter.student_fused_block(
                 self.student,
                 current,
@@ -972,7 +983,7 @@ class PDDPipeline(DistillationPipeline):
             velocity = self._normalize_velocity(
                 velocity,
                 expected_shape=current.shape,
-                device=state.device,
+                device=noise.device,
                 name="student_fused_block",
             )
             current = current + (grid[end] - grid[start]) * velocity

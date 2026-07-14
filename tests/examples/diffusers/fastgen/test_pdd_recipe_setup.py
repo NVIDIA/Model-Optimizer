@@ -15,6 +15,7 @@ import sys
 
 import pytest
 import torch
+import yaml
 from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
@@ -49,6 +50,7 @@ def _raw_config(model_dir: pathlib.Path, *, qkv: bool = False) -> dict:
             "student_sample_steps": 2,
             "student_sample_type": "ode",
             "grid_size": 4,
+            "grid_max_t": 0.999,
             "flow_shift": 5.0,
             "block_size_min": 1,
             "block_size_max": 4,
@@ -72,6 +74,12 @@ def _raw_config(model_dir: pathlib.Path, *, qkv: bool = False) -> dict:
             "save_consolidated": False,
         },
     }
+
+
+def test_example_recipe_explicitly_pins_grid_max_t() -> None:
+    raw = yaml.safe_load((_FASTGEN_DIR / "configs" / "pdd_qwen_image.yaml").read_text())
+    assert type(raw["pdd"]["grid_max_t"]) is float
+    assert raw["pdd"]["grid_max_t"] == 0.999
 
 
 @pytest.mark.parametrize(
@@ -134,7 +142,7 @@ def test_restore_requires_enabled_checkpointing(tmp_path) -> None:
     raw["checkpoint"]["enabled"] = False
     raw["checkpoint"]["restore_from"] = "LATEST"
 
-    with pytest.raises(ValueError, match="restore_from requires checkpoint.enabled=true"):
+    with pytest.raises(ValueError, match=r"restore_from requires checkpoint\.enabled=true"):
         resolve_pdd_recipe_config(raw)
 
 

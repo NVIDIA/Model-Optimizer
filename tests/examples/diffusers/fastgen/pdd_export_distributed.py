@@ -45,6 +45,7 @@ def _raw_config(model_dir: pathlib.Path, checkpoint_dir: pathlib.Path) -> dict:
             "student_sample_steps": 2,
             "student_sample_type": "ode",
             "grid_size": 4,
+            "grid_max_t": 0.999,
             "flow_shift": 5.0,
             "block_size_min": 1,
             "block_size_max": 4,

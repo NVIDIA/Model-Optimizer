@@ -83,6 +83,7 @@ class _TinyQwenTransformer(nn.Module):
 def _config(*, guidance_scale: float | None = 4.0, grid_size: int = 4) -> PDDConfig:
     return PDDConfig(
         grid_size=grid_size,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=1,
         block_size_max=grid_size,

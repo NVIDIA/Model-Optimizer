@@ -32,21 +32,36 @@ EVALUATION_CONDITIONS = (
 )
 
 
-def _grid_protocol(grid_size: int) -> Mapping[str, Any]:
-    nodes = [float(value) for value in make_shifted_flow_grid(grid_size, 5.0).tolist()]
+def _grid_protocol(grid_size: int, *, grid_max_t: float) -> Mapping[str, Any]:
+    nodes = [
+        float(value)
+        for value in make_shifted_flow_grid(
+            grid_size,
+            5.0,
+            max_t=grid_max_t,
+        ).tolist()
+    ]
     return {
         "builder": "modelopt.torch.fastgen.make_shifted_flow_grid",
-        "formula": "s*u/(1+(s-1)*u), u=1-i/grid_size, i=0..grid_size",
+        "construction_dtype": "float64",
+        "formula": (
+            "u64=clamp(linspace(grid_max_t,0,grid_size+1),max=grid_max_t); "
+            "g64=clamp(shift*u64/(1+(shift-1)*u64),max=grid_max_t); "
+            "nodes=float32(g64)"
+        ),
         "grid_size": grid_size,
+        "grid_max_t": grid_max_t,
         "flow_shift": 5.0,
+        "initial_state": "float32(float64(noise)*float64(grid_max_t))",
         "nodes": nodes,
         "nodes_sha256": hashlib.sha256(canonical_json_bytes(nodes)).hexdigest(),
+        "runtime_dtype": "float32",
     }
 
 
 GRID_PROTOCOLS: Mapping[str, Mapping[str, Any]] = {
-    "pdd_grid_128_shift5": _grid_protocol(128),
-    "teacher_grid_50_shift5": _grid_protocol(50),
+    "pdd_grid_128_shift5": _grid_protocol(128, grid_max_t=0.999),
+    "teacher_grid_50_shift5": _grid_protocol(50, grid_max_t=0.999),
 }
 
 _GUIDED_CFG_PROTOCOL = {

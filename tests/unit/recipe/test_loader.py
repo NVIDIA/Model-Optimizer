@@ -79,6 +79,8 @@ def test_load_pdd_config_builtin_recipe():
 
     assert isinstance(config, PDDConfig)
     assert config.guidance_scale == 4.0
+    assert config.grid_max_t == 0.999
+    assert "grid_max_t" in config.model_fields_set
     assert config.inference_blocks == [32, 32, 32, 32]
 
 

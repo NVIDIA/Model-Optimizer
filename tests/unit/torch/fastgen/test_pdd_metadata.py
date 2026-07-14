@@ -109,6 +109,7 @@ class _ToyAdapter:
 def _config() -> PDDConfig:
     return PDDConfig(
         grid_size=4,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=1,
         block_size_max=4,
@@ -140,8 +141,8 @@ def test_plain_torch_training_sampling_and_strict_metadata_reconstruction(tmp_pa
 
     assert torch.isfinite(loss)
     assert not torch.equal(projection.weight, projection_before)
-    initial = torch.tensor([[1.0, -0.5, 0.25], [-0.25, 0.75, 1.5]])
-    expected_sample = pipeline.sample(initial)
+    inference_noise = torch.tensor([[1.0, -0.5, 0.25], [-0.25, 0.75, 1.5]])
+    expected_sample = pipeline.sample(inference_noise)
 
     metadata = PDDMetadata.from_config(config, projection)
     metadata_path = tmp_path / "pdd_metadata.json"
@@ -151,6 +152,7 @@ def test_plain_torch_training_sampling_and_strict_metadata_reconstruction(tmp_pa
 
     restored_config = PDDConfig(
         grid_size=restored_metadata.grid_size,
+        grid_max_t=restored_metadata.grid_max_t,
         flow_shift=restored_metadata.flow_shift,
         block_size_min=restored_metadata.block_size_min,
         block_size_max=restored_metadata.block_size_max,
@@ -177,7 +179,7 @@ def test_plain_torch_training_sampling_and_strict_metadata_reconstruction(tmp_pa
         restored_config,
         _ToyAdapter(restored_metadata.grid_size),
     )
-    torch.testing.assert_close(restored_pipeline.sample(initial), expected_sample)
+    torch.testing.assert_close(restored_pipeline.sample(inference_noise), expected_sample)
 
 
 def test_strict_restore_rejects_checkpoint_with_different_projection_grid() -> None:

@@ -525,6 +525,7 @@ def pdd_config_from_metadata(
         resolved = tuple(blocks)
     return PDDConfig(
         grid_size=metadata.grid_size,
+        grid_max_t=metadata.grid_max_t,
         flow_shift=metadata.flow_shift,
         block_size_min=metadata.block_size_min,
         block_size_max=metadata.block_size_max,

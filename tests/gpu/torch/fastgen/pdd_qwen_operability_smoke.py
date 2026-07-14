@@ -183,6 +183,7 @@ def validate_stage_result(value: Mapping[str, Any], *, stage: str) -> None:
         raise ValueError("smoke model identity is invalid")
     if value["pdd"] != {
         "grid_size": 128,
+        "grid_max_t": 0.999,
         "flow_shift": 5.0,
         "block_size_min": 4,
         "block_size_max": 64,
@@ -398,6 +399,7 @@ def _validate_checkpoint_identity(identity: Any, *, stage: Mapping[str, Any]) ->
     pdd = stage["pdd"]
     if (
         metadata.grid_size != pdd["grid_size"]
+        or metadata.grid_max_t != pdd["grid_max_t"]
         or metadata.flow_shift != pdd["flow_shift"]
         or metadata.block_size_min != pdd["block_size_min"]
         or metadata.block_size_max != pdd["block_size_max"]
@@ -580,6 +582,7 @@ def _raw_config(run_root: pathlib.Path, world_size: int) -> dict[str, Any]:
             "student_sample_steps": 4,
             "student_sample_type": "ode",
             "grid_size": 128,
+            "grid_max_t": 0.999,
             "flow_shift": 5.0,
             "block_size_min": 4,
             "block_size_max": 64,
@@ -960,6 +963,7 @@ def _run_training_stage(stage: str, run_root: pathlib.Path) -> None:
             "model": {"id": _MODEL_ID, "revision": _MODEL_REVISION, "dtype": "bfloat16"},
             "pdd": {
                 "grid_size": 128,
+                "grid_max_t": 0.999,
                 "flow_shift": 5.0,
                 "block_size_min": 4,
                 "block_size_max": 64,

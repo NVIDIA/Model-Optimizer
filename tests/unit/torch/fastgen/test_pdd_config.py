@@ -37,6 +37,7 @@ def test_default_pdd_config_is_canonical_and_lists_are_independent():
     assert first.student_sample_type == "ode"
     assert first.student_sample_steps == 4
     assert first.grid_size == 128
+    assert first.grid_max_t == 0.999
     assert first.flow_shift == 5.0
     assert first.block_size_min == 4
     assert first.block_size_max == 64
@@ -88,10 +89,32 @@ def test_rejected_mapping_assignment_leaves_pdd_config_unchanged():
     assert config.inference_blocks == [32, 32, 32, 32]
 
 
+@pytest.mark.parametrize("value", [True, 1])
+def test_pdd_config_rejects_non_float_grid_max_t_before_coercion(value):
+    with pytest.raises(ValueError, match="grid_max_t must be a float"):
+        PDDConfig(grid_max_t=value)
+
+    config = PDDConfig()
+    with pytest.raises(ValueError, match="grid_max_t must be a float"):
+        config.grid_max_t = value
+    assert config.grid_max_t == 0.999
+
+
+def test_pdd_config_accepts_explicit_grid_max_t_upper_boundary():
+    config = PDDConfig(grid_max_t=1.0)
+    assert config.grid_max_t == 1.0
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
         ({"grid_size": 0}, "grid_size must be > 0"),
+        ({"grid_max_t": 0.0}, "0 < grid_max_t <= 1"),
+        ({"grid_max_t": -0.1}, "0 < grid_max_t <= 1"),
+        ({"grid_max_t": 1.0001}, "0 < grid_max_t <= 1"),
+        ({"grid_max_t": float("nan")}, "0 < grid_max_t <= 1"),
+        ({"grid_max_t": float("inf")}, "0 < grid_max_t <= 1"),
+        ({"grid_max_t": float("-inf")}, "0 < grid_max_t <= 1"),
         ({"flow_shift": 0.5}, "flow_shift must be finite and >= 1"),
         ({"flow_shift": float("inf")}, "flow_shift must be finite and >= 1"),
         ({"block_size_min": 0}, "0 < block_size_min"),

@@ -154,6 +154,7 @@ def _fill_parameters(model: nn.Module, *, offset: float) -> None:
 def _config() -> PDDConfig:
     return PDDConfig(
         grid_size=_GRID_SIZE,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=1,
         block_size_max=_GRID_SIZE,

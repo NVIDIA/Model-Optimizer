@@ -38,6 +38,7 @@ def _stage_result(stage: str) -> dict:
         },
         "pdd": {
             "grid_size": 128,
+            "grid_max_t": 0.999,
             "flow_shift": 5.0,
             "block_size_min": 4,
             "block_size_max": 64,
@@ -139,6 +140,7 @@ def _checkpoint_identity(stage: dict) -> dict:
         "pdd_metadata": {
             "schema_version": 1,
             "grid_size": 128,
+            "grid_max_t": 0.999,
             "flow_shift": 5.0,
             "block_size_min": 4,
             "block_size_max": 64,

@@ -34,6 +34,7 @@ from modelopt.torch.fastgen import PDDConfig
 def test_canonical_2k_assignment_covers_all_1568_pairs_32_starts_and_128_heads() -> None:
     config = PDDConfig(
         grid_size=128,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=4,
         block_size_max=64,

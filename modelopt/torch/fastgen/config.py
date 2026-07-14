@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -248,6 +248,11 @@ class PDDConfig(DistillationConfig):
         title="PDD grid size",
         description="Number of rectified-flow intervals and student output heads.",
     )
+    grid_max_t: float = ModeloptField(
+        default=0.999,
+        title="PDD grid maximum time",
+        description="Maximum rectified-flow time used to construct the fixed PDD grid.",
+    )
     flow_shift: float = ModeloptField(
         default=5.0,
         title="Rectified-flow grid shift",
@@ -292,10 +297,22 @@ class PDDConfig(DistillationConfig):
             type(self).model_validate(candidate)
         super().__setattr__(name, value)
 
+    @field_validator("grid_max_t", mode="before")
+    @classmethod
+    def _check_grid_max_t_type(cls, value: object) -> object:
+        if type(value) is not float:
+            raise ValueError(f"grid_max_t must be a float, got {value!r}.")
+        return value
+
     @model_validator(mode="after")
     def _check_pdd(self) -> PDDConfig:
         if self.grid_size <= 0:
             raise ValueError(f"grid_size must be > 0, got {self.grid_size}.")
+        if not math.isfinite(self.grid_max_t) or not 0.0 < self.grid_max_t <= 1.0:
+            raise ValueError(
+                "grid_max_t must be finite and satisfy 0 < grid_max_t <= 1, got "
+                f"{self.grid_max_t!r}."
+            )
         if not math.isfinite(self.flow_shift) or self.flow_shift < 1.0:
             raise ValueError(f"flow_shift must be finite and >= 1, got {self.flow_shift}.")
         if not 0 < self.block_size_min <= self.block_size_max <= self.grid_size:

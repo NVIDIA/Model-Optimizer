@@ -53,6 +53,7 @@ def _rewrite_manifest(manifest: pathlib.Path, data: dict) -> None:
 def _export(root: pathlib.Path, automodel: dict) -> pathlib.Path:
     config = PDDConfig(
         grid_size=128,
+        grid_max_t=0.999,
         flow_shift=5.0,
         block_size_min=4,
         block_size_max=64,
@@ -357,6 +358,22 @@ def test_effectiveness_bundle_is_authenticated_and_emits_effective_conclusion(tm
     assert first["aggregates"]["pdd_4"]["peak_device_memory_bytes"]["mean"] > 0
 
 
+def test_grid_protocol_pins_fastgen_precision_and_raw_noise_initialization() -> None:
+    pdd_grid = GRID_PROTOCOLS["pdd_grid_128_shift5"]
+    teacher_grid = GRID_PROTOCOLS["teacher_grid_50_shift5"]
+
+    assert pdd_grid["grid_max_t"] == teacher_grid["grid_max_t"] == 0.999
+    assert pdd_grid["construction_dtype"] == "float64"
+    assert pdd_grid["runtime_dtype"] == "float32"
+    assert pdd_grid["initial_state"] == "float32(float64(noise)*float64(grid_max_t))"
+    assert pdd_grid["nodes"][0] == 0.9990000128746033
+    assert pdd_grid["nodes"][-1] == 0.0
+    assert (
+        pdd_grid["nodes_sha256"]
+        == hashlib.sha256(canonical_json_bytes(pdd_grid["nodes"])).hexdigest()
+    )
+
+
 @pytest.mark.parametrize(
     "corruption",
     [
@@ -374,7 +391,11 @@ def test_effectiveness_bundle_is_authenticated_and_emits_effective_conclusion(tm
         "bootstrap",
         "prompt_reference",
         "guided_count",
+        "grid_construction_dtype",
+        "grid_initial_state",
+        "grid_max_t",
         "grid_nodes",
+        "grid_nodes_hash",
         "latency_decision",
         "integrator_formula",
         "protocol",
@@ -445,6 +466,14 @@ def test_effectiveness_bundle_rejects_unclaimable_evidence(tmp_path, corruption)
         data["prompt_set"] = _reference(root, alternate)
     elif corruption == "grid_nodes":
         data["grid_protocols"]["pdd_grid_128_shift5"]["nodes"][32] += 1e-4
+    elif corruption == "grid_nodes_hash":
+        data["grid_protocols"]["pdd_grid_128_shift5"]["nodes_sha256"] = "0" * 64
+    elif corruption == "grid_max_t":
+        data["grid_protocols"]["pdd_grid_128_shift5"]["grid_max_t"] = 1.0
+    elif corruption == "grid_construction_dtype":
+        data["grid_protocols"]["pdd_grid_128_shift5"]["construction_dtype"] = "float32"
+    elif corruption == "grid_initial_state":
+        data["grid_protocols"]["pdd_grid_128_shift5"]["initial_state"] = "noise"
     elif corruption == "latency_decision":
         data["decision_rule"]["efficiency_measure"] = "latency_seconds"
     elif corruption == "integrator_formula":
