@@ -39,7 +39,7 @@ def launch_mip(cfg: DictConfig) -> list[str]:
 
 
 def launch_realize_model(cfg: DictConfig):
-    validate_puzzle_solutions(args=cfg.realize_model)
+    validate_puzzle_solutions(args=cfg.realize_model, hydra_cfg=cfg)
 
 
 def launch_mip_and_realize_model(cfg: DictConfig) -> list[str]:

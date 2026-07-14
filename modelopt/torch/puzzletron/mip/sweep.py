@@ -66,7 +66,7 @@ def _load_teacher_subblock_stats(hydra_cfg: DictConfig) -> tuple[dict[str, Any],
     if not subblock_stats_path.exists():
         raise FileNotFoundError(
             f"subblock_stats.json not found at {subblock_stats_path}. "
-            "Please run the full pipeline first without --mip-only flag."
+            "Please run the build_library stage before --stage mip."
         )
 
     with open(subblock_stats_path) as f:

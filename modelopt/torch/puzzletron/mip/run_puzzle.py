@@ -21,6 +21,7 @@ import dataclasses
 import enum
 import json
 import sys
+from collections import defaultdict
 from collections.abc import Hashable, Iterable
 from copy import deepcopy
 from pathlib import Path
@@ -33,17 +34,21 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from modelopt.torch.utils import json_dump
 
 from ..anymodel.model_descriptor import ModelDescriptorFactory
-from ..block_config import AttentionConfig, BlockConfig, FFNConfig
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig, MambaConfig, MoEConfig
 from ..replacement_library.replacement_utils import (
     extract_block_configs_and_locations,
     parse_layer_replacement,
     replacement_is_teacher,
 )
+from ..replacement_library.score_composition import (
+    compose_full_block_metrics,
+    composed_table_to_gathered_metrics,
+)
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
 from ..utils.misc import block_config_to_str, solution_to_str
 from ..utils.parsing import get_nested_key, parse_json, parse_path
-from .mip_with_multi_layer_replacements import run_mip as run_multi_layer_replacement_mip
+from .solver_backend import run_mip_with_backend
 
 __all__ = [
     "PuzzleMetrics",
@@ -66,6 +71,56 @@ or as "human constraints" (e.g. 'target_memory', 'target_throughput', for the fu
 
 PuzzleMetrics: TypeAlias = dict[Hashable, dict[Hashable, dict[str, float]]]
 MultiLayerPuzzleMetrics: TypeAlias = dict[str, dict[str, Hashable]]
+
+_ATTENTION_LIKE_KINDS = frozenset(("attention", "mla", "mamba"))
+_FFN_LIKE_KINDS = frozenset(("ffn", "moe"))
+
+
+def _block_config_tp_compatible(block_config: BlockConfig, tp_size: int) -> bool:
+    """Return whether a physically realized block can use the requested TP mesh.
+
+    Colwise Q/K/V projection sharding requires complete heads on every rank.
+    Runtime engines may support replicated KV heads, but native AutoModel's
+    current generic TP plan shards these projections, so a MIP must not select
+    a geometry that would split one head across ranks.
+    """
+    tp_size = int(tp_size)
+    if tp_size <= 1:
+        return True
+    for subblock in block_config.subblock_configs:
+        if subblock.no_op or not isinstance(subblock, AttentionConfig):
+            continue
+        for value in (subblock.num_query_heads, subblock.num_kv_heads):
+            if value is not None and int(value) % tp_size:
+                return False
+    return True
+
+
+def _filter_tp_incompatible_replacements(gathered_metrics: dict, tp_size: int) -> dict:
+    if int(tp_size) <= 1:
+        return gathered_metrics
+    filtered = {
+        key: value
+        for key, value in gathered_metrics.items()
+        if value.get("is_teacher", False)
+        or _block_config_tp_compatible(value["block_config"], tp_size)
+    }
+    removed = len(gathered_metrics) - len(filtered)
+    if removed:
+        mprint(
+            f"Excluded {removed} replacement candidates that cannot be physically "
+            f"sharded with materialization_tp={tp_size}."
+        )
+    layers_before = {
+        int(value["block_idx"]) for value in gathered_metrics.values() if "block_idx" in value
+    }
+    layers_after = {int(value["block_idx"]) for value in filtered.values() if "block_idx" in value}
+    if layers_before != layers_after:
+        raise RuntimeError(
+            "Topology filtering removed every candidate for layers "
+            f"{sorted(layers_before - layers_after)} at tp={tp_size}."
+        )
+    return filtered
 
 
 @dataclasses.dataclass
@@ -273,6 +328,7 @@ def parse_args() -> DictConfig:
     parser.add_argument("--objective", type=str)
     parser.add_argument("--mip_constraints", type=parse_json)
     parser.add_argument("--human_constraints", type=parse_json)
+    parser.add_argument("--solver_backend", type=str, default=None)
     parser.add_argument("--report_additional_costs", type=str, action="append", default=[])
 
     parser.add_argument(
@@ -303,8 +359,23 @@ def run_single_puzzle_config(
 ) -> Path:
     # we override the constraints and subblock_stats_args for this run to keep reporting out the same way.
     args = deepcopy(args)
+    report_additional_costs = args.get("report_additional_costs", []) or []
 
     subblock_stats = filter_subblock_stats_by_args(subblock_stats, subblock_stats_args)
+    teacher_reference_metrics = deepcopy(gathered_metrics)
+    gathered_metrics = _filter_tp_incompatible_replacements(
+        gathered_metrics,
+        int(args.get("materialization_tp", 1) or 1),
+    )
+    _add_block_stats_to_gathered_metrics(teacher_reference_metrics, subblock_stats)
+    forced_removals = list(args.get("forced_removals", []) or [])
+    if forced_removals:
+        gathered_metrics = _apply_forced_removals(
+            gathered_metrics,
+            forced_removals,
+            objective=str(args.objective),
+            bigger_is_better=bool(args.bigger_is_better),
+        )
     _add_block_stats_to_gathered_metrics(gathered_metrics, subblock_stats)
 
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -312,7 +383,10 @@ def run_single_puzzle_config(
 
     non_block_stats = {"stats": _get_block_stats(subblock_stats, "non_block")}
     if constraints.has_ratio_constraints():
-        teacher_stats = _get_teacher_total_stats(gathered_metrics, non_block_stats["stats"])
+        teacher_stats = _get_teacher_total_stats(
+            teacher_reference_metrics,
+            non_block_stats["stats"],
+        )
         constraints = constraints.resolve_ratio_constraints(teacher_stats)
     batch_size = subblock_stats["args"]["batch_size"]
     generation_seq_len = subblock_stats["args"]["generation_seq_len"]
@@ -346,21 +420,22 @@ def run_single_puzzle_config(
             mip_constraints[stat_name] = max_cost
 
     # If there's an additional cost that is not a constraint - set it to "inf" so MIP report the actual value of it.
-    for cost in set(args.report_additional_costs) - set(orig_mip_constraints.keys()):
+    for cost in set(report_additional_costs) - set(orig_mip_constraints.keys()):
         mip_constraints[cost] = np.inf
 
     mprint(f"After non-block adjustments: {mip_constraints=}")
 
-    solutions = run_multi_layer_replacement_mip(
+    solutions = run_mip_with_backend(
         replacements=gathered_metrics,
         objective=args.objective,
         constraints=mip_constraints,
         bigger_is_better=args.bigger_is_better,
-        max_seconds_per_solution=args.max_seconds_per_solution,
+        max_seconds_per_solution=args.get("max_seconds_per_solution", None),
+        solver_backend=args.get("solver_backend", args.get("use_cuopt", None)),
     )
 
     for solution in solutions:
-        for stat_name in set([*orig_mip_constraints.keys(), *args.report_additional_costs]):
+        for stat_name in set([*orig_mip_constraints.keys(), *report_additional_costs]):
             try:
                 non_block_cost = get_nested_key(non_block_stats, stat_name)
             except KeyError:
@@ -407,8 +482,92 @@ def _dump_gathered_metrics(gathered_metrics: PuzzleMetrics, output_folder: Path)
     json_dump(gathered_metrics_for_dump, output_folder / "replacement_metrics_and_stats.json")
 
 
+def _apply_forced_removals(
+    gathered_metrics: dict,
+    forced_removals: list[dict],
+    *,
+    objective: str,
+    bigger_is_better: bool,
+) -> dict:
+    """Create scenario-local no-op configs while keeping the canonical library no-op-free."""
+    import dataclasses
+
+    removals_by_layer: dict[int, set[str]] = defaultdict(set)
+    for removal in forced_removals:
+        removals_by_layer[int(removal["layer_idx"])].add(str(removal["kind"]))
+
+    teacher_blocks: dict[int, BlockConfig] = {}
+    for replacement in gathered_metrics.values():
+        if replacement.get("is_teacher", False):
+            layer_idx = int(replacement["parent_layer_indices"][0])
+            teacher_blocks[layer_idx] = replacement["block_config"]
+    missing = sorted(set(removals_by_layer) - set(teacher_blocks))
+    if missing:
+        raise ValueError(f"forced-depth scenarios are missing teacher blocks for layers {missing}")
+
+    transformed: dict[str, dict] = {}
+    dedupe: dict[tuple[int, str], tuple[str, float]] = {}
+    serial = 0
+    for replacement_id, replacement in gathered_metrics.items():
+        layer_indices = replacement.get("parent_layer_indices", [])
+        if len(layer_indices) != 1:
+            raise ValueError("forced-depth MIP currently requires one-layer replacements")
+        layer_idx = int(layer_indices[0])
+        kinds = removals_by_layer.get(layer_idx)
+        candidate = deepcopy(replacement)
+        if kinds:
+            block = candidate["block_config"]
+            teacher = teacher_blocks[layer_idx]
+            compare_kinds = kinds - {"block"}
+            if "block" in kinds and block != teacher:
+                continue
+            if any(
+                block.get_subblock(kind) != teacher.get_subblock(kind) for kind in compare_kinds
+            ):
+                continue
+            if "block" in kinds:
+                for subblock in tuple(block.subblock_configs):
+                    block = block.with_subblock(dataclasses.replace(subblock, no_op=True))
+            else:
+                for kind in sorted(kinds):
+                    subblock = block.require_subblock(kind)
+                    block = block.with_subblock(dataclasses.replace(subblock, no_op=True))
+            candidate["block_config"] = block
+            candidate["is_teacher"] = False
+            layer_replacement = candidate.get("layer_replacement")
+            if layer_replacement is not None:
+                layer_replacement = deepcopy(layer_replacement)
+                layer_replacement["child_block_configs"] = [block]
+                candidate["layer_replacement"] = layer_replacement
+
+        key = (layer_idx, str(candidate["block_config"]))
+        try:
+            value = float(get_nested_key(candidate, objective))
+        except (KeyError, TypeError, ValueError):
+            value = float("-inf") if bigger_is_better else float("inf")
+        existing = dedupe.get(key)
+        if existing is not None and (
+            existing[1] >= value if bigger_is_better else existing[1] <= value
+        ):
+            continue
+        if existing is not None:
+            transformed.pop(existing[0], None)
+        new_id = f"depth_{layer_idx}_{serial}"
+        serial += 1
+        transformed[new_id] = candidate
+        dedupe[key] = (new_id, value)
+
+    covered = {int(item["parent_layer_indices"][0]) for item in transformed.values()}
+    expected = {int(item["parent_layer_indices"][0]) for item in gathered_metrics.values()}
+    if covered != expected:
+        raise ValueError(f"forced-depth transform lost layers: {sorted(expected - covered)}")
+    return transformed
+
+
 def _load_all_constraints(args, puzzle_profile):
     def parse_constraints(constraints, constraints_type: PuzzleConstraints.Type):
+        if OmegaConf.is_config(constraints):
+            constraints = OmegaConf.to_container(constraints, resolve=True)
         if isinstance(constraints, (list, ListConfig)):
             return [PuzzleConstraints(type=constraints_type, constraints=c) for c in constraints]
         elif isinstance(constraints, (dict, DictConfig)):
@@ -416,11 +575,13 @@ def _load_all_constraints(args, puzzle_profile):
         raise TypeError(f"Invalid constraints type: {constraints_type}")
 
     # Constraints can be given explicitely
-    if args.mip_constraints is not None:
-        return parse_constraints(args.mip_constraints, PuzzleConstraints.Type.MIP)
+    mip_constraints = args.get("mip_constraints", None)
+    human_constraints = args.get("human_constraints", None)
+    if mip_constraints is not None:
+        return parse_constraints(mip_constraints, PuzzleConstraints.Type.MIP)
 
-    if args.human_constraints is not None:
-        return parse_constraints(args.human_constraints, PuzzleConstraints.Type.HUMAN)
+    if human_constraints is not None:
+        return parse_constraints(human_constraints, PuzzleConstraints.Type.HUMAN)
 
     # Or through the puzzle_profile
     if "mip_constraints" in puzzle_profile:
@@ -436,11 +597,14 @@ def _load_all_constraints(args, puzzle_profile):
 
 def _load_all_subblock_stats_args(args, puzzle_profile):
     # If given explicitely in args
-    if args.subblock_stats_args is not None:
-        if isinstance(args.subblock_stats_args, dict):
-            return [args.subblock_stats_args]
+    subblock_stats_args = args.get("subblock_stats_args", None)
+    if OmegaConf.is_config(subblock_stats_args):
+        subblock_stats_args = OmegaConf.to_container(subblock_stats_args, resolve=True)
+    if subblock_stats_args is not None:
+        if isinstance(subblock_stats_args, dict):
+            return [subblock_stats_args]
         else:
-            return args.subblock_stats_args
+            return subblock_stats_args
 
     # Or can be given inside puzzle_profile
     if "subblock_stats_args" in puzzle_profile:
@@ -492,11 +656,24 @@ def _assert_valid_config(args, puzzle_profile):
 
 
 def _get_minimal_unique_names(dicts: list[dict]) -> list[str]:
+    if len(dicts) == 1:
+        return ["default"]
+
+    def _stable_value(value):
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, sort_keys=True)
+        return value
+
+    def _safe_name(value):
+        if isinstance(value, (dict, list, tuple)):
+            value = json.dumps(value, sort_keys=True)
+        return str(value).replace(".", "_").replace("/", "_")
+
     all_keys = set(k for d in dicts for k in d.keys())
-    all_values = {k: set(d[k] for d in dicts if k in d) for k in all_keys}
+    all_values = {k: set(_stable_value(d[k]) for d in dicts if k in d) for k in all_keys}
     non_common_keys = [k for k, values in all_values.items() if len(values) > 1]
 
-    return ["-".join(f"{k}_{d[k]}".replace(".", "_") for k in non_common_keys) for d in dicts]
+    return ["-".join(f"{k}_{_safe_name(d[k])}" for k in non_common_keys) for d in dicts]
 
 
 def run_puzzle(args: DictConfig) -> list[str]:
@@ -511,15 +688,32 @@ def run_puzzle(args: DictConfig) -> list[str]:
     _assert_valid_config(args, puzzle_profile)
 
     # Read Metrics and Stats
+    score_granularity = str(args.get("score_granularity", "block")).lower()
+    if score_granularity not in {"block", "subblock"}:
+        raise ValueError(f"unsupported MIP score_granularity={score_granularity!r}")
     if args.gathered_metrics_path is not None:
         gathered_metrics = json.loads(args.gathered_metrics_path.read_text())
+    elif score_granularity == "subblock":
+        canonical_path = args.get("canonical_solutions_path", None)
+        if canonical_path is None:
+            raise ValueError("MIP score_granularity=subblock requires canonical_solutions_path")
+        gathered_metrics = gather_composed_subblock_puzzle_metrics(
+            Path(canonical_path),
+            args.single_block_replacement_validation_dir,
+            exact_block_validation_dir=(
+                Path(args.exact_block_replacement_validation_dir)
+                if args.get("exact_block_replacement_validation_dir", None)
+                else None
+            ),
+        )
     else:
         gathered_metrics = gather_multi_layer_puzzle_metrics(
             args.single_block_replacement_validation_dir
         )
 
-    if args.metric_overrides is not None:
-        gathered_metrics = {**gathered_metrics, **args.metric_overrides}
+    metric_overrides = args.get("metric_overrides", None)
+    if metric_overrides is not None:
+        gathered_metrics = {**gathered_metrics, **metric_overrides}
 
     subblock_stats = json.loads(args.subblock_stats_path.read_text())
 
@@ -595,6 +789,53 @@ def gather_multi_layer_puzzle_metrics(
     return gathered_metrics
 
 
+def gather_composed_subblock_puzzle_metrics(
+    canonical_solutions_path: Path,
+    subblock_validation_dir: Path,
+    *,
+    exact_block_validation_dir: Path | None = None,
+) -> MultiLayerPuzzleMetrics:
+    """Compose atomic subblock scores into the canonical full-block MIP table."""
+
+    result_paths = sorted(subblock_validation_dir.glob("*solution*.json"))
+    if not result_paths:
+        raise FileNotFoundError(
+            f"No atomic solution_*.json files found in {subblock_validation_dir}"
+        )
+    subblock_results = [json.loads(path.read_text()) for path in result_paths]
+    sliced_baseline = subblock_results[0].get("sliced_teacher_baseline") or {}
+    teacher_baseline = {
+        name: float(value["avg"])
+        for name, value in sliced_baseline.items()
+        if isinstance(value, dict) and isinstance(value.get("avg"), (int, float))
+    }
+    if not teacher_baseline:
+        raise ValueError(
+            f"subblock score {result_paths[0]} has no sliced_teacher_baseline averages"
+        )
+    teacher_records = _parse_teacher_block_metrics(subblock_validation_dir, teacher_baseline.keys())
+    teacher_records.sort(key=lambda record: int(record["block_idx"]))
+    teacher_blocks = [record["block_config"] for record in teacher_records]
+
+    canonical_solutions = json.loads(canonical_solutions_path.read_text())
+    if not isinstance(canonical_solutions, list):
+        raise TypeError("canonical_solutions_path must contain a JSON list")
+    exact_results = []
+    if exact_block_validation_dir is not None and exact_block_validation_dir.is_dir():
+        exact_results = [
+            json.loads(path.read_text())
+            for path in sorted(exact_block_validation_dir.glob("*solution*.json"))
+        ]
+    table = compose_full_block_metrics(
+        canonical_solutions,
+        subblock_results,
+        teacher_blocks=teacher_blocks,
+        teacher_baseline=teacher_baseline,
+        exact_results=exact_results,
+    )
+    return composed_table_to_gathered_metrics(table, canonical_solutions, teacher_records)
+
+
 def _parse_single_block_replacement_metrics(metrics_path: Path) -> dict:
     raw_metrics = json.loads(metrics_path.read_text())
     single_block_replacement = raw_metrics["puzzle_solution"]["single_block_replacement"]
@@ -628,7 +869,37 @@ def _parse_teacher_block_metrics(
     single_block_replacement_validation_dir: Path,
     all_metric_names: Iterable[str] = ("kl_div_loss",),
 ) -> list[dict]:
-    raw_metrics = json.loads((single_block_replacement_validation_dir / "teacher.json").read_text())
+    teacher_path = single_block_replacement_validation_dir / "teacher.json"
+    if teacher_path.exists():
+        raw_metrics = json.loads(teacher_path.read_text())
+    else:
+        solution_paths = sorted(single_block_replacement_validation_dir.glob("*solution*.json"))
+        if not solution_paths:
+            raise FileNotFoundError(
+                f"No teacher.json or solution_*.json files found in "
+                f"{single_block_replacement_validation_dir}"
+            )
+        first_solution = json.loads(solution_paths[0].read_text())
+        raw_metrics = {"args": first_solution["args"]}
+        sliced_baseline = first_solution.get("sliced_teacher_baseline") or {}
+        for metric_name in all_metric_names:
+            if metric_name.startswith("one_minus_"):
+                continue
+            baseline_value = sliced_baseline.get(metric_name)
+            if isinstance(baseline_value, dict):
+                baseline_value = baseline_value.get("avg")
+            value = (
+                baseline_value
+                if isinstance(baseline_value, (int, float))
+                else 1.0
+                if metric_name.startswith("token_accuracy")
+                else 0.0
+            )
+            raw_metrics[metric_name] = {"avg": value, "per_sample": []}
+        mprint(
+            f"{teacher_path} not found; synthesized teacher metrics from the "
+            f"sliced-teacher baseline in {solution_paths[0].name}"
+        )
     teacher_checkpoint_dir = Path(raw_metrics["args"]["teacher_dir"]).resolve()
     descriptor_name = raw_metrics["args"]["descriptor"]
     descriptor = ModelDescriptorFactory.get(descriptor_name)
@@ -641,7 +912,16 @@ def _parse_teacher_block_metrics(
     replacement_library_path = raw_metrics["args"].get("replacement_library_path")
     if replacement_library_path is not None:
         teacher_replacements = dict()
-        all_layer_replacements = json.loads(Path(replacement_library_path).read_text())
+        raw_replacement_library = json.loads(Path(replacement_library_path).read_text())
+        if (
+            isinstance(raw_replacement_library, dict)
+            and raw_replacement_library.get("version") == 2
+        ):
+            all_layer_replacements = raw_replacement_library.get("entries", [])
+            for layer_replacement in all_layer_replacements:
+                layer_replacement.setdefault("weight_paths", [])
+        else:
+            all_layer_replacements = raw_replacement_library
         for layer_replacement in all_layer_replacements:
             layer_replacement = parse_layer_replacement(layer_replacement)
             if replacement_is_teacher(
@@ -687,11 +967,33 @@ def filter_subblock_stats_by_args(
     subblock_stats_args: dict[str, Any],
     convert_dicts_to_dataclasses: bool = True,
 ) -> dict[str, dict]:
+    subblock_stats_args = _normalize_subblock_stats_args(dict(subblock_stats_args or {}))
     matching_subblock_stats = [
         subblock_stats
         for subblock_stats in all_subblock_stats
         if _dict_is_subset(subblock_stats_args, subblock_stats["args"])
     ]
+    if not matching_subblock_stats:
+        raise ValueError(
+            "No exact subblock statistics identity matches the requested scenario. "
+            "Puzzletron will not substitute measurements from a different hidden width, "
+            "workload, dtype, or runtime implementation. "
+            f"requested={subblock_stats_args}, "
+            f"available={[entry.get('args') for entry in all_subblock_stats]}"
+        )
+    if len(matching_subblock_stats) > 1:
+        runtime_matches = [
+            stats for stats in matching_subblock_stats if stats["args"].get("runtime_stats", False)
+        ]
+        block_runtime_matches = [
+            stats
+            for stats in runtime_matches
+            if stats["args"].get("runtime_granularity") == "block"
+        ]
+        if len(block_runtime_matches) == 1:
+            matching_subblock_stats = block_runtime_matches
+        elif len(runtime_matches) == 1:
+            matching_subblock_stats = runtime_matches
     assert len(matching_subblock_stats) == 1, (
         "The provided subblock_stats_args should match exactly one measurement "
         f"scenario, instead matched {len(matching_subblock_stats)}:\n"
@@ -700,7 +1002,9 @@ def filter_subblock_stats_by_args(
     subblock_stats = deepcopy(matching_subblock_stats[0])
 
     if convert_dicts_to_dataclasses:
-        class_name_to_class = {klass.__name__: klass for klass in [AttentionConfig, FFNConfig]}
+        class_name_to_class = {
+            klass.__name__: klass for klass in [AttentionConfig, FFNConfig, MambaConfig, MoEConfig]
+        }
         subblocks_dict = dict()
         for substats in subblock_stats["subblocks"]:
             subblock_config_class = class_name_to_class[substats.pop("subblock_config_class")]
@@ -711,6 +1015,23 @@ def filter_subblock_stats_by_args(
             subblocks_dict[dict_key] = substats
         subblock_stats["subblocks"] = subblocks_dict
     return subblock_stats
+
+
+def _normalize_subblock_stats_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Normalize user-facing MIP stats args to the persisted stats schema."""
+    if "batch_sizes" in args and "batch_size" not in args:
+        batch_sizes = args.pop("batch_sizes")
+        if isinstance(batch_sizes, Iterable) and not isinstance(batch_sizes, (str, bytes, dict)):
+            batch_sizes = list(batch_sizes)
+            if len(batch_sizes) != 1:
+                raise ValueError(
+                    "MIP subblock_stats_args must select exactly one batch size, got "
+                    f"batch_sizes={batch_sizes}"
+                )
+            args["batch_size"] = batch_sizes[0]
+        else:
+            args["batch_size"] = batch_sizes
+    return args
 
 
 def _dict_is_subset(dict1: dict, dict2: dict) -> bool:
@@ -732,7 +1053,15 @@ def _add_block_stats_to_gathered_metrics(
             )
         else:
             for block_config, variant_metrics in block_variants.items():
-                variant_metrics["stats"] = _get_block_stats(subblock_stats, block_config)
+                variant_parent_layer_index = None
+                if isinstance(variant_metrics, dict):
+                    if "parent_layer_indices" in variant_metrics:
+                        variant_parent_layer_index = variant_metrics["parent_layer_indices"][0]
+                    elif "block_idx" in variant_metrics:
+                        variant_parent_layer_index = variant_metrics["block_idx"]
+                variant_metrics["stats"] = _get_block_stats(
+                    subblock_stats, block_config, variant_parent_layer_index
+                )
 
 
 def _iter_teacher_stats(gathered_metrics: PuzzleMetrics) -> Iterable[dict[str, float]]:
@@ -777,53 +1106,109 @@ def _get_block_stats(
     if block_config == "non_block":
         return subblock_stats["non_block"]
 
-    if block_config.parallel_blocks is None:
-        attention_key = (block_config.attention, parent_layer_index)
-        ffn_key = (block_config.ffn, parent_layer_index)
-        attention_stats = subblock_stats["subblocks"][attention_key]
-        ffn_stats = subblock_stats["subblocks"][ffn_key]
-        assert set(attention_stats.keys()) == set(ffn_stats.keys())
+    subblock_entries = []
+    template_stats = next(iter(subblock_stats["subblocks"].values()), {})
+    for subblock_ref in block_config.subblocks():
+        if subblock_ref.config.no_op:
+            stats = {
+                key: (None if value is None else 0.0 if isinstance(value, (int, float)) else value)
+                for key, value in template_stats.items()
+            }
+        else:
+            stats = _lookup_subblock_stats(
+                subblock_stats["subblocks"], subblock_ref.config, parent_layer_index
+            )
+        subblock_entries.append((subblock_ref.config, stats))
+    if not subblock_entries:
+        return {"has_attention": 0, "has_mamba": 0, "has_ffn": 0, "has_moe": 0, "not_no_op": 0}
 
-        block_stats = dict()
-        for k in attention_stats.keys():
-            block_stats[k] = _none_add(attention_stats[k], ffn_stats[k])
-            block_stats[f"attention_{k}"] = attention_stats[k]
-            block_stats[f"ffn_{k}"] = ffn_stats[k]
-
-        block_stats["has_attention"] = int(
-            not block_config.attention.no_op and block_config.attention.mamba is None
-        )
-        block_stats["has_ffn"] = int(not block_config.ffn.no_op)
-        block_stats["has_moe"] = int(block_config.ffn.moe is not None)
-        block_stats["not_no_op"] = int(
-            not (block_config.attention.no_op and block_config.ffn.no_op)
-        )
-        block_stats["num_kv_heads"] = (
-            block_config.attention.num_key_value_heads if block_stats["has_attention"] else 0
-        )
-        block_stats["num_local_experts"] = (
-            block_config.ffn.moe.num_local_experts if block_stats["has_moe"] else 0
-        )
-
-        return block_stats
-
-    # this is a parallel block
-    ADDITIVE_METRICS = ("memory_mib", "num_params", "kv_cache_memory_mib")
-    ADDITIVE_METRICS = [
-        f"{prefix}{metric}" for prefix in ("", "attention_", "ffn_") for metric in ADDITIVE_METRICS
-    ]
-    block_stats = [
-        _get_block_stats(subblock_stats, sub_parallel)
-        for sub_parallel in block_config.parallel_blocks
-    ]
-    block_stats = {
-        k: _none_add_list([sub_parallel_stat[k] for sub_parallel_stat in block_stats])
-        if k in ADDITIVE_METRICS
-        else _none_max_list([sub_parallel_stat[k] for sub_parallel_stat in block_stats])
-        for k in block_stats[0].keys()
+    stat_keys = {
+        key
+        for key, value in subblock_entries[0][1].items()
+        if value is None or isinstance(value, (int, float))
     }
+    for _, stats in subblock_entries[1:]:
+        numeric_keys = {
+            key for key, value in stats.items() if value is None or isinstance(value, (int, float))
+        }
+        assert numeric_keys == stat_keys
+
+    block_stats = dict()
+    for key in stat_keys:
+        block_stats[key] = _none_add_list([stats[key] for _, stats in subblock_entries])
+        for subblock_config, stats in subblock_entries:
+            block_stats[f"{subblock_config.kind}_{key}"] = stats[key]
+
+        attention_like_values = [
+            stats[key]
+            for subblock_config, stats in subblock_entries
+            if subblock_config.kind in _ATTENTION_LIKE_KINDS
+        ]
+        if attention_like_values:
+            block_stats[f"attention_{key}"] = _none_add_list(attention_like_values)
+
+        ffn_like_values = [
+            stats[key]
+            for subblock_config, stats in subblock_entries
+            if subblock_config.kind in _FFN_LIKE_KINDS
+        ]
+        if ffn_like_values:
+            block_stats[f"ffn_{key}"] = _none_add_list(ffn_like_values)
+
+    attention = block_config.get_subblock("attention")
+    mamba = block_config.get_subblock("mamba")
+    ffn = block_config.get_subblock("ffn")
+    moe = block_config.get_subblock("moe")
+
+    def _active(subblock_config) -> bool:
+        return subblock_config is not None and not subblock_config.no_op
+
+    block_stats["has_attention"] = int(_active(attention))
+    block_stats["has_mamba"] = int(_active(mamba))
+    block_stats["has_ffn"] = int(_active(ffn))
+    block_stats["has_moe"] = int(_active(moe))
+    block_stats["not_no_op"] = int(
+        any(not subblock_config.no_op for subblock_config, _ in subblock_entries)
+    )
+    block_stats["num_kv_heads"] = (
+        attention.num_kv_heads if _active(attention) and attention.num_kv_heads is not None else 0
+    )
+    block_stats["num_query_heads"] = (
+        attention.num_query_heads
+        if _active(attention) and attention.num_query_heads is not None
+        else 0
+    )
+    block_stats["num_experts"] = (
+        moe.num_experts if _active(moe) and moe.num_experts is not None else 0
+    )
+    block_stats["top_k"] = moe.top_k if _active(moe) and moe.top_k is not None else 0
 
     return block_stats
+
+
+def _lookup_subblock_stats(
+    subblocks_stats: dict,
+    subblock_config,
+    parent_layer_index: int | None,
+) -> dict[str, float]:
+    lookup_keys = []
+    if parent_layer_index is not None:
+        lookup_keys.append((subblock_config, parent_layer_index))
+    lookup_keys.extend([(subblock_config, None), (subblock_config, -1)])
+    for key in lookup_keys:
+        if key in subblocks_stats:
+            return subblocks_stats[key]
+
+    matches = [
+        stats
+        for (candidate_config, _candidate_parent_layer_index), stats in subblocks_stats.items()
+        if candidate_config == subblock_config
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    raise KeyError(
+        f"Could not find unique stats for {subblock_config} at parent_layer_index={parent_layer_index}"
+    )
 
 
 def _none_add(a: float | int | None, b: float | int | None) -> float | int | None:
