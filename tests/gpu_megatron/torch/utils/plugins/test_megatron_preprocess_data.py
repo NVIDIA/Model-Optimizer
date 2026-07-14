@@ -23,6 +23,15 @@ from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
 from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
 
 
+# Depends on the external HF datasets-server, which intermittently returns 5xx
+# (e.g. 503) on the /splits lookup. Allow-fail the transient outage while keeping
+# real assertion failures visible (raises=RuntimeError only, strict=False so a
+# normal pass doesn't xpass-fail). download_hf_dataset_as_jsonl already retries.
+@pytest.mark.xfail(
+    raises=RuntimeError,
+    strict=False,
+    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
+)
 def test_megatron_preprocess_data_with_jsonl_path(tmp_path):
     input_jsonl = download_hf_dataset_as_jsonl("nanotron/minipile_100_samples", tmp_path / "raw")
     assert len(input_jsonl) == 1, "Expected 1 JSONL file"
@@ -53,6 +62,12 @@ def test_megatron_preprocess_data_with_jsonl_path(tmp_path):
     assert Path(prefixes[0] + ".idx").stat().st_size > 0, "Index file should not be empty"
 
 
+# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
+@pytest.mark.xfail(
+    raises=RuntimeError,
+    strict=False,
+    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
+)
 @pytest.mark.parametrize(
     ("hf_dataset", "hf_split", "json_keys"),
     [
@@ -197,6 +212,12 @@ def test_megatron_preprocess_data_tool_calls_arguments_normalized(tmp_path):
     )
 
 
+# Allow-fail transient HF datasets-server 5xx (see the /splits note above).
+@pytest.mark.xfail(
+    raises=RuntimeError,
+    strict=False,
+    reason="Flaky: transient HF datasets-server 5xx on the /splits lookup",
+)
 def test_megatron_preprocess_data_hf_streaming_warning(tmp_path):
     # hf_streaming without hf_max_samples_per_split should warn and fall back to non-streaming
     with pytest.warns(UserWarning, match="hf_streaming"):
