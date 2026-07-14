@@ -35,11 +35,31 @@ def normalized_mse_loss(
     target: Tensor,
     reduction: Literal["none", "mean", "sum"] = "mean",
     epsilon: float = 1e-6,
+    *,
+    chunk_numel: int = 8 * 1024 * 1024,
 ) -> Tensor:
-    loss = F.mse_loss(input, target, reduction=reduction) / F.mse_loss(
-        target, torch.zeros_like(target) + epsilon, reduction=reduction
-    )
-    return loss
+    if reduction == "none" or input.shape != target.shape:
+        return F.mse_loss(input, target, reduction=reduction) / F.mse_loss(
+            target, torch.zeros_like(target) + epsilon, reduction=reduction
+        )
+    if chunk_numel <= 0:
+        raise ValueError(f"chunk_numel must be positive, got {chunk_numel}")
+
+    flat_input = input.reshape(-1)
+    flat_target = target.reshape(-1)
+    numerator = input.new_zeros((), dtype=torch.float32)
+    denominator = input.new_zeros((), dtype=torch.float32)
+    for start in range(0, flat_input.numel(), chunk_numel):
+        stop = start + chunk_numel
+        input_chunk = flat_input[start:stop]
+        target_chunk = flat_target[start:stop]
+        numerator = numerator + F.mse_loss(input_chunk, target_chunk, reduction="sum").float()
+        denominator = denominator + F.mse_loss(
+            target_chunk,
+            torch.full_like(target_chunk, epsilon),
+            reduction="sum",
+        ).float()
+    return numerator / denominator
 
 
 def cosine_embedding_loss_batched(input: Tensor, target: Tensor) -> Tensor:

@@ -29,6 +29,7 @@ __all__ = [
     "register_hydra_resolvers",
     "initialize_hydra_config_for_dir",
     "initialize_hydra_config",
+    "clone_hydra_config",
 ]
 
 
@@ -90,16 +91,73 @@ def _warmup_steps_resolver(*args):
     )
 
 
+def _register_resolver(name, resolver):
+    try:
+        OmegaConf.register_new_resolver(name, resolver, replace=True)
+        return
+    except TypeError:
+        pass
+
+    if hasattr(OmegaConf, "has_resolver") and OmegaConf.has_resolver(name):
+        if hasattr(OmegaConf, "clear_resolver"):
+            OmegaConf.clear_resolver(name)
+        else:
+            return
+    try:
+        OmegaConf.register_new_resolver(name, resolver)
+    except ValueError as exc:
+        if "already registered" not in str(exc):
+            raise
+
+
 def register_hydra_resolvers():
-    OmegaConf.register_new_resolver("to_path", lambda x: Path(x))
-    OmegaConf.register_new_resolver(
-        "random_int", lambda low, high: random.randint(int(low), int(high))
-    )
-    OmegaConf.register_new_resolver(
+    _register_resolver("to_path", lambda x: Path(x))
+    _register_resolver("random_int", lambda low, high: random.randint(int(low), int(high)))
+    _register_resolver(
         "timedelta_minutes", lambda x: datetime.timedelta(minutes=x) if x is not None else None
     )
-    OmegaConf.register_new_resolver("warmup_steps", _warmup_steps_resolver)
-    OmegaConf.register_new_resolver("get_object", lambda x: get_object(x))
+    _register_resolver("warmup_steps", _warmup_steps_resolver)
+    _register_resolver("get_object", lambda x: get_object(x))
+
+
+def clone_hydra_config(config, *, resolve: bool = True) -> DictConfig:
+    """Clone a Puzzletron config without dropping resolved Python objects.
+
+    Puzzletron enables ``allow_objects`` before resolving Hydra so registered
+    mixin classes, dataset callables, ``Path`` values, and similar runtime
+    objects are valid configuration values. Derived stage configs must preserve
+    the same contract instead of rebuilding a primitive-only ``DictConfig``.
+    """
+    content = (
+        OmegaConf.to_container(config, resolve=resolve)
+        if OmegaConf.is_config(config)
+        else config
+    )
+    cloned = OmegaConf.create(content, flags={"allow_objects": True})
+    OmegaConf.set_struct(cloned, False)
+    return cloned
+
+
+def _normalize_puzzletron_overrides(overrides: list[str]) -> list[str]:
+    """Make Puzzletron CLI overrides tolerant of runtime-only keys.
+
+    Hydra applies CLI overrides while the composed config is still strict. Puzzletron's
+    ``--override`` flag is used mostly for runtime values produced by launch scripts
+    (teacher paths, recipes, timeouts), so requiring every such key to be present in
+    every config makes the clean hierarchical configs brittle. Treat plain
+    ``KEY=VALUE`` overrides as Hydra ``++KEY=VALUE`` overrides, which update existing
+    keys or add missing runtime keys. Explicit Hydra operators are preserved.
+    """
+    normalized = []
+    for override in overrides or []:
+        text = str(override)
+        stripped = text.lstrip()
+        if not stripped or stripped.startswith(("+", "~")) or "=" not in stripped:
+            normalized.append(text)
+            continue
+        prefix_len = len(text) - len(stripped)
+        normalized.append(f"{text[:prefix_len]}++{stripped}")
+    return normalized
 
 
 def initialize_hydra_config_for_dir(
@@ -117,7 +175,7 @@ def initialize_hydra_config_for_dir(
     """
 
     with initialize_config_dir(version_base=None, config_dir=config_dir):
-        args = compose(config_name, overrides)
+        args = compose(config_name, _normalize_puzzletron_overrides(overrides))
         args._set_flag("allow_objects", True)
         OmegaConf.resolve(args)  # resolve object attributes
         OmegaConf.set_struct(args, False)
@@ -127,7 +185,7 @@ def initialize_hydra_config_for_dir(
 
 def initialize_hydra_config(config_path: str, config_name: str, overrides: list[str]) -> DictConfig:
     with initialize(version_base=None, config_path=config_path):
-        args = compose(config_name, overrides)
+        args = compose(config_name, _normalize_puzzletron_overrides(overrides))
         args._set_flag("allow_objects", True)
         OmegaConf.resolve(args)  # resolve object attributes
         OmegaConf.set_struct(args, False)

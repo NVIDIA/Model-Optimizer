@@ -105,7 +105,7 @@ def format_block_configs(config) -> str:
     """
     Formats block_configs from a model configuration into a beautiful, readable string.
 
-    Each line represents a layer with attention and FFN configuration.
+    Each line represents a layer with typed subblock configuration.
 
     Args:
         config: PretrainedConfig object containing block_configs
@@ -114,39 +114,33 @@ def format_block_configs(config) -> str:
         Formatted string with layer configurations
 
     Example output:
-        ╭─────────────────────── Model Architecture ────────────────────────╮
-        │  Layer  1  │  Attention: no_op                │  FFN: mult = 4.95   │
-        │  Layer  2  │  Attention: 4 heads in group     │  FFN: mult = 4.95   │
-        │  Layer  3  │  Attention: no_op                │  FFN: no_op         │
-        ╰────────────────────────────────────────────────────────────────────╯
+        Layer  1 | attention: no_op | ffn: intermediate_size=8192
     """
     if not hasattr(config, "block_configs") or not config.block_configs:
-        return "❌ No block configs found"
+        return "No block configs found"
 
     lines = []
-
-    # Header
-    header = "╭─────────────────────────────────────── Model Architecture ────────────────────────────────────────╮"
-    lines.append(header)
-
-    # Format each layer
     for i, block in enumerate(config.block_configs, 1):
-        attention_info = _format_attention_config(block.attention)
-        ffn_info = _format_ffn_config(block.ffn)
-
-        # Create formatted line with proper padding
-        layer_str = f"Layer {i:2d}"
-        attention_str = f"Attention: {attention_info}"
-        ffn_str = f"FFN: {ffn_info}"
-
-        line = f"│  {layer_str:8s} │  {attention_str:30s} │  {ffn_str:18s} │"
-        lines.append(line)
-
-    # Footer
-    footer = "╰────────────────────────────────────────────────────────────────────────────────────────────────────╯"
-    lines.append(footer)
+        parts = []
+        for ref in block.subblocks():
+            parts.append(f"{ref.name}: {_format_subblock_config(ref.config)}")
+        lines.append(f"Layer {i:2d} | " + " | ".join(parts))
 
     return "\n".join(lines)
+
+
+def _format_subblock_config(subblock_config) -> str:
+    if not subblock_config:
+        return "default"
+    if subblock_config.kind == "attention":
+        return _format_attention_config(subblock_config)
+    if subblock_config.kind == "ffn":
+        return _format_ffn_config(subblock_config)
+    if subblock_config.kind == "moe":
+        return _format_moe_config(subblock_config)
+    if subblock_config.kind == "mamba":
+        return _format_mamba_config(subblock_config)
+    return str(subblock_config)
 
 
 def _format_attention_config(attention_config) -> str:
@@ -155,27 +149,21 @@ def _format_attention_config(attention_config) -> str:
         return "default"
 
     if attention_config.no_op:
-        return "❌ no_op"
+        return "no_op"
 
-    num_kv_heads = attention_config.num_key_value_heads
+    num_kv_heads = attention_config.num_kv_heads
     if num_kv_heads is not None:
-        return f"🐙 {num_kv_heads} kv heads"
+        return f"num_kv_heads={num_kv_heads}"
 
-    if attention_config.replace_with_linear:
-        return "linear replacement"
-
-    # Check for other attention types
-    if attention_config.mamba:
-        return "🐍 mamba"
+    num_query_heads = attention_config.num_query_heads
+    if num_query_heads is not None:
+        return f"num_query_heads={num_query_heads}"
     if attention_config.llama4:
-        return "🦙 llama4"
+        return "llama4"
 
-    window_length = attention_config.window_length
-    if window_length is not None:
-        return f"windowed ({window_length})"
-
-    if attention_config.sparsify:
-        return "sparse"
+    sliding_window_size = attention_config.sliding_window_size
+    if sliding_window_size is not None:
+        return f"sliding_window_size={sliding_window_size}"
 
     return "default"
 
@@ -186,24 +174,45 @@ def _format_ffn_config(ffn_config) -> str:
         return "default"
 
     if ffn_config.no_op:
-        return "❌ no_op"
-
-    if ffn_config.replace_with_linear:
-        return "linear"
+        return "no_op"
 
     ffn_intermediate = ffn_config.intermediate_size
     if ffn_intermediate is not None:
-        return f"🧱 ffn_dim = {ffn_intermediate}"
-
-    # Check for MoE configuration
-    moe_config = ffn_config.moe
-    if moe_config:
-        return "🔀 MoE"
-
-    if ffn_config.sparsify:
-        return "sparse"
+        return f"intermediate_size={ffn_intermediate}"
 
     return "default"
+
+
+def _format_moe_config(moe_config) -> str:
+    if moe_config.no_op:
+        return "no_op"
+    parts = []
+    if moe_config.num_experts is not None:
+        parts.append(f"num_experts={moe_config.num_experts}")
+    if moe_config.top_k is not None:
+        parts.append(f"top_k={moe_config.top_k}")
+    if moe_config.expert_intermediate_size is not None:
+        parts.append(f"expert_intermediate_size={moe_config.expert_intermediate_size}")
+    if moe_config.shared_expert_intermediate_size is not None:
+        parts.append(
+            f"shared_expert_intermediate_size={moe_config.shared_expert_intermediate_size}"
+        )
+    if moe_config.latent_dim is not None:
+        parts.append(f"latent_dim={moe_config.latent_dim}")
+    return ", ".join(parts) if parts else "default"
+
+
+def _format_mamba_config(mamba_config) -> str:
+    if mamba_config.no_op:
+        return "no_op"
+    parts = []
+    if mamba_config.num_heads is not None:
+        parts.append(f"num_heads={mamba_config.num_heads}")
+    if mamba_config.head_dim is not None:
+        parts.append(f"head_dim={mamba_config.head_dim}")
+    if mamba_config.state_dim is not None:
+        parts.append(f"state_dim={mamba_config.state_dim}")
+    return ", ".join(parts) if parts else "default"
 
 
 def format_global_config(config: DictConfig, title: str = "Global Configuration") -> str:

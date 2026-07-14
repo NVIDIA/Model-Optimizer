@@ -21,7 +21,7 @@ from typing import Any
 
 import torch
 
-from ..block_config import AttentionConfig, BlockConfig, FFNConfig
+from ..block_config import BlockConfig, SubblockConfig
 
 __all__ = [
     "calculate_kv_dim",
@@ -35,21 +35,21 @@ __all__ = [
 ]
 
 
-def calculate_kv_dim(num_key_value_heads: int, n_head: int, n_embd: int) -> int:
+def calculate_kv_dim(num_kv_heads: int, n_head: int, n_embd: int) -> int:
     """Calculate the key-value dimension for grouped-query attention.
 
     Args:
-        num_key_value_heads: Number of key-value heads.
+        num_kv_heads: Number of key-value heads.
         n_head: Total number of attention heads.
         n_embd: Embedding dimension.
 
     Returns:
-        Combined dimension for key and value tensors (2 * num_key_value_heads * head_size).
+        Combined dimension for key and value tensors (2 * num_kv_heads * head_size).
     """
-    if num_key_value_heads is None:
+    if num_kv_heads is None:
         return 0
     head_size = n_embd // n_head
-    kv_dim = 2 * num_key_value_heads * head_size
+    kv_dim = 2 * num_kv_heads * head_size
     return kv_dim
 
 
@@ -64,7 +64,8 @@ def raise_unknown_subblock_config_error(subblock_config: Any) -> None:
         ValueError: Always raised with a message indicating the expected types.
     """
     raise ValueError(
-        f"subblock_config should be an instance of FFNConfig or AttentionConfig, instead got {type(subblock_config)}"
+        "subblock_config should be an instance of FFNConfig, AttentionConfig, "
+        f"MoEConfig, or MambaConfig, instead got {type(subblock_config)}"
     )
 
 
@@ -132,7 +133,7 @@ def block_config_to_str(block_config: BlockConfig | dict[str, Any] | None) -> st
 
     TODO: Consider a better place for this function.
     Args:
-        block_config: BlockConfig dataclass or dict containing attention and ffn configs.
+        block_config: BlockConfig dataclass or dict containing strict subblock configs.
 
     Returns:
         Formatted string with attention and FFN information, or None if input is None.
@@ -140,73 +141,70 @@ def block_config_to_str(block_config: BlockConfig | dict[str, Any] | None) -> st
     if block_config is None:
         return None
     rep = ""
-    if dataclasses.is_dataclass(block_config):
-        block_config = dataclasses.asdict(block_config)
-    for subblock_name in ["attention", "ffn"]:
-        subblock_config = block_config[subblock_name]
-        rep += subblock_config_to_str(subblock_config, subblock_name)
+    if isinstance(block_config, BlockConfig):
+        subblock_configs = block_config.subblock_configs
+    elif isinstance(block_config, dict):
+        subblock_configs = block_config.get("subblock_configs", ())
+    elif dataclasses.is_dataclass(block_config):
+        subblock_configs = dataclasses.asdict(block_config).get("subblock_configs", ())
+    else:
+        raise TypeError(f"Unsupported block_config type: {type(block_config)}")
+
+    for subblock_config in subblock_configs:
+        rep += subblock_config_to_str(subblock_config)
     return rep
 
 
 # TODO: Consider a better place for this function.
 def subblock_config_to_str(
-    subblock_config: FFNConfig | AttentionConfig | dict[str, Any] | None,
+    subblock_config: SubblockConfig | dict[str, Any] | None,
     subblock_name: None | str = None,
 ) -> str | None:
     """Convert a subblock config (FFN, Attention, Mamba, or MoE) to string.
 
     Args:
-        subblock_config: FFNConfig, AttentionConfig dataclass or dict.
+        subblock_config: FFNConfig, AttentionConfig, MoEConfig, MambaConfig dataclass or dict.
         subblock_name: Name of subblock ('ffn', 'attention', 'mamba', 'moe').
                       Auto-detected if subblock_config is a dataclass.
 
     Returns:
         Formatted string showing subblock type and key parameters (e.g., intermediate_size,
-        num_key_value_heads), or None if input is None.
+        num_kv_heads), or None if input is None.
     """
     if subblock_config is None:
         return None
-    subblock_name = (
-        "ffn"
-        if isinstance(subblock_config, FFNConfig)
-        else "mamba"
-        if isinstance(subblock_config, AttentionConfig) and subblock_config.is_mamba
-        else "attention"
-        if isinstance(subblock_config, AttentionConfig)
-        else subblock_name
-    )
+
+    if isinstance(subblock_config, SubblockConfig):
+        subblock_name = subblock_config.kind
+    elif isinstance(subblock_config, dict):
+        subblock_name = subblock_config.get("kind", subblock_name)
     assert subblock_name is not None, "Must provide subblock_name if subblock_config is a dict."
 
     if dataclasses.is_dataclass(subblock_config):
         subblock_config = dataclasses.asdict(subblock_config)
 
-    if subblock_name == "attention" and subblock_config.get("mamba") is not None:
-        subblock_name = "mamba"
-
-    if subblock_name == "ffn" and subblock_config.get("moe") is not None:
-        subblock_name = "moe"
-
     rep = f"  {subblock_name}"
     if subblock_config.get("no_op"):
         rep += "  no_op".ljust(8)
-    elif subblock_config.get("replace_with_linear"):
-        rep += "  linear".ljust(8)
     elif subblock_name == "ffn":
         intermediate_size = subblock_config["intermediate_size"]
         rep += f"  intermediate_{intermediate_size}".ljust(8)
     elif subblock_name == "attention":
-        num_key_value_heads = subblock_config["num_key_value_heads"]
-        rep += f"  kv_heads_{num_key_value_heads}".ljust(8)
+        num_kv_heads = subblock_config["num_kv_heads"]
+        num_query_heads = subblock_config.get("num_query_heads")
+        rep += f"  kv_heads_{num_kv_heads}".ljust(8)
+        if num_query_heads is not None:
+            rep += f"  q_heads_{num_query_heads}".ljust(8)
     elif subblock_name == "mamba":
-        mamba_num_heads = subblock_config["mamba"]["num_heads"]
-        mamba_head_dim = subblock_config["mamba"]["head_dim"]
+        mamba_num_heads = subblock_config["num_heads"]
+        mamba_head_dim = subblock_config["head_dim"]
         rep += f"  num_heads_{mamba_num_heads}  head_dim_{mamba_head_dim}".ljust(8)
     elif subblock_name == "moe":
-        moe_num_local_experts = subblock_config["moe"]["num_local_experts"]
-        moe_expert_intermediate_dim = subblock_config["moe"]["expert_intermediate_dim"]
-        shared_expert_intermediate_dim = subblock_config["moe"]["shared_expert_intermediate_dim"]
-        num_experts_per_tok = subblock_config["moe"]["num_experts_per_tok"]
-        rep += f"  num_experts_{moe_num_local_experts}  expert_intermediate_dim_{moe_expert_intermediate_dim}  shared_expert_intermediate_dim_{shared_expert_intermediate_dim}  num_experts_per_tok_{num_experts_per_tok}".ljust(
+        num_experts = subblock_config["num_experts"]
+        expert_intermediate_size = subblock_config["expert_intermediate_size"]
+        shared_expert_intermediate_size = subblock_config.get("shared_expert_intermediate_size")
+        top_k = subblock_config["top_k"]
+        rep += f"  num_experts_{num_experts}  expert_intermediate_size_{expert_intermediate_size}  shared_expert_intermediate_size_{shared_expert_intermediate_size}  top_k_{top_k}".ljust(
             8
         )
     else:

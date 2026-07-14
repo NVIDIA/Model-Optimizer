@@ -31,9 +31,16 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 from transformers import PretrainedConfig
-from typeguard import check_type
 
-from ...block_config import SUBBLOCK_CLS_DICT, BlockConfig, _get_dataclass_type, _is_dataclass_type
+from ...block_config import (
+    SUBBLOCK_CLS_DICT,
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+    MoEConfig,
+    SubblockConfig,
+)
 from ...pruning.pruning_utils import (
     GQAInitMode,
     HiddenSizeInitMode,
@@ -52,6 +59,64 @@ __all__ = ["create_child_state_dict", "update_model_config"]
 IgnoreFn = Callable[[str], bool]
 
 default_ignore_fn: IgnoreFn = lambda _: False
+
+
+def _get_typed_subblock(
+    block_config: BlockConfig, kind: str, expected_type: type[SubblockConfig]
+) -> SubblockConfig | None:
+    subblock = block_config.get_subblock(kind)
+    if subblock is None:
+        return None
+    if not isinstance(subblock, expected_type):
+        raise TypeError(
+            f"Expected {expected_type.__name__} for {kind!r}, got {type(subblock).__name__}"
+        )
+    return subblock
+
+
+def _require_typed_subblock(
+    block_config: BlockConfig, kind: str, expected_type: type[SubblockConfig]
+) -> SubblockConfig:
+    subblock = block_config.require_subblock(kind)
+    if not isinstance(subblock, expected_type):
+        raise TypeError(
+            f"Expected {expected_type.__name__} for {kind!r}, got {type(subblock).__name__}"
+        )
+    return subblock
+
+
+def _get_attention_config(block_config: BlockConfig) -> AttentionConfig | None:
+    return _get_typed_subblock(block_config, "attention", AttentionConfig)
+
+
+def _require_attention_config(block_config: BlockConfig) -> AttentionConfig:
+    return _require_typed_subblock(block_config, "attention", AttentionConfig)
+
+
+def _get_ffn_config(block_config: BlockConfig) -> FFNConfig | None:
+    return _get_typed_subblock(block_config, "ffn", FFNConfig)
+
+
+def _require_ffn_config(block_config: BlockConfig) -> FFNConfig:
+    return _require_typed_subblock(block_config, "ffn", FFNConfig)
+
+
+def _get_moe_config(block_config: BlockConfig) -> MoEConfig | None:
+    return _get_typed_subblock(block_config, "moe", MoEConfig)
+
+
+def _require_moe_config(block_config: BlockConfig) -> MoEConfig:
+    return _require_typed_subblock(block_config, "moe", MoEConfig)
+
+
+def _get_mamba_config(block_config: BlockConfig) -> MambaConfig | None:
+    return _get_typed_subblock(block_config, "mamba", MambaConfig)
+
+
+def _require_int(value: int | None, field_name: str) -> int:
+    if value is None:
+        raise ValueError(f"{field_name} must be set in the strict BlockConfig schema")
+    return int(value)
 
 
 class _PerLayerKeysView(MutableMapping[str, str]):
@@ -168,6 +233,10 @@ def _process_single_layer(
 
     parent_block_config = original_config.block_configs[layer_idx]
     child_block_config = new_config.block_configs[layer_idx]
+    if isinstance(parent_block_config, dict):
+        parent_block_config = BlockConfig(**parent_block_config)
+    if isinstance(child_block_config, dict):
+        child_block_config = BlockConfig(**child_block_config)
 
     # Attention processing
     for part in ["weight", "bias"]:
@@ -246,8 +315,8 @@ def _process_single_layer(
                                 layer_out_state_dict[new_key] = new_state_dict[new_key]
 
     # MLP/MoE processing
-    is_parent_moe = parent_block_config.ffn.is_moe
-    if not is_parent_moe:  # not MoE, init the MLP
+    parent_moe_config = _get_moe_config(parent_block_config)
+    if parent_moe_config is None or parent_moe_config.no_op:  # not MoE, init the MLP
         mlp_prefix = f"model.layers.{layer_idx}.mlp"
         linear_mlp_key = f"{mlp_prefix}.linear_mlp.weight"
 
@@ -279,14 +348,14 @@ def _process_single_layer(
                 )
             )
     else:
-        is_child_moe = child_block_config.ffn.is_moe
-        if is_child_moe:
-            parent_moe_config = original_config.block_configs[layer_idx].ffn.moe
-            child_moe_config = new_config.block_configs[layer_idx].ffn.moe
+        child_moe_config = _get_moe_config(child_block_config)
+        if child_moe_config is not None and not child_moe_config.no_op:
             if parent_moe_config == child_moe_config:
                 pass  # copy the MoE as is
             elif mlp_init_mode == MlpInitMode.MoEChannelPruning:
-                for expert_idx in range(parent_moe_config.num_local_experts):
+                for expert_idx in range(
+                    _require_int(parent_moe_config.num_experts, "moe.num_experts")
+                ):
                     layer_out_state_dict.update(
                         _init_mlp(
                             mlp_init_mode=mlp_init_mode,
@@ -303,12 +372,10 @@ def _process_single_layer(
                     )
 
             elif mlp_init_mode == MlpInitMode.ExpertRemoval:  # remove some of the routed experts
-                router_key, new_experts_keys = _generate_moe_keys(
-                    layer_idx, child_block_config.ffn.moe.num_local_experts
-                )
-                _, orig_experts_keys = _generate_moe_keys(
-                    layer_idx, parent_block_config.ffn.moe.num_local_experts
-                )
+                new_num_experts = _require_int(child_moe_config.num_experts, "moe.num_experts")
+                orig_num_experts = _require_int(parent_moe_config.num_experts, "moe.num_experts")
+                router_key, new_experts_keys = _generate_moe_keys(layer_idx, new_num_experts)
+                _, orig_experts_keys = _generate_moe_keys(layer_idx, orig_num_experts)
                 keys_to_remove[router_key] = keys.get(router_key)
                 for key in sum(orig_experts_keys.values(), []):
                     keys_to_remove[key] = keys.get(key)
@@ -325,17 +392,22 @@ def _process_single_layer(
                     layer_idx=layer_idx,
                     mlp_init_mode=mlp_init_mode,
                     mlp_init_config=mlp_init_config,
-                    orig_router_weight=parent_state_dict[router_key],
+                    orig_router_weights={"weight": [parent_state_dict[router_key]]},
                     orig_experts_weights=orig_experts_weights,
-                    new_router_weight=new_state_dict[router_key],
+                    new_router_weights={"weight": [new_state_dict[router_key]]},
                     new_experts_weights=new_experts_weights,
+                    orig_num_experts=orig_num_experts,
+                    new_num_experts=new_num_experts,
                 )
-                layer_out_state_dict[router_key] = out_router_weights
+                layer_out_state_dict[router_key] = out_router_weights["weight"][0]
                 for name in new_experts_keys.keys():
                     layer_out_state_dict.update(
                         zip(new_experts_keys[name], out_experts_weights[name])
                     )
-        elif child_block_config.ffn.no_op:  # no-op, drop this layer
+        elif (
+            (child_ffn_config := _get_ffn_config(child_block_config)) is not None
+            and child_ffn_config.no_op
+        ) or (child_moe_config is not None and child_moe_config.no_op):
             parent_mlp_prefix = f"model.layers.{layer_idx}.mlp"
             for key in list(keys.keys()):
                 if key.startswith(parent_mlp_prefix):
@@ -438,10 +510,14 @@ def create_child_state_dict(
             else:
                 out_state_dict[key] = tensor
 
-    # Check if original model is MHA (all layers have num_key_value_heads == num_attention_heads)
-    original_num_kv_heads_per_layer = [
-        b.attention.num_key_value_heads for b in original_config.block_configs
-    ]
+    # Check if original model is MHA (all attention layers have num_kv_heads == global query heads)
+    original_num_kv_heads_per_layer = []
+    for block_config in original_config.block_configs:
+        if isinstance(block_config, dict):
+            block_config = BlockConfig(**block_config)
+        attention_config = _get_attention_config(block_config)
+        if attention_config is not None and attention_config.num_kv_heads is not None:
+            original_num_kv_heads_per_layer.append(attention_config.num_kv_heads)
     num_attention_heads = original_lm_config.num_attention_heads
     is_original_mha = all(kv == num_attention_heads for kv in original_num_kv_heads_per_layer)
     is_same_hidden_size = original_lm_config.hidden_size == new_lm_config.hidden_size
@@ -608,22 +684,31 @@ def _concatenate_experts_into_dense_ffn(
     # Llama4 experts use SwiGLU (gated + silu); FFNConfig does not track these fields directly.
 
     # verify sizes
-    child_intermediate_size = child_block_config.ffn.intermediate_size
-    parent_moe_config = parent_block_config.ffn.moe
-    shared_expert_intermediate_dim = parent_moe_config.shared_expert_intermediate_dim
-    routed_expert_intermediate_dim = parent_moe_config.expert_intermediate_dim
-    total_concatenated_routed_experts_size = (
-        child_intermediate_size - shared_expert_intermediate_dim
+    child_ffn_config = _require_ffn_config(child_block_config)
+    parent_moe_config = _require_moe_config(parent_block_config)
+    child_intermediate_size = _require_int(
+        child_ffn_config.intermediate_size, "ffn.intermediate_size"
     )
-    assert total_concatenated_routed_experts_size % routed_expert_intermediate_dim == 0, (
+    shared_expert_intermediate_size = _require_int(
+        parent_moe_config.shared_expert_intermediate_size,
+        "moe.shared_expert_intermediate_size",
+    )
+    routed_expert_intermediate_size = _require_int(
+        parent_moe_config.expert_intermediate_size,
+        "moe.expert_intermediate_size",
+    )
+    total_concatenated_routed_experts_size = (
+        child_intermediate_size - shared_expert_intermediate_size
+    )
+    assert total_concatenated_routed_experts_size % routed_expert_intermediate_size == 0, (
         f"{child_intermediate_size=}  "
-        f"{shared_expert_intermediate_dim=}  "
-        f"{routed_expert_intermediate_dim=}  "
+        f"{shared_expert_intermediate_size=}  "
+        f"{routed_expert_intermediate_size=}  "
         f"{total_concatenated_routed_experts_size=}  "
-        f"{total_concatenated_routed_experts_size % routed_expert_intermediate_dim=} != 0"
+        f"{total_concatenated_routed_experts_size % routed_expert_intermediate_size=} != 0"
     )
     num_concatenated_routed_experts = (
-        total_concatenated_routed_experts_size // routed_expert_intermediate_dim
+        total_concatenated_routed_experts_size // routed_expert_intermediate_size
     )
 
     # if needed, concatenate some of the routed experts
@@ -637,7 +722,7 @@ def _concatenate_experts_into_dense_ffn(
             f"Concatenating {num_concatenated_routed_experts} routed experts to the shared expert in layer {layer_idx}"
         )
         router_key, orig_experts_keys = _generate_moe_keys(
-            layer_idx, parent_moe_config.num_local_experts
+            layer_idx, _require_int(parent_moe_config.num_experts, "moe.num_experts")
         )
         orig_experts_weights = {
             name: [original_state_dict[key] for key in orig_experts_module_keys]
@@ -783,7 +868,7 @@ def _prune_experts_by_score(
         len(orig_experts_module_weights) == orig_num_experts
         for orig_experts_module_weights in orig_experts_weights.values()
     )
-    expert_scores = _load_expert_scores(mlp_init_config)[layer_idx]
+    expert_scores = _load_expert_scores(mlp_init_config, layer_idx)
     assert len(expert_scores) == orig_num_experts
     selected_experts = sorted(
         range(orig_num_experts),
@@ -812,7 +897,12 @@ def _init_linear_attn(
     n_embd = parent_config.hidden_size
     head_size = _get_head_dim(parent_config)
     # Get num_kv_heads from config, compute n_heads_in_group
-    n_kv_heads = parent_config.block_configs[layer_idx].attention.num_key_value_heads
+    parent_block_config = parent_config.block_configs[layer_idx]
+    if isinstance(parent_block_config, dict):
+        parent_block_config = BlockConfig(**parent_block_config)
+    n_kv_heads = _require_int(
+        _require_attention_config(parent_block_config).num_kv_heads, "attention.num_kv_heads"
+    )
     n_heads_in_group = parent_config.num_attention_heads // n_kv_heads
 
     wv = parent_state_dict[v_key]
@@ -851,44 +941,86 @@ def update_model_config(
         model_config_overrides, lm_config.num_hidden_layers
     )
 
-    def override(item, item_overrides):
-        if item_overrides is None:
-            # Hydra/OmegaConf ``null`` means "leave this field unchanged" in
-            # model_config_overrides. This lets compact overrides update only one
-            # sibling field without clearing the rest of the dataclass.
-            return item
-        if dataclasses.is_dataclass(item):
-            assert isinstance(item_overrides, dict)
-            return dataclass_override(item, item_overrides)
-        if isinstance(item, list):
-            assert isinstance(item_overrides, list)
-            return list_override(item, item_overrides)
-        return item_overrides
-
     def list_override(ls, ls_overrides: list):
         assert len(ls) == len(ls_overrides)
-        return [override(item, item_overrides) for item, item_overrides in zip(ls, ls_overrides)]
+        return [
+            block_config_override(item, item_overrides)
+            for item, item_overrides in zip(ls, ls_overrides)
+        ]
 
     def dataclass_override(dc, dc_overrides: dict):
-        if not set(dc_overrides.keys()).issubset(dataclasses.asdict(dc).keys()):
+        field_names = {field.name for field in dataclasses.fields(dc)}
+        if not set(dc_overrides.keys()).issubset(field_names):
             raise ValueError(
-                f"Uknown overrides for dataclass {type(dc)}: {', '.join(set(dc_overrides.keys()) - dataclasses.asdict(dc).keys())}"
+                f"Unknown overrides for {type(dc).__name__}: "
+                f"{', '.join(sorted(set(dc_overrides.keys()) - field_names))}"
             )
-        field_types = {field.name: field.type for field in dataclasses.fields(dc)}
         dc_changes = {}
         for key, item_overrides in dc_overrides.items():
-            previous_value, item_type = getattr(dc, key), field_types[key]
+            if item_overrides is None:
+                # Hydra/OmegaConf ``null`` means "leave this field unchanged" in
+                # model_config_overrides. This lets compact overrides update only one
+                # sibling field without clearing the rest of the dataclass.
+                continue
             # if original block was no_op, we should not override it
             if getattr(dc, "no_op", False):
                 return dc
 
-            if previous_value is None and _is_dataclass_type(item_type):
-                new_value = _get_dataclass_type(item_type)(**item_overrides)
+            previous_value = getattr(dc, key)
+            if dataclasses.is_dataclass(previous_value):
+                if not isinstance(item_overrides, dict):
+                    raise TypeError(
+                        f"Expected dict override for nested dataclass field {key!r}, "
+                        f"got {type(item_overrides).__name__}"
+                    )
+                dc_changes[key] = dataclass_override(previous_value, item_overrides)
             else:
-                new_value = override(previous_value, item_overrides)
-            check_type(new_value, item_type)
-            dc_changes[key] = new_value
+                dc_changes[key] = item_overrides
         return dataclasses.replace(dc, **dc_changes)
+
+    def block_config_override(block_config, block_overrides):
+        if isinstance(block_config, dict):
+            block_config = BlockConfig(**block_config)
+        if block_overrides is None:
+            return block_config
+        if isinstance(block_overrides, BlockConfig):
+            return block_overrides
+        if not isinstance(block_overrides, dict):
+            raise TypeError(
+                f"Expected BlockConfig override dict, got {type(block_overrides).__name__}"
+            )
+        if "subblock_configs" in block_overrides:
+            unknown = set(block_overrides) - {"subblock_configs"}
+            if unknown:
+                raise ValueError(
+                    f"Full BlockConfig overrides may only contain subblock_configs, got {sorted(unknown)}"
+                )
+            return BlockConfig(**block_overrides)
+
+        updated_block = block_config
+        for kind, subblock_overrides in block_overrides.items():
+            if kind not in SUBBLOCK_CLS_DICT:
+                raise ValueError(
+                    f"Unknown subblock override {kind!r}; expected one of {sorted(SUBBLOCK_CLS_DICT)}"
+                )
+            if subblock_overrides is None:
+                continue
+            if not isinstance(subblock_overrides, dict):
+                raise TypeError(
+                    f"Expected dict override for {kind!r}, got {type(subblock_overrides).__name__}"
+                )
+            subblock = updated_block.get_subblock(kind)
+            if subblock is None:
+                # Compact per-kind overrides mean "change this kind where it
+                # already exists". They must not create attention in Mamba
+                # blocks, FFN in MoE blocks, etc. Use a full
+                # ``subblock_configs`` BlockConfig override for deliberate
+                # structural replacement.
+                continue
+            else:
+                subblock = dataclass_override(subblock, subblock_overrides)
+            updated_block = updated_block.with_subblock(subblock)
+        return updated_block
 
     new_model_config.block_configs = list_override(
         new_model_config.block_configs, model_config_overrides
@@ -904,7 +1036,7 @@ def _parse_model_config_overrides(
     """
     example model_config_overrides_dict:
     {
-        "attention": [{"num_key_value_heads": 4}],
+        "attention": [{"num_kv_heads": 4}],
         "ffn": [{"intermediate_size": 14336}]
     }
     """
@@ -1022,32 +1154,15 @@ def _apply_hidden_size_pruning(
             )
 
     for block_idx in owned_block_indexes:
-        if new_config.block_configs[block_idx].parallel_blocks is None:
-            key_prefix = f"model.layers.{block_idx}"
-            out_state_dict = _prune_hidden_size_dimension_block(
-                out_state_dict,
-                new_hidden_size,
-                hidden_size_init_mode,
-                channel_ranking,
-                new_config.block_configs[block_idx],
-                key_prefix,
-            )
-        else:
-            for internal_block_idx in range(
-                len(new_config.block_configs[block_idx].parallel_blocks)
-            ):
-                block_config = new_config.block_configs[block_idx].parallel_blocks[
-                    internal_block_idx
-                ]
-                key_prefix = f"model.layers.{block_idx}.parallel_blocks.{internal_block_idx}"
-                out_state_dict = _prune_hidden_size_dimension_block(
-                    out_state_dict,
-                    new_hidden_size,
-                    hidden_size_init_mode,
-                    channel_ranking,
-                    block_config,
-                    key_prefix,
-                )
+        key_prefix = f"model.layers.{block_idx}"
+        out_state_dict = _prune_hidden_size_dimension_block(
+            out_state_dict,
+            new_hidden_size,
+            hidden_size_init_mode,
+            channel_ranking,
+            new_config.block_configs[block_idx],
+            key_prefix,
+        )
     return out_state_dict
 
 
@@ -1059,6 +1174,8 @@ def _prune_hidden_size_dimension_block(
     block_config,
     key_prefix,
 ):
+    if isinstance(block_config, dict):
+        block_config = BlockConfig(**block_config)
     for layer_norm in ["input_layernorm", "post_attention_layernorm"]:
         for part in ["weight", "bias"]:
             key = f"{key_prefix}.{layer_norm}.{part}"
@@ -1071,8 +1188,10 @@ def _prune_hidden_size_dimension_block(
                     dim=0,
                 )
     attn_prefix = f"{key_prefix}.self_attn"
-    if block_config.attention.replace_with_linear:
-        linear_attn_key = f"{attn_prefix}.linear_attn.weight"
+    linear_attn_key = f"{attn_prefix}.linear_attn.weight"
+    mamba_config = _get_mamba_config(block_config)
+    attention_config = _get_attention_config(block_config)
+    if linear_attn_key in out_state_dict:
         for dim in [0, 1]:
             out_state_dict[linear_attn_key] = _prune_hidden_size_dimension(
                 out_state_dict[linear_attn_key],
@@ -1081,17 +1200,18 @@ def _prune_hidden_size_dimension_block(
                 channel_ranking,
                 dim=dim,
             )
-    elif block_config.attention.is_mamba:
+    elif mamba_config is not None and not mamba_config.no_op:
         for proj in ["in", "out"]:
             mamba_key = f"{attn_prefix}.mamba_mixer.{proj}_proj.weight"
-            out_state_dict[mamba_key] = _prune_hidden_size_dimension(
-                out_state_dict[mamba_key],
-                new_hidden_size,
-                hidden_size_init_mode,
-                channel_ranking,
-                dim=1 if proj == "in" else 0,
-            )
-    else:
+            if mamba_key in out_state_dict:
+                out_state_dict[mamba_key] = _prune_hidden_size_dimension(
+                    out_state_dict[mamba_key],
+                    new_hidden_size,
+                    hidden_size_init_mode,
+                    channel_ranking,
+                    dim=1 if proj == "in" else 0,
+                )
+    elif attention_config is not None and not attention_config.no_op:
         for k in "qkvo":
             for part in ["weight", "bias"]:
                 if k in "qkv" and part == "bias":
@@ -1106,8 +1226,10 @@ def _prune_hidden_size_dimension_block(
                         dim=1 if part == "weight" and k in "qkv" else 0,
                     )
     ffn_prefix = f"{key_prefix}.mlp"
-    if block_config.ffn.replace_with_linear:
-        linear_mlp_key = f"{ffn_prefix}.linear_mlp.weight"
+    linear_mlp_key = f"{ffn_prefix}.linear_mlp.weight"
+    moe_config = _get_moe_config(block_config)
+    ffn_config = _get_ffn_config(block_config)
+    if linear_mlp_key in out_state_dict:
         for dim in [0, 1]:
             out_state_dict[linear_mlp_key] = _prune_hidden_size_dimension(
                 out_state_dict[linear_mlp_key],
@@ -1116,15 +1238,16 @@ def _prune_hidden_size_dimension_block(
                 channel_ranking,
                 dim=dim,
             )
-    elif block_config.ffn.moe is not None:
+    elif moe_config is not None and not moe_config.no_op:
         router_key = f"{ffn_prefix}.router.weight"
-        out_state_dict[router_key] = _prune_hidden_size_dimension(
-            out_state_dict[router_key],
-            new_hidden_size,
-            hidden_size_init_mode,
-            channel_ranking,
-            dim=1,
-        )
+        if router_key in out_state_dict:
+            out_state_dict[router_key] = _prune_hidden_size_dimension(
+                out_state_dict[router_key],
+                new_hidden_size,
+                hidden_size_init_mode,
+                channel_ranking,
+                dim=1,
+            )
         _prune_hidden_size_dimension_mlp(
             f"{ffn_prefix}.shared_expert",
             out_state_dict,
@@ -1132,7 +1255,7 @@ def _prune_hidden_size_dimension_block(
             hidden_size_init_mode,
             channel_ranking,
         )
-        for expert_idx in range(block_config.ffn.moe.num_local_experts):
+        for expert_idx in range(_require_int(moe_config.num_experts, "moe.num_experts")):
             _prune_hidden_size_dimension_mlp(
                 f"{ffn_prefix}.experts.{expert_idx}",
                 out_state_dict,
@@ -1140,7 +1263,7 @@ def _prune_hidden_size_dimension_block(
                 hidden_size_init_mode,
                 channel_ranking,
             )
-    else:
+    elif ffn_config is not None and not ffn_config.no_op:
         _prune_hidden_size_dimension_mlp(
             ffn_prefix, out_state_dict, new_hidden_size, hidden_size_init_mode, channel_ranking
         )

@@ -11,5 +11,5 @@ activation_hooks_kwargs:
 hidden_size_list: [3072, 2048]  # Target hidden sizes to prune to
 hidden_size_init_mode: "PruneByChannelRanking"
 mlp_init_mode: "Truncate" # TODO, make it work with CopyAsIs/FromTeacher
-gqa_init_mode: "AverageKV" # TODO, make it work with CopyAsIs/FromTeacher
+gqa_init_mode: "FirstKV"
 linear_init_mode: "FromTeacher"

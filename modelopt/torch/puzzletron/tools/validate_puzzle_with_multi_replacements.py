@@ -33,21 +33,11 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
 
-from ..anymodel.converter import Converter
 from ..anymodel.model_descriptor import ModelDescriptorFactory
 from ..replacement_library.library import ReplacementLibrary
 from ..replacement_library.replacement_utils import parse_layer_replacement
 from ..utils.parsing import get_nested_key
-from ..utils.validate_runtime_pipeline import perform_pipeline_stitches
-from . import validate_model
-from .checkpoint_utils import copy_tokenizer
-from .checkpoint_utils_hf import load_passthrough_state_dict, save_checkpoint_from_shards
 from .common import resolve_torch_dtype
-from .sharded_checkpoint_utils import load_and_shard_model
-from .validation_utils import (
-    validate_model_and_extract_hidden_states,
-    validate_model_with_teacher_similarity_metrics,
-)
 
 __all__ = ["validate_puzzle_solutions", "load_puzzle_solutions"]
 
@@ -62,7 +52,7 @@ with an args object containing the required attributes. See the function docstri
 
 
 @torch.no_grad()
-def validate_puzzle_solutions(args: DictConfig) -> None:
+def validate_puzzle_solutions(args: DictConfig, hydra_cfg: DictConfig | None = None) -> None:
     """Validate puzzle solutions by applying layer replacements and evaluating model performance.
 
     Args:
@@ -124,12 +114,6 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         args.solutions_to_validate = list(range(len(puzzle_solutions)))
     puzzle_solutions = [puzzle_solutions[i] for i in args.solutions_to_validate]
 
-    tokenizer = _load_tokenizer(args, trust_remote_code=descriptor.requires_trust_remote_code())
-    if not args.skip_validation:
-        val_dataloader = (
-            validate_model.prepare_dataloader(args, tokenizer) if dist.is_master() else None
-        )
-
     output_dir = (
         args.output_dir
         if getattr(args, "output_dir", None) is not None
@@ -142,91 +126,49 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         model_config_overrides={"use_cache": False},
     )
 
-    teacher_hidden_states = None
-    if (args.teacher_dir is not None) and (not args.skip_validation):
-        teacher_model = load_and_shard_model(
-            checkpoint_path=args.teacher_dir, descriptor=descriptor
-        )
-        teacher_model.cuda(dist.local_rank())
-        stitched_model = perform_pipeline_stitches(teacher_model, descriptor=descriptor)
-        teacher_hidden_states = validate_model_and_extract_hidden_states(
-            args,
-            stitched_model,
-            tokenizer,
-            output_dir,
-            model_name="teacher",
-            val_dataloader=val_dataloader,
-        )
-
-        # Properly release CUDA memory after teacher validation
-        teacher_model.cpu()
-        stitched_model.cpu()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        dist.barrier()
-
+    realized_checkpoints: list[tuple[int, Path, dict]] = []
     for i_solution, puzzle_solution in tqdm(
         list(zip(args.solutions_to_validate, puzzle_solutions)), desc="Validating solutions"
     ):
         layer_replacements = _extract_layer_replacements_from_puzzle_solution(puzzle_solution)
-        realizable_as_symlinks = can_realize_as_symlinks(layer_replacements)
-        # realizable_as_symlinks = False
         model_config = replacement_library.create_model_config(layer_replacements)
-        if (args.save_models and not realizable_as_symlinks) or (not args.skip_validation):
-            model = replacement_library.load_model(layer_replacements)
-            model_config = model.config
+        checkpoint_dir = None
 
-        if args.save_models:
+        if args.save_models or not args.skip_validation:
             checkpoint_dir = (
                 args.solutions_path.with_name(f"{args.solutions_path.stem}--checkpoints")
                 / f"solution_{i_solution}"
             )
 
             model_config.dtype = resolve_torch_dtype(getattr(args, "model_dtype", "torch.bfloat16"))
-            Converter.copy_checkpoint_files(args.teacher_dir, checkpoint_dir)
-            passthrough_state_dict = (
-                load_passthrough_state_dict(args.teacher_dir, descriptor)
-                if dist.is_master()
-                else None
-            )
-            if realizable_as_symlinks:
-                if dist.is_master():
-                    # TODO: Loo into internal Puzzleron code to see how to save as symlinks
-                    # save_checkpoint_as_symlinks is currently not supported
-                    pass
-            save_checkpoint_from_shards(
-                model, checkpoint_dir, descriptor, extra_state_dict=passthrough_state_dict
-            )
+            if dist.is_master():
+                from ..identity import stable_hash
 
-            copy_tokenizer(
-                args.tokenizer_name,
-                checkpoint_dir,
-                trust_remote_code=descriptor.requires_trust_remote_code(),
-            )
+                replacement_library.materialize_checkpoint(
+                    layer_replacements,
+                    checkpoint_dir,
+                    model_config=model_config,
+                    overwrite=bool(getattr(args, "overwrite", False)),
+                    solution_identity=stable_hash(puzzle_solution, prefix="mip_solution"),
+                )
+            realized_checkpoints.append((i_solution, checkpoint_dir, puzzle_solution))
 
         dist.barrier()
 
-        if not args.skip_validation:
-            model.cuda(dist.local_rank())
-            stitched_model = perform_pipeline_stitches(model, descriptor=descriptor)
-            validate_model_with_teacher_similarity_metrics(
-                args,
-                stitched_model,
-                tokenizer,
-                teacher_hidden_states,
-                output_dir,
-                model_name=f"solution_{i_solution}",
-                extra_payload={"i_solution": i_solution, "puzzle_solution": puzzle_solution},
-                val_dataloader=val_dataloader,
+    if not args.skip_validation:
+        if hydra_cfg is None:
+            raise ValueError(
+                "AutoModel solution validation requires the full Hydra config; "
+                "call validate_puzzle_solutions(args, hydra_cfg=cfg)"
             )
+        from ..plugins.automodel.validation import validate_realized_checkpoints_automodel
 
-            # Properly release CUDA memory after solution validation
-            model.cpu()
-            stitched_model.cpu()
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
-        dist.barrier()
+        validate_realized_checkpoints_automodel(
+            hydra_cfg,
+            args,
+            realized_checkpoints,
+            output_dir,
+        )
 
 
 def can_realize_as_symlinks(layer_replacements: list[dict]) -> bool:

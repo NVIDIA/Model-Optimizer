@@ -16,6 +16,7 @@
 
 import copy
 import inspect
+import threading
 from contextlib import ExitStack, contextmanager
 from functools import wraps
 from typing import Any, Dict, List
@@ -29,6 +30,8 @@ __all__ = [
     "deci_x_patcher",
     "override_config_with_block_configs",
 ]
+
+_PATCHER_LOCK = threading.RLock()
 
 
 def _get_variable_from_stack(names: list[str]) -> Any:
@@ -67,50 +70,79 @@ def deci_x_patcher(
     if not isinstance(decoder_layer_classes, list):
         decoder_layer_classes = [decoder_layer_classes]
 
-    orig_inits = []
-    for cls in decoder_layer_classes:
-        orig_inits.append(cls.__init__)
-
     block_configs = maybe_cast_block_configs(block_configs)
 
-    @wraps(orig_inits[0])
-    def _patched_decoder_layer_init(self, config, *args, **kwargs):
-        _block_configs = block_configs or getattr(config, "block_configs", None)
-        if _block_configs is None:
-            return orig_inits[decoder_layer_classes.index(self.__class__)](
-                self, config, *args, **kwargs
+    with _PATCHER_LOCK:
+        orig_inits = []
+        for cls in decoder_layer_classes:
+            orig_inits.append(cls.__init__)
+
+        def _orig_init_for(instance):
+            for cls, orig_init in zip(decoder_layer_classes, orig_inits):
+                if isinstance(instance, cls):
+                    return orig_init
+            raise TypeError(
+                f"{type(instance).__name__} is not an instance of a patched decoder layer class"
             )
 
-        _block_configs = maybe_cast_block_configs(_block_configs)
-        layer_idx = _get_variable_from_stack(["layer_idx", "idx"])
-        _block_config = _block_configs[layer_idx]
-        override_block_config = model_descriptor.block_config_to_layer_overrides(_block_config)
-        _config = override_config_with_block_configs(config, override_block_config)
-        orig_inits[decoder_layer_classes.index(self.__class__)](self, _config, *args, **kwargs)
+        @wraps(orig_inits[0])
+        def _patched_decoder_layer_init(self, config, *args, **kwargs):
+            _block_configs = block_configs or getattr(config, "block_configs", None)
+            if _block_configs is None:
+                return _orig_init_for(self)(self, config, *args, **kwargs)
 
-        # Apply no-op post-init
-        if _block_config.attention.no_op:
-            if not model_descriptor.attn_no_op_supported():
-                raise NotImplementedError(
-                    f"attn no-op not supported for `{model_descriptor.__class__.__name__}`, "
-                    "please implement the method: `attn_no_op_post_init()`"
-                )
-            model_descriptor.attn_no_op_post_init(decoder_layer=self)
+            _block_configs = maybe_cast_block_configs(_block_configs)
+            layer_idx = _get_variable_from_stack(["layer_idx", "idx"])
+            # Native models can reuse an HF decoder-layer class for auxiliary
+            # layers outside the backbone, such as Qwen3.5 MTP depths.  Those
+            # indices intentionally have no Puzzletron block config and must
+            # retain their native construction.
+            if not isinstance(layer_idx, int) or not 0 <= layer_idx < len(_block_configs):
+                return _orig_init_for(self)(self, config, *args, **kwargs)
+            _block_config = _block_configs[layer_idx]
+            override_block_config = model_descriptor.block_config_to_layer_overrides(
+                _block_config
+            )
+            _config = override_config_with_block_configs(config, override_block_config)
+            model_descriptor.patch_layer_config(_config, _block_config, layer_idx)
+            # Keep the copied config aligned with the typed context. NemotronH no-op
+            # hooks read back through decoder_layer.config.block_configs after init.
+            _config.block_configs = _block_configs
+            _orig_init_for(self)(self, _config, *args, **kwargs)
 
-        if _block_config.ffn.no_op:
-            if not model_descriptor.mlp_no_op_supported():
-                raise NotImplementedError(
-                    f"mlp no-op not supported for `{model_descriptor.__class__.__name__}`, "
-                    "please implement the method: `mlp_no_op_post_init()`"
-                )
-            model_descriptor.mlp_no_op_post_init(decoder_layer=self)
+            # Apply no-op post-init
+            attention_like_no_op = any(
+                (subblock := _block_config.get_subblock(kind)) is not None and subblock.no_op
+                for kind in ("attention", "mamba")
+            )
+            mlp_like_no_op = any(
+                (subblock := _block_config.get_subblock(kind)) is not None and subblock.no_op
+                for kind in ("ffn", "moe")
+            )
+            if attention_like_no_op:
+                if not model_descriptor.attn_no_op_supported():
+                    raise NotImplementedError(
+                        f"attn no-op not supported for `{model_descriptor.__class__.__name__}`, "
+                        "please implement the method: `attn_no_op_post_init()`"
+                    )
+                model_descriptor.attn_no_op_post_init(decoder_layer=self)
 
-    with ExitStack() as stack:
-        # Patch every decoder layer class
-        for orig_init, cls in zip(orig_inits, decoder_layer_classes):
-            stack.callback(setattr, cls, "__init__", orig_init)  # Restore on exit
-            cls.__init__ = _patched_decoder_layer_init
-        yield
+            if mlp_like_no_op:
+                if not model_descriptor.mlp_no_op_supported():
+                    raise NotImplementedError(
+                        f"mlp no-op not supported for `{model_descriptor.__class__.__name__}`, "
+                        "please implement the method: `mlp_no_op_post_init()`"
+                    )
+                model_descriptor.mlp_no_op_post_init(decoder_layer=self)
+
+        with ExitStack() as stack:
+            # Patch every decoder layer class. The patch is process-global, so keep
+            # construction serialized when runtime-stat workers build benchmark
+            # models concurrently.
+            for orig_init, cls in zip(orig_inits, decoder_layer_classes):
+                stack.callback(setattr, cls, "__init__", orig_init)  # Restore on exit
+                cls.__init__ = _patched_decoder_layer_init
+            yield
 
 
 def override_config_with_block_configs(

@@ -65,6 +65,26 @@ def set_submodule(model: nn.Module, module_name: str, new_submodule: nn.Module) 
     setattr(parent_module, attr, new_submodule)
 
 
+def _live_module_name(descriptor, model: nn.Module, module_name: str) -> str:
+    return descriptor.adapt_module_name_for_model(module_name, model)
+
+
+def _checkpoint_key_aliases(descriptor, model: nn.Module, config, model_keys: Iterable[str]):
+    checkpoint_to_model_key: dict[str, str] = {}
+    checkpoint_keys: list[str] = []
+    for model_key in model_keys:
+        candidates = descriptor.checkpoint_key_candidates_for_model_key(
+            model_key,
+            model=model,
+            config=config,
+        )
+        for checkpoint_key in candidates:
+            if checkpoint_key not in checkpoint_to_model_key:
+                checkpoint_keys.append(checkpoint_key)
+            checkpoint_to_model_key[checkpoint_key] = model_key
+    return checkpoint_keys, checkpoint_to_model_key
+
+
 def create_local_shard_(model, owned_block_indexes: set[int], descriptor, runtime):
     # Get language model config (handles nested configs like Qwen3-VL's text_config)
     lm_config = descriptor.get_language_model_config(model.config)
@@ -74,7 +94,9 @@ def create_local_shard_(model, owned_block_indexes: set[int], descriptor, runtim
 
     unowned_block_indexes = all_block_indexes - owned_block_indexes
     for block_index in unowned_block_indexes:
-        decoder_layer_name = descriptor.layer_block_name(block_index)
+        decoder_layer_name = _live_module_name(
+            descriptor, model, descriptor.layer_block_name(block_index)
+        )
         decoder_layer = model.get_submodule(decoder_layer_name)
         set_submodule(
             model,
@@ -88,14 +110,22 @@ def create_local_shard_(model, owned_block_indexes: set[int], descriptor, runtim
     if not has_first_block and not (has_last_block and model.config.tie_word_embeddings):
         set_submodule(
             model,
-            descriptor.input_embedding_name(),
+            _live_module_name(descriptor, model, descriptor.input_embedding_name()),
             DummyWTE(lm_config.hidden_size, dtype=runtime.dtype),
         )
 
     if not has_last_block:
-        set_submodule(model, descriptor.final_norm_name(), nn.Identity())
+        set_submodule(
+            model,
+            _live_module_name(descriptor, model, descriptor.final_norm_name()),
+            nn.Identity(),
+        )
         if not (model.config.tie_word_embeddings and has_first_block):
-            set_submodule(model, descriptor.output_embedding_name(), DummyLMHead(lm_config))
+            set_submodule(
+                model,
+                _live_module_name(descriptor, model, descriptor.output_embedding_name()),
+                DummyLMHead(lm_config),
+            )
 
     return model
 
@@ -175,10 +205,22 @@ def load_and_shard_model(
                 *[name for name, _ in model_shard.named_parameters()],
                 *[name for name, _ in model_shard.named_buffers()],
             ]
+            checkpoint_keys, checkpoint_to_model_key = _checkpoint_key_aliases(
+                descriptor,
+                model_shard,
+                model_config,
+                shard_keys,
+            )
             shard_state_dict = load_sharded_state_dict(
                 model_name_or_path=str(checkpoint_path),
-                keys_to_load=shard_keys,
+                keys_to_load=checkpoint_keys,
                 device=runtime.device,
+            )
+            shard_state_dict = descriptor.adapt_loaded_state_dict_for_model(
+                shard_state_dict,
+                model=model_shard,
+                config=model_config,
+                checkpoint_to_model_key=checkpoint_to_model_key,
             )
 
             # strict=False: allows missing lm_head.weight when tie_word_embeddings=True (e.g., Llama 3.2 3B)
@@ -199,7 +241,11 @@ def load_and_shard_model(
             if model_config.tie_word_embeddings and has_last_block and not has_first_block:
                 set_submodule(
                     model_shard,
-                    descriptor.input_embedding_name(),
+                    _live_module_name(
+                        descriptor,
+                        model_shard,
+                        descriptor.input_embedding_name(),
+                    ),
                     DummyWTE(
                         descriptor.get_language_model_config(model_config).hidden_size,
                         dtype=runtime.dtype,
@@ -208,6 +254,12 @@ def load_and_shard_model(
         else:
             mprint("Loading state_dict in main process")
             state_dict = load_state_dict(checkpoint_path) if runtime.is_main_process else None
+            if state_dict is not None:
+                state_dict = descriptor.adapt_materialized_state_dict_for_model(
+                    state_dict,
+                    model=model_shard,
+                    config=model_config,
+                )
 
             mprint("Distributing model to shards")
             load_state_dict_to_shards(model_shard=model_shard, loaded_state_dict=state_dict)
@@ -283,7 +335,7 @@ def create_sharded_model(
 def load_state_dict_to_shards(
     model_shard: torch.nn.Module, loaded_state_dict: dict | None = None
 ) -> None:
-    from ..sewing_kit.utils import distributed_isend_obj, distributed_recv_obj
+    from ..utils.distributed_object import distributed_isend_obj, distributed_recv_obj
 
     model_shard.to("meta")
     local_state_dict_keys = list(model_shard.state_dict().keys())
@@ -392,16 +444,17 @@ def load_sharded_state_dict(
     keys_to_load: entire state_dict if None, else partial state_dict containing only these keys
     """
     shard_paths = _resolve_shard_paths(model_name_or_path)
+    keys_to_load_set = None if keys_to_load is None else set(keys_to_load)
     # print(f"shard_paths: {shard_paths}")
     partial_state_dict = {}
     for safetensors_path in shard_paths:
-        if keys_to_load is None:
+        if keys_to_load_set is None:
             shard = safe_load_file(safetensors_path)
             partial_state_dict.update(shard)
         else:
             with safe_open(safetensors_path, framework="pt", device=str(device)) as f:
                 for key in f.keys():  # noqa: SIM118 - safe_open objects require .keys(), not directly iterable
-                    if key in keys_to_load:
+                    if key in keys_to_load_set:
                         partial_state_dict[key] = f.get_tensor(key)
     return partial_state_dict
 

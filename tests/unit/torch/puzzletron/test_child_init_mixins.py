@@ -103,8 +103,10 @@ def test_update_model_config_treats_null_overrides_as_leave_unchanged():
         num_hidden_layers=1,
         block_configs=[
             BlockConfig(
-                attention=AttentionConfig(num_key_value_heads=8),
-                ffn=FFNConfig(intermediate_size=32),
+                subblock_configs=(
+                    AttentionConfig(num_query_heads=16, num_kv_heads=8),
+                    FFNConfig(intermediate_size=32),
+                )
             )
         ],
     )
@@ -113,13 +115,13 @@ def test_update_model_config_treats_null_overrides_as_leave_unchanged():
         config,
         [
             {
-                "attention": {"num_key_value_heads": 4},
+                "attention": {"num_kv_heads": 4},
                 "ffn": None,
             }
         ],
     )
 
     assert updated is not config
-    assert updated.block_configs[0].attention.num_key_value_heads == 4
-    assert updated.block_configs[0].ffn == config.block_configs[0].ffn
-    assert config.block_configs[0].attention.num_key_value_heads == 8
+    assert updated.block_configs[0].require_subblock("attention").num_kv_heads == 4
+    assert updated.block_configs[0].require_subblock("ffn") == config.block_configs[0].require_subblock("ffn")
+    assert config.block_configs[0].require_subblock("attention").num_kv_heads == 8

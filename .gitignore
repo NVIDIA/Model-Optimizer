@@ -35,6 +35,10 @@ docs/source/reference/generated
 env/
 venv/
 
+# Machine-local Puzzletron paths
+examples/puzzletron/configs/clean/my_paths.yaml
+/nv-internal/
+
 # Linters
 **/.mypy_cache
 **/.ruff_cache

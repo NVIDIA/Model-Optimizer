@@ -66,8 +66,29 @@ class MatchingZeros(nn.Module):
     should leave the residual unchanged.
     """
 
-    def forward(self, hidden_states, *args, **kwargs):
+    def forward(self, hidden_states=None, *args, **kwargs):
+        # Native model families do not share one sublayer call signature.  HF
+        # modules commonly use ``hidden_states=`` while native AutoModel blocks
+        # may use ``x=`` (for example Qwen full attention).  A no-op must accept
+        # either spelling so a fully removed block remains callable.
+        if hidden_states is None:
+            for name in ("x", "input", "inputs", "input_tensor", "hidden"):
+                candidate = kwargs.get(name)
+                if candidate is not None:
+                    hidden_states = candidate
+                    break
+        if hidden_states is None:
+            raise TypeError(
+                "MatchingZeros requires an input tensor via a positional argument, "
+                "hidden_states=, or x="
+            )
         return torch.zeros_like(hidden_states)
+
+    def reset_parameters(self, *args, **kwargs):
+        """Satisfy native-model initialization contracts without creating state."""
+
+    def init_weights(self, *args, **kwargs):
+        """Satisfy native-model initialization contracts without creating state."""
 
 
 class Same(nn.Module):
@@ -78,6 +99,12 @@ class Same(nn.Module):
 
     def forward(self, hidden_states, *args, **kwargs):
         return hidden_states
+
+    def reset_parameters(self, *args, **kwargs):
+        """Identity modules have no parameters to initialize."""
+
+    def init_weights(self, *args, **kwargs):
+        """Identity modules have no parameters to initialize."""
 
     @property
     def weight(self):

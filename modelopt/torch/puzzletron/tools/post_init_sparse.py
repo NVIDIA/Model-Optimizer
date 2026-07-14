@@ -62,37 +62,14 @@ class SparsityMethod:
                 print(torch.sum(mask_dict[name]) / mask_dict[name].numel())
 
     def do_sparsity(self, model: nn.Module, mask_dict=None):
-        full_name_layers = []
-        for block_idx, block_config in enumerate(model.config.block_configs):
-            ffn_names = block_config.ffn.sparsify  # layers_to_sparsify_pattern[block_idx]
-            att_name = block_config.attention.sparsify
-            block = model.model.layers[block_idx]
-            if hasattr(block, "mlp"):
-                for name, m in block.mlp.named_modules():
-                    if isinstance(m, torch.nn.Linear) and self.filter_function(name, ffn_names):
-                        full_name_layers.append(
-                            "model.layers." + str(block_idx) + "." + "mlp." + name
-                        )
-            if hasattr(block, "self_attn"):
-                for name, m in block.self_attn.named_modules():
-                    if isinstance(m, torch.nn.Linear) and self.filter_function(name, att_name):
-                        full_name_layers.append(
-                            "model.layers." + str(block_idx) + "." + "self_attn." + name
-                        )
+        if mask_dict is not None:
+            self.apply_masks(model, mask_dict)
+            return
 
-        if mask_dict is None:
-            state_dict_for_sparsifying = {
-                k.rstrip(".weight"): v
-                for k, v in model.state_dict().items()
-                if k.rstrip(".weight") in full_name_layers
-            }
-            mask_dict = self.calculate_masks(state_dict_for_sparsifying)
-        # print('Apply sparsity')
-        # print(full_name_layers)
-        # print(model.state_dict().keys())
-        # print(list(mask_dict.keys()))
-
-        self.apply_masks(model, mask_dict)
+        raise NotImplementedError(
+            "Implicit post-init sparsity from BlockConfig.sparsify is not supported by the "
+            "strict BlockConfig schema. Pass an explicit mask_dict to do_sparsity instead."
+        )
 
 
 class SparsityMethod2o4(SparsityMethod):
