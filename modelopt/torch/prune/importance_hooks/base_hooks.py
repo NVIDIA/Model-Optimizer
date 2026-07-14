@@ -16,6 +16,7 @@
 
 import gc
 import json
+import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,9 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
+
+# Set ACTIVATION_SCORE_DEBUG=N to print per-rank activation stats for the first N iterations.
+_DBG_ITERS = int(os.environ.get("ACTIVATION_SCORE_DEBUG", "0"))
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils import json_dump, safe_load
@@ -151,7 +155,16 @@ class ForwardHook(ABC):
         if rank == 0:
             if args.activation_hooks_kwargs is not None:
                 args.activation_hooks_kwargs.pop("model", None)
-            json_dump(OmegaConf.to_container(args, resolve=True), activations_log_dir / "args.json")
+            from omegaconf import OmegaConf as _OC
+            if _OC.is_config(args):
+                args_serializable = _OC.to_container(args, resolve=True)
+            else:
+                # Plain dict (e.g. from the benchmark harness): keep only JSON-safe primitives.
+                args_serializable = {
+                    k: v for k, v in (args.items() if hasattr(args, "items") else vars(args).items())
+                    if isinstance(v, (str, int, float, bool, type(None), list, dict))
+                }
+            json_dump(args_serializable, activations_log_dir / "args.json")
         dist.barrier()
 
         print(f"Dumped final activations log to {activations_log_path}")
@@ -386,6 +399,7 @@ class IterativeChannelContributionHook(ForwardHook):
     def __init__(self, linear_layer: nn.Module, activation_hooks_kwargs: dict):
         """Initialize the iterative channel contribution hook."""
         self.weight_matrix = linear_layer.weight
+        self._debug_name: str = ""  # set by the caller to the layer name for debug prints
 
         # Check if it's a RowParallelLinear (Megatron-Core) or nn.Linear (PyTorch)
         # TODO: Consider better design to handle RowParallelLinear and nn.Linear
@@ -429,13 +443,29 @@ class IterativeChannelContributionHook(ForwardHook):
         else:
             output_tensor = output
 
-        activations = args[0]
+        activations = args[0].float()
+
+        if _DBG_ITERS > 0 and self.curr_iter < _DBG_ITERS:
+            import torch.distributed as _tdist
+            gr = _tdist.get_rank() if _tdist.is_initialized() else 0
+            print(
+                f"[DBG:skit rank={gr}] {self._debug_name}  iter={self.curr_iter}  "
+                f"input: shape={tuple(activations.shape)}  "
+                f"|act|.mean={activations.abs().float().mean().item():.5f}",
+                flush=True,
+            )
 
         n_channels_to_prune = self.pruning_schedule[self.curr_iter]
 
+        # Compute the contribution in float32: c = sum(w^2) and the final sqrt are otherwise bf16,
+        # whose ~0.2% rounding randomizes the order of the densely-packed near-tied channels (the
+        # independent scorer already uses a float32 weight norm, which is why it matched). Recompute
+        # the reference (unpruned) output via F.linear so it is consistent with output_curr.
+        weight = self.weight_matrix.float()
+        output_tensor = F.linear(activations, weight)  # full (unpruned) reference output, float32
         curr_activations = activations.clone()  # Shape B,T,I
         curr_activations[..., self.pruned_channels] = 0
-        output_curr = F.linear(input=curr_activations, weight=self.weight_matrix)  # Shape B,T,E
+        output_curr = F.linear(input=curr_activations, weight=weight)  # Shape B,T,E
 
         if self.calibration_method is None:
             scaling_factor_per_token = torch.ones_like(output_tensor[..., 0])  # Shape B,T
@@ -451,22 +481,38 @@ class IterativeChannelContributionHook(ForwardHook):
 
         s = scaling_factor_per_token.unsqueeze(-1) * output_tensor - output_curr  # Shape: (B, T, E)
         s_squared_per_token = torch.sum(s**2, dim=-1)  # Shape: (B, T)
-        b = s @ self.weight_matrix  # Shape: (B, T, I)
-        c = torch.sum(self.weight_matrix**2, dim=0)  # Shape: (I)
+        b = s @ weight  # Shape: (B, T, I)
+        c = torch.sum(weight**2, dim=0)  # Shape: (I)
         del s, output_curr
         clear_gpu_memory(clear=self.clear_gpu_memory)
 
         contribution_squared = (
             s_squared_per_token.unsqueeze(2) + 2 * activations * b + (activations**2) * c
         )  # Shape: (B, T, I)
+        _n_tokens_dbg = activations.shape[0] * activations.shape[1]
         del s_squared_per_token, b, c, activations
         clear_gpu_memory(clear=self.clear_gpu_memory)
 
         contribution = torch.sqrt(contribution_squared + self.epsilon)  # Shape: (B, T, I)
-        mean_cont_per_channel = torch.mean(contribution, dim=(0, 1))  # Shape: (I)
-        mean_cont_per_channel[self.pruned_channels] = torch.inf
+        # Accumulate in float64 to avoid bfloat16/fp32 rounding swapping tied-boundary channels.
+        mean_cont_per_channel = contribution.mean(dim=(0, 1), dtype=torch.float64).float()  # Shape: (I)
         del contribution, contribution_squared
         clear_gpu_memory(clear=self.clear_gpu_memory)
+
+        if _DBG_ITERS > 0 and self.curr_iter < _DBG_ITERS:
+            import torch.distributed as _tdist
+            gr = _tdist.get_rank() if _tdist.is_initialized() else 0
+            finite = mean_cont_per_channel[mean_cont_per_channel.isfinite()]
+            print(
+                f"[DBG:skit rank={gr}] {self._debug_name}  iter={self.curr_iter}  "
+                f"mean_cont(before inf-mask): mean={finite.mean().item():.5f} "
+                f"std={finite.std().item():.5f} norm={finite.norm().item():.5f}  "
+                f"n_tokens={_n_tokens_dbg}  "
+                f"bottom3_ch={mean_cont_per_channel.topk(3, largest=False).indices.tolist()}",
+                flush=True,
+            )
+
+        mean_cont_per_channel[self.pruned_channels] = torch.inf
 
         self.agg_cont_per_channel += mean_cont_per_channel
         if n_channels_to_prune > 0:

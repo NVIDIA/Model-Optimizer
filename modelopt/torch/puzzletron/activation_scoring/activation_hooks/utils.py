@@ -75,7 +75,14 @@ def register_activation_hooks(
             "block_config": block_config,
         }
 
-        hook = hook_class(module, curr_activation_hooks_kwargs)
+        try:
+            hook = hook_class(module, curr_activation_hooks_kwargs)
+        except TypeError:
+            # Some hooks take only the module, not the activation_hooks_kwargs dict
+            # (e.g. IndependentChannelContributionHook, the minitron one-shot FFN scorer).
+            hook = hook_class(module)
+        if hasattr(hook, "_debug_name"):
+            hook._debug_name = module_name
         module.register_forward_hook(hook)
         activation_hooks[module_name] = hook
 
