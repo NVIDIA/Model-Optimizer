@@ -24,9 +24,11 @@ DISJOINT slice and (b) the legacy and AutoModel backends observe the SAME set of
 Check it with, e.g.::
 
     # union of all automodel ranks == union of all legacy ranks (same samples)?
-    cat $DIR/automodel_rank*.txt | grep -o 'hash=[0-9a-f]*' | sort -u > /tmp/am.txt
-    cat $DIR/legacy_rank*.txt    | grep -o 'hash=[0-9a-f]*' | sort -u > /tmp/lg.txt
-    diff /tmp/am.txt /tmp/lg.txt && echo "SAME SAMPLE SET"
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
+    cat $DIR/automodel_rank*.txt | grep -o 'hash=[0-9a-f]*' | sort -u > "$tmp_dir/am.txt"
+    cat $DIR/legacy_rank*.txt    | grep -o 'hash=[0-9a-f]*' | sort -u > "$tmp_dir/lg.txt"
+    diff "$tmp_dir/am.txt" "$tmp_dir/lg.txt" && echo "SAME SAMPLE SET"
     # per dp rank disjoint? (no hash appears for two different dp ranks)
     grep -h . $DIR/automodel_rank*.txt | sed -E 's/.*(dp=[0-9]+).*(hash=[0-9a-f]+)/\2 \1/' | sort | uniq -c | sort -rn | head
 """

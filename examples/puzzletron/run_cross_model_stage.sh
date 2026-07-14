@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT=/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen
-CAMPAIGN_ROOT=${ROOT}/puzzle_runs/clean/acceptance/2026-07-06-cross-model-stage-matrix
+SCRIPT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+ROOT=${PUZZLETRON_ROOT:-${SCRIPT_ROOT}}
+CAMPAIGN_ROOT=${PUZZLETRON_CAMPAIGN_ROOT:-${ROOT}/puzzle_runs/clean/acceptance/cross-model-stage-matrix}
 MODEL_ID=${1:?usage: run_cross_model_stage.sh MODEL_ID STAGE}
 STAGE=${2:?usage: run_cross_model_stage.sh MODEL_ID STAGE}
 EXTRA_ARGS=("${@:3}")
@@ -12,9 +13,12 @@ MAIN=${ROOT}/examples/puzzletron/main.py
 PUZZLETRON_VENV=${PUZZLETRON_VENV:-"${ROOT}/.venv"}
 
 if [[ "${PUZZLETRON_ENV_READY:-0}" != 1 ]]; then
-  source /shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/setup-envs.sh
+  if [[ -n "${PUZZLETRON_SETUP_ENV:-}" ]]; then
+    source "${PUZZLETRON_SETUP_ENV}"
+  fi
   source "${PUZZLETRON_VENV}/bin/activate"
 fi
+export PUZZLETRON_SETUP_ENV=${PUZZLETRON_SETUP_ENV:-}
 # The NeMo container may expose a different CUDA-major PyTorch under
 # /usr/local than the active venv.  Native extensions such as Transformer
 # Engine have unversioned libtorch dependencies, so resolve those from the
@@ -103,9 +107,11 @@ payload = {
         "modelopt_dirty": bool(git(repo, "status", "--porcelain")),
         "automodel_head": git(automodel, "rev-parse", "HEAD"),
         "automodel_dirty": bool(git(automodel, "status", "--porcelain")),
-        "setup_env_sha256": sha(Path(
-            "/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/setup-envs.sh"
-        )),
+        "setup_env_sha256": (
+            sha(Path(os.environ["PUZZLETRON_SETUP_ENV"]))
+            if os.environ.get("PUZZLETRON_SETUP_ENV")
+            else None
+        ),
     },
     "log": str(log),
 }

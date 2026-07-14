@@ -14,7 +14,9 @@ OVERRIDES=("$@")
 
 SCRIPT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ROOT=${PUZZLETRON_ROOT:-${SLURM_SUBMIT_DIR:-"${SCRIPT_ROOT}"}}
-IMAGE=${PUZZLETRON_IMAGE:-/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/images/nvidia+nemo+26.04.01.sqsh}
+: "${PUZZLETRON_IMAGE:?export PUZZLETRON_IMAGE with the container image path}"
+: "${PUZZLETRON_CONTAINER_MOUNTS:?export PUZZLETRON_CONTAINER_MOUNTS for the container}"
+IMAGE=${PUZZLETRON_IMAGE}
 LOG_DIR=${PUZZLETRON_LOG_DIR:-"${ROOT}/puzzle_runs/logs"}
 NPROC_PER_NODE=${NPROC_PER_NODE:-8}
 
@@ -25,6 +27,7 @@ mkdir -p "${LOG_DIR}"
 MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 MASTER_PORT=${MASTER_PORT:-$((29500 + SLURM_JOB_ID % 1000))}
 export ROOT STAGE CONFIG_PATH RECIPE_PATH LOG_DIR NPROC_PER_NODE MASTER_ADDR MASTER_PORT
+export PUZZLETRON_SETUP_ENV=${PUZZLETRON_SETUP_ENV:-}
 
 srun_args=(--nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1)
 if [[ "${PUZZLETRON_SRUN_EXCLUSIVE:-0}" == "1" ]]; then
@@ -33,12 +36,12 @@ fi
 
 srun "${srun_args[@]}" \
   --container-image="${IMAGE}" \
-  --container-mounts=/shared:/shared \
+  --container-mounts="${PUZZLETRON_CONTAINER_MOUNTS}" \
   --container-workdir="${ROOT}" \
   --mpi=pmix \
   /bin/bash -lc '
 set -Eeuo pipefail
-source /shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/setup-envs.sh
+if [[ -n "${PUZZLETRON_SETUP_ENV:-}" ]]; then source "${PUZZLETRON_SETUP_ENV}"; fi
 source "${ROOT}/.venv/bin/activate"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1

@@ -47,8 +47,8 @@ def convert_model(
 
     Example:
         >>> convert_model(
-        ...     input_dir="/path/to/Llama-3.1-8B-Instruct",
-        ...     output_dir="/path/to/output/ckpts/teacher",
+        ...     input_dir="models/Llama-3.1-8B-Instruct",
+        ...     output_dir="puzzle_runs/output/ckpts/teacher",
         ...     converter="llama",
         ... )
     """

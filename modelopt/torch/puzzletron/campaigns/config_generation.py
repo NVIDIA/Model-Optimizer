@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,13 +20,9 @@ from .schema import CampaignModel, CrossModelCampaign
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _BASE_CONFIG = _REPO_ROOT / "examples/puzzletron/configs/clean/base.yaml"
-_TEXT_DATASET = Path(
-    "/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/"
-    "Puzzle-KD-Nemotron-Post-Training-Dataset-v2"
-)
-_VLM_DATASET = _REPO_ROOT / (
-    "puzzle_runs/clean/acceptance/2026-07-06-qwen35-packed-multimodal-embedding/"
-    "data/intersyn-8-plus-8"
+_TEXT_DATASET = Path(os.environ.get("PUZZLETRON_TEXT_DATASET", "data/puzzle_kd_text"))
+_VLM_DATASET = Path(
+    os.environ.get("PUZZLETRON_MULTIMODAL_DATASET", "data/pinned_intersyn")
 )
 
 ConfigLoader = Callable[[CampaignModel, ModelPreflight], Any]

@@ -12,6 +12,7 @@ import signal
 import shutil
 import socket
 import subprocess  # nosec B404
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -60,7 +61,12 @@ def _free_port() -> int:
 
 def _short_tokenizer_alias(checkpoint_dir: Path, artifact_dir: Path) -> Path:
     """Return a node-local alias that stays below HF cache component limits."""
-    root = Path(os.environ.get("AIPERF_TOKENIZER_ALIAS_DIR", "/tmp/puzzletron-aiperf-tokenizers"))
+    root = Path(
+        os.environ.get(
+            "AIPERF_TOKENIZER_ALIAS_DIR",
+            str(Path(tempfile.gettempdir()) / "puzzletron-aiperf-tokenizers"),
+        )
+    )
     root.mkdir(parents=True, exist_ok=True)
     alias_hash = stable_hash(
         {"checkpoint": str(checkpoint_dir), "artifact": str(artifact_dir)},

@@ -15,7 +15,9 @@ TASK_COUNT=${SLURM_NTASKS:-1}
 JOB_ID=${SLURM_JOB_ID:-local}
 
 cd "${ROOT}"
-source /shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/setup-envs.sh
+if [[ -n "${PUZZLETRON_SETUP_ENV:-}" ]]; then
+  source "${PUZZLETRON_SETUP_ENV}"
+fi
 source .venv/bin/activate
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1

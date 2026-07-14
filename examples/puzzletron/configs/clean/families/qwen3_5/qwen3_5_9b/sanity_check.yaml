@@ -6,13 +6,13 @@ defaults:
 
 # Keep this campaign independent from the full-pipeline run while retaining its
 # model, data, topology, and recipe settings through the parent overlay.
-puzzle_dir: /shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/puzzle_runs/qwen3_5/qwen3_5_9b/sanity_check
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs}/qwen3_5/qwen3_5_9b/sanity_check
 display_name: Qwen3.5-9B - Sanity Check
 
 # Import these immutable bundles with import_campaign_artifacts.py before running
 # the enabled stages. Bypass evidence is deliberately report-only.
 artifact_import:
-  source_root: /shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/puzzle_runs/qwen3_5/qwen3_5_9b/full_pipeline
+  source_root: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs}/qwen3_5/qwen3_5_9b/full_pipeline
   bundles: [width_importance, depth_importance, vllm_stats, replacement_scoring, bypass]
   bypass_evidence_report_only: true
 

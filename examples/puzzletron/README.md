@@ -204,6 +204,18 @@ On Slurm, map one distributed model task per node or launch explicit independent
 on bare metal, use passwordless SSH, shared storage at identical paths, deterministic rank
 mapping, per-host logs/PIDs, and complete peer cleanup after a failure.
 
+The supplied container launchers take machine-local values from the environment rather
+than embedding filesystem paths:
+
+```bash
+export PUZZLETRON_IMAGE="path/to/container.sqsh"
+export PUZZLETRON_CONTAINER_MOUNTS="shared:shared"
+export PUZZLETRON_SETUP_ENV="path/to/optional-setup-env.sh"  # optional
+export PUZZLETRON_RUN_ROOT="puzzle_runs"                     # optional
+```
+
+Keep concrete values in an ignored machine-local script or scheduler export file.
+
 ## Stage Correctness
 
 ### Conversion and data
@@ -291,7 +303,7 @@ from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
     generate_campaign_progress_report,
 )
 
-result = generate_campaign_progress_report("/path/to/experiment", model_name="Model name")
+result = generate_campaign_progress_report("puzzle_runs/experiment", model_name="Model name")
 print(result)
 PY
 ```

@@ -8,10 +8,13 @@ fi
 
 config=$(realpath -m "$1")
 root=${PUZZLETRON_ROOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}
-image=${PUZZLETRON_IMAGE:-/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/images/nvidia+nemo+26.04.01.sqsh}
+: "${PUZZLETRON_IMAGE:?export PUZZLETRON_IMAGE with the container image path}"
+: "${PUZZLETRON_CONTAINER_MOUNTS:?export PUZZLETRON_CONTAINER_MOUNTS for the container}"
+image=${PUZZLETRON_IMAGE}
 log_dir=${PUZZLETRON_LOG_DIR:-${root}/.runtime/sanity_logs}
 mkdir -p "$log_dir"
 export PUZZLETRON_ROOT="$root" PUZZLETRON_LOG_DIR="$log_dir"
+export PUZZLETRON_SETUP_ENV=${PUZZLETRON_SETUP_ENV:-}
 
 srun \
   --exclusive \
@@ -22,12 +25,12 @@ srun \
   --gpus-per-task=2 \
   --gpu-bind=none \
   --container-image="$image" \
-  --container-mounts=/shared:/shared \
+  --container-mounts="${PUZZLETRON_CONTAINER_MOUNTS}" \
   --container-workdir="$root" \
   --mpi=pmix \
   /bin/bash -lc '
 set -Eeuo pipefail
-source /shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/setup-envs.sh
+if [[ -n "${PUZZLETRON_SETUP_ENV:-}" ]]; then source "${PUZZLETRON_SETUP_ENV}"; fi
 source "${PUZZLETRON_ROOT}/.venv/bin/activate"
 export PYTHONPATH="${PUZZLETRON_ROOT}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
@@ -42,12 +45,12 @@ srun \
   --ntasks=1 \
   --gpus-per-task=1 \
   --container-image="$image" \
-  --container-mounts=/shared:/shared \
+  --container-mounts="${PUZZLETRON_CONTAINER_MOUNTS}" \
   --container-workdir="$root" \
   --mpi=pmix \
   /bin/bash -lc '
 set -Eeuo pipefail
-source /shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/setup-envs.sh
+if [[ -n "${PUZZLETRON_SETUP_ENV:-}" ]]; then source "${PUZZLETRON_SETUP_ENV}"; fi
 source "${PUZZLETRON_ROOT}/.venv/bin/activate"
 export PYTHONPATH="${PUZZLETRON_ROOT}:${PYTHONPATH:-}"
 python examples/puzzletron/run_axis_diagnostic_worker.py --config "$1" --finalize 2>&1 \

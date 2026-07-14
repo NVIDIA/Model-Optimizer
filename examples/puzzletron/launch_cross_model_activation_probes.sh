@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT=/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen
-CAMPAIGN_ROOT=${ROOT}/puzzle_runs/clean/acceptance/2026-07-06-cross-model-stage-matrix
+SCRIPT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+ROOT=${PUZZLETRON_ROOT:-${SCRIPT_ROOT}}
+CAMPAIGN_ROOT=${PUZZLETRON_CAMPAIGN_ROOT:-${ROOT}/puzzle_runs/clean/acceptance/cross-model-stage-matrix}
 PREFLIGHT=${CAMPAIGN_ROOT}/campaign/preflight.json
 RUNNER=${ROOT}/examples/puzzletron/run_cross_model_stage.sh
 INVENTORY=${ROOT}/examples/puzzletron/cross_model_campaign_inventory.py
-IMAGE=/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/images/nvidia+nemo+26.04.01.sqsh
+: "${PUZZLETRON_IMAGE:?export PUZZLETRON_IMAGE with the container image path}"
+: "${PUZZLETRON_CONTAINER_MOUNTS:?export PUZZLETRON_CONTAINER_MOUNTS for the container}"
+IMAGE=${PUZZLETRON_IMAGE}
 
 mapfile -t MODEL_ROWS < <(
   inventory_args=("${PREFLIGHT}")
@@ -37,7 +40,7 @@ PY
 
   srun_args=(
     -p interactive -t 1:00:00 -A coreai_dlalgo_llm
-    --container-image "${IMAGE}" --container-mounts /shared:/shared
+    --container-image "${IMAGE}" --container-mounts "${PUZZLETRON_CONTAINER_MOUNTS}"
     --container-workdir "${ROOT}" --mpi=pmix
     --nodes="${nodes}" --ntasks="${nodes}" --ntasks-per-node=1
     --gres="gpu:${gpus_per_node}"

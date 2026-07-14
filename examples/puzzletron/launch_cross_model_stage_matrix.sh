@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT=/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen
+SCRIPT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+ROOT=${PUZZLETRON_ROOT:-${SCRIPT_ROOT}}
 CAMPAIGN=${ROOT}/examples/puzzletron/configs/clean/campaigns/cross_model_stage_matrix.yaml
-CAMPAIGN_ROOT=${ROOT}/puzzle_runs/clean/acceptance/2026-07-06-cross-model-stage-matrix
+CAMPAIGN_ROOT=${PUZZLETRON_CAMPAIGN_ROOT:-${ROOT}/puzzle_runs/clean/acceptance/cross-model-stage-matrix}
 PREFLIGHT=${CAMPAIGN_ROOT}/campaign/preflight.json
 RUNNER=${ROOT}/examples/puzzletron/run_cross_model_stage.sh
 RESUME=${ROOT}/examples/puzzletron/acceptance_resume.py
-IMAGE=/shared/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/gkarch/images/nvidia+nemo+26.04.01.sqsh
+: "${PUZZLETRON_IMAGE:?export PUZZLETRON_IMAGE with the container image path}"
+: "${PUZZLETRON_CONTAINER_MOUNTS:?export PUZZLETRON_CONTAINER_MOUNTS for the container}"
+IMAGE=${PUZZLETRON_IMAGE}
 PARTITION=interactive
 ACCOUNT=coreai_dlalgo_llm
 TIME_LIMIT=3:50:00
@@ -74,7 +77,7 @@ for stage in "${STAGES[@]}"; do
 
     srun_args=(
       -p "${PARTITION}" -t "${TIME_LIMIT}" -A "${ACCOUNT}"
-      --container-image "${IMAGE}" --container-mounts /shared:/shared
+      --container-image "${IMAGE}" --container-mounts "${PUZZLETRON_CONTAINER_MOUNTS}"
       --container-workdir "${ROOT}" --mpi=pmix
     )
     case "${stage}" in
