@@ -19,6 +19,9 @@
 import copy
 import dataclasses
 import json
+import math
+import os
+from collections.abc import Mapping
 from functools import partial
 from itertools import product
 from pathlib import Path
@@ -34,26 +37,186 @@ from transformers import PretrainedConfig
 from modelopt.torch.utils import json_dump
 
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
-from ..block_config import AttentionConfig, BlockConfig, FFNConfig, SubblockConfig
+from ..block_config import SUBBLOCK_CLS_DICT, BlockConfig, FFNConfig, SubblockConfig
 from ..replacement_library.replacement_utils import parse_layer_replacement
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
 from ..utils.parsing import format_global_config
 from .calc_subblock_params_and_memory import (
     calc_subblock_active_params,
+    calculate_additive_metrics,
     calculate_non_block_memory,
     calculate_non_block_params,
     calculate_subblock_memory,
     calculate_subblock_params,
 )
+from .runtime_vllm import RuntimeMeasurement
 
 __all__ = [
     "calculate_subblock_stats",
     "launch_calc_subblock_stats",
 ]
 
+
+def _freeze_stats_args(value):
+    """Return a recursively hashable key for JSON-compatible stats arguments."""
+    if isinstance(value, Mapping):
+        return tuple(
+            sorted((str(key), _freeze_stats_args(item)) for key, item in value.items())
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_stats_args(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted(_freeze_stats_args(item) for item in value))
+    return value
+
 # Type variable for dataclasses
 T_DataClass = TypeVar("T_DataClass")
+
+_SUBBLOCK_KINDS = ("attention", "mla", "mamba", "ffn", "moe")
+_ATTENTION_LIKE_KINDS = frozenset(("attention", "mla", "mamba"))
+_FFN_LIKE_KINDS = frozenset(("ffn", "moe"))
+_NON_BLOCK_PARAM_CACHE: dict[tuple[str, str, int], int] = {}
+
+
+def _runtime_measurement_fields(
+    measurement: RuntimeMeasurement | None,
+    *,
+    generation_seq_len: int,
+) -> dict:
+    """Flatten a typed timing measurement into the stable stats schema."""
+    if measurement is None:
+        return {
+            "runtime_ms": None,
+            "prefill_runtime_ms": None,
+            "decode_runtime_ms": None,
+            "decode_runtime_ms_per_token": None,
+            "latency_difference_negative": None,
+            "additive_metric_provenance": {},
+        }
+    return {
+        "runtime_ms": measurement.total_ms,
+        "prefill_runtime_ms": measurement.prefill_ms,
+        "decode_runtime_ms": measurement.decode_ms,
+        "decode_runtime_ms_per_token": measurement.decode_ms_per_token(
+            generation_seq_len
+        ),
+        "latency_difference_negative": measurement.decode_ms < 0,
+        "additive_metric_provenance": {
+            "runtime_ms": "vllm_measured",
+            "prefill_runtime_ms": "vllm_measured_prompt_plus_one_output",
+            "decode_runtime_ms": "combined_minus_prefill",
+            "decode_runtime_ms_per_token": (
+                "combined_minus_prefill_per_remaining_output"
+            ),
+        },
+    }
+
+
+def _subblock_identity(subblock: SubblockConfig | dict) -> str:
+    payload = subblock.to_dict() if isinstance(subblock, SubblockConfig) else subblock
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _select_runtime_subblock_configs(
+    available: list[immutabledict[str, SubblockConfig]],
+    manifest: dict,
+) -> list[immutabledict[str, SubblockConfig]]:
+    """Resolve a layer-independent sparse runtime view over a canonical library."""
+
+    selected_payloads = [row.get("subblock_config") for row in manifest.get("selected", [])]
+    if not manifest.get("identity") or not selected_payloads:
+        raise ValueError("sparse runtime manifest must have an identity and selected subblocks")
+    if any(payload is None for payload in selected_payloads):
+        raise ValueError("sparse runtime manifest contains a block-level selection")
+
+    available_by_identity = {
+        _subblock_identity(row["subblock_config"]): row["subblock_config"]
+        for row in available
+    }
+    selected_by_identity: dict[str, SubblockConfig] = {}
+    for payload in selected_payloads:
+        identity = _subblock_identity(payload)
+        if identity not in available_by_identity:
+            raise ValueError(
+                "sparse runtime subblock is not present in the canonical library: "
+                f"{payload}"
+            )
+        selected_by_identity[identity] = available_by_identity[identity]
+    return [
+        immutabledict(
+            {"subblock_config": subblock, "parent_layer_indices": (-1,)}
+        )
+        for subblock in sorted(selected_by_identity.values())
+    ]
+
+
+def _validate_sparse_runtime_settings(runtime_stats_config: Mapping) -> None:
+    if runtime_stats_config.get("granularity", "subblock") != "subblock":
+        raise ValueError("sparse runtime collection requires subblock granularity")
+    if (
+        int(runtime_stats_config.get("num_warmup_iters", -1)) != 2
+        or int(runtime_stats_config.get("num_iters", -1)) != 3
+    ):
+        raise ValueError(
+            "sparse runtime collection requires num_warmup_iters=2 and num_iters=3"
+        )
+
+
+def _checkpoint_non_block_params(
+    teacher_dir: Path,
+    descriptor: Type[ModelDescriptor],
+    num_layers: int,
+) -> int | None:
+    """Count every checkpoint tensor not owned by a decoder subblock.
+
+    This includes ViT, projector, embeddings/head, MTP, and family-specific
+    fixed tensors, so width-specific parameter constraints match physically
+    materialized multimodal checkpoints instead of an LM-only estimate.
+    """
+    cache_key = (str(Path(teacher_dir).resolve()), descriptor.__name__, int(num_layers))
+    if cache_key in _NON_BLOCK_PARAM_CACHE:
+        return _NON_BLOCK_PARAM_CACHE[cache_key]
+    try:
+        from safetensors import safe_open
+
+        from ..pruning.sorted_teacher import iter_safetensor_weight_files
+
+        predicates = descriptor.layer_name_predicates(int(num_layers))
+        block_patterns = [
+            pattern for name, pattern in predicates.items() if str(name).startswith("block_")
+        ]
+        total = 0
+        for relative in iter_safetensor_weight_files(teacher_dir):
+            with safe_open(str(Path(teacher_dir) / relative), framework="pt") as handle:
+                for key in handle.keys():
+                    if any(pattern.fullmatch(key) for pattern in block_patterns):
+                        continue
+                    shape = handle.get_slice(key).get_shape()
+                    total += math.prod(int(dim) for dim in shape)
+        _NON_BLOCK_PARAM_CACHE[cache_key] = int(total)
+        return int(total)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        return None
+
+
+def _block_config_from_subblocks(*subblocks: SubblockConfig | None) -> BlockConfig:
+    return BlockConfig(subblock_configs=tuple(subblock for subblock in subblocks if subblock))
+
+
+def _runtime_measurement_noop(subblock: SubblockConfig) -> SubblockConfig:
+    """Return a timing-only zero-cost baseline without adding it to the library.
+
+    Width-search libraries are allowed to be strictly no-op-free.  Marginal
+    block timing still needs one disabled mixer and one disabled FFN reference,
+    so synthesize those references only inside the runtime experiment.
+    """
+    return SUBBLOCK_CLS_DICT[subblock.kind](
+        kind=subblock.kind,
+        name=subblock.name,
+        no_op=True,
+    )
+
 
 """
 Usage:
@@ -71,7 +234,7 @@ def calculate_subblock_stats(
     model_config: PretrainedConfig,
     descriptor: Type[ModelDescriptor],
     master_puzzle_dir: Path,
-    subblock_configs: list[immutabledict[str, AttentionConfig | FFNConfig]],
+    subblock_configs: list[immutabledict[str, SubblockConfig]],
     batch_size: int,
     prefill_seq_len: int,
     generation_seq_len: int,
@@ -83,11 +246,33 @@ def calculate_subblock_stats(
     weights_dtype: torch.dtype,
     activations_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
+    runtime_selection_identity: str | None = None,
 ) -> dict:
+    runtime_granularity = "subblock"
+    runtime_stats_config = (
+        calc_subblock_stats_config.get("runtime_stats", {}) if runtime_stats_enabled else {}
+    )
+    if runtime_stats_enabled and not descriptor.runtime_benchmark_supported():
+        mprint(
+            f"Runtime stats requested, but {descriptor.__name__} does not implement "
+            "synthetic vLLM benchmark models; continuing with params/memory stats only."
+        )
+        runtime_stats_enabled = False
     if runtime_stats_enabled:
         from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
+            calc_runtime_for_blocks,
             calc_runtime_for_subblocks,
         )
+
+        runtime_granularity = calc_subblock_stats_config.get("runtime_stats", {}).get(
+            "granularity", "subblock"
+        )
+        if runtime_granularity not in ("subblock", "block"):
+            raise ValueError(
+                f"runtime_stats.granularity must be 'subblock' or 'block', got "
+                f"{runtime_granularity!r}. 'subblock' times attention/ffn separately; 'block' times "
+                "the whole block (attn+ffn) together for interaction-aware costs."
+            )
 
     gpu = None if not torch.cuda.is_available() else torch.cuda.get_device_name()
     subblock_stats = {
@@ -100,10 +285,32 @@ def calculate_subblock_stats(
             n_head=n_head,
             vocab_size=vocab_size,
             runtime_stats=runtime_stats_enabled,
+            runtime_granularity=runtime_granularity if runtime_stats_enabled else None,
             use_cuda_graph=use_cuda_graph,
             weights_dtype=str(weights_dtype),
             activations_dtype=str(activations_dtype),
             kv_cache_dtype=str(kv_cache_dtype),
+            runtime_backend=runtime_stats_config.get("backend") if runtime_stats_enabled else None,
+            num_iters=runtime_stats_config.get("num_iters", 30) if runtime_stats_enabled else None,
+            num_warmup_iters=(
+                runtime_stats_config.get("num_warmup_iters", 10) if runtime_stats_enabled else None
+            ),
+            max_num_seqs=(
+                runtime_stats_config.get("max_num_seqs") if runtime_stats_enabled else None
+            ),
+            repeat_block_n_times=(
+                max(2, int(runtime_stats_config.get("repeat_block_n_times", 10)))
+                if runtime_stats_enabled
+                else None
+            ),
+            vllm_args=(
+                [str(arg) for arg in runtime_stats_config.get("vllm_args", [])]
+                if runtime_stats_enabled
+                else None
+            ),
+            runtime_selection_identity=(
+                runtime_selection_identity if runtime_stats_enabled else None
+            ),
         ),
         "non_block": dict(),
         "subblocks": list(),
@@ -114,11 +321,9 @@ def calculate_subblock_stats(
             [subblock_config["subblock_config"] for subblock_config in subblock_configs]
         )
 
-        runtime_stats_config = calc_subblock_stats_config.get("runtime_stats", {})
         lm_config = descriptor.get_language_model_config(model_config)
 
-        runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_for_subblocks(
-            subblock_config_set=subblock_configs_nolayerindex,
+        _runtime_common = dict(
             runtime_stats_config=runtime_stats_config,
             vocab_size=vocab_size,
             hidden_size=n_embd,
@@ -132,6 +337,126 @@ def calculate_subblock_stats(
             batch_size=batch_size,
             cache_dir=Path(master_puzzle_dir) / "runtime_cache",
         )
+        if runtime_granularity == "block":
+            # Block-level timing: build the cross-product of unique (attn, ffn) subblock configs
+            # seen in the library and benchmark each (attn, ffn) pair together in one vLLM call.
+            # This is more accurate than summing independent subblock timings.
+            _attn_set = {
+                sc["subblock_config"]
+                for sc in subblock_configs
+                if sc["subblock_config"].kind in _ATTENTION_LIKE_KINDS
+            }
+            _ffn_set = {
+                sc["subblock_config"]
+                for sc in subblock_configs
+                if sc["subblock_config"].kind in _FFN_LIKE_KINDS
+            }
+            if not _attn_set or not _ffn_set:
+                raise ValueError(
+                    "Block-level runtime decomposition needs at least one attention-like "
+                    "subblock and one FFN-like subblock in the library."
+                )
+            include_noop_baselines = bool(
+                runtime_stats_config.get("include_noop_baselines", True)
+            )
+            if include_noop_baselines:
+                # These baselines are measurement controls, not replacement
+                # candidates. Keeping them local preserves a no-op-free search
+                # library while retaining the established marginal-cost equation.
+                for kind in sorted({subblock.kind for subblock in _attn_set}):
+                    _attn_set.add(
+                        _runtime_measurement_noop(
+                            min(subblock for subblock in _attn_set if subblock.kind == kind)
+                        )
+                    )
+                _ffn_set.add(_runtime_measurement_noop(min(_ffn_set)))
+            block_config_set = {
+                _block_config_from_subblocks(a, f) for a in _attn_set for f in _ffn_set
+            }
+            runtime_by_block_dict, non_block_runtime_ms = calc_runtime_for_blocks(
+                block_config_set=block_config_set, **_runtime_common
+            )
+            # The legacy MIP interface consumes additive per-subblock costs, so decompose the exact
+            # full-block measurements without assigning the whole block time to both subblocks.
+            # When zero-cost controls are available, retain the established marginal decomposition.
+            # Otherwise use the two-way additive projection:
+            #   attn(A) = row_mean(A) - overall_mean / 2
+            #   ffn(F)  = col_mean(F) - overall_mean / 2
+            # whose sum is the least-squares additive fit to the valid Cartesian block timings. This
+            # keeps no-op-free searches entirely inside deployable configurations. Exact per-(A,F)
+            # measurements remain available in ``block_runtime_records`` for reports and block-aware
+            # optimization.
+            attn_no_ops = {
+                a.kind: a for a in _attn_set if getattr(a, "no_op", False)
+            }
+            ffn_no_op = next((f for f in _ffn_set if getattr(f, "no_op", False)), None)
+            def _block_ms(a, f):
+                return runtime_by_block_dict[_block_config_from_subblocks(a, f)]
+
+            if attn_no_ops and ffn_no_op is not None:
+                decomposition_method = "noop_marginal"
+                active_attn = [a for a in _attn_set if not getattr(a, "no_op", False)]
+                active_ffn = [f for f in _ffn_set if not getattr(f, "no_op", False)]
+
+                def _subblock_runtime_from_block(sc):
+                    if sc.kind in _ATTENTION_LIKE_KINDS:
+                        return RuntimeMeasurement.mean(
+                            [
+                                _block_ms(sc, f) - _block_ms(attn_no_ops[sc.kind], f)
+                                for f in active_ffn
+                            ]
+                        )
+                    if sc.kind in _FFN_LIKE_KINDS:
+                        return RuntimeMeasurement.mean(
+                            [_block_ms(a, sc) - _block_ms(a, ffn_no_op) for a in active_attn]
+                        )
+                    return RuntimeMeasurement.zero()
+
+            else:
+                decomposition_method = "two_way_additive_projection"
+                overall_mean = RuntimeMeasurement.mean(
+                    [_block_ms(a, f) for a in _attn_set for f in _ffn_set]
+                )
+
+                def _subblock_runtime_from_block(sc):
+                    if sc.kind in _ATTENTION_LIKE_KINDS:
+                        return RuntimeMeasurement.mean([_block_ms(sc, f) for f in _ffn_set]) - (
+                            overall_mean / 2
+                        )
+                    if sc.kind in _FFN_LIKE_KINDS:
+                        return RuntimeMeasurement.mean([_block_ms(a, sc) for a in _attn_set]) - (
+                            overall_mean / 2
+                        )
+                    return RuntimeMeasurement.zero()
+
+            runtime_by_subblock_dict = {
+                sc: _subblock_runtime_from_block(sc) for sc in subblock_configs_nolayerindex
+            }
+            subblock_stats["runtime_decomposition"] = {
+                "method": decomposition_method,
+                "include_noop_baselines": include_noop_baselines,
+                "attention_levels": len(_attn_set),
+                "ffn_levels": len(_ffn_set),
+            }
+            # Expose block-level data on the stats dict for downstream consumers that want it.
+            subblock_stats["block_runtimes"] = {
+                str(bc): ms.total_ms for bc, ms in runtime_by_block_dict.items()
+            }
+            # Keep the historical string-keyed map readable, while also emitting a stable,
+            # machine-readable representation for diagnostic and optimization tooling.
+            subblock_stats["block_runtime_records"] = [
+                {
+                    "block_config": bc.to_dict(),
+                    **_runtime_measurement_fields(
+                        ms, generation_seq_len=generation_seq_len
+                    ),
+                }
+                for bc, ms in sorted(runtime_by_block_dict.items(), key=lambda item: str(item[0]))
+            ]
+        else:
+            runtime_by_subblock_dict, non_block_runtime_ms = calc_runtime_for_subblocks(
+                subblock_config_set=subblock_configs_nolayerindex, **_runtime_common
+            )
 
     sorted_subblock_config = sorted(
         subblock_configs, key=lambda subblock_config: subblock_config["subblock_config"]
@@ -150,12 +475,10 @@ def calculate_subblock_stats(
             descriptor.get_language_model_config(layer_model_config), parent_layer_indices[0]
         )
 
-        if runtime_stats_enabled:
-            total_runtime_ms = runtime_by_subblock_dict[subblock_config]
-            prefill_runtime_ms = None
-            decode_runtime_ms = None
-        else:
-            total_runtime_ms, prefill_runtime_ms, decode_runtime_ms = None, None, None
+        latency_fields = _runtime_measurement_fields(
+            runtime_by_subblock_dict[subblock_config] if runtime_stats_enabled else None,
+            generation_seq_len=generation_seq_len,
+        )
 
         subblock_memory = calculate_subblock_memory(
             subblock_config,
@@ -174,36 +497,73 @@ def calculate_subblock_stats(
 
         subblock_params = calculate_subblock_params(layer_model_config, subblock_config, descriptor)
         # For dense subblocks this equals subblock_params; for MoE it is the deterministic
-        # top-k active-parameter count (router + shared expert + num_experts_per_tok experts).
+        # top-k active-parameter count (router + shared expert + top_k experts).
         subblock_active_params = calc_subblock_active_params(
             subblock_config,
             layer_model_config,
             descriptor,
             n_embd,
         )
+        additive_fields = calculate_additive_metrics(
+            subblock_config,
+            model_config=layer_model_config,
+            descriptor=descriptor,
+            batch_size=batch_size,
+            prefill_seq_len=prefill_seq_len,
+            generation_seq_len=generation_seq_len,
+            n_embd=n_embd,
+            n_head=n_head,
+            weights_dtype=weights_dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            num_params=subblock_params,
+            active_params=subblock_active_params,
+        )
+        provenance = {
+            **additive_fields.pop("additive_metric_provenance"),
+            **latency_fields.pop("additive_metric_provenance"),
+        }
         subblock_stats["subblocks"].append(
             {
                 "subblock_config": subblock_config,
                 "subblock_config_class": type(subblock_config).__name__,
-                "runtime_ms": total_runtime_ms,
-                "prefill_runtime_ms": prefill_runtime_ms,
-                "decode_runtime_ms": decode_runtime_ms,
                 "num_params": subblock_params,
                 "active_params": subblock_active_params,
                 "parent_layer_index": parent_layer_indices[0],
+                **latency_fields,
                 **subblock_memory,
+                **additive_fields,
+                "additive_metric_provenance": provenance,
             }
         )
 
     if not runtime_stats_enabled:
         non_block_runtime_ms = None
     non_block_memory = calculate_non_block_memory(n_embd, vocab_size, weights_dtype)
-    non_block_params = calculate_non_block_params(n_embd, vocab_size)
+    lm_config = descriptor.get_language_model_config(model_config)
+    non_block_params = _checkpoint_non_block_params(
+        teacher_dir,
+        descriptor,
+        int(lm_config.num_hidden_layers),
+    )
+    if non_block_params is None:
+        non_block_params = calculate_non_block_params(n_embd, vocab_size)
 
     subblock_stats["non_block"] = {
-        "runtime_ms": non_block_runtime_ms,
+        **_runtime_measurement_fields(
+            non_block_runtime_ms, generation_seq_len=generation_seq_len
+        ),
         "memory_mib": non_block_memory,
         "num_params": non_block_params,
+        "parameter_count_source": (
+            "checkpoint_tensor_inventory"
+            if _checkpoint_non_block_params(
+                teacher_dir,
+                descriptor,
+                int(lm_config.num_hidden_layers),
+            )
+            is not None
+            else "lm_formula_fallback"
+        ),
     }
     return subblock_stats
 
@@ -249,23 +609,44 @@ def _arg_signature(args: dict) -> tuple:
         str(args["activations_dtype"]),
         str(args["kv_cache_dtype"]),
         args["n_embd"],
+        args.get("runtime_selection_identity"),
     )
 
 
 def _subblock_stats_already_complete(
     existing_stats: list,
+    subblock_configs: list[immutabledict[str, SubblockConfig]],
     batch_sizes: Iterable[int],
     data_types: list,
     model_hidden_sizes: Iterable[int],
     runtime_stats_enabled: bool,
+    runtime_granularity: str = "subblock",
+    runtime_selection_identity: str | None = None,
 ) -> bool:
     """Whether ``existing_stats`` already covers every configuration this run would compute.
 
     When runtime benchmarking is enabled, the bf16 entries (the only ones for
     which runtime is ever measured) must additionally already carry runtime
-    measurements, otherwise the expensive vLLM step still needs to run.
+    measurements **at the requested granularity** — switching subblock<->block must trigger a
+    recompute rather than silently reusing the other granularity's numbers.
     """
     by_signature = {_arg_signature(entry["args"]): entry for entry in existing_stats}
+    required_subblock_keys = {
+        (subblock_config["subblock_config"], subblock_config["parent_layer_indices"][0])
+        for subblock_config in subblock_configs
+    }
+
+    def _entry_subblock_keys(entry: dict) -> set[tuple[SubblockConfig, int]]:
+        keys = set()
+        for substats in entry.get("subblocks", []):
+            raw_config = substats["subblock_config"]
+            kind = raw_config.get("kind")
+            if kind not in SUBBLOCK_CLS_DICT:
+                return set()
+            keys.add(
+                (SUBBLOCK_CLS_DICT[kind](**raw_config), substats.get("parent_layer_index", -1))
+            )
+        return keys
 
     for batch_size, (
         weights_dtype,
@@ -278,15 +659,43 @@ def _subblock_stats_already_complete(
             str(activations_dtype),
             str(kv_cache_dtype),
             model_hidden_size,
+            (
+                runtime_selection_identity
+                if runtime_stats_enabled and weights_dtype == torch.bfloat16
+                else None
+            ),
         )
         entry = by_signature.get(signature)
         if entry is None:
             return False
+        if not required_subblock_keys.issubset(_entry_subblock_keys(entry)):
+            return False
         # Runtime is only measured for the bf16 configuration (see the
         # ``curr_runtime_stats_enabled`` guard below); require it to be present.
         runtime_expected = runtime_stats_enabled and weights_dtype == torch.bfloat16
-        if runtime_expected and not entry["args"].get("runtime_stats", False):
-            return False
+        if runtime_expected:
+            if not entry["args"].get("runtime_stats", False):
+                return False
+            # Default to "subblock" for entries written before granularity was recorded.
+            if entry["args"].get("runtime_granularity", "subblock") != runtime_granularity:
+                return False
+            required_runtime_fields = (
+                "runtime_ms",
+                "prefill_runtime_ms",
+                "decode_runtime_ms",
+                "decode_runtime_ms_per_token",
+                "weight_memory_mib",
+                "kv_cache_bytes_per_token",
+                "state_cache_bytes_per_sequence",
+                "prefill_flops",
+                "decode_flops",
+            )
+            for substats in entry.get("subblocks", []):
+                if any(substats.get(field) is None for field in required_runtime_fields):
+                    return False
+                provenance = substats.get("additive_metric_provenance") or {}
+                if any(field not in provenance for field in required_runtime_fields):
+                    return False
     return True
 
 
@@ -325,6 +734,28 @@ def calculate_subblock_stats_for_puzzle_dir(
     # Get language model config for LM-specific attributes (VL models have nested config)
     lm_config = descriptor.get_language_model_config(model_config)
     subblock_configs = _load_subblock_configs(master_puzzle_dir, ffn_hidden_sizes)
+    runtime_selection_identity = None
+    runtime_stats_config = calc_subblock_stats_config.get("runtime_stats", {})
+    selection_manifest_path = runtime_stats_config.get("selection_manifest", None)
+    if selection_manifest_path:
+        selection_manifest_path = Path(str(selection_manifest_path))
+        if not selection_manifest_path.is_file():
+            candidate = master_puzzle_dir / selection_manifest_path
+            if candidate.is_file():
+                selection_manifest_path = candidate
+            else:
+                raise FileNotFoundError(
+                    f"sparse runtime selection manifest does not exist: {selection_manifest_path}"
+                )
+        manifest = json.loads(selection_manifest_path.read_text())
+        if manifest.get("mode") != "subblock_runtime":
+            raise ValueError(
+                f"runtime selection manifest has mode={manifest.get('mode')!r}, "
+                "expected 'subblock_runtime'"
+            )
+        _validate_sparse_runtime_settings(runtime_stats_config)
+        subblock_configs = _select_runtime_subblock_configs(subblock_configs, manifest)
+        runtime_selection_identity = str(manifest["identity"])
 
     data_types = [
         ("nvfp4", "nvfp4", "nvfp4"),
@@ -350,7 +781,16 @@ def calculate_subblock_stats_for_puzzle_dir(
             subblock_stats = json.load(f)
 
         if _subblock_stats_already_complete(
-            subblock_stats, batch_sizes, data_types, model_hidden_sizes, runtime_stats_enabled
+            subblock_stats,
+            subblock_configs,
+            batch_sizes,
+            data_types,
+            model_hidden_sizes,
+            runtime_stats_enabled,
+            runtime_granularity=calc_subblock_stats_config.get("runtime_stats", {}).get(
+                "granularity", "subblock"
+            ),
+            runtime_selection_identity=runtime_selection_identity,
         ):
             mprint(
                 f"Subblock stats file {subblock_stats_file} already covers all requested "
@@ -367,7 +807,9 @@ def calculate_subblock_stats_for_puzzle_dir(
     else:
         subblock_stats = []
 
-    subblock_stats_args = {immutabledict(x["args"]) for x in subblock_stats}
+    subblock_stats_indices = {
+        _freeze_stats_args(entry["args"]): index for index, entry in enumerate(subblock_stats)
+    }
 
     for batch_size, (
         weights_dtype,
@@ -392,20 +834,29 @@ def calculate_subblock_stats_for_puzzle_dir(
             n_head=lm_config.num_attention_heads,
             vocab_size=lm_config.vocab_size,
             runtime_stats_enabled=curr_runtime_stats_enabled,
-            use_cuda_graph=True,
+            # The vLLM benchmark runs with --optimization-level 0 (CUDA graphs disabled) for
+            # accurate per-block timing, so record that rather than a misleading True.
+            use_cuda_graph=False,
             weights_dtype=weights_dtype,
             activations_dtype=activations_dtype,
             kv_cache_dtype=kv_cache_dtype,
+            runtime_selection_identity=runtime_selection_identity,
         )
 
-        if immutabledict(curr_subblock_stats["args"]) in subblock_stats_args:
-            raise ValueError(
-                f"Failed merging subblock_stats. The following arguments already existed in the file: {curr_subblock_stats['args']}"
-            )
+        curr_args = _freeze_stats_args(curr_subblock_stats["args"])
+        if curr_args in subblock_stats_indices:
+            subblock_stats[subblock_stats_indices[curr_args]] = curr_subblock_stats
+        else:
+            subblock_stats_indices[curr_args] = len(subblock_stats)
+            subblock_stats.append(curr_subblock_stats)
 
-        subblock_stats.append(curr_subblock_stats)
-
-    json_dump(subblock_stats, subblock_stats_file)
+    shard_index = int(os.environ.get("PUZZLETRON_RUNTIME_SHARD_INDEX", "0"))
+    shard_count = int(os.environ.get("PUZZLETRON_RUNTIME_SHARD_COUNT", "1"))
+    if (
+        os.environ.get("PUZZLETRON_RUNTIME_CACHE_WARMUP_ONLY") != "1"
+        and (shard_count == 1 or shard_index == 0)
+    ):
+        json_dump(subblock_stats, subblock_stats_file)
 
     mprint(subblock_stats_file)
 
@@ -433,19 +884,20 @@ def _load_subblock_configs(
 
 def _load_subblock_configs_from_subblock_library(master_puzzle_dir: Path) -> list[SubblockConfig]:
     subblocks_df = pd.read_json(master_puzzle_dir / "subblock_library.json")
-    subblocks_df["attention_config"] = subblocks_df["attention_config"].apply(
-        partial(_dataclass_from_dict, cls=AttentionConfig)
-    )
-    subblocks_df["ffn_config"] = subblocks_df["ffn_config"].apply(
-        partial(_dataclass_from_dict, cls=FFNConfig)
-    )
-    attention_configs = subblocks_df["attention_config"].dropna().drop_duplicates().tolist()
-    ffn_configs = subblocks_df["ffn_config"].dropna().drop_duplicates().tolist()
+    configs = []
+    for kind in _SUBBLOCK_KINDS:
+        column = f"{kind}_config"
+        if column not in subblocks_df:
+            continue
+        subblocks_df[column] = subblocks_df[column].apply(
+            partial(_dataclass_from_dict, cls=SUBBLOCK_CLS_DICT[kind])
+        )
+        configs.extend(subblocks_df[column].dropna().drop_duplicates().tolist())
+
     # Wrap in the same dict format expected by calculate_subblock_stats() callers.
     # Use parent_layer_indices=(-1,) to indicate no specific parent layer.
     subblock_configs = [
-        immutabledict({"subblock_config": cfg, "parent_layer_indices": (-1,)})
-        for cfg in attention_configs + ffn_configs
+        immutabledict({"subblock_config": cfg, "parent_layer_indices": (-1,)}) for cfg in configs
     ]
     return subblock_configs
 
@@ -453,57 +905,36 @@ def _load_subblock_configs_from_subblock_library(master_puzzle_dir: Path) -> lis
 def _load_subblock_configs_from_replacement_library(
     master_puzzle_dir: Path,
 ) -> list[SubblockConfig]:
-    """Load unique subblocks from replacement_library.json, e.g.,
-    256 = 32*8 unique sublocks will be returned for a model with 32 layers and the search space of
-    4 intermediate_size + teacher_intermediate_size + ffn_noop + att_op (teacher) + att_noop.
+    """Load unique subblocks from replacement_library.json (v1 list or v2 dict with header).
 
     Args:
         master_puzzle_dir: Directory with "replacement_library.json" file
     """
-    replacement_library = json.loads((master_puzzle_dir / "replacement_library.json").read_text())
+    raw = json.loads((master_puzzle_dir / "replacement_library.json").read_text())
+    if isinstance(raw, dict) and raw.get("version") == 2:
+        entries = raw.get("entries", [])
+        for e in entries:
+            e.setdefault("weight_paths", [])
+        replacement_library = entries
+    else:
+        replacement_library = raw
     subblock_configs = set()
     for layer_replacement in replacement_library:
         layer_replacement = parse_layer_replacement(layer_replacement)
 
         for block_config in layer_replacement["child_block_configs"]:
             block_config: BlockConfig
-            attention_frozen_dict = immutabledict(
-                {
-                    "subblock_config": block_config.attention,
-                    "parent_layer_indices": tuple(layer_replacement["parent_layer_indices"]),
-                }
-            )
-            ffn_frozen_dict = immutabledict(
-                {
-                    "subblock_config": block_config.ffn,
-                    "parent_layer_indices": tuple(layer_replacement["parent_layer_indices"]),
-                }
-            )
-            subblock_configs.add(attention_frozen_dict)
-            subblock_configs.add(ffn_frozen_dict)
-
-            if block_config.parallel_blocks is not None:
-                for block_idx, internal_block_config in enumerate(block_config.parallel_blocks):
-                    attention_frozen_dict = immutabledict(
+            for subblock_ref in block_config.subblocks():
+                subblock_configs.add(
+                    immutabledict(
                         {
-                            "subblock_config": internal_block_config.attention,
+                            "subblock_config": subblock_ref.config,
                             "parent_layer_indices": tuple(
                                 layer_replacement["parent_layer_indices"]
                             ),
-                            "inner_block_idx": block_idx,
                         }
                     )
-                    ffn_frozen_dict = immutabledict(
-                        {
-                            "subblock_config": internal_block_config.ffn,
-                            "parent_layer_indices": tuple(
-                                layer_replacement["parent_layer_indices"]
-                            ),
-                            "inner_block_idx": block_idx,
-                        }
-                    )
-                    subblock_configs.add(attention_frozen_dict)
-                    subblock_configs.add(ffn_frozen_dict)
+                )
 
     subblock_configs = list(subblock_configs)
     return subblock_configs
@@ -519,6 +950,9 @@ def _dataclass_from_dict(
     if isinstance(d, cls):
         return d
     if isinstance(d, dict):
+        kind = d.get("kind")
+        if kind is not None:
+            return SUBBLOCK_CLS_DICT[kind](**d)
         return cls(**d)
     if pd.isna(d):
         return None

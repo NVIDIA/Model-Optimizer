@@ -12,14 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Utilities for runtime benchmarking and model saving in ModelOpt NAS.
+"""Utilities for runtime benchmarking and model saving in Puzzletron.
 
 This module provides classes and utility functions used for empirical runtime
 estimation of Transformer subblocks and for saving models and tokenizers in
-formats suitable for benchmarking (e.g., vLLM latency benchmark) or the
-AnyModel subblock-safetensors format. It defines the configuration dataclass
-used to parameterize runtime benchmarks, as well as model checkpointing helpers
-to ensure compatibility with downstream evaluation pipelines.
+formats suitable for benchmarking with vLLM.
 """
 
 import json
@@ -30,7 +27,22 @@ from typing import Any
 import torch
 from transformers import AutoTokenizer, PreTrainedModel
 
-from ..anymodel.converter import Converter
+from ..export.vllm import prepare_vllm_config
+from .topology import RuntimeTopology
+
+
+def _thaw_config_value(value: Any) -> Any:
+    """Restore mappings frozen into tuples for hashable runtime identities."""
+    if isinstance(value, tuple):
+        if all(
+            isinstance(item, tuple)
+            and len(item) == 2
+            and isinstance(item[0], str)
+            for item in value
+        ):
+            return {key: _thaw_config_value(item) for key, item in value}
+        return tuple(_thaw_config_value(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,7 @@ class RuntimeConfig:
     batch_size: int
     num_iters: int
     num_warmup_iters: int
+    extra_vllm_args: tuple[str, ...] = ()
     # vLLM benchmark concurrency (``--max-num-seqs``). ``None`` keeps the
     # historical single-stream behavior (max-num-seqs=1), in which the
     # ``batch_size`` prompts run one at a time. Set this to ``batch_size`` (or
@@ -58,10 +71,11 @@ class RuntimeConfig:
     # sequences at ``prefill_seq_len + generation_seq_len`` must fit in GPU
     # memory, which bounds the usable value at long context.
     max_num_seqs: int | None = None
+    topology: RuntimeTopology = RuntimeTopology()
 
     def model_config_value(self, key: str, default: Any = None) -> Any:
         """Return a descriptor-specific benchmark config value."""
-        return dict(self.model_config_fields).get(key, default)
+        return _thaw_config_value(dict(self.model_config_fields).get(key, default))
 
 
 def save_model(
@@ -81,24 +95,19 @@ def save_model(
 
 
 def save_model_as_anymodel(model, output_dir: Path, descriptor, runtime_descriptor=None):
-    """Save a model checkpoint in AnyModel subblock-safetensors format."""
-    # Save standard model checkpoint (as safetensors, HF format)
+    """Save a temporary vLLM-compatible AnyModel benchmark checkpoint."""
     model.save_pretrained(output_dir, safe_serialization=True)
-
-    # Convert/slice weights into AnyModel subblock_safetensors format
-    Converter.convert_model_weights(
-        input_dir=output_dir,
-        output_dir=output_dir,
-        descriptor=descriptor,
-        num_hidden_layers=descriptor.get_language_model_config(model.config).num_hidden_layers,
-    )
-    # Load the model config.json, update "architectures" to ["AnyModel"], and write back to disk.
+    descriptor_for_config = runtime_descriptor or descriptor
+    descriptor_for_config.postprocess_runtime_benchmark_checkpoint(output_dir)
 
     config_path = output_dir / "config.json"
     if config_path.exists():
         with open(config_path) as f:
             config_data = json.load(f)
-        config_data["architectures"] = ["AnyModel"]
-        (runtime_descriptor or descriptor).update_runtime_benchmark_config(config_data)
+        arch_info = dict(descriptor_for_config.anymodel_arch_info())
+        arch_info.update(dict(config_data.get("anymodel_arch_info") or {}))
+        config_data["anymodel_arch_info"] = arch_info
+        descriptor_for_config.update_runtime_benchmark_config(config_data)
+        prepare_vllm_config(config_data, descriptor_name=descriptor_for_config.__name__)
         with open(config_path, "w") as f:
             json.dump(config_data, f, indent=2)
