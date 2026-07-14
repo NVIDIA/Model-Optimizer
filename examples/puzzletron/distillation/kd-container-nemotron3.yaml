@@ -1,0 +1,157 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Default Megatron Bridge ConfigContainer layout for examples/puzzletron/distillation/distill.py
+# Merge order: _pretrain_common() skeleton → this file → Hydra-style CLI overrides.
+#
+# Paths below are placeholders — override for your environment.
+
+# ---------------------------------------------------------------------------
+# Model (DistillationProvider + TransformerConfig fields)
+# ---------------------------------------------------------------------------
+model:
+  # Heterogeneous AnyModel / per-layer MoE: distinct checkpoint keys per global layer.
+  hetereogenous_dist_checkpoint: true
+  # expert_model_parallel_size: 1
+  # pipeline_model_parallel_size: 1
+  # expert_tensor_parallel_size: 1
+  # context_parallel_size: 1
+  # sequence_parallel: true
+  # use_shared_experts: false
+  pipeline_dtype: torch.bfloat16
+  seq_length: &seq_length_anchor 4096
+
+  cross_entropy_fusion_impl: native
+
+  kd_config:
+    logit_layers:
+      - output_layer
+      - output_layer
+    # intermediate_layer_pairs: null # disabled
+      # - [decoder.final_norm, decoder.final_norm]
+    skip_lm_loss: true
+    kd_loss_scale: 1.0
+    logit_kl_temperature: 1.0
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+train:
+  train_iters: 1000
+  global_batch_size: 256
+  micro_batch_size: 1
+  manual_gc: true
+  manual_gc_interval: 100
+
+# ---------------------------------------------------------------------------
+# Validation (preferred over deprecated train.eval_* fields)
+# ---------------------------------------------------------------------------
+validation:
+  eval_interval: 50
+  eval_iters: 10
+
+# ---------------------------------------------------------------------------
+# Optimizer / scheduler (matches distributed_fused_adam_with_cosine_annealing defaults)
+# ---------------------------------------------------------------------------
+
+optimizer:
+  optimizer: adam
+  lr: 3.0e-6
+  min_lr: 3.0e-7
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  bf16: true
+  fp16: false
+  use_distributed_optimizer: true
+  clip_grad: 1.0
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 10
+  min_lr: 3.0e-8
+
+# ---------------------------------------------------------------------------
+# DDP
+# ---------------------------------------------------------------------------
+ddp:
+  check_for_nan_in_grad: true
+  grad_reduce_in_fp32: true
+  overlap_grad_reduce: true
+  # Required false when use_distributed_optimizer is false (Megatron).
+  overlap_param_gather: false
+  average_in_collective: true
+  use_distributed_optimizer: true
+
+# ---------------------------------------------------------------------------
+# Dataset (mock blend — replace with real blend / per_split_data_args_path for production)
+# ---------------------------------------------------------------------------
+dataset:
+  seq_length: *seq_length_anchor
+  path_to_cache: /puzzletron/workspaces/datasets_cache
+  random_seed: &seed 42
+  reset_attention_mask: false
+  reset_position_ids: false
+  eod_mask_loss: false
+  num_dataset_builder_threads: 1
+  data_sharding: true
+  dataloader_type: "cyclic"
+  skip_getting_attention_mask_from_dataset: true
+  num_workers: 1
+  split:
+  blend:
+  blend_per_split:
+    -   -   - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Nemotron-3-Nano-30B-A3B-BF16/puzzle_kd-train_text_document
+        - [1.0]
+    -   -   - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Nemotron-3-Nano-30B-A3B-BF16/puzzle_kd-valid_text_document
+        - [1.0]
+    -   -   - /puzzletron/datasets/Puzzle-KD-Nemotron-Post-Training-Dataset-v2-Nemotron-3-Nano-30B-A3B-BF16/puzzle_kd-valid_text_document
+        - [1.0]
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  # Omit ``tokenizer_model`` here so distill.py can set it from ``--student-checkpoint``.
+
+# ---------------------------------------------------------------------------
+# Checkpoint
+# ---------------------------------------------------------------------------
+checkpoint:
+  save_interval: 50
+  save: ???
+  load: ???
+  most_recent_k: 5
+  ckpt_format: torch_dist
+  async_save: true
+  fully_parallel_save: true
+  save_optim: true
+  # Fail fast on any sharded-checkpoint key mismatch when resuming from a Megatron
+  # torch_dist checkpoint at `load`. Use "raise_all" while debugging the heterogeneous
+  # student/teacher pipeline; switch to "log_all" once the bridge is verified.
+  # NOTE: this knob applies only to dist_checkpointing.load() (Megatron resume path).
+  # The HF -> Megatron weight bridge run on the very first iteration is a separate
+  # codepath and is governed by the bridge's `allowed_mismatched_params` argument.
+  dist_ckpt_strictness: raise_all
+
+# ---------------------------------------------------------------------------
+# Logger
+# ---------------------------------------------------------------------------
+logger:
+  log_interval: 1
+  log_timers_to_tensorboard: true
+  wandb_project: ???
+  wandb_entity: ???
+  wandb_exp_name: ???
+  tensorboard_dir: ???
+  wandb_save_dir: ???
+
+# ---------------------------------------------------------------------------
+# RNG / distributed / precision
+# ---------------------------------------------------------------------------
+rng:
+  seed: *seed
+
+dist:
+  distributed_timeout_minutes: 180
+
+mixed_precision: bf16_mixed
