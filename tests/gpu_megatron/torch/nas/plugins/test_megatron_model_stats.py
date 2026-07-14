@@ -287,6 +287,16 @@ class TestMcoreParamCountFormulas:
             _BASE_CFG, _V, num_layers=4, num_moe_experts=None, **_GDN_OVERRIDES
         )
         assert total == _BASE_UNTIED + 3 * (_GDN + _DENSE_MLP) + (_ATTN + _DENSE_MLP)
+        # Real Qwen3.5 configs store the pattern as an explicit per-layer list (1=linear/GDN, 0=full)
+        # instead of an int cadence; the equivalent list ([1,1,1,0] == freq 4 here) must match.
+        total_list, _ = mcore_param_count(
+            _BASE_CFG,
+            _V,
+            num_layers=4,
+            num_moe_experts=None,
+            **{**_GDN_OVERRIDES, "linear_attention_freq": [1, 1, 1, 0]},
+        )
+        assert total_list == total
 
     def test_gated_delta_net_differs_from_plain_attention(self):
         # Without the variant flag, the same layers are counted as plain attention (no GDN dispatch).

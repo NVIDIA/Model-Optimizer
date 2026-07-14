@@ -115,10 +115,14 @@ For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automati
 
 ## Sanity-Check Generation
 
-[generate_vllm.py](generate_vllm.py) runs a quick generation check on a unified HuggingFace checkpoint using vLLM. vLLM auto-detects the ModelOpt quantization from the exported `hf_quant_config.json`, so no extra quant flags are needed:
+[generate_vllm.py](generate_vllm.py) runs a quick generation check on an exported HuggingFace checkpoint using vLLM — a useful smoke test for both a **quantized** and a **pruned** model to confirm it still produces coherent text before investing in [distillation](#distillation) to recover accuracy. For quantized checkpoints, vLLM auto-detects the ModelOpt quantization from the exported `hf_quant_config.json`, so no extra flags are needed:
 
 ```bash
+# Quantized model
 python generate_vllm.py --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 --trust_remote_code
+
+# Pruned model
+python generate_vllm.py --model /tmp/Qwen3-8B-Pruned-6B
 ```
 
 ## Distillation

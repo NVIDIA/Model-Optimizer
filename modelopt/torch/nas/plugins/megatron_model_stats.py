@@ -394,14 +394,23 @@ def mcore_param_count(
     # GatedDeltaNet (linear-attention) hybrid, e.g. Qwen3-Next / Qwen3.5: every ``linear_attention_freq``-th
     # layer keeps full attention, the rest use GatedDeltaNet linear attention.
     experimental_attention_variant: str | None = _get("experimental_attention_variant", None)
-    linear_attention_freq: int | None = _get("linear_attention_freq", None)
+    # ``linear_attention_freq`` is either an int interval (every N-th layer is full attention) or an
+    # explicit per-layer pattern (list; 1 = linear_attention / GatedDeltaNet, 0 = full_attention).
+    linear_attention_freq: int | list[int] | None = _get("linear_attention_freq", None)
     is_gdn = experimental_attention_variant == "gated_delta_net" and bool(linear_attention_freq)
+
+    def _is_linear_attention_layer(i: int) -> bool:
+        """Whether layer ``i`` uses GatedDeltaNet linear attention (vs full attention)."""
+        if isinstance(linear_attention_freq, (list, tuple)):
+            return bool(linear_attention_freq[i])
+        return (i + 1) % linear_attention_freq != 0
+
     # Multi-Latent Attention (MLA), e.g. DeepSeek / Kimi: low-rank compressed q/kv projections.
     multi_latent_attention: bool = _get("multi_latent_attention", False)
 
     def _attn_params(i: int) -> int:
         """Params for the attention sublayer of layer ``i`` (GatedDeltaNet / MLA / standard)."""
-        if is_gdn and (i + 1) % linear_attention_freq != 0:
+        if is_gdn and _is_linear_attention_layer(i):
             return _gated_delta_net_layer_params(
                 hidden_size,
                 _get("linear_num_key_heads"),
