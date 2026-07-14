@@ -621,7 +621,6 @@ class PrecisionConverter:
                         f"Convert initializer {init_name} to "
                         f"{self.low_precision_type.str_short}, only used by low precision nodes"
                     )
-                    from_type = self.high_precision_type
                     to_type = self.low_precision_type
                 elif len(tracker.high_precision_nodes) > 0:
                     logger.debug(
@@ -629,12 +628,16 @@ class PrecisionConverter:
                         f"{self.high_precision_type.str_short}, "
                         "only used by high precision nodes"
                     )
-                    from_type = self.low_precision_type
                     to_type = self.high_precision_type
                 else:
                     raise ValueError(
                         f"Unexpected: initializer {init_name} is not used by any "
                         "nodes and is not a float"
+                    )
+                from_type = self._precision_type_from_onnx_type(init.data_type)
+                if from_type is None:
+                    raise ValueError(
+                        f"Unexpected: initializer {init_name} is not a supported float"
                     )
 
                 new_init = self._cast_initializer(
@@ -724,14 +727,7 @@ class PrecisionConverter:
                 if init.data_type not in ONNX_TYPES or init.data_type == target_type.onnx_type:
                     continue
 
-                from_type = (
-                    self.high_precision_type
-                    if init.data_type == self.high_precision_type.onnx_type
-                    else self.low_precision_type
-                    if init.data_type == self.low_precision_type.onnx_type
-                    else None
-                )
-
+                from_type = self._precision_type_from_onnx_type(init.data_type)
                 if from_type is None:
                     logger.debug(
                         f"Skipping subgraph initializer {init.name} with unsupported type {init.data_type}"
@@ -742,6 +738,10 @@ class PrecisionConverter:
                 init.CopyFrom(new_init)
 
         utils.walk_subgraphs_recursive(self.model.graph, _convert_subgraph_callback)
+
+    def _precision_type_from_onnx_type(self, onnx_type: int) -> PrecisionTypes | None:
+        """Return the converter precision metadata for a supported ONNX float type."""
+        return next((p for p in PRECISION_MAP.values() if p.onnx_type == onnx_type), None)
 
     def _convert_initializer_data(
         self,
@@ -762,15 +762,19 @@ class PrecisionConverter:
         Returns:
             onnx.TensorProto: The converted initializer.
         """
-        np_array = numpy_helper.to_array(init)
+        np_array = (
+            onnx_utils.read_f16_tensor_as_fp32(init)
+            if self._is_bf16(from_type)
+            else numpy_helper.to_array(init)
+        )
 
         # Handle bfloat16 conversion
-        if self._is_bf16(to_type) and self._is_fp32(from_type):
+        if self._is_bf16(to_type):
             new_init = onnx.TensorProto()
             new_init.dims.extend(np_array.shape)
             new_init.name = init.name
             new_init.data_type = onnx.TensorProto.BFLOAT16
-            bf16_bytes = np_array.astype(ml_dtypes.bfloat16).view(np.uint16)
+            bf16_bytes = np_array.astype(np.float32).astype(ml_dtypes.bfloat16).view(np.uint16)
             new_init.raw_data = bf16_bytes.tobytes()
         else:
             assert to_type.numpy_type is not None
@@ -1185,10 +1189,10 @@ class PrecisionConverter:
                 converted_type = tensor.type.tensor_type.elem_type
 
                 if converted_type != original_type:
-                    # There's one allowed exception: FP32 I/O converted to the selected low precision type with
-                    # keep_io_types=False
+                    # There's one allowed exception: floating point I/O converted to the selected low
+                    # precision type with keep_io_types=False.
                     if (
-                        original_type == onnx.TensorProto.FLOAT
+                        original_type in ONNX_TYPES
                         and converted_type == self.low_precision_type.onnx_type
                         and not self.keep_io_types
                     ):
