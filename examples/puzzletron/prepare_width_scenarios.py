@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Create isolated physical parents and Cartesian libraries for every width."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import shutil
+
+from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
+from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
+from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
+from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
+from modelopt.torch.puzzletron.pruning.materialize import materialize_hidden_width_checkpoint
+from modelopt.torch.puzzletron.scoring_parent import ensure_scoring_parent
+from modelopt.torch.puzzletron.replacement_library.build_replacement_library import (
+    build_replacement_library_from_sorted_teacher,
+)
+from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
+
+
+def _atomic_json(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def _prepare_scenario_destination(
+    scenario_dir: Path,
+    *,
+    source_checkpoint_fingerprint: str,
+    overwrite_stale: bool,
+) -> bool:
+    """Return whether a width scenario must be built, removing it only when authorized."""
+    if not scenario_dir.exists():
+        return True
+    manifest_path = scenario_dir / "scenario_manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text())
+        checkpoint = scenario_dir / "ckpts" / "sorted_teacher"
+        complete = all(
+            path.is_file()
+            for path in (
+                checkpoint / "config.json",
+                scenario_dir / "replacement_library.json",
+                scenario_dir / "single_sequence_replacement_solutions.json",
+            )
+        )
+        if (
+            manifest.get("status") == "complete"
+            and manifest.get("source_checkpoint_fingerprint")
+            == source_checkpoint_fingerprint
+            and complete
+        ):
+            return False
+    if not overwrite_stale:
+        raise FileExistsError(
+            "width scenario exists with a different parent identity: "
+            f"{scenario_dir}; pass --overwrite-stale to rebuild it"
+        )
+    shutil.rmtree(scenario_dir)
+    return True
+
+
+def _resolve_source_checkpoint(
+    config: dict, *, explicit: str | None
+) -> Path:
+    parent = ensure_scoring_parent(config)
+    if explicit is None:
+        return parent.path
+    requested = Path(explicit).resolve()
+    requested_identity = checkpoint_identity(requested)
+    if requested_identity["fingerprint"] != parent.fingerprint:
+        raise RuntimeError(
+            "explicit width-scenario source does not match the resolved scoring parent: "
+            f"{requested} != {parent.path}"
+        )
+    return requested
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--source-checkpoint")
+    parser.add_argument("--overwrite-stale", action="store_true")
+    args = parser.parse_args()
+
+    cfg = pipeline_config_from_path(args.config)
+    puzzle_dir = Path(cfg["puzzle_dir"])
+    source = _resolve_source_checkpoint(cfg, explicit=args.source_checkpoint)
+    if not (source / "config.json").is_file():
+        raise FileNotFoundError(f"width-scenario parent is incomplete: {source}")
+    source_identity = checkpoint_identity(source)
+    model_cfg = cfg.get("model") or {}
+    descriptor = resolve_descriptor_from_pretrained(
+        str(source),
+        trust_remote_code=bool(model_cfg.get("trust_remote_code", False)),
+    ).descriptor
+    source_config = load_model_config(
+        source,
+        trust_remote_code=descriptor.requires_trust_remote_code(),
+    )
+    teacher_width = int(descriptor.get_language_model_config(source_config).hidden_size)
+    teacher_blocks = list(maybe_cast_block_configs(source_config.block_configs))
+    embedding = dict(cfg.get("embedding_pruning") or {})
+    widths = tuple(int(width) for width in embedding.get("widths", ()))
+    if teacher_width not in widths:
+        raise ValueError(f"embedding widths {widths} do not include parent width {teacher_width}")
+
+    summary = {
+        "source_checkpoint": str(source.resolve()),
+        "source_checkpoint_identity": source_identity,
+        "scenarios": [],
+    }
+    for width in widths:
+        scenario_dir = puzzle_dir / "scenarios" / f"width-{width:04d}" / "depth-00"
+        if not _prepare_scenario_destination(
+            scenario_dir,
+            source_checkpoint_fingerprint=source_identity["fingerprint"],
+            overwrite_stale=bool(args.overwrite_stale),
+        ):
+            summary["scenarios"].append(
+                json.loads((scenario_dir / "scenario_manifest.json").read_text())
+            )
+            continue
+        parent_dir = scenario_dir / "ckpts" / "sorted_teacher"
+        if width == teacher_width:
+            parent_dir.parent.mkdir(parents=True, exist_ok=True)
+            if parent_dir.is_symlink() or parent_dir.exists():
+                if parent_dir.resolve() != source.resolve():
+                    raise FileExistsError(
+                        f"full-width parent exists with a different target: {parent_dir}"
+                    )
+            else:
+                parent_dir.symlink_to(source.resolve(), target_is_directory=True)
+        else:
+            materialize_hidden_width_checkpoint(
+                source,
+                descriptor,
+                width,
+                parent_dir,
+                alignment=int(embedding.get("alignment", 1)),
+            )
+
+        build_replacement_library_from_sorted_teacher(
+            master_puzzle_dir=scenario_dir,
+            sorted_teacher_dir=parent_dir,
+            descriptor=descriptor,
+            search_space=cfg.get("search_space") or {},
+            include_noops=bool(
+                (cfg.get("build_replacement_library") or {}).get(
+                    "include_noops", False
+                )
+            ),
+            hidden_width=width,
+        )
+        library = json.loads((scenario_dir / "replacement_library.json").read_text())
+        solutions = json.loads(
+            (scenario_dir / "single_sequence_replacement_solutions.json").read_text()
+        )
+        teacher_entries = sum(
+            1
+            for entry in library["entries"]
+            if entry["child_block_configs"][0]
+            == teacher_blocks[entry["parent_layer_indices"][0]].to_dict()
+        )
+        num_layers = len(teacher_blocks)
+        if teacher_entries != num_layers:
+            raise RuntimeError(
+                f"width {width} library has {teacher_entries} teacher entries, expected {num_layers}"
+            )
+        if len(solutions) != len(library["entries"]) - num_layers:
+            raise RuntimeError(
+                f"width {width} solution/library cardinality mismatch: "
+                f"solutions={len(solutions)} entries={len(library['entries'])} layers={num_layers}"
+            )
+        scenario = {
+            "status": "complete",
+            "hidden_width": width,
+            "removed_sublayers": 0,
+            "scenario_dir": str(scenario_dir),
+            "parent_checkpoint": str(parent_dir.resolve()),
+            "parent_checkpoint_identity": checkpoint_identity(parent_dir),
+            "source_checkpoint_fingerprint": source_identity["fingerprint"],
+            "model_revision": (cfg.get("model") or {}).get("revision"),
+            "descriptor": cfg.get("descriptor"),
+            "alignment": int(embedding.get("alignment", 1)),
+            "library_entries": len(library["entries"]),
+            "teacher_entries": teacher_entries,
+            "replacement_solutions": len(solutions),
+        }
+        _atomic_json(scenario_dir / "scenario_manifest.json", scenario)
+        summary["scenarios"].append(scenario)
+
+    _atomic_json(puzzle_dir / "scenarios" / "width_scenarios.json", summary)
+
+
+if __name__ == "__main__":
+    main()

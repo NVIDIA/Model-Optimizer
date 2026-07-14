@@ -1,0 +1,313 @@
+# @package _global_
+
+defaults:
+  - _self_
+
+clean_config_root: examples/puzzletron/configs/clean
+puzzle_root: puzzle_runs/clean
+dataset_path: ../Puzzle-KD-Nemotron-Post-Training-Dataset-v2
+recipe_path: ${clean_config_root}/recipes/automodel.yaml
+nccl_timeout_minutes: 120
+
+teacher_dir: ${puzzle_dir}/ckpts/teacher
+replacement_library_path: ${puzzle_dir}/replacement_library.json
+skip_realize_model: false
+
+experiment:
+  dir: ${puzzle_dir}
+
+model:
+  source: ${input_hf_model_path}
+  trust_remote_code: true
+  force_hf: true
+
+convert:
+  teacher_dir: ${teacher_dir}
+  # AutoModel PP cannot pipeline tied input/output embeddings.  Conversion writes an explicit
+  # lm_head shard for tied checkpoints so the teacher remains numerically equivalent but PP-safe.
+  untie_word_embeddings: true
+
+data:
+  modality: text
+  layout: packed_varlen
+  max_sample_length: 4096
+  packing:
+    pack_size: 4096
+    packing_ratio: 0.9
+    drop_long_samples: true
+  path: ${dataset_path}
+  calibration:
+    path: ${dataset_path}
+    num_samples: ${pruning.eval_samples}
+    micro_batch_size: ${pruning.micro_batch_size}
+    seq_len: ${pruning.block_size}
+  replacement_scoring:
+    num_samples: ${replacement_scoring.eval_samples}
+    micro_batch_size: ${replacement_scoring.micro_batch_size}
+
+embedding_pruning:
+  enabled: false
+  widths: []
+  alignment: 1
+  cycle_widths: true
+
+pruning:
+  backend: automodel
+  output: sorted_teacher
+  model_name_or_path: ${teacher_dir}
+  experiment_id: full
+  eval_samples: 131072
+  micro_batch_size: 1
+  block_size: 4096
+  dataset_path: ${dataset_path}
+  realized_dataset_cache_dir: ${puzzle_dir}/dataset_cache
+  val_dataset_name: train
+  data_column: messages
+  seed: 42
+  shuffle_seed: 444
+  fim_rate: 0.0
+  fim_spm_rate: 0.0
+  source_datasets_to_discard: []
+  bos_rate: 1.0
+  load_dataset_fn: load_from_disk_fn
+  activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/automodel/${pruning.experiment_id}
+  mlp_init_mode: PruneByActivationsLog
+  gqa_init_mode: PruneKVHeads
+  activation_hooks_kwargs: {}
+  automodel:
+    force_hf: ${model.force_hf}
+    use_puzzletron_dataloader: true
+    recipe_path: ${recipe_path}
+
+bypass:
+  enabled: false
+  granularity: block
+  backend: automodel
+  automodel:
+    recipe_path: ${recipe_path}
+  elastic: false
+  elastic_seed: 42
+  dtype: bf16
+  seed: 42
+  experiment_id:
+  experiment_dir:
+  iter_num: 1
+  step_num: 1
+  token_count: 0
+  data:
+    data_column: messages
+    block_size: 512
+    bos_rate: 1.0
+    fim_rate: 0.0
+    fim_spm_rate: 0.0
+    source_datasets_to_discard: []
+    load_from_disk: true
+    keep_in_memory: false
+    val_dataset_name: valid
+    max_eval_samples: 1
+    eval_samples_per_process:
+    shuffle_train_data_seed: 444
+  training:
+    optimizer: adamw
+    learning_rate: 1e-4
+    training_tokens: 512
+    micro_batch_size: 1
+    val_micro_batch_size: 1
+    warmup_ratio: 0.0
+    warmup_steps: 0
+    min_lr_factor: 1e-5
+    grad_accumulation_steps: 1
+    skip_first_batches: 0
+    weight_decay: 0.1
+    momentum: 0.0
+    decay_lr: true
+    beta1: 0.9
+    beta2: 0.95
+    use_grad_scaling: false
+    grad_clip: 1.0
+    grad_clip_type: norm
+    clipping_count: 0
+    log_interval: 1
+    eval_interval: 1
+  resume_checkpoint_path:
+  find_last_ckpt_for_resume: false
+  parameter_count:
+  init_checkpoint_path:
+  model:
+    student_weights_dtype: bf16
+    model_overrides:
+      delete_old_checkpoints: true
+      save_interval_seconds: 12900
+      save_interval: 1000000000
+      save_checkpoint_when_done: true
+    model_config_overrides: {}
+  model_factory:
+    factory: bypass_factory_fn
+    block_loss_func: normalized_mse_loss
+    gqa_init_mode: FirstKV
+    mlp_init_mode: CopyAsIs
+    mlp_init_config:
+      activations_log_dir: ${pruning.activations_log_dir}
+    linear_init_mode: FromTeacher
+    submodule_for_loss_calculation:
+    keys_to_learn: subblock_attention
+  disable_initial_validate: true
+  validate_teacher_model: false
+  validate_student_model: false
+  disable_validation: true
+  best_val_loss: 1e+9
+  compile: false
+  disable_fa2: false
+  teacher_model_load_on_cpu: false
+  save_checkpoint_before_training: false
+  disable_checkpoint_save: false
+  save_best_ckpt: false
+  kill_after_first_save: false
+  realize_best_or_latest: latest
+  wandb_log: false
+  wandb:
+    project:
+    entity:
+  configs: []
+
+build_library:
+  source_checkpoint_dir:
+  include_noops: false
+  include_bypass: false
+  # Optional explicit scenario width. Omitted for legacy full-width runs.
+  hidden_width:
+
+vllm_stats:
+  enabled: false
+  batch_sizes: [1]
+  prefill_seq_len: 4096
+  generation_seq_len: 4096
+  model_hidden_sizes: []
+  ffn_hidden_sizes: []
+  merge_with_existing_stats: true
+  subblock_stats_filename: subblock_stats.json
+  runtime_stats:
+    enabled: true
+    backend: vllm
+    granularity: block
+    num_iters: 30
+    num_warmup_iters: 10
+    max_num_seqs: 1
+    topology:
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      prefill_context_parallel_size: 1
+      decode_context_parallel_size: 1
+      distributed_executor_backend: mp
+      gpu_group_size: 1
+
+  stats_path: ${puzzle_dir}/subblock_stats.json
+  output_dir: ${puzzle_dir}/artifacts/vllm_stats
+  anchor_count: 3
+  trend_relative_tolerance: 0.05
+
+replacement_scoring:
+  enabled: true
+  backend: automodel
+  granularity: block
+  replacement_library_path: ${replacement_library_path}
+  solutions_path: ${to_path:${puzzle_dir}/single_sequence_replacement_solutions.json}
+  block_solutions_path: ${to_path:${puzzle_dir}/single_sequence_replacement_solutions.json}
+  subblock_solutions_path: ${to_path:${puzzle_dir}/single_subblock_replacement_solutions.json}
+  teacher_dir: ${to_path:${teacher_dir}}
+  output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
+  block_output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
+  subblock_output_dir: ${puzzle_dir}/single_subblock_replacement_solutions--validation
+  solutions_to_validate:
+  skip_existing_solutions: true
+  skip_validation: false
+  save_models: false
+  bigger_is_better: false
+  sort_solutions_by:
+  calculate_full_score_ablations: false
+  eval_samples: 16
+  micro_batch_size: 1
+  block_size: ${pruning.block_size}
+  seed: 42
+  shuffle_seed: 444
+  dataset_path: ${dataset_path}
+  realized_dataset_cache_dir: ${puzzle_dir}/dataset_cache
+  val_dataset_name: train
+  data_column: messages
+  fim_rate: 0.0
+  fim_spm_rate: 0.0
+  source_datasets_to_discard: []
+  bos_rate: 1.0
+  load_dataset_fn: load_from_disk_fn
+  automodel:
+    force_hf: ${model.force_hf}
+    use_puzzletron_dataloader: true
+    recipe_path: ${recipe_path}
+    temperature: 1.0
+    chunk_size: 16384
+
+  report_output_dir: ${puzzle_dir}/artifacts/replacement_scoring
+  default_metric: normalized_mse_loss_hidden_states
+  default_layer_count: 5
+  anchor_count: 3
+  trend_relative_tolerance: 0.02
+
+realize_model:
+  replacement_library_path: ${replacement_library_path}
+  solutions_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions/solutions.json}
+  solutions_to_validate:
+  teacher_dir: ${to_path:${teacher_dir}}
+  tokenizer_name: ${to_path:${teacher_dir}}
+  output_dir: ${puzzle_dir}/mip/realized_validation
+  skip_validation: true
+  save_models: true
+  bigger_is_better: false
+  sort_solutions_by:
+  model_dtype: torch.bfloat16
+  autocast_dtype: torch.bfloat16
+  eval_samples: ${replacement_scoring.eval_samples}
+  micro_batch_size: ${replacement_scoring.micro_batch_size}
+  block_size: ${replacement_scoring.block_size}
+  seed: ${replacement_scoring.seed}
+  shuffle_seed: ${replacement_scoring.shuffle_seed}
+  dataset_path: ${replacement_scoring.dataset_path}
+  realized_dataset_cache_dir: ${replacement_scoring.realized_dataset_cache_dir}
+  val_dataset_name: ${replacement_scoring.val_dataset_name}
+  data_column: ${replacement_scoring.data_column}
+  fim_rate: ${replacement_scoring.fim_rate}
+  fim_spm_rate: ${replacement_scoring.fim_spm_rate}
+  source_datasets_to_discard: ${replacement_scoring.source_datasets_to_discard}
+  bos_rate: ${replacement_scoring.bos_rate}
+  load_dataset_fn: ${replacement_scoring.load_dataset_fn}
+
+mip:
+  single_block_replacement_validation_dir: ${to_path:${replacement_scoring.output_dir}}
+  score_granularity: ${replacement_scoring.granularity}
+  canonical_solutions_path: ${to_path:${replacement_scoring.block_solutions_path}}
+  exact_block_replacement_validation_dir:
+  subblock_stats_path: ${to_path:${puzzle_dir}/${vllm_stats.subblock_stats_filename}}
+  output_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions}
+  gathered_metrics_path:
+  puzzle_profile:
+  objective: metrics.cosine_embedding_loss_hidden_states
+  bigger_is_better: false
+  subblock_stats_args:
+    weights_dtype: torch.bfloat16
+    activations_dtype: torch.bfloat16
+    kv_cache_dtype: torch.bfloat16
+    batch_sizes: ${vllm_stats.batch_sizes}
+    prefill_seq_len: ${vllm_stats.prefill_seq_len}
+    generation_seq_len: ${vllm_stats.generation_seq_len}
+
+global_distillation:
+  backend: automodel
+  teacher_dir: ${teacher_dir}
+  student_dir: ${puzzle_dir}/ckpts/final
+  output_dir: ${puzzle_dir}/ckpts/final_distilled
+  force_hf: ${model.force_hf}
+
+zero_shot_evaluation:
+  enabled: false
+
+aiperf:
+  enabled: false

@@ -1,0 +1,222 @@
+# @package _global_
+
+defaults:
+  - /base@_global_
+  - /families/nemotron3/family@_global_
+  - /families/nemotron3/super_120b_a12b_bf16/model@_global_
+  - _self_
+
+puzzle_dir: ${puzzle_root}/nemotron3/super_120b_a12b_bf16/final_automodel_smoke
+recipe_path: ${clean_config_root}/recipes/automodel_pp4_ep4.yaml
+skip_realize_model: false
+
+model:
+  force_hf: false
+
+data:
+  layout: fixed
+  max_sample_length: 4096
+  packing: null
+
+sort:
+  deferred_axes: [kv_groups, q_heads_per_group]
+
+pruning:
+  experiment_id: final_accurate
+  eval_samples: 2048
+  micro_batch_size: 8
+  block_size: 4096
+  # [total_query_heads, kv_groups], including the complete 2x2 grid.
+  attn_heads_list: [[32, 2], [24, 2], [16, 1], [12, 1]]
+  attention_scored_axes: [kv_groups, q_heads_per_group]
+  activation_pass_filter:
+    exclude: [attention_grouped]
+
+search_space:
+  no_op:
+    subblocks: [attention, mamba, moe]
+    whole_block: true
+    cartesian: true
+  axes:
+    kv_groups:
+      enabled: true
+      teacher_value: 2
+      values: [1]
+    q_heads_per_group:
+      enabled: true
+      teacher_value: 16
+      values: [12]
+    mamba_heads:
+      enabled: true
+      teacher_value: 128
+      values: [96]
+    mamba_head_dim:
+      enabled: true
+      teacher_value: 64
+      values: [48]
+    moe_experts:
+      enabled: true
+      teacher_value: 512
+      values: [384]
+    moe_expert_intermediate:
+      enabled: true
+      teacher_value: 2688
+      values: [2016]
+    moe_shared_expert_intermediate:
+      enabled: true
+      teacher_value: 5376
+      values: [4032]
+    moe_latent_dim:
+      enabled: true
+      teacher_value: 1024
+      values: [768]
+    moe_top_k:
+      enabled: true
+      teacher_value: 22
+      values: [16]
+
+width_sanity:
+  enabled: true
+  overwrite: false
+  single_load_parent_sweep: true
+  deferred_axes: [kv_groups, q_heads_per_group]
+  axes:
+    - mamba_heads
+    - mamba_head_dim
+    - moe_experts
+    - moe_expert_intermediate
+    - moe_shared_expert_intermediate
+    - moe_latent_dim
+  methods: [activation, random, reverse]
+  target_values:
+    mamba_heads: 96
+    mamba_head_dim: 48
+    moe_experts: 384
+    moe_expert_intermediate: 2016
+    moe_shared_expert_intermediate: 4032
+    moe_latent_dim: 768
+  non_sortable_axes: []
+  layer_count: 2
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 4096
+  primary_metric: normalized_mse_loss_hidden_states
+  force_rescore: false
+  parent_equivalence_tolerances:
+    # Exact permutations across 40 BF16 fused-Mamba layers measured 0.001407
+    # worst-case LM drift after fixing the missing dt-row coupling.  Keep a
+    # narrow numerical allowance while the independent output gates stay strict.
+    max_abs_lm_loss_delta: 2.0e-3
+    max_kl_div: 1.0e-2
+    max_cosine_embedding_loss_hidden_states: 1.0e-2
+    max_normalized_mse_loss_hidden_states: 2.0e-2
+    max_mse_loss_hidden_states: 1.0e-1
+    max_mae_loss_hidden_states: 5.0e-1
+
+sort_sanity:
+  enabled: true
+  metric: lm_loss
+  max_abs_lm_loss_delta: 2.0e-3
+
+bypass:
+  enabled: true
+  backend: automodel
+  elastic: true
+  elastic_cycle_all_targets: false
+  elastic_coverage_mode: axis_endpoints
+  experiment_id: final_native_local_kd
+  automodel:
+    recipe_path: ${recipe_path}
+  data:
+    block_size: 1024
+    max_eval_samples: 8
+  training:
+    # Eight optimizer steps cover teacher, no-op, each single-axis endpoint,
+    # and the representative maximally-reduced mixed config for active 4-axis MoE.
+    training_tokens: 32768
+    micro_batch_size: 4
+    val_micro_batch_size: 4
+    learning_rate: 1.0e-6
+    weight_decay: 0.0
+    warmup_steps: 0
+    log_interval: 1
+    eval_interval: 1000000
+  model_factory:
+    keys_to_learn: entire_block
+
+build_library:
+  source_checkpoint_dir: null
+
+vllm_stats:
+  prefill_seq_len: 1024
+  generation_seq_len: 1024
+  runtime_stats:
+    enabled: true
+    granularity: block
+    num_iters: 3
+    num_warmup_iters: 2
+    max_num_seqs: 1
+
+replacement_scoring:
+  eval_samples: 8
+  micro_batch_size: 4
+  block_size: 1024
+  automodel:
+    force_hf: false
+    lm_head_backend: flash_kld
+    flash_kld_token_chunk_size: 512
+    flash_kld_reduction_backend: fla
+
+mip:
+  human_constraints:
+    num_params_ratio: 0.85
+  grid_budgeting:
+    enabled: true
+    param_ratios: [0.85]
+
+realize_model:
+  skip_validation: false
+  eval_samples: 8
+  micro_batch_size: 4
+  block_size: 1024
+
+global_distillation:
+  backend: automodel
+  force_hf: false
+  teacher_descriptor: nemotron_h
+  student_descriptor: nemotron_h
+  teacher_force_hf: false
+  student_force_hf: false
+  domain: llm
+  global_batch_size: 16
+  local_batch_size: 4
+  max_steps: 3
+  validation_enabled: false
+  objective:
+    main_ce: 0.5
+    main_kd:
+      weight: 0.5
+      metric: kld
+      temperature: 1.0
+      chunk_size: 512
+    mtp_ce: 0.5
+    mtp_kd:
+      weight: 0.5
+      metric: kld
+      temperature: 1.0
+      chunk_size: 512
+  metadata:
+    llm:
+      dataset:
+        target: modelopt.torch.puzzletron.distillation.synthetic_vlm.make_synthetic_llm_dataset
+        count: 64
+        seq_length: 128
+      dataloader:
+        target: torchdata.stateful_dataloader.StatefulDataLoader
+        shuffle: false
+        collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+zero_shot_evaluation:
+  enabled: true
+  eval_samples: 8
+  block_size: 1024

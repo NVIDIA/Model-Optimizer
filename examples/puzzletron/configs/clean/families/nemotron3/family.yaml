@@ -1,0 +1,87 @@
+# @package _global_
+
+descriptor: nemotron_h
+
+family:
+  name: nemotron3
+  descriptor_family: nemotron_h
+  executable_smoke_axes:
+    - kv_groups
+    - q_heads_per_group
+    - moe_experts
+    - moe_expert_intermediate
+    - moe_shared_expert_intermediate
+    - moe_latent_dim
+    - moe_top_k
+    - mamba_heads
+    - mamba_head_dim
+  declared_future_axes: []
+
+model:
+  trust_remote_code: true
+
+pruning:
+  activation_passes:
+    - name: attention_grouped
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor
+      hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook}
+      activation_hooks_kwargs:
+        method: grouped_attention_contribution
+        optimize_for: memory
+        target_layer: mixer.o_proj
+        layer_input_descriptors_path:
+
+    - name: moe_expert_removal
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MoEPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMoELayerDescriptor
+          target_name: mixer
+          require_attrs: [gate, experts]
+      activation_hooks_kwargs:
+        method: removed_expert_diff
+        target_layer: mixer
+
+    - name: moe_expert_intermediate
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MoEPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMoELayerDescriptor
+          target_name: "regex:(^|\\.)(backbone|model)?\\.?layers\\.\\d+\\.mixer\\.experts(\\.\\d+\\.down_proj)?$"
+      activation_hooks_kwargs:
+        method: moe_channel
+        target_layer: mixer.experts
+
+    - name: moe_shared_expert_intermediate
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MoEPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMoELayerDescriptor
+          target_name: mixer.shared_experts.down_proj
+      activation_hooks_kwargs:
+        method: shared_expert_intermediate_contribution
+        target_layer: mixer.shared_experts.down_proj
+
+    - name: moe_latent
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MoEPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMoELayerDescriptor
+          target_name: mixer
+          require_attrs: [gate, experts]
+      activation_hooks_kwargs:
+        method: moe_latent
+        target_layer: mixer
+
+    - name: mamba_head_and_dim
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MambaPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMambaLayerDescriptor
+          target_name: mixer.in_proj
+      activation_hooks_kwargs:
+        method: mamba_head_and_dim
+        target_layer: mixer.in_proj

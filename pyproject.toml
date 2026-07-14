@@ -92,6 +92,7 @@ puzzletron = [ # Dependedencies for modelopt.torch.puzzletron subpackage
     "immutabledict",
     "lru-dict",
     "pandas",
+    "plotly",
     "typeguard",
 ]
 dev-lint = [

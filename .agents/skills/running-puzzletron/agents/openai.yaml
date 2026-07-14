@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Puzzletron"
+  short_description: "Onboard and run resumable Puzzletron campaigns"
+  default_prompt: "Use $running-puzzletron to onboard this model and produce a runnable Puzzletron campaign configuration."

@@ -1,388 +1,366 @@
-# Puzzletron Algorithm Tutorial
+# Puzzletron
 
-This tutorial demonstrates how to compress large language models using the puzzletron algorithm based on the [Puzzle paper](https://arxiv.org/abs/2411.19146).
-The goal of the algorithm it to find the most optimal modifications to MLP and attention layers of the model, resulting in a heterogeneous model architecture.
-The supported modifications are:
+Puzzletron searches for smaller, faster variants of pretrained language and multimodal
+models while preserving a reproducible path from the teacher checkpoint to realized,
+evaluated, and optionally distilled models. The current implementation is an
+artifact-driven DAG: each stage consumes immutable upstream artifacts, publishes a
+manifest, can resume independently, and contributes to one cumulative HTML report.
 
-- `ffn_intermediate_size`: different FFN intermediate sizes
-- `attention op/noop`: complete removal of attention layers
+## Start Here
 
-To use the Puzzle algorithm effectively, we need to specify the target number of parameters and/or the memory. The final stage is based on Mixed-Integer Programming (MIP) algorithm to find the most optimal combination of layer modifications that satisfy the target requirements.
+For a new model, use the [running-puzzletron skill](../../PUZZLETRON_SKILL.md). It guides
+model-aware intake, source inspection, descriptor/backend selection, pruning-axis
+admission, multimodal and MTP handling, full-coverage smoke validation, production config
+generation, execution, resume, and reporting.
 
-In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) model reducing GPU memory usage from 113 GiB to 96 GiB (15% reduction) with less than 1% regression in the token_accuracy_top_10 metric. Other supported models should be compressed in a similar way. For GptOss there is one [additional step to be performed](GPTOSS.md).
+The skill must produce an actual runnable config bundle and exact commands after the
+questionnaire; it is not only a review checklist. It also requires physical pruning to be
+the ground truth for every dynamic slicing implementation.
 
-> **Note:** Other models are also supported. See the [configs](./configs/) directory for additional model configurations (e.g., Llama-3.2-3B-Instruct on 1x H100, Qwen2.5-7B-Instruct on 1x H100, Qwen3-8B on 1x H100, Nemotron-Nano-12B-v2 on 1x H100, Mistral-Small-24B-Instruct-2501 on 4x H100, Nemotron-3-Nano-30B-A3B-Base-BF16 on 8x H100 — see the [bypass distillation tutorial](Nemotron-3-Nano-30B-A3B-Base-BF16.md)). For information on adding support for new models, see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md).
+For NVIDIA-internal operation, the ignored `nv-internal/sepehr_scripts.md` contains the
+long-form step-by-step command sequence and `nv-internal/CLUSTER_GUIDE_NV.md` records the
+current cluster behavior. These files are intentionally not part of the public Git tree.
+The shorter local pointer is preserved at
+`nv-internal/examples/puzzletron/sepehr_scripts.md`.
 
-## Environment
+## Installation
 
-### Container setup (NeMo)
-
-The recommended way to run puzzletron is inside an NVIDIA NeMo container (e.g. `nvcr.io/nvidia/nemo:26.02`). NeMo containers ship a pre-installed `nvidia-modelopt` that does not include the puzzletron extras so you need to replace it with an editable install from this repo.
-
-> [!WARNING]
-> Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers.
-
-> [!NOTE]
-> NeMo containers ship `nvidia-lm-eval` which may conflict with `lm-eval` that is used for evaluation, hence we uninstall and replace it with `lm-eval` from the repo.
-
-Once inside the container with the repo available, install dependencies from the repo root:
-
-```bash
-python -m pip uninstall nvidia-lm-eval -y 2>/dev/null
-python -m pip install -e ".[hf,puzzletron,dev-test]"
-python -m pip install -r examples/puzzletron/requirements.txt
-```
-
-To verify the install, you can run the GPU tests as a smoke check:
+Create one environment whose PyTorch, CUDA, ModelOpt, AutoModel, vLLM, and AIPerf builds
+are ABI-compatible. From the repository root:
 
 ```bash
-python -m pytest tests/gpu/torch/puzzletron/test_puzzletron.py -k "Qwen3-8B"
+source .venv/bin/activate
+python -m pip install -e .
+python -m pip install -e ../vllm
+python -m pip install -e ../aiperf
+python -m pip install -e ../Automodel
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```
 
-### Hardware
+Record package revisions and `torch.version.cuda` in the experiment. Revalidate imports
+and one GPU forward after rebuilding any compiled sibling.
 
-- For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use a single GPU.
+## What v2 Adds
 
-- To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
+The v2 branch is more than a new runner. Its reusable additions include:
+
+- content-addressed identities, manifests, artifact inventory/import/coverage, and
+  acceptance-based resume;
+- scheduler-neutral stage graph and isolated stage workers;
+- family/model capability registries, generic decoder contracts, HF conversion, native
+  AutoModel descriptors, and AnyModel vLLM export;
+- fixed, padded, packed, and multimodal batch contracts with sample hashing;
+- coordinated activation passes, sorted teachers, reverse-sort and physical-slice sanity,
+  hidden-width/PLE support, and typed attention/FFN/MoE/Mamba/GDN surgery;
+- checkpointed elastic bypass with per-DP architecture observations and subblock boundaries;
+- iterative depth trajectories, block/subblock candidate libraries, sparse sampling,
+  shardable vLLM statistics, and distributed replace-one evaluation;
+- multi-profile MIP, content-addressed solution registries, physical realization, exact
+  evaluation, AIPerf sweeps, and post-distillation evaluation;
+- full-vocabulary chunked/flash CE and KD objectives, MTP loss separation, VLM-aware global
+  KD, scenario grids, and tournament selection;
+- an artifact-driven cumulative HTML report with a navigable DAG, per-stage warnings,
+  granularity-aware sections, interactive bypass/scoring plots, and partial-run visibility.
+
+See the repository map below for the source ownership of each subsystem.
+
+## Configuration
+
+All supported configurations live under [`configs/clean/`](configs/clean/):
+
+```text
+configs/clean/
+├── base.yaml                  # scheduler-neutral defaults and stage contracts
+├── families/<family>/        # family defaults
+│   └── <model>/model.yaml     # checkpoint, descriptor, axes, model geometry
+├── recipes/                   # TP/CP/PP/EP/DP execution recipes
+├── campaigns/                 # reusable multi-model campaign definitions
+├── my_paths.example.yaml      # template for machine-local paths
+└── my_paths.yaml              # ignored local overlay
+```
+
+An experiment YAML composes the base, family, model, topology recipe, and experiment
+overrides. Keep checkpoint, dataset, container, account, and artifact-root values in the
+ignored `my_paths.yaml`; committed configs must be portable.
+
+Important configuration choices are independent:
+
+- Data modality and layout: text or supported media combinations; fixed, padded, or
+  packed variable-length batches.
+- Per-stage granularity: depth, bypass, vLLM statistics, and replace-one scoring each
+  choose block or subblock semantics independently.
+- Search domains and constraints: legal axis values, depth scenarios, runtime/memory/
+  parameter budgets, and numbers of models to evaluate or distill.
+- Execution topology: TP, CP, PP, EP, DP, sequence parallelism, microbatch, and global
+  batch. Validate the backend mesh rather than multiplying labels blindly.
+
+Granularity is a per-component contract, not a campaign-wide switch:
+
+| Component | Default | Meaning |
+|---|---|---|
+| Depth importance | `subblock` | Rank removable attention/FFN/typed sublayers independently |
+| vLLM statistics | `block` | Measure full block combinations unless subblock additivity is requested |
+| Candidate statistics | `block` | Build cost records at the configured library unit |
+| Replace-one scoring | `block` | Score one block candidate; `subblock` scores one changed sublayer at a time |
+| Bypass | `block` | Sample and train complete block candidates; `subblock` isolates local sublayer losses |
+
+`Build Block Library` remains the public stage name at either granularity. Artifacts and
+report labels record the actual per-stage setting; changing one component does not silently
+change the others.
+
+Parse the final config with the same loader used by the runner before allocating GPUs:
 
 ```bash
-hf auth login --token <your token>
+python - <<'PY'
+from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
+
+cfg = pipeline_config_from_path("path/to/experiment.yaml")
+print(cfg["experiment"]["dir"])
+PY
 ```
 
-## Compress the Model
+## Pipeline DAG
 
-1. Download and prepare the [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
+The authoritative registry is
+[`stages/graph.py`](../../modelopt/torch/puzzletron/stages/graph.py). Required and optional
+stages, dependencies, display names, distributed execution, and completion artifacts are
+defined there.
 
-   dataset split: "code", "math", "stem", "chat", excluding reasoning samples (2.62GB)
+```text
+Convert Checkpoint
+├── Tokenize Data
+│   ├── Depth Importance Estimation (optional)
+│   └── Width Importance Estimation
+│       └── Sort Checkpoint
+│           ├── Sort Sanity Check (optional)
+│           ├── Width Sanity Check (optional)
+│           ├── Slicing Sanity Check (optional)
+│           └── Bypass Sanity Check (optional)
+│               └── Bypass (optional; block or subblock)
+│                   └── Build Block Library
+│                       └── Replace-one-block/subblock Scoring
+└── vLLM Stats (optional; block or subblock)
 
-   ```bash
-   python -m modelopt.torch.puzzletron.dataset.prepare_dataset \
-      --dataset_name nvidia/Nemotron-Post-Training-Dataset-v2 \
-      --output_dir path/to/Nemotron-Post-Training-Dataset-v2
-   ```
+vLLM Stats + Depth Importance + Replace-one Scoring
+└── MIP Search
+    ├── AIPerf (optional)
+    └── Zero-shot Evaluation (optional)
+        └── Global Distillation Sanity Check (optional)
+            └── Global Distillation (optional)
+                └── Post Distillation Evaluation (optional)
+```
 
-2. Specify the `puzzle_dir`, `input_hf_model_path`, `dataset_path`, `intermediate_size_list`, and `target_memory` arguments in the [llama-3_1-8B_pruneffn_memory.yaml](./configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml) configuration file.
+The graph is not a command-order recommendation for one giant allocation. Run independent
+branches concurrently when they have disjoint writers, and use the smallest appropriate
+resource topology for each stage.
 
-   - `puzzle_dir` indicates a new directory for saving the resulting model.
-   - `input_hf_model_path` indicates the local directory with the input model checkpoint.
-   - `dataset_path` indicates the directory with the dataset downloaded earlier.
+## Running the Pipeline
 
-   **_NOTE:_**
-   How to choose `intermediate_size_list`?
-   The list specifies the candidate FFN sizes that we wish to search over. It is recommended to choose several pruning sizes (e.g. 15%, 20%, 30% etc of the original). Note that the values must be hardware-friendly (divisible by a 256) to avoid issues with tensor operations in subsequent steps.
-
-   Let's first shoot for 32% GPU memory reduction setting `target_memory = 78_000` MiB. This means that the algorithm will choose the candidates with highest accuracy that also meet the specified requirements.
-
-   We can also set the target size of the resulting model using `num_params = 7_000_000_000`. This will be used as an upper bound for the number of parameters of the model.
-
-3. Run the puzzletron pipeline.
-
-   ```bash
-   torchrun --nproc_per_node 2 examples/puzzletron/main.py --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
-   ```
-
-   This will save the full output to `log.txt` and display the following progress on screen:
-
-   ```bash
-   [2025-11-02 12:06:34][rank-0][main.py:71] Puzzletron Progress 1/8: starting puzzletron pipeline
-   [2025-11-02 12:06:45][rank-0][puzzletron_nas_plugin.py:123] Puzzletron Progress 2/8: converting model from HF to DeciLM (single-gpu)
-   [2025-11-02 12:07:07][rank-0][puzzletron_nas_plugin.py:132] Puzzletron Progress 3/8: scoring pruning activations (multi-gpu)
-   [2025-11-02 12:11:36][rank-0][puzzletron_nas_plugin.py:137] Puzzletron Progress 4/8: pruning the model and saving pruned checkpoints (single-gpu)
-   [2025-11-02 12:12:20][rank-0][puzzletron_nas_plugin.py:217] Puzzletron Progress 5/8: building replacement library and subblock statistics (single-gpu)
-   [2025-11-02 12:12:21][rank-0][puzzletron_nas_plugin.py:222] Puzzletron Progress 6/8: calculating one block scores (multi-gpu)
-   [2025-11-02 12:50:41][rank-0][puzzletron_nas_plugin.py:226] Puzzletron Progress 7/8: running MIP and realizing models (multi-gpu)
-   [2025-11-02 12:52:34][rank-0][main.py:115] Puzzletron Progress 8/8: puzzletron pipeline completed (multi-gpu)
-   ```
-
-   Once the process is complete, the resulting network architecture will be recorded in `log.txt` for your review:
-
-   ```bash
-   ...
-   block_0:   attention  gqa_4   ffn  intermediate_14336
-   block_1:   attention  gqa_4   ffn  intermediate_14336
-   block_2:   attention  gqa_4   ffn  intermediate_14336
-   block_3:   attention  gqa_4   ffn  intermediate_14336
-   block_4:   attention  gqa_4   ffn  intermediate_14336
-   block_5:   attention  gqa_4   ffn  intermediate_14336
-   block_6:   attention  gqa_4   ffn  intermediate_14336
-   block_7:   attention  gqa_4   ffn  intermediate_14336
-   block_8:   attention  gqa_4   ffn  intermediate_14336
-   block_9:   attention  gqa_4   ffn  intermediate_14336
-   block_10:  attention  gqa_4   ffn  intermediate_14336
-   block_11:  attention  gqa_4   ffn  intermediate_14336
-   block_12:  attention  gqa_4   ffn  intermediate_14336
-   block_13:  attention  gqa_4   ffn  intermediate_14336
-   block_14:  attention  gqa_4   ffn  intermediate_14336
-   block_15:  attention  gqa_4   ffn  intermediate_14336
-   block_16:  attention  gqa_4   ffn  intermediate_14336
-   block_17:  attention  no_op   ffn  intermediate_14336
-   block_18:  attention  no_op   ffn  intermediate_14336
-   block_19:  attention  no_op   ffn  intermediate_14336
-   block_20:  attention  no_op   ffn  intermediate_14336
-   block_21:  attention  no_op   ffn  intermediate_14336
-   block_22:  attention  no_op   ffn  intermediate_14336
-   block_23:  attention  no_op   ffn  intermediate_14336
-   block_24:  attention  no_op   ffn  intermediate_14336
-   block_25:  attention  no_op   ffn  intermediate_14336
-   block_26:  attention  no_op   ffn  intermediate_14336
-   block_27:  attention  no_op   ffn  intermediate_14336
-   block_28:  attention  no_op   ffn  intermediate_14336
-   block_29:  attention  gqa_4   ffn  intermediate_14336
-   block_30:  attention  gqa_4   ffn  intermediate_14336
-   block_31:  attention  gqa_4   ffn  intermediate_14336
-
-   [2025-11-02 04:53:11,332]^[[92m[rank-0]^[[0m[run_puzzle.py:295] Total costs: {'stats.memory_mib': 75796.4140625, 'stats.ffn_num_params': 5637275648, 'stats.num_kv_heads': 160, 'stats.kv_cache_memory_mib': 61440.0, 'stats.ffn_memory_mib': 10752.25, 'stats.attention_memory_mib': 63040.15625, 'stats.attention_num_params': 838942720, 'stats.num_params': 7526895616, 'stats.has_attention': 20, 'stats.has_ffn': 32}
-   ...
-   ################################################################
-   validate_model_and_extract_token_probs(model_name='teacher')
-   ################################################################
-   ...
-   Average losses = {'lm_loss': 1.118250765837729, 'token_accuracy_top_1': 0.7331905364990234, 'token_accuracy_top_5': 0.9094219207763672, 'token_accuracy_top_10': 0.9423646926879883}
-   ...
-   ################################################################
-   validate_model_with_kl_div(model_name='solution_0', is_calc_kl_div=True)
-   ################################################################
-   ....
-   Average losses = {'lm_loss': 1.7577573340386152, 'token_accuracy_top_1': 0.6225490570068359, 'token_accuracy_top_5': 0.846257209777832, 'token_accuracy_top_10': 0.8987817764282227}
-   ```
-
-   30% GPU memory reduction leads to nearly 5% regression in token_accuracy_top_10 metric (0.898 / 0.942).
-
-## Re-run MIP Search with different constraints
-
-If you want to try different constraints without re-running the expensive pruning and scoring steps, use the `--mip-only` flag.
-This assumes pruning, replacement library building, NAS scoring, and subblock stats calculation have already been completed.
-
-For example, let's set `target_memory: 96_000` in `llama-3_1-8B_pruneffn_memory.yaml`.
+Run all enabled stages sequentially in dependency order:
 
 ```bash
-torchrun --nproc_per_node 2 examples/puzzletron/main.py \
-   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml \
-   --mip-only 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+python examples/puzzletron/main.py \
+  --config path/to/experiment.yaml \
+  --stage full \
+  --gpus-per-node 8
 ```
 
-This will generate the following network architecture (see `log.txt`):
+Run one stage:
 
 ```bash
-block_0:   attention  gqa_4   ffn  intermediate_14336
-block_1:   attention  gqa_4   ffn  intermediate_14336
-block_2:   attention  gqa_4   ffn  intermediate_14336
-block_3:   attention  gqa_4   ffn  intermediate_14336
-block_4:   attention  gqa_4   ffn  intermediate_14336
-block_5:   attention  gqa_4   ffn  intermediate_14336
-block_6:   attention  gqa_4   ffn  intermediate_14336
-block_7:   attention  gqa_4   ffn  intermediate_14336
-block_8:   attention  gqa_4   ffn  intermediate_14336
-block_9:   attention  gqa_4   ffn  intermediate_14336
-block_10:  attention  gqa_4   ffn  intermediate_14336
-block_11:  attention  gqa_4   ffn  intermediate_14336
-block_12:  attention  gqa_4   ffn  intermediate_14336
-block_13:  attention  gqa_4   ffn  intermediate_14336
-block_14:  attention  gqa_4   ffn  intermediate_14336
-block_15:  attention  gqa_4   ffn  intermediate_14336
-block_16:  attention  gqa_4   ffn  intermediate_14336
-block_17:  attention  gqa_4   ffn  intermediate_14336
-block_18:  attention  no_op   ffn  intermediate_14336
-block_19:  attention  no_op   ffn  intermediate_14336
-block_20:  attention  no_op   ffn  intermediate_14336
-block_21:  attention  gqa_4   ffn  intermediate_14336
-block_22:  attention  no_op   ffn  intermediate_14336
-block_23:  attention  no_op   ffn  intermediate_14336
-block_24:  attention  no_op   ffn  intermediate_14336
-block_25:  attention  gqa_4   ffn  intermediate_14336
-block_26:  attention  gqa_4   ffn  intermediate_14336
-block_27:  attention  gqa_4   ffn  intermediate_14336
-block_28:  attention  gqa_4   ffn  intermediate_14336
-block_29:  attention  gqa_4   ffn  intermediate_14336
-block_30:  attention  gqa_4   ffn  intermediate_14336
-block_31:  attention  gqa_4   ffn  intermediate_14336
-
-[2025-11-02 12:50:42,024]^[[92m[rank-0]^[[0m[run_puzzle.py:295] Total costs: {'stats.memory_mib': 94708.4609375, 'stats.has_ffn': 32, 'stats.ffn_memory_mib': 10752.25, 'stats.kv_cache_memory_mib': 79872.0, 'stats.attention_num_params': 1090625536, 'stats.ffn_num_params': 5637275648, 'stats.has_attention': 26, 'stats.num_params': 7778578432, 'stats.attention_memory_mib': 81952.203125, 'stats.num_kv_heads': 208}
-...
-################################################################
-validate_model_with_kl_div(model_name='solution_0', is_calc_kl_div=True)
-################################################################
-Average losses = {'lm_loss': 1.2425934937782586, 'token_accuracy_top_1': 0.703862190246582, 'token_accuracy_top_5': 0.8954982757568359, 'token_accuracy_top_10': 0.9336576461791992
+python examples/puzzletron/main.py \
+  --config path/to/experiment.yaml \
+  --stage width_importance \
+  --gpus-per-node 8
 ```
 
-On the other hand, if you set `target_memory: 28_000`, you'll observe that the intermediate FFN sizes are significantly reduced in certain layers (see `log.txt` for details):
+Apply a resolved config override without editing the YAML:
 
 ```bash
-block_5:   attention  no_op   ffn  intermediate_11520
-block_6:   attention  no_op   ffn  intermediate_14336
-block_7:   attention  no_op   ffn  intermediate_8704
-block_8:   attention  no_op   ffn  intermediate_14336
-block_9:   attention  no_op   ffn  intermediate_3072
-block_10:  attention  no_op   ffn  intermediate_11520
-block_11:  attention  no_op   ffn  intermediate_11520
-block_12:  attention  no_op   ffn  intermediate_11520
-block_13:  attention  no_op   ffn  intermediate_11520
-block_14:  attention  no_op   ffn  intermediate_3072
+python examples/puzzletron/main.py \
+  --config path/to/experiment.yaml \
+  --stage bypass_sanity \
+  --override bypass.granularity=subblock
 ```
 
-### MIP Sweep Mode
+Use `--force` only when intentionally invalidating a valid completion marker. Normally the
+runner skips a stage only when its marker, semantic config, upstream identities, and
+required outputs agree.
 
-The **MIP sweep mode** lets you explore multiple memory compression rates in a single run and compare the accuracy-memory trade-offs.
-
-#### Quick Start
-
-1. Enable sweep in your config YAML (e.g., `llama-3_1-8B_pruneffn_memory.yaml`):
-
-   ```yaml
-   mip:
-     sweep:
-       enabled: true
-       memory_compression_rates: [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-       output_csv: ${puzzle_dir}/mip_sweep_results.csv
-   ```
-
-2. Run the sweep:
-
-   ```bash
-   torchrun --nproc_per_node 2 examples/puzzletron/main.py \
-      --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml \
-      --mip-only 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
-   ```
-
-3. View results: The CSV file contains compression rates, memory usage, and accuracy metrics for each configuration.
-
-#### Example Results
-
-<img src="mip_sweep_example.png" alt="MIP Sweep Results" width="600">
-
-The plot shows how token accuracy changes with different compression rates. Higher compression (0.5 = 50% of original memory) reduces accuracy, while lower compression maintains accuracy closer to the teacher model.
-
-## Evaluation
-
-Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly.
+The orchestrator launches a fresh local worker for each stage so distributed state and GPU
+memory cannot leak across stages. For an externally launched distributed job, run exactly
+one distributed stage. The launcher must establish the process group, for example:
 
 ```bash
-python examples/llm_eval/lm_eval_hf.py \
-   --model hf \
-   --model_args pretrained=path/to/checkpoint,dtype=bfloat16,parallelize=True \
-   --tasks mmlu \
-   --num_fewshot 5 \
-   --batch_size 4
+torchrun --nnodes="$NNODES" --nproc-per-node="$GPUS_PER_NODE" \
+  --rdzv-backend=c10d --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+  examples/puzzletron/main.py \
+  --config path/to/experiment.yaml \
+  --stage replacement_scoring \
+  --gpus-per-node "$GPUS_PER_NODE"
 ```
 
-For a quick smoke test, add `--limit 10`.
+On Slurm, map one distributed model task per node or launch explicit independent workers;
+on bare metal, use passwordless SSH, shared storage at identical paths, deterministic rank
+mapping, per-host logs/PIDs, and complete peer cleanup after a failure.
 
-> **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
-> see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
+## Stage Correctness
 
-## Deploy compressed model in vLLM
+### Conversion and data
 
-To deploy a compressed model in vLLM, install vLLM fork with AnyModel enabled:
+Conversion must preserve teacher outputs, model-specific config, tokenizer/processor
+assets, tied-weight semantics, and backend loadability. Tokenization must preserve sample
+identity, padding/loss masks, packed document boundaries, modality fields, and MTP target
+boundaries.
+
+### Width importance, sorting, and slicing
+
+Inventory every distinct layer implementation before defining pruning axes. Each admitted
+axis needs a dynamic implementation, physical materialization, state-dict conversion, cost
+model, backend compatibility, and equivalence case.
+
+Keep the three diagnoses separate:
+
+- Sort sanity compares full-size original, sorted, and reverse-sorted checkpoints.
+- Width sanity checks whether the learned ranking improves reduced candidates.
+- Slicing sanity compares dynamic sorted, dynamic unsorted, dynamic reverse, and physically
+  materialized sorted variants against the original teacher.
+
+Physical materialization is the oracle. A mismatch is a bug until localized; do not change
+physical pruning to match a mask.
+
+### Bypass
+
+Run fixed-smallest and diverse-resampling sanity checks before a long nested bypass. The
+fixed candidate should overfit clearly; the diverse trend should decrease despite scatter.
+When DP ranks sample distinct architectures, save rank, step, canonical architecture hash,
+human-readable config, parameter ratio, sample identity, and component losses for every
+observation.
+
+### Expensive immutable stages
+
+Depth importance, vLLM statistics, and replace-one scoring must use shard manifests and
+resume only missing identities. They should remain usable when worker count/topology changes
+if their artifact schema is topology-independent. Never delete or rerun complete expensive
+shards merely to regenerate a report.
+
+### MIP, evaluation, AIPerf, and KD
+
+MIP solutions must reference exact score/runtime/depth inputs and satisfy the declared
+constraints after physical realization. Include the teacher in zero-shot evaluation.
+AIPerf should sweep meaningful concurrency/topology values and verify successful requests,
+token lengths, and instruct templates.
+
+Global KD sanity must overfit before a real run. Report `main_ce`, `mtp_ce`, `main_kd`, and
+`mtp_kd` separately and compute their configured weighted sum. Shifted MTP targets must not
+cross padding, packed-document, or modality boundaries. Validate interruption/resume before
+trusting a long job.
+
+## Resuming and Checkpointing
+
+Long-running stages should publish before the scheduler deadline. A training checkpoint is
+complete only when model, optimizer, scheduler/scaler, dataloader cursor, global step, all
+RNG states, topology metadata, architecture observations, and a completion marker agree.
+
+Write checkpoints transactionally:
+
+1. Write all shards to a temporary transaction directory.
+2. Validate expected shards and identities.
+3. Publish the completion marker atomically.
+4. Update `latest` only after publication.
+5. Quarantine incomplete transactions and resume the newest complete checkpoint.
+
+Use normal dependency-on-success for DAG transitions. A continuation after timeout or
+failure is safe only for a stage whose resume contract has been validated.
+
+## Report
+
+Every worker calls
+`diagnostics.campaign_progress_report.generate_campaign_progress_report` and refreshes the
+cumulative report from artifacts on disk. The stable HTML path is:
+
+```text
+<experiment-dir>/artifacts/campaign_report/campaign_report.html
+```
+
+Regenerate it without rerunning a stage:
 
 ```bash
-git clone https://github.com/askliar/vllm.git
-cd vllm
-git checkout feature/add_anymodel_to_vllm
-VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
+python - <<'PY'
+from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
+    generate_campaign_progress_report,
+)
+
+result = generate_campaign_progress_report("/path/to/experiment", model_name="Model name")
+print(result)
+PY
 ```
 
-See [vLLM documentation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for more details on installation.
+The generator reads existing artifacts only; it must not mutate or invalidate completed
+stage data.
 
-**NOTE:** This is a temporary workaround pending official vLLM integration. You can track merge status [here](https://github.com/vllm-project/vllm/pull/36512).
+The report contains:
 
-Then, add the following to the model's `config.json` file (here we use Llama as an example):
+- experiment identity and resolved important config;
+- pipeline DAG with completed, pending, and disabled nodes;
+- artifact provenance and stage warnings;
+- sorting, width, slicing, bypass, depth, runtime, scoring, MIP, evaluation, AIPerf, and KD
+  sections whenever their artifacts exist;
+- partial long-running bypass/KD observations without erasing earlier results.
 
-```json
-{
-  ...
-  "architectures": ["AnyModel"],
-  "base_architecture": "LlamaForCausalLM",
-  ...
-}
-```
+Warnings should appear beside the affected values. A warning does not make an artifact
+incomplete, but it must remain visible and explain the expected invariant.
 
-For new architectures that are not supported by vLLM, you additionally need to add the following to the `config.json` file (using Llama3 as an example):
+## Adding a New Model
 
-```json
-{
-  ...
-  "anymodel_arch_info": {
-    "decoder_layer_module": ".<module_name>",
-    "decoder_layer_class": "<decoder_layer_class_name>",
-    "base_model_module": ".<base_model_module_name>",
-    "layers_path": "<layers_path>",
-    "init_prefix": "model",
-    "Layer_hf_config": "<Layer_hf_config>"
-  }
-  ...
-}
-```
+Use the Puzzletron skill instead of copying a nearby descriptor blindly. At minimum:
 
-With these changes it is now possible to load the compressed model in vLLM for inference:
+1. Resolve the exact checkpoint and inspect every distinct HF layer implementation.
+2. Read matching vLLM and AutoModel implementations when they exist.
+3. Select AutoModel only when the unpruned model is already natively supported; otherwise
+   use the HF-native Puzzletron path.
+4. Admit only axes supported by all required constructors, kernels, caches, export paths,
+   and physical materializers.
+5. Exercise every selected modality/layout and topology path in a tiny full-coverage smoke.
+6. Deliberately interrupt and resume bypass and Global KD.
+7. Produce a resolved production config bundle and exact direct/Slurm/SSH commands before
+   requesting approval for expensive compute.
 
-```bash
-vllm serve <model_name_or_path>
-```
+## Debugging
 
-### Inference Performance Benchmarking
+Debug in dependency order:
 
-Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency.
+1. Confirm resolved config, revisions, environment, and artifact identity.
+2. Inspect one processor-native batch and all masks/media/packed metadata.
+3. Run one unpruned forward under the exact backend and topology.
+4. Compare dynamic and physical outputs at the first changed module boundary.
+5. Read every rank log and diagnose the earliest failure before changing resources.
+6. Validate shard/checkpoint manifests before resuming.
+7. Regenerate the report and verify its node states follow artifacts and active config.
 
-- Benchmark latency
+Common failures include wrong PP schedules, TP without required sequence parallelism,
+unequal CP token reductions, dropped multimodal keys, packed targets crossing documents,
+incomplete checkpoints presented as `latest`, and allocated GPUs with no active workers.
 
-```bash
-vllm bench latency --model path/to/model --load-format safetensors
-```
+## Repository Map
 
-- Benchmark throughput
+- [`main.py`](main.py): scheduler-neutral orchestrator and isolated worker launcher.
+- [`modelopt/torch/puzzletron/stages/`](../../modelopt/torch/puzzletron/stages): stage
+  graph and handlers.
+- [`modelopt/torch/puzzletron/anymodel/`](../../modelopt/torch/puzzletron/anymodel):
+  model descriptors, conversion, and capability registry.
+- [`modelopt/torch/puzzletron/plugins/automodel/`](../../modelopt/torch/puzzletron/plugins/automodel):
+  native AutoModel hooks, scoring, evaluation, bypass, and KD integration.
+- [`modelopt/torch/puzzletron/pruning/`](../../modelopt/torch/puzzletron/pruning):
+  dynamic candidates, sorting, physical materialization, and axis surgery.
+- [`modelopt/torch/puzzletron/diagnostics/`](../../modelopt/torch/puzzletron/diagnostics):
+  sanity aggregation and cumulative HTML report.
+- [`modelopt/torch/puzzletron/replacement_library/`](../../modelopt/torch/puzzletron/replacement_library):
+  candidate library and score composition.
+- [`modelopt/torch/puzzletron/distillation/`](../../modelopt/torch/puzzletron/distillation):
+  global KD datasets, losses, recipes, checkpointing, and publication.
+- [`tests/unit/torch/puzzletron/`](../../tests/unit/torch/puzzletron): focused contracts
+  for pipeline stages and model-independent behavior.
 
-```bash
-vllm bench throughput --model path/to/model --input-len 2000 --output-len 100 --load-format safetensors
-```
-
-## Knowledge Distillation
-
-To recover degradation in the quality of the compressed model, we can use knowledge distillation. This allows transferring the capabilities of the original model to the pruned one.
-
-See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) for instructions on using Megatron-Bridge for knowledge distillation. The distillation script supports both standard HuggingFace and Puzzletron AnyModel checkpoints.
-
-For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
-
-## Runtime-Based Latency Optimization
-
-You can enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints.
-
-A ready-to-run example config is included at [`configs/llama-3_1-8B_pruneffn_runtime/`](./configs/llama-3_1-8B_pruneffn_runtime/llama-3_1-8B_pruneffn_runtime.yaml). The following key fields enable and control execution of the runtime statistics in the `llama-3_1-8B_pruneffn_runtime.yaml` config file:
-
-```yaml
-calc_subblock_stats:
-  runtime_stats:
-    enabled: true
-    num_warmup_iters: 2
-    num_iters: 10
-```
-
-The runtime constraint is specified in the `human_constraints` section of the config `Llama-3_1-8B.yaml`:
-
-```yaml
-human_constraints:
-  target_latency_seconds: 21
-```
-
-Run the pipeline against this config the same way as the memory-constrained variant:
-
-```bash
-torchrun --nproc_per_node 2 examples/puzzletron/main.py \
-   --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_runtime/llama-3_1-8B_pruneffn_runtime.yaml 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
-```
-
-The MIP solver will now search for a heterogeneous architecture whose measured end-to-end latency is at or below `target_latency_seconds`, instead of optimizing for a memory budget.
-
-Because vLLM startup adds substantial overhead during stats collection, extend the distributed process group timeout accordingly (already included in the example config):
-
-```yaml
-nccl_timeout_minutes: 90  # default is 10 if omitted
-```
-
-This field is supported in any Puzzletron YAML config and overrides the default 10-minute distributed timeout.
-
-Due to non-linear extension of the runtime stats of single subblocks to the total runtime of the model, the `target_latency_seconds` value should be set to a value that is slightly lower than the desired latency. For example, in our experiments, the `target_latency_seconds` value of 5 resulted in a final model latency of 5.4 seconds.
-
-## Advanced Usage
-
-Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenarios.
+Keep public examples generic. Site-specific scheduler commands, personal experiment notes,
+and historical campaign debugging belong under ignored `nv-internal/`, not in this tree.

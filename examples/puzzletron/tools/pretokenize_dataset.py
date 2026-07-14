@@ -34,8 +34,8 @@ block size.
 
 Usage (CPU-only, no GPU; run on a many-core node):
     python examples/puzzletron/tools/pretokenize_dataset.py \
-        --config examples/puzzletron/configs/qwen3_6-27b_pruneffn_runtime/qwen3_6_27b_pruneffn_runtime.yaml \
-        --output /shared/.../Nemotron-Post-Training-Dataset-v2-qwen36-tokenized \
+        --config examples/puzzletron/configs/clean/families/qwen3_5/qwen3_5_0_8b/smoke_test.yaml \
+        --output /shared/.../Nemotron-Post-Training-Dataset-v2-qwen35-tokenized \
         --num-proc 64
 
 Then set ``dataset_path: <output>`` in the config. The tokenizer is read from

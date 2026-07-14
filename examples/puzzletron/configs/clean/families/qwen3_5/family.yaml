@@ -1,0 +1,43 @@
+# @package _global_
+
+family:
+  name: qwen3_5
+  executable_smoke_axes:
+    - ffn_intermediate
+    - kv_groups
+    - q_heads_per_group
+    - gdn_key_groups
+    - gdn_key_head_dim
+    - gdn_value_head_dim
+
+pruning:
+  activation_passes:
+    - name: ffn_iterative
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor.Qwen3P5VLFFNIntermediateLayerDescriptor
+      hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook}
+      activation_hooks_kwargs:
+        method: iterative
+        target_layer: mlp.down_proj
+        layer_input_descriptors_path:
+    - name: attention_grouped
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor.Qwen3P5VLKVHeadsLayerDescriptor
+      hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook}
+      activation_hooks_kwargs:
+        method: grouped_attention_contribution
+        optimize_for: memory
+        target_layer: self_attn.o_proj
+        layer_input_descriptors_path:
+    - name: gdn_activation
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.gated_delta_net_pruning_mixin.GatedDeltaNetPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor.Qwen3P5VLGatedDeltaNetLayerDescriptor
+      activation_hooks_kwargs:
+        method: gdn_activation_contribution
+        token_chunk_size: 64

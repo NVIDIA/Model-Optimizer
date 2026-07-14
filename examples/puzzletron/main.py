@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,303 +13,398 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""One-command Puzzletron pipeline and single-stage runner.
+
+The public process is an orchestrator. It launches a fresh worker process for
+each stage so distributed state and GPU memory cannot leak between stages.
+Workers are selected through the private ``--worker-stage`` option.
 """
-Main script for running the puzzletron algorithm on large language models (based on Puzzle paper https://arxiv.org/abs/2411.19146).
 
-This script provides three modes:
-1. Default mode: Runs the full puzzletron pipeline
-2. MIP-only mode: Runs only the MIP search and realize models phase
-3. MIP sweep mode: Runs MIP for multiple memory compression rates (enabled via config)
-
-Usage:
-    # Full puzzletron pipeline
-    torchrun main.py --config ./configs/llama_3.2_1B_pruneffn_memory.yaml
-
-    # Only MIP search and realize models phase
-    torchrun main.py --config ./configs/llama_3.2_1B_pruneffn_memory.yaml --mip-only
-
-    # MIP sweep mode (set mip.sweep.enabled: true in config)
-    torchrun main.py --config ./configs/llama_3.2_1B_pruneffn_memory.yaml --mip-only
-"""
+from __future__ import annotations
 
 import argparse
-from datetime import timedelta
+import faulthandler
+import json
+import os
+import signal
+import subprocess
+import sys
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import hydra
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
-import modelopt.torch.nas as mtn
 import modelopt.torch.puzzletron as mtpz
-import modelopt.torch.utils.distributed as dist
+from modelopt.torch.puzzletron.manifest import (
+    StageManifest,
+    semantic_stage_config,
+    write_stage_manifest,
+)
+from modelopt.torch.puzzletron.stages.graph import (
+    distributed_stage_ids,
+    enabled_stage_ids,
+    required_stage_ids,
+    selected_parent_stage_ids,
+    stage_ids,
+    stage_is_enabled,
+    topological_stage_ids,
+)
 
-# Stages that can be run in isolation via ``--stage``. ``bypass`` and ``scoring``
-# additionally support multi-node work splitting via ``--nodes``/``--idx``.
-STAGES = ("full", "bypass", "build_library", "scoring", "mip")
-MULTI_NODE_STAGES = ("bypass", "scoring")
+if __package__:
+    from .acceptance_resume import build_payload, check_marker, marker_path, write_marker
+else:
+    from acceptance_resume import build_payload, check_marker, marker_path, write_marker
+
+STAGES = stage_ids()
+PIPELINE_STAGE_ORDER = topological_stage_ids()
+REQUIRED_STAGES = frozenset(required_stage_ids())
+DISTRIBUTED_STAGES = frozenset(distributed_stage_ids())
+REQUIRED_OUTPUT_PATTERNS = {
+    "convert": ("ckpts/teacher/config.json",),
+    "tokenize_data": ("dataset_cache/*.tokens", "dataset_cache/*.tokens.json"),
+    "sort": ("ckpts/sorted_teacher/config.json",),
+    "slicing_sanity": (
+        "artifacts/width_slice_equivalence/manifest.json",
+        "artifacts/width_slice_equivalence/summary.json",
+        "artifacts/width_slice_equivalence/cases/**/*.json",
+        "artifacts/width_slice_equivalence/comparisons/*.safetensors",
+    ),
+    "depth_importance": ("depth/iterative/trajectory.json",),
+    "build_library": (
+        "replacement_library.json",
+        "candidate_library.json",
+        "subblock_stats.json",
+    ),
+    "vllm_stats": ("artifacts/vllm_stats/summary.json",),
+    "replacement_scoring": ("artifacts/replacement_scoring/summary.json",),
+    "mip": ("mip/**/*.json",),
+    "zero_shot_evaluation": ("artifacts/**/evaluation_summary.json",),
+    "aiperf": ("artifacts/aiperf/**/*.json",),
+    "global_distillation_sanity": ("artifacts/global_distillation_sanity/**/*.json",),
+    "global_distillation": ("artifacts/global_distillation/**/*.json",),
+}
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Compress large language models using the Puzzletron algorithm (based on Puzzle paper https://arxiv.org/abs/2411.19146)"
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the main config YAML file (e.g., ./configs/llama_3.2_1B_pruneffn_memory.yaml)",
-    )
-    parser.add_argument(
-        "--mip-only",
-        action="store_true",
-        help="Deprecated alias for --stage mip.",
-    )
-    parser.add_argument(
-        "--stage",
-        type=str,
-        default="full",
-        choices=STAGES,
-        help=(
-            "Which pipeline stage to run. 'full' (default) runs everything end to end. "
-            "'bypass'/'build_library'/'scoring'/'mip' run a single stage and assume the "
-            "prior stages already completed (their outputs live in puzzle_dir). "
-            "'bypass' and 'scoring' can be split across nodes with --nodes/--idx."
-        ),
-    )
-    parser.add_argument(
-        "--nodes",
-        type=int,
-        default=1,
-        help="Total number of nodes splitting a multi-node stage (bypass/scoring).",
-    )
-    parser.add_argument(
-        "--idx",
-        type=int,
-        default=0,
-        help="This node's index in [0, --nodes). Each node processes a disjoint slice.",
-    )
-
-    args = parser.parse_args()
-    if args.mip_only:
-        args.stage = "mip"
-    if args.nodes < 1:
-        parser.error("--nodes must be >= 1")
-    if not (0 <= args.idx < args.nodes):
-        parser.error("--idx must be in [0, --nodes)")
-    if args.nodes > 1 and args.stage not in MULTI_NODE_STAGES:
-        parser.error(
-            f"--nodes > 1 is only supported for stages {MULTI_NODE_STAGES} "
-            f"(got --stage {args.stage}); other stages are single-node."
+def _register_faulthandler() -> None:
+    if not hasattr(signal, "SIGUSR1"):
+        return
+    stack_log = None
+    if os.environ.get("SLURM_JOB_ID") and os.environ.get("RANK") is not None:
+        stack_path = Path("puzzle_runs/logs") / (
+            f"faulthandler_{os.environ['SLURM_JOB_ID']}_rank{os.environ['RANK']}.log"
         )
+        stack_path.parent.mkdir(parents=True, exist_ok=True)
+        stack_log = stack_path.open("a")
+    faulthandler.register(signal.SIGUSR1, file=stack_log, all_threads=True)
+
+
+_register_faulthandler()
+
+
+def _stage_enabled(config: dict, stage: str) -> bool:
+    return stage_is_enabled(stage, config)
+
+
+def stage_sequence(stage: str | None, config: dict) -> tuple[str, ...]:
+    """Return one explicit stage or every configured stage in dependency order."""
+
+    if stage is not None:
+        if stage == "full":
+            return enabled_stage_ids(config)
+        return (stage,)
+    return enabled_stage_ids(config)
+
+
+def _is_externally_launched() -> bool:
+    """Return whether torchrun has already established this process group."""
+
+    # Slurm's PMIx environment also exports RANK/WORLD_SIZE/LOCAL_RANK for a
+    # single srun task.  torchrun uniquely provides this rendezvous identifier,
+    # so it distinguishes a real worker from a shell that must self-launch.
+    return os.environ.get("TORCHELASTIC_RUN_ID") is not None
+
+
+def build_worker_command(
+    *,
+    config_path: str | Path,
+    stage: str,
+    overrides: Sequence[str],
+    gpus_per_node: int,
+    force_single: bool = False,
+) -> tuple[str, ...]:
+    """Build the isolated worker command for one stage."""
+
+    command = [sys.executable]
+    if stage in DISTRIBUTED_STAGES and not force_single:
+        command.extend(
+            (
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                f"--nproc_per_node={gpus_per_node}",
+            )
+        )
+    command.extend(
+        (
+            str(Path(__file__).resolve()),
+            "--config",
+            str(config_path),
+            "--worker-stage",
+            stage,
+        )
+    )
+    for override in overrides:
+        command.extend(("--override", str(override)))
+    return tuple(command)
+
+
+def refresh_campaign_report(config: dict, running_stage: str | None = None) -> None:
+    """Refresh the stable campaign report from rank zero."""
+
+    if int(os.environ.get("RANK", "0")) != 0:
+        return
+    puzzle_dir = config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir")
+    if not puzzle_dir:
+        return
+    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
+        generate_campaign_progress_report,
+    )
+
+    model = config.get("model") or {}
+    generate_campaign_progress_report(
+        puzzle_dir,
+        model_name=str(model.get("source") or "Puzzletron model"),
+        running_stage=running_stage,
+    )
+
+
+def _manifest_is_complete(config: dict, stage: str) -> bool:
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    path = puzzle_dir / "manifests" / f"{stage}.json"
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return payload.get("status") in {"success", "imported"}
+
+
+def _runtime_stats_filename(config: dict) -> str:
+    stats = config.get("vllm_stats") or {}
+    return str(stats.get("subblock_stats_filename", "subblock_stats.json"))
+
+
+def _stage_output_patterns(config: dict, stage: str) -> tuple[str, ...]:
+    if stage == "vllm_stats":
+        return (_runtime_stats_filename(config),)
+    patterns = REQUIRED_OUTPUT_PATTERNS.get(stage, ())
+    if stage == "build_library":
+        return tuple(
+            _runtime_stats_filename(config) if pattern == "subblock_stats.json" else pattern
+            for pattern in patterns
+        )
+    return patterns
+
+
+def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    upstream = {
+        parent: marker_path(puzzle_dir, parent, None, None)
+        for parent in selected_parent_stage_ids(stage, config)
+    }
+    paths = config.get("paths") or {}
+    repositories = tuple(
+        Path(paths[key]) for key in ("automodel_root", "vllm_root", "aiperf_root") if paths.get(key)
+    )
+    return {
+        "root": puzzle_dir,
+        "config": Path(config_path),
+        "mode": stage,
+        "width": None,
+        "depth": None,
+        "required_patterns": (
+            f"manifests/{stage}.json",
+            *_stage_output_patterns(config, stage),
+        ),
+        "upstream_markers": upstream,
+        "stage_config": semantic_stage_config(config, stage),
+        "repository_roots": repositories,
+    }
+
+
+def _completion_is_valid(config: dict, config_path: str | Path, stage: str) -> bool:
+    if not _manifest_is_complete(config, stage):
+        return False
+    kwargs = _resume_kwargs(config, config_path, stage)
+    return check_marker(marker_path(kwargs["root"], stage, None, None), **kwargs)
+
+
+def _mark_completion(config: dict, config_path: str | Path, stage: str) -> None:
+    if not _manifest_is_complete(config, stage):
+        raise RuntimeError(f"enabled stage {stage!r} did not write a successful manifest")
+    kwargs = _resume_kwargs(config, config_path, stage)
+    write_marker(kwargs["root"], stage, build_payload(**kwargs))
+
+
+def run_pipeline(
+    *,
+    config_path: str | Path,
+    config: dict,
+    stages: Sequence[str],
+    overrides: Sequence[str],
+    gpus_per_node: int,
+    force: bool,
+    is_complete: Callable[[str], bool],
+    mark_complete: Callable[[str], None],
+    refresh_report: Callable[[str | None], None],
+    command_runner: Callable[[Sequence[str]], subprocess.CompletedProcess] = subprocess.run,
+) -> None:
+    """Run stage workers sequentially, stopping on the first failed worker."""
+
+    refresh_report(None)
+    for stage in stages:
+        if not force and is_complete(stage):
+            continue
+        refresh_report(stage)
+        command = build_worker_command(
+            config_path=config_path,
+            stage=stage,
+            overrides=overrides,
+            gpus_per_node=gpus_per_node,
+            force_single=bool((config.get("embedding_pruning") or {}).get("enabled", False))
+            and stage == "replacement_scoring",
+        )
+        result = command_runner(command)
+        refresh_report(None)
+        if result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, command)
+        mark_complete(stage)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Puzzletron compression pipeline.")
+    parser.add_argument("--config", required=True, help="Hydra YAML entrypoint.")
+    parser.add_argument("--stage", choices=("full", *STAGES))
+    parser.add_argument("--force", action="store_true", help="Rerun the selected stage(s).")
+    parser.add_argument("--gpus-per-node", type=int, default=None)
+    parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument("--worker-stage", choices=STAGES, help=argparse.SUPPRESS)
+    parser.add_argument("--scenario-child", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.gpus_per_node is not None and args.gpus_per_node < 1:
+        parser.error("--gpus-per-node must be >= 1")
+    if args.force and args.worker_stage:
+        parser.error("--force is an orchestrator option")
     return args
 
 
-def run_full_puzzletron(hydra_config_path: str):
-    """Run the full puzzletron pipeline.
-
-    Args:
-        config_path: Path to the YAML configuration file
-    """
-    # Register Hydra custom resolvers (needed for config resolution)
-    mtpz.tools.register_hydra_resolvers()
-
-    hydra_config_path = Path(hydra_config_path).resolve()
-    hydra_config_dir = str(hydra_config_path.parent)
-    hydra_config_name = hydra_config_path.stem
-
-    # Load hydra config to determine total step count (bypass adds one step)
-    hydra_cfg = mtpz.tools.initialize_hydra_config_for_dir(
-        config_dir=hydra_config_dir,
-        config_name=hydra_config_name,
-        overrides=[],
+def _run_worker(args: argparse.Namespace) -> None:
+    cfg = mtpz.pipeline_config.pipeline_config_from_path(
+        args.config,
+        overrides=args.override,
     )
-    start_step, total_steps = mtpz.puzzletron_nas_plugin._progress_step(hydra_cfg, "start")
-
-    mtpz.tools.mprint(
-        f"Puzzletron Progress {start_step}/{total_steps}: starting puzzletron pipeline"
+    embedding_root = (
+        bool((cfg.get("embedding_pruning") or {}).get("enabled", False)) and not args.scenario_child
     )
+    gpus_per_node = int(args.gpus_per_node or (cfg.get("execution") or {}).get("gpus_per_node", 8))
+    composite_only = {"replacement_scoring", "mip"}
+    if args.worker_stage == "tokenize_data":
+        if __package__:
+            from .tokenize_data import tokenize_data_stage
+        else:
+            from tokenize_data import tokenize_data_stage
 
-    # Default timeout: 10 minutes, or extended to nccl_timeout_minutes if set in config
-    if hasattr(hydra_cfg, "nccl_timeout_minutes"):
-        timeout_minutes = hydra_cfg.nccl_timeout_minutes
+        result = tokenize_data_stage(cfg)
+    elif embedding_root and args.worker_stage in composite_only:
+        if __package__:
+            from .embedding_pipeline import run_embedding_stage
+        else:
+            from embedding_pipeline import run_embedding_stage
+
+        outputs = run_embedding_stage(
+            config_path=args.config,
+            config=cfg,
+            stage=args.worker_stage,
+            gpus_per_node=gpus_per_node,
+        )
+        result = _complete_composite_stage(cfg, args.worker_stage, outputs)
     else:
-        timeout_minutes = timedelta(minutes=10)
+        result = mtpz.stage_runner.run_stage(cfg, args.worker_stage)
+        if embedding_root and args.worker_stage in {"build_library", "vllm_stats"}:
+            if __package__:
+                from .embedding_pipeline import run_embedding_stage
+            else:
+                from embedding_pipeline import run_embedding_stage
 
-    dist.setup(timeout=timeout_minutes)
-
-    # Convert model (convert from HF to DeciLM, score pruning activations,
-    # prune the model and save pruned checkpoints)
-    input_model = mtpz.puzzletron_nas_plugin.PuzzletronModel()
-    converted_model = mtn.convert(
-        input_model,
-        mode=[
-            (
-                "puzzletron",
-                {
-                    "puzzle_dir": str(hydra_cfg.puzzle_dir),
-                    "input_model_path": hydra_cfg.input_hf_model_path,
-                    "hydra_config_dir": hydra_config_dir,
-                    "hydra_config_name": hydra_config_name,
-                    "dataset_path": str(hydra_cfg.dataset_path),
-                },
+            outputs = run_embedding_stage(
+                config_path=args.config,
+                config=cfg,
+                stage=args.worker_stage,
+                gpus_per_node=gpus_per_node,
             )
-        ],
-    )
-
-    # Run NAS search (build replacement library and compute stats,
-    # compute one block scores, run MIP and realize models)
-    mtn.search(
-        converted_model,
-        constraints={},  # this is not used as the search space is defined in the hydra config
-        dummy_input=None,  # Not used
-        config={},  # this is not used as the search space is defined in the hydra config
-    )
-
-    dist.cleanup()
-    complete_step, _ = mtpz.puzzletron_nas_plugin._progress_step(hydra_cfg, "complete")
+            outputs["base_manifest"] = str(result.manifest_path)
+            result = _complete_composite_stage(cfg, args.worker_stage, outputs)
+    refresh_campaign_report(cfg)
     mtpz.tools.mprint(
-        f"Puzzletron Progress {complete_step}/{total_steps}: puzzletron pipeline completed (multi-gpu)"
+        f"Puzzletron stage {result.stage!r} finished with status {result.status}: "
+        f"{result.manifest_path}"
+    )
+    if result.status not in {"success", "skipped"}:
+        raise RuntimeError(f"stage {result.stage!r} finished with status {result.status!r}")
+
+
+def _complete_composite_stage(config: dict, stage: str, outputs: dict):
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
+    manifest = StageManifest(stage=stage, inputs={"config": config}, config=config)
+    manifest.complete(outputs=outputs)
+    write_stage_manifest(manifest_path, manifest)
+    return mtpz.stage_runner.StageResult(
+        stage=stage,
+        status="success",
+        manifest_path=manifest_path,
+        message=f"Completed embedding-width composite stage {stage!r}.",
     )
 
 
-def run_mip_only(hydra_config_path: str):
-    """Run only the MIP search and realize models phase.
-
-    This assumes that pruning, replacement library building, NAS scoring, and subblock stats calculation
-    have already been completed.
-
-    Args:
-        hydra_config_path: Path to the YAML configuration file
-    """
-    dist.setup(timeout=timedelta(minutes=10))
-
-    # Register Hydra custom resolvers (needed for config resolution)
-    mtpz.tools.register_hydra_resolvers()
-
-    hydra_config_path = Path(hydra_config_path).resolve()
-    hydra_config_dir = str(hydra_config_path.parent)
-    hydra_config_name = hydra_config_path.stem
-
-    # Load hydra config
-    hydra_cfg = mtpz.tools.initialize_hydra_config_for_dir(
-        config_dir=hydra_config_dir,
-        config_name=hydra_config_name,
-        overrides=[],
-    )
-    mip_step, total_steps = mtpz.puzzletron_nas_plugin._progress_step(hydra_cfg, "mip")
-
-    # Check if sweep mode is enabled
-    if hasattr(hydra_cfg.mip, "sweep") and hydra_cfg.mip.sweep.get("enabled", False):
-        mtpz.tools.mprint(
-            f"Puzzletron Progress {mip_step}/{total_steps}:"
-            " running MIP sweep for multiple compression rates (multi-gpu)"
-        )
-        mtpz.mip.run_mip_sweep(hydra_cfg)
-    else:
-        # mip_and_realize_models (distributed processing)
-        # TODO: How to make it part of mnt.search() api, similarly to run_full_puzzletron() API
-        mtpz.tools.mprint(
-            f"Puzzletron Progress {mip_step}/{total_steps}: running MIP and realizing models (multi-gpu)"
-        )
-        mtpz.mip.launch_mip_and_realize_model(hydra_cfg)
-
-    dist.cleanup()
-    complete_step, _ = mtpz.puzzletron_nas_plugin._progress_step(hydra_cfg, "complete")
-    mtpz.tools.mprint(
-        f"Puzzletron Progress {complete_step}/{total_steps}: puzzletron pipeline completed (multi-gpu)"
-    )
-
-
-def _load_hydra_cfg(hydra_config_path: str):
-    """Load, resolve, and instantiate the Hydra config for a single-stage run."""
-    mtpz.tools.register_hydra_resolvers()
-    hydra_config_path = Path(hydra_config_path).resolve()
-    hydra_cfg = mtpz.tools.initialize_hydra_config_for_dir(
-        config_dir=str(hydra_config_path.parent),
-        config_name=hydra_config_path.stem,
-        overrides=[],
-    )
-    # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class), matching
-    # how the full pipeline (puzzletron_nas_plugin.run_search) prepares the config.
-    return hydra.utils.instantiate(hydra_cfg)
-
-
-def _stage_timeout(hydra_cfg):
-    """NCCL/process-group timeout from config, defaulting to 10 minutes."""
-    if hasattr(hydra_cfg, "nccl_timeout_minutes"):
-        return hydra_cfg.nccl_timeout_minutes
-    return timedelta(minutes=10)
-
-
-def run_stage_bypass(hydra_config_path: str, num_nodes: int, node_index: int):
-    """Run only the bypass-distillation stage (splittable across nodes).
-
-    Assumes teacher conversion and pruning checkpoints already exist in puzzle_dir.
-    """
-    hydra_cfg = _load_hydra_cfg(hydra_config_path)
-    if hydra_cfg.get("bypass", None) is None:
-        mtpz.tools.mprint("No 'bypass' section in config; nothing to do.")
+def main() -> None:
+    args = _parse_args()
+    if args.worker_stage:
+        _run_worker(args)
         return
-    dist.setup(timeout=_stage_timeout(hydra_cfg))
-    try:
-        mtpz.tools.mprint(
-            f"Running bypass distillation stage (node {node_index}/{num_nodes})"
-        )
-        mtpz.bypass_distillation.launch_bypass_distillation(
-            hydra_cfg, num_nodes=num_nodes, node_index=node_index
-        )
-    finally:
-        dist.cleanup()
 
-
-def run_stage_build_library(hydra_config_path: str):
-    """Run only the build-replacement-library + subblock-stats stage.
-
-    Single-process by design: the vLLM runtime benchmark fans out across all
-    visible GPUs internally, so launch this with ``--nproc_per_node=1``.
-    """
-    hydra_cfg = _load_hydra_cfg(hydra_config_path)
-    dist.setup(timeout=_stage_timeout(hydra_cfg))
-    try:
-        if dist.is_master():
-            mtpz.tools.mprint("Running build replacement library + subblock stats stage")
-            mtpz.build_library_and_stats.launch_build_library_and_stats(hydra_cfg)
-        dist.barrier()
-    finally:
-        dist.cleanup()
-
-
-def run_stage_scoring(hydra_config_path: str, num_nodes: int, node_index: int):
-    """Run only the scoring stage (splittable across nodes).
-
-    Assumes the replacement library and single-block solutions already exist.
-    Per-solution result files are written to a shared output dir, so nodes
-    coordinate (and resume) implicitly via ``skip_existing_solutions``.
-    """
-    hydra_cfg = _load_hydra_cfg(hydra_config_path)
-    dist.setup(timeout=_stage_timeout(hydra_cfg))
-    try:
-        mtpz.tools.mprint(f"Running scoring stage (node {node_index}/{num_nodes})")
-        mtpz.scoring.launch_scoring(hydra_cfg, num_nodes=num_nodes, node_index=node_index)
-    finally:
-        dist.cleanup()
-
-
-def main():
-    args = parse_args()
-
-    if args.stage == "full":
-        run_full_puzzletron(hydra_config_path=args.config)
-    elif args.stage == "bypass":
-        run_stage_bypass(args.config, num_nodes=args.nodes, node_index=args.idx)
-    elif args.stage == "build_library":
-        run_stage_build_library(args.config)
-    elif args.stage == "scoring":
-        run_stage_scoring(args.config, num_nodes=args.nodes, node_index=args.idx)
-    elif args.stage == "mip":
-        run_mip_only(hydra_config_path=args.config)
-    else:
-        raise ValueError(f"Unknown stage: {args.stage}")
+    cfg = mtpz.pipeline_config.pipeline_config_from_path(args.config, overrides=args.override)
+    execution = cfg.get("execution") or {}
+    gpus_per_node = int(args.gpus_per_node or execution.get("gpus_per_node", 8))
+    stages = stage_sequence(args.stage, cfg)
+    if _is_externally_launched():
+        if len(stages) != 1 or stages[0] not in DISTRIBUTED_STAGES:
+            raise RuntimeError(
+                "An externally launched distributed job must run exactly one distributed stage."
+            )
+        stage = stages[0]
+        if args.force or not _completion_is_valid(cfg, args.config, stage):
+            args.worker_stage = stage
+            _run_worker(args)
+            if int(os.environ["RANK"]) == 0:
+                _mark_completion(cfg, args.config, stage)
+        refresh_campaign_report(cfg)
+        return
+    run_pipeline(
+        config_path=args.config,
+        config=cfg,
+        stages=stages,
+        overrides=tuple(args.override),
+        gpus_per_node=gpus_per_node,
+        force=args.force,
+        is_complete=partial(_completion_is_valid, cfg, args.config),
+        mark_complete=partial(_mark_completion, cfg, args.config),
+        refresh_report=lambda running: refresh_campaign_report(cfg, running),
+    )
 
 
 if __name__ == "__main__":
