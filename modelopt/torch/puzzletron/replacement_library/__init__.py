@@ -17,3 +17,5 @@
 
 from .library import *
 from .replacement_utils import *
+from .score_composition import *
+from .subblock_scoring import *

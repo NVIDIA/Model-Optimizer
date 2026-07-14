@@ -103,15 +103,6 @@ def is_replacement_identical_to_teacher(
             replacement_block_config: BlockConfig = child_block_configs[0]
             if replacement_block_config == teacher_block_config:
                 return True
-            else:
-                parallel_blocks = getattr(replacement_block_config, "parallel_blocks", None)
-                if (
-                    parallel_blocks is not None
-                    and len(parallel_blocks) == 1
-                    and parallel_blocks[0].attention == teacher_block_config.attention
-                    and parallel_blocks[0].ffn == teacher_block_config.ffn
-                ):
-                    return True
     return False
 
 

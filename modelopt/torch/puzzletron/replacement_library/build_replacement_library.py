@@ -12,628 +12,246 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-This module constructs the replacement library JSON files from a puzzle directory containing
-multiple trained model checkpoints. It analyzes checkpoints to extract unique block and subblock
-configurations, builds a library of available replacements, and generates solutions for layer
-replacement in compressed models. The resulting replacement library can then be used by
-ReplacementLibrary to efficiently load models with mixed teacher/student layers.
+"""Build a v2 virtual replacement library from one sorted-teacher checkpoint."""
 
-Standard Puzzle Usage:
-======================
-python -m modelopt.torch.puzzletron.replacement_library.build_replacement_library PUZZLE_DIR
+from __future__ import annotations
 
-Teacher checkpoint dir is assumed to be inside PUZZLE_DIR/ckpts/teacher (symlink is recommended)
-though you can supply an explicit --teacher_checkpoint_dir.
-
---add_ffn_no_ops and --add_attention_no_ops are optional (default True),
-
-
-"""
-# mypy: ignore-errors
-
+import dataclasses
 import json
 from pathlib import Path
-from typing import Any, Type
+from typing import Any
 
-import pandas as pd
 from omegaconf import DictConfig
 
-from modelopt.torch.utils import json_dump, json_load
+from modelopt.torch.utils import json_dump
 
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
-from ..block_config import AttentionConfig, BlockConfig, FFNConfig
-from ..bypass_distillation.bypass_utils import learned_subblocks_from_keys_to_learn
-from ..mip.utils import sort_replacements
-from ..tools.checkpoint_utils import (
-    SAFETENSORS_SUBBLOCKS_DIR_NAME,
-    is_valid_decilm_checkpoint,
-    load_model_config,
+from ..block_config import (
+    SUBBLOCK_CLS_DICT,
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    SubblockConfig,
+    maybe_cast_block_configs,
 )
+from ..candidates import build_candidate_library
+from ..mip.utils import sort_replacements
+from ..tools.checkpoint_utils_hf import load_model_config
 from ..tools.logger import mprint
-from ..utils.misc import block_config_to_str, subblock_config_to_str
 from ..utils.parsing import format_global_config
-from .replacement_utils import is_replacement_identical_to_teacher, replacement_is_teacher
+from .replacement_utils import is_replacement_identical_to_teacher, parse_layer_replacement
 
 __all__ = [
-    "UNIQUE_SUBBLOCK_IDENTIFIER",
-    "CHECKPOINTS_DIR_NAME",
-    "build_replacement_library",
+    "build_replacement_library_from_sorted_teacher",
     "launch_build_replacement_library",
-    "infer_teacher_dir",
 ]
 
-UNIQUE_SUBBLOCK_IDENTIFIER = ["block_config", "attention_config", "ffn_config", "block_idx"]
+
+SORTED_TEACHER_DIR_NAME = "sorted_teacher"
+ELASTIC_SORTED_TEACHER_DIR_NAME = "elastic_sorted_teacher"
 CHECKPOINTS_DIR_NAME = "ckpts"
+SUBBLOCK_KINDS = ("attention", "mla", "mamba", "ffn", "moe")
+ATTENTION_LIKE_KINDS = frozenset(("attention", "mla", "mamba"))
+FFN_LIKE_KINDS = frozenset(("ffn", "moe"))
 
 
-def build_replacement_library(
-    master_puzzle_dir: Path | str,
-    descriptor: ModelDescriptor,
-    teacher_checkpoint_dir: Path | str | None = None,
-    add_ffn_no_ops: bool = True,
-    add_attention_no_ops: bool = True,
-) -> None:
-    """
-    For normal puzzle runs, use default values.
-    For advanced use cases, see the Usage section.
-    """
-    master_puzzle_dir = Path(master_puzzle_dir)
-    (master_puzzle_dir / "ckpts").mkdir(exist_ok=True)
-    teacher_checkpoint_dir = infer_teacher_dir(master_puzzle_dir, teacher_checkpoint_dir)
-    trust_remote_code = descriptor.requires_trust_remote_code()
-    subblocks_df = _build_subblocks_df(
-        master_puzzle_dir,
-        teacher_checkpoint_dir,
-        add_ffn_no_ops,
-        add_attention_no_ops,
-        trust_remote_code=trust_remote_code,
-    )
-    block_library_df = _build_block_library_from_subblocks(subblocks_df, master_puzzle_dir)
+def _replace_subblock(
+    block_config: BlockConfig,
+    subblock_config: SubblockConfig,
+    *,
+    replace_kinds: frozenset[str],
+) -> BlockConfig:
+    return block_config.with_subblock(subblock_config, replace_kinds=replace_kinds)
 
-    layer_replacements = _build_layer_replacements(
-        block_library_df, master_puzzle_dir, teacher_checkpoint_dir, trust_remote_code
-    )
 
-    single_sequence_replacement_solutions = _build_single_sequence_replacement_solutions(
-        layer_replacements, teacher_checkpoint_dir, descriptor, trust_remote_code
-    )
+def _get_subblock_for_group(block_config: BlockConfig, kinds: frozenset[str]) -> SubblockConfig | None:
+    for subblock in block_config.subblock_configs:
+        if subblock.kind in kinds:
+            return subblock
+    return None
 
-    json_dump(block_library_df.to_dict(orient="records"), master_puzzle_dir / "block_library.json")
-    json_dump(subblocks_df.to_dict(orient="records"), master_puzzle_dir / "subblock_library.json")
-    json_dump(layer_replacements, master_puzzle_dir / "replacement_library.json")
-    json_dump(
-        single_sequence_replacement_solutions,
-        master_puzzle_dir / "single_sequence_replacement_solutions.json",
-    )
-    mprint("done")
 
+def _to_serializable(obj: Any) -> Any:
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return {key: _to_serializable(value) for key, value in dataclasses.asdict(obj).items()}
+    if isinstance(obj, tuple | list):
+        return [_to_serializable(value) for value in obj]
+    if isinstance(obj, dict):
+        return {key: _to_serializable(value) for key, value in obj.items()}
+    return obj
 
-def launch_build_replacement_library(cfg: DictConfig) -> None:
-    """
-    Launch the build replacement library function with Hydra configuration.
-    """
-    mprint(f"Building replacement library for puzzle directory: {cfg.puzzle_dir}")
-    mprint(f"Teacher directory: {cfg.teacher_dir}")
-    mprint(
-        f"Build replacement library config: {format_global_config(cfg.build_replacement_library, title='Build replacement library')}"
-    )
 
-    descriptor = ModelDescriptorFactory.get(cfg.descriptor)
-    build_replacement_library(
-        master_puzzle_dir=cfg.puzzle_dir,
-        teacher_checkpoint_dir=cfg.teacher_dir,
-        add_ffn_no_ops=cfg.build_replacement_library.add_ffn_no_ops,
-        add_attention_no_ops=cfg.build_replacement_library.add_attention_no_ops,
-        descriptor=descriptor,
-    )
+def _target_ints(values: Any) -> list[int]:
+    return [int(value) for value in list(values or []) if value is not None]
 
 
-def infer_teacher_dir(
-    master_puzzle_dir: Path | str,
-    teacher_checkpoint_dir: Path | str | None = None,
-) -> Path:
-    if teacher_checkpoint_dir is None:
-        teacher_checkpoint_dir = Path(master_puzzle_dir) / CHECKPOINTS_DIR_NAME / "teacher"
-        if not teacher_checkpoint_dir.exists():
-            raise ValueError(
-                f"You must either provide the --teacher_checkpoint_dir argument, or create a link to the "
-                f"teacher dir under '{{PUZZLE_DIR}}/ckpts'."
-            )
-    teacher_checkpoint_dir = Path(teacher_checkpoint_dir).resolve().absolute()
-    return teacher_checkpoint_dir
+def _target_pairs(values: Any) -> list[tuple[int, int]]:
+    pairs: list[tuple[int, int]] = []
+    for value in list(values or []):
+        if value is None:
+            continue
+        q, kv = value
+        pairs.append((int(q), int(kv)))
+    return pairs
 
 
-def _build_block_library_from_subblocks(
-    subblocks_df: pd.DataFrame, output_dir: Path
-) -> pd.DataFrame:
-    joint_blocks_df = subblocks_df.dropna(subset=["block_config"]).copy()
-    constructed_blocks_df = _construct_blocks_from_subblocks(subblocks_df)
-
-    is_constructed_block_has_joint_variant = pd.Series(
-        map(tuple, constructed_blocks_df[["block_config", "block_idx"]].values)
-    ).isin(pd.Series(map(tuple, joint_blocks_df[["block_config", "block_idx"]].values)))
-    constructed_blocks_df = constructed_blocks_df[~is_constructed_block_has_joint_variant]
-
-    block_library_df = pd.concat([joint_blocks_df, constructed_blocks_df])
-    block_library_df["block_repr"] = block_library_df["block_config"].apply(block_config_to_str)
-
-    dups = block_library_df.loc[
-        block_library_df[["block_config", "block_idx"]].duplicated()
-    ].sort_values(by=["block_config", "block_idx"])
-    if len(dups) > 0:
-        mprint(f"Found {len(dups)} duplicate blocks in the block library. Here are some examples:")
-        dup_block_idx = dups["block_idx"].iloc[0]
-        dups_with_same_block_idx = dups[dups["block_idx"] == dup_block_idx]
-        for _, row in dups_with_same_block_idx.head(10).iterrows():
-            mprint(row.to_dict())
-        json_dump(
-            block_library_df.to_dict(orient="records"), output_dir / "ERROR_block_library.json"
-        )
-        json_dump(
-            subblocks_df.to_dict(orient="records"), output_dir / "ERROR_subblock_library.json"
-        )
-        raise ValueError(
-            f"Found {len(dups)} duplicate blocks in the block library. See ERROR_block_library.json and ERROR_subblock_library.json for more details."
-        )
-
-    return block_library_df
-
-
-def _construct_blocks_from_subblocks(subblocks_df: pd.DataFrame) -> pd.DataFrame:
-    columns = subblocks_df.columns
-    decomp_blocks_df = subblocks_df[subblocks_df["block_config"].isna()].drop(
-        columns=columns[columns.str.contains("block_config|joint|block_repr")]
-    )
-
-    attention_df = decomp_blocks_df.dropna(subset="attention_config").drop(
-        columns=columns[columns.str.contains("ffn")]
-    )
-    ffn_df = decomp_blocks_df.dropna(subset="ffn_config").drop(
-        columns=columns[columns.str.contains("attention")]
-    )
-    constructed_blocks_df = pd.merge(attention_df, ffn_df, on="block_idx")
-
-    constructed_blocks_df["block_config"] = constructed_blocks_df.apply(
-        lambda row: BlockConfig(ffn=row["ffn_config"], attention=row["attention_config"]), axis=1
-    )
-
-    return constructed_blocks_df
-
-
-def _build_subblocks_df(
-    master_puzzle_dir: Path | str,
-    teacher_checkpoint_dir: Path | str,
-    add_ffn_no_ops: bool,
-    add_attention_no_ops: bool,
-    trust_remote_code: bool = False,
-) -> pd.DataFrame:
-    teacher_checkpoint_dir = Path(teacher_checkpoint_dir)
-    checkpoint_dirs = _get_last_checkpoint_from_each_experiment(
-        master_puzzle_dir, trust_remote_code=trust_remote_code
-    )
-
-    # Order the non-teacher checkpoints so that downstream `drop_duplicates(keep="first")`
-    # deterministically prefers bypass-trained subblocks over untrained pruned ones
-    # when both produce a row with the same architectural identifier. Without this,
-    # `set` iteration order makes the choice random (hash-of-path) and we'd sometimes
-    # discard the BLD-trained weights we just paid 30+ min to compute.
-    #
-    # Priority (lowest sort key wins): 0 = bypass-trained, 1 = everything else.
-    # Bypass checkpoints land under `<puzzle_dir>/bypass/bypass_runs/<exp_id>/<latest>`.
-    def _checkpoint_priority(p: Path) -> tuple[int, str]:
-        is_bypass = "bypass" in p.parts and "bypass_runs" in p.parts
-        return (0 if is_bypass else 1, str(p))
-
-    non_teacher_dirs = sorted(checkpoint_dirs - {teacher_checkpoint_dir}, key=_checkpoint_priority)
-    checkpoint_dirs = [teacher_checkpoint_dir] + non_teacher_dirs
-    checkpoints_to_split = [teacher_checkpoint_dir]
-
-    subblock_rows = []
-    for checkpoint_dir in checkpoint_dirs:
-        subblocks_to_extract = _infer_subblocks_to_extract(checkpoint_dir, checkpoints_to_split)
-        if len(subblocks_to_extract) > 0:
-            subblock_rows_from_current_checkpoint = (
-                _construct_subblock_rows_from_current_checkpoint(
-                    checkpoint_dir, subblocks_to_extract, trust_remote_code=trust_remote_code
-                )
-            )
-            subblock_rows.extend(subblock_rows_from_current_checkpoint)
-
-    subblocks_df = pd.DataFrame(subblock_rows)
-
-    subblocks_df = _drop_duplicates_of_decomp_no_op(subblocks_df)
-    assert subblocks_df.duplicated().sum() == 0
-
-    if add_ffn_no_ops or add_attention_no_ops:
-        subblocks_df = _add_no_op_subblock_rows(subblocks_df, add_ffn_no_ops, add_attention_no_ops)
-
-    subblocks_df = _drop_duplicates_of_teacher(subblocks_df, teacher_checkpoint_dir)
-
-    subblocks_that_have_multiple_sources = list(
-        subblocks_df[subblocks_df.duplicated(UNIQUE_SUBBLOCK_IDENTIFIER, keep=False)].groupby(
-            UNIQUE_SUBBLOCK_IDENTIFIER, dropna=False
-        )
-    )
-    if len(subblocks_that_have_multiple_sources) > 0:
-        mprint(
-            f"Found {len(subblocks_that_have_multiple_sources)} subblock types with multiple sources. Dropping duplicates..."
-        )
-        for subblock_identifier, duplicates_df in subblocks_that_have_multiple_sources:
-            mprint("\n================================")
-            mprint(dict(zip(UNIQUE_SUBBLOCK_IDENTIFIER, subblock_identifier)))
-            for _, row in duplicates_df.iterrows():
-                mprint(row.to_dict())
-
-        # Drop duplicates, keeping the first occurrence (which should be from teacher)
-        mprint(f"Dropping duplicates. Original count: {len(subblocks_df)}")
-        subblocks_df = subblocks_df.drop_duplicates(subset=UNIQUE_SUBBLOCK_IDENTIFIER, keep="first")
-        mprint(f"After dropping duplicates: {len(subblocks_df)}")
-
-    subblocks_df["ffn_repr"] = subblocks_df["ffn_config"].apply(subblock_config_to_str)
-    subblocks_df["attention_repr"] = subblocks_df["attention_config"].apply(subblock_config_to_str)
-    subblocks_df["block_repr"] = subblocks_df["block_config"].apply(block_config_to_str)
-
-    return subblocks_df
-
-
-def _drop_duplicates_of_teacher(
-    subblocks_df: pd.DataFrame,
-    teacher_checkpoint_dir: Path | str,
-) -> pd.DataFrame:
-    orig_subblocks_df = subblocks_df.copy()
-
-    attention_is_teacher = subblocks_df["attention_checkpoint_dir"] == str(teacher_checkpoint_dir)
-    ffn_is_teacher = subblocks_df["ffn_checkpoint_dir"] == str(teacher_checkpoint_dir)
-    is_joint_teacher = attention_is_teacher & ffn_is_teacher
-
-    is_decomp_attention = subblocks_df["ffn_config"].isna()
-    is_decomp_ffn = subblocks_df["attention_config"].isna()
-    is_joint_block = ~is_decomp_attention & ~is_decomp_ffn
-
-    student_indices_that_have_teacher_dups = []
-
-    for current_subset, is_teacher in [
-        (is_decomp_attention, attention_is_teacher),
-        (is_decomp_ffn, ffn_is_teacher),
-        (is_joint_block, is_joint_teacher),
-    ]:
-        subblocks_df = orig_subblocks_df.copy().loc[current_subset]
-
-        subblocks_df["is_student"] = ~is_teacher.loc[current_subset]
-
-        def get_student_indices_that_have_teacher_dups(grouped_is_student: pd.Series) -> list:
-            if grouped_is_student.all():
-                return []
-            return grouped_is_student.index[grouped_is_student].tolist()
-
-        current_student_indices_that_have_teacher_dups = [
-            dup_index
-            for dup_list in subblocks_df.groupby(UNIQUE_SUBBLOCK_IDENTIFIER, dropna=False)[
-                "is_student"
-            ].apply(get_student_indices_that_have_teacher_dups)
-            for dup_index in dup_list
-        ]
-        student_indices_that_have_teacher_dups.extend(
-            current_student_indices_that_have_teacher_dups
-        )
-
-    dedup_subblocks_df = orig_subblocks_df.drop(index=student_indices_that_have_teacher_dups)
-    return dedup_subblocks_df
-
-
-def _drop_duplicates_of_decomp_no_op(subblocks_df: pd.DataFrame) -> pd.DataFrame:
-    is_decomp = subblocks_df["block_config"].isna()
-    is_ffn_no_op = subblocks_df["ffn_config"].apply(lambda conf: conf is not None and conf.no_op)
-    is_attention_no_op = subblocks_df["attention_config"].apply(
-        lambda conf: conf is not None and conf.no_op
-    )
-    is_duplicated = subblocks_df.duplicated(subset=UNIQUE_SUBBLOCK_IDENTIFIER, keep="first")
-    is_dup_of_decomp_no_op = is_duplicated & is_decomp & (is_ffn_no_op | is_attention_no_op)
-    subblocks_df = subblocks_df[~is_dup_of_decomp_no_op]
-    return subblocks_df
-
-
-def _construct_subblock_rows_from_current_checkpoint(
-    checkpoint_dir: Path, subblocks_to_extract: list[str], trust_remote_code: bool = False
-) -> list[dict[str, Any]]:
-    subblock_rows_from_current_checkpoint = []
-    model_config = load_model_config(checkpoint_dir, trust_remote_code=trust_remote_code)
-    for block_idx, block_config in enumerate(model_config.block_configs):
-        for subblock_to_extract in subblocks_to_extract:
-            subblock_row = _init_empty_subblock_row(block_idx)
-
-            if subblock_to_extract == "block":
-                subblock_row["block_config"] = block_config
-                subblock_row["attention_config"] = block_config.attention
-                subblock_row["attention_checkpoint_dir"] = (
-                    str(checkpoint_dir) if not block_config.attention.no_op else None
-                )
-                subblock_row["ffn_config"] = block_config.ffn
-                subblock_row["ffn_checkpoint_dir"] = (
-                    str(checkpoint_dir) if not block_config.ffn.no_op else None
-                )
-            elif subblock_to_extract == "ffn":
-                subblock_row["ffn_config"] = block_config.ffn
-                subblock_row["ffn_checkpoint_dir"] = (
-                    str(checkpoint_dir) if not block_config.ffn.no_op else None
-                )
-            elif subblock_to_extract == "attention":
-                subblock_row["attention_config"] = block_config.attention
-                subblock_row["attention_checkpoint_dir"] = (
-                    str(checkpoint_dir) if not block_config.attention.no_op else None
-                )
-            else:
-                raise ValueError()
-
-            subblock_rows_from_current_checkpoint.append(subblock_row)
-    return subblock_rows_from_current_checkpoint
-
-
-def _add_no_op_subblock_rows(
-    subblocks_df: pd.DataFrame,
-    add_ffn_no_op: bool,
-    add_attention_no_op: bool,
-) -> pd.DataFrame:
-    n_layer = subblocks_df["block_idx"].max() + 1
-
-    no_op_subblocks = []
-    if add_ffn_no_op:
-        no_op_subblocks.append("ffn")
-    if add_attention_no_op:
-        no_op_subblocks.append("attention")
-
-    additional_no_op_rows = []
-    for no_op_subblock in no_op_subblocks:
-        rows_with_no_op_subblock, subblock_cls = _get_rows_with_no_op_subblock(
-            subblocks_df, no_op_subblock
-        )
-        existing_no_op_indices = rows_with_no_op_subblock["block_idx"].values
-        missing_no_op_indices = list(set(range(n_layer)) - set(existing_no_op_indices))
-        for block_idx in missing_no_op_indices:
-            no_op_subblock_row = {
-                **_init_empty_subblock_row(block_idx),
-                f"{no_op_subblock}_config": subblock_cls(no_op=True),
-            }
-            additional_no_op_rows.append(no_op_subblock_row)
-
-    subblocks_df = pd.concat([subblocks_df, pd.DataFrame(additional_no_op_rows)])
-
-    for no_op_subblock in no_op_subblocks:
-        rows_with_no_op_subblock, _ = _get_rows_with_no_op_subblock(subblocks_df, no_op_subblock)
-        assert len(rows_with_no_op_subblock) == n_layer, (
-            f"Got {len(rows_with_no_op_subblock)} rows with {no_op_subblock}=no_op, but we have {n_layer} layers"
-        )
-    return subblocks_df
-
-
-def _get_rows_with_no_op_subblock(
-    subblocks_df: pd.DataFrame, no_op_subblock: str
-) -> tuple[pd.DataFrame, Type[AttentionConfig] | Type[FFNConfig]]:
-    other_subblock = "ffn" if no_op_subblock == "attention" else "attention"
-    subblock_cls = AttentionConfig if no_op_subblock == "attention" else FFNConfig
-    no_op_subblock_config = subblock_cls(no_op=True)
-    rows_with_no_op_subblock = subblocks_df[
-        (subblocks_df[f"{no_op_subblock}_config"] == no_op_subblock_config)
-        & subblocks_df[f"{other_subblock}_config"].isna()
-    ]
-    return rows_with_no_op_subblock, subblock_cls
-
-
-def _get_last_checkpoint_from_each_experiment(
-    master_puzzle_dir: Path | str, trust_remote_code: bool = False
-) -> set[Path]:
-    master_puzzle_dir = Path(master_puzzle_dir)
-    master_checkpoints_dir = master_puzzle_dir / CHECKPOINTS_DIR_NAME
-    subdirs_of_master_checkpoints_dir = [
-        p.resolve() for p in master_checkpoints_dir.iterdir() if p.is_dir()
-    ]
-    checkpoint_dirs = [
-        p.parent
-        for subdir in subdirs_of_master_checkpoints_dir
-        for p in subdir.rglob("config.json")
-    ]
-
-    for checkpoint_dir in checkpoint_dirs:
-        if checkpoint_dir == master_checkpoints_dir:
-            raise ValueError(
-                f"We need at least 1 hierarchy level under the '{CHECKPOINTS_DIR_NAME}' dir. "
-                "Name your checkpoints, preferably with meaningful names. "
-                "If you are Ido Galil, tell Tomer that you got this exception ;) "
-            )
-
-    # Filter out checkpoints without block_configs (e.g. unconverted raw HF layouts)
-    valid_checkpoint_dirs = [
-        cp
-        for cp in checkpoint_dirs
-        if is_valid_decilm_checkpoint(cp, trust_remote_code=trust_remote_code)
-    ]
-
-    experiment_dirs = [
-        p if (p in subdirs_of_master_checkpoints_dir) else p.parent for p in valid_checkpoint_dirs
-    ]
-
-    deduped_checkpoint_dirs = set(
-        pd.DataFrame({"checkpoint_dir": valid_checkpoint_dirs, "experiment_dir": experiment_dirs})
-        .sort_values("checkpoint_dir")
-        .drop_duplicates(subset="experiment_dir", keep="last")["checkpoint_dir"]
-        .tolist()
-    )
-    return deduped_checkpoint_dirs
-
-
-def _infer_subblocks_to_extract(
-    checkpoint_dir: Path,
-    checkpoints_to_split: list[Path],
-) -> list[str]:
-    if (checkpoint_dir / "replacement_library.json").exists():
-        return []
-    bypass_config_path = checkpoint_dir / "bypass_config.json"
-    bypass_args_path = checkpoint_dir / "args.json"
-    if (checkpoint_dir in checkpoints_to_split) or (
-        not bypass_config_path.exists() and not bypass_args_path.exists()
-    ):
-        subblocks_to_extract = ["block", "attention", "ffn"]
-    else:
-        if bypass_args_path.exists():
-            bypass_config = json_load(bypass_args_path)
-            keys_to_learn = bypass_config.get("model_factory", {}).get(
-                "keys_to_learn", "entire_block"
-            )
-        else:
-            bypass_config = json.loads(bypass_config_path.read_text())
-            keys_to_learn = bypass_config.get("keys_to_learn", "entire_block")
-
-        subblocks_to_extract = learned_subblocks_from_keys_to_learn(keys_to_learn)
-    return subblocks_to_extract
-
-
-def _init_empty_subblock_row(block_idx: int) -> dict[str, Any]:
+def _entry(layer_idx: int, block_config: BlockConfig) -> dict[str, Any]:
     return {
-        "attention_checkpoint_dir": None,
-        "ffn_checkpoint_dir": None,
-        "block_config": None,
-        "attention_config": None,
-        "ffn_config": None,
-        "block_idx": block_idx,
-        "block_repr": None,
-        "attention_repr": None,
-        "ffn_repr": None,
+        "weight_paths": [],
+        "parent_layer_indices": [layer_idx],
+        "child_block_configs": [_to_serializable(block_config)],
     }
 
 
-def _build_layer_replacements(
-    block_library_df: pd.DataFrame,
-    master_puzzle_dir: Path,
-    teacher_checkpoint_dir: Path,
-    trust_remote_code: bool = False,
-) -> list[dict]:
-    layer_replacements_from_blocks = _build_layer_replacements_from_block_library(block_library_df)
-    layer_replacements_from_checkpoints = _gather_layer_replacements_from_checkpoints(
-        master_puzzle_dir, trust_remote_code=trust_remote_code
-    )
-    layer_replacements = layer_replacements_from_blocks + layer_replacements_from_checkpoints
-    layer_replacements = _filter_duplicate_teacher_replacements(
-        layer_replacements, teacher_checkpoint_dir, trust_remote_code
-    )
-    return layer_replacements
+def _block_entries_for_layer(
+    *,
+    layer_idx: int,
+    block_config: BlockConfig,
+    teacher_ffn_size: int | None,
+    teacher_q: int,
+    teacher_kv: int,
+    ffn_targets: list[int],
+    attn_targets: list[tuple[int, int]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Build identity + pruned virtual candidates for one layer."""
+    attn_like = _get_subblock_for_group(block_config, ATTENTION_LIKE_KINDS)
+    ffn_like = _get_subblock_for_group(block_config, FFN_LIKE_KINDS)
+    ffn_prunable = isinstance(ffn_like, FFNConfig)
+    attn_prunable = isinstance(attn_like, AttentionConfig)
 
+    lyr_ffn = getattr(ffn_like, "intermediate_size", None) or teacher_ffn_size
+    lyr_q = getattr(attn_like, "num_query_heads", None) or teacher_q
+    lyr_kv = getattr(attn_like, "num_kv_heads", None) or teacher_kv
 
-def _build_layer_replacements_from_block_library(block_library_df: pd.DataFrame) -> list[dict]:
-    layer_replacements = []
-    for _, row in block_library_df.iterrows():
-        block_idx = row["block_idx"]
-        block_config = row["block_config"]
-        weight_paths = []
-        for subblock_name in ["attention", "ffn"]:
-            checkpoint_dir = row[f"{subblock_name}_checkpoint_dir"]
-            # pandas represents missing cells as float NaN (e.g. for no-op subblocks),
-            # so check for both None and NaN before constructing a Path.
-            if checkpoint_dir is None or (
-                isinstance(checkpoint_dir, float) and pd.isna(checkpoint_dir)
-            ):
-                continue
-            subblock_path = (
-                Path(checkpoint_dir)
-                / SAFETENSORS_SUBBLOCKS_DIR_NAME
-                / f"block_{block_idx}_{subblock_name}.safetensors"
-            )
-            weight_paths.append(subblock_path)
-        weight_paths = sorted(set(weight_paths))
-        layer_replacement = {
-            "parent_layer_indices": [block_idx],
-            "child_block_configs": [block_config],
-            "weight_paths": weight_paths,
-        }
-        layer_replacements.append(layer_replacement)
-    return layer_replacements
+    ffn_values = [lyr_ffn]
+    if ffn_prunable and lyr_ffn is not None:
+        ffn_values = sorted({lyr_ffn, *[target for target in ffn_targets if target <= lyr_ffn]})
 
+    attn_values = [(lyr_q, lyr_kv)]
+    if attn_prunable:
+        attn_values = sorted(
+            {(lyr_q, lyr_kv), *[(q, kv) for q, kv in attn_targets if q <= lyr_q and kv <= lyr_kv]}
+        )
 
-def _gather_layer_replacements_from_checkpoints(
-    master_puzzle_dir: str | Path, trust_remote_code: bool = False
-) -> list[dict]:
-    gathered_layer_replacements = []
-    checkpoint_dirs = _get_last_checkpoint_from_each_experiment(
-        master_puzzle_dir, trust_remote_code=trust_remote_code
-    )
-    for checkpoint_dir in checkpoint_dirs:
-        if (layer_replacements_path := checkpoint_dir / "replacement_library.json").exists():
-            layer_replacements = json.loads(layer_replacements_path.read_text())
-            for layer_replacement in layer_replacements:
-                layer_replacement["child_block_configs"] = [
-                    BlockConfig(**block_config_dict)
-                    for block_config_dict in layer_replacement["child_block_configs"]
-                ]
-                layer_replacement["weight_paths"] = sorted(
-                    set(Path(p) for p in layer_replacement["weight_paths"])
+    entries: list[dict[str, Any]] = []
+    student_count = 0
+    for ffn_size in ffn_values:
+        for q, kv in attn_values:
+            child_cfg = block_config
+            if ffn_prunable and ffn_size != lyr_ffn:
+                child_cfg = _replace_subblock(
+                    child_cfg,
+                    dataclasses.replace(ffn_like, intermediate_size=ffn_size),
+                    replace_kinds=FFN_LIKE_KINDS,
                 )
-            gathered_layer_replacements.extend(layer_replacements)
-    return gathered_layer_replacements
+            if attn_prunable and (q != lyr_q or kv != lyr_kv):
+                child_attn = dataclasses.replace(
+                    attn_like,
+                    num_query_heads=(None if q == teacher_q else q),
+                    num_kv_heads=kv,
+                )
+                child_cfg = _replace_subblock(
+                    child_cfg,
+                    child_attn,
+                    replace_kinds=ATTENTION_LIKE_KINDS,
+                )
+            if child_cfg != block_config:
+                student_count += 1
+            entries.append(_entry(layer_idx, child_cfg))
+    return entries, student_count
 
 
-def _filter_duplicate_teacher_replacements(
-    layer_replacements: list[dict],
-    teacher_checkpoint_dir: Path,
-    trust_remote_code: bool = False,
-) -> list[dict]:
-    teacher_model_config = load_model_config(
-        teacher_checkpoint_dir, trust_remote_code=trust_remote_code
+def _no_op_entries_for_layer(layer_idx: int, block_config: BlockConfig) -> list[dict[str, Any]]:
+    """Add one attention-like and one FFN-like no-op candidate for depth/grid budgeting."""
+    attn_like = _get_subblock_for_group(block_config, ATTENTION_LIKE_KINDS)
+    ffn_like = _get_subblock_for_group(block_config, FFN_LIKE_KINDS)
+    no_attn_kind = attn_like.kind if attn_like is not None else "attention"
+    no_ffn_kind = ffn_like.kind if ffn_like is not None else "ffn"
+    no_attn = _replace_subblock(
+        block_config,
+        SUBBLOCK_CLS_DICT[no_attn_kind](no_op=True),
+        replace_kinds=ATTENTION_LIKE_KINDS,
     )
-    filtered_layer_replacements = []
-    for layer_replacement in layer_replacements:
-        if replacement_is_teacher(
-            layer_replacement, teacher_model_config, teacher_checkpoint_dir
-        ) or not is_replacement_identical_to_teacher(layer_replacement, teacher_model_config):
-            filtered_layer_replacements.append(layer_replacement)
-    return filtered_layer_replacements
+    no_ffn = _replace_subblock(
+        block_config,
+        SUBBLOCK_CLS_DICT[no_ffn_kind](no_op=True),
+        replace_kinds=FFN_LIKE_KINDS,
+    )
+    return [_entry(layer_idx, no_ffn), _entry(layer_idx, no_attn)]
+
+
+def _no_op_block_variants(block_config: BlockConfig) -> list[BlockConfig]:
+    """Expand no-op over the full numeric mixer/FFN grid, including joint no-op."""
+    attn_like = _get_subblock_for_group(block_config, ATTENTION_LIKE_KINDS)
+    ffn_like = _get_subblock_for_group(block_config, FFN_LIKE_KINDS)
+    variants: list[BlockConfig] = []
+    no_attn = None
+    no_ffn = None
+    if attn_like is not None and not attn_like.no_op:
+        no_attn = _replace_subblock(
+            block_config,
+            SUBBLOCK_CLS_DICT[attn_like.kind](kind=attn_like.kind, name=attn_like.name, no_op=True),
+            replace_kinds=ATTENTION_LIKE_KINDS,
+        )
+        variants.append(no_attn)
+    if ffn_like is not None and not ffn_like.no_op:
+        no_ffn = _replace_subblock(
+            block_config,
+            SUBBLOCK_CLS_DICT[ffn_like.kind](kind=ffn_like.kind, name=ffn_like.name, no_op=True),
+            replace_kinds=FFN_LIKE_KINDS,
+        )
+        variants.append(no_ffn)
+    if no_attn is not None and ffn_like is not None and not ffn_like.no_op:
+        variants.append(
+            _replace_subblock(
+                no_attn,
+                SUBBLOCK_CLS_DICT[ffn_like.kind](
+                    kind=ffn_like.kind,
+                    name=ffn_like.name,
+                    no_op=True,
+                ),
+                replace_kinds=FFN_LIKE_KINDS,
+            )
+        )
+    return variants
 
 
 def _build_single_sequence_replacement_solutions(
     layer_replacements: list[dict],
     teacher_checkpoint_dir: Path,
     descriptor: ModelDescriptor,
-    trust_remote_code: bool = False,
 ) -> list[dict]:
     teacher_model_config = load_model_config(
-        teacher_checkpoint_dir, trust_remote_code=trust_remote_code
+        teacher_checkpoint_dir, trust_remote_code=descriptor.requires_trust_remote_code()
     )
     n_layer = descriptor.get_language_model_config(teacher_model_config).num_hidden_layers
 
-    teacher_replacements = dict()
+    teacher_replacements: dict[int, dict] = {}
     student_replacements = []
     for layer_replacement in layer_replacements:
-        if replacement_is_teacher(layer_replacement, teacher_model_config, teacher_checkpoint_dir):
+        if is_replacement_identical_to_teacher(layer_replacement, teacher_model_config):
             block_idx = layer_replacement["parent_layer_indices"][0]
             teacher_replacements[block_idx] = layer_replacement
         else:
             student_replacements.append(layer_replacement)
 
-    teacher_indices_represented_in_replacements = sorted(teacher_replacements.keys())
-    assert teacher_indices_represented_in_replacements == list(range(n_layer)), (
-        f"{n_layer=}, {teacher_indices_represented_in_replacements=}"
-    )
-
-    student_replacements = sort_replacements(student_replacements)
+    represented = sorted(teacher_replacements)
+    if represented != list(range(n_layer)):
+        raise ValueError(f"Replacement library is missing teacher entries: {n_layer=}, {represented=}")
 
     solutions = []
-    for layer_replacement in student_replacements:
-        block_indices_not_represented_in_replacement = sorted(
-            set(range(n_layer)) - set(layer_replacement["parent_layer_indices"])
-        )
+    for layer_replacement in sort_replacements(student_replacements):
+        missing = sorted(set(range(n_layer)) - set(layer_replacement["parent_layer_indices"]))
         chosen_replacements = sort_replacements(
-            [layer_replacement]
-            + [
-                teacher_replacements[block_idx]
-                for block_idx in block_indices_not_represented_in_replacement
-            ]
+            [layer_replacement] + [teacher_replacements[block_idx] for block_idx in missing]
         )
-
         block_configs = [
             block_config
             for replacement in chosen_replacements
             for block_config in replacement["child_block_configs"]
         ]
-
         solutions.append(
             {
                 "single_sequence_replacement": layer_replacement,
@@ -641,5 +259,169 @@ def _build_single_sequence_replacement_solutions(
                 "block_configs": block_configs,
             }
         )
-
     return solutions
+
+
+def build_replacement_library_from_sorted_teacher(
+    master_puzzle_dir: Path | str,
+    sorted_teacher_dir: Path | str,
+    descriptor: ModelDescriptor,
+    ffn_targets: list[int] | None = None,
+    attn_targets: list[tuple[int, int]] | None = None,
+    search_space: dict[str, Any] | None = None,
+    include_noops: bool = True,
+    hidden_width: int | None = None,
+) -> None:
+    """Build ``replacement_library.json`` and one-replacement scoring solutions.
+
+    The library is virtual: every entry has empty ``weight_paths`` and is
+    materialized from ``sorted_teacher_dir`` by slicing or no-op replacement.
+    """
+    master_puzzle_dir = Path(master_puzzle_dir)
+    sorted_teacher_dir = Path(sorted_teacher_dir).resolve()
+    master_puzzle_dir.mkdir(parents=True, exist_ok=True)
+
+    teacher_config = load_model_config(
+        sorted_teacher_dir, trust_remote_code=descriptor.requires_trust_remote_code()
+    )
+    lm = descriptor.get_language_model_config(teacher_config)
+    teacher_hidden_width = int(lm.hidden_size)
+    if hidden_width is None:
+        hidden_width = teacher_hidden_width
+    hidden_width = int(hidden_width)
+    if not 0 < hidden_width <= teacher_hidden_width:
+        raise ValueError(
+            f"hidden_width must be in [1, {teacher_hidden_width}], got {hidden_width}"
+        )
+    block_configs = maybe_cast_block_configs(teacher_config.block_configs)
+    teacher_ffn_size = getattr(lm, "intermediate_size", None)
+    teacher_q = int(lm.num_attention_heads)
+    teacher_kv = int(getattr(lm, "num_key_value_heads", teacher_q))
+
+    entries_serializable: list[dict[str, Any]] = []
+    student_count = 0
+    if search_space:
+        candidates = build_candidate_library(
+            block_configs,
+            search_space=search_space,
+            parent_checkpoint_identity=str(sorted_teacher_dir),
+            include_self=True,
+            include_noops=include_noops,
+            stats_cache=None,
+            hidden_width=hidden_width,
+        )
+        seen_entries: set[str] = set()
+        for candidate in candidates:
+            candidate_config = candidate.block_config
+            entry = _entry(candidate.layer_idx, candidate_config)
+            key = json.dumps(_to_serializable(entry), sort_keys=True)
+            if key in seen_entries:
+                continue
+            seen_entries.add(key)
+            entries_serializable.append(entry)
+            if candidate_config.to_dict() != block_configs[candidate.layer_idx].to_dict():
+                student_count += 1
+    else:
+        for layer_idx, block_config in enumerate(block_configs):
+            entries, layer_student_count = _block_entries_for_layer(
+                layer_idx=layer_idx,
+                block_config=block_config,
+                teacher_ffn_size=teacher_ffn_size,
+                teacher_q=teacher_q,
+                teacher_kv=teacher_kv,
+                ffn_targets=ffn_targets or [],
+                attn_targets=attn_targets or [],
+            )
+            entries_serializable.extend(entries)
+            if include_noops:
+                entries_serializable.extend(_no_op_entries_for_layer(layer_idx, block_config))
+            student_count += layer_student_count
+
+    library_v2 = {
+        "version": 2,
+        "sorted_teacher_dir": str(sorted_teacher_dir),
+        "hidden_width": hidden_width,
+        "teacher_hidden_width": teacher_hidden_width,
+        "scenario": f"width-{hidden_width:04d}",
+        "entries": entries_serializable,
+    }
+    json_dump(library_v2, master_puzzle_dir / "replacement_library.json")
+
+    parsed_entries = [parse_layer_replacement(entry) for entry in entries_serializable]
+    solutions = _build_single_sequence_replacement_solutions(
+        parsed_entries,
+        teacher_checkpoint_dir=sorted_teacher_dir,
+        descriptor=descriptor,
+    )
+    for solution in solutions:
+        solution["hidden_width"] = hidden_width
+        solution["teacher_hidden_width"] = teacher_hidden_width
+        solution["scenario"] = f"width-{hidden_width:04d}"
+    json_dump(solutions, master_puzzle_dir / "single_sequence_replacement_solutions.json")
+
+    mprint(
+        f"Sorted-teacher replacement library: {len(entries_serializable)} entries, "
+        f"{student_count} pruned entries, {len(solutions)} one-replacement solutions, "
+        f"hidden_width={hidden_width}, sorted_teacher_dir={sorted_teacher_dir}"
+    )
+
+
+def _resolve_sorted_teacher_source(
+    puzzle_dir: Path,
+    source_checkpoint_dir: str | Path | None = None,
+) -> Path:
+    if source_checkpoint_dir:
+        source = Path(source_checkpoint_dir).resolve()
+        if not (source / "config.json").exists():
+            raise FileNotFoundError(
+                "Configured build_replacement_library.source_checkpoint_dir is not a "
+                f"complete HF checkpoint: {source}"
+            )
+        mprint(f"Using configured sorted/distilled supernet for the library: {source}")
+        return source
+    ckpts = puzzle_dir / CHECKPOINTS_DIR_NAME
+    elastic = ckpts / ELASTIC_SORTED_TEACHER_DIR_NAME
+    if (elastic / "config.json").exists():
+        mprint(f"Using elastic sorted teacher for the library: {elastic}")
+        return elastic
+    sorted_teacher = ckpts / SORTED_TEACHER_DIR_NAME
+    if not (sorted_teacher / "config.json").exists():
+        raise FileNotFoundError(
+            f"Sorted teacher not found at {sorted_teacher}. Run the sort stage before build_library."
+        )
+    return sorted_teacher
+
+
+def launch_build_replacement_library(cfg: DictConfig) -> None:
+    """Build the modern virtual replacement library."""
+    mprint(f"Building replacement library for puzzle directory: {cfg.puzzle_dir}")
+    mprint(
+        "Build replacement library config: "
+        f"{format_global_config(cfg.build_replacement_library, title='Build replacement library')}"
+    )
+
+    pruning_output = cfg.pruning.get("output", "sorted_teacher") if hasattr(cfg, "pruning") else "sorted_teacher"
+    if pruning_output != "sorted_teacher":
+        raise ValueError(
+            "Only pruning.output=sorted_teacher is supported. "
+            "Explicit-checkpoint replacement libraries have been removed."
+        )
+
+    descriptor = ModelDescriptorFactory.get(cfg.descriptor)
+    ffn_targets = _target_ints(cfg.pruning.get("intermediate_size_list", []))
+    raw_attn = cfg.pruning.get("attn_heads_list", None) or cfg.pruning.get("attention_groups_list", [])
+    attn_targets = _target_pairs(raw_attn)
+    source_dir = _resolve_sorted_teacher_source(
+        Path(cfg.puzzle_dir),
+        cfg.build_replacement_library.get("source_checkpoint_dir", None),
+    )
+    build_replacement_library_from_sorted_teacher(
+        master_puzzle_dir=cfg.puzzle_dir,
+        sorted_teacher_dir=source_dir,
+        descriptor=descriptor,
+        ffn_targets=ffn_targets,
+        attn_targets=attn_targets,
+        search_space=cfg.get("search_space", None),
+        include_noops=bool(cfg.build_replacement_library.get("include_noops", True)),
+        hidden_width=cfg.build_replacement_library.get("hidden_width", None),
+    )
