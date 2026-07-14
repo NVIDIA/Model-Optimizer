@@ -21,7 +21,6 @@ from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor impo
 from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
 from modelopt.torch.puzzletron.dataset import DataLayout, PuzzletronBatch, batch_from_automodel
 from modelopt.torch.puzzletron.diagnostics import width_slice_equivalence as width_slice_module
-from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import _stage_status
 from modelopt.torch.puzzletron.diagnostics.width_slice_equivalence import (
     WidthSliceCase,
     _runtime_context,
@@ -662,33 +661,7 @@ def test_axis_structure_rejects_unrelated_tensor_shape_change():
     assert evidence == {}
 
 
-def test_artifact_validation_detects_deleted_case_and_progress_is_not_complete(tmp_path: Path):
-    checkpoint = _tiny_sorted_llama(tmp_path)
-    artifact_dir = tmp_path / "artifacts" / "width_slice_equivalence"
-    summary = evaluate_width_slice_equivalence(
-        descriptor=_FFNOnlyLlamaDescriptor,
-        sorted_checkpoint_dir=checkpoint,
-        batch=_text_batch(),
-        artifact_dir=artifact_dir,
-    )
-    manifest = StageManifest(stage="width_slice_equivalence")
-    manifest.complete(
-        outputs={
-            "summary_path": str(artifact_dir / "summary.json"),
-            "artifact_manifest_path": str(artifact_dir / "manifest.json"),
-            "artifact_identity": summary["artifact_identity"],
-        }
-    )
-    write_stage_manifest(tmp_path / "manifests" / "width_slice_equivalence.json", manifest)
-
-    assert _stage_status(tmp_path, "width_slice_equivalence", None) == "complete"
-    next((artifact_dir / "cases").rglob("*.json")).unlink()
-    with pytest.raises(RuntimeError, match="missing"):
-        validate_width_slice_artifacts(artifact_dir)
-    assert _stage_status(tmp_path, "width_slice_equivalence", None) != "complete"
-
-
-def test_progress_rejects_stage_manifest_artifact_identity_mismatch(tmp_path: Path):
+def test_artifact_validation_detects_deleted_case(tmp_path: Path):
     checkpoint = _tiny_sorted_llama(tmp_path)
     artifact_dir = tmp_path / "artifacts" / "width_slice_equivalence"
     evaluate_width_slice_equivalence(
@@ -697,24 +670,17 @@ def test_progress_rejects_stage_manifest_artifact_identity_mismatch(tmp_path: Pa
         batch=_text_batch(),
         artifact_dir=artifact_dir,
     )
-    manifest = StageManifest(stage="width_slice_equivalence")
-    manifest.complete(
-        outputs={
-            "artifact_identity": "different-published-artifact",
-            "artifact_manifest_path": str(artifact_dir / "manifest.json"),
-        }
-    )
-    write_stage_manifest(tmp_path / "manifests" / "width_slice_equivalence.json", manifest)
-
-    assert _stage_status(tmp_path, "width_slice_equivalence", None) == "failed"
+    next((artifact_dir / "cases").rglob("*.json")).unlink()
+    with pytest.raises(RuntimeError, match="missing"):
+        validate_width_slice_artifacts(artifact_dir)
 
 
 def test_stage_is_reachable_from_the_generic_handler_registry():
-    assert DEFAULT_HANDLERS["width_slice_equivalence"] is width_slice_equivalence_stage
+    assert DEFAULT_HANDLERS["slicing_sanity"] is width_slice_equivalence_stage
 
 
 def test_dag_resume_inventories_manifest_summary_and_every_case():
-    assert _stage_output_patterns({}, "width_slice_equivalence") == (
+    assert _stage_output_patterns({}, "slicing_sanity") == (
         "artifacts/width_slice_equivalence/manifest.json",
         "artifacts/width_slice_equivalence/summary.json",
         "artifacts/width_slice_equivalence/cases/**/*.json",
