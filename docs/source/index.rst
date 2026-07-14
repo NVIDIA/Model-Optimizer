@@ -34,14 +34,14 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    <p class="announcement-empty" id="announcement-empty" hidden>No announcements match this search.</p>
 
 .. toctree::
+   :hidden:
    :maxdepth: 1
    :caption: Announcements
 
    self
-   announcements/dspark-vs-domino
-   announcements/github-pages-announcements
 
 .. toctree::
+   :hidden:
    :glob:
    :maxdepth: 1
    :caption: Getting Started
@@ -58,6 +58,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    Quick Start: Sparsity <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity>
 
 .. toctree::
+   :hidden:
    :glob:
    :maxdepth: 1
    :caption: Guides
@@ -65,6 +66,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    guides/[0-9]*
 
 .. toctree::
+   :hidden:
    :glob:
    :maxdepth: 1
    :caption: Deployment
@@ -72,6 +74,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    deployment/[0-9]*
 
 .. toctree::
+   :hidden:
    :glob:
    :maxdepth: 1
    :caption: Examples
@@ -79,6 +82,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    examples/[0-9]*
 
 .. toctree::
+   :hidden:
    :glob:
    :maxdepth: 1
    :caption: Reference
@@ -86,6 +90,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    reference/[0-9]*
 
 .. toctree::
+   :hidden:
    :glob:
    :maxdepth: 1
    :caption: Support
