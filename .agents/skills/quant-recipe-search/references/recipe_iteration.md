@@ -27,6 +27,7 @@ axes, not just a numeric format.
 | Calibration/search algorithm | Max, MSE, GPTQ, AWQ, AutoQuant scoring, calibration data variants | Algorithm choice is independent from numeric format. |
 | Selection method | Manual/heuristic, sensitivity-guided manual, AutoQuant, hybrid | Record how each candidate was selected. |
 | Module family | Attention, MLP, MoE experts, routers/gates, embeddings, `lm_head`, adapters, vision encoders | Change one major family at a time for ablations. |
+| Layer position | First/last transformer-layer counts or explicit ordinal ranges kept in BF16 | Treat as a controlled ablation, not a default. Start with first 3-4 and last 1-2 layers when evidence supports it. |
 | Runtime constraints | Fused attention groups, fused MoE expert projections, backend-supported formats | Do not mix incompatible quantization inside a fused runtime group. |
 | Calibration budget | Dataset mix, sample count, sequence length, batch size | Vary deliberately and record the budget. |
 
@@ -88,6 +89,26 @@ Choose which modules get which format by one of these methods:
 - Hybrid: start from AutoQuant, then override known runtime constraints or
   known-sensitive fused groups manually.
 
+### Layer Position Axis
+
+Use positional exclusions when sensitivity results or model behavior suggest
+that boundary transformer layers are unusually sensitive. Do not assume every
+model benefits from them.
+
+- Resolve ordinal positions from the model's transformer block sequence rather
+  than assuming a model-specific module path.
+- Start with controlled candidates that keep the first 3 or 4 layers, the last
+  1 or 2 layers, or both ranges in BF16. Include zero exclusion as the control.
+- Change one boundary or count at a time when identifying the useful range.
+- For manual candidates, exclude the resolved block paths in the recipe. For
+  AutoQuant or hybrid candidates, pass the positional exclusions into the
+  selected implementation when supported; otherwise apply them as a manual
+  override after selection and record that constraint.
+- Keep fused runtime groups internally compatible. Expand an exclusion to the
+  complete fused group when the backend cannot mix precisions within it.
+- Compare each excluded-layer candidate with the same BF16 baseline, benchmarks,
+  and acceptance threshold used for the rest of the search.
+
 ## Design Workflow
 
 1. Recover existing evidence:
@@ -115,6 +136,8 @@ Choose which modules get which format by one of these methods:
    - Add at least one manual or sensitivity-guided candidate for comparison and
      as a fallback if AutoQuant misses the benchmark frontier or produces a
      runtime-incompatible recipe.
+   - Add positional BF16 exclusion candidates only when sensitivity or observed
+     behavior warrants the ablation.
 
 5. Generate and validate:
    - Delegate checkpoint generation and validation to `ptq`.
@@ -136,6 +159,9 @@ Search by module family, but respect modules fused by the target runtime.
 - Fused MoE kernels can couple expert projections such as gate/up (`w1`/`w3`, or
   equivalent names); treat each fused expert group as one recipe unit unless
   deployment confirms mixed formats are supported.
+- Positional exclusions must preserve these grouping rules. If one boundary
+  layer intersects a fused group, keep the whole group at a compatible
+  precision or choose another boundary.
 - If a checkpoint is valid but deployment fails due to missing support, classify
   it as checkpoint-quality, recipe/runtime compatibility, or deployment
   implementation. For deployment implementation, try small patches or flags via
@@ -152,6 +178,8 @@ Use this loop after each candidate:
    - Protect sensitive module families.
    - Try MSE, GPTQ, or AWQ variants.
    - Use AutoQuant sensitivity to choose manual overrides.
+   - Test first-layer, last-layer, or combined BF16 exclusion candidates when
+     sensitivity or model behavior points to boundary layers.
 4. If performance or active cost is insufficient:
    - Quantize the next high-cost active family.
    - Try a more aggressive format.
@@ -219,6 +247,7 @@ For every candidate, record:
 
 - Objective and acceptance threshold.
 - Numeric formats and module-family coverage.
+- First/last BF16 exclusion counts or ordinal ranges.
 - Calibration/search algorithm and calibration data budget.
 - Selection method: manual, sensitivity-guided, AutoQuant, or hybrid.
 - Whether the candidate came from AutoQuant, manual ablation, or a hybrid

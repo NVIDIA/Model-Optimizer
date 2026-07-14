@@ -153,9 +153,16 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 import re
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal, TypeAlias
 
-from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -671,6 +678,43 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         """,
     )
 
+    constant_amax: float | None = ModeloptField(
+        default=None,
+        title="Pin the quantizer amax to a constant value and skip calibration.",
+        description="""If set, the quantizer ``amax`` is fixed to this constant value and no
+        activation calibration is performed (no forward statistics are collected). The constant
+        is stored on the ``_amax`` buffer, so it is used by both the fake-quant forward pass and
+        the exported scaling factor (e.g. ``input_scale``).
+
+        This differs from ``use_constant_amax``, which pins amax to the FP8 E4M3 range (448.0)
+        for KV-cache cast math and does not register an ``_amax`` buffer. For NVFP4 activations
+        the exported ``input_scale`` equals ``amax / (E2M1_MAX * E4M3_MAX) = amax / (6 * 448)``;
+        setting ``constant_amax`` to ``2688.0`` therefore yields an exported ``input_scale`` of
+        ``1.0``.
+        """,
+    )
+
+    @field_validator("constant_amax")
+    @classmethod
+    def validate_constant_amax(cls, v):
+        """Validate that constant_amax, when set, is a positive value."""
+        assert v is None or v > 0, "constant_amax must be a positive value."
+        return v
+
+    @model_validator(mode="after")
+    def validate_constant_amax_modes(self):
+        """Forbid combining ``use_constant_amax`` and ``constant_amax``.
+
+        Both pin the amax but disagree on the value: ``use_constant_amax`` uses the FP8 E4M3
+        range (448.0) for the fake-quant forward and registers no ``_amax`` buffer, while
+        ``constant_amax`` pins ``_amax`` to its configured value for both forward and export.
+        Setting both would make the simulated and exported scales silently diverge.
+        """
+        assert not (self.use_constant_amax and self.constant_amax is not None), (
+            "use_constant_amax and constant_amax are mutually exclusive; set only one."
+        )
+        return self
+
 
 class LayerwiseConfig(ModeloptBaseConfig):
     """Nested config for layer-by-layer calibration behavior."""
@@ -1142,6 +1186,18 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    skip_layers: list[str] | None = ModeloptField(
+        default=None,
+        title="Module-name wildcard patterns excluded from the SVDQuant algorithm",
+        description=(
+            "Quantized linears whose module name matches any of these fnmatch-style wildcard "
+            "patterns (e.g. ``'*.attn.add_q_proj'``) keep their quantizer config but skip the "
+            "SVDQuant algorithm entirely: no AWQ smoothing (``pre_quant_scale``) and no "
+            "low-rank branch, leaving their weights unchanged. They are max-calibrated "
+            "instead, i.e. quantized like a plain max recipe."
+        ),
+    )
+
 
 class GPTQCalibConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
@@ -1189,6 +1245,104 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
             self.layerwise = self.layerwise.model_copy(
                 update={"get_qdq_activations_from_prev_layer": True}
             )
+        return self
+
+
+_ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
+
+
+class LSQConfig(QuantizeAlgorithmConfig):
+    """Config for LSQ (Learnt Scale Quantization) and Dual-LSQ algorithms.
+
+    In LSQ, the scale used for quantization is learnt. ModelOpt's LSQ is similar to the
+    original `Learned Step Size Quantization paper <https://arxiv.org/pdf/1902.08153>`_.
+    Its forward pass is ``w_q = Q_STE(w / s) * s``, where ``s`` is learnt.
+
+    Dual-LSQ learns separate pre-quantization and post-quantization scales. Its forward
+    pass is ``w_q = Q_STE(w / s_pre) * s_post``, where ``s_pre`` and ``s_post`` are
+    learnt. Dual-LSQ generally performs better than LSQ for learning NVFP4 per-block
+    weight scales.
+
+    Currently, only NVFP4 per-block weight-scale learning is supported. Both LSQ and
+    Dual-LSQ use a reparameterization that learns ``amax`` instead of scale directly,
+    where ``scale = amax / max_bound``.
+
+    ``learnable_amax`` controls which amax parameters are learnable vs frozen:
+        - ``["pre", "post"]``: both learnable
+        - ``"post"`` or ``["post"]``: only post learnable, pre frozen
+        - ``"pre"`` or ``["pre"]``: only pre learnable, post frozen
+        - ``[]``: both frozen (static scales)
+
+    ``tied_amax`` makes pre and post share a single tensor (requires both to
+    have the same learnable state, i.e. ``learnable_amax`` must be
+    ``["pre", "post"]`` or ``[]``).
+
+    ``quantize_pre_scale=False`` leaves the pre-quantization scale unquantized
+    while preserving the existing post-scale quantization behavior.
+    """
+
+    ScaleCalibConfig: ClassVar[Any] = _ScaleCalibConfig
+
+    method: Literal["lsq"] = ModeloptField("lsq")
+
+    learnable_amax: list[Literal["pre", "post"]] | Literal["pre", "post"] = ModeloptField(
+        default=["post"],
+        title="Which amax parameters are learnable.",
+        description=(
+            "Which amax params are learnable. "
+            "'pre', 'post', ['pre', 'post'], or []. "
+            "Defaults to ['post'] (post-only learnable)."
+        ),
+    )
+
+    tied_amax: bool = ModeloptField(
+        default=False,
+        title="Tie pre and post amax into a single tensor.",
+        description=(
+            "If True, pre and post share one underlying tensor. "
+            "Requires both to have the same learnable state."
+        ),
+    )
+
+    quantize_pre_scale: bool = ModeloptField(
+        default=True,
+        title="FP8-quantize the LSQ pre-quantization scale.",
+        description=(
+            "If False, LSQ uses the raw pre-quantization scale while keeping post-scale "
+            "quantization controlled by the quantizer's block-scale settings."
+        ),
+    )
+
+    scale_algorithm: _ScaleCalibConfig | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm to run first.",
+        description=(
+            "Dict with 'method' key: 'mse', 'local_hessian', or 'max'. "
+            "Optional keys include 'fp8_scale_sweep' for FP4 formats. "
+            "Defaults to {'method': 'mse'} if None."
+        ),
+    )
+
+    @field_serializer("scale_algorithm")
+    def _serialize_scale_algorithm(self, value: _ScaleCalibConfig | None):
+        """Preserve the sparse public dict shape accepted by this field."""
+        if value is None:
+            return None
+        return {"method": value.method, **value.model_dump(exclude={"method"}, exclude_unset=True)}
+
+    @model_validator(mode="after")
+    def _validate_tied_amax(self):
+        """Validate tied_amax is compatible with learnable_amax."""
+        learn = self.learnable_amax
+        if isinstance(learn, str):
+            learn = [learn]
+        learn_set = set(learn)
+        if self.tied_amax:
+            if learn_set not in (set(), {"pre", "post"}):
+                raise ValueError(
+                    f"tied_amax=True requires learnable_amax to be [] or ['pre', 'post'], "
+                    f"got {self.learnable_amax}"
+                )
         return self
 
 
