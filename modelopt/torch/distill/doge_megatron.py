@@ -103,6 +103,8 @@ class DoGEForwardStep:
             part = f"{Path(path).name} weight={weight:.4f}"
             if alignment_scores is not None:
                 part += f" alignment={alignment_scores[path]:.4f}"
+            if alignment_debug is not None and "advantage_scaled_dot" in alignment_debug[path]:
+                part += f" advantage_dot={alignment_debug[path]['advantage_scaled_dot']:.4e}"
             if source_probe_kd_loss is not None:
                 part += f" probe_kd={source_probe_kd_loss[path]:.4f}"
             summary_parts.append(part)
@@ -146,7 +148,7 @@ class DoGEForwardStep:
         # Outer loop: use the target batch to score each source batch and update the data-blend
         # weights. This changes only ``self.blend_weights``, not the student model.
         scores, alignment_debug, source_probe_kd_loss, target_probe_kd_loss = (
-            compute_alignment_scores(state, source_batches, target_batch, model)
+            compute_alignment_scores(state, source_batches, target_batch, model, self.blend_weights)
         )
         self.blend_weights = dict(self.updater.update(self.blend_weights, scores))
         self.write_trajectory_record(
