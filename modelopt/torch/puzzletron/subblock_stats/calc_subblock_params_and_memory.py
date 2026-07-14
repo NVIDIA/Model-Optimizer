@@ -359,12 +359,7 @@ def calculate_subblock_params(
     layer_config: BlockConfig | SubblockConfig,
     descriptor: type[ModelDescriptor],
 ) -> int:
-    """Count parameters on one meta decoder layer.
-
-    The caller is responsible for adjusting per-layer config fields (e.g.
-    ``hybrid_override_pattern``) before passing ``config``; see
-    ``ModelDescriptor.truncate_pattern_for_subblock``.
-    """
+    """Count parameters on one meta decoder layer."""
     if isinstance(layer_config, SubblockConfig):
         block_config = _single_subblock_to_block_config(config, layer_config, descriptor)
     else:
@@ -389,11 +384,9 @@ def calculate_subblock_params(
         return 0
 
     _config = copy.deepcopy(config)
-    lm_config = descriptor.get_language_model_config(_config)
-    lm_config.num_hidden_layers = 1
-
     block_configs = maybe_cast_block_configs([block_config])
-    _config.block_configs = block_configs
+    descriptor.set_block_configs(_config, block_configs)
+    lm_config = descriptor.get_language_model_config(_config)
     if lm_config is not _config:
         lm_config.block_configs = block_configs
 
