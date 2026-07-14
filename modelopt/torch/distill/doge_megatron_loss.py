@@ -31,6 +31,7 @@ from modelopt.torch.distill.doge_megatron_data import _GPTBatch
 __all__ = [
     "compute_alignment_scores",
     "weighted_source_forward_step",
+    "zero_training_forward_step",
 ]
 
 
@@ -77,6 +78,25 @@ def _weighted_loss(
     fragile violation of the tensor-valued forward-step contract.
     """
     return loss, num_tokens, report
+
+
+def _zero_training_loss(
+    loss: torch.Tensor,
+    num_tokens: torch.Tensor,
+    report: dict[str, torch.Tensor],
+    _output_tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+    """Return a zero loss for DoGE diagnostic-only runs."""
+    return loss, num_tokens, report
+
+
+def zero_training_forward_step(model: GPTModel) -> tuple[torch.Tensor, partial]:
+    """Return a zero training loss connected to the model graph."""
+    parameter = next(parameter for parameter in model.parameters() if parameter.requires_grad)
+    zero_loss = parameter.reshape(-1)[0] * 0.0
+    num_tokens = torch.ones((), dtype=zero_loss.dtype, device=zero_loss.device)
+    report = {"doge diagnostic loss": torch.stack([zero_loss.detach(), num_tokens])}
+    return zero_loss, partial(_zero_training_loss, zero_loss, num_tokens, report)
 
 
 def weighted_source_forward_step(
@@ -356,13 +376,13 @@ def _calc_advantage_debug(
     target_gradient: torch.Tensor,
     blend_weights: dict[str, float],
 ) -> dict[str, dict[str, float]]:
-    """Return whether shifting weight toward each source is better than the current blend.
+    """Return the predicted target-loss benefit of shifting weight toward each source.
 
-    ``advantage_scaled_dot`` is proportional to
-    ``dot(g_target, g_source - g_mix)``. Positive values mean moving weight toward that source is
-    predicted to improve target loss more than the current blend under the first-order Taylor
-    approximation. Values are scaled by a shared positive constant for numeric stability, so signs
-    and relative ordering are preserved but absolute magnitudes are diagnostic only.
+    ``advantage_scaled_dot`` is a numerically scaled version of
+    ``dot(g_target, g_source - g_mix)``. Under the first-order Taylor approximation, positive
+    values mean moving weight toward that source is predicted to reduce target loss more than
+    keeping the current blend. The shared positive scale preserves signs and ordering but not
+    absolute magnitudes.
     """
     mix_gradient = None
     for path, gradient in source_gradients.items():

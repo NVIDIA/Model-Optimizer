@@ -203,6 +203,11 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Learning rate for exponentiated blend-weight updates",
     )
+    doge.add_argument(
+        "--doge_diagnostic_only",
+        action="store_true",
+        help="Log DoGE score diagnostics without updating blend weights or student weights",
+    )
     return parser.parse_args(argv)
 
 
@@ -307,6 +312,7 @@ def main(args: argparse.Namespace) -> None:
         target_data_paths=args.target_data_paths,
         meta_lr=args.doge_meta_lr,
         output_dir=args.output_dir,
+        diagnostic_only=args.doge_diagnostic_only,
     )
 
     print("Initial DoGE blend weights:")
