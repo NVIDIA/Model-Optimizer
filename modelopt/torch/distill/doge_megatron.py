@@ -35,7 +35,7 @@ from modelopt.torch.distill.doge_megatron_data import (
 from modelopt.torch.distill.doge_megatron_loss import (
     compute_alignment_scores,
     weighted_source_forward_step,
-    zero_training_forward_step,
+    zero_weighted_source_forward_step,
 )
 from modelopt.torch.utils import print_rank_0
 
@@ -162,7 +162,13 @@ class DoGEForwardStep:
             target_probe_kd_loss,
         )
         if self.diagnostic_only:
-            return zero_training_forward_step(model)
+            return zero_weighted_source_forward_step(
+                state,
+                source_batches,
+                model,
+                self.blend_weights,
+                return_schedule_plan,
+            )
 
         # Inner loop: train the student on source batches mixed with the updated DoGE weights.
         # Megatron-Bridge backpropagates the returned loss and performs the optimizer step.
