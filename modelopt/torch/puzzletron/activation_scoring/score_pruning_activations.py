@@ -25,6 +25,46 @@ from ..tools.logger import mprint
 __all__ = ["launch_score_activations"]
 
 
+def _activation_pass_name(pass_cfg) -> str:
+    return pass_cfg.get("name", None) or pass_cfg.activation_hooks_kwargs.method
+
+
+def _filtered_activation_passes(cfg: DictConfig):
+    passes = cfg.pruning.get("activation_passes", None)
+    if not passes:
+        return None
+
+    pass_list = list(passes)
+    filters = cfg.pruning.get("activation_pass_filter", None) or {}
+    include = set(filters.get("include", []) or [])
+    exclude = set(filters.get("exclude", []) or [])
+    if not include and not exclude:
+        return pass_list
+
+    names = [_activation_pass_name(p) for p in pass_list]
+    unknown = (include | exclude) - set(names)
+    if unknown:
+        raise ValueError(
+            "pruning.activation_pass_filter references unknown pass name(s): "
+            f"{sorted(unknown)}; available={names}"
+        )
+
+    filtered = [
+        p
+        for p, name in zip(pass_list, names)
+        if (not include or name in include) and name not in exclude
+    ]
+    if not filtered:
+        raise ValueError(
+            "pruning.activation_pass_filter removed every activation pass; "
+            f"include={sorted(include)} exclude={sorted(exclude)}"
+        )
+    filtered_names = [_activation_pass_name(p) for p in filtered]
+    if filtered_names != names:
+        mprint(f"[activation] filtered activation passes: {filtered_names} (from {names})")
+    return filtered
+
+
 def has_checkpoint_support(activation_hooks_kwargs: dict) -> bool:
     """Determine if the activation hook method has proper checkpoint support implemented.
 
@@ -112,10 +152,25 @@ def should_skip_scoring_completely(cfg: DictConfig) -> bool:
     # Get hook configuration to check if resume is mathematically safe
     activation_hooks_kwargs = getattr(cfg.pruning, "activation_hooks_kwargs", {})
 
-    # Check if scoring is already completed
-    is_completed = check_scoring_completion(
-        cfg.pruning.activations_log_dir, activation_hooks_kwargs
-    )
+    # When activation_passes is set each pass writes to a subdir of activations_log_dir.
+    # The root dir itself never contains rank_*.pth, so checking it always returns False.
+    # Instead, verify that every pass subdir is complete.
+    passes = _filtered_activation_passes(cfg)
+    if passes:
+        from pathlib import Path as _Path
+        parent = cfg.pruning.activations_log_dir
+        is_completed = all(
+            check_scoring_completion(
+                str(_Path(parent) / _activation_pass_name(p)),
+                activation_hooks_kwargs,
+            )
+            for p in passes
+        )
+    else:
+        # Check if scoring is already completed
+        is_completed = check_scoring_completion(
+            cfg.pruning.activations_log_dir, activation_hooks_kwargs
+        )
 
     # Broadcast the result to all processes in distributed mode
     if dist.size() > 1:
@@ -129,14 +184,87 @@ def should_skip_scoring_completely(cfg: DictConfig) -> bool:
     return is_completed
 
 
-def launch_score_activations(cfg: DictConfig):
-    from ..tools.validate_model import validate_model
+def _run_activation_passes(cfg: DictConfig, num_nodes: int, node_index: int) -> bool:
+    """Run multiple scoring passes (e.g. FFN + attention) into one parent ``activations_log_dir``.
 
-    # Check if we should skip scoring entirely (only if 100% complete)
+    When ``pruning.activation_passes`` is set (a list of per-pass overrides: ``name`` +
+    ``pruning_mixin`` / ``activation_hooks_kwargs`` / ``hook_class``), each pass writes its
+    ``rank_*.pth`` to ``<activations_log_dir>/<name>/`` so the sorted-teacher builder (which
+    ``rglob``s the parent) merges them by module name. Returns ``True`` when passes were run.
+
+    **AutoModel backend**: ALL passes are registered as forward hooks simultaneously and the
+    model runs ONE forward pass — O(1) data cost regardless of the number of pass types.
+    The hooks attach to different modules (e.g. ``mlp.down_proj`` and ``self_attn.o_proj``)
+    and are fully independent; combining them is exact.
+
+    """
+    all_passes = list(cfg.pruning.get("activation_passes", None) or [])
+    passes = _filtered_activation_passes(cfg)
+    if not passes:
+        return False
+
+    import json as _json
+    from pathlib import Path as _Path
+
+    parent = cfg.pruning.get("activations_log_dir", None) or str(
+        _Path(cfg.puzzle_dir) / "pruning" / "pruning_scores"
+    )
+    pass_names = [_activation_pass_name(p) for p in passes]
+    backend = cfg.pruning.get("backend", "automodel")
+    if backend != "automodel":
+        raise ValueError("Activation scoring only supports pruning.backend=automodel.")
+
+    if should_skip_scoring_completely(cfg):
+        mprint("[activation] all passes already complete, skipping multi-pass scoring")
+        return True
+    from ..plugins.automodel.launch import launch_score_activations_automodel_multipass
+
+    launch_score_activations_automodel_multipass(
+        cfg, passes, pass_names, parent, num_nodes, node_index
+    )
+
+    # Write a manifest so that sorted_teacher can verify the pass structure hasn't changed.
+    # For filtered reruns, keep already-complete sibling pass dirs in the manifest; refreshing
+    # attention scores should not make the canonical parent look attention-only.
+    if dist.is_master() and pass_names:
+        manifest_path = _Path(parent) / "activation_passes_manifest.json"
+        manifest_names = [
+            _activation_pass_name(pass_cfg)
+            for pass_cfg in all_passes
+            if check_scoring_completion(
+                str(_Path(parent) / _activation_pass_name(pass_cfg)),
+                pass_cfg.get("activation_hooks_kwargs", {}),
+            )
+        ]
+        if not manifest_names:
+            manifest_names = pass_names
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(_json.dumps({"passes": manifest_names}, indent=2))
+        mprint(f"[activation] wrote pass manifest: {manifest_path}")
+    return True
+
+
+def launch_score_activations(cfg: DictConfig, num_nodes: int = 1, node_index: int = 0):
+    """Score pruning activations.
+
+    ``num_nodes``/``node_index`` mirror the bypass/scoring stages and allow
+    splitting the work across nodes. Activation scoring is handled by the
+    AutoModel backend (``pruning.backend: automodel``).
+
+    When ``pruning.activation_passes`` is set, runs one scoring pass per entry (FFN + attention)
+    into subdirs of ``activations_log_dir`` — see :func:`_run_activation_passes`.
+    """
+    if _run_activation_passes(cfg, num_nodes, node_index):
+        return
+
+    backend = cfg.pruning.get("backend", "automodel")
+    if backend != "automodel":
+        raise ValueError("Activation scoring only supports pruning.backend=automodel.")
+    mprint(f"[activation] scoring backend = {backend!r}")
+
     if should_skip_scoring_completely(cfg):
         return
 
-    mprint("Starting pruning activation scoring...")
+    from ..plugins.automodel.launch import launch_score_activations_automodel
 
-    # The checkpoint manager inside validate_model handles all progress tracking
-    validate_model(args=cfg.pruning)
+    launch_score_activations_automodel(cfg, num_nodes=num_nodes, node_index=node_index)
