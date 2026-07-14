@@ -24,6 +24,7 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.model_quant as model_quant
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
@@ -39,7 +40,7 @@ from modelopt.torch.quantization.algorithms import (
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
-from modelopt.torch.utils import safe_load
+from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
@@ -366,9 +367,51 @@ def test_auto_quantize_module_search_spaces_keep_fixed_routed_experts_costed():
     assert routed_hparam.active == int4_recipe
 
 
-def test_auto_quantize_fixed_module_isolated_from_unrelated_calibration(monkeypatch):
-    import modelopt.torch.quantization.model_quant as model_quant
+@pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG, ()])
+def test_auto_quantize_rejects_non_list_global_formats(formats):
+    with pytest.raises(TypeError, match="`quantization_formats` must be a list"):
+        mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
 
+
+@pytest.mark.parametrize("formats", [[], [None]])
+def test_auto_quantize_rejects_empty_global_formats(formats):
+    with pytest.raises(ValueError, match="`quantization_formats` must"):
+        mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
+
+
+@pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG, ()])
+def test_auto_quantize_rejects_non_list_module_formats(formats):
+    with pytest.raises(
+        TypeError, match=r"module_search_spaces\.quantization_formats must be a list"
+    ):
+        mtq.auto_quantize(
+            TransformerBlock(),
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*mlp*"],
+                    "quantization_formats": formats,
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize("formats", [[], [None]])
+def test_auto_quantize_rejects_empty_module_formats(formats):
+    with pytest.raises(ValueError, match=r"module_search_spaces\.quantization_formats must"):
+        mtq.auto_quantize(
+            TransformerBlock(),
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*mlp*"],
+                    "quantization_formats": formats,
+                }
+            ],
+        )
+
+
+def test_auto_quantize_fixed_module_isolated_from_unrelated_calibration(monkeypatch):
     model = TransformerBlock()
     calibration_states = []
     original_calibrate = model_quant.calibrate
@@ -1008,6 +1051,82 @@ def test_auto_quantize_calibration_only_checkpoint_validates_module_search_space
             num_calib_steps=1,
             num_score_steps=1,
             checkpoint=checkpoint_path,
+        )
+
+
+def test_auto_quantize_calibration_only_checkpoint_validates_global_formats_and_legacy(
+    tmp_path, monkeypatch
+):
+    checkpoint_path = str(tmp_path / "autoquant_calibration_only_checkpoint.pth")
+    legacy_checkpoint_path = str(tmp_path / "autoquant_legacy_calibration_only_checkpoint.pth")
+    original_estimate_scores = AutoQuantizeGradientSearcher.estimate_sensitivity_scores
+
+    def interrupt_after_calibration(self):
+        raise RuntimeError("interrupt after calibration")
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        interrupt_after_calibration,
+    )
+    model = TransformerBlock()
+    with pytest.raises(RuntimeError, match="interrupt after calibration"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    saved = safe_load(checkpoint_path)
+    assert saved["quantizer_states"]
+    assert saved["quantization_formats_signature"]
+    legacy_saved = dict(saved)
+    legacy_saved.pop("quantization_formats_signature")
+    safe_save(legacy_saved, legacy_checkpoint_path)
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        original_estimate_scores,
+    )
+    mismatched_model = TransformerBlock()
+    with pytest.raises(ValueError, match="quantization_formats do not match"):
+        mtq.auto_quantize(
+            mismatched_model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.FP8_DEFAULT_CFG],
+            data_loader=[mismatched_model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    legacy_model = TransformerBlock()
+    with pytest.raises(ValueError, match="does not record its quantization_formats signature"):
+        mtq.auto_quantize(
+            legacy_model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            data_loader=[legacy_model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=legacy_checkpoint_path,
         )
 
 

@@ -519,9 +519,13 @@ def auto_quantize(
             processed.append((quant_cfg, name))
         return processed
 
+    if not isinstance(quantization_formats, list):
+        raise TypeError("`quantization_formats` must be a list.")
+    if not quantization_formats:
+        raise ValueError("`quantization_formats` must be a non-empty list.")
     processed_quantization_formats = _process_quantization_formats(quantization_formats, "CUSTOM")
-
-    assert len(processed_quantization_formats) > 0, "`quantization_formats` should not be empty"
+    if not processed_quantization_formats:
+        raise ValueError("`quantization_formats` must contain at least one non-None format.")
 
     processed_module_search_spaces = []
     for idx, search_space in enumerate(module_search_spaces or []):
@@ -545,12 +549,15 @@ def auto_quantize(
             raise ValueError(
                 "module_search_spaces.module_name_patterns must be a non-empty string list."
             )
-        formats = _process_quantization_formats(
-            search_space.get("quantization_formats") or [], f"CUSTOM_MODULE_{idx}"
-        )
+        raw_formats = search_space.get("quantization_formats")
+        if not isinstance(raw_formats, list):
+            raise TypeError("module_search_spaces.quantization_formats must be a list.")
+        if not raw_formats:
+            raise ValueError("module_search_spaces.quantization_formats must be a non-empty list.")
+        formats = _process_quantization_formats(raw_formats, f"CUSTOM_MODULE_{idx}")
         if not formats:
             raise ValueError(
-                "module_search_spaces.quantization_formats must contain at least one format."
+                "module_search_spaces.quantization_formats must contain at least one non-None format."
             )
         allow_no_quant = search_space.get("allow_no_quant", True)
         if not isinstance(allow_no_quant, bool):

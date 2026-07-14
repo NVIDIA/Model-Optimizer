@@ -508,6 +508,11 @@ def _module_search_space_signature(module_search_spaces) -> tuple:
     )
 
 
+def _quantization_formats_signature(quant_recipes) -> tuple[str, ...]:
+    """Return a checkpoint-stable description of the global candidate formats."""
+    return tuple(sorted(recipe.checkpoint_signature for recipe in quant_recipes))
+
+
 class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     """Base searcher for AutoQuantize algorithm."""
 
@@ -569,6 +574,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost": {},
             "active_moe_expert_ratio": None,
             "cost_denominator": None,
+            "quantization_formats_signature": None,
             "module_search_space_signature": None,
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
@@ -911,11 +917,29 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         module_search_spaces = self._normalize_module_search_spaces(
             self.config["module_search_spaces"]
         )
+        default_search_recipes = self._get_search_recipes(self.config["quantization_formats"])
+        quantization_formats_signature = _quantization_formats_signature(default_search_recipes)
         module_search_space_signature = _module_search_space_signature(module_search_spaces)
+        restored_quantization_formats_signature = getattr(
+            self, "quantization_formats_signature", None
+        )
         restored_module_search_space_signature = getattr(
             self, "module_search_space_signature", None
         )
         has_restored_calibration_or_scores = bool(self.quantizer_states or self.candidate_stats)
+        if has_restored_calibration_or_scores and restored_quantization_formats_signature is None:
+            raise ValueError(
+                "Checkpoint does not record its quantization_formats signature and cannot be "
+                "safely reused. Use a different checkpoint path."
+            )
+        if (
+            has_restored_calibration_or_scores
+            and restored_quantization_formats_signature != quantization_formats_signature
+        ):
+            raise ValueError(
+                "Checkpoint quantization_formats do not match the current search config. "
+                "Use a different checkpoint path."
+            )
         if has_restored_calibration_or_scores and (
             (restored_module_search_space_signature is None and module_search_space_signature)
             or (
@@ -927,9 +951,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 "Checkpoint module_search_spaces do not match the current search config. "
                 "Use a different checkpoint path."
             )
+        self.quantization_formats_signature = quantization_formats_signature
         self.module_search_space_signature = module_search_space_signature
 
-        default_search_recipes = self._get_search_recipes(self.config["quantization_formats"])
         search_recipes = sorted(
             {
                 *default_search_recipes,
