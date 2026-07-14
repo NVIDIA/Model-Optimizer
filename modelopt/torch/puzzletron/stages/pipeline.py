@@ -1,0 +1,852 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import math
+import os
+from contextlib import contextmanager
+from datetime import timedelta
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterator
+
+from omegaconf import OmegaConf
+
+import modelopt.torch.utils.distributed as dist
+
+from ..identity import canonicalize, stable_hash
+from ..pipeline_config import load_runtime_hydra_config
+from ..rpc_eval import EvaluationCache, EvaluationRequest, EvaluationResult
+from ..scoring_parent import ensure_scoring_parent
+from .common import complete_stage, experiment_dir, stage_manifest_path
+
+if TYPE_CHECKING:
+    from ..manifest import StageManifest
+
+__all__ = [
+    "activation_stage",
+    "sort_stage",
+    "bypass_overfit_stage",
+    "bypass_stage",
+    "build_library_stage",
+    "vllm_stats_stage",
+    "scoring_stage",
+    "mip_stage",
+]
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _timeout_minutes(hydra_cfg: Any) -> timedelta:
+    raw = _get(hydra_cfg, "nccl_timeout_minutes", None)
+    if raw is None:
+        return timedelta(minutes=10)
+    if isinstance(raw, timedelta):
+        return raw
+    return timedelta(minutes=int(raw))
+
+
+@contextmanager
+def _distributed(hydra_cfg: Any) -> Iterator[None]:
+    already_initialized = dist.is_initialized()
+    failed = False
+    if not already_initialized:
+        dist.setup(timeout=_timeout_minutes(hydra_cfg))
+    try:
+        yield
+    except BaseException:
+        # Any process-group operation during exception unwinding (including
+        # destroy_process_group) can permanently hide the originating error
+        # when other PP ranks are still inside stage-local FSDP collectives.
+        # Let this rank escape; torchrun will terminate its peers.
+        failed = True
+        raise
+    finally:
+        if not failed and not already_initialized and dist.is_initialized():
+            dist.cleanup()
+
+
+def _runtime_split(config: dict[str, Any]) -> tuple[int, int]:
+    runtime = dict(config.get("_runtime") or {})
+    requested_nodes = int(runtime.get("num_nodes", 1))
+    requested_index = int(runtime.get("node_index", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_world_size = max(1, int(os.environ.get("LOCAL_WORLD_SIZE", str(world_size))))
+    torchrun_nodes = (world_size + local_world_size - 1) // local_world_size
+    if torchrun_nodes > requested_nodes:
+        return torchrun_nodes, int(os.environ.get("GROUP_RANK", requested_index))
+    return requested_nodes, requested_index
+
+
+def _puzzle_dir(config: dict[str, Any], hydra_cfg: Any) -> Path:
+    return Path(_get(hydra_cfg, "puzzle_dir", None) or experiment_dir(config))
+
+
+def _teacher_dir(config: dict[str, Any], hydra_cfg: Any) -> Path:
+    convert_cfg = config.get("convert") or {}
+    return Path(
+        _get(hydra_cfg, "teacher_dir", None)
+        or convert_cfg.get("teacher_dir")
+        or _puzzle_dir(config, hydra_cfg) / "ckpts" / "teacher"
+    )
+
+
+def _activations_log_dir(config: dict[str, Any], hydra_cfg: Any) -> Path:
+    pruning_cfg = _get(hydra_cfg, "pruning", {}) or {}
+    return Path(
+        _get(pruning_cfg, "activations_log_dir", None)
+        or _get(hydra_cfg, "activations_log_dir", None)
+        or _puzzle_dir(config, hydra_cfg) / "activations_log"
+    )
+
+
+def _hf_checkpoint_complete(path: Path, *, required_files: tuple[str, ...] = ()) -> bool:
+    if not (path / "config.json").is_file():
+        return False
+    if any(not (path / name).is_file() for name in required_files):
+        return False
+    if (path / "model.safetensors").is_file() or (path / "pytorch_model.bin").is_file():
+        return True
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_path = path / index_name
+        if not index_path.is_file():
+            continue
+        try:
+            index = json.loads(index_path.read_text())
+        except json.JSONDecodeError:
+            return False
+        shards = set(index.get("weight_map", {}).values())
+        if shards and all((path / shard).is_file() for shard in shards):
+            return True
+    return False
+
+
+def _manifest_success(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        return json.loads(path.read_text()).get("status") == "success"
+    except json.JSONDecodeError:
+        return False
+
+
+def _inputs_not_newer_than(output_manifest: Path, input_paths: tuple[Path, ...]) -> bool:
+    if not output_manifest.is_file():
+        return False
+    output_mtime = output_manifest.stat().st_mtime
+    return all((not path.exists()) or path.stat().st_mtime <= output_mtime for path in input_paths)
+
+
+def _sorted_teacher_complete(config: dict[str, Any], sorted_teacher_dir: Path) -> bool:
+    manifest_path = stage_manifest_path(config, "sort")
+    activation_manifest = stage_manifest_path(config, "activation")
+    convert_manifest = stage_manifest_path(config, "convert")
+    permutations_path = sorted_teacher_dir / "sorted_permutations.json"
+    try:
+        has_permutations = bool(json.loads(permutations_path.read_text()))
+    except (OSError, json.JSONDecodeError):
+        has_permutations = False
+    return (
+        _manifest_success(manifest_path)
+        and _hf_checkpoint_complete(
+            sorted_teacher_dir, required_files=("sorted_permutations.json",)
+        )
+        and has_permutations
+        and _inputs_not_newer_than(manifest_path, (activation_manifest, convert_manifest))
+    )
+
+
+def _scoring_output_dir(hydra_cfg: Any) -> Path:
+    from ..scoring import resolve_scoring_output_dir
+
+    return Path(resolve_scoring_output_dir(hydra_cfg))
+
+
+def _plain(value: Any) -> Any:
+    if OmegaConf.is_config(value):
+        return OmegaConf.to_container(value, resolve=True)
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _runtime_stats_are_sharded(hydra_cfg: Any) -> bool:
+    stats_cfg = _get(hydra_cfg, "calc_subblock_stats", {}) or {}
+    runtime_cfg = _get(stats_cfg, "runtime_stats", {}) or {}
+    return str(_get(runtime_cfg, "execution", "inline")).lower() == "sharded"
+
+
+def _vllm_stats_is_explicit(config: dict[str, Any]) -> bool:
+    """Return whether the canonical DAG selects the standalone vLLM producer."""
+    return bool((config.get("vllm_stats") or {}).get("enabled", False))
+
+
+def _write_runtime_subblock_library(path: Path, block_configs: tuple[Any, ...]) -> None:
+    """Write the legacy subblock-library input without assembling a replacement library."""
+    rows = []
+    for block_config in block_configs:
+        row = {
+            f"{subblock.kind}_config": subblock.to_dict()
+            for subblock in block_config.subblock_configs
+        }
+        rows.append(row)
+    path.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n")
+
+
+def vllm_stats_stage(config: dict[str, Any], manifest: StageManifest):
+    """Collect runtime statistics from converted-teacher candidates before library assembly."""
+    hydra_cfg = load_runtime_hydra_config(config)
+    puzzle_dir = _puzzle_dir(config, hydra_cfg)
+    teacher_dir = _teacher_dir(config, hydra_cfg)
+    OmegaConf.set_struct(hydra_cfg, False)
+    if not hasattr(hydra_cfg, "calc_subblock_stats"):
+        raise ValueError("vLLM statistics require calc_subblock_stats runtime configuration")
+    runtime_cfg = _get(hydra_cfg.calc_subblock_stats, "runtime_stats", None)
+    if runtime_cfg is None:
+        hydra_cfg.calc_subblock_stats.runtime_stats = {}
+        runtime_cfg = hydra_cfg.calc_subblock_stats.runtime_stats
+    runtime_cfg.enabled = True
+    hydra_cfg.teacher_dir = str(teacher_dir)
+
+    from ..anymodel.model_descriptor import ModelDescriptorFactory
+    from ..subblock_stats.calc_runtime_stats import enumerate_runtime_block_configs
+    from ..subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
+
+    descriptor = ModelDescriptorFactory.get(_get(hydra_cfg, "descriptor", None))
+    block_configs = enumerate_runtime_block_configs(
+        teacher_dir,
+        descriptor,
+        search_space=config.get("search_space") or {},
+        include_noops=bool((config.get("build_library") or {}).get("include_noops", True)),
+    )
+    puzzle_dir.mkdir(parents=True, exist_ok=True)
+    subblock_library_path = puzzle_dir / "subblock_library.json"
+    _write_runtime_subblock_library(subblock_library_path, block_configs)
+    launch_calc_subblock_stats(hydra_cfg)
+    stats_path = puzzle_dir / _get(
+        hydra_cfg.calc_subblock_stats, "subblock_stats_filename", "subblock_stats.json"
+    )
+    if not stats_path.is_file() or stats_path.stat().st_size == 0:
+        raise RuntimeError(f"vLLM statistics aggregate is missing or empty: {stats_path}")
+    report_summary: dict[str, Any] = {}
+    if int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0"))) == 0:
+        from ..diagnostics import generate_vllm_stats_report
+
+        granularity = str(_get(runtime_cfg, "granularity", "block"))
+        report_summary = generate_vllm_stats_report(
+            puzzle_dir,
+            stats_path=stats_path,
+            output_dir=puzzle_dir / "artifacts" / "vllm_stats",
+            granularity=granularity,
+        )
+    return complete_stage(
+        config,
+        manifest,
+        outputs={
+            "subblock_stats_path": str(stats_path),
+            "subblock_library_path": str(subblock_library_path),
+            "runtime_candidate_count": len(block_configs),
+            "runtime_granularity": _get(runtime_cfg, "granularity", "block"),
+            "report": report_summary,
+        },
+    )
+
+
+def _extract_average_metrics(raw: dict[str, Any]) -> dict[str, Any]:
+    metrics = {}
+    for key, value in raw.items():
+        if isinstance(value, dict) and "avg" in value:
+            metrics[key] = value["avg"]
+            metrics[f"one_minus_{key}"] = 1 - value["avg"]
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            metrics[key] = value
+    return metrics
+
+
+def _index_scoring_results(config: dict[str, Any], hydra_cfg: Any) -> dict[str, Any]:
+    output_dir = _scoring_output_dir(hydra_cfg)
+    if not dist.is_master():
+        return {"scoring_output_dir": str(output_dir), "indexed_scores": 0}
+    if not output_dir.exists():
+        raise RuntimeError(f"Replace-one-block scoring produced no output directory: {output_dir}")
+
+    cache = EvaluationCache(_puzzle_dir(config, hydra_cfg) / "rpc_eval" / "replace_one_block")
+    index_entries = []
+    settings = {
+        "scoring": _plain(_get(hydra_cfg, "scoring", {})),
+        "teacher_dir": str(_teacher_dir(config, hydra_cfg)),
+        "sorted_teacher_dir": str(_puzzle_dir(config, hydra_cfg) / "ckpts" / "sorted_teacher"),
+    }
+    for result_path in sorted(output_dir.glob("solution*.json")):
+        raw = json.loads(result_path.read_text())
+        request = EvaluationRequest(
+            handler="replace_one_block",
+            payload={
+                "puzzle_solution": raw.get("puzzle_solution"),
+                "i_solution": raw.get("i_solution"),
+                "source_result_path": str(result_path),
+            },
+            settings=settings,
+        )
+        result = EvaluationResult(
+            request_id=request.identity,
+            metrics=_extract_average_metrics(raw),
+            artifacts={"source_result_path": str(result_path)},
+            metadata={
+                "result_kind": "replace_one_block",
+                "candidate_score_identity": stable_hash(
+                    {"request": request.to_dict(), "metrics": _extract_average_metrics(raw)},
+                    prefix="score",
+                ),
+            },
+        )
+        cache.put(result, request)
+        index_entries.append(
+            {
+                "request_id": request.identity,
+                "source_result_path": str(result_path),
+                "metrics": result.metrics,
+                "metadata": result.metadata,
+            }
+        )
+    if not index_entries:
+        raise RuntimeError(
+            f"Replace-one-block scoring produced no solution_*.json files in {output_dir}"
+        )
+    index_path = cache.root / "score_index.json"
+    index_path.write_text(
+        json.dumps(
+            canonicalize({"version": 1, "scores": index_entries}),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return {
+        "scoring_output_dir": str(output_dir),
+        "score_cache_dir": str(cache.root),
+        "score_index_path": str(index_path),
+        "indexed_scores": len(index_entries),
+    }
+
+
+def _index_mip_results(
+    config: dict[str, Any],
+    hydra_cfg: Any,
+    solution_paths: list[str],
+) -> dict[str, Any]:
+    if not dist.is_master():
+        return {"indexed_mip_solutions": 0}
+    cache = EvaluationCache(_puzzle_dir(config, hydra_cfg) / "rpc_eval" / "mip_solutions")
+    index_entries = []
+    settings = {
+        "mip": _plain(_get(hydra_cfg, "mip", {})),
+        "realize_model": _plain(_get(hydra_cfg, "realize_model", {})),
+        "skip_realize_model": bool(_get(hydra_cfg, "skip_realize_model", False)),
+    }
+    for solution_path in solution_paths:
+        path = Path(solution_path)
+        raw = json.loads(path.read_text()) if path.exists() else {"solution_path": str(path)}
+        request = EvaluationRequest(
+            handler="mip_solution",
+            payload={"solution_path": str(path), "solution": raw},
+            settings=settings,
+        )
+        result = EvaluationResult(
+            request_id=request.identity,
+            metrics={},
+            artifacts={"solution_path": str(path)},
+            metadata={"solution_identity": stable_hash(raw, prefix="solution")},
+        )
+        cache.put(result, request)
+        index_entries.append(result.to_dict())
+    index_path = cache.root / "mip_solution_index.json"
+    index_path.write_text(
+        json.dumps(
+            canonicalize({"version": 1, "solutions": index_entries}),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return {
+        "mip_cache_dir": str(cache.root),
+        "mip_solution_index_path": str(index_path),
+        "indexed_mip_solutions": len(index_entries),
+    }
+
+
+def activation_stage(config: dict[str, Any], manifest: StageManifest):
+    hydra_cfg = load_runtime_hydra_config(config)
+    num_nodes, node_index = _runtime_split(config)
+    if not hasattr(hydra_cfg, "pruning"):
+        raise ValueError(
+            "Activation stage needs runtime pruning target config. Provide "
+            "pruning.activation_passes or pruning.pruning_mixin for the descriptor."
+        )
+    if not hydra_cfg.pruning.get("activation_passes", None) and not hydra_cfg.pruning.get(
+        "pruning_mixin", None
+    ):
+        raise ValueError(
+            "Activation stage needs target selectors: set pruning.activation_passes "
+            "for unified multi-hook scoring or pruning.pruning_mixin for a single pass."
+        )
+    with _distributed(hydra_cfg):
+        from ..activation_scoring import launch_score_activations
+
+        launch_score_activations(hydra_cfg, num_nodes=num_nodes, node_index=node_index)
+        dist.barrier()
+    return complete_stage(
+        config,
+        manifest,
+        outputs={
+            "activations_log_dir": str(_activations_log_dir(config, hydra_cfg)),
+            "num_nodes": num_nodes,
+            "node_index": node_index,
+        },
+    )
+
+
+def sort_stage(config: dict[str, Any], manifest: StageManifest):
+    hydra_cfg = load_runtime_hydra_config(config)
+    sorted_teacher_dir = _puzzle_dir(config, hydra_cfg) / "ckpts" / "sorted_teacher"
+    if _sorted_teacher_complete(config, sorted_teacher_dir):
+        return complete_stage(
+            config,
+            manifest,
+            outputs={
+                "sorted_teacher_dir": str(sorted_teacher_dir),
+                "parent_teacher_dir": str(_teacher_dir(config, hydra_cfg)),
+                "activations_log_dir": str(_activations_log_dir(config, hydra_cfg)),
+                "skipped_existing": True,
+            },
+        )
+    with _distributed(hydra_cfg):
+        from ..anymodel.model_descriptor import ModelDescriptorFactory
+        from ..pruning.sorted_teacher import build_sorted_teacher
+
+        descriptor = ModelDescriptorFactory.get(_get(hydra_cfg, "descriptor", None))
+        sort_cfg = _get(hydra_cfg, "sort", {})
+        deferred_axes = tuple(_get(sort_cfg, "deferred_axes", ()) or ())
+        mamba_state_score_key = str(_get(sort_cfg, "mamba_state_score_key", "ssm_channel_contrib"))
+        embedding_cfg = _get(hydra_cfg, "embedding_pruning", {})
+        embedding_widths = tuple(_get(embedding_cfg, "widths", ()) or ())
+        build_sorted_teacher(
+            _teacher_dir(config, hydra_cfg),
+            _activations_log_dir(config, hydra_cfg),
+            sorted_teacher_dir,
+            descriptor,
+            deferred_axes=deferred_axes,
+            mamba_state_score_key=mamba_state_score_key,
+            embedding_widths=embedding_widths,
+        )
+        dist.barrier()
+    return complete_stage(
+        config,
+        manifest,
+        outputs={
+            "sorted_teacher_dir": str(sorted_teacher_dir),
+            "parent_teacher_dir": str(_teacher_dir(config, hydra_cfg)),
+            "activations_log_dir": str(_activations_log_dir(config, hydra_cfg)),
+        },
+    )
+
+
+def bypass_stage(config: dict[str, Any], manifest: StageManifest):
+    hydra_cfg = load_runtime_hydra_config(config)
+    bypass_cfg = config.get("bypass") or {}
+    if bypass_cfg.get("enabled") is False:
+        parent_artifact = _puzzle_dir(config, hydra_cfg) / "artifacts" / "scoring_parent.json"
+        result = complete_stage(
+            config,
+            manifest,
+            outputs={
+                "skipped": True,
+                "scoring_parent_artifact": str(parent_artifact),
+            },
+            status="skipped",
+            message="Bypass is disabled.",
+        )
+        if os.environ.get("RANK") in (None, "", "0"):
+            ensure_scoring_parent(config, refresh=True)
+        return result
+    num_nodes, node_index = _runtime_split(config)
+    puzzle_dir = _puzzle_dir(config, hydra_cfg)
+    with _distributed(hydra_cfg):
+        from ..bypass_distillation import launch_bypass_distillation
+
+        launch_bypass_distillation(hydra_cfg, num_nodes=num_nodes, node_index=node_index)
+        dist.barrier()
+    result = complete_stage(
+        config,
+        manifest,
+        outputs={
+            "puzzle_dir": str(puzzle_dir),
+            "ckpts_dir": str(puzzle_dir / "ckpts"),
+            "num_nodes": num_nodes,
+            "node_index": node_index,
+            "scoring_parent_artifact": str(puzzle_dir / "artifacts" / "scoring_parent.json"),
+        },
+    )
+    if os.environ.get("RANK") in (None, "", "0"):
+        # The parent fingerprints this completed manifest.  Never rewrite the
+        # manifest afterward: embedding its own fingerprint would create a
+        # self-referential identity that is stale by construction.
+        ensure_scoring_parent(config, refresh=True)
+    return result
+
+
+def _finalize_bypass_sanity_summary(
+    puzzle_dir: Path,
+    modes: list[str],
+    repetitions: int,
+) -> Path | None:
+    """Publish one completion artifact after every independent probe is complete."""
+
+    mode_summaries: dict[str, dict[str, Any]] = {}
+    for mode in modes:
+        history_path = (
+            puzzle_dir
+            / "artifacts"
+            / "bypass"
+            / "overfit_probe"
+            / mode
+            / "local_kd_loss_history.json"
+        )
+        if not history_path.is_file():
+            return None
+        try:
+            history = json.loads(history_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        records = [row for row in history.get("records", ()) if isinstance(row, dict)]
+        steps = [int(row.get("step", -1)) for row in records]
+        losses = [row.get("loss") for row in records]
+        valid_losses = all(
+            isinstance(loss, (int, float)) and math.isfinite(float(loss)) for loss in losses
+        )
+        if (
+            len(records) != repetitions
+            or steps != list(range(1, repetitions + 1))
+            or not valid_losses
+        ):
+            return None
+        mode_summaries[mode] = {
+            "history_path": str(history_path),
+            "record_count": len(records),
+            "first_loss": float(losses[0]),
+            "last_loss": float(losses[-1]),
+            "finite": True,
+            "max_step": steps[-1],
+            "history_summary": history.get("summary") or {},
+        }
+
+    summary_path = puzzle_dir / "artifacts" / "bypass_sanity" / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
+    temporary_path.write_text(
+        json.dumps(
+            {
+                "stage": "bypass_sanity",
+                "complete": True,
+                "modes": modes,
+                "repetitions": repetitions,
+                "mode_summaries": mode_summaries,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary_path, summary_path)
+    return summary_path
+
+
+def bypass_overfit_stage(config: dict[str, Any], manifest: StageManifest):
+    """Run only the isolated same-batch nested-bypass acceptance probe."""
+
+    hydra_cfg = load_runtime_hydra_config(config)
+    puzzle_dir = _puzzle_dir(config, hydra_cfg)
+    num_nodes, node_index = _runtime_split(config)
+    OmegaConf.set_struct(hydra_cfg, False)
+    hydra_cfg.bypass.overfit.enabled = True
+    hydra_cfg.bypass.overfit.only = True
+    with _distributed(hydra_cfg):
+        from ..bypass_distillation import launch_bypass_distillation
+
+        launch_bypass_distillation(hydra_cfg, num_nodes=num_nodes, node_index=node_index)
+        dist.barrier()
+    configured_modes = hydra_cfg.bypass.overfit.get("modes", None)
+    modes = (
+        [str(mode) for mode in configured_modes]
+        if configured_modes is not None
+        else ["smallest_fixed"]
+    )
+    history_paths = {
+        mode: str(
+            puzzle_dir
+            / "artifacts"
+            / "bypass"
+            / "overfit_probe"
+            / mode
+            / "local_kd_loss_history.json"
+        )
+        for mode in modes
+    }
+    repetitions = int(hydra_cfg.bypass.overfit.repetitions)
+    summary_path = None
+    if os.environ.get("RANK") in (None, "", "0"):
+        summary_path = _finalize_bypass_sanity_summary(
+            puzzle_dir,
+            modes,
+            repetitions,
+        )
+    return complete_stage(
+        config,
+        manifest,
+        outputs={
+            "puzzle_dir": str(puzzle_dir),
+            "history_paths": history_paths,
+            "summary_path": str(summary_path) if summary_path is not None else None,
+            "modes": modes,
+            "repetitions": repetitions,
+            "single_batch": True,
+            "nested": bool(hydra_cfg.bypass.elastic),
+            "num_nodes": num_nodes,
+            "node_index": node_index,
+        },
+    )
+
+
+def build_library_stage(config: dict[str, Any], manifest: StageManifest):
+    hydra_cfg = load_runtime_hydra_config(config)
+    puzzle_dir = _puzzle_dir(config, hydra_cfg)
+    scoring_parent = ensure_scoring_parent(config, refresh=True)
+    OmegaConf.set_struct(hydra_cfg, False)
+    hydra_cfg.build_replacement_library.source_checkpoint_dir = str(scoring_parent.path)
+    candidate_library_path = puzzle_dir / "candidate_library.json"
+    stats_path = puzzle_dir / _get(
+        _get(hydra_cfg, "calc_subblock_stats", {}) or {},
+        "subblock_stats_filename",
+        "subblock_stats.json",
+    )
+    with _distributed(hydra_cfg):
+        if dist.is_master():
+            if _vllm_stats_is_explicit(config):
+                if not stats_path.is_file():
+                    raise RuntimeError(
+                        "build-library requires the standalone vLLM aggregate at "
+                        f"{stats_path}; run or import vllm_stats first"
+                    )
+                from ..replacement_library.build_replacement_library import (
+                    launch_build_replacement_library,
+                )
+
+                launch_build_replacement_library(hydra_cfg)
+            elif _runtime_stats_are_sharded(hydra_cfg):
+                from ..replacement_library.build_replacement_library import (
+                    launch_build_replacement_library,
+                )
+
+                launch_build_replacement_library(hydra_cfg)
+            else:
+                from ..build_library_and_stats import launch_build_library_and_stats
+
+                launch_build_library_and_stats(hydra_cfg)
+            try:
+                from ..candidates import build_candidate_library_from_checkpoint
+
+                library_cfg = config.get("build_replacement_library") or {}
+                configured_parent = library_cfg.get("source_checkpoint_dir")
+                parent_dir = (
+                    Path(configured_parent).resolve() if configured_parent else scoring_parent.path
+                )
+                if parent_dir.resolve() != scoring_parent.path.resolve():
+                    raise RuntimeError(
+                        "build-library source does not match the resolved scoring parent: "
+                        f"{parent_dir} != {scoring_parent.path}"
+                    )
+                build_candidate_library_from_checkpoint(
+                    parent_dir,
+                    search_space=config.get("search_space") or {},
+                    output_path=candidate_library_path,
+                    puzzle_dir=puzzle_dir,
+                    include_noops=bool(library_cfg.get("include_noops", True)),
+                    include_bypass=bool(library_cfg.get("include_bypass", True)),
+                    stats_paths=(stats_path,) if stats_path.is_file() else (),
+                    metadata={"library_settings": config.get("library") or {}},
+                    hidden_width=library_cfg.get("hidden_width"),
+                )
+            except ImportError:
+                pass
+        dist.barrier()
+    return complete_stage(
+        config,
+        manifest,
+        outputs={
+            "replacement_library_path": str(puzzle_dir / "replacement_library.json"),
+            "candidate_library_path": str(candidate_library_path),
+            "subblock_stats_path": str(
+                puzzle_dir
+                / _get(
+                    _get(hydra_cfg, "calc_subblock_stats", {}) or {},
+                    "subblock_stats_filename",
+                    "subblock_stats.json",
+                )
+            ),
+            "runtime_stats_execution": (
+                "sharded" if _runtime_stats_are_sharded(hydra_cfg) else "inline"
+            ),
+            "scoring_parent": scoring_parent.to_dict(),
+        },
+    )
+
+
+def scoring_stage(config: dict[str, Any], manifest: StageManifest):
+    hydra_cfg = load_runtime_hydra_config(config)
+    scoring_parent = ensure_scoring_parent(config)
+    OmegaConf.set_struct(hydra_cfg, False)
+    hydra_cfg.scoring.source_checkpoint_dir = str(scoring_parent.path)
+    reference = str((config.get("replacement_scoring") or {}).get("reference", "scoring_parent"))
+    hydra_cfg.scoring.target_teacher_dir = str(
+        _teacher_dir(config, hydra_cfg) if reference == "original_teacher" else scoring_parent.path
+    )
+    num_nodes, node_index = _runtime_split(config)
+    with _distributed(hydra_cfg):
+        from ..scoring import launch_scoring
+
+        try:
+            launch_scoring(hydra_cfg, num_nodes=num_nodes, node_index=node_index)
+        except BaseException:
+            # ``dist.cleanup()`` enters a global barrier.  In a PP failure, the
+            # failing stage otherwise waits there while another stage waits in
+            # P2P receive, hiding the original traceback until NCCL times out.
+            import traceback
+
+            traceback.print_exc()
+            raise
+        dist.barrier()
+        indexed_outputs = _index_scoring_results(config, hydra_cfg)
+        dist.barrier()
+        report_summary: dict[str, Any] = {}
+        if dist.is_master():
+            from ..diagnostics import generate_replace_block_report
+
+            report_config = config.get("replacement_scoring") or {}
+            granularity = str(_get(hydra_cfg.scoring, "granularity", "block"))
+            report_summary = generate_replace_block_report(
+                _puzzle_dir(config, hydra_cfg),
+                scores_dir=_scoring_output_dir(hydra_cfg),
+                output_dir=_puzzle_dir(config, hydra_cfg) / "artifacts" / "replacement_scoring",
+                granularity=granularity,
+                default_metric=str(
+                    report_config.get("default_metric", "normalized_mse_loss_hidden_states")
+                ),
+                default_layer_count=int(report_config.get("default_layer_count", 5)),
+                anchor_count=int(report_config.get("anchor_count", 3)),
+                trend_relative_tolerance=float(
+                    report_config.get("trend_relative_tolerance", 0.02)
+                ),
+            )
+        dist.barrier()
+    return complete_stage(
+        config,
+        manifest,
+        outputs={
+            **indexed_outputs,
+            "scoring_parent": scoring_parent.to_dict(),
+            "num_nodes": num_nodes,
+            "node_index": node_index,
+            "report": report_summary,
+        },
+    )
+
+
+def mip_stage(config: dict[str, Any], manifest: StageManifest):
+    hydra_cfg = load_runtime_hydra_config(config)
+    coverage_report = None
+    if str(hydra_cfg.mip.get("score_granularity", "block")) == "subblock":
+        from ..artifact_coverage import verify_real_campaign_artifacts
+
+        coverage_report = verify_real_campaign_artifacts(
+            _puzzle_dir(config, hydra_cfg),
+            expected_depth_scenarios=int(hydra_cfg.mip.get("depth_scenario_count", 1)),
+            bypass_enabled=bool(hydra_cfg.bypass.get("enabled", False)),
+            expected_checkpoint_dir=str(hydra_cfg.scoring.source_checkpoint_dir),
+            expected_data_identity={
+                "eval_samples": int(hydra_cfg.scoring.eval_samples),
+                "block_size": int(hydra_cfg.scoring.block_size),
+            },
+        )
+        coverage_report.require_complete()
+    solution_paths: list[str] = []
+    with _distributed(hydra_cfg):
+        coverage_path = (
+            _puzzle_dir(config, hydra_cfg) / "artifacts" / "mip" / "artifact_coverage.json"
+        )
+        if coverage_report is not None and dist.is_master():
+            coverage_path.parent.mkdir(parents=True, exist_ok=True)
+            coverage_path.write_text(
+                json.dumps(dataclasses.asdict(coverage_report), indent=2, default=str) + "\n"
+            )
+        has_depth_trajectory = bool(
+            hasattr(hydra_cfg, "mip") and hydra_cfg.mip.get("depth_trajectory_path", None)
+        )
+        has_mip_sweep = (
+            hasattr(hydra_cfg, "mip")
+            and hasattr(hydra_cfg.mip, "sweep")
+            and hydra_cfg.mip.sweep.get("enabled", False)
+        )
+        if has_depth_trajectory:
+            from ..depth.mip_scenarios import run_depth_mip_scenarios
+
+            solution_paths = run_depth_mip_scenarios(hydra_cfg) or []
+        elif has_mip_sweep:
+            from ..mip import run_mip_sweep
+
+            run_mip_sweep(hydra_cfg)
+        else:
+            grid_cfg = dict((config.get("mip") or {}).get("grid_budgeting") or {})
+            if grid_cfg.get("enabled"):
+                from ..mip.grid_budgeting import run_grid_budgeted_mip
+
+                solution_paths = run_grid_budgeted_mip(hydra_cfg, grid_cfg) or []
+            else:
+                from ..mip import launch_mip_and_realize_model
+
+                solution_paths = launch_mip_and_realize_model(hydra_cfg) or []
+        dist.barrier()
+        indexed_outputs = _index_mip_results(config, hydra_cfg, solution_paths)
+        dist.barrier()
+    return complete_stage(
+        config,
+        manifest,
+        outputs={
+            "solution_paths": [str(path) for path in solution_paths],
+            "artifact_coverage_path": (
+                str(_puzzle_dir(config, hydra_cfg) / "artifacts" / "mip" / "artifact_coverage.json")
+                if coverage_report is not None
+                else None
+            ),
+            **indexed_outputs,
+        },
+    )
