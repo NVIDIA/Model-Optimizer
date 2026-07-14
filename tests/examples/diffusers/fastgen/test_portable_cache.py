@@ -219,6 +219,12 @@ def test_authenticated_cache_constants_hash_framing_and_seedless_split() -> None
     assert train == tuple(str(index) for index in range(16) if str(index) not in heldout)
     assert heldout not in (("0", "2", "4", "11"), ("2", "7", "8", "9"))
 
+    permuted = tuple(reversed(tuple(str(index) for index in range(16))))
+    permuted_train, permuted_heldout = select_pdd_holdout_ids(permuted, 4)
+    assert set(permuted_heldout) == set(heldout)
+    assert permuted_train == tuple(item for item in permuted if item not in set(heldout))
+    assert permuted_heldout == tuple(item for item in permuted if item in set(heldout))
+
 
 def test_approved_id_artifact_is_strict_and_externally_authenticatable(tmp_path) -> None:
     path = tmp_path / "approved.json"
@@ -246,9 +252,10 @@ def test_approved_id_artifact_is_strict_and_externally_authenticatable(tmp_path)
     path.write_text('{"schema_version":1,"schema_version":1}')
     with pytest.raises(ValueError, match="duplicate key"):
         load_approved_sample_ids(path)
-    path.write_text('{"schema_version": NaN}')
-    with pytest.raises(ValueError, match="non-standard constant"):
-        load_approved_sample_ids(path)
+    for constant in ("NaN", "Infinity", "-Infinity"):
+        path.write_text(f'{{"schema_version": {constant}}}')
+        with pytest.raises(ValueError, match="non-standard constant"):
+            load_approved_sample_ids(path)
     path.write_bytes(b"\xff")
     with pytest.raises(ValueError, match="UTF-8 JSON"):
         load_approved_sample_ids(path)
@@ -266,6 +273,21 @@ def test_approved_id_artifact_is_strict_and_externally_authenticatable(tmp_path)
         load_approved_sample_ids(tmp_path)
     with pytest.raises(ValueError, match="expected approved-ID"):
         load_approved_sample_ids(real, expected_sha256="f" * 64)
+
+
+def test_approved_hash_is_identical_to_finalized_all_index_hash(tmp_path) -> None:
+    root = tmp_path / "cache"
+    splits = _make_snapshot(root)
+    approved_path = tmp_path / "approved.json"
+    approved_digest = _write_approved_manifest(approved_path, splits["all"])
+    _, loaded_digest = load_approved_sample_ids(
+        approved_path,
+        expected_sha256=approved_digest,
+    )
+    all_index, _ = load_portable_metadata(root)
+    assert loaded_digest == all_index["ordered_sample_ids_sha256"]
+    assert loaded_digest == ordered_sample_ids_sha256(all_index["sample_ids"])
+    assert loaded_digest == all_index["split_policy"]["approved_ordered_ids_sha256"]
 
 
 @pytest.mark.parametrize(
@@ -291,6 +313,47 @@ def test_self_consistent_all_list_rewrite_fails_external_hash(tmp_path) -> None:
             expected_approved_ids_sha256=ordered_sample_ids_sha256(approved_ids),
             reject_orphans=False,
         )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("order", "frozen PDD policy"),
+        ("gap", "split union"),
+        ("duplicate", "contains duplicates"),
+        ("member", "frozen PDD policy"),
+    ],
+)
+def test_split_order_gap_duplicate_and_membership_tampering_is_rejected(
+    tmp_path, mutation, message
+) -> None:
+    root = tmp_path / "cache"
+    sample_ids = tuple(str(index) for index in range(16))
+    _make_id_only_snapshot(root, sample_ids, 4)
+    train_path = root / "metadata_train.json"
+    heldout_path = root / "metadata_heldout.json"
+    train = json.loads(train_path.read_text())
+    heldout = json.loads(heldout_path.read_text())
+
+    if mutation == "order":
+        train["sample_ids"] = list(reversed(train["sample_ids"]))
+    elif mutation == "gap":
+        train["sample_ids"].pop()
+    elif mutation == "duplicate":
+        train["sample_ids"].append(train["sample_ids"][0])
+    else:
+        train["sample_ids"][0], heldout["sample_ids"][0] = (
+            heldout["sample_ids"][0],
+            train["sample_ids"][0],
+        )
+
+    for path, index in ((train_path, train), (heldout_path, heldout)):
+        index["total_items"] = len(index["sample_ids"])
+        if len(index["sample_ids"]) == len(set(index["sample_ids"])):
+            index["ordered_sample_ids_sha256"] = ordered_sample_ids_sha256(index["sample_ids"])
+        _write_json(path, index)
+    with pytest.raises(ValueError, match=message):
+        validate_snapshot(root, reject_orphans=False)
 
 
 @pytest.mark.parametrize(
@@ -327,6 +390,26 @@ def test_strict_index_and_shard_json_reject_duplicates_and_nonfinite(tmp_path) -
     shard_path.write_text('[{"sample_id":"a","value":NaN}]')
     with pytest.raises(ValueError, match="non-standard constant"):
         load_portable_metadata(tmp_path / "second")
+
+    nested_policy = tmp_path / "nested-policy"
+    _make_snapshot(nested_policy)
+    nested_index_path = nested_policy / "metadata.json"
+    nested_index = nested_index_path.read_text()
+    domain = '"domain": "modelopt-pdd-holdout-v1"'
+    nested_index_path.write_text(nested_index.replace(domain, f"{domain},\n    {domain}", 1))
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_portable_metadata(nested_policy)
+
+    nested_shard = tmp_path / "nested-shard"
+    splits = _make_snapshot(nested_shard)
+    nested_shard_path = nested_shard / "metadata_shard_s0000.json"
+    nested_entries = nested_shard_path.read_text()
+    sample_id = f'"sample_id": "{splits["all"][0]}"'
+    nested_shard_path.write_text(
+        nested_entries.replace(sample_id, f"{sample_id},\n    {sample_id}", 1)
+    )
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_portable_metadata(nested_shard)
 
 
 @pytest.mark.parametrize("actual_heldout_count", [1999, 2001])

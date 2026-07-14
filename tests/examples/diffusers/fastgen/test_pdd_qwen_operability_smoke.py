@@ -10,8 +10,11 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+torch = pytest.importorskip("torch")
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _HARNESS = _REPO_ROOT / "tests" / "gpu" / "torch" / "fastgen" / "pdd_qwen_operability_smoke.py"
@@ -109,6 +112,81 @@ def test_gpu_harness_uses_shared_unambiguous_ordered_id_hash() -> None:
     source = _HARNESS.read_text()
     assert "modelopt-pdd-ordered-{split}-ids-v1" not in source
     assert 'digest.update(b"\\n")' not in source
+
+
+def test_gpu_harness_checkpoint_identity_uses_exact_shared_hashes() -> None:
+    from modelopt.torch.fastgen import PDDLayerSpec, PDDMetadata
+
+    train_ids = smoke._training_sample_ids(2)
+    parameter = torch.nn.Parameter(torch.tensor(1.0))
+    optimizer = torch.optim.AdamW([parameter], lr=2.0e-5)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+    setup = SimpleNamespace(
+        metadata=PDDMetadata(
+            grid_size=128,
+            grid_max_t=0.999,
+            flow_shift=5.0,
+            block_size_min=4,
+            block_size_max=64,
+            inference_blocks=(32, 32, 32, 32),
+            teacher_integrator="euler",
+            layer_spec=PDDLayerSpec(
+                projection_path="transformer.proj_out",
+                head_layout="channel_major",
+            ),
+            projection_in_features=3072,
+            projection_out_features=64,
+            projection_bias=True,
+        ),
+        automodel_snapshot={
+            "distribution": "nemo_automodel",
+            "version": "0.5.0",
+            "package_tree_sha256": "a" * 64,
+            "wheel_sha256": "b" * 64,
+            "runtime_versions": {"diffusers": "0.38.0"},
+        },
+        optimizer=optimizer,
+    )
+    config = SimpleNamespace(
+        model_id="Qwen/Qwen-Image",
+        model_revision="75e0b4be04f60ec59a75f475837eced720f823b6",
+        pdd=SimpleNamespace(guidance_scale=4.0),
+        guidance=SimpleNamespace(rescale=1.0, eps=1e-5),
+        training=SimpleNamespace(
+            seed=17,
+            validation_seed=29,
+            validation_every_steps=1000,
+            max_grad_norm=1.0,
+            zero_grad_warmup_steps=0,
+        ),
+        parallel=SimpleNamespace(activation_checkpointing=False),
+    )
+    sampler = SimpleNamespace(
+        dataset=SimpleNamespace(metadata=[{"sample_id": sample_id} for sample_id in train_ids])
+    )
+    raw = {"pdd": {"grid_size": 128, "block_size_max": 64}}
+
+    identity = smoke._identity(
+        setup=setup,
+        training=SimpleNamespace(scheduler=scheduler),
+        config=config,
+        sampler=sampler,
+        raw=raw,
+    )
+
+    assert identity["data"] == {
+        "ordered_train_id_sha256": (
+            "4df732c492d043d5b0ea3549bcc80dbb847369021d0d3f242cd60386d1e94313"
+        ),
+        "ordered_heldout_id_sha256": (
+            "38486bc077b6bd9b06a82167399e720f6c8dc70329dd0ce5fa23a92e4f30c198"
+        ),
+        "dataset_snapshot_sha256": smoke._canonical_sha256(
+            {"domain": "modelopt-pdd-synthetic-smoke-v1", "config": raw["pdd"]}
+        ),
+        "local_batch_size": 1,
+        "grad_accumulation_steps": 1,
+    }
 
 
 def _automodel_snapshot_fixture() -> tuple[dict, dict]:

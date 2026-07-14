@@ -15,15 +15,19 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from portable_cache import ordered_sample_ids_sha256
 
 sys.dont_write_bytecode = True
 
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parents[2]
+# These entrypoints are also supported through ``python -m``. In that mode the
+# sibling ModelOpt-owned example modules are not importable until this directory
+# is added explicitly.
 for path in (_REPO_ROOT, _THIS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
+
+from portable_cache import ordered_sample_ids_sha256  # noqa: E402
 
 _CANONICAL_PDD_HELDOUT_COUNT = 2000
 
@@ -186,6 +190,54 @@ def _validated_loader_order_hashes(
     if heldout_digest != reported.get("heldout"):
         raise RuntimeError("heldout loader order does not match the authenticated snapshot.")
     return train_digest, heldout_digest
+
+
+def _collective_validated_loader_order_hashes(
+    train_metadata: Any,
+    heldout_metadata: Any,
+    snapshot_report: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Authenticate loader order on every rank before distributed model construction."""
+    import torch.distributed as dist
+
+    try:
+        hashes = _validated_loader_order_hashes(
+            train_metadata,
+            heldout_metadata,
+            snapshot_report,
+        )
+        local_status: dict[str, Any] = {"ok": True, "hashes": hashes}
+    except BaseException as error:
+        local_status = {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
+    statuses: list[Any] = [None] * dist.get_world_size()
+    dist.all_gather_object(statuses, local_status)
+    failures: list[str] = []
+    resolved_hashes: list[tuple[str, str]] = []
+    for rank, status in enumerate(statuses):
+        if not isinstance(status, Mapping) or type(status.get("ok")) is not bool:
+            failures.append(f"rank {rank}: malformed loader authentication status")
+            continue
+        if not status["ok"]:
+            failures.append(f"rank {rank}: {status.get('error')}")
+            continue
+        hashes = status.get("hashes")
+        if (
+            not isinstance(hashes, tuple | list)
+            or len(hashes) != 2
+            or any(not isinstance(value, str) for value in hashes)
+        ):
+            failures.append(f"rank {rank}: malformed loader authentication hashes")
+            continue
+        resolved_hashes.append((hashes[0], hashes[1]))
+    if failures:
+        raise RuntimeError("PDD loader-order authentication failed: " + "; ".join(failures))
+    if len(set(resolved_hashes)) != 1:
+        raise RuntimeError(
+            "PDD ranks resolved different authenticated train/heldout loader orders: "
+            f"{resolved_hashes}."
+        )
+    return resolved_hashes[0]
 
 
 def _build_validation_plan(sampler: Any, config: Any) -> tuple[Any, tuple[tuple[bool, ...], ...]]:
@@ -441,14 +493,14 @@ def main() -> None:
         dp_rank=rank,
         dp_world_size=world_size,
     )
-    validation_assignments, validation_masks = _build_validation_plan(
-        validation_sampler,
-        config,
-    )
-    train_ordered_id_sha256, heldout_ordered_id_sha256 = _validated_loader_order_hashes(
+    train_ordered_id_sha256, heldout_ordered_id_sha256 = _collective_validated_loader_order_hashes(
         sampler.dataset.metadata,
         validation_sampler.dataset.metadata,
         snapshot_report,
+    )
+    validation_assignments, validation_masks = _build_validation_plan(
+        validation_sampler,
+        config,
     )
     setup = build_pdd_setup(config)
     transformer_config = getattr(setup.student, "config", None)

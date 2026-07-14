@@ -140,6 +140,47 @@ def test_canonical_training_requires_external_hash_before_validator(tmp_path) ->
         pdd_finetune._validate_dataset_snapshot(raw, config)
 
 
+def test_valid_canonical_data_gate_reaches_validator_unchanged(monkeypatch, tmp_path) -> None:
+    expected_hash = "a" * 64
+    raw = _raw_config(tmp_path)
+    raw["data"] = {
+        "expected_approved_ordered_ids_sha256": expected_hash,
+        "expected_heldout_count": 2000,
+        "dataloader": {
+            "_target_": "fastgen_data.build_text_to_image_multiresolution_dataloader",
+            "cache_dir": str(tmp_path),
+        },
+    }
+    config = resolve_pdd_recipe_config(raw)
+    captured = None
+
+    def _validator(root, **kwargs):
+        nonlocal captured
+        captured = (root, kwargs)
+        return {"snapshot_sha256": "b" * 64}
+
+    def _all_gather_object(output, value):
+        output[0] = value
+
+    monkeypatch.setattr("validate_cache_snapshot.validate_snapshot", _validator)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", _all_gather_object)
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda payload, src: None)
+
+    assert pdd_finetune._validate_dataset_snapshot(raw, config) == {"snapshot_sha256": "b" * 64}
+    assert captured == (
+        tmp_path.resolve(),
+        {
+            "all_index": config.all_metadata_index,
+            "train_index": config.train_metadata_index,
+            "heldout_index": config.validation_metadata_index,
+            "expected_approved_ids_sha256": expected_hash,
+            "expected_heldout_count": 2000,
+        },
+    )
+
+
 def test_loader_order_must_match_authenticated_report() -> None:
     train = [{"sample_id": "train-a"}, {"sample_id": "train-b"}]
     heldout = [{"sample_id": "heldout-a"}]
@@ -155,6 +196,66 @@ def test_loader_order_must_match_authenticated_report() -> None:
     )
     with pytest.raises(RuntimeError, match="training loader order"):
         pdd_finetune._validated_loader_order_hashes(list(reversed(train)), heldout, report)
+
+
+def test_collective_loader_order_gate_rejects_rank_disagreement(monkeypatch) -> None:
+    train = [{"sample_id": "train-a"}, {"sample_id": "train-b"}]
+    heldout = [{"sample_id": "heldout-a"}]
+    report = {
+        "ordered_sample_ids_sha256": {
+            "train": pdd_finetune._ordered_id_sha256(train, split="train"),
+            "heldout": pdd_finetune._ordered_id_sha256(heldout, split="heldout"),
+        }
+    }
+
+    def _all_gather_object(output, value):
+        output[:] = [value, {"ok": True, "hashes": ("c" * 64, value["hashes"][1])}]
+
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", _all_gather_object)
+    with pytest.raises(RuntimeError, match="different authenticated"):
+        pdd_finetune._collective_validated_loader_order_hashes(train, heldout, report)
+
+
+def test_two_rank_loader_order_divergence_fails_before_model_setup() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nnodes=1",
+            "--nproc-per-node=2",
+            str(
+                _REPO_ROOT
+                / "tests"
+                / "examples"
+                / "diffusers"
+                / "fastgen"
+                / "pdd_training_preflight_distributed.py"
+            ),
+        ],
+        cwd=_REPO_ROOT,
+        env=environment,
+        check=True,
+        timeout=60,
+    )
+
+
+def test_pdd_finetune_namespace_module_help() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-m", "examples.diffusers.fastgen.pdd_finetune", "--help"],
+        cwd=_REPO_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Train Qwen-Image" in result.stdout
 
 
 @pytest.mark.parametrize(

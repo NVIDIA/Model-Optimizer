@@ -18,7 +18,12 @@ if str(_REPO_ROOT) not in sys.path:
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
-from pdd_finetune import _collective_training_batch, _collective_training_iterator
+from pdd_finetune import (
+    _collective_training_batch,
+    _collective_training_iterator,
+    _collective_validated_loader_order_hashes,
+    _ordered_id_sha256,
+)
 
 
 class _Sampler:
@@ -152,6 +157,33 @@ def main() -> None:
         dist.all_gather_object(iterator_messages, iterator_message)
         assert all(
             item is not None and "iterator construction" in item for item in iterator_messages
+        )
+        dist.barrier()
+
+        canonical_train = [{"sample_id": "train-a"}, {"sample_id": "train-b"}]
+        heldout = [{"sample_id": "heldout-a"}]
+        report = {
+            "ordered_sample_ids_sha256": {
+                "train": _ordered_id_sha256(canonical_train, split="train"),
+                "heldout": _ordered_id_sha256(heldout, split="heldout"),
+            }
+        }
+        local_train = canonical_train if rank == 0 else list(reversed(canonical_train))
+        gate_error = None
+        model_setup_reached = False
+        try:
+            _collective_validated_loader_order_hashes(local_train, heldout, report)
+            model_setup_reached = True
+        except RuntimeError as error:
+            gate_error = str(error)
+        outcomes: list[tuple[str | None, bool] | None] = [None] * dist.get_world_size()
+        dist.all_gather_object(outcomes, (gate_error, model_setup_reached))
+        assert all(
+            outcome is not None
+            and outcome[0] is not None
+            and "loader-order authentication failed" in outcome[0]
+            and not outcome[1]
+            for outcome in outcomes
         )
     finally:
         dist.destroy_process_group()
