@@ -27,8 +27,35 @@ import pytest
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from omegaconf import OmegaConf
 
-from modelopt.torch.puzzletron.block_config import AttentionConfig, FFNConfig
-from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import calc_runtime_for_subblocks
+from modelopt.torch.puzzletron.block_config import AttentionConfig, FFNConfig, MoEConfig
+from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
+    _hybrid_override_pattern_for_block_configs,
+    _make_moe_ffn_baseline_block_config,
+    _make_moe_ffn_block_config,
+    _uses_moe,
+    calc_runtime_for_subblocks,
+)
+
+
+def test_moe_ffn_runtime_path_preserves_explicit_moe_block():
+    """MoE expert-removal candidates should benchmark as real MoE layers."""
+    pruned_ffn = FFNConfig(
+        moe=MoEConfig(
+            num_local_experts=16,
+            num_experts_per_tok=4,
+            expert_intermediate_dim=128,
+            shared_expert_intermediate_dim=256,
+        ),
+    )
+
+    target_block = _make_moe_ffn_block_config(pruned_ffn)
+    baseline_block = _make_moe_ffn_baseline_block_config()
+
+    assert _uses_moe(pruned_ffn)
+    assert target_block.attention.no_op
+    assert target_block.ffn.moe.num_local_experts == 16
+    assert baseline_block.attention.no_op and baseline_block.ffn.no_op
+    assert _hybrid_override_pattern_for_block_configs([target_block]) == "E"
 
 
 @pytest.mark.skip(reason="AnyModel is not supported in vLLM yet")
