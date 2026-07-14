@@ -133,29 +133,65 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
             )
         return decoder_cls_list
 
+    @classmethod
+    def anymodel_arch_info(cls) -> dict:
+        return {
+            "decoder_layer_module": ".nemotron_h",
+            "decoder_layer_class": "NemotronHAttentionDecoderLayer",
+            "decoder_layer_class_map": {
+                "*": "NemotronHAttentionDecoderLayer",
+                "-": "NemotronHMLPDecoderLayer",
+                "E": "NemotronHMoEDecoderLayer",
+                "M": "NemotronHMambaDecoderLayer",
+            },
+            "hybrid_pattern_field": "hybrid_override_pattern",
+            "attn_module": "mixer",
+            "attn_norm_module": "norm",
+            "ffn_module": "mixer",
+            "ffn_norm_module": "norm",
+        }
+
     @staticmethod
     def requires_trust_remote_code() -> bool:
         return True
 
     @staticmethod
+    def truncate_pattern_for_subblock(lm_config, parent_layer_index: int | None = None) -> None:
+        layer_types = getattr(lm_config, "layers_block_type", None)
+        if layer_types:
+            if parent_layer_index is not None and 0 <= parent_layer_index < len(layer_types):
+                lm_config.layers_block_type = [layer_types[parent_layer_index]]
+            else:
+                lm_config.layers_block_type = [layer_types[0]]
+            return
+        ModelDescriptor.truncate_pattern_for_subblock(lm_config, parent_layer_index)
+
+    @staticmethod
     def block_config_to_layer_overrides(block_config: BlockConfig):
         override_kwargs = {}
-        if block_config.ffn is not None and block_config.ffn.intermediate_size is not None:
-            override_kwargs["intermediate_size"] = block_config.ffn.intermediate_size
+        ffn = block_config.get_subblock("ffn")
+        attention = block_config.get_subblock("attention")
+        moe = block_config.get_subblock("moe")
 
-        if (
-            block_config.attention is not None
-            and block_config.attention.num_key_value_heads is not None
-        ):
-            override_kwargs["num_key_value_heads"] = block_config.attention.num_key_value_heads
+        if ffn is not None and ffn.intermediate_size is not None:
+            override_kwargs["intermediate_size"] = ffn.intermediate_size
 
-        if block_config.ffn is not None and block_config.ffn.moe is not None:
-            if block_config.ffn.moe.expert_intermediate_dim is not None:
-                override_kwargs["moe_intermediate_size"] = (
-                    block_config.ffn.moe.expert_intermediate_dim
+        if attention is not None and attention.num_kv_heads is not None:
+            override_kwargs["num_key_value_heads"] = attention.num_kv_heads
+        if attention is not None and attention.num_query_heads is not None:
+            override_kwargs["num_attention_heads"] = attention.num_query_heads
+
+        if moe is not None:
+            if moe.expert_intermediate_size is not None:
+                override_kwargs["moe_intermediate_size"] = moe.expert_intermediate_size
+            if moe.num_experts is not None:
+                override_kwargs["n_routed_experts"] = moe.num_experts
+            if moe.top_k is not None:
+                override_kwargs["num_experts_per_tok"] = moe.top_k
+            if moe.shared_expert_intermediate_size is not None:
+                override_kwargs["moe_shared_expert_intermediate_size"] = (
+                    moe.shared_expert_intermediate_size
                 )
-            if block_config.ffn.moe.num_local_experts is not None:
-                override_kwargs["n_routed_experts"] = block_config.ffn.moe.num_local_experts
 
         return override_kwargs
 
@@ -165,8 +201,10 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
         Due to the subblock structure of NemotronH always one of the subblock is set to no-op, for a real no-op both attention & ffn no-op should be set to True.
         """
         block_config = decoder_layer.config.block_configs[decoder_layer.layer_idx]
-        ffn_no_op = block_config.ffn is not None and block_config.ffn.no_op
-        attn_no_op = block_config.attention is not None and block_config.attention.no_op
+        ffn = block_config.get_subblock("ffn")
+        attention = block_config.get_subblock("attention")
+        ffn_no_op = ffn is not None and ffn.no_op
+        attn_no_op = attention is not None and attention.no_op
         if ffn_no_op and attn_no_op:
             decoder_layer.norm = Same()
             decoder_layer.mixer = MatchingZeros()
@@ -212,7 +250,7 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def layer_block_name(index: int):
-        return f"backbone.layers.{index}"
+        return f"model.layers.{index}"
 
     @classmethod
     def get_weight_groups(

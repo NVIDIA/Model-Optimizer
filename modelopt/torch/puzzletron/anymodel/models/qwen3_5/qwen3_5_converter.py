@@ -17,7 +17,7 @@
 
 from typing import TYPE_CHECKING, List
 
-from ....block_config import AttentionConfig, BlockConfig, FFNConfig, MambaConfig
+from ....block_config import AttentionConfig, BlockConfig, FFNConfig, MambaConfig, MoEConfig
 from ...converter import Converter, ConverterFactory
 
 if TYPE_CHECKING:
@@ -30,6 +30,8 @@ __all__ = ["Qwen3P5Converter"]
 @ConverterFactory.register_decorator("qwen3_6")
 @ConverterFactory.register_decorator("qwen3_5_text")
 @ConverterFactory.register_decorator("qwen3_5")
+@ConverterFactory.register_decorator("qwen3_5_moe_text")
+@ConverterFactory.register_decorator("qwen3_5_moe")
 class Qwen3P5Converter(Converter):
     @staticmethod
     def create_block_configs_from_main_config(config: "PretrainedConfig") -> List[BlockConfig]:
@@ -49,29 +51,44 @@ class Qwen3P5Converter(Converter):
         block_configs = []
         for layer_idx, layer_type in enumerate(layer_types[: text_config.num_hidden_layers]):
             if layer_type == "linear_attention":
-                attention_config = AttentionConfig(
-                    mamba=MambaConfig(
-                        state_dim=text_config.linear_key_head_dim,
-                        num_heads=text_config.linear_num_value_heads,
-                        head_dim=text_config.linear_value_head_dim,
-                        num_groups=text_config.linear_num_key_heads,
-                        conv_kernel_size=text_config.linear_conv_kernel_dim,
-                    )
+                attention_config = None
+                mamba_config = MambaConfig(
+                    state_dim=text_config.linear_key_head_dim,
+                    num_heads=text_config.linear_num_value_heads,
+                    head_dim=text_config.linear_value_head_dim,
+                    num_groups=text_config.linear_num_key_heads,
+                    conv_kernel_size=text_config.linear_conv_kernel_dim,
                 )
             elif layer_type == "full_attention":
                 attention_config = AttentionConfig(
-                    no_op=False, num_key_value_heads=text_config.num_key_value_heads
+                    no_op=False,
+                    num_kv_heads=text_config.num_key_value_heads,
+                    num_query_heads=text_config.num_attention_heads,
                 )
+                mamba_config = None
             else:
                 raise ValueError(
                     f"Unsupported Qwen3.5 layer type at layer {layer_idx}: {layer_type}"
                 )
 
-            block_configs.append(
-                BlockConfig(
-                    attention=attention_config,
-                    ffn=FFNConfig(no_op=False, intermediate_size=text_config.intermediate_size),
+            if getattr(text_config, "num_experts", None) is not None:
+                ffn_config = MoEConfig(
+                    num_experts=text_config.num_experts,
+                    top_k=text_config.num_experts_per_tok,
+                    expert_intermediate_size=text_config.moe_intermediate_size,
+                    shared_expert_intermediate_size=getattr(
+                        text_config, "shared_expert_intermediate_size", None
+                    ),
                 )
-            )
+            else:
+                ffn_config = FFNConfig(
+                    no_op=False, intermediate_size=text_config.intermediate_size
+                )
+            if mamba_config is not None:
+                block_configs.append(BlockConfig(subblock_configs=(mamba_config, ffn_config)))
+            else:
+                block_configs.append(
+                    BlockConfig(subblock_configs=(attention_config, ffn_config))
+                )
 
         return block_configs

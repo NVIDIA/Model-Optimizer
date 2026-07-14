@@ -1,0 +1,613 @@
+from __future__ import annotations
+
+import dataclasses
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from modelopt.torch.puzzletron.block_config import (
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+    MoEConfig,
+)
+from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor import (
+    NemotronHModelDescriptor,
+)
+from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
+    LlamaModelDescriptor,
+)
+from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor import (
+    GptOssModelDescriptor,
+)
+from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_converter import (
+    GptOssConverter,
+)
+from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
+    Qwen3P5TextModelDescriptor,
+)
+from modelopt.torch.puzzletron.block_config import AttentionConfig
+from modelopt.torch.puzzletron.anymodel.registry import infer_descriptor_name, resolve_descriptor
+from modelopt.torch.puzzletron.anymodel.capabilities import (
+    AxisCapabilities,
+    CapabilityValidationError,
+    default_capabilities,
+    validate_capabilities,
+)
+from modelopt.torch.puzzletron.stage_runner import (
+    StageResult,
+    _preflight,
+    _resolve_capabilities,
+    run_stage,
+)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "architecture", "expected"),
+    [
+        ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration", "qwen3_5_moe"),
+        ("qwen3_5_moe_text", "Qwen3_5MoeForCausalLM", "qwen3_5_moe_text"),
+    ],
+)
+def test_cross_model_registry_resolution(model_type, architecture, expected) -> None:
+    config = SimpleNamespace(model_type=model_type, architectures=[architecture])
+
+    assert infer_descriptor_name(config)[0] == expected
+    assert resolve_descriptor(config).name == expected
+
+
+def _text_config(**overrides):
+    values = {
+        "model_type": "fixture",
+        "hidden_size": 2048,
+        "num_hidden_layers": 40,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "head_dim": 128,
+        "intermediate_size": 8192,
+        "num_experts": 128,
+        "moe_intermediate_size": 512,
+        "shared_expert_intermediate_size": 512,
+        "tie_word_embeddings": False,
+        "enable_moe_block": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_qwen_moe_contract_combines_moe_gdn_attention_vlm_and_mtp() -> None:
+    text = _text_config(
+        model_type="qwen3_5_moe_text",
+        layer_types=["linear_attention", "full_attention"],
+        linear_num_key_heads=16,
+        linear_num_value_heads=32,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    config = SimpleNamespace(
+        model_type="qwen3_5_moe",
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+        text_config=text,
+    )
+    resolution = resolve_descriptor(config)
+    contract = resolution.descriptor.generic_decoder_contract(config)
+    capabilities = resolution.descriptor.puzzletron_capabilities(config)
+
+    assert contract.routed_moe is not None
+    assert contract.vision is not None
+    assert contract.mtp is not None
+    assert {
+        "gdn_key_groups",
+        "gdn_value_heads_per_group",
+        "gdn_key_head_dim",
+        "gdn_value_head_dim",
+        "moe_experts",
+        "moe_expert_intermediate",
+        "moe_shared_expert_intermediate",
+    } <= set(capabilities.axes)
+    assert resolution.descriptor.sorted_teacher_layout_kwargs(text) == {
+        "q_gate_row_group": 1,
+        "mamba_module": "linear_attn",
+        "gated_delta_net": True,
+        "moe_fused_expert_subnames": (
+            "experts.gate_up_proj",
+            "experts.down_proj",
+        ),
+        "moe_fused_gate_up_subnames": ("experts.gate_up_proj",),
+        "moe_fused_down_subnames": ("experts.down_proj",),
+    }
+
+
+def test_qwen_moe_embedding_spec_covers_mtp_attention_gdn_and_experts() -> None:
+    config = _text_config(
+        model_type="qwen3_5_moe_text",
+        hidden_size=8,
+        architectures=["Qwen3_5MoeForCausalLM"],
+    )
+    descriptor = resolve_descriptor(config).descriptor
+    spec = descriptor.embedding_pruning_spec(config, widths=(8, 4), alignment=1)
+    state = {
+        "mtp.fc.weight": torch.zeros(8, 16),
+        "mtp.pre_fc_norm_embedding.weight": torch.zeros(8),
+        "mtp.pre_fc_norm_hidden.weight": torch.zeros(8),
+        "mtp.norm.weight": torch.zeros(8),
+        "mtp.layers.0.input_layernorm.weight": torch.zeros(8),
+        "mtp.layers.0.post_attention_layernorm.weight": torch.zeros(8),
+        "mtp.layers.0.self_attn.q_proj.weight": torch.zeros(16, 8),
+        "mtp.layers.0.self_attn.o_proj.weight": torch.zeros(8, 16),
+        "mtp.layers.0.linear_attn.in_proj_qkv.weight": torch.zeros(24, 8),
+        "mtp.layers.0.linear_attn.out_proj.weight": torch.zeros(8, 16),
+        "mtp.layers.0.mlp.gate.weight": torch.zeros(4, 8),
+        "mtp.layers.0.mlp.experts.gate_up_proj": torch.zeros(4, 12, 8),
+        "mtp.layers.0.mlp.experts.down_proj": torch.zeros(4, 8, 6),
+        "mtp.layers.0.mlp.shared_expert.gate_proj.weight": torch.zeros(6, 8),
+        "mtp.layers.0.mlp.shared_expert.down_proj.weight": torch.zeros(8, 6),
+        "mtp.layers.0.mlp.shared_expert_gate.weight": torch.zeros(1, 8),
+    }
+
+    audit = spec.audit_state_dict(state)
+
+    assert set(audit["handled"]) == set(state)
+
+
+@pytest.mark.parametrize(
+    ("layer_idx", "window", "expected_types", "expected_window"),
+    [
+        (0, "full", ["full_attention", "full_attention"], 128),
+        (1, 64, ["sliding_attention", "sliding_attention"], 64),
+    ],
+)
+def test_gpt_oss_native_layer_config_applies_window_and_attention_type(
+    layer_idx, window, expected_types, expected_window
+) -> None:
+    config = SimpleNamespace(
+        layer_types=["sliding_attention", "full_attention"],
+        sliding_window=128,
+    )
+    block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(
+                num_query_heads=4,
+                num_kv_heads=2,
+                sliding_window_size=window,
+            ),
+        )
+    )
+
+    GptOssModelDescriptor.patch_layer_config(config, block, layer_idx)
+
+    assert config.layer_types == expected_types
+    assert config.sliding_window == expected_window
+
+
+def test_gpt_oss_converter_preserves_each_layers_attention_window() -> None:
+    config = SimpleNamespace(
+        num_hidden_layers=4,
+        num_local_experts=32,
+        experts_per_token=4,
+        intermediate_size=2880,
+        num_key_value_heads=8,
+        num_attention_heads=64,
+        sliding_window=128,
+        layer_types=[
+            "sliding_attention",
+            "full_attention",
+            "sliding_attention",
+            "full_attention",
+        ],
+    )
+
+    blocks = [
+        BlockConfig(**block)
+        for block in GptOssConverter.create_block_configs_from_main_config(config)
+    ]
+
+    assert [
+        block.require_subblock("attention").sliding_window_size for block in blocks
+    ] == [128, "full", 128, "full"]
+
+
+def test_gpt_oss_hf_and_native_share_contract_field_mapping() -> None:
+    block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(num_query_heads=8, num_kv_heads=2),
+            MoEConfig(num_experts=16, expert_intermediate_size=1440, top_k=2),
+        )
+    )
+
+    assert GptOssModelDescriptor.block_config_to_layer_overrides(block) == {
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "num_local_experts": 16,
+        "intermediate_size": 1440,
+        "num_experts_per_tok": 2,
+    }
+
+
+def test_gpt_oss_weight_groups_accept_native_automodel_moe_names() -> None:
+    native_names = [
+        "model.layers.0.post_attention_layernorm.weight",
+        "model.layers.0.mlp.gate.weight",
+        "model.layers.0.mlp.gate.bias",
+        "model.layers.0.mlp.experts.gate_and_up_projs",
+        "model.layers.0.mlp.experts.down_projs",
+    ]
+
+    groups = GptOssModelDescriptor.get_weight_groups(native_names, 1)
+
+    assert groups["block_0_ffn"] == native_names
+
+
+def test_gpt_oss_native_automodel_uses_flex_attention_without_te() -> None:
+    assert GptOssModelDescriptor.automodel_model_kwargs(
+        object(), distributed={"tp_size": 2, "cp_size": 2, "ep_size": 2}
+    ) == {"backend": {"attn": "flex"}}
+
+
+def test_nemotron_weight_groups_accept_native_automodel_moe_names() -> None:
+    native_block_names = [
+        "model.layers.0.norm.weight",
+        "model.layers.0.mixer.gate.weight",
+        "model.layers.0.mixer.gate.e_score_correction_bias",
+        "model.layers.0.mixer.experts.gate_and_up_projs",
+        "model.layers.0.mixer.experts.down_projs",
+    ]
+    native_output_names = ["model.norm.weight", "lm_head.weight"]
+
+    groups = NemotronHModelDescriptor.get_weight_groups(
+        native_block_names + native_output_names, 1
+    )
+
+    assert groups["block_0_ffn"] == native_block_names
+    assert groups["lm_head"] == native_output_names
+
+
+def test_nemotron_hidden_width_spec_covers_hf_and_native_hybrid_tensors() -> None:
+    config = SimpleNamespace(hidden_size=2688, tie_word_embeddings=False)
+    spec = NemotronHModelDescriptor.embedding_pruning_spec(
+        config, widths=(2688, 1344), alignment=64
+    )
+    state = {
+        "backbone.embeddings.weight": torch.zeros(8, 2688),
+        "backbone.layers.0.norm.weight": torch.zeros(2688),
+        "backbone.layers.0.mixer.in_proj.weight": torch.zeros(16, 2688),
+        "backbone.layers.0.mixer.out_proj.weight": torch.zeros(2688, 16),
+        "backbone.layers.1.mixer.q_proj.weight": torch.zeros(8, 2688),
+        "backbone.layers.1.mixer.o_proj.weight": torch.zeros(2688, 8),
+        "backbone.layers.2.mixer.gate.weight": torch.zeros(4, 2688),
+        "backbone.layers.2.mixer.experts.0.up_proj.weight": torch.zeros(6, 2688),
+        "backbone.layers.2.mixer.experts.0.down_proj.weight": torch.zeros(2688, 6),
+        "backbone.layers.2.mixer.shared_experts.up_proj.weight": torch.zeros(12, 2688),
+        "backbone.layers.2.mixer.shared_experts.down_proj.weight": torch.zeros(2688, 12),
+        "backbone.norm_f.weight": torch.zeros(2688),
+        "lm_head.weight": torch.zeros(8, 2688),
+        "model.layers.3.mixer.experts.gate_and_up_projs": torch.zeros(4, 2688, 6),
+        "model.layers.3.mixer.experts.down_projs": torch.zeros(4, 6, 2688),
+    }
+
+    audit = spec.audit_state_dict(state)
+    sliced = spec.slice_state_dict(state, 1344)
+
+    assert len(audit["handled"]) == len(state)
+    assert sliced["backbone.layers.0.mixer.in_proj.weight"].shape == (16, 1344)
+    assert sliced["backbone.layers.0.mixer.out_proj.weight"].shape == (1344, 16)
+    assert sliced["model.layers.3.mixer.experts.gate_and_up_projs"].shape == (4, 1344, 6)
+    assert sliced["model.layers.3.mixer.experts.down_projs"].shape == (4, 6, 1344)
+    assert spec.validate_width(1344, tp_size=2) == 1344
+
+
+def test_nemotron_capabilities_include_hidden_width_pipeline() -> None:
+    capability = NemotronHModelDescriptor.puzzletron_capabilities(
+        SimpleNamespace(hidden_size=2688)
+    ).axes["hidden_width"]
+
+    assert capability.score_hooks == ("minitron_hidden_width",)
+    assert capability.sort_impl == "sorted_teacher.embedding"
+    assert capability.materialize_impl == "materialize.hidden_width"
+    assert capability.runtime_slice_impl == "runtime_hidden_width"
+    assert capability.vllm_export is True
+
+
+def test_nemotron_moe_variant_axes_cover_scoring_and_materialization() -> None:
+    axes = NemotronHModelDescriptor.puzzletron_capabilities(
+        SimpleNamespace(hidden_size=2688)
+    ).axes
+
+    assert axes["moe_experts"].runtime_slice_impl == "solution_recipe.moe_expert_reroute"
+    assert axes["moe_top_k"].materialize_impl == "materialize.config_only_moe_top_k"
+
+
+def test_nemotron_equivalence_tolerance_accounts_for_bf16_hidden_basis_permutation() -> None:
+    assert NemotronHModelDescriptor.checkpoint_equivalence_tolerances() == {
+        "max_abs_lm_loss_delta": 5.0e-3,
+        "max_kl_div": 1.0e-2,
+        "min_top_1_logit_agreement": 0.9,
+    }
+
+
+def test_gpt_oss_pipeline_patch_restores_native_inner_forward() -> None:
+    class Inner:
+        def forward(self):
+            return "native"
+
+        def __call__(self):
+            return self.forward()
+
+    inner = Inner()
+    inner.forward = lambda: "generic-pp"
+    model_part = SimpleNamespace(model=inner)
+
+    assert GptOssModelDescriptor.patch_pipeline_model_part(model_part) is True
+    assert inner() == "native"
+
+
+def test_gpt_oss_embedding_spec_preserves_mxfp4_input_channel_blocks() -> None:
+    config = SimpleNamespace(hidden_size=64, tie_word_embeddings=False)
+    spec = GptOssModelDescriptor.embedding_pruning_spec(
+        config, widths=(64, 32), alignment=32
+    )
+    state = {
+        "model.layers.0.mlp.experts.gate_up_proj_blocks": torch.zeros(2, 128, 2, 16),
+        "model.layers.0.mlp.experts.gate_up_proj_scales": torch.zeros(2, 128, 2),
+        "model.layers.0.mlp.experts.down_proj_blocks": torch.zeros(2, 64, 2, 16),
+        "model.layers.0.mlp.experts.down_proj_scales": torch.zeros(2, 64, 2),
+        "model.layers.0.mlp.experts.down_proj_bias": torch.zeros(2, 64),
+    }
+
+    audit = spec.audit_state_dict(state)
+    order = spec.order_from_scores(torch.cat((torch.zeros(32), torch.ones(32))))
+    permuted = spec.permute_state_dict(state, order)
+    sliced = spec.slice_state_dict(permuted, 32)
+
+    assert len(audit["handled"]) == len(state)
+    assert torch.equal(order, torch.cat((torch.arange(32, 64), torch.arange(32))))
+    assert sliced["model.layers.0.mlp.experts.gate_up_proj_blocks"].shape == (2, 128, 1, 16)
+    assert sliced["model.layers.0.mlp.experts.down_proj_blocks"].shape == (2, 32, 2, 16)
+
+
+def test_gpt_oss_embedding_spec_slices_post_bypass_fused_experts() -> None:
+    config = SimpleNamespace(hidden_size=64, tie_word_embeddings=False)
+    spec = GptOssModelDescriptor.embedding_pruning_spec(
+        config, widths=(64, 32), alignment=32
+    )
+    state = {
+        "model.layers.0.mlp.experts.gate_up_proj": torch.zeros(2, 64, 128),
+        "model.layers.0.mlp.experts.down_proj": torch.zeros(2, 128, 64),
+    }
+
+    audit = spec.audit_state_dict(state)
+    sliced = spec.slice_state_dict(state, 32)
+
+    assert len(audit["handled"]) == 2
+    assert sliced["model.layers.0.mlp.experts.gate_up_proj"].shape == (2, 32, 128)
+    assert sliced["model.layers.0.mlp.experts.down_proj"].shape == (2, 128, 32)
+
+
+def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
+    monkeypatch, tmp_path
+) -> None:
+    resolution = resolve_descriptor(
+        SimpleNamespace(model_type="llama", architectures=["LlamaForCausalLM"])
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.stage_runner._resolve_capabilities",
+        lambda _config: resolution,
+    )
+    observed = {}
+
+    def handler(config, manifest):
+        observed["runtime_descriptor"] = config["_runtime"]["descriptor"]
+        observed["manifest_config"] = manifest.config
+        observed["resolution"] = manifest.inputs["descriptor_resolution"]
+        return StageResult(
+            stage="activation",
+            status="success",
+            manifest_path=tmp_path / "activation.json",
+            message="ok",
+        )
+
+    input_config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"source": "/checkpoint", "force_hf": False},
+        "bypass": {"backend": "automodel"},
+        "search_space": {"axes": {}},
+    }
+
+    run_stage(input_config, "activation", handlers={"activation": handler})
+
+    assert observed["runtime_descriptor"] == "llama"
+    assert "_runtime" not in observed["manifest_config"]
+    assert "descriptor_override" not in observed["manifest_config"]["model"]
+    assert observed["resolution"]["name"] == "llama"
+
+
+def test_gpt_oss_declares_attention_sink_as_query_head_state() -> None:
+    assert GptOssModelDescriptor.sorted_teacher_layout_kwargs(SimpleNamespace()) == {
+        "attention_q_head_subnames": ("sinks",),
+        "moe_router_subname": "router",
+        "moe_router_aux_subnames": ("router.bias",),
+        "moe_fused_expert_subnames": (
+            "experts.gate_up_proj_blocks",
+            "experts.gate_up_proj_scales",
+            "experts.gate_up_proj_bias",
+            "experts.down_proj_blocks",
+            "experts.down_proj_scales",
+            "experts.down_proj_bias",
+        ),
+        "moe_fused_gate_up_subnames": (
+            "experts.gate_up_proj_blocks",
+            "experts.gate_up_proj_scales",
+            "experts.gate_up_proj_bias",
+        ),
+        "moe_fused_down_subnames": (
+            "experts.down_proj_blocks",
+            "experts.down_proj_scales",
+        ),
+        "moe_expert_intermediate_group_size": 32,
+        "moe_expert_order_mode": "metadata_only",
+        "moe_fused_gate_layout": "interleaved",
+    }
+
+
+def test_generic_window_capability_is_discovered_for_non_gpt_attention() -> None:
+    config = _text_config(sliding_window=512)
+
+    axis = LlamaModelDescriptor.puzzletron_capabilities(config).axes[
+        "sliding_window_size"
+    ]
+
+    assert axis.variant_only
+    assert axis.vllm_export
+    assert axis.values == (256, 512, "full")
+
+
+def test_stage_resolution_uses_converted_teacher_for_dynamic_capabilities(
+    tmp_path, monkeypatch
+) -> None:
+    teacher = tmp_path / "teacher"
+    teacher.mkdir()
+    sentinel = object()
+    calls = []
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.stage_runner.resolve_descriptor_from_pretrained",
+        lambda path, **kwargs: calls.append(path) or sentinel,
+    )
+
+    resolution = _resolve_capabilities(
+        {
+            "teacher_dir": str(teacher),
+            "model": {
+                "source": "org/remote-model",
+                "descriptor_override": "llama",
+                "trust_remote_code": True,
+            },
+        }
+    )
+
+    assert resolution is sentinel
+    assert calls == [str(teacher)]
+
+
+def test_stage_preflight_requires_vllm_control_for_runtime_stats(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.stage_runner.validate_capabilities",
+        lambda capabilities, **kwargs: captured.update(kwargs),
+    )
+
+    _preflight(
+        {
+            "model": {"force_hf": False},
+            "parallel": {"ep": 1},
+            "search_space": {
+                "axes": {"mla_q_lora_rank": {"enabled": True, "values": [384]}}
+            },
+            "calc_subblock_stats": {
+                "runtime_stats": {"enabled": True, "backend": "vllm"}
+            },
+        },
+        SimpleNamespace(capabilities=object()),
+        stage="library",
+    )
+
+    assert captured["require_vllm"] is True
+
+
+def test_complete_pipeline_preflight_names_every_missing_axis_consumer() -> None:
+    base = default_capabilities(descriptor_name="fixture")
+    broken = AxisCapabilities(
+        axis_id="broken_width",
+        subblock_kind="ffn",
+        field="intermediate_size",
+    )
+    capabilities = dataclasses.replace(base, axes={"broken_width": broken})
+
+    with pytest.raises(CapabilityValidationError) as error:
+        validate_capabilities(
+            capabilities,
+            enabled_axes=("broken_width",),
+            force_hf=False,
+            require_vllm=True,
+            require_complete_pipeline=True,
+        )
+
+    message = str(error.value)
+    assert "activation scorer" in message
+    assert "sort_impl" in message
+    assert "materialize_impl" in message
+    assert "runtime_slice_impl" in message
+    assert "vLLM export" in message
+
+
+def test_variant_axis_is_complete_without_activation_or_sorting() -> None:
+    base = default_capabilities(descriptor_name="fixture")
+    variant = AxisCapabilities(
+        axis_id="window",
+        subblock_kind="attention",
+        field="sliding_window_size",
+        sortable=False,
+        variant_only=True,
+        materialize_impl="block_config.variant",
+        runtime_slice_impl="block_config.variant",
+        vllm_export=True,
+    )
+    capabilities = dataclasses.replace(base, axes={"window": variant})
+
+    validate_capabilities(
+        capabilities,
+        enabled_axes=("window",),
+        force_hf=False,
+        require_vllm=True,
+        require_complete_pipeline=True,
+    )
+
+
+def test_qwen_dense_smoke_axes_have_complete_pipeline_consumers() -> None:
+    config = _text_config(
+        model_type="qwen3_5_text",
+        linear_num_key_heads=16,
+        linear_num_value_heads=16,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    capabilities = Qwen3P5TextModelDescriptor.puzzletron_capabilities(config)
+
+    validate_capabilities(
+        capabilities,
+        enabled_axes=(
+            "hidden_width",
+            "ffn_intermediate",
+            "kv_groups",
+            "q_heads_per_group",
+            "gdn_key_groups",
+            "gdn_key_head_dim",
+            "gdn_value_head_dim",
+        ),
+        force_hf=False,
+        require_vllm=True,
+        require_complete_pipeline=True,
+    )
+
+
+def test_nemotron_updates_remote_read_only_layer_types_through_hybrid_pattern() -> None:
+    class RemoteNemotronConfig:
+        def __init__(self):
+            self.num_hidden_layers = 2
+            self.hybrid_override_pattern = "M-"
+
+        @property
+        def layers_block_type(self):
+            mapping = {"M": "mamba", "-": "mlp", "*": "attention", "E": "moe"}
+            return [mapping[value] for value in self.hybrid_override_pattern]
+
+    config = RemoteNemotronConfig()
+    blocks = [
+        BlockConfig(subblock_configs=(MambaConfig(num_heads=2, head_dim=8),)),
+        BlockConfig(subblock_configs=(FFNConfig(intermediate_size=16),)),
+    ]
+
+    NemotronHModelDescriptor.set_block_configs(config, blocks)
+
+    assert config.hybrid_override_pattern == "M-"
+    assert config.layers_block_type == ["mamba", "mlp"]

@@ -35,38 +35,53 @@ class NemotronHConverter(Converter):
         for i, char in enumerate(pattern):
             if char == "M":
                 _block_config = BlockConfig(
-                    attention=AttentionConfig(
-                        mamba=MambaConfig(  # Those parameters are currently used only for calc_block_stats.
+                    subblock_configs=(
+                        MambaConfig(  # Those parameters are currently used only for calc_block_stats.
                             state_dim=config.ssm_state_size,
                             num_heads=config.mamba_num_heads,
                             head_dim=config.mamba_head_dim,
                             num_groups=config.n_groups,
-                        )
+                        ),
+                        FFNConfig(no_op=True),
                     ),
-                    ffn=FFNConfig(no_op=True),
                 )
 
             elif char == "-":
                 _block_config = BlockConfig(
-                    attention=AttentionConfig(no_op=True),
-                    ffn=FFNConfig(intermediate_size=config.intermediate_size),
+                    subblock_configs=(
+                        AttentionConfig(no_op=True),
+                        FFNConfig(intermediate_size=config.intermediate_size),
+                    ),
                 )
 
             elif char == "*":
                 _block_config = BlockConfig(
-                    attention=AttentionConfig(num_key_value_heads=config.num_key_value_heads),
-                    ffn=FFNConfig(no_op=True),
+                    subblock_configs=(
+                        AttentionConfig(
+                            num_kv_heads=config.num_key_value_heads,
+                            num_query_heads=getattr(config, "num_attention_heads", None),
+                            qk_head_dim=getattr(config, "head_dim", None)
+                            or config.hidden_size // config.num_attention_heads,
+                            v_head_dim=getattr(config, "head_dim", None)
+                            or config.hidden_size // config.num_attention_heads,
+                        ),
+                        FFNConfig(no_op=True),
+                    ),
                 )
 
             elif char == "E":
                 _block_config = BlockConfig(
-                    attention=AttentionConfig(no_op=True),
-                    ffn=FFNConfig(
-                        moe=MoEConfig(
-                            num_local_experts=config.n_routed_experts,
-                            expert_intermediate_dim=config.moe_intermediate_size,
-                            num_experts_per_tok=config.num_experts_per_tok,
-                        )
+                    subblock_configs=(
+                        AttentionConfig(no_op=True),
+                        MoEConfig(
+                            num_experts=config.n_routed_experts,
+                            expert_intermediate_size=config.moe_intermediate_size,
+                            shared_expert_intermediate_size=getattr(
+                                config, "moe_shared_expert_intermediate_size", None
+                            ),
+                            top_k=config.num_experts_per_tok,
+                            latent_dim=getattr(config, "moe_latent_size", None),
+                        ),
                     ),
                 )
             else:

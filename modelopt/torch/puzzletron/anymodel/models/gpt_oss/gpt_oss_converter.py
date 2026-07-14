@@ -20,7 +20,7 @@ from typing import List
 
 from transformers import PretrainedConfig
 
-from ....block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig
+from ....block_config import AttentionConfig, BlockConfig, MoEConfig
 from ...converter import Converter, ConverterFactory
 
 __all__ = ["GptOssConverter"]
@@ -34,35 +34,44 @@ class GptOssConverter(Converter):
     All layers use MoE FFN (no standard dense FFN layers).
     """
 
-    quantized = "mxfp4"
-
     @staticmethod
     def create_block_configs_from_main_config(config: PretrainedConfig) -> List[BlockConfig]:
         """Create block configs for GPT-OSS layers.
 
-        GPT-OSS uses MoE for all FFN layers with:
-        - 32/128 local experts (num_local_experts)
-        - 4/16 active experts per token (experts_per_token)
+        GPT-OSS uses MoE for all MLP layers with:
+        - 32/128 experts
+        - 4/16 active experts per token
         - No dense/standard FFN layers
         """
         num_hidden_layers = config.num_hidden_layers
-        num_local_experts = config.num_local_experts
-        experts_per_token = config.experts_per_token
-        intermediate_size = config.intermediate_size
+        num_experts = config.num_local_experts
+        top_k = config.experts_per_token
+        expert_intermediate_size = config.intermediate_size
+        layer_types = tuple(getattr(config, "layer_types", ()) or ())
+        sliding_window = getattr(config, "sliding_window", None)
 
         block_configs = []
         for layer_idx in range(num_hidden_layers):
+            attention_type = (
+                layer_types[layer_idx] if layer_idx < len(layer_types) else None
+            )
+            window = (
+                "full"
+                if attention_type == "full_attention"
+                else int(sliding_window) if sliding_window is not None else None
+            )
             block_config = BlockConfig(
-                attention=AttentionConfig(
-                    no_op=False, num_key_value_heads=config.num_key_value_heads
-                ),
-                ffn=FFNConfig(
-                    no_op=False,
-                    intermediate_size=None,  # MoE doesn't use this field
-                    moe=MoEConfig(
-                        num_local_experts=num_local_experts,
-                        num_experts_per_tok=experts_per_token,
-                        expert_intermediate_dim=intermediate_size,
+                subblock_configs=(
+                    AttentionConfig(
+                        no_op=False,
+                        num_kv_heads=config.num_key_value_heads,
+                        num_query_heads=config.num_attention_heads,
+                        sliding_window_size=window,
+                    ),
+                    MoEConfig(
+                        num_experts=num_experts,
+                        top_k=top_k,
+                        expert_intermediate_size=expert_intermediate_size,
                     ),
                 ),
             ).to_dict()
