@@ -26,7 +26,11 @@ if str(pathlib.Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from fastgen_data.replayable_sampler import ReplayableBatchSampler
-from pdd_checkpoint import PDDCheckpointManager, build_pdd_checkpoint_identity
+from pdd_checkpoint import (
+    PDDCheckpointManager,
+    build_pdd_checkpoint_identity,
+    resolve_pdd_training_checkpoint,
+)
 from pdd_recipe import initialize_pdd_distributed
 from pdd_test_utils import SamplerDataset, build_toy_lifecycle, make_batch, ordered_id_sha256
 from pdd_training import prepare_qwen_pdd_batch
@@ -394,6 +398,14 @@ def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) 
     _refresh_complete_marker(mismatched)
     (tmp_path / "checkpoints" / "LATEST").write_text(mismatched.name + "\n")
     assert third_manager.resolve("LATEST") == resumed_checkpoint.resolve()
+    selected, selected_manifest = resolve_pdd_training_checkpoint(
+        tmp_path / "checkpoints",
+        "LATEST",
+        expected_world_size=1,
+        expected_identity=third_manager.identity,
+    )
+    assert selected == resumed_checkpoint.resolve()
+    assert selected_manifest["identity"] == third_manager.identity
     with pytest.raises(RuntimeError, match="identity"):
         third_manager.resolve(mismatched.name)
 

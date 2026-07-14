@@ -11,6 +11,7 @@ import math
 import os
 import shutil
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,7 +21,7 @@ import torch.distributed as dist
 from modelopt.torch.fastgen import PDDMetadata
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
 _CHECKPOINT_SCHEMA_VERSION = 1
 _COMPLETE_SCHEMA_VERSION = 1
@@ -304,6 +305,204 @@ class PDDResumeState:
             )
 
 
+def _checkpoint_sidecar_paths(checkpoint: Path, world_size: int) -> list[Path]:
+    paths: list[Path] = []
+    for rank in range(world_size):
+        paths.extend(
+            (
+                checkpoint / "rng" / f"rng_dp_rank_{rank}.pt",
+                checkpoint / "sampler" / f"sampler_dp_rank_{rank}.pt",
+                checkpoint / "trainer" / f"trainer_dp_rank_{rank}.pt",
+            )
+        )
+    return paths
+
+
+def validate_pdd_training_checkpoint(
+    checkpoint: str | Path,
+    *,
+    expected_identity: Mapping[str, Any] | None = None,
+    expected_world_size: int | None = None,
+) -> dict[str, Any]:
+    """Validate a complete training checkpoint without deserializing pickle sidecars."""
+    unresolved_checkpoint = Path(checkpoint)
+    if unresolved_checkpoint.is_symlink():
+        raise RuntimeError(f"PDD checkpoint cannot be a symlink: {unresolved_checkpoint}.")
+    checkpoint = unresolved_checkpoint.resolve()
+    if not checkpoint.is_dir():
+        raise RuntimeError(f"PDD checkpoint is not a regular directory: {checkpoint}.")
+    symlinks = [path for path in checkpoint.rglob("*") if path.is_symlink()]
+    if symlinks:
+        raise RuntimeError(f"PDD checkpoint contains a symlink: {symlinks[0]}.")
+    marker_path = checkpoint / "COMPLETE"
+    manifest_path = checkpoint / "manifest.json"
+    if (
+        not marker_path.is_file()
+        or marker_path.is_symlink()
+        or not manifest_path.is_file()
+        or manifest_path.is_symlink()
+    ):
+        raise RuntimeError(f"PDD checkpoint is incomplete: {checkpoint}.")
+    marker = _read_json(marker_path)
+    if (
+        set(marker) != {"schema_version", "manifest_sha256"}
+        or marker.get("schema_version") != _COMPLETE_SCHEMA_VERSION
+    ):
+        raise RuntimeError("PDD COMPLETE marker is incompatible.")
+    if marker["manifest_sha256"] != _sha256(manifest_path):
+        raise RuntimeError("PDD COMPLETE marker does not match manifest content.")
+    manifest = _read_json(manifest_path)
+    manifest_keys = {
+        "schema_version",
+        "identity",
+        "completed_steps",
+        "learning_rates",
+        "parent_checkpoint",
+        "rank_progress",
+        "dcp_sha256",
+        "sidecar_sha256",
+    }
+    if set(manifest) != manifest_keys or manifest["schema_version"] != _CHECKPOINT_SCHEMA_VERSION:
+        raise RuntimeError("PDD checkpoint manifest schema is incompatible.")
+    if expected_identity is not None and manifest["identity"] != expected_identity:
+        raise RuntimeError("PDD checkpoint identity does not match the current run.")
+    identity = manifest["identity"]
+    topology = identity.get("topology") if isinstance(identity, Mapping) else None
+    world_size = topology.get("world_size") if isinstance(topology, Mapping) else None
+    if type(world_size) is not int or world_size < 1:
+        raise RuntimeError("PDD checkpoint identity has an invalid world size.")
+    if expected_world_size is not None and world_size != expected_world_size:
+        raise RuntimeError(
+            f"PDD checkpoint world size {world_size} does not match {expected_world_size}."
+        )
+    if _read_json(checkpoint / "pdd_config.json") != identity:
+        raise RuntimeError("PDD checkpoint config sidecar does not match the manifest.")
+    trainer_state = _read_json(checkpoint / "trainer_state.json")
+    if trainer_state != {
+        "completed_steps": manifest["completed_steps"],
+        "learning_rates": manifest["learning_rates"],
+        "parent_checkpoint": manifest["parent_checkpoint"],
+    }:
+        raise RuntimeError("PDD trainer-state sidecar does not match the manifest.")
+    rank_progress = manifest["rank_progress"]
+    if not isinstance(rank_progress, list) or len(rank_progress) != world_size:
+        raise RuntimeError("PDD checkpoint rank progress does not match its topology.")
+    expected_dcp = manifest["dcp_sha256"]
+    if not isinstance(expected_dcp, dict) or any(
+        not isinstance(path, str) or not isinstance(digest, str)
+        for path, digest in expected_dcp.items()
+    ):
+        raise RuntimeError("PDD checkpoint DCP hash inventory is malformed.")
+    if _dcp_payload_hashes(checkpoint) != expected_dcp:
+        raise RuntimeError("PDD checkpoint DCP payload inventory or hash does not match.")
+    expected_sidecars = _checkpoint_sidecar_paths(checkpoint, world_size)
+    expected_relative = {path.relative_to(checkpoint).as_posix() for path in expected_sidecars}
+    if (
+        not isinstance(manifest["sidecar_sha256"], dict)
+        or set(manifest["sidecar_sha256"]) != expected_relative
+    ):
+        raise RuntimeError("PDD checkpoint sidecar inventory does not match the topology.")
+    for path in expected_sidecars:
+        relative = path.relative_to(checkpoint).as_posix()
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"PDD checkpoint sidecar is missing: {relative}.")
+        if _sha256(path) != manifest["sidecar_sha256"][relative]:
+            raise RuntimeError(f"PDD checkpoint sidecar hash mismatch: {relative}.")
+    for candidate in checkpoint.rglob("*"):
+        lowered = candidate.name.lower()
+        if any(token in lowered for token in _FORBIDDEN_ARTIFACT_TOKENS):
+            raise RuntimeError(f"PDD checkpoint contains a forbidden DMD artifact: {candidate}.")
+    return manifest
+
+
+def resolve_pdd_training_checkpoint(
+    root: str | Path,
+    restore_from: str | Path,
+    *,
+    expected_world_size: int,
+    expected_identity: Mapping[str, Any] | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve an explicit checkpoint or the newest compatible complete LATEST candidate."""
+    unresolved_root = Path(root)
+    if unresolved_root.is_symlink():
+        raise ValueError("PDD checkpoint_dir cannot be a symlink.")
+    root = unresolved_root.resolve()
+    if str(restore_from).upper() != "LATEST":
+        candidate = Path(restore_from)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if candidate.is_symlink():
+            raise ValueError("explicit PDD checkpoint cannot be a symlink.")
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as error:
+            raise ValueError("explicit PDD checkpoint must be beneath checkpoint_dir.") from error
+        manifest = validate_pdd_training_checkpoint(
+            candidate,
+            expected_world_size=expected_world_size,
+        )
+        if expected_identity is not None and not _identity_contains(
+            manifest.get("identity"), expected_identity
+        ):
+            raise RuntimeError("explicit PDD checkpoint identity does not match the selector.")
+        return candidate, manifest
+
+    if not isinstance(expected_identity, Mapping) or not expected_identity:
+        raise ValueError("LATEST resolution requires a non-empty expected_identity selector.")
+
+    pointed: tuple[int, Path, dict[str, Any]] | None = None
+    pointer = root / "LATEST"
+    if pointer.is_file() and not pointer.is_symlink():
+        candidate = (root / pointer.read_text().strip()).resolve()
+        try:
+            candidate.relative_to(root)
+            manifest = validate_pdd_training_checkpoint(
+                candidate,
+                expected_world_size=expected_world_size,
+            )
+            completed = manifest["completed_steps"]
+            if type(completed) is not int or completed < 0:
+                raise RuntimeError("PDD checkpoint completed_steps is invalid.")
+            if not _identity_contains(manifest.get("identity"), expected_identity):
+                raise RuntimeError("pointed PDD checkpoint identity does not match the selector.")
+            pointed = (completed, candidate, manifest)
+        except (ValueError, RuntimeError):
+            pass
+
+    candidates: list[tuple[int, Path, dict[str, Any]]] = []
+    if root.is_dir():
+        for path in root.iterdir():
+            suffix = path.name.removeprefix("step_")
+            if not path.is_dir() or not path.name.startswith("step_") or not suffix.isdigit():
+                continue
+            if pointed is not None and int(suffix) <= pointed[0]:
+                continue
+            try:
+                manifest = validate_pdd_training_checkpoint(
+                    path,
+                    expected_world_size=expected_world_size,
+                )
+            except RuntimeError:
+                continue
+            if not _identity_contains(manifest.get("identity"), expected_identity):
+                continue
+            completed = manifest["completed_steps"]
+            if type(completed) is int and completed >= 0:
+                candidates.append((completed, path.resolve(), manifest))
+    if pointed is not None:
+        candidates.append(pointed)
+    if not candidates:
+        raise FileNotFoundError(f"no complete compatible PDD checkpoint exists beneath {root}.")
+    return max(candidates, key=lambda item: (item[0], item[1].name))[1:]
+
+
+def _identity_contains(actual: Any, expected: Mapping[str, Any]) -> bool:
+    if not isinstance(actual, Mapping):
+        return False
+    return all(key in actual and actual[key] == value for key, value in expected.items())
+
+
 class PDDCheckpointManager:
     """Publish and restore complete, metadata-compatible PDD checkpoints only."""
 
@@ -349,16 +548,7 @@ class PDDCheckpointManager:
         }
 
     def _sidecar_paths(self, checkpoint: Path) -> list[Path]:
-        paths: list[Path] = []
-        for rank in range(_world_size()):
-            paths.extend(
-                (
-                    checkpoint / "rng" / f"rng_dp_rank_{rank}.pt",
-                    checkpoint / "sampler" / f"sampler_dp_rank_{rank}.pt",
-                    checkpoint / "trainer" / f"trainer_dp_rank_{rank}.pt",
-                )
-            )
-        return paths
+        return _checkpoint_sidecar_paths(checkpoint, _world_size())
 
     def _manifest(self, checkpoint: Path) -> dict[str, Any]:
         manifest = _read_json(checkpoint / "manifest.json")
@@ -379,61 +569,11 @@ class PDDCheckpointManager:
         return manifest
 
     def _validate_checkpoint(self, checkpoint: Path, *, require_identity: bool) -> dict[str, Any]:
-        if not checkpoint.is_dir() or checkpoint.is_symlink():
-            raise RuntimeError(f"PDD checkpoint is not a regular directory: {checkpoint}.")
-        marker_path = checkpoint / "COMPLETE"
-        manifest_path = checkpoint / "manifest.json"
-        if not marker_path.is_file() or not manifest_path.is_file():
-            raise RuntimeError(f"PDD checkpoint is incomplete: {checkpoint}.")
-        marker = _read_json(marker_path)
-        if (
-            set(marker) != {"schema_version", "manifest_sha256"}
-            or marker.get("schema_version") != _COMPLETE_SCHEMA_VERSION
-        ):
-            raise RuntimeError("PDD COMPLETE marker is incompatible.")
-        if marker["manifest_sha256"] != _sha256(manifest_path):
-            raise RuntimeError("PDD COMPLETE marker does not match manifest content.")
-        manifest = self._manifest(checkpoint)
-        if require_identity and manifest["identity"] != self.identity:
-            raise RuntimeError("PDD checkpoint identity does not match the current run.")
-        if _read_json(checkpoint / "pdd_config.json") != manifest["identity"]:
-            raise RuntimeError("PDD checkpoint config sidecar does not match the manifest.")
-        trainer_state = _read_json(checkpoint / "trainer_state.json")
-        if trainer_state != {
-            "completed_steps": manifest["completed_steps"],
-            "learning_rates": manifest["learning_rates"],
-            "parent_checkpoint": manifest["parent_checkpoint"],
-        }:
-            raise RuntimeError("PDD trainer-state sidecar does not match the manifest.")
-        expected_dcp = manifest["dcp_sha256"]
-        if not isinstance(expected_dcp, dict) or any(
-            not isinstance(path, str) or not isinstance(digest, str)
-            for path, digest in expected_dcp.items()
-        ):
-            raise RuntimeError("PDD checkpoint DCP hash inventory is malformed.")
-        actual_dcp = _dcp_payload_hashes(checkpoint)
-        if actual_dcp != expected_dcp:
-            raise RuntimeError("PDD checkpoint DCP payload inventory or hash does not match.")
-        expected_sidecars = self._sidecar_paths(checkpoint)
-        expected_relative = {path.relative_to(checkpoint).as_posix() for path in expected_sidecars}
-        if (
-            not isinstance(manifest["sidecar_sha256"], dict)
-            or set(manifest["sidecar_sha256"]) != expected_relative
-        ):
-            raise RuntimeError("PDD checkpoint sidecar inventory does not match the topology.")
-        for path in expected_sidecars:
-            relative = path.relative_to(checkpoint).as_posix()
-            if not path.is_file() or path.is_symlink():
-                raise RuntimeError(f"PDD checkpoint sidecar is missing: {relative}.")
-            if _sha256(path) != manifest["sidecar_sha256"][relative]:
-                raise RuntimeError(f"PDD checkpoint sidecar hash mismatch: {relative}.")
-        for candidate in checkpoint.rglob("*"):
-            lowered = candidate.name.lower()
-            if any(token in lowered for token in _FORBIDDEN_ARTIFACT_TOKENS):
-                raise RuntimeError(
-                    f"PDD checkpoint contains a forbidden DMD artifact: {candidate}."
-                )
-        return manifest
+        return validate_pdd_training_checkpoint(
+            checkpoint,
+            expected_identity=self.identity if require_identity else None,
+            expected_world_size=_world_size(),
+        )
 
     def _compatible_candidates(
         self,

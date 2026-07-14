@@ -22,7 +22,12 @@ _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
-from pdd_recipe import build_pdd_setup, initialize_pdd_distributed, resolve_pdd_recipe_config
+from pdd_recipe import (
+    build_pdd_export_setup,
+    build_pdd_setup,
+    initialize_pdd_distributed,
+    resolve_pdd_recipe_config,
+)
 from verify_readonly_automodel import snapshot_installed_distribution
 
 
@@ -259,6 +264,27 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     source.checkpointer.save_model(source.student, str(checkpoint_root))
     source.checkpointer.save_optimizer(source.optimizer, source.student, str(checkpoint_root))
 
+    export_setup = build_pdd_export_setup(config)
+    assert export_setup.lifecycle == (
+        "load/select",
+        "pdd_conversion",
+        "device",
+        "qkv",
+        "parallelize",
+        "checkpoint",
+    )
+    assert export_setup.metadata == source.metadata
+    assert export_setup.checkpoint_keys == source.checkpoint_keys
+    assert not hasattr(export_setup, "optimizer")
+    export_setup.checkpointer.load_model(
+        export_setup.student,
+        str(checkpoint_root / "model"),
+    )
+    torch.testing.assert_close(
+        export_setup.student.state_dict()["proj_out.weight"],
+        expected_weight,
+    )
+
     destination = build_pdd_setup(config)
     assert destination.metadata == source.metadata
     destination_projection = destination.projection
@@ -283,6 +309,7 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert snapshot_installed_distribution() == before
     source.checkpointer.close()
     destination.checkpointer.close()
+    export_setup.checkpointer.close()
 
 
 def test_qwen_pdd_adapter_has_no_automodel_import() -> None:

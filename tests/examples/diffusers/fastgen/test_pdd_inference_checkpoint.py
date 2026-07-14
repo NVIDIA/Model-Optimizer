@@ -1,0 +1,298 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Hermetic evidence for authenticated PDD export, reconstruction, and schedules."""
+
+from __future__ import annotations
+
+import copy
+import pathlib
+import sys
+from types import SimpleNamespace
+
+import pytest
+import torch
+from torch import nn
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
+_FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
+for path in (_REPO_ROOT, _FASTGEN_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from inference_pdd_qwen_image import _normalize_prompt_condition, _validate_qwen_projection
+from pdd_export import (
+    PDD_INFERENCE_SCHEDULES,
+    inspect_pdd_export,
+    load_pdd_export_into_model,
+    pdd_config_from_metadata,
+    write_pdd_export,
+)
+
+from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDPipeline
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+    QwenImagePDDAdapter,
+    convert_qwen_image_to_pdd,
+)
+
+
+class _TinyQwen(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(guidance_embeds=False, in_channels=4)
+        self.backbone = nn.Linear(4, 5)
+        self.proj_out = nn.Linear(5, 4)
+        self.calls = 0
+
+    def forward(
+        self,
+        *,
+        hidden_states,
+        timestep,
+        encoder_hidden_states,
+        encoder_hidden_states_mask,
+        img_shapes,
+        txt_seq_lens,
+        guidance,
+        return_dict,
+    ):
+        del img_shapes, txt_seq_lens, guidance, return_dict
+        condition = encoder_hidden_states.mean(dim=(1, 2), keepdim=True)
+        condition += encoder_hidden_states_mask.sum(dim=1)[:, None, None] / 100
+        hidden = torch.tanh(self.backbone(hidden_states))
+        self.calls += 1
+        return (self.proj_out(hidden + condition + timestep[:, None, None] / 10),)
+
+
+def _config(blocks=(32, 32, 32, 32)) -> PDDConfig:
+    return PDDConfig(
+        grid_size=128,
+        flow_shift=5.0,
+        block_size_min=4,
+        block_size_max=64,
+        inference_blocks=list(blocks),
+        student_sample_steps=len(blocks),
+        guidance_scale=4.0,
+        num_train_timesteps=None,
+    )
+
+
+def _converted(seed: int = 17):
+    torch.manual_seed(seed)
+    model = _TinyQwen()
+    config = _config()
+    projection = convert_qwen_image_to_pdd(model, config)
+    generator = torch.Generator().manual_seed(seed + 1)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.copy_(torch.randn(parameter.shape, generator=generator) / 10)
+    return model, config, PDDMetadata.from_config(config, projection)
+
+
+def _identity(metadata: PDDMetadata) -> dict:
+    return {
+        "schema_version": 1,
+        "model": {"id": "synthetic-qwen", "revision": "f" * 40, "dtype": "float32"},
+        "pdd_metadata": metadata.to_dict(),
+        "guidance": {"scale": 4.0, "rescale": 1.0, "eps": 1e-5},
+        "automodel": {
+            "distribution": "nemo_automodel",
+            "version": "0.5.0",
+            "package_tree_sha256": "1" * 64,
+            "wheel_sha256": "2" * 64,
+            "runtime_versions": {"diffusers": "0.38.0"},
+        },
+        "topology": {"world_size": 1, "pure_data_parallel": True},
+    }
+
+
+def _write(tmp_path: pathlib.Path):
+    model, config, metadata = _converted()
+    output = write_pdd_export(
+        tmp_path / "export",
+        model.state_dict(),
+        metadata=metadata,
+        transformer_config={"_class_name": "SyntheticQwen", "in_channels": 4},
+        identity=_identity(metadata),
+        source_checkpoint={
+            "name": "step_00000010",
+            "manifest_sha256": "3" * 64,
+            "completed_steps": 10,
+        },
+        modelopt_source={"commit": "4" * 40, "dirty": False},
+        max_shard_bytes=12_000,
+    )
+    return output, model, config, metadata
+
+
+def _condition():
+    return torch.tensor([[[0.2, -0.3], [0.1, 0.4]]]), torch.ones(1, 2, dtype=torch.long)
+
+
+def _sample(model: nn.Module, config: PDDConfig, state: torch.Tensor) -> torch.Tensor:
+    pipeline = PDDPipeline(model, nn.Identity(), config, QwenImagePDDAdapter(config))
+    return pipeline.sample(state.clone(), condition=_condition())
+
+
+def test_bounded_safe_export_round_trip_and_seeded_schedules(tmp_path, monkeypatch) -> None:
+    output, source, _source_config, metadata = _write(tmp_path)
+    descriptor = inspect_pdd_export(output)
+
+    shards = sorted(output.glob("*.safetensors"))
+    assert len(shards) >= 2
+    assert all(path.stat().st_size <= descriptor.manifest["max_shard_bytes"] for path in shards)
+    assert descriptor.metadata == metadata
+
+    restored = _TinyQwen()
+    convert_qwen_image_to_pdd(restored, _config())
+    monkeypatch.setattr(torch, "load", lambda *args, **kwargs: pytest.fail("unsafe torch.load"))
+    load_pdd_export_into_model(output, restored)
+    for key, tensor in source.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[key], tensor, rtol=0, atol=0)
+
+    state = torch.randn((1, 1, 4, 4), generator=torch.Generator().manual_seed(91))
+    for schedule, blocks in PDD_INFERENCE_SCHEDULES.items():
+        config = pdd_config_from_metadata(
+            metadata,
+            schedule=schedule,
+            guidance_scale=4.0,
+        )
+        source.calls = 0
+        restored.calls = 0
+        expected = _sample(source, config, state)
+        actual = _sample(restored, config, state)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert source.calls == restored.calls == len(blocks)
+        torch.testing.assert_close(_sample(restored, config, state), actual, rtol=0, atol=0)
+
+    with pytest.raises(ValueError, match="block_size_max"):
+        pdd_config_from_metadata(metadata, blocks=[128], guidance_scale=4.0)
+
+
+def test_pinned_qwen_none_prompt_mask_is_normalized_for_pdd() -> None:
+    """Diffusers 0.38 returns None when the single-prompt mask is all ones."""
+    embeddings = torch.randn(1, 3, 5, dtype=torch.float32)
+    resolved_embeddings, resolved_mask = _normalize_prompt_condition(
+        embeddings,
+        None,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
+    )
+    assert resolved_embeddings.dtype == torch.bfloat16
+    assert resolved_mask.dtype == torch.long
+    assert resolved_mask.shape == embeddings.shape[:2]
+    assert torch.equal(resolved_mask, torch.ones_like(resolved_mask))
+
+
+def test_qwen_projection_rejects_inconsistent_packed_width() -> None:
+    _model, _config_value, metadata = _converted()
+    base = _TinyQwen()
+    assert _validate_qwen_projection(base, metadata) is base.proj_out
+    base.config.in_channels = 8
+    with pytest.raises(RuntimeError, match="proj_out width"):
+        _validate_qwen_projection(base, metadata)
+
+
+def test_export_is_complete_before_atomic_rename(tmp_path, monkeypatch) -> None:
+    original_rename = pathlib.Path.rename
+    observed = False
+
+    def checked_rename(path, target):
+        nonlocal observed
+        if path.name.endswith(".staging"):
+            inspect_pdd_export(path)
+            assert (path / "COMPLETE").is_file()
+            observed = True
+        return original_rename(path, target)
+
+    monkeypatch.setattr(pathlib.Path, "rename", checked_rename)
+    _write(tmp_path)
+    assert observed
+
+
+def test_export_rejects_unpinned_local_model_identity(tmp_path) -> None:
+    model, _config_value, metadata = _converted()
+    identity = _identity(metadata)
+    identity["model"]["revision"] = None
+    with pytest.raises(ValueError, match="pinned 40-character"):
+        write_pdd_export(
+            tmp_path / "local-model-export",
+            model.state_dict(),
+            metadata=metadata,
+            transformer_config={"in_channels": 4},
+            identity=identity,
+            source_checkpoint={
+                "name": "step_00000010",
+                "manifest_sha256": "3" * 64,
+                "completed_steps": 10,
+            },
+            modelopt_source={"commit": "4" * 40, "dirty": False},
+            max_shard_bytes=12_000,
+        )
+
+
+def test_export_rejects_nonfinite_and_existing_destination(tmp_path) -> None:
+    output, model, _config_value, metadata = _write(tmp_path)
+    with pytest.raises(FileExistsError):
+        write_pdd_export(
+            output,
+            model.state_dict(),
+            metadata=metadata,
+            transformer_config={"in_channels": 4},
+            identity=_identity(metadata),
+            source_checkpoint={
+                "name": "step_00000010",
+                "manifest_sha256": "3" * 64,
+                "completed_steps": 10,
+            },
+            modelopt_source={"commit": "4" * 40, "dirty": False},
+            max_shard_bytes=12_000,
+        )
+
+    bad = copy.deepcopy(model.state_dict())
+    bad["backbone.weight"][0, 0] = float("nan")
+    with pytest.raises(FloatingPointError, match="non-finite"):
+        write_pdd_export(
+            tmp_path / "bad",
+            bad,
+            metadata=metadata,
+            transformer_config={"in_channels": 4},
+            identity=_identity(metadata),
+            source_checkpoint={
+                "name": "step_00000010",
+                "manifest_sha256": "3" * 64,
+                "completed_steps": 10,
+            },
+            modelopt_source={"commit": "4" * 40, "dirty": False},
+            max_shard_bytes=12_000,
+        )
+
+
+@pytest.mark.parametrize("corruption", ["complete", "shard", "extra", "symlink"])
+def test_export_authentication_rejects_corruption(tmp_path, corruption) -> None:
+    output, _model, _config_value, _metadata = _write(tmp_path)
+    if corruption == "complete":
+        (output / "COMPLETE").unlink()
+    elif corruption == "shard":
+        shard = next(output.glob("*.safetensors"))
+        with shard.open("ab") as stream:
+            stream.write(b"corrupt")
+    elif corruption == "extra":
+        (output / "undeclared.bin").write_bytes(b"extra")
+    else:
+        (output / "linked").symlink_to(output / "config.json")
+
+    with pytest.raises((FileNotFoundError, RuntimeError)):
+        inspect_pdd_export(output)
+
+
+def test_safe_load_rejects_wrong_model_inventory(tmp_path) -> None:
+    output, _model, _config_value, _metadata = _write(tmp_path)
+    unconverted = _TinyQwen()
+    with pytest.raises(RuntimeError, match="shape mismatch"):
+        load_pdd_export_into_model(output, unconverted)
+
+    wrong_dtype = _TinyQwen().to(torch.float64)
+    convert_qwen_image_to_pdd(wrong_dtype, _config())
+    with pytest.raises(RuntimeError, match="dtype mismatch"):
+        load_pdd_export_into_model(output, wrong_dtype)

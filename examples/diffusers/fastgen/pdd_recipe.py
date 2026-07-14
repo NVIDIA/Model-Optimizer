@@ -121,6 +121,23 @@ class PDDTrainingArtifacts:
     rng: Any
 
 
+@dataclass(frozen=True)
+class PDDExportSetupArtifacts:
+    """Student-only FSDP2 objects needed for collective DCP export."""
+
+    pipe: Any
+    student: nn.Module
+    projection: PDDOutputProjection
+    distributed_setup: Any
+    fsdp_manager: Any
+    checkpointer: Any
+    metadata: PDDMetadata
+    checkpoint_keys: tuple[str, ...]
+    transformer_config: Mapping[str, Any]
+    lifecycle: tuple[str, ...]
+    automodel_snapshot: Mapping[str, Any]
+
+
 def _as_mapping(value: Any, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping, got {type(value).__name__}.")
@@ -455,41 +472,26 @@ def _require_projection_module(
         raise RuntimeError(f"PDD projection module was replaced during {stage}.")
 
 
-def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
-    """Compose released AutoModel APIs without editing or patching external packages."""
-    if not isinstance(config, PDDRecipeConfig):
-        raise TypeError(f"config must be PDDRecipeConfig, got {type(config).__name__}.")
-    if not dist.is_available() or not dist.is_initialized():
-        raise RuntimeError("Initialize torch.distributed before building the PDD FSDP2 setup.")
-
-    automodel_snapshot = snapshot_installed_distribution()
-    lifecycle: list[str] = []
-
-    # Imports are intentionally delayed until the exact installed wheel has passed verification.
-    from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
-    from nemo_automodel.components.checkpoint.config import CheckpointingConfig
-    from nemo_automodel.components.distributed import (
-        DistributedSetup,
-        FSDP2Config,
-        ParallelismSizes,
-    )
-    from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
-
+def _resolve_model_source(config: PDDRecipeConfig) -> str:
     if Path(config.model_id).is_dir():
-        model_source = config.model_id
-    else:
-        from huggingface_hub import snapshot_download
+        return config.model_id
+    from huggingface_hub import snapshot_download
 
-        if config.model_revision is None:
-            raise ValueError("Remote PDD models require a pinned model revision.")
-        model_source = snapshot_download(config.model_id, revision=config.model_revision)
-        if Path(model_source).resolve().name != config.model_revision:
-            raise RuntimeError(
-                "Hugging Face resolved a model snapshot that does not match the pinned revision."
-            )
+    if config.model_revision is None:
+        raise ValueError("Remote PDD models require a pinned model revision.")
+    model_source = snapshot_download(config.model_id, revision=config.model_revision)
+    if Path(model_source).resolve().name != config.model_revision:
+        raise RuntimeError(
+            "Hugging Face resolved a model snapshot that does not match the pinned revision."
+        )
+    return model_source
 
-    pipe, loader_managers = NeMoAutoDiffusionPipeline.from_pretrained(
-        model_source,
+
+def _load_unwrapped_transformer(
+    config: PDDRecipeConfig, pipeline_type: Any
+) -> tuple[Any, nn.Module]:
+    pipe, loader_managers = pipeline_type.from_pretrained(
+        _resolve_model_source(config),
         parallel_scheme=None,
         device=None,
         torch_dtype=config.dtype,
@@ -511,6 +513,30 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     student = pipe.transformer
     if not isinstance(student, nn.Module):
         raise TypeError("AutoModel pipeline did not return an nn.Module transformer.")
+    return pipe, student
+
+
+def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
+    """Compose released AutoModel APIs without editing or patching external packages."""
+    if not isinstance(config, PDDRecipeConfig):
+        raise TypeError(f"config must be PDDRecipeConfig, got {type(config).__name__}.")
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError("Initialize torch.distributed before building the PDD FSDP2 setup.")
+
+    automodel_snapshot = snapshot_installed_distribution()
+    lifecycle: list[str] = []
+
+    # Imports are intentionally delayed until the exact installed wheel has passed verification.
+    from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
+    from nemo_automodel.components.checkpoint.config import CheckpointingConfig
+    from nemo_automodel.components.distributed import (
+        DistributedSetup,
+        FSDP2Config,
+        ParallelismSizes,
+    )
+    from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
+
+    pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
     teacher = copy.deepcopy(student).eval().requires_grad_(False)
     lifecycle.append("load/select")
 
@@ -640,6 +666,107 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         checkpointer=checkpointer,
         metadata=metadata,
         checkpoint_keys=checkpoint_keys,
+        lifecycle=tuple(lifecycle),
+        automodel_snapshot=automodel_snapshot,
+    )
+
+
+def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
+    """Build only the converted/sharded student needed for collective export."""
+    if not isinstance(config, PDDRecipeConfig):
+        raise TypeError(f"config must be PDDRecipeConfig, got {type(config).__name__}.")
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError("Initialize torch.distributed before building PDD export setup.")
+    automodel_snapshot = snapshot_installed_distribution()
+
+    from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
+    from nemo_automodel.components.checkpoint.config import CheckpointingConfig
+    from nemo_automodel.components.distributed import (
+        DistributedSetup,
+        FSDP2Config,
+        ParallelismSizes,
+    )
+    from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
+
+    lifecycle = ["load/select"]
+    pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    raw_transformer_config = getattr(student, "config", None)
+    if hasattr(raw_transformer_config, "to_dict"):
+        transformer_config = raw_transformer_config.to_dict()
+    elif isinstance(raw_transformer_config, Mapping):
+        transformer_config = dict(raw_transformer_config)
+    else:
+        raise TypeError("Qwen transformer config must expose to_dict() or Mapping.")
+
+    projection = convert_qwen_image_to_pdd(student, config.pdd)
+    identity = _projection_identity(projection)
+    metadata = PDDMetadata.from_config(config.pdd, projection)
+    lifecycle.append("pdd_conversion")
+    student.to(device=config.device, dtype=config.dtype)
+    _require_projection_identity(student, projection, identity, stage="device placement")
+    lifecycle.append("device")
+
+    if config.fuse_qkv_projections:
+        if not hasattr(student, "fuse_qkv_projections"):
+            raise AttributeError("QKV fusion requires Qwen to expose the object API.")
+        student.fuse_qkv_projections()
+    _require_projection_identity(student, projection, identity, stage="QKV fusion")
+    lifecycle.append("qkv")
+
+    world_size = dist.get_world_size()
+    dp_size = config.parallel.dp_size or world_size
+    if dp_size != world_size:
+        raise ValueError(
+            f"Pure-DP PDD export requires fsdp.dp_size ({dp_size}) to equal world size "
+            f"({world_size})."
+        )
+    strategy = FSDP2Config(activation_checkpointing=False)
+    distributed_setup = DistributedSetup.build(
+        strategy=strategy,
+        parallelism_sizes=ParallelismSizes(dp_size=dp_size),
+        activation_checkpointing=False,
+        world_size=world_size,
+    )
+    mesh_context = distributed_setup.mesh_context
+    manager = FSDP2Manager(
+        distributed_setup.strategy_config,
+        device_mesh=mesh_context.device_mesh,
+        moe_mesh=mesh_context.moe_mesh,
+    )
+    student = manager.parallelize(student)
+    pipe.transformer = student
+    _require_projection_module(student, projection, stage="FSDP2 export parallelization")
+    lifecycle.append("parallelize")
+
+    checkpoint_keys = tuple(student.state_dict())
+    if "proj_out.weight" not in checkpoint_keys:
+        raise RuntimeError("PDD projection is missing from the export checkpoint key inventory.")
+    checkpoint_config = CheckpointingConfig(
+        enabled=True,
+        checkpoint_dir=config.checkpoint.checkpoint_dir,
+        model_save_format="torch_save",
+        model_repo_id=config.model_id,
+        save_consolidated=False,
+        is_peft=False,
+        model_state_dict_keys=list(checkpoint_keys),
+    )
+    checkpointer = checkpoint_config.build(
+        dp_rank=dist.get_rank(),
+        tp_rank=0,
+        pp_rank=0,
+        moe_mesh=None,
+    )
+    lifecycle.append("checkpoint")
+    return PDDExportSetupArtifacts(
+        pipe=pipe,
+        student=student,
+        projection=projection,
+        distributed_setup=distributed_setup,
+        fsdp_manager=manager,
+        checkpointer=checkpointer,
+        metadata=metadata,
+        checkpoint_keys=checkpoint_keys,
+        transformer_config=transformer_config,
         lifecycle=tuple(lifecycle),
         automodel_snapshot=automodel_snapshot,
     )
