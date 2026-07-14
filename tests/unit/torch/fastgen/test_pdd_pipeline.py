@@ -62,6 +62,7 @@ class _RecordingAdapter:
         self.teacher_calls: list[dict[str, Any]] = []
         self.bad_student_shape = False
         self.bad_fused_dtype = False
+        self.low_precision_outputs = False
 
     def student_all_heads(
         self,
@@ -81,7 +82,9 @@ class _RecordingAdapter:
             }
         )
         output = model.all_heads(state)
-        return output[:, :-1] if self.bad_student_shape else output
+        if self.bad_student_shape:
+            output = output[:, :-1]
+        return output.to(torch.bfloat16) if self.low_precision_outputs else output
 
     def student_fused_block(
         self,
@@ -131,7 +134,8 @@ class _RecordingAdapter:
                 "kwargs": model_kwargs,
             }
         )
-        return model(state, time)
+        output = model(state, time)
+        return output.to(torch.bfloat16) if self.low_precision_outputs else output
 
 
 def _config(*, teacher_integrator: str = "euler") -> PDDConfig:
@@ -244,6 +248,26 @@ def test_midpoint_target_uses_exact_final_interval_midpoint() -> None:
     torch.testing.assert_close(adapter.teacher_calls[0]["time"], grid[k])
     torch.testing.assert_close(adapter.teacher_calls[1]["state"], midpoint_state)
     torch.testing.assert_close(adapter.teacher_calls[1]["time"], midpoint_time)
+
+
+def test_selected_head_low_precision_outputs_use_float32_mse() -> None:
+    pipeline, adapter = _pipeline()
+    adapter.low_precision_outputs = True
+    data = torch.tensor([[1.0, -2.0, 0.5]])
+    noise = torch.tensor([[0.25, 1.5, -0.5]])
+    n = torch.tensor([0])
+    k = torch.tensor([0])
+
+    loss, _ = pipeline.compute_loss(data, noise=noise, n=n, k=k)
+
+    grid = pipeline.time_grid()
+    x_n = (1 - grid[n, None]) * data + grid[n, None] * noise
+    selected = pipeline.student.all_heads(x_n)[:, 0].to(torch.bfloat16).float()
+    teacher = pipeline.teacher(x_n, grid[k]).to(torch.bfloat16).float()
+    expected = (selected - teacher).square().mean()
+
+    assert loss.dtype == torch.float32
+    torch.testing.assert_close(loss, expected)
 
 
 def test_small_grid_accepts_exactly_the_trained_index_support() -> None:
@@ -385,6 +409,10 @@ def test_loss_rejects_indices_outside_trained_support(n, k, message) -> None:
 
 def test_pipeline_rejects_invalid_shapes_dtypes_and_blocks() -> None:
     pipeline, adapter = _pipeline()
+    with pytest.raises(TypeError, match="data must be a tensor"):
+        pipeline.compute_loss({"state": torch.ones(1, 3)})  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="state must be a tensor"):
+        pipeline.sample({"state": torch.ones(1, 3)})  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="real floating-point"):
         pipeline.compute_loss(torch.ones(1, 3, dtype=torch.int64))
     with pytest.raises(ValueError, match="noise must match"):

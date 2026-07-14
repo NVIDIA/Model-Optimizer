@@ -119,6 +119,7 @@ def test_pdd_config_rejects_invalid_grid_and_block_boundaries(overrides, message
         {"pred_type": "x0"},
         {"student_sample_type": "sde"},
         {"teacher_integrator": "heun"},
+        {"teacher_integrator": "rk4"},
         {"data_free": True},
     ],
 )
@@ -130,6 +131,9 @@ def test_pdd_config_locks_algorithm_modes(overrides):
 def test_pdd_config_rejects_nondefault_sample_timestep_config():
     with pytest.raises(ValueError, match="sample_t_cfg is unused by PDD"):
         PDDConfig(sample_t_cfg=SampleTimestepConfig(shift=6.0))
+
+    with pytest.raises(ValueError, match="sample_t_cfg is unused by PDD"):
+        PDDConfig(sample_t_cfg=SampleTimestepConfig(t_list=[1.0, 0.0]))
 
 
 def test_pdd_config_accepts_explicit_default_sample_timestep_config():

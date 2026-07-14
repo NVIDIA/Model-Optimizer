@@ -915,7 +915,7 @@ class PDDPipeline(DistillationPipeline):
         if blocks is None:
             resolved = tuple(self.config.inference_blocks)
         else:
-            if isinstance(blocks, (str, bytes)) or not isinstance(blocks, Sequence):
+            if isinstance(blocks, str | bytes) or not isinstance(blocks, Sequence):
                 raise TypeError("blocks must be a sequence of integer interval counts.")
             resolved = tuple(blocks)
         if not resolved:
