@@ -143,7 +143,8 @@ class BaseModelProcessor(ABC):
                 - bucket_resolution: Tuple[int, int]
                 - crop_offset: Tuple[int, int]
                 - prompt: str
-                - image_path: str
+                - sample_id: str
+                - source_ref: Optional[str]
                 - bucket_id: str
                 - tier: str
                 - aspect_ratio: float

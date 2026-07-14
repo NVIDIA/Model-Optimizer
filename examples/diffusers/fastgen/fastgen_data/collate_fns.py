@@ -97,7 +97,6 @@ def collate_fn_text_to_image(
             "sample_ids": torch.tensor([item["sample_id"] for item in batch], dtype=torch.long),
         },
     }
-
     # Optional model-specific embedding fields, when a dataset provides them.
     for key in ("pooled_prompt_embeds", "clip_hidden"):
         if key in batch[0]:

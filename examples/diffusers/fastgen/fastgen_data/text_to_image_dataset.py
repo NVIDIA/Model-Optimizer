@@ -119,7 +119,6 @@ class TextToImageDataset(BaseMultiresolutionDataset):
 
         # Load cached data
         data = torch.load(cache_file, map_location="cpu", weights_only=True)
-
         # Prepare output - support both bucket_resolution and crop_resolution keys
         resolution_key = "bucket_resolution" if "bucket_resolution" in item else "crop_resolution"
         output = {
@@ -133,7 +132,6 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             "aspect_ratio": item.get("aspect_ratio", 1.0),
             "sample_id": sample_id,
         }
-
         if self.train_text_encoder:
             output["clip_tokens"] = data["clip_tokens"].squeeze(0)
             output["t5_tokens"] = data["t5_tokens"].squeeze(0)

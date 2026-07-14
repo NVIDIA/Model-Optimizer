@@ -172,7 +172,7 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
 
     seq, dim, c, h, w = 5, 16, 4, 8, 8
     # A per-item sample matching what TextToImageDataset emits — collate_fn_production requires
-    # crop_resolution / original_resolution / crop_offset / prompt / image_path / bucket_id /
+    # crop_resolution / original_resolution / crop_offset / prompt / sample_id / bucket_id /
     # aspect_ratio in addition to the latent + text embeds.
     sample = {
         "latent": torch.randn(c, h, w),
@@ -180,7 +180,8 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
         "original_resolution": torch.tensor([h, w]),
         "crop_offset": torch.tensor([0, 0]),
         "prompt": "a test prompt",
-        "image_path": "img.png",
+        "sample_id": "sample-0",
+        "source_ref": "images/img.png",
         "bucket_id": 0,
         "aspect_ratio": 1.0,
         "prompt_embeds": torch.randn(seq, dim),

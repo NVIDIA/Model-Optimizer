@@ -149,6 +149,10 @@ data:
   dataloader:
     _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: /path/to/preprocessed/qwen_image_1024p
+    # cache_dir must be a finalized migrate_cache_manifest.py snapshot. The split index and
+    # negative embedding are portable references beneath the effective root.
+    # MODELOPT_FASTGEN_DATASET_CACHE_DIR overrides cache_dir when set to a non-empty value.
+    metadata_index: metadata_train.json
     base_resolution: [1024, 1024]
     batch_size: 1
     drop_last: false
