@@ -49,7 +49,8 @@ class ModelDescriptor(ABC):
 
         Example implementation to override the FFN intermediate size of a block:
             >>> def block_config_to_layer_overrides(block_config: BlockConfig) -> Dict[str, Any]:
-            >>>     return {"intermediate_size": block_config.ffn.intermediate_size}
+            >>>     ffn = block_config.require_subblock("ffn")
+            >>>     return {"intermediate_size": ffn.intermediate_size}
         """
         raise NotImplementedError
 
@@ -170,6 +171,79 @@ class ModelDescriptor(ABC):
         return True
 
     @staticmethod
+    def position_id_axes(config) -> int:
+        """Return the leading coordinate-axis count for canonical position IDs.
+
+        Standard decoder models use ``[batch, sequence]`` position IDs and
+        therefore return one. Models whose distributed kernels require
+        pre-expanded multi-axis positions (for example mRoPE) override this
+        descriptor contract. Expansion happens before CP/PP sharding so those
+        transforms preserve the coordinate axes.
+        """
+        del config
+        return 1
+
+    @classmethod
+    def checkpoint_equivalence_tolerances(cls) -> dict[str, float]:
+        """Numerical output-space gates for function-preserving checkpoint transforms.
+
+        Most BF16 checkpoints use the strict defaults. Descriptors for storage formats
+        whose kernels amplify otherwise equivalent permutations (for example MXFP4)
+        may relax these output-space gates without weakening structural validation.
+        """
+        return {
+            "max_abs_lm_loss_delta": 1.0e-3,
+            "max_kl_div": 1.0e-2,
+            "min_top_1_logit_agreement": 0.9,
+        }
+
+    @classmethod
+    def width_slice_equivalence_tolerances(cls) -> dict[str, float]:
+        """Numerical gates for physical-versus-runtime width slices."""
+
+        return {
+            "loss_atol": 1.0e-5,
+            "loss_rtol": 1.0e-5,
+            "output_atol": 1.0e-5,
+            "output_rtol": 1.0e-5,
+        }
+
+    @classmethod
+    def width_slice_equivalence_operations(
+        cls,
+        config,
+        sorted_checkpoint_dir,
+        *,
+        alignment: int = 1,
+        sampled_layers: Iterable[int] | None = None,
+    ):
+        """Build declarative cases for every capability-backed width operation."""
+
+        from ...diagnostics.width_slice_equivalence import build_width_slice_cases
+
+        return build_width_slice_cases(
+            cls,
+            config,
+            sorted_checkpoint_dir,
+            alignment=alignment,
+            sampled_layers=sampled_layers,
+        )
+
+    @classmethod
+    def stage_execution_policy(cls) -> dict[str, tuple[str, ...]]:
+        """Descriptor-owned execution exceptions for model stages.
+
+        Activation diagnosis repeatedly loads and evaluates physically different
+        tensor shapes in one process.  Globally compiled model-local kernels can
+        retain shape-specific distributed graphs across those transitions, so
+        diagnosis defaults to the mathematically identical eager path.  A
+        descriptor may extend or override this policy.  Keeping it descriptor-
+        owned avoids model-name checks in launchers and lets future families
+        reuse the same generic mechanism.
+        """
+        return {"torch_compile_disabled_stages": ("activation_diagnostic",)}
+
+    @staticmethod
     def pruning_mixins() -> Dict[str, Any]:
         """Return available pruning mixins for bypass distillation.
 
@@ -191,6 +265,215 @@ class ModelDescriptor(ABC):
         language model portion (e.g., config.text_config for Qwen-VL).
         """
         return config
+
+    @classmethod
+    def generic_decoder_contract(cls, config):
+        """Return this family's composable decoder contract when one is declared.
+
+        Existing descriptors remain valid without adopting the generic surface. New
+        cross-family descriptors override this hook so scoring, sorting, materialization,
+        and preflight all consume the same structural declaration.
+        """
+        return None
+
+    @classmethod
+    def local_kd_subblock_module_paths(
+        cls, block_config: BlockConfig, *, layer_idx: int
+    ) -> dict[tuple[str, str], str]:
+        """Map semantic subblock identities to decoder-layer-relative module paths."""
+
+        del block_config, layer_idx
+        raise NotImplementedError(
+            f"{cls.__name__} does not declare descriptor-backed subblock bypass boundaries"
+        )
+
+    @classmethod
+    def vision_module_names(cls) -> tuple[str, ...]:
+        """Canonical vision-tower module names for multimodal observability."""
+        return ()
+
+    @classmethod
+    def automodel_model_kwargs(
+        cls, config, *, distributed: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Model-construction settings required by the native AutoModel family."""
+        return {}
+
+    @classmethod
+    def automodel_tp_linear_backend(cls, config) -> str | None:
+        """Linear backend compatible with the native model's TP plan.
+
+        AutoModel's standard tensor-parallel plans use PyTorch DTensor
+        ``RowwiseParallel``/``ColwiseParallel`` styles, which operate on
+        ``nn.Linear`` rather than Transformer Engine ``Linear`` modules.  A
+        family with a custom TE-aware TP implementation may override this hook.
+        """
+
+        return "torch"
+
+    @classmethod
+    def patch_layer_config(
+        cls,
+        layer_config: Any,
+        block_config: BlockConfig,
+        layer_idx: int,
+    ) -> None:
+        """Apply structural per-layer fields not expressible as scalar overrides.
+
+        Most families need no work here. Hybrid families can update list-valued
+        fields such as ``layer_types`` on the already-copied layer config.
+        """
+
+        attention = block_config.get_subblock("attention")
+        window = getattr(attention, "sliding_window_size", None) if attention is not None else None
+        if window is None:
+            return
+        desired_type = "full_attention" if window == "full" else "sliding_attention"
+        layer_types = list(getattr(layer_config, "layer_types", ()) or ())
+        if layer_types:
+            if len(layer_types) <= layer_idx:
+                layer_types.extend(["full_attention"] * (layer_idx + 1 - len(layer_types)))
+            layer_types[layer_idx] = desired_type
+            layer_config.layer_types = layer_types
+        layer_config.sliding_window = None if window == "full" else int(window)
+
+    @classmethod
+    def embedding_pruning_spec(
+        cls,
+        config,
+        *,
+        widths: Iterable[int],
+        alignment: int,
+    ):
+        """Return the complete residual-width contract, or reject unsupported families."""
+        raise NotImplementedError(
+            f"language hidden-width pruning is not implemented for {cls.__name__}"
+        )
+
+    @classmethod
+    def ple_pruning_spec(cls, config):
+        """Return a global per-layer-embedding pruning contract when supported."""
+        return None
+
+    @classmethod
+    def adapt_materialized_state_dict_for_model(
+        cls,
+        state_dict: dict[str, Any],
+        *,
+        model: nn.Module,
+        config: Any,
+    ) -> dict[str, Any]:
+        """Rewrite realized checkpoint keys before loading into a freshly built model.
+
+        The sorted teacher keeps Puzzletron's canonical AnyModel checkpoint names.  Some native
+        HF/AutoModel classes expose the same weights under different module prefixes during
+        initialization.  Descriptors can override this hook to bridge that boundary without
+        teaching the generic materializer about family-specific names.
+        """
+        return state_dict
+
+    @classmethod
+    def adapt_module_name_for_model(cls, module_name: str, model: nn.Module) -> str:
+        """Rewrite a descriptor module FQN for an instantiated runtime model if needed.
+
+        Descriptor names are Puzzletron's canonical checkpoint names. Some remote-code
+        classes expose the same modules under different initialization prefixes. Keep
+        that compatibility at the descriptor boundary so sharding and native runtime
+        views can address live modules without changing canonical checkpoint keys.
+        """
+        return module_name
+
+    @classmethod
+    def checkpoint_key_candidates_for_model_key(
+        cls,
+        model_key: str,
+        *,
+        model: nn.Module,
+        config: Any,
+    ) -> tuple[str, ...]:
+        """Return checkpoint keys that may satisfy a runtime model state_dict key."""
+        return (model_key,)
+
+    @classmethod
+    def adapt_loaded_state_dict_for_model(
+        cls,
+        state_dict: dict[str, Any],
+        *,
+        model: nn.Module,
+        config: Any,
+        checkpoint_to_model_key: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Rewrite loaded checkpoint keys to the live model's state_dict names."""
+        if not checkpoint_to_model_key:
+            return state_dict
+        return {checkpoint_to_model_key.get(key, key): value for key, value in state_dict.items()}
+
+    @classmethod
+    def pipeline_module_fqns_per_model_part(
+        cls,
+        config: Any,
+        *,
+        pp_size: int,
+        pipeline_config: dict[str, Any] | None = None,
+    ) -> list[list[str]] | None:
+        """Return descriptor-owned pipeline stage module FQNs for NeMo AutoModel.
+
+        NeMo's generic HF splitter assumes common names such as ``model.embed_tokens`` and
+        ``model.norm``. Remote-code families may use different module names while still being
+        valid HF models; those names belong in the model descriptor so future families can
+        customize PP splitting without patching NeMo or central Puzzletron code.
+
+        Return ``None`` to let NeMo AutoModel use its built-in split logic.
+        """
+        return None
+
+    @classmethod
+    def build_sequential_pipeline_module_fqns(
+        cls,
+        *,
+        num_stages: int,
+        num_layers: int,
+        layer_fqn_template: str,
+        first_stage_fqns: Iterable[str] = (),
+        last_stage_fqns: Iterable[str] = (),
+        all_stage_fqns: Iterable[str] = (),
+    ) -> list[list[str]]:
+        """Build an even sequential layer split for descriptor-defined PP layouts."""
+        if num_stages < 1:
+            raise ValueError("num_stages must be at least 1")
+        if num_layers < 1:
+            raise ValueError("num_layers must be at least 1")
+        if num_stages > num_layers:
+            raise ValueError(f"num_stages ({num_stages}) cannot exceed num_layers ({num_layers})")
+
+        layers_per_stage = num_layers // num_stages
+        extra_layers = num_layers % num_stages
+        module_fqns: list[list[str]] = []
+        layer_idx = 0
+        for stage_idx in range(num_stages):
+            stage_fqns: list[str] = []
+            if stage_idx == 0:
+                stage_fqns.extend(str(name) for name in first_stage_fqns)
+            stage_layer_count = layers_per_stage + (1 if stage_idx < extra_layers else 0)
+            for _ in range(stage_layer_count):
+                stage_fqns.append(layer_fqn_template.format(layer_idx=layer_idx))
+                layer_idx += 1
+            if stage_idx == num_stages - 1:
+                stage_fqns.extend(str(name) for name in last_stage_fqns)
+            stage_fqns.extend(str(name) for name in all_stage_fqns)
+            module_fqns.append(stage_fqns)
+        return module_fqns
+
+    @classmethod
+    def patch_pipeline_model_part(cls, model_part: nn.Module) -> bool:
+        """Patch a local AutoModel pipeline chunk after NeMo splits it.
+
+        This is a descriptor escape hatch for PP forward-name compatibility only.  It should
+        install transient aliases or lightweight attributes on the already-split stage object,
+        not mutate canonical checkpoints or global library code.  Return ``True`` when any
+        patch was applied so callers can log what happened.
+        """
+        return False
 
     @classmethod
     def set_block_configs(cls, model_config: Any, block_configs: list[BlockConfig | dict]) -> None:
@@ -221,10 +504,14 @@ class ModelDescriptor(ABC):
         for hybrid families whose default attention/MLP classes need extra config.
         """
         return BlockConfig(
-            attention=AttentionConfig(
-                no_op=False, num_key_value_heads=runtime_config.num_key_value_heads
+            subblock_configs=(
+                AttentionConfig(
+                    no_op=False,
+                    num_kv_heads=runtime_config.num_key_value_heads,
+                    num_query_heads=runtime_config.num_attention_heads,
+                ),
+                FFNConfig(no_op=False, intermediate_size=256),
             ),
-            ffn=FFNConfig(no_op=False, intermediate_size=256, moe=None),
         )
 
     @classmethod
@@ -240,9 +527,51 @@ class ModelDescriptor(ABC):
         raise NotImplementedError(f"Runtime benchmarking is not supported for {cls.__name__}")
 
     @classmethod
+    def runtime_benchmark_supported(cls) -> bool:
+        """Whether this descriptor implements synthetic vLLM benchmark models."""
+        method = getattr(
+            cls.create_runtime_benchmark_model, "__func__", cls.create_runtime_benchmark_model
+        )
+        base_method = getattr(
+            ModelDescriptor.create_runtime_benchmark_model,
+            "__func__",
+            ModelDescriptor.create_runtime_benchmark_model,
+        )
+        return method is not base_method
+
+    @classmethod
     def runtime_benchmark_export_descriptor(cls) -> type["ModelDescriptor"]:
         """Return the descriptor that matches the temporary benchmark checkpoint layout."""
         return cls
+
+    @classmethod
+    def postprocess_runtime_benchmark_checkpoint(cls, output_dir: Any) -> None:
+        """Descriptor hook for temporary vLLM benchmark checkpoint fixes."""
+
+    @classmethod
+    def anymodel_arch_info(cls) -> dict[str, Any]:
+        """Return vLLM AnyModel architecture metadata for this descriptor.
+
+        The vLLM fork can either use its built-in registry keyed by
+        ``base_architecture`` or a config-local ``anymodel_arch_info`` contract.
+        Runtime benchmark checkpoints are synthetic, so emit the minimal
+        config-local contract by default from the HF decoder layer class.
+        Hybrid/custom families should override this with their full contract.
+        """
+        decoder_classes = cls.decoder_layer_cls()
+        if isinstance(decoder_classes, list):
+            decoder_cls = decoder_classes[0]
+        else:
+            decoder_cls = decoder_classes
+        module = decoder_cls.__module__
+        module_name = module.rsplit(".", 1)[-1]
+        if ".models." in module:
+            module_name = module.split(".models.", 1)[1].split(".", 1)[0]
+        module_name = module_name.removeprefix("modeling_")
+        return {
+            "decoder_layer_module": f".{module_name}",
+            "decoder_layer_class": decoder_cls.__name__,
+        }
 
     @classmethod
     def update_runtime_benchmark_config(cls, config_data: dict[str, Any]) -> None:

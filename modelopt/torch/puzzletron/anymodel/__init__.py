@@ -38,6 +38,9 @@ Supported models:
 """
 
 from . import models  # trigger factory registration
+from .automodel import *
+from .capabilities import *
 from .converter import *
 from .model_descriptor import *
 from .puzzformer import *
+from .registry import *

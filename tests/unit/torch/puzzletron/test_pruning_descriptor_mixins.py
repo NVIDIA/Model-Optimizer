@@ -54,10 +54,20 @@ def test_nemotron_h_descriptor_exposes_expert_removal_and_kv_heads_mixins():
 
     mixins = NemotronHModelDescriptor.pruning_mixins()
 
-    assert set(mixins) == {"experts_removal", "kv_heads"}
+    assert set(mixins) == {
+        "experts_removal",
+        "kv_heads",
+        "moe_experts",
+        "moe_expert_removal",
+        "moe_expert_intermediate",
+        "moe_shared_expert_intermediate",
+        "moe_latent_dim",
+        "mamba_heads",
+        "mamba_head_dim",
+    }
     assert isinstance(mixins["experts_removal"], ExpertRemovalPruningMixIn)
     assert isinstance(mixins["kv_heads"], KVHeadsPruningMixIn)
-    assert mixins["kv_heads"].layer_descriptor.attn_prefix(2) == "backbone.layers.2.mixer"
+    assert mixins["kv_heads"].layer_descriptor.attn_prefix(2) == "model.layers.2.mixer"
 
 
 def test_nemotron_h_v2_descriptor_exposes_ffn_and_kv_heads_mixins():
@@ -102,8 +112,8 @@ def test_qwen3_5_descriptors_expose_ffn_and_kv_heads_mixins():
     text_mixins = Qwen3P5TextModelDescriptor.pruning_mixins()
     vl_mixins = Qwen3P5VLModelDescriptor.pruning_mixins()
 
-    assert set(text_mixins) == {"ffn_intermediate", "kv_heads"}
-    assert set(vl_mixins) == {"ffn_intermediate", "kv_heads"}
+    assert set(text_mixins) == {"ffn_intermediate", "kv_heads", "gated_delta_net"}
+    assert set(vl_mixins) == {"ffn_intermediate", "kv_heads", "gated_delta_net"}
     assert isinstance(text_mixins["ffn_intermediate"], FFNIntermediatePruningMixIn)
     assert isinstance(vl_mixins["ffn_intermediate"], FFNIntermediatePruningMixIn)
     assert isinstance(text_mixins["kv_heads"], KVHeadsPruningMixIn)

@@ -27,16 +27,14 @@ pytest.importorskip("transformers")
 
 import modelopt.torch.puzzletron as mtpz
 
-MODEL_ID = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-Base"
-
-FACTORY_MODULE = "modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory"
+REGISTRY_MODULE = "modelopt.torch.puzzletron.anymodel.registry"
 
 
 class TestResolveDescriptorCachesDynamicModules:
     """resolve_descriptor_from_pretrained must call force_cache_dynamic_modules."""
 
-    @patch(f"{FACTORY_MODULE}.force_cache_dynamic_modules")
-    @patch(f"{FACTORY_MODULE}.AutoConfig")
+    @patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules")
+    @patch(f"{REGISTRY_MODULE}.AutoConfig")
     def test_force_cache_called(self, mock_auto_config_cls, mock_force_cache):
         mock_config = MagicMock()
         mock_config.model_type = "llama"
@@ -46,8 +44,8 @@ class TestResolveDescriptorCachesDynamicModules:
 
         mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=True)
 
-    @patch(f"{FACTORY_MODULE}.force_cache_dynamic_modules")
-    @patch(f"{FACTORY_MODULE}.AutoConfig")
+    @patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules")
+    @patch(f"{REGISTRY_MODULE}.AutoConfig")
     def test_force_cache_called_without_trust_remote_code(
         self, mock_auto_config_cls, mock_force_cache
     ):
@@ -59,20 +57,23 @@ class TestResolveDescriptorCachesDynamicModules:
 
         mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=False)
 
+    @patch(f"{REGISTRY_MODULE}.register_native_config_aliases")
+    @patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules")
+    @patch(f"{REGISTRY_MODULE}.AutoConfig")
+    def test_native_config_aliases_registered_before_loading_pretrained_config(
+        self, mock_auto_config_cls, mock_force_cache, mock_register_aliases
+    ):
+        mock_config = MagicMock()
+        mock_config.model_type = "llama"
+        mock_auto_config_cls.from_pretrained.side_effect = (
+            lambda *args, **kwargs: mock_config
+            if mock_register_aliases.called
+            else pytest.fail("native aliases must be registered before AutoConfig loading")
+        )
 
-def test_resolve_descriptor_caches_dynamic_modules():
-    """End-to-end: resolve_descriptor_from_pretrained must cache dynamic modules so decoder_layer_cls works."""
-    pytest.importorskip("mamba_ssm")
+        mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path")
 
-    descriptor = mtpz.anymodel.resolve_descriptor_from_pretrained(MODEL_ID, trust_remote_code=True)
-
-    layer_classes = descriptor.decoder_layer_cls()
-    assert layer_classes, (
-        "decoder_layer_cls() returned empty after resolve_descriptor_from_pretrained"
-    )
-    print(
-        f"  Descriptor: {descriptor.__name__}, decoder classes: {[c.__name__ for c in layer_classes]}"
-    )
+        mock_register_aliases.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -84,8 +85,8 @@ def test_resolve_descriptor_caches_dynamic_modules():
         ("qwen3_6", "Qwen3P5VLModelDescriptor"),
     ],
 )
-@patch(f"{FACTORY_MODULE}.force_cache_dynamic_modules")
-@patch(f"{FACTORY_MODULE}.AutoConfig")
+@patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules")
+@patch(f"{REGISTRY_MODULE}.AutoConfig")
 def test_resolve_qwen3_5_and_qwen3_6_model_types(
     mock_auto_config_cls, mock_force_cache, model_type, descriptor_name
 ):
@@ -94,7 +95,7 @@ def test_resolve_qwen3_5_and_qwen3_6_model_types(
     mock_config.model_type = model_type
     mock_auto_config_cls.from_pretrained.return_value = mock_config
 
-    descriptor = mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path")
+    resolution = mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path")
 
-    assert descriptor.__name__ == descriptor_name
+    assert resolution.descriptor.__name__ == descriptor_name
     mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=False)
