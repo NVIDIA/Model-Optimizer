@@ -672,6 +672,29 @@ def test_needs_activation_forward_ignores_mx_and_dynamic_quantizers():
     assert not _needs_activation_forward_for_max_calib(dyn)
 
 
+def test_needs_activation_forward_for_static_bias_calibrator():
+    """A static bias calibrator collects data during the forward, even on MX/dynamic amax."""
+    static_bias = {-1: None, "type": "static"}
+    mx_cfg = {"num_bits": (4, 3), "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}}
+
+    # MX amax (no per-tensor amax) but a *static* bias -> the forward is still required.
+    mx_static_bias = _make_quant_linear(QuantizerAttributeConfig(**mx_cfg, bias=static_bias))
+    assert mx_static_bias.input_quantizer.bias_type == "static"
+    assert _needs_activation_forward_for_max_calib(mx_static_bias)
+
+    # A *dynamic* bias is computed on the fly, so no forward is needed.
+    mx_dynamic_bias = _make_quant_linear(
+        QuantizerAttributeConfig(**mx_cfg, bias={-1: None, "type": "dynamic"})
+    )
+    assert not _needs_activation_forward_for_max_calib(mx_dynamic_bias)
+
+    # constant_amax exempts the quantizer from calibration entirely (bias included).
+    const_static_bias = _make_quant_linear(
+        QuantizerAttributeConfig(num_bits=8, constant_amax=127.0, bias=static_bias)
+    )
+    assert not _needs_activation_forward_for_max_calib(const_static_bias)
+
+
 def test_max_calib_config_skip_is_opt_in():
     """The flag is opt-in (default False) so it does not change behavior for direct callers."""
     assert MaxCalibConfig().skip_forward_without_activation_calib is False

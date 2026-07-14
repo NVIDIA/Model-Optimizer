@@ -258,16 +258,17 @@ def _needs_activation_forward_for_max_calib(model: nn.Module) -> bool:
     """Return True if any enabled quantizer still needs a calibration forward pass.
 
     Weight quantizers are calibrated directly on the weight tensors by
-    :func:`weight_only_quantize`, so they never need the data forward. Activation-side
-    quantizers (input/output/BMM) need it only when they collect data-driven statistics:
-    i.e. they are enabled, have a calibrator, and are none of
+    :func:`weight_only_quantize`, so they never need the data forward. An activation-side
+    quantizer (input/output/BMM) needs it when it collects data-driven statistics during the
+    forward, which :func:`finish_stats_collection` does in two ways:
 
-    - dynamic (top-level ``type: dynamic``), which computes amax on the fly;
-    - MX formats (MXFP4/MXFP8), whose per-block E8M0 scales are dynamic and which carry no
-      per-tensor amax (``is_mx_format`` makes ``amax`` always ``None``);
-    - pinned to a constant amax (``use_constant_amax`` / ``constant_amax``). Constant-amax
-      quantizers also skip bias calibration in :func:`finish_stats_collection`, so they never
-      require the forward either.
+    - **amax**: loaded for a quantizer that has a calibrator and is not dynamic (top-level
+      ``type: dynamic``), MX (MXFP4/MXFP8, whose E8M0 per-block scales are dynamic and which
+      carry no per-tensor amax), or pinned to a constant amax
+      (``use_constant_amax`` / ``constant_amax``);
+    - **static bias**: loaded for a quantizer with a static ``bias_calibrator``. Constant-amax
+      quantizers are exempted from calibration entirely (they ``continue`` before the bias
+      block), so only non-constant quantizers with a static bias need the forward for it.
 
     When this returns False (e.g. an experts-only recipe whose activation quantizers all use
     ``constant_amax``), the calibration forward can be skipped entirely and only weight
@@ -280,12 +281,18 @@ def _needs_activation_forward_for_max_calib(model: nn.Module) -> bool:
         # are calibrated on the weight tensor directly, not via the data forward.
         if any(part.endswith("weight_quantizer") for part in name.split(".")):
             continue
-        if (
-            module._dynamic
-            or module.is_mx_format
-            or module._use_constant_amax
-            or getattr(module, "_constant_amax", None) is not None
-        ):
+
+        is_constant = (
+            module._use_constant_amax or getattr(module, "_constant_amax", None) is not None
+        )
+
+        # A static bias calibrator collects data during the forward. Constant-amax quantizers
+        # skip bias calibration, so only non-constant quantizers with a static bias need it.
+        if not is_constant and module.bias_calibrator is not None and module.bias_type == "static":
+            return True
+
+        # amax is data-driven only for a calibrated, non-dynamic, non-MX, non-constant quantizer.
+        if is_constant or module._dynamic or module.is_mx_format:
             continue
         if getattr(module, "_calibrator", None) is not None:
             return True
