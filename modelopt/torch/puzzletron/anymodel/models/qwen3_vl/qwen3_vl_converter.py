@@ -47,24 +47,30 @@ class Qwen3VLConverter(Converter):
             if is_moe_layer:
                 # MoE layer
                 block_config = BlockConfig(
-                    attention=AttentionConfig(
-                        no_op=False, num_key_value_heads=text_config.num_key_value_heads
-                    ),
-                    ffn=FFNConfig(
-                        moe=MoEConfig(
-                            num_local_experts=text_config.num_experts,
-                            expert_intermediate_dim=text_config.moe_intermediate_size,
-                            num_experts_per_tok=text_config.num_experts_per_tok,
-                        )
+                    subblock_configs=(
+                        AttentionConfig(
+                            no_op=False,
+                            num_kv_heads=text_config.num_key_value_heads,
+                            num_query_heads=text_config.num_attention_heads,
+                        ),
+                        MoEConfig(
+                            num_experts=text_config.num_experts,
+                            expert_intermediate_size=text_config.moe_intermediate_size,
+                            top_k=text_config.num_experts_per_tok,
+                        ),
                     ),
                 )
             else:
                 # Dense layer
                 block_config = BlockConfig(
-                    attention=AttentionConfig(
-                        no_op=False, num_key_value_heads=text_config.num_key_value_heads
+                    subblock_configs=(
+                        AttentionConfig(
+                            no_op=False,
+                            num_kv_heads=text_config.num_key_value_heads,
+                            num_query_heads=text_config.num_attention_heads,
+                        ),
+                        FFNConfig(no_op=False, intermediate_size=text_config.intermediate_size),
                     ),
-                    ffn=FFNConfig(no_op=False, intermediate_size=text_config.intermediate_size),
                 )
 
             block_configs.append(block_config)

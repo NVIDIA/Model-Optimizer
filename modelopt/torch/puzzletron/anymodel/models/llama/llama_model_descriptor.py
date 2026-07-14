@@ -30,9 +30,16 @@ from transformers.models.llama.modeling_llama import (
 from ....block_config import BlockConfig
 from ....pruning.ffn_intermediate_pruning_mixin import FFNIntermediateLayerDescriptor
 from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
+from ...capabilities import default_capabilities
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer import deci_x_patcher
 from ...puzzformer.no_op import MatchingZeros, Same, return_tuple_of_size
+from ..generic_decoder import (
+    DecoderLayout,
+    GatedDenseFFNContract,
+    GenericDecoderContract,
+    StandardGQAAttentionContract,
+)
 
 __all__ = [
     "LlamaModelDescriptor",
@@ -49,11 +56,40 @@ class LlamaModelDescriptor(ModelDescriptor):
     def decoder_layer_cls():
         return LlamaDecoderLayer
 
+    @classmethod
+    def generic_decoder_contract(cls, config):
+        return GenericDecoderContract(
+            descriptor_name="llama",
+            model_family="llama",
+            layout=DecoderLayout(
+                language_config_path=(),
+                language_prefix="model",
+                layer_template="model.layers.{layer_idx}",
+                input_embedding="model.embed_tokens",
+                output_embedding="lm_head",
+                final_norm="model.norm",
+                layer_norm_names=("input_layernorm", "post_attention_layernorm"),
+            ),
+            attention=StandardGQAAttentionContract(),
+            dense_ffn=GatedDenseFFNContract(),
+            native_automodel_supported=True,
+            sequence_parallel_supported=True,
+        )
+
+    @classmethod
+    def embedding_pruning_spec(cls, config, *, widths, alignment: int):
+        return cls.generic_decoder_contract(config).embedding_pruning_spec(
+            config, widths=widths, alignment=alignment
+        )
+
     @staticmethod
     def block_config_to_layer_overrides(block_config: BlockConfig):
+        attention = block_config.require_subblock("attention")
+        ffn = block_config.require_subblock("ffn")
         return {
-            "intermediate_size": block_config.ffn.intermediate_size,
-            "num_key_value_heads": block_config.attention.num_key_value_heads,
+            "intermediate_size": ffn.intermediate_size,
+            "num_key_value_heads": attention.num_kv_heads,
+            "num_attention_heads": attention.num_query_heads,
         }
 
     @staticmethod
@@ -143,6 +179,10 @@ class LlamaModelDescriptor(ModelDescriptor):
 
         layer_name_patterns.update(**build_ffn_predicates(), **build_attention_predicates())
         return layer_name_patterns
+
+    @classmethod
+    def puzzletron_capabilities(cls, config):
+        return cls.generic_decoder_contract(config).capabilities(config)
 
 
 @dataclass

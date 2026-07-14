@@ -41,10 +41,14 @@ class LlamaConverter(Converter):
 
         block_configs = [
             BlockConfig(
-                attention=AttentionConfig(
-                    no_op=False, num_key_value_heads=config.num_key_value_heads
+                subblock_configs=(
+                    AttentionConfig(
+                        no_op=False,
+                        num_kv_heads=config.num_key_value_heads,
+                        num_query_heads=config.num_attention_heads,
+                    ),
+                    FFNConfig(no_op=False, intermediate_size=config.intermediate_size),
                 ),
-                ffn=FFNConfig(no_op=False, intermediate_size=config.intermediate_size),
             ).to_dict()
             for _ in range(num_hidden_layers)
         ]

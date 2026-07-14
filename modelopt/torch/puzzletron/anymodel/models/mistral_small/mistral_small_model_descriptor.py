@@ -45,9 +45,12 @@ class MistralSmallModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def block_config_to_layer_overrides(block_config: BlockConfig):
+        attention = block_config.require_subblock("attention")
+        ffn = block_config.require_subblock("ffn")
         return {
-            "intermediate_size": block_config.ffn.intermediate_size,
-            "num_key_value_heads": block_config.attention.num_key_value_heads,
+            "intermediate_size": ffn.intermediate_size,
+            "num_key_value_heads": attention.num_kv_heads,
+            "num_attention_heads": attention.num_query_heads,
         }
 
     @staticmethod

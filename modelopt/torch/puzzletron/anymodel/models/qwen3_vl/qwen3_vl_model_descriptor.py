@@ -73,13 +73,20 @@ class Qwen3VLModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def block_config_to_layer_overrides(block_config: BlockConfig):
-        override_kwargs = {"num_key_value_heads": block_config.attention.num_key_value_heads}
+        attention = block_config.require_subblock("attention")
+        moe = block_config.get_subblock("moe")
+        override_kwargs = {
+            "num_key_value_heads": attention.num_kv_heads,
+            "num_attention_heads": attention.num_query_heads,
+        }
 
-        if block_config.ffn.moe:
-            override_kwargs["moe_intermediate_size"] = block_config.ffn.moe.expert_intermediate_dim
-            override_kwargs["num_experts"] = block_config.ffn.moe.num_local_experts
+        if moe is not None:
+            override_kwargs["moe_intermediate_size"] = moe.expert_intermediate_size
+            override_kwargs["num_experts"] = moe.num_experts
+            override_kwargs["num_experts_per_tok"] = moe.top_k
         else:
-            override_kwargs["intermediate_size"] = block_config.ffn.intermediate_size
+            ffn = block_config.require_subblock("ffn")
+            override_kwargs["intermediate_size"] = ffn.intermediate_size
 
         return override_kwargs
 

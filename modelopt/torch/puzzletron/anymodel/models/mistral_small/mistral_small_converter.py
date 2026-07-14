@@ -31,8 +31,14 @@ class MistralSmallConverter(Converter):
         num_hidden_layers = config.num_hidden_layers
 
         block_config = BlockConfig(
-            attention=AttentionConfig(no_op=False, num_key_value_heads=config.num_key_value_heads),
-            ffn=FFNConfig(no_op=False, intermediate_size=config.intermediate_size),
+            subblock_configs=(
+                AttentionConfig(
+                    no_op=False,
+                    num_kv_heads=config.num_key_value_heads,
+                    num_query_heads=config.num_attention_heads,
+                ),
+                FFNConfig(no_op=False, intermediate_size=config.intermediate_size),
+            ),
         ).to_dict()
 
         block_configs = [block_config.copy() for _ in range(num_hidden_layers)]
