@@ -1,0 +1,244 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for the puzzletron -> NeMo recipe config translation (no NeMo/GPU)."""
+
+from types import SimpleNamespace
+
+import pytest
+from omegaconf import OmegaConf
+
+from modelopt.torch.puzzletron.plugins.automodel.config import (
+    _align_pipeline_batch_size,
+    build_recipe_config,
+    build_solution_recipe_config,
+    scoring_params,
+)
+
+
+def _cfg(method="independent", eval_samples=200, micro_batch_size=2):
+    return OmegaConf.create(
+        {
+            "puzzle_dir": "/puzzle",
+            "descriptor": "qwen3",
+            "nccl_timeout_minutes": 90,
+            "pruning": {
+                "activations_log_dir": "/puzzle/scores",
+                "eval_samples": eval_samples,
+                "micro_batch_size": micro_batch_size,
+                "activation_hooks_kwargs": {"method": method, "optimize_for": "memory"},
+                "automodel": {
+                    "force_hf": True,
+                    "eval_iters": 50,
+                    "recipe": {
+                        "model": {"torch_dtype": "bf16"},
+                        "distributed": {"tp_size": 2, "ep_size": 1},
+                        "dataset": {"_target_": "some.dataset"},
+                    },
+                },
+            },
+        }
+    )
+
+
+def test_build_recipe_config_injects_model_fields():
+    recipe = build_recipe_config(_cfg())
+    model = recipe["model"]
+    assert model["_target_"] == "nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained"
+    assert model["pretrained_model_name_or_path"] == "/puzzle/ckpts/teacher"
+    assert model["anymodel_descriptor"] == "qwen3"
+    assert model["force_hf"] is True
+    assert model["torch_dtype"] == "bf16"  # operator-provided field preserved
+    assert recipe["distributed"]["tp_size"] == 2
+    assert recipe["dist_env"]["timeout_minutes"] == 90
+
+
+def test_build_recipe_config_respects_explicit_overrides():
+    cfg = _cfg()
+    cfg.pruning.model_name_or_path = "/custom/teacher"
+    cfg.pruning.automodel.recipe.model.anymodel_descriptor = "llama"
+    cfg.pruning.automodel.recipe.model.force_hf = False
+
+    recipe = build_recipe_config(cfg)
+    assert recipe["model"]["pretrained_model_name_or_path"] == "/custom/teacher"
+    assert recipe["model"]["anymodel_descriptor"] == "llama"
+    assert recipe["model"]["force_hf"] is False
+
+
+def test_solution_recipe_uses_inferred_runtime_descriptor(monkeypatch):
+    cfg = OmegaConf.create(
+        {
+            "puzzle_dir": "/puzzle",
+            "_runtime": {"descriptor": "qwen3"},
+            "pruning": {"block_size": 32, "micro_batch_size": 1},
+            "scoring": {
+                "block_size": 32,
+                "micro_batch_size": 1,
+                "automodel": {"force_hf": False, "recipe": {"model": {}}},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
+        lambda *args, **kwargs: None,
+    )
+
+    recipe = build_solution_recipe_config(cfg, "/checkpoint")
+
+    assert recipe["model"]["anymodel_descriptor"] == "qwen3"
+
+
+@pytest.mark.parametrize(("cp_size", "expected_backend"), [(1, None), (2, {"attn": "te"})])
+def test_build_recipe_config_injects_topology_dependent_model_backend(
+    monkeypatch, cp_size, expected_backend
+):
+    cfg = _cfg()
+    cfg.descriptor = "llama"
+    cfg.pruning.model_name_or_path = "/converted/llama"
+    cfg.pruning.automodel.recipe.distributed.cp_size = cp_size
+
+    class Descriptor:
+        @staticmethod
+        def automodel_model_kwargs(config, *, distributed):
+            return {"backend": {"attn": "te"}} if distributed["cp_size"] > 1 else {}
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._registered_descriptor",
+        lambda name: Descriptor,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._load_model_config_for_descriptor",
+        lambda *args, **kwargs: object(),
+    )
+
+    recipe = build_recipe_config(cfg)
+
+    assert recipe["model"].get("backend") == expected_backend
+
+
+def test_build_recipe_config_uses_torch_linears_for_native_dtensor_tp(monkeypatch):
+    """PyTorch Row/ColwiseParallel cannot shard Transformer Engine Linear modules."""
+
+    cfg = _cfg()
+    cfg.pruning.automodel.force_hf = False
+    cfg.pruning.automodel.recipe.model.force_hf = False
+    cfg.pruning.automodel.recipe.distributed.cp_size = 2
+
+    class Descriptor:
+        @staticmethod
+        def automodel_model_kwargs(config, *, distributed):
+            return {"backend": {"attn": "te"}}
+
+        @staticmethod
+        def automodel_tp_linear_backend(config):
+            return "torch"
+
+        @staticmethod
+        def puzzletron_capabilities(config):
+            return SimpleNamespace(native_automodel_supported=True)
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._registered_descriptor",
+        lambda name: Descriptor,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._load_model_config_for_descriptor",
+        lambda *args, **kwargs: object(),
+    )
+
+    recipe = build_recipe_config(cfg)
+
+    assert recipe["model"]["backend"] == {"attn": "te", "linear": "torch"}
+
+
+def test_pipeline_batch_alignment_counts_ep_when_explicit_dp_is_absent():
+    recipe = {
+        "distributed": {
+            "dp_size": None,
+            "ep_size": 2,
+            "pp_size": 2,
+            "pipeline": {},
+        },
+        "step_scheduler": {},
+    }
+
+    _align_pipeline_batch_size(recipe, micro_batch_size=2)
+
+    assert recipe["distributed"]["pipeline"]["pp_microbatch_size"] == 2
+    assert recipe["distributed"]["pipeline"]["pp_batch_size"] == 4
+    assert recipe["step_scheduler"]["local_batch_size"] == 4
+    assert recipe["step_scheduler"]["global_batch_size"] == 8
+
+
+def test_build_recipe_config_missing_descriptor_raises():
+    cfg = _cfg()
+    cfg.descriptor = None  # and no descriptor under recipe.model
+    with pytest.raises(ValueError, match="descriptor"):
+        build_recipe_config(cfg)
+
+
+def test_scoring_params_independent():
+    params = scoring_params(_cfg(method="independent"))
+    assert params["method"] == "independent"
+    assert params["activations_log_dir"] == "/puzzle/scores"
+    assert params["eval_iters"] == 50  # explicit automodel.eval_iters for non-iterative
+    assert params["force_hf"] is True
+    assert params["ep_size"] == 1
+    assert params["use_puzzletron_dataloader"] is True
+    # validation_full_iters = eval_samples // micro_batch_size = 200 // 2
+    assert params["hook_kwargs"]["validation_full_iters"] == 100
+    assert params["hook_kwargs"]["optimize_for"] == "memory"
+
+
+def test_scoring_params_iterative_eval_iters_equals_full_iters():
+    params = scoring_params(_cfg(method="iterative", eval_samples=200, micro_batch_size=2))
+    # iterative: one iteration per batch -> eval_iters == validation_full_iters
+    assert params["hook_kwargs"]["validation_full_iters"] == 100
+    assert params["eval_iters"] == 100
+
+
+def test_build_recipe_config_selects_native_vlm_and_neat_packing():
+    cfg = _cfg()
+    cfg.pruning.automodel.force_hf = False
+    cfg.pruning.automodel.use_puzzletron_dataloader = False
+    cfg.data = {
+        "path": "/puzzle/data/intersyn-16",
+        "modality": "multimodal",
+        "layout": "packed_varlen",
+        "max_sample_length": 1536,
+        "packing": {
+            "pack_size": 2048,
+            "packing_ratio": 0.9,
+            "drop_long_samples": True,
+        },
+    }
+
+    recipe = build_recipe_config(cfg)
+
+    assert recipe["model"]["_target_"] == (
+        "nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained"
+    )
+    assert recipe["dataset"]["_target_"] == (
+        "modelopt.torch.puzzletron.dataset.load_materialized_conversation_dataset"
+    )
+    assert recipe["dataset"]["path_or_dataset"] == "/puzzle/data/intersyn-16"
+    assert recipe["dataset"]["max_length"] == 1536
+    assert recipe["packed_sequence"]["pack_size"] == 2048
+    assert recipe["packed_sequence"]["packing_ratio"] == 0.9
+    assert recipe["packed_sequence"]["attn_implementation"] == "flash_attention_2"
