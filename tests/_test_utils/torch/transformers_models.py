@@ -184,6 +184,126 @@ def create_tiny_qwen3vl_dir(
     return qwen3vl_dir
 
 
+##### Qwen3.5 #####
+def get_tiny_qwen3_5(**config_kwargs) -> PreTrainedModel:
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+
+    set_seed(SEED)
+
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "linear_key_head_dim": 8,
+        "linear_value_head_dim": 8,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_conv_kernel_dim": 4,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+        "layer_types": [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+        ],
+    }
+    kwargs.update(**config_kwargs)
+    return Qwen3_5ForCausalLM(Qwen3_5TextConfig(**kwargs))
+
+
+def create_tiny_qwen3_5_dir(
+    tmp_path: Path | str,
+    with_tokenizer: bool = False,
+    with_mtp: bool = False,
+    **config_kwargs,
+) -> Path:
+    qwen3_5_dir = Path(tmp_path) / "tiny_qwen3_5"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(qwen3_5_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    model = get_tiny_qwen3_5(**config_kwargs)
+    model.save_pretrained(qwen3_5_dir)
+    if with_mtp:
+        _add_mtp_tensor_to_single_safetensors(
+            qwen3_5_dir, torch.ones(model.config.hidden_size, dtype=torch.bfloat16)
+        )
+    return qwen3_5_dir
+
+
+def get_tiny_qwen3_5vl(**config_kwargs) -> PreTrainedModel:
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
+
+    set_seed(SEED)
+
+    text_kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "linear_key_head_dim": 8,
+        "linear_value_head_dim": 8,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_conv_kernel_dim": 4,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+        "layer_types": [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+        ],
+    }
+    text_kwargs.update(config_kwargs)
+    vision_kwargs = {
+        "depth": 1,
+        "hidden_size": 16,
+        "intermediate_size": 16,
+        "num_heads": 2,
+        "in_channels": 3,
+        "patch_size": 4,
+        "spatial_merge_size": 1,
+        "temporal_patch_size": 1,
+        "out_hidden_size": text_kwargs["hidden_size"],
+    }
+    cfg = Qwen3_5Config(text_config=text_kwargs, vision_config=vision_kwargs)
+    return Qwen3_5ForConditionalGeneration(cfg)
+
+
+def create_tiny_qwen3_5vl_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    qwen3_5vl_dir = Path(tmp_path) / "tiny_qwen3_5vl"
+    if with_tokenizer:
+        tokenizer = get_tiny_tokenizer()
+        tokenizer.save_pretrained(qwen3_5vl_dir)
+        config_kwargs["vocab_size"] = tokenizer.vocab_size
+    get_tiny_qwen3_5vl(**config_kwargs).save_pretrained(qwen3_5vl_dir)
+    return qwen3_5vl_dir
+
+
+def _add_mtp_tensor_to_single_safetensors(model_dir: Path, tensor: torch.Tensor) -> None:
+    from safetensors.torch import load_file, save_file
+
+    model_path = model_dir / "model.safetensors"
+    if not model_path.exists():
+        raise FileNotFoundError(f"Expected single-file safetensors checkpoint at {model_path}")
+    tensors = load_file(model_path)
+    tensors["mtp.0.norm.weight"] = tensor
+    save_file(tensors, model_path, metadata={"format": "pt"})
+
+
 ##### NEMOTRON #####
 def get_tiny_nemotron(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)

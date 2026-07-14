@@ -58,7 +58,22 @@ def find_missing_solutions(solutions_df, validation_dir):
     return unbenchmarked_solutions.tolist()
 
 
-def get_solutions_to_validate(cfg: DictConfig):
+def partition_for_node(items: list, num_nodes: int, node_index: int) -> list:
+    """Keep only the items this node owns, interleaved by value.
+
+    Interleaving (``value % num_nodes``) rather than contiguous slicing balances
+    the heavier solutions (e.g. attention layers with more variants) across nodes.
+    Works on solution ids, so it is stable across resumes and composes with
+    ``skip_existing_solutions``.
+    """
+    if num_nodes <= 1:
+        return items
+    if not (0 <= node_index < num_nodes):
+        raise ValueError(f"node_index {node_index} must be in [0, {num_nodes})")
+    return [x for x in items if int(x) % num_nodes == node_index]
+
+
+def get_solutions_to_validate(cfg: DictConfig, num_nodes: int = 1, node_index: int = 0):
     _solutions_to_validate = cfg.scoring.solutions_to_validate
     if _solutions_to_validate is None:
         single_block_replacement_solutions = pd.read_json(cfg.scoring.solutions_path)
@@ -68,12 +83,15 @@ def get_solutions_to_validate(cfg: DictConfig):
             )
         else:
             _solutions_to_validate = np.arange(single_block_replacement_solutions.shape[0]).tolist()
-    return _solutions_to_validate
+    return partition_for_node(_solutions_to_validate, num_nodes, node_index)
 
 
-def launch_scoring(cfg: DictConfig):
-    cfg.scoring.solutions_to_validate = get_solutions_to_validate(cfg)
-    mprint(f"Solutions to validate: {cfg.scoring.solutions_to_validate}")
+def launch_scoring(cfg: DictConfig, num_nodes: int = 1, node_index: int = 0):
+    cfg.scoring.solutions_to_validate = get_solutions_to_validate(cfg, num_nodes, node_index)
+    mprint(
+        f"Solutions to validate (node {node_index}/{num_nodes}): "
+        f"{cfg.scoring.solutions_to_validate}"
+    )
     validate_puzzle_solutions(args=cfg.scoring)
 
 

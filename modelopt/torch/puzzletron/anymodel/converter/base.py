@@ -75,10 +75,19 @@ class Converter(ABC):
         for name, file in param_to_file.items():
             file_to_params[file].add(name)
 
+        passthrough_subblocks = descriptor.get_passthrough_weight_groups(all_param_names)
+        passthrough_param_names = {
+            name for param_names in passthrough_subblocks.values() for name in param_names
+        }
+        model_param_names = [
+            name for name in all_param_names if name not in passthrough_param_names
+        ]
+
         # Determine subblocks needed
         subblocks = descriptor.get_weight_groups(
-            all_param_names, num_hidden_layers=num_hidden_layers
+            model_param_names, num_hidden_layers=num_hidden_layers
         )
+        subblocks.update(passthrough_subblocks)
 
         # Output directory
         out_dir = output_dir / "subblocks_safetensors"
@@ -97,8 +106,9 @@ class Converter(ABC):
                 for name in param_names:
                     if param_to_file[name] == file and name in data:
                         converted_name = cls.convert_weight_name(name)
+                        is_passthrough = name in passthrough_param_names
                         # Convert MoE packed tensors if quantized is mxfp4 //gpt-oss-20b
-                        if getattr(cls, "quantized", None) == "mxfp4":
+                        if getattr(cls, "quantized", None) == "mxfp4" and not is_passthrough:
                             if name.endswith("_blocks"):
                                 converted_name = converted_name.replace("_blocks", "")
                                 tensors[converted_name] = convert_moe_packed_tensors(
@@ -136,13 +146,17 @@ class Converter(ABC):
         input_dir: Path,
         output_dir: Path,
         trust_remote_code: bool = False,
+        descriptor: ModelDescriptor | None = None,
     ):
         """Convert config and add block_configs."""
         config = load_model_config(input_dir, trust_remote_code=trust_remote_code)
 
         block_configs = cls.create_block_configs_from_main_config(config)
         out_config = copy.deepcopy(config)
-        out_config.block_configs = block_configs
+        if descriptor is None:
+            out_config.block_configs = block_configs
+        else:
+            descriptor.set_block_configs(out_config, block_configs)
 
         save_model_config(out_config, output_dir)
         return out_config
@@ -182,10 +196,14 @@ class Converter(ABC):
         cls.copy_checkpoint_files(input_dir, output_dir)
         trust_remote_code = descriptor.requires_trust_remote_code()
         config = cls.convert_configs_in_dirs(
-            input_dir, output_dir, trust_remote_code=trust_remote_code
+            input_dir, output_dir, trust_remote_code=trust_remote_code, descriptor=descriptor
         )
+        lm_config = descriptor.get_language_model_config(config)
         cls.convert_model_weights(
-            input_dir, output_dir, descriptor=descriptor, num_hidden_layers=config.num_hidden_layers
+            input_dir,
+            output_dir,
+            descriptor=descriptor,
+            num_hidden_layers=lm_config.num_hidden_layers,
         )
 
     @staticmethod

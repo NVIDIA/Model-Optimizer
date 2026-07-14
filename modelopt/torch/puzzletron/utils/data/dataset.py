@@ -27,6 +27,7 @@ __all__ = [
     "ConstantLengthDataset",
     "permute",
     "get_fim_token_ids",
+    "render_messages_to_text",
 ]
 
 FIM_TOKEN_START = "<fim"  # nosec B105
@@ -60,6 +61,29 @@ def _format_messages_without_chat_template(messages) -> str:
     return "\n".join(
         f"{message['role']}: {_message_content_to_text(message['content'])}" for message in messages
     )
+
+
+def render_messages_to_text(content, tokenizer):
+    """Render a raw ``messages``/content value to the text that will be tokenized.
+
+    This is the exact rendering used by ``ConstantLengthDataset.__iter__`` for the
+    not-yet-tokenized path. It is factored out so offline pre-tokenization (see
+    ``examples/puzzletron/tools/pretokenize_dataset.py``) produces token ids that
+    are identical to the on-the-fly path. Non-list content is returned unchanged.
+    """
+    sample = content
+    if isinstance(sample, list):
+        if len(sample) == 0:
+            sample = ""
+        elif isinstance(sample[0], dict) and {"content", "role"}.issubset(sample[0]):
+            if len(sample) > 1:
+                if getattr(tokenizer, "chat_template", None) is not None:
+                    sample = tokenizer.apply_chat_template(sample, tokenize=False)
+                else:
+                    sample = _format_messages_without_chat_template(sample)
+            else:
+                sample = _message_content_to_text(sample[0]["content"])
+    return sample
 
 
 class ConstantLengthDataset(IterableDataset):
@@ -148,22 +172,9 @@ class ConstantLengthDataset(IterableDataset):
                     ):
                         continue
                     if not self.is_dataset_already_tokenized:
-                        sample = sample[self.content_field]
-                        if isinstance(sample, list):
-                            if len(sample) == 0:
-                                sample = ""
-                            elif isinstance(sample[0], dict) and {"content", "role"}.issubset(
-                                sample[0]
-                            ):
-                                if len(sample) > 1:
-                                    if getattr(self.tokenizer, "chat_template", None) is not None:
-                                        sample = self.tokenizer.apply_chat_template(
-                                            sample, tokenize=False
-                                        )
-                                    else:
-                                        sample = _format_messages_without_chat_template(sample)
-                                else:
-                                    sample = _message_content_to_text(sample[0]["content"])
+                        sample = render_messages_to_text(
+                            sample[self.content_field], self.tokenizer
+                        )
                     else:
                         sample = sample[self.tokens_field]
                     sample = sample[: self.max_sample_length]

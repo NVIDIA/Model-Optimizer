@@ -406,8 +406,12 @@ def create_child_state_dict(
 
     # Phase 1: Initial setup and validation
     setup_start_time = time.time()
+    # Get language model config for LM-specific attributes (VL models have nested config)
+    original_lm_config = descriptor.get_language_model_config(original_config)
+    new_lm_config = descriptor.get_language_model_config(new_config)
+
     if owned_block_indexes is None:
-        owned_block_indexes = set(range(new_config.num_hidden_layers))
+        owned_block_indexes = set(range(new_lm_config.num_hidden_layers))
 
     # Auto-calculate optimal layer workers: min(cpu_count, num_layers)
     if max_layer_workers is None:
@@ -433,10 +437,6 @@ def create_child_state_dict(
                 out_state_dict[key] = tensor.contiguous()
             else:
                 out_state_dict[key] = tensor
-
-    # Get language model config for LM-specific attributes (VL models have nested config)
-    original_lm_config = descriptor.get_language_model_config(original_config)
-    new_lm_config = descriptor.get_language_model_config(new_config)
 
     # Check if original model is MHA (all layers have num_key_value_heads == num_attention_heads)
     original_num_kv_heads_per_layer = [
@@ -846,8 +846,9 @@ def update_model_config(
     if model_config_overrides is None:
         return new_model_config
 
+    lm_config = getattr(model_config, "text_config", model_config)
     model_config_overrides = _parse_model_config_overrides(
-        model_config_overrides, model_config.num_hidden_layers
+        model_config_overrides, lm_config.num_hidden_layers
     )
 
     def override(item, item_overrides):

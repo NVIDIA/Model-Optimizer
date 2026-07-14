@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Type
 
 import torch.nn as nn
 
-from ...block_config import BlockConfig
+from ...block_config import AttentionConfig, BlockConfig, FFNConfig, maybe_cast_block_configs
 from ...utils.dummy_modules import DummyBlock
 
 __all__ = ["ModelDescriptor"]
@@ -191,6 +191,110 @@ class ModelDescriptor(ABC):
         language model portion (e.g., config.text_config for Qwen-VL).
         """
         return config
+
+    @classmethod
+    def set_block_configs(cls, model_config: Any, block_configs: list[BlockConfig | dict]) -> None:
+        """Attach block configs and update the language model layer count.
+
+        Multimodal configs often store the decoder layer count on a nested text
+        config.  This helper keeps callers from writing to ``config.num_hidden_layers``
+        directly when the real language model config lives elsewhere.
+        """
+        block_configs = maybe_cast_block_configs(block_configs)
+        model_config.block_configs = block_configs
+        lm_config = cls.get_language_model_config(model_config)
+        lm_config.num_hidden_layers = len(block_configs)
+        if lm_config is not model_config:
+            model_config.num_hidden_layers = len(block_configs)
+
+    @classmethod
+    def runtime_benchmark_config_fields(cls, lm_config: Any) -> dict[str, Any]:
+        """Return model-family fields required to synthesize latency benchmark configs."""
+        return {}
+
+    @classmethod
+    def runtime_benchmark_base_block_config(cls, runtime_config: Any) -> BlockConfig:
+        """Return the standard block used as benchmark scaffolding.
+
+        Runtime stats measure a candidate subblock by repeating it after one standard
+        block, then subtracting a matching baseline.  Descriptors may override this
+        for hybrid families whose default attention/MLP classes need extra config.
+        """
+        return BlockConfig(
+            attention=AttentionConfig(
+                no_op=False, num_key_value_heads=runtime_config.num_key_value_heads
+            ),
+            ffn=FFNConfig(no_op=False, intermediate_size=256, moe=None),
+        )
+
+    @classmethod
+    def create_runtime_benchmark_model(
+        cls, runtime_config: Any, block_configs: list[BlockConfig]
+    ) -> nn.Module:
+        """Build a small model for vLLM latency benchmarking.
+
+        Implement this on descriptors that support runtime stats.  Keeping model
+        construction on the descriptor prevents the central benchmarking loop from
+        hardcoding architecture-specific attention or MLP classes.
+        """
+        raise NotImplementedError(f"Runtime benchmarking is not supported for {cls.__name__}")
+
+    @classmethod
+    def runtime_benchmark_export_descriptor(cls) -> type["ModelDescriptor"]:
+        """Return the descriptor that matches the temporary benchmark checkpoint layout."""
+        return cls
+
+    @classmethod
+    def update_runtime_benchmark_config(cls, config_data: dict[str, Any]) -> None:
+        """Adjust the temporary benchmark config before vLLM loads it."""
+
+    @classmethod
+    def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
+        """Return extra ``vllm bench latency`` args for this descriptor."""
+        return []
+
+    @staticmethod
+    def passthrough_weight_name_predicates() -> Dict[str, re.Pattern]:
+        """Return optional non-model weight groups that should be preserved as-is.
+
+        These tensors are not loaded into the active HF model but should survive
+        conversion and checkpoint realization, e.g. draft/MTP heads ignored by the
+        main model class.
+        """
+        return {}
+
+    @classmethod
+    def get_passthrough_weight_groups(cls, layer_names: Iterable[str]) -> Dict[str, List[str]]:
+        """Group passthrough weights using ``passthrough_weight_name_predicates``."""
+        weight_groups = defaultdict(list)
+        passthrough_predicates = cls.passthrough_weight_name_predicates()
+        for name in layer_names:
+            for group, pattern in passthrough_predicates.items():
+                if pattern.match(name):
+                    weight_groups[group].append(name)
+                    break
+        return weight_groups
+
+    @classmethod
+    def is_passthrough_weight_name(cls, name: str) -> bool:
+        """Return whether ``name`` belongs to a passthrough weight group."""
+        return any(
+            pattern.match(name) for pattern in cls.passthrough_weight_name_predicates().values()
+        )
+
+    @classmethod
+    def split_passthrough_state_dict(
+        cls, state_dict: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Split a state dict into model weights and passthrough-only weights."""
+        model_state_dict = {}
+        passthrough_state_dict = {}
+        for key, value in state_dict.items():
+            if cls.is_passthrough_weight_name(key):
+                passthrough_state_dict[key] = value
+            else:
+                model_state_dict[key] = value
+        return model_state_dict, passthrough_state_dict
 
     @staticmethod
     def truncate_pattern_for_subblock(

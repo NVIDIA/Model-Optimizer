@@ -84,6 +84,7 @@ class FFNIntermediatePruningMixIn(PruningMixIn):
         pruned_filters = None
         projection_matrix = None
 
+        descriptor = kwargs.get("descriptor")
         for mlp_key in mlp_keys:
             expanded_dim = 1 if self.layer_descriptor.down_proj_name in mlp_key else 0
             if mlp_key in new_state_dict.keys():
@@ -99,6 +100,7 @@ class FFNIntermediatePruningMixIn(PruningMixIn):
                     mlp_init_config,
                     pruned_filters,
                     projection_matrix,
+                    descriptor=descriptor,
                 )
                 layer_out_state_dict[mlp_key] = mlp_module_weight
 

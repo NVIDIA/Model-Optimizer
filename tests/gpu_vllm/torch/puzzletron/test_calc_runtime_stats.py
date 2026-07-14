@@ -26,7 +26,9 @@ from pathlib import Path
 import pytest
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from omegaconf import OmegaConf
+from transformers import LlamaConfig
 
+from modelopt.torch.puzzletron.anymodel.models.llama import LlamaModelDescriptor
 from modelopt.torch.puzzletron.block_config import AttentionConfig, FFNConfig
 from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import calc_runtime_for_subblocks
 
@@ -55,6 +57,8 @@ def test_calc_runtime_for_subblocks(tmp_path: Path):
         hidden_size=256,
         num_attention_heads=4,
         num_key_value_heads=2,
+        descriptor=LlamaModelDescriptor,
+        lm_config=LlamaConfig(hidden_size=256, num_attention_heads=4, num_key_value_heads=2),
         tokenizer_path=str(tokenizer_dir),
         prefill_seq_len=8,
         generation_seq_len=4,

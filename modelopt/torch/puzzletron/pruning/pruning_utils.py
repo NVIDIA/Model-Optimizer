@@ -125,14 +125,18 @@ def _init_mlp_module(
     mlp_init_config: Optional[dict[str, Any]],
     pruned_filters: Optional[torch.Tensor] = None,
     projection_matrix: Optional[dict[str, torch.Tensor]] = None,
+    descriptor: Optional["ModelDescriptor"] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[dict[str, torch.Tensor]]]:
     if isinstance(mlp_init_mode, str):
         mlp_init_mode = MlpInitMode(mlp_init_mode)
     assert orig_item.ndim == 2, f"{orig_item.ndim=}"
     assert new_item.ndim == 2, f"{new_item.ndim=}"
 
-    assert new_config.num_hidden_layers == original_config.num_hidden_layers, (
-        f"({new_config.num_hidden_layers=}) != ({original_config.num_hidden_layers=})"
+    get_lm_config = descriptor.get_language_model_config if descriptor is not None else lambda c: c
+    new_num_layers = get_lm_config(new_config).num_hidden_layers
+    orig_num_layers = get_lm_config(original_config).num_hidden_layers
+    assert new_num_layers == orig_num_layers, (
+        f"({new_num_layers=}) != ({orig_num_layers=})"
     )
 
     new_intermediate_size = new_config.block_configs[layer_idx].ffn.intermediate_size

@@ -53,7 +53,7 @@ class TestBuildSlurmExecutor:
             identity=None,
             slurm_config=slurm_config,
             experiment_id="exp_001",
-            job_dir="/lustre/experiments",
+            job_dir="/shared/experiments",
             task_name="job_0",
             packager=MagicMock(),
             experiment_title="cicd",

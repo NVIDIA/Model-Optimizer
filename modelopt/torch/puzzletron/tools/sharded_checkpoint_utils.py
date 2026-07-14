@@ -200,7 +200,10 @@ def load_and_shard_model(
                 set_submodule(
                     model_shard,
                     descriptor.input_embedding_name(),
-                    DummyWTE(model_config.hidden_size, dtype=runtime.dtype),
+                    DummyWTE(
+                        descriptor.get_language_model_config(model_config).hidden_size,
+                        dtype=runtime.dtype,
+                    ),
                 )
         else:
             mprint("Loading state_dict in main process")

@@ -22,12 +22,8 @@ calc_subblock_stats:
   batch_sizes: [1, 4]
   prefill_seq_len: 1024
   generation_seq_len: 1024
-  num_active_tokens_override: # Optional override for sequence lengths
-  prefill_queue_size: 0
-  allocate_prefill_query: false
   merge_with_existing_stats: false
   subblock_stats_filename: "subblock_stats.json"
-  moe_stats_filename: "moe_stats.json"
 
 scoring:
   descriptor: ${descriptor}

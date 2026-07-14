@@ -182,6 +182,7 @@ class MambaConfig(BaseDataclass):
     num_heads: int
     head_dim: int
     num_groups: int
+    conv_kernel_size: int = 4
 
 
 @dataclass(frozen=True, kw_only=True)

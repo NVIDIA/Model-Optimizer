@@ -82,7 +82,7 @@ The launcher SSHes to `SLURM_HOST` via `nemo_run.SSHTunnel`. If `identity` is om
 > **`SLURM_HF_LOCAL` — HF cache bind-mount.** `slurm_factory` mounts the host HF
 > cache at `/hf-local` from `$SLURM_HF_LOCAL` (default `/hf-local`). If that host
 > dir is missing, pyxis fails at container start (`enroot-mount: failed to mount:
-> /hf-local`). Export a real path (`SLURM_HF_LOCAL=/lustre/.../hf-local`); `ptq.sh`
+> /hf-local`). Export a real path (`SLURM_HF_LOCAL=/shared/.../hf-local`); `ptq.sh`
 > reuses a model already there (skips the download).
 
 **If using `clusters.yaml`**: read the cluster config and map fields to launcher args:

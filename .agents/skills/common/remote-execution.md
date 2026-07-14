@@ -148,7 +148,7 @@ remote_sync_from <remote_output_subdir> /local/output/
 | SSH proxy completely unreachable (`Network is unreachable`) | VPN/proxy host is down or not running on this machine | Check if VPN is connected; verify `socat`/proxy service is running locally; try direct SSH by temporarily removing `ssh_proxy` from config |
 | `unix_listener: cannot bind to path ... Read-only file system` | SSH ControlMaster socket in non-writable `/tmp` | `remote_exec.sh` auto-finds writable dir; ensure `TMPDIR` or `/tmp/claude-*` exists |
 | `cd: /home/user/~/path: No such file or directory` | `~` not expanding on remote | Use absolute paths in `workspace` config, not `~/...` |
-| Login nodes resolve home dirs differently | Symlinked home dirs vary by node | Use absolute lustre/NFS paths (e.g., `/lustre/fs1/...`) in job scripts |
+| Login nodes resolve home dirs differently | Symlinked home dirs vary by node | Use absolute lustre/NFS paths (e.g., `/shared/fs1/...`) in job scripts |
 | `#!` becomes `#\!` in scripts | Shell environment mangles shebang | Fix with `sed -i 's\|^#\\\\!\|#!\|' script.sh` after writing |
 
 ## Reference Files

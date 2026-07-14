@@ -1,0 +1,4 @@
+defaults:
+  - nemotron-3-nano-30b-a3b
+  - override bypass: defaults
+  - _self_

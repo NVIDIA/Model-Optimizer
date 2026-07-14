@@ -16,149 +16,144 @@
 
 """Runtime statistics calculation for NAS subblock benchmarking via vLLM."""
 
+import os
+import queue
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from functools import cache
 from pathlib import Path
+from typing import Any, Type
 
 from omegaconf import DictConfig
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
 
-from ..anymodel.models.llama import LlamaModelDescriptor
-from ..anymodel.puzzformer import deci_x_patcher
+from ..anymodel.model_descriptor import ModelDescriptor
 from ..block_config import AttentionConfig, BlockConfig, FFNConfig, SubblockConfig
+from ..tools.logger import mprint
 from .runtime_utils import RuntimeConfig, save_model
 from .runtime_vllm import run_vllm_latency_benchmark
 
 
-def _make_standard_block_config(num_key_value_heads: int) -> BlockConfig:
-    return BlockConfig(
-        attention=AttentionConfig(no_op=False, num_key_value_heads=num_key_value_heads),
-        ffn=FFNConfig(no_op=False, intermediate_size=256, moe=None),
-    )
+def _freeze_config_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(sorted((key, _freeze_config_value(val)) for key, val in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_config_value(item) for item in value)
+    return value
+
+
+def _freeze_config_fields(fields: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    return tuple(sorted((key, _freeze_config_value(value)) for key, value in fields.items()))
 
 
 def create_benchmark_model(
-    vocab_size: int,
-    hidden_size: int,
-    num_key_value_heads: int,
-    num_attention_heads: int,
-    prefill_seq_len: int,
-    generation_seq_len: int,
-    block_config: BlockConfig | None,
-    repeat_block_n_times: int = 10,
-) -> LlamaForCausalLM:
-    """Build a small Llama model with repeated subblocks for latency benchmarking."""
-    block_configs = [_make_standard_block_config(num_key_value_heads)]
-
-    if block_config:
-        block_configs.extend([block_config] * repeat_block_n_times)
-
-    model_config = LlamaConfig(
-        max_position_embeddings=prefill_seq_len + generation_seq_len,
-        vocab_size=vocab_size,
-        hidden_size=hidden_size,
-        num_attention_heads=num_attention_heads,
-        num_hidden_layers=len(block_configs),
-        head_dim=None,  # Compute from hidden_size // num_attention_heads instead of using default 128
-        # this is required for trt-llm convertion to know which model classes to use to the checkpoint
-        auto_map={
-            "AutoConfig": "transformers.models.llama.configuration_llama.LlamaConfig",
-            "AutoModelForCausalLM": "transformers.models.llama.modeling_llama.LlamaForCausalLM",
-        },
-    )
-
-    for idx, bc in enumerate(block_configs):
-        block_configs[idx] = bc.to_dict()
-    model_config.block_configs = block_configs
-
-    with deci_x_patcher(LlamaModelDescriptor, block_configs):
-        model = AutoModelForCausalLM.from_config(model_config)
-
-    model.config.architectures = ["AnyModel"]
-    model.config.base_architecture = "LlamaForCausalLM"
-
-    return model
-
-
-def calc_model_runtime(model: LlamaForCausalLM, runtime_config: RuntimeConfig) -> float:
-    """Measure total runtime of a model via vLLM latency benchmark."""
-    with tempfile.TemporaryDirectory() as model_tmpdir:
-        save_model(model, Path(runtime_config.tokenizer_path), Path(model_tmpdir))
-        model_total_runtime_ms = run_vllm_latency_benchmark(Path(model_tmpdir), runtime_config)
-    return model_total_runtime_ms
-
-
-@cache
-def calc_subblock_runtime(
     runtime_config: RuntimeConfig,
-    subblock_config: SubblockConfig | None,
-) -> float:
-    """Measure total runtime of a repeated subblock via vLLM latency benchmark."""
-    block_config: BlockConfig | None = None
+    block_config: BlockConfig | None,
+):
+    """Build a small descriptor-specific model with repeated subblocks."""
+    block_configs = [runtime_config.descriptor.runtime_benchmark_base_block_config(runtime_config)]
+    if block_config:
+        block_configs.extend([block_config] * runtime_config.repeat_block_n_times)
 
-    if subblock_config is not None:
-        if isinstance(subblock_config, BlockConfig):
-            block_config = subblock_config
-        elif isinstance(subblock_config, (AttentionConfig, FFNConfig)):
-            if isinstance(subblock_config, FFNConfig):
-                block_config = BlockConfig(
-                    attention=AttentionConfig(
-                        no_op=False, num_key_value_heads=runtime_config.num_key_value_heads
-                    ),
-                    ffn=subblock_config,
-                )
-            else:
-                block_config = subblock_config.to_blockconfig()
-        else:
-            raise Exception(f"Runtime stats: Not supported subblock type: {subblock_config}")
-
-    model = create_benchmark_model(
-        runtime_config.vocab_size,
-        runtime_config.hidden_size,
-        runtime_config.num_key_value_heads,
-        runtime_config.num_attention_heads,
-        runtime_config.prefill_seq_len,
-        runtime_config.generation_seq_len,
-        block_config=block_config,
-        repeat_block_n_times=runtime_config.repeat_block_n_times,
-    )
-    return calc_model_runtime(model, runtime_config)
+    return runtime_config.descriptor.create_runtime_benchmark_model(runtime_config, block_configs)
 
 
-@cache
-def calc_base_runtime(runtime_config: RuntimeConfig, subblock_config: SubblockConfig) -> float:
-    """Calculate the base runtime of a model with no subblocks."""
-    base_runtime_ms = None
+def _block_config_for_subblock(
+    runtime_config: RuntimeConfig, subblock_config: SubblockConfig | None
+) -> BlockConfig | None:
+    """Map a subblock to the repeated ``BlockConfig`` used to benchmark it.
+
+    ``None`` means "no repeated block" (i.e. the base block only).
+    """
+    if subblock_config is None:
+        return None
+    if isinstance(subblock_config, BlockConfig):
+        return subblock_config
+    if isinstance(subblock_config, FFNConfig):
+        base_block_config = runtime_config.descriptor.runtime_benchmark_base_block_config(
+            runtime_config
+        )
+        return BlockConfig(attention=base_block_config.attention, ffn=subblock_config)
     if isinstance(subblock_config, AttentionConfig):
-        base_runtime_ms = calc_subblock_runtime(runtime_config, None)
-    elif isinstance(subblock_config, FFNConfig):
-        attn_block_config = AttentionConfig(
-            no_op=False, num_key_value_heads=runtime_config.num_key_value_heads
-        ).to_blockconfig()
-        base_runtime_ms = calc_subblock_runtime(runtime_config, attn_block_config)
-    else:
-        raise ValueError(f"Unsupported subblock type: {type(subblock_config)}")
-
-    return base_runtime_ms
+        return subblock_config.to_blockconfig()
+    raise Exception(f"Runtime stats: Not supported subblock type: {subblock_config}")
 
 
-@cache
-def calc_no_block_runtime(runtime_config: RuntimeConfig) -> float:
-    """Estimate the overhead runtime (embedding + LM head) with no decoder blocks."""
-    runtime_cfg_ten_blocks = replace(runtime_config, repeat_block_n_times=9)
+def _benchmark_spec(
+    runtime_config: RuntimeConfig,
+    block_config: BlockConfig | None,
+    gpu_id: str | int | None,
+    cache_dir: Path | None,
+) -> float:
+    """Build the repeated-block model for a spec and measure its total latency (ms)."""
+    model = create_benchmark_model(runtime_config, block_config=block_config)
+    with tempfile.TemporaryDirectory() as model_tmpdir:
+        save_model(
+            model,
+            Path(runtime_config.tokenizer_path),
+            Path(model_tmpdir),
+            runtime_config.descriptor,
+        )
+        return run_vllm_latency_benchmark(
+            Path(model_tmpdir), runtime_config, gpu_id=gpu_id, cache_dir=cache_dir
+        )
 
-    block_config = _make_standard_block_config(runtime_config.num_key_value_heads)
 
-    runtime_ms_one_block = calc_subblock_runtime(runtime_config, None)  # only one base block
-    runtime_ms_ten_blocks = calc_subblock_runtime(
-        runtime_cfg_ten_blocks, block_config
-    )  # one base block + 9 repeated blocks
+def _resolve_gpu_ids() -> list[str | None]:
+    """Physical GPU ids available to this process (honoring CUDA_VISIBLE_DEVICES).
 
-    no_block_runtime_ms = runtime_ms_one_block - (runtime_ms_ten_blocks - runtime_ms_one_block) / 9
+    Returns ``[None]`` when no GPUs are detected, meaning "run serially and let
+    vLLM choose the device".
+    """
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible is not None and cuda_visible.strip() != "":
+        ids = [d.strip() for d in cuda_visible.split(",") if d.strip() != ""]
+        return ids or [None]
+    try:
+        import torch
 
-    return no_block_runtime_ms
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return [str(i) for i in range(torch.cuda.device_count())]
+    except Exception:  # pragma: no cover - torch optional / no CUDA
+        pass
+    return [None]
+
+
+def _run_benchmarks(
+    specs: dict[tuple, tuple[RuntimeConfig, BlockConfig | None]],
+    gpu_ids: list[str | None],
+    cache_dir: Path | None,
+) -> dict[tuple, float]:
+    """Benchmark each unique spec, fanning out across ``gpu_ids`` concurrently.
+
+    Each concurrent task holds one GPU (taken from a queue) for the duration of
+    its vLLM subprocess, so at most ``len(gpu_ids)`` benchmarks run at once and
+    no two share a device. ``subprocess.run`` releases the GIL while the child
+    runs, so threads give real parallelism here.
+    """
+    gpu_pool: "queue.Queue[str | None]" = queue.Queue()
+    for gpu in gpu_ids:
+        gpu_pool.put(gpu)
+
+    def _work(item: tuple[tuple, tuple[RuntimeConfig, BlockConfig | None]]) -> tuple[tuple, float]:
+        key, (rc, block_config) = item
+        gpu = gpu_pool.get()
+        try:
+            ms = _benchmark_spec(rc, block_config, gpu_id=gpu, cache_dir=cache_dir)
+        finally:
+            gpu_pool.put(gpu)
+        return key, ms
+
+    max_workers = max(1, len(gpu_ids))
+    results: dict[tuple, float] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for key, ms in tqdm(
+            executor.map(_work, list(specs.items())),
+            total=len(specs),
+            desc=f"Benchmarking {len(specs)} subblock models on {max_workers} GPU(s)",
+        ):
+            results[key] = ms
+    return results
 
 
 def calc_runtime_for_subblocks(
@@ -168,12 +163,21 @@ def calc_runtime_for_subblocks(
     hidden_size: int,
     num_attention_heads: int,
     num_key_value_heads: int,
+    descriptor: Type[ModelDescriptor],
+    lm_config: Any,
     tokenizer_path: str,
     prefill_seq_len: int,
     generation_seq_len: int,
     batch_size: int,
+    cache_dir: Path | None = None,
 ) -> tuple[dict[SubblockConfig, float], float]:
-    """Benchmark each unique subblock and return per-subblock runtimes and no-block overhead."""
+    """Benchmark each unique subblock and return per-subblock runtimes and no-block overhead.
+
+    The distinct vLLM benchmarks are enumerated up front and run concurrently
+    across all visible GPUs (with on-disk caching via ``cache_dir`` for resume),
+    then the per-subblock runtimes are derived from the cached measurements using
+    the same differencing the sequential version used.
+    """
     repeat_block_n_times = 10
 
     runtime_config = RuntimeConfig(
@@ -181,6 +185,8 @@ def calc_runtime_for_subblocks(
         hidden_size,
         num_attention_heads,
         num_key_value_heads,
+        descriptor,
+        _freeze_config_fields(descriptor.runtime_benchmark_config_fields(lm_config)),
         tokenizer_path,
         repeat_block_n_times,
         prefill_seq_len,
@@ -188,26 +194,68 @@ def calc_runtime_for_subblocks(
         batch_size,
         runtime_stats_config.get("num_iters", 30),
         runtime_stats_config.get("num_warmup_iters", 10),
+        runtime_stats_config.get("max_num_seqs", None),
     )
+    # Config with one fewer repeat, used only for the no-block overhead estimate.
+    runtime_config_fewer = replace(runtime_config, repeat_block_n_times=repeat_block_n_times - 1)
+    base_block_config = descriptor.runtime_benchmark_base_block_config(runtime_config)
+    base_attention_block = base_block_config.attention.to_blockconfig()
 
+    # ---- Enumerate the distinct (runtime_config, block_config) benchmarks ----
+    # A spec is uniquely identified by (runtime_config, block_config); the same
+    # spec requested twice (e.g. a baseline shared by every FFN subblock) is
+    # benchmarked once.
+    specs: dict[tuple, tuple[RuntimeConfig, BlockConfig | None]] = {}
+
+    def _add_spec(rc: RuntimeConfig, block_config: BlockConfig | None) -> tuple:
+        key = (rc, block_config)
+        specs.setdefault(key, (rc, block_config))
+        return key
+
+    base_key = _add_spec(runtime_config, None)  # 1 base block (attn baseline + no-block)
+    ten_block_key = _add_spec(runtime_config_fewer, base_block_config)  # base + 9 base blocks
+    ffn_baseline_key = _add_spec(runtime_config, base_attention_block)  # base + 10 attn-only blocks
+
+    subblock_spec_keys: dict[SubblockConfig, tuple] = {}
+    for subblock_config in subblock_config_set:
+        if not subblock_config.no_op:
+            subblock_spec_keys[subblock_config] = _add_spec(
+                runtime_config, _block_config_for_subblock(runtime_config, subblock_config)
+            )
+
+    # ---- Run all benchmarks (parallel across GPUs, cached/resumable) ----
+    gpu_ids = _resolve_gpu_ids()
+    mprint(
+        f"Computing runtime for {len(subblock_config_set)} subblocks "
+        f"({len(specs)} unique benchmarks) across {len(gpu_ids)} GPU(s)"
+    )
+    results = _run_benchmarks(specs, gpu_ids, cache_dir)
+
+    # ---- Derive per-subblock runtimes from the measured totals ----
     runtime_by_subblock_dict = {}
-
-    for subblock_config in tqdm(
-        sorted(subblock_config_set),
-        desc=(f"Computing runtime for {len(subblock_config_set)} subblocks\n"),
-    ):
-        baseline_runtime_ms = calc_base_runtime(runtime_config, subblock_config)
+    for subblock_config in sorted(subblock_config_set):
+        if isinstance(subblock_config, AttentionConfig):
+            baseline_runtime_ms = results[base_key]
+        elif isinstance(subblock_config, FFNConfig):
+            baseline_runtime_ms = results[ffn_baseline_key]
+        else:
+            raise ValueError(f"Unsupported subblock type: {type(subblock_config)}")
 
         if subblock_config.no_op:
             total_runtime_ms = 0.0
         else:
-            subblock_total_runtime_ms = calc_subblock_runtime(runtime_config, subblock_config)
+            subblock_total_runtime_ms = results[subblock_spec_keys[subblock_config]]
             total_runtime_ms = (
                 subblock_total_runtime_ms - baseline_runtime_ms
             ) / repeat_block_n_times
 
         runtime_by_subblock_dict[subblock_config] = total_runtime_ms
 
-    no_block_runtime_ms = calc_no_block_runtime(runtime_config)
+    # No-block overhead (embedding + LM head): extrapolate from 1- and 10-block models.
+    runtime_ms_one_block = results[base_key]
+    runtime_ms_ten_blocks = results[ten_block_key]
+    no_block_runtime_ms = runtime_ms_one_block - (
+        runtime_ms_ten_blocks - runtime_ms_one_block
+    ) / (repeat_block_n_times - 1)
 
     return runtime_by_subblock_dict, no_block_runtime_ms

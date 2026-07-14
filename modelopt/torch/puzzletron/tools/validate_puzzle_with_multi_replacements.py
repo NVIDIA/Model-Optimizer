@@ -41,7 +41,7 @@ from ..utils.parsing import get_nested_key
 from ..utils.validate_runtime_pipeline import perform_pipeline_stitches
 from . import validate_model
 from .checkpoint_utils import copy_tokenizer
-from .checkpoint_utils_hf import save_checkpoint_from_shards
+from .checkpoint_utils_hf import load_passthrough_state_dict, save_checkpoint_from_shards
 from .common import resolve_torch_dtype
 from .sharded_checkpoint_utils import load_and_shard_model
 from .validation_utils import (
@@ -184,12 +184,19 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
 
             model_config.dtype = resolve_torch_dtype(getattr(args, "model_dtype", "torch.bfloat16"))
             Converter.copy_checkpoint_files(args.teacher_dir, checkpoint_dir)
+            passthrough_state_dict = (
+                load_passthrough_state_dict(args.teacher_dir, descriptor)
+                if dist.is_master()
+                else None
+            )
             if realizable_as_symlinks:
                 if dist.is_master():
                     # TODO: Loo into internal Puzzleron code to see how to save as symlinks
                     # save_checkpoint_as_symlinks is currently not supported
                     pass
-            save_checkpoint_from_shards(model, checkpoint_dir, descriptor)
+            save_checkpoint_from_shards(
+                model, checkpoint_dir, descriptor, extra_state_dict=passthrough_state_dict
+            )
 
             copy_tokenizer(
                 args.tokenizer_name,
