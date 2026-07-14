@@ -664,13 +664,10 @@ def _modelopt_source() -> dict[str, Any]:
     return {"commit": commit, "dirty": False}
 
 
-def _ordered_id_sha256(sample_ids: Sequence[str], *, split: str) -> str:
-    digest = hashlib.sha256()
-    digest.update(f"modelopt-pdd-ordered-{split}-ids-v1\0".encode())
-    for sample_id in sample_ids:
-        digest.update(sample_id.encode())
-        digest.update(b"\n")
-    return digest.hexdigest()
+def _ordered_id_sha256(sample_ids: Sequence[str]) -> str:
+    from portable_cache import ordered_sample_ids_sha256
+
+    return ordered_sample_ids_sha256(sample_ids)
 
 
 def _training_sample_ids(world_size: int) -> tuple[str, ...]:
@@ -773,8 +770,8 @@ def _identity(
         guidance_rescale=config.guidance.rescale,
         guidance_eps=config.guidance.eps,
         automodel_snapshot=setup.automodel_snapshot,
-        ordered_train_id_sha256=_ordered_id_sha256(train_ids, split="train"),
-        ordered_heldout_id_sha256=_ordered_id_sha256(heldout_ids, split="heldout"),
+        ordered_train_id_sha256=_ordered_id_sha256(train_ids),
+        ordered_heldout_id_sha256=_ordered_id_sha256(heldout_ids),
         dataset_snapshot_sha256=_canonical_sha256(
             {"domain": "modelopt-pdd-synthetic-smoke-v1", "config": raw["pdd"]}
         ),

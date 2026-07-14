@@ -99,6 +99,18 @@ def _stage_result(stage: str) -> dict:
     }
 
 
+def test_gpu_harness_uses_shared_unambiguous_ordered_id_hash() -> None:
+    assert smoke._ordered_id_sha256(("a", "b")) == (
+        "8cf774af4e8509811c2d4bc2adec6b852e4c614f9d8d833924502ead7c0689d7"
+    )
+    assert smoke._ordered_id_sha256(("a\nb",)) == (
+        "41e07cc133e8a85fc4a08e60a38c223f3c24dbca80312d106f251e533254eedf"
+    )
+    source = _HARNESS.read_text()
+    assert "modelopt-pdd-ordered-{split}-ids-v1" not in source
+    assert 'digest.update(b"\\n")' not in source
+
+
 def _automodel_snapshot_fixture() -> tuple[dict, dict]:
     records = []
     tree = hashlib.sha256()

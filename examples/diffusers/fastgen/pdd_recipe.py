@@ -88,6 +88,8 @@ class PDDRecipeConfig:
     all_metadata_index: str
     train_metadata_index: str
     validation_metadata_index: str
+    expected_approved_ordered_ids_sha256: str | None
+    expected_heldout_count: int | None
     device: torch.device
     dtype: torch.dtype
     fuse_qkv_projections: bool
@@ -232,6 +234,24 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
         data.get("validation_metadata_index", "metadata_heldout.json"),
         label="data.validation_metadata_index",
     ).as_posix()
+    expected_approved_ordered_ids_sha256 = data.get("expected_approved_ordered_ids_sha256")
+    if expected_approved_ordered_ids_sha256 is not None and (
+        not isinstance(expected_approved_ordered_ids_sha256, str)
+        or len(expected_approved_ordered_ids_sha256) != 64
+        or expected_approved_ordered_ids_sha256.lower() != expected_approved_ordered_ids_sha256
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_approved_ordered_ids_sha256
+        )
+    ):
+        raise ValueError(
+            "data.expected_approved_ordered_ids_sha256 must be a lowercase hexadecimal SHA-256."
+        )
+    expected_heldout_count = data.get("expected_heldout_count")
+    if expected_heldout_count is not None and (
+        type(expected_heldout_count) is not int or expected_heldout_count <= 0
+    ):
+        raise ValueError("data.expected_heldout_count must be a positive integer.")
 
     _reject_enabled(model.get("transformer_engine_linear"), name="global TE-linear conversion")
     _reject_enabled(model.get("peft"), name="PEFT/LoRA")
@@ -435,6 +455,8 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
         all_metadata_index=all_metadata_index,
         train_metadata_index=train_metadata_index,
         validation_metadata_index=validation_metadata_index,
+        expected_approved_ordered_ids_sha256=expected_approved_ordered_ids_sha256,
+        expected_heldout_count=expected_heldout_count,
         device=torch.device(model.get("device", "cuda" if torch.cuda.is_available() else "cpu")),
         dtype=_resolve_dtype(model.get("torch_dtype", "bfloat16")),
         fuse_qkv_projections=fuse_qkv_projections,

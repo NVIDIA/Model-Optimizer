@@ -6,6 +6,11 @@ Changelog
 
 **Backward Breaking Changes**
 
+- FastGen example portable caches now require authenticated schema-2 all/train/held-out indices.
+  Existing schema-1 or unversioned caches, including fresh preprocessing output, must be finalized
+  with ``examples/diffusers/fastgen/migrate_cache_manifest.py`` and an approved ordered-ID
+  artifact; they no longer load directly. This changes only the example cache protocol, not the
+  framework-neutral PDD checkpoint or API contract.
 - Remove the ``examples/diffusers/eval`` image-quality evaluation example (ImageReward / CLIP-IQA / CLIP metrics) and its references in ``examples/diffusers/README.md``. The example was deprecated in 0.45 and is no longer maintained.
 - Remove the deprecated ``examples/llm_autodeploy`` example (deprecated in 0.45). Use TensorRT-LLM's `AutoDeploy <https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy>`_ directly together with ModelOpt PTQ in ``examples/llm_ptq``.
 

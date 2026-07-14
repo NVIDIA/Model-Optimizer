@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import hashlib
 import logging
 import sys
 import time
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from portable_cache import ordered_sample_ids_sha256
 
 sys.dont_write_bytecode = True
 
@@ -24,6 +24,8 @@ _REPO_ROOT = _THIS_DIR.parents[2]
 for path in (_REPO_ROOT, _THIS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
+
+_CANONICAL_PDD_HELDOUT_COUNT = 2000
 
 
 def _parse_args() -> argparse.Namespace:
@@ -50,13 +52,7 @@ def _metadata_sample_ids(metadata: Any, *, split: str) -> tuple[str, ...]:
 
 
 def _ordered_id_sha256(metadata: Any, *, split: str) -> str:
-    sample_ids = _metadata_sample_ids(metadata, split=split)
-    digest = hashlib.sha256()
-    digest.update(f"modelopt-pdd-ordered-{split}-ids-v1\0".encode())
-    for sample_id in sample_ids:
-        digest.update(sample_id.encode())
-        digest.update(b"\n")
-    return digest.hexdigest()
+    return ordered_sample_ids_sha256(_metadata_sample_ids(metadata, split=split))
 
 
 def _dataloader_options(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -132,6 +128,15 @@ def _validate_dataset_snapshot(raw: Mapping[str, Any], config: Any) -> Mapping[s
     from portable_cache import resolve_cache_root
     from validate_cache_snapshot import validate_snapshot
 
+    if config.expected_approved_ordered_ids_sha256 is None:
+        raise ValueError(
+            "PDD training requires data.expected_approved_ordered_ids_sha256 before validation."
+        )
+    if config.expected_heldout_count != _CANONICAL_PDD_HELDOUT_COUNT:
+        raise ValueError(
+            f"PDD training requires data.expected_heldout_count={_CANONICAL_PDD_HELDOUT_COUNT}."
+        )
+
     options = _dataloader_options(raw)
     root = resolve_cache_root(options["cache_dir"])
     roots: list[str] = [""] * dist.get_world_size()
@@ -147,6 +152,8 @@ def _validate_dataset_snapshot(raw: Mapping[str, Any], config: Any) -> Mapping[s
                 all_index=config.all_metadata_index,
                 train_index=config.train_metadata_index,
                 heldout_index=config.validation_metadata_index,
+                expected_approved_ids_sha256=(config.expected_approved_ordered_ids_sha256),
+                expected_heldout_count=config.expected_heldout_count,
             )
             status = {"ok": True, "report": report}
         except BaseException as error:
@@ -162,6 +169,23 @@ def _validate_dataset_snapshot(raw: Mapping[str, Any], config: Any) -> Mapping[s
     if not isinstance(report, Mapping):
         raise RuntimeError("PDD dataset snapshot report is malformed.")
     return report
+
+
+def _validated_loader_order_hashes(
+    train_metadata: Any,
+    heldout_metadata: Any,
+    snapshot_report: Mapping[str, Any],
+) -> tuple[str, str]:
+    train_digest = _ordered_id_sha256(train_metadata, split="train")
+    heldout_digest = _ordered_id_sha256(heldout_metadata, split="heldout")
+    reported = snapshot_report.get("ordered_sample_ids_sha256")
+    if not isinstance(reported, Mapping):
+        raise RuntimeError("PDD dataset snapshot report has no ordered sample-ID hashes.")
+    if train_digest != reported.get("train"):
+        raise RuntimeError("training loader order does not match the authenticated snapshot.")
+    if heldout_digest != reported.get("heldout"):
+        raise RuntimeError("heldout loader order does not match the authenticated snapshot.")
+    return train_digest, heldout_digest
 
 
 def _build_validation_plan(sampler: Any, config: Any) -> tuple[Any, tuple[tuple[bool, ...], ...]]:
@@ -421,6 +445,11 @@ def main() -> None:
         validation_sampler,
         config,
     )
+    train_ordered_id_sha256, heldout_ordered_id_sha256 = _validated_loader_order_hashes(
+        sampler.dataset.metadata,
+        validation_sampler.dataset.metadata,
+        snapshot_report,
+    )
     setup = build_pdd_setup(config)
     transformer_config = getattr(setup.student, "config", None)
     if isinstance(transformer_config, Mapping):
@@ -446,11 +475,8 @@ def main() -> None:
         guidance_rescale=config.guidance.rescale,
         guidance_eps=config.guidance.eps,
         automodel_snapshot=setup.automodel_snapshot,
-        ordered_train_id_sha256=_ordered_id_sha256(sampler.dataset.metadata, split="train"),
-        ordered_heldout_id_sha256=_ordered_id_sha256(
-            validation_sampler.dataset.metadata,
-            split="heldout",
-        ),
+        ordered_train_id_sha256=train_ordered_id_sha256,
+        ordered_heldout_id_sha256=heldout_ordered_id_sha256,
         dataset_snapshot_sha256=snapshot_report["snapshot_sha256"],
         local_batch_size=config.training.local_batch_size,
         grad_accumulation_steps=config.training.grad_accumulation_steps,

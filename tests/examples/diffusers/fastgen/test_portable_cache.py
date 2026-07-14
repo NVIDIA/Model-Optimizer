@@ -27,10 +27,15 @@ from fastgen_data import (
 )
 from portable_cache import (
     DATASET_CACHE_ENV,
+    PORTABLE_SNAPSHOT_SCHEMA_VERSION,
+    PREPROCESS_STAGING_SCHEMA_VERSION,
     audit_no_absolute_paths,
+    load_approved_sample_ids,
     load_portable_metadata,
+    ordered_sample_ids_sha256,
     resolve_cache_root,
     resolve_negative_embedding,
+    select_pdd_holdout_ids,
     sha256_file,
 )
 from validate_cache_snapshot import validate_snapshot
@@ -44,7 +49,72 @@ def _sample_id(source_ref: str, resolution: tuple[int, int]) -> str:
 
 
 def _write_json(path: pathlib.Path, value) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n")
+
+
+def _write_approved_manifest(path: pathlib.Path, sample_ids: list[str]) -> str:
+    digest = ordered_sample_ids_sha256(sample_ids)
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "ordered_sample_ids": sample_ids,
+            "ordered_sample_ids_sha256": digest,
+        },
+    )
+    return digest
+
+
+def _make_id_only_snapshot(
+    root: pathlib.Path,
+    sample_ids: tuple[str, ...],
+    heldout_count: int,
+    *,
+    heldout_override: tuple[str, ...] | None = None,
+) -> None:
+    root.mkdir()
+    (root / "payload.pt").write_bytes(b"placeholder-not-read-before-split-gates")
+    entries = [
+        {
+            "sample_id": sample_id,
+            "cache_file": "payload.pt",
+            "payload_sha256": "0" * 64,
+        }
+        for sample_id in sample_ids
+    ]
+    _write_json(root / "metadata_shard_s0000.json", entries)
+    if heldout_override is None:
+        train_ids, heldout_ids = select_pdd_holdout_ids(sample_ids, heldout_count)
+    else:
+        heldout_ids = heldout_override
+        heldout_members = set(heldout_ids)
+        train_ids = tuple(sample_id for sample_id in sample_ids if sample_id not in heldout_members)
+    approved_digest = ordered_sample_ids_sha256(sample_ids)
+    policy = {
+        "schema_version": 1,
+        "algorithm": "sha256-domain-ranked",
+        "domain": "modelopt-pdd-holdout-v1",
+        "heldout_count": heldout_count,
+        "approved_ordered_ids_sha256": approved_digest,
+    }
+    for name, split, ids in (
+        ("metadata.json", "all", sample_ids),
+        ("metadata_train.json", "train", train_ids),
+        ("metadata_heldout.json", "heldout", heldout_ids),
+    ):
+        _write_json(
+            root / name,
+            {
+                "schema_version": 2,
+                "split": split,
+                "total_items": len(ids),
+                "num_shards": 1,
+                "shards": ["metadata_shard_s0000.json"],
+                "sample_ids": list(ids),
+                "ordered_sample_ids_sha256": ordered_sample_ids_sha256(ids),
+                "split_policy": policy,
+            },
+        )
 
 
 def _make_snapshot(root: pathlib.Path) -> dict[str, list[str]]:
@@ -83,22 +153,29 @@ def _make_snapshot(root: pathlib.Path) -> dict[str, list[str]]:
 
     _write_json(root / "metadata_shard_s0000.json", entries)
     all_ids = [entry["sample_id"] for entry in entries]
-    splits = {
-        "all": all_ids,
-        "train": [all_ids[2], all_ids[0], all_ids[1]],
-        "heldout": [all_ids[3]],
+    train_ids, heldout_ids = select_pdd_holdout_ids(all_ids, 1)
+    splits = {"all": all_ids, "train": list(train_ids), "heldout": list(heldout_ids)}
+    approved_digest = ordered_sample_ids_sha256(all_ids)
+    split_policy = {
+        "schema_version": 1,
+        "algorithm": "sha256-domain-ranked",
+        "domain": "modelopt-pdd-holdout-v1",
+        "heldout_count": 1,
+        "approved_ordered_ids_sha256": approved_digest,
     }
     for split, ids in splits.items():
         name = "metadata.json" if split == "all" else f"metadata_{split}.json"
         _write_json(
             root / name,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "split": split,
                 "total_items": len(ids),
                 "num_shards": 1,
                 "shards": ["metadata_shard_s0000.json"],
                 "sample_ids": ids,
+                "ordered_sample_ids_sha256": ordered_sample_ids_sha256(ids),
+                "split_policy": split_policy,
             },
         )
     negative_path = root / "negative_prompt_embedding.pt"
@@ -119,6 +196,153 @@ def _batch_signature(dataset: TextToImageDataset) -> list[tuple[str, float]]:
         (dataset[index]["sample_id"], dataset[index]["latent"].sum().item())
         for index in range(len(dataset))
     ]
+
+
+def test_authenticated_cache_constants_hash_framing_and_seedless_split() -> None:
+    assert PREPROCESS_STAGING_SCHEMA_VERSION == 1
+    assert PORTABLE_SNAPSHOT_SCHEMA_VERSION == 2
+    expected = {
+        ("a\nb",): "41e07cc133e8a85fc4a08e60a38c223f3c24dbca80312d106f251e533254eedf",
+        ("a", "b"): "8cf774af4e8509811c2d4bc2adec6b852e4c614f9d8d833924502ead7c0689d7",
+        ("ab", "c"): "6df9e72da4c55f09b4c0320337d6a5d46396271ac61b7a60e1ee8146ce49709e",
+        ("a", "bc"): "7cedefc9d46613683a89c3081c3a743b66164861975cf100346d59c13cf31d26",
+        tuple(
+            str(index) for index in range(16)
+        ): "b157f73e9710fe1eb2c4f8d94286f304d5c2a9de2b09b31d2b1f5eee15448e69",
+    }
+    for sample_ids, digest in expected.items():
+        assert ordered_sample_ids_sha256(sample_ids) == digest
+    assert len(set(expected.values())) == len(expected)
+
+    train, heldout = select_pdd_holdout_ids(tuple(str(index) for index in range(16)), 4)
+    assert heldout == ("4", "7", "10", "13")
+    assert train == tuple(str(index) for index in range(16) if str(index) not in heldout)
+    assert heldout not in (("0", "2", "4", "11"), ("2", "7", "8", "9"))
+
+
+def test_approved_id_artifact_is_strict_and_externally_authenticatable(tmp_path) -> None:
+    path = tmp_path / "approved.json"
+    digest = _write_approved_manifest(path, ["second", "first"])
+    assert load_approved_sample_ids(path, expected_sha256=digest) == (
+        ("second", "first"),
+        digest,
+    )
+
+    for value, message in (
+        ({"schema_version": 1}, "keys mismatch"),
+        (
+            {
+                "schema_version": 1,
+                "ordered_sample_ids": ["first", "first"],
+                "ordered_sample_ids_sha256": digest,
+            },
+            "duplicates",
+        ),
+    ):
+        _write_json(path, value)
+        with pytest.raises(ValueError, match=message):
+            load_approved_sample_ids(path)
+
+    path.write_text('{"schema_version":1,"schema_version":1}')
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_approved_sample_ids(path)
+    path.write_text('{"schema_version": NaN}')
+    with pytest.raises(ValueError, match="non-standard constant"):
+        load_approved_sample_ids(path)
+    path.write_bytes(b"\xff")
+    with pytest.raises(ValueError, match="UTF-8 JSON"):
+        load_approved_sample_ids(path)
+    path.write_text("{")
+    with pytest.raises(ValueError, match="UTF-8 JSON"):
+        load_approved_sample_ids(path)
+
+    real = tmp_path / "real.json"
+    _write_approved_manifest(real, ["first", "second"])
+    path.unlink()
+    path.symlink_to(real)
+    with pytest.raises(ValueError, match="symlink"):
+        load_approved_sample_ids(path)
+    with pytest.raises(ValueError, match="regular file"):
+        load_approved_sample_ids(tmp_path)
+    with pytest.raises(ValueError, match="expected approved-ID"):
+        load_approved_sample_ids(real, expected_sha256="f" * 64)
+
+
+@pytest.mark.parametrize(
+    "old_heldout",
+    [("0", "2", "4", "11"), ("2", "7", "8", "9")],
+)
+def test_self_consistent_old_seed_partitions_are_rejected(tmp_path, old_heldout) -> None:
+    root = tmp_path / "cache"
+    sample_ids = tuple(str(index) for index in range(16))
+    _make_id_only_snapshot(root, sample_ids, 4, heldout_override=old_heldout)
+    with pytest.raises(ValueError, match="frozen PDD policy"):
+        validate_snapshot(root, reject_orphans=False)
+
+
+def test_self_consistent_all_list_rewrite_fails_external_hash(tmp_path) -> None:
+    approved_ids = tuple(str(index) for index in range(16))
+    rewritten_ids = approved_ids[:-1]
+    root = tmp_path / "cache"
+    _make_id_only_snapshot(root, rewritten_ids, 4)
+    with pytest.raises(ValueError, match="expected approved ordered-ID hash"):
+        validate_snapshot(
+            root,
+            expected_approved_ids_sha256=ordered_sample_ids_sha256(approved_ids),
+            reject_orphans=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("policy_update", "message"),
+    [
+        ({"domain": "modelopt-fastgen-split-v1"}, "domain"),
+        ({"algorithm": "other"}, "algorithm"),
+        ({"schema_version": 2}, "schema_version"),
+        ({"heldout_count": True}, "heldout_count"),
+        ({"extra": "field"}, "keys mismatch"),
+    ],
+)
+def test_split_policy_tampering_is_rejected(tmp_path, policy_update, message) -> None:
+    root = tmp_path / "cache"
+    _make_snapshot(root)
+    for name in ("metadata.json", "metadata_train.json", "metadata_heldout.json"):
+        index = json.loads((root / name).read_text())
+        index["split_policy"].update(policy_update)
+        _write_json(root / name, index)
+    with pytest.raises(ValueError, match=message):
+        validate_snapshot(root)
+
+
+def test_strict_index_and_shard_json_reject_duplicates_and_nonfinite(tmp_path) -> None:
+    root = tmp_path / "cache"
+    _make_snapshot(root)
+    index_path = root / "metadata.json"
+    index_path.write_text('{"schema_version":2,"schema_version":2}')
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_portable_metadata(root)
+
+    _make_snapshot(tmp_path / "second")
+    shard_path = tmp_path / "second" / "metadata_shard_s0000.json"
+    shard_path.write_text('[{"sample_id":"a","value":NaN}]')
+    with pytest.raises(ValueError, match="non-standard constant"):
+        load_portable_metadata(tmp_path / "second")
+
+
+@pytest.mark.parametrize("actual_heldout_count", [1999, 2001])
+def test_validator_rejects_noncanonical_actual_holdout_counts(
+    tmp_path, actual_heldout_count
+) -> None:
+    root = tmp_path / "cache"
+    sample_ids = tuple(str(index) for index in range(actual_heldout_count + 1))
+    _make_id_only_snapshot(root, sample_ids, actual_heldout_count)
+    with pytest.raises(ValueError, match="expected_heldout_count"):
+        validate_snapshot(
+            root,
+            expected_approved_ids_sha256=ordered_sample_ids_sha256(sample_ids),
+            expected_heldout_count=2000,
+            reject_orphans=False,
+        )
 
 
 def test_cache_root_environment_precedence(monkeypatch, tmp_path):
@@ -266,7 +490,10 @@ def test_collate_emits_logical_identity_without_source_paths(tmp_path):
     root = tmp_path / "cache"
     _make_snapshot(root)
     dataset = TextToImageDataset(str(root), metadata_index="metadata_train.json")
-    samples = [dataset[1], dataset[2]]
+    same_resolution = next(
+        group["indices"] for group in dataset.bucket_groups.values() if len(group["indices"]) >= 2
+    )
+    samples = [dataset[index] for index in same_resolution[:2]]
     output = collate_fn_text_to_image(samples)
     assert output["metadata"]["sample_ids"] == [item["sample_id"] for item in samples]
     assert output["metadata"]["source_refs"] == [item["source_ref"] for item in samples]
@@ -288,6 +515,7 @@ def test_validator_detects_hash_split_and_orphan_failures(tmp_path):
     heldout_path = root / "metadata_heldout.json"
     heldout = json.loads(heldout_path.read_text())
     heldout["sample_ids"] = [splits["train"][0]]
+    heldout["ordered_sample_ids_sha256"] = ordered_sample_ids_sha256(heldout["sample_ids"])
     _write_json(heldout_path, heldout)
     with pytest.raises(ValueError, match="overlap"):
         validate_snapshot(root)
@@ -349,11 +577,13 @@ def test_empty_split_is_rejected_before_bucket_grouping(tmp_path):
     _write_json(
         root / "metadata_empty.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "split": "empty",
             "total_items": 0,
             "shards": ["metadata_shard_s0000.json"],
             "sample_ids": [],
+            "ordered_sample_ids_sha256": "0" * 64,
+            "split_policy": json.loads((root / "metadata.json").read_text())["split_policy"],
         },
     )
     with pytest.raises(ValueError, match="non-empty"):
@@ -436,12 +666,22 @@ def test_portable_index_writer_is_deterministic(monkeypatch, tmp_path):
     )
     index = json.loads((staging / "metadata.json").read_text())
     shard = json.loads((staging / index["shards"][0]).read_text())
+    assert index["schema_version"] == PREPROCESS_STAGING_SCHEMA_VERSION
     expected_ids = sorted(entry["sample_id"] for entry in entries)
     assert index["sample_ids"] == expected_ids
     assert [entry["sample_id"] for entry in shard] == expected_ids
     assert not (staging / "metadata_train.json").exists()
     assert str(staging) not in json.dumps([index, shard])
+    with pytest.raises(ValueError, match=r"migrate_cache_manifest\.py"):
+        load_portable_metadata(staging, "metadata.json")
 
     finalized = tmp_path / "finalized"
-    migrate_cache(staging, finalized, heldout_count=1)
+    approved = tmp_path / "approved.json"
+    _write_approved_manifest(approved, expected_ids)
+    migrate_cache(
+        staging,
+        finalized,
+        approved_ids_manifest=approved,
+        heldout_count=1,
+    )
     assert validate_snapshot(finalized)["splits"] == {"all": 2, "train": 1, "heldout": 1}

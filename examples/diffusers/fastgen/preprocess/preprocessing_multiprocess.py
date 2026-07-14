@@ -136,7 +136,7 @@ def _save_metadata_shards(
         chunk_idx = chunk_start // shard_size
         shard_file = output_dir / f"metadata_shard_{shard_prefix}s{chunk_idx:04d}.json"
         with open(shard_file, "w") as f:
-            json.dump(chunk_data, f, indent=2)
+            json.dump(chunk_data, f, indent=2, allow_nan=False)
         shard_files.append(shard_file.name)
 
     metadata = {
@@ -154,7 +154,7 @@ def _save_metadata_shards(
         metadata["shard_world"] = shard_world
 
     with open(output_dir / index_filename, "w") as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(metadata, f, indent=2, allow_nan=False)
 
 
 def _print_bucket_distribution(all_metadata: list[dict]) -> None:

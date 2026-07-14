@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -29,9 +28,16 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from portable_cache import (
-    CACHE_SCHEMA_VERSION,
+    PDD_HOLDOUT_DOMAIN,
+    PORTABLE_SNAPSHOT_SCHEMA_VERSION,
+    PREPROCESS_STAGING_SCHEMA_VERSION,
+    SPLIT_POLICY_SCHEMA_VERSION,
     audit_no_absolute_paths,
+    load_approved_sample_ids,
+    load_strict_json,
+    ordered_sample_ids_sha256,
     resolve_cache_asset,
+    select_pdd_holdout_ids,
     sha256_file,
     stable_sample_id,
     validate_relative_reference,
@@ -50,7 +56,6 @@ _REMOVED_PATH_KEYS = {
     "source_path",
     "video_path",
 }
-_SPLIT_DOMAIN = "modelopt-fastgen-split-v1"
 
 
 @dataclass(frozen=True)
@@ -66,14 +71,25 @@ class MigrationRecord:
 
 
 def _load_json(path: Path, expected_type: type, label: str):
-    try:
-        with path.open(encoding="utf-8") as stream:
-            value = json.load(stream)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"{label} is not valid JSON: {path}") from error
+    value = load_strict_json(path, label=label)
     if not isinstance(value, expected_type):
         raise ValueError(f"{label} must contain {expected_type.__name__}")
     return value
+
+
+def _load_source_json(
+    root: Path,
+    reference: str,
+    *,
+    expected_type: type,
+    label: str,
+):
+    relative = validate_relative_reference(reference, label=label)
+    candidate = root / relative
+    if candidate.is_symlink():
+        raise ValueError(f"{label} must not be a symlink: {relative}")
+    path = resolve_cache_asset(root, reference, label=label)
+    return _load_json(path, expected_type, label)
 
 
 def _relative_to_legacy_prefix(raw: str, prefix: Path, *, label: str) -> Path:
@@ -177,9 +193,11 @@ def plan_migration(
     all_shards: set[str] = set()
     for index_number, index_ref in enumerate(source_indexes):
         label = f"source_index[{index_number}]"
-        index_path = resolve_cache_asset(root, index_ref, label=label)
-        index = _load_json(index_path, dict, label)
-        if "schema_version" in index and index["schema_version"] != CACHE_SCHEMA_VERSION:
+        index = _load_source_json(root, index_ref, expected_type=dict, label=label)
+        if "schema_version" in index and (
+            type(index["schema_version"]) is not int
+            or index["schema_version"] != PREPROCESS_STAGING_SCHEMA_VERSION
+        ):
             raise ValueError(f"{label}.schema_version is unsupported")
         shards = index.get("shards")
         if (
@@ -190,7 +208,9 @@ def plan_migration(
             raise ValueError(f"{label}.shards must be a non-empty list of relative paths")
         if len(shards) != len(set(shards)):
             raise ValueError(f"{label}.shards contains duplicates")
-        if "num_shards" in index and index["num_shards"] != len(shards):
+        if "num_shards" in index and (
+            type(index["num_shards"]) is not int or index["num_shards"] != len(shards)
+        ):
             raise ValueError(f"{label}.num_shards does not match len(shards)")
         overlap = all_shards.intersection(shards)
         if overlap:
@@ -204,6 +224,12 @@ def plan_migration(
     if ranked_indexes:
         if len(ranked_indexes) != len(parsed_indexes):
             raise ValueError("all source indices must declare shard_rank and shard_world")
+        if any(
+            type(index.get(field)) is not int
+            for index in ranked_indexes
+            for field in ("shard_rank", "shard_world")
+        ):
+            raise ValueError("source shard_rank and shard_world must be integers")
         worlds = {index.get("shard_world") for index in ranked_indexes}
         ranks = {index.get("shard_rank") for index in ranked_indexes}
         if worlds != {len(parsed_indexes)} or ranks != set(range(len(parsed_indexes))):
@@ -216,8 +242,12 @@ def plan_migration(
         source_sample_ids = []
         for shard_number, shard_ref in enumerate(shards):
             shard_label = f"{index_label}.shards[{shard_number}]"
-            shard_path = resolve_cache_asset(root, shard_ref, label=shard_label)
-            entries = _load_json(shard_path, list, shard_label)
+            entries = _load_source_json(
+                root,
+                shard_ref,
+                expected_type=list,
+                label=shard_label,
+            )
             index_record_count += len(entries)
             for entry_number, entry in enumerate(entries):
                 label = f"{shard_label}[{entry_number}]"
@@ -263,7 +293,9 @@ def plan_migration(
                         manifest_fields=_portable_manifest_fields(entry, label=label),
                     )
                 )
-        if "total_items" in index and index["total_items"] != index_record_count:
+        if "total_items" in index and (
+            type(index["total_items"]) is not int or index["total_items"] != index_record_count
+        ):
             raise ValueError(f"{index_label}.total_items does not match its loaded entry count")
         if "sample_ids" in index and index["sample_ids"] != source_sample_ids:
             raise ValueError(f"{index_label}.sample_ids does not match its loaded entries")
@@ -275,34 +307,19 @@ def plan_migration(
 
 def _write_json(path: Path, value: Any) -> None:
     with path.open("w", encoding="utf-8") as stream:
-        json.dump(value, stream, indent=2, sort_keys=True)
+        json.dump(value, stream, indent=2, sort_keys=True, allow_nan=False)
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
-
-
-def _split_ids(records: tuple[MigrationRecord, ...], heldout_count: int, split_seed: str):
-    if heldout_count <= 0 or heldout_count >= len(records):
-        raise ValueError("heldout_count must be positive and smaller than the sample count")
-    ranked = sorted(
-        records,
-        key=lambda record: hashlib.sha256(
-            f"{_SPLIT_DOMAIN}\0{split_seed}\0{record.sample_id}".encode()
-        ).hexdigest(),
-    )
-    heldout = {record.sample_id for record in ranked[:heldout_count]}
-    ordered = [record.sample_id for record in records]
-    return [sample_id for sample_id in ordered if sample_id not in heldout], [
-        sample_id for sample_id in ordered if sample_id in heldout
-    ]
 
 
 def migrate_cache(
     source_root: str | Path,
     output_root: str | Path,
     *,
+    approved_ids_manifest: str | Path,
     heldout_count: int,
-    split_seed: str = "0",
+    expected_approved_ids_sha256: str | None = None,
     source_index: str | Sequence[str] = "metadata.json",
     legacy_cache_root: str | Path | None = None,
     legacy_source_root: str | Path | None = None,
@@ -315,8 +332,8 @@ def migrate_cache(
         raise FileExistsError(f"output_root already exists: {destination}")
     if not destination.parent.exists():
         raise FileNotFoundError(f"output_root parent does not exist: {destination.parent}")
-    if shard_size <= 0:
-        raise ValueError("shard_size must be positive")
+    if type(shard_size) is not int or shard_size <= 0:
+        raise ValueError("shard_size must be a positive integer")
 
     # Pass 1 is intentionally complete before any destination or staging path is created.
     records = plan_migration(
@@ -325,7 +342,16 @@ def migrate_cache(
         legacy_cache_root=legacy_cache_root,
         legacy_source_root=legacy_source_root,
     )
-    train_ids, heldout_ids = _split_ids(records, heldout_count, split_seed)
+    approved_ids, approved_digest = load_approved_sample_ids(
+        Path(approved_ids_manifest).expanduser(),
+        expected_sha256=expected_approved_ids_sha256,
+    )
+    records_by_id = {record.sample_id: record for record in records}
+    unknown_ids = [sample_id for sample_id in approved_ids if sample_id not in records_by_id]
+    if unknown_ids:
+        raise ValueError(f"approved_ids_manifest references unknown sample IDs: {unknown_ids[:5]}")
+    selected_records = tuple(records_by_id[sample_id] for sample_id in approved_ids)
+    train_ids, heldout_ids = select_pdd_holdout_ids(approved_ids, heldout_count)
 
     source = Path(source_root).expanduser().resolve(strict=True)
     negative_source = None
@@ -345,7 +371,7 @@ def migrate_cache(
     try:
         (staging / "payloads").mkdir()
         portable_entries = []
-        for record in records:
+        for record in selected_records:
             if sha256_file(record.source_payload) != record.source_sha256:
                 raise RuntimeError(f"source payload changed after pass 1: {record.source_payload}")
             payload = torch.load(record.source_payload, map_location="cpu", weights_only=True)
@@ -384,14 +410,21 @@ def migrate_cache(
             }
 
         common = {
-            "schema_version": CACHE_SCHEMA_VERSION,
+            "schema_version": PORTABLE_SNAPSHOT_SCHEMA_VERSION,
             "shards": shard_names,
             "num_shards": len(shard_names),
+            "split_policy": {
+                "schema_version": SPLIT_POLICY_SCHEMA_VERSION,
+                "algorithm": "sha256-domain-ranked",
+                "domain": PDD_HOLDOUT_DOMAIN,
+                "heldout_count": heldout_count,
+                "approved_ordered_ids_sha256": approved_digest,
+            },
         }
         if negative_declaration is not None:
             common["negative_prompt_embedding"] = negative_declaration
         split_specs = {
-            "metadata.json": ("all", [record.sample_id for record in records]),
+            "metadata.json": ("all", approved_ids),
             "metadata_train.json": ("train", train_ids),
             "metadata_heldout.json": ("heldout", heldout_ids),
         }
@@ -399,23 +432,33 @@ def migrate_cache(
             index = {
                 **common,
                 "split": split,
-                "sample_ids": sample_ids,
+                "sample_ids": list(sample_ids),
+                "ordered_sample_ids_sha256": ordered_sample_ids_sha256(sample_ids),
                 "total_items": len(sample_ids),
             }
             audit_no_absolute_paths(index, context=name)
             _write_json(staging / name, index)
 
-        validate_snapshot(staging)
+        validation = validate_snapshot(
+            staging,
+            expected_approved_ids_sha256=expected_approved_ids_sha256,
+            expected_heldout_count=heldout_count,
+        )
         os.replace(staging, destination)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
     return {
+        "schema_version": 1,
+        "record_type": "modelopt_fastgen_cache_migration",
         "output_root": str(destination.resolve()),
-        "total_items": len(records),
-        "train_items": len(train_ids),
-        "heldout_items": len(heldout_ids),
+        "counts": {
+            "source": len(records),
+            "approved": len(selected_records),
+            "filtered": len(records) - len(selected_records),
+        },
+        "validation": validation,
     }
 
 
@@ -432,22 +475,24 @@ def main() -> None:
     parser.add_argument("--legacy-cache-root")
     parser.add_argument("--legacy-source-root")
     parser.add_argument("--negative-embedding")
+    parser.add_argument("--approved-ids-manifest", required=True)
+    parser.add_argument("--expected-approved-ids-sha256")
     parser.add_argument("--heldout-count", required=True, type=int)
-    parser.add_argument("--split-seed", default="0")
     parser.add_argument("--shard-size", default=10000, type=int)
     args = parser.parse_args()
     report = migrate_cache(
         args.source_root,
         args.output_root,
+        approved_ids_manifest=args.approved_ids_manifest,
         heldout_count=args.heldout_count,
-        split_seed=args.split_seed,
+        expected_approved_ids_sha256=args.expected_approved_ids_sha256,
         source_index=tuple(args.source_indexes) if args.source_indexes else "metadata.json",
         legacy_cache_root=args.legacy_cache_root,
         legacy_source_root=args.legacy_source_root,
         negative_embedding=args.negative_embedding,
         shard_size=args.shard_size,
     )
-    print(report)
+    print(json.dumps(report, sort_keys=True, allow_nan=False))
 
 
 if __name__ == "__main__":

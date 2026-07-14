@@ -61,6 +61,8 @@ fsdp:
 data:
   all_metadata_index: metadata.json
   validation_metadata_index: metadata_heldout.json
+  expected_approved_ordered_ids_sha256:
+  expected_heldout_count: 2000
   dataloader:
     _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: data/qwen_image_cache

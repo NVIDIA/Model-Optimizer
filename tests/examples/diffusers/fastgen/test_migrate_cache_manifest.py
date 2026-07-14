@@ -19,12 +19,25 @@ if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
 import migrate_cache_manifest as migration
-from portable_cache import load_portable_metadata
+from portable_cache import load_portable_metadata, ordered_sample_ids_sha256
 from validate_cache_snapshot import validate_snapshot
 
 
 def _write_json(path: pathlib.Path, value) -> None:
-    path.write_text(json.dumps(value, indent=2) + "\n")
+    path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+
+
+def _write_approved(path: pathlib.Path, sample_ids: list[str] | tuple[str, ...]) -> str:
+    digest = ordered_sample_ids_sha256(sample_ids)
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "ordered_sample_ids": list(sample_ids),
+            "ordered_sample_ids_sha256": digest,
+        },
+    )
+    return digest
 
 
 def _make_legacy_cache(
@@ -105,21 +118,33 @@ def test_migration_is_path_independent_and_relocatable(tmp_path):
 
     alice_output = tmp_path / "alice-portable"
     bob_output = tmp_path / "bob-portable"
-    migration.migrate_cache(
+    planned_ids = [
+        record.sample_id
+        for record in migration.plan_migration(
+            alice,
+            legacy_cache_root=alice_cache_prefix,
+            legacy_source_root=alice_source_prefix,
+        )
+    ]
+    approved_ids = [planned_ids[index] for index in (2, 0, 3)]
+    approved = tmp_path / "approved.json"
+    approved_digest = _write_approved(approved, approved_ids)
+    alice_result = migration.migrate_cache(
         alice,
         alice_output,
+        approved_ids_manifest=approved,
         heldout_count=1,
-        split_seed="fixed",
+        expected_approved_ids_sha256=approved_digest,
         legacy_cache_root=alice_cache_prefix,
         legacy_source_root=alice_source_prefix,
         negative_embedding="legacy-negative.pt",
         shard_size=2,
     )
-    migration.migrate_cache(
+    bob_result = migration.migrate_cache(
         bob,
         bob_output,
+        approved_ids_manifest=approved,
         heldout_count=1,
-        split_seed="fixed",
         legacy_cache_root=bob_cache_prefix,
         legacy_source_root=bob_source_prefix,
         negative_embedding="legacy-negative.pt",
@@ -132,9 +157,38 @@ def test_migration_is_path_independent_and_relocatable(tmp_path):
     assert alice_train == bob_train
     alice_report = validate_snapshot(alice_output)
     bob_report = validate_snapshot(bob_output)
-    assert alice_report["splits"] == {"all": 4, "train": 3, "heldout": 1}
-    assert bob_report["splits"] == {"all": 4, "train": 3, "heldout": 1}
+    assert alice_report["splits"] == {"all": 3, "train": 2, "heldout": 1}
+    assert bob_report["splits"] == {"all": 3, "train": 2, "heldout": 1}
     assert alice_report["snapshot_sha256"] == bob_report["snapshot_sha256"]
+    assert alice_report["ordered_sample_ids_sha256"]["all"] == approved_digest
+    assert alice_report["split_policy"]["approved_ordered_ids_sha256"] == approved_digest
+    assert alice_result["validation"] == bob_result["validation"]
+    assert alice_result["counts"] == {"source": 4, "approved": 3, "filtered": 1}
+    assert set(alice_result) == {
+        "schema_version",
+        "record_type",
+        "output_root",
+        "counts",
+        "validation",
+    }
+    assert set(alice_result["validation"]) == {
+        "schema_version",
+        "record_type",
+        "snapshot_schema_version",
+        "indexes",
+        "split_policy",
+        "splits",
+        "ordered_sample_ids_sha256",
+        "index_sha256",
+        "negative_prompt_embedding",
+        "unique_payloads",
+        "declared_files",
+        "snapshot_sha256",
+    }
+    validation_text = json.dumps(alice_result["validation"], sort_keys=True)
+    assert str(alice_output) not in validation_text
+    assert ".staging-" not in validation_text
+    assert alice_result["output_root"] != bob_result["output_root"]
 
     cli = subprocess.run(
         [
@@ -186,6 +240,7 @@ def test_incomplete_pass_one_publishes_nothing(monkeypatch, tmp_path):
         migration.migrate_cache(
             legacy,
             output,
+            approved_ids_manifest=tmp_path / "unused-approved.json",
             heldout_count=1,
             legacy_cache_root=cache_prefix,
             legacy_source_root=source_prefix,
@@ -193,6 +248,143 @@ def test_incomplete_pass_one_publishes_nothing(monkeypatch, tmp_path):
     assert not output.exists()
     assert not list(tmp_path.glob(".portable.staging-*"))
     assert save_calls == []
+
+
+def test_approved_artifact_failures_and_final_validation_publish_nothing(
+    monkeypatch, tmp_path
+) -> None:
+    legacy = tmp_path / "legacy"
+    cache_prefix = pathlib.Path("/legacy/cache")
+    source_prefix = pathlib.Path("/legacy/images")
+    _make_legacy_cache(
+        legacy,
+        stored_cache_root=cache_prefix,
+        stored_source_root=source_prefix,
+    )
+    records = migration.plan_migration(
+        legacy,
+        legacy_cache_root=cache_prefix,
+        legacy_source_root=source_prefix,
+    )
+    sample_ids = [record.sample_id for record in records]
+    approved = tmp_path / "approved.json"
+    digest = _write_approved(approved, sample_ids)
+
+    with pytest.raises(ValueError, match="expected approved-ID"):
+        migration.migrate_cache(
+            legacy,
+            tmp_path / "bad-external",
+            approved_ids_manifest=approved,
+            expected_approved_ids_sha256="f" * 64,
+            heldout_count=1,
+            legacy_cache_root=cache_prefix,
+            legacy_source_root=source_prefix,
+        )
+    unknown = tmp_path / "unknown.json"
+    _write_approved(unknown, [*sample_ids, "unknown"])
+    with pytest.raises(ValueError, match="unknown sample IDs"):
+        migration.migrate_cache(
+            legacy,
+            tmp_path / "unknown-output",
+            approved_ids_manifest=unknown,
+            heldout_count=1,
+            legacy_cache_root=cache_prefix,
+            legacy_source_root=source_prefix,
+        )
+    symlink = tmp_path / "approved-symlink.json"
+    symlink.symlink_to(approved)
+    with pytest.raises(ValueError, match="symlink"):
+        migration.migrate_cache(
+            legacy,
+            tmp_path / "symlink-output",
+            approved_ids_manifest=symlink,
+            heldout_count=1,
+            legacy_cache_root=cache_prefix,
+            legacy_source_root=source_prefix,
+        )
+
+    monkeypatch.setattr(
+        migration,
+        "validate_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("injected final validation")),
+    )
+    output = tmp_path / "validation-output"
+    with pytest.raises(ValueError, match="injected final validation"):
+        migration.migrate_cache(
+            legacy,
+            output,
+            approved_ids_manifest=approved,
+            expected_approved_ids_sha256=digest,
+            heldout_count=1,
+            legacy_cache_root=cache_prefix,
+            legacy_source_root=source_prefix,
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob(".validation-output.staging-*"))
+
+
+def test_migration_cli_removes_seed_and_requires_approved_manifest() -> None:
+    cli = subprocess.run(
+        [sys.executable, str(_FASTGEN_DIR / "migrate_cache_manifest.py"), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert cli.returncode == 0, cli.stderr
+    assert "--approved-ids-manifest" in cli.stdout
+    assert "--split-seed" not in cli.stdout
+
+
+def test_migration_rejects_finalized_and_non_strict_source_json(tmp_path) -> None:
+    cache_prefix = pathlib.Path("/legacy/cache")
+    source_prefix = pathlib.Path("/legacy/images")
+
+    finalized = tmp_path / "finalized-source"
+    _make_legacy_cache(
+        finalized,
+        stored_cache_root=cache_prefix,
+        stored_source_root=source_prefix,
+    )
+    index_path = finalized / "metadata.json"
+    index = json.loads(index_path.read_text())
+    index["schema_version"] = 2
+    _write_json(index_path, index)
+    with pytest.raises(ValueError, match="schema_version is unsupported"):
+        migration.plan_migration(
+            finalized,
+            legacy_cache_root=cache_prefix,
+            legacy_source_root=source_prefix,
+        )
+
+    duplicate = tmp_path / "duplicate-source"
+    _make_legacy_cache(
+        duplicate,
+        stored_cache_root=cache_prefix,
+        stored_source_root=source_prefix,
+    )
+    (duplicate / "metadata.json").write_text(
+        '{"shards":["legacy-shard-0.json"],"shards":["legacy-shard-1.json"]}'
+    )
+    with pytest.raises(ValueError, match="duplicate key"):
+        migration.plan_migration(
+            duplicate,
+            legacy_cache_root=cache_prefix,
+            legacy_source_root=source_prefix,
+        )
+
+    nonfinite = tmp_path / "nonfinite-source"
+    _make_legacy_cache(
+        nonfinite,
+        stored_cache_root=cache_prefix,
+        stored_source_root=source_prefix,
+    )
+    (nonfinite / "metadata.json").write_text('{"shards":[],"total_items":NaN}')
+    with pytest.raises(ValueError, match="non-standard constant"):
+        migration.plan_migration(
+            nonfinite,
+            legacy_cache_root=cache_prefix,
+            legacy_source_root=source_prefix,
+        )
 
 
 def test_changed_source_after_frozen_plan_cleans_staging(monkeypatch, tmp_path):
@@ -218,10 +410,13 @@ def test_changed_source_after_frozen_plan_cleans_staging(monkeypatch, tmp_path):
 
     monkeypatch.setattr(migration, "plan_migration", _return_frozen)
     output = tmp_path / "portable"
+    approved = tmp_path / "approved.json"
+    _write_approved(approved, [record.sample_id for record in frozen])
     with pytest.raises(RuntimeError, match="changed after pass 1"):
         migration.migrate_cache(
             legacy,
             output,
+            approved_ids_manifest=approved,
             heldout_count=1,
             legacy_cache_root=cache_prefix,
             legacy_source_root=source_prefix,
@@ -250,6 +445,7 @@ def test_invalid_legacy_reference_fails_before_publish(tmp_path):
         migration.migrate_cache(
             legacy,
             output,
+            approved_ids_manifest=tmp_path / "unused-approved.json",
             heldout_count=1,
             legacy_cache_root=cache_prefix,
             legacy_source_root=source_prefix,
@@ -275,6 +471,7 @@ def test_incomplete_source_counts_and_rank_indices_publish_nothing(tmp_path):
         migration.migrate_cache(
             legacy,
             output,
+            approved_ids_manifest=tmp_path / "unused-approved.json",
             heldout_count=1,
             legacy_cache_root=cache_prefix,
             legacy_source_root=source_prefix,
@@ -299,6 +496,7 @@ def test_incomplete_source_counts_and_rank_indices_publish_nothing(tmp_path):
         migration.migrate_cache(
             legacy,
             incomplete_output,
+            approved_ids_manifest=tmp_path / "unused-approved.json",
             source_index="metadata_r00.json",
             heldout_count=1,
             legacy_cache_root=cache_prefix,
@@ -307,9 +505,18 @@ def test_incomplete_source_counts_and_rank_indices_publish_nothing(tmp_path):
     assert not incomplete_output.exists()
 
     complete_output = tmp_path / "complete-ranks-output"
+    complete_records = migration.plan_migration(
+        legacy,
+        source_index=("metadata_r00.json", "metadata_r01.json"),
+        legacy_cache_root=cache_prefix,
+        legacy_source_root=source_prefix,
+    )
+    complete_approved = tmp_path / "complete-approved.json"
+    _write_approved(complete_approved, [record.sample_id for record in complete_records])
     migration.migrate_cache(
         legacy,
         complete_output,
+        approved_ids_manifest=complete_approved,
         source_index=("metadata_r00.json", "metadata_r01.json"),
         heldout_count=1,
         legacy_cache_root=cache_prefix,
@@ -348,6 +555,7 @@ def test_migration_path_audit_allows_prompt_commands_but_rejects_set_paths(tmp_p
         migration.migrate_cache(
             legacy,
             output,
+            approved_ids_manifest=tmp_path / "unused-approved.json",
             heldout_count=1,
             legacy_cache_root=cache_prefix,
             legacy_source_root=source_prefix,

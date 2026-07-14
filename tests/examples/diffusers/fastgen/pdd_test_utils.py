@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 from pdd_training import PDDTrainer, PreparedPDDBatch
+from portable_cache import ordered_sample_ids_sha256
 from torch import nn
 
 from modelopt.torch.fastgen import (
@@ -211,9 +211,4 @@ class SamplerDataset:
 
 
 def ordered_id_sha256(sample_ids: tuple[str, ...]) -> str:
-    digest = hashlib.sha256()
-    digest.update(b"modelopt-pdd-ordered-train-ids-v1\0")
-    for sample_id in sample_ids:
-        digest.update(sample_id.encode())
-        digest.update(b"\n")
-    return digest.hexdigest()
+    return ordered_sample_ids_sha256(sample_ids)

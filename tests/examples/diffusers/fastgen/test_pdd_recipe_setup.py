@@ -23,6 +23,7 @@ _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
+import pdd_finetune
 from pdd_recipe import (
     build_pdd_export_setup,
     build_pdd_setup,
@@ -80,6 +81,80 @@ def test_example_recipe_explicitly_pins_grid_max_t() -> None:
     raw = yaml.safe_load((_FASTGEN_DIR / "configs" / "pdd_qwen_image.yaml").read_text())
     assert type(raw["pdd"]["grid_max_t"]) is float
     assert raw["pdd"]["grid_max_t"] == 0.999
+    assert raw["data"]["expected_approved_ordered_ids_sha256"] is None
+    assert raw["data"]["expected_heldout_count"] == 2000
+
+
+def test_data_authentication_config_fields_are_strict_but_nullable(tmp_path) -> None:
+    raw = _raw_config(tmp_path)
+    raw["data"] = {
+        "expected_approved_ordered_ids_sha256": "a" * 64,
+        "expected_heldout_count": 2000,
+    }
+    config = resolve_pdd_recipe_config(raw)
+    assert config.expected_approved_ordered_ids_sha256 == "a" * 64
+    assert config.expected_heldout_count == 2000
+
+    for invalid_hash in ("A" * 64, "a" * 63, 7):
+        raw["data"]["expected_approved_ordered_ids_sha256"] = invalid_hash
+        with pytest.raises(ValueError, match="expected_approved_ordered_ids_sha256"):
+            resolve_pdd_recipe_config(raw)
+    raw["data"]["expected_approved_ordered_ids_sha256"] = None
+    for invalid_count in (0, -1, True, 1.5):
+        raw["data"]["expected_heldout_count"] = invalid_count
+        with pytest.raises(ValueError, match="expected_heldout_count"):
+            resolve_pdd_recipe_config(raw)
+
+
+@pytest.mark.parametrize("heldout_count", [1999, 2001])
+def test_canonical_training_count_cannot_be_overridden(
+    monkeypatch, tmp_path, heldout_count
+) -> None:
+    raw = _raw_config(tmp_path)
+    raw["data"] = {
+        "expected_approved_ordered_ids_sha256": "a" * 64,
+        "expected_heldout_count": heldout_count,
+    }
+    config = resolve_pdd_recipe_config(raw)
+    called = False
+
+    def _unexpected_validator(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("validator must not be called for a weakened canonical count")
+
+    monkeypatch.setattr("validate_cache_snapshot.validate_snapshot", _unexpected_validator)
+    with pytest.raises(ValueError, match="expected_heldout_count=2000"):
+        pdd_finetune._validate_dataset_snapshot(raw, config)
+    assert not called
+
+
+def test_canonical_training_requires_external_hash_before_validator(tmp_path) -> None:
+    raw = _raw_config(tmp_path)
+    raw["data"] = {
+        "expected_approved_ordered_ids_sha256": None,
+        "expected_heldout_count": 2000,
+    }
+    config = resolve_pdd_recipe_config(raw)
+    with pytest.raises(ValueError, match="expected_approved_ordered_ids_sha256"):
+        pdd_finetune._validate_dataset_snapshot(raw, config)
+
+
+def test_loader_order_must_match_authenticated_report() -> None:
+    train = [{"sample_id": "train-a"}, {"sample_id": "train-b"}]
+    heldout = [{"sample_id": "heldout-a"}]
+    report = {
+        "ordered_sample_ids_sha256": {
+            "train": pdd_finetune._ordered_id_sha256(train, split="train"),
+            "heldout": pdd_finetune._ordered_id_sha256(heldout, split="heldout"),
+        }
+    }
+    assert pdd_finetune._validated_loader_order_hashes(train, heldout, report) == (
+        report["ordered_sample_ids_sha256"]["train"],
+        report["ordered_sample_ids_sha256"]["heldout"],
+    )
+    with pytest.raises(RuntimeError, match="training loader order"):
+        pdd_finetune._validated_loader_order_hashes(list(reversed(train)), heldout, report)
 
 
 @pytest.mark.parametrize(
