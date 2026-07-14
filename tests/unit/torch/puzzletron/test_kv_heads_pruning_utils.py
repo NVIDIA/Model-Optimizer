@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import torch
 
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
 from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import (
     KVHeadsLayerDescriptor,
     KVHeadsPruningMixIn,
@@ -26,6 +27,12 @@ from modelopt.torch.puzzletron.tools.bypassed_training.child_init import _proces
 
 ATTN_PREFIX = "model.layers.0.self_attn"
 QKVO_NAMES = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+
+def test_gqa_initialization_does_not_expose_kv_merge_modes():
+    assert "AverageKV" not in GQAInitMode.__members__
+    assert "ContributionWeightedKV" not in GQAInitMode.__members__
+    assert GQAInitMode.PruneKVHeads.value == "PruneKVHeads"
 
 
 class DecoderConfigDescriptor:
@@ -38,9 +45,11 @@ def _make_config():
     return SimpleNamespace(
         decoder_config=SimpleNamespace(head_dim=2, hidden_size=4, num_attention_heads=2),
         block_configs=[
-            SimpleNamespace(
-                attention=SimpleNamespace(num_key_value_heads=2),
-                ffn=SimpleNamespace(is_moe=False),
+            BlockConfig(
+                subblock_configs=(
+                    AttentionConfig(num_query_heads=2, num_kv_heads=2),
+                    FFNConfig(intermediate_size=4),
+                )
             )
         ],
         attention_bias=True,

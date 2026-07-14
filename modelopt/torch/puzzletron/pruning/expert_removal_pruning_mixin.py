@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 from transformers import PretrainedConfig
 
+from ..block_config import BlockConfig, MoEConfig
 from modelopt.torch.prune.importance_hooks.base_hooks import ForwardHook
 from modelopt.torch.prune.importance_hooks.expert_removal_hooks import (
     NemotronHRemoveExpertsIndependentHook,
@@ -34,6 +35,21 @@ __all__ = [
     "ExpertRemovalLayerDescriptor",
     "ExpertRemovalPruningMixIn",
 ]
+
+
+def _get_moe_config(block_config: BlockConfig) -> MoEConfig | None:
+    subblock = block_config.get_subblock("moe")
+    if subblock is None:
+        return None
+    if not isinstance(subblock, MoEConfig):
+        raise TypeError(f"Expected MoEConfig for 'moe', got {type(subblock).__name__}")
+    return subblock
+
+
+def _require_num_experts(moe_config: MoEConfig, field_name: str = "moe.num_experts") -> int:
+    if moe_config.num_experts is None:
+        raise ValueError(f"{field_name} must be set for expert removal")
+    return int(moe_config.num_experts)
 
 
 @dataclass
@@ -105,12 +121,21 @@ class ExpertRemovalPruningMixIn(PruningMixIn):
 
         child_block_config = new_config.block_configs[layer_idx]
         parent_block_config = original_config.block_configs[layer_idx]
+        if isinstance(child_block_config, dict):
+            child_block_config = BlockConfig(**child_block_config)
+        if isinstance(parent_block_config, dict):
+            parent_block_config = BlockConfig(**parent_block_config)
 
-        if not parent_block_config.ffn.is_moe:
+        parent_moe_config = _get_moe_config(parent_block_config)
+        if parent_moe_config is None or parent_moe_config.no_op:
             return layer_out_state_dict
 
-        new_num_experts = child_block_config.ffn.moe.num_local_experts
-        orig_num_experts = parent_block_config.ffn.moe.num_local_experts
+        child_moe_config = _get_moe_config(child_block_config)
+        if child_moe_config is None:
+            raise ValueError("Expert removal requires a child MoEConfig subblock")
+
+        new_num_experts = _require_num_experts(child_moe_config)
+        orig_num_experts = _require_num_experts(parent_moe_config)
 
         child_router_keys, new_experts_keys = self._generate_moe_keys(layer_idx, new_num_experts)
         parent_router_keys, orig_experts_keys = self._generate_moe_keys(layer_idx, orig_num_experts)
