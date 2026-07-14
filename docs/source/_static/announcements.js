@@ -21,7 +21,9 @@ document.addEventListener('DOMContentLoaded', () => {
   trimAnnouncementPostSidebar();
 
   const search = document.querySelector('#announcement-search');
-  const cards = Array.from(document.querySelectorAll('.announcement-card'));
+  const cards = Array.from(document.querySelectorAll('.announcement-card')).sort((left, right) => {
+    return (right.dataset.date || '').localeCompare(left.dataset.date || '');
+  });
   const tags = Array.from(document.querySelectorAll('.announcement-tag'));
   const empty = document.querySelector('#announcement-empty');
   const pager = document.querySelector('#announcement-pager');
@@ -29,6 +31,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const next = document.querySelector('#announcement-next');
   const status = document.querySelector('#announcement-page-status');
   const pageSize = 5;
+
+  cards.forEach((card) => card.parentNode.appendChild(card));
   let activeTag = 'all';
   let currentPage = 1;
 
