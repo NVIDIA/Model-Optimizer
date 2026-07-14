@@ -184,12 +184,11 @@ def docs(session):
             "-d",
             "/tmp/doctrees",
             "source",
-            "build/html/api",
+            "build/html",
             "--fail-on-warning",
             "--show-traceback",
             "--keep-going",
         )
-        session.run("python", "build_site.py", "--output", "build/html")
 
 
 @nox.session
