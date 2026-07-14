@@ -168,11 +168,11 @@ def zero_weighted_source_forward_step(
     blend_weights: dict[str, float],
     return_schedule_plan: bool,
 ) -> tuple[torch.Tensor, partial]:
-    """Return the weighted source graph with a zero loss for diagnostic-only DoGE runs.
+    """Return the weighted source graph with a zero loss for frozen-student DoGE runs.
 
     Megatron DDP expects the backward pass to visit the same parameters as a real training step.
     A scalar zero loss attached to only one parameter leaves DDP's gradient-ready state incomplete,
-    so diagnostic mode builds the normal weighted source loss and zeroes it at the loss-function
+    so frozen-student mode builds the normal weighted source loss and zeroes it at the loss-function
     boundary.
     """
     output_tensor, loss_function = weighted_source_forward_step(

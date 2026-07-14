@@ -51,7 +51,8 @@ class DoGEForwardStep:
         target_data_paths: list[str],
         meta_lr: float,
         output_dir: str | Path,
-        diagnostic_only: bool = False,
+        freeze_student: bool = False,
+        freeze_blend: bool = False,
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
 
@@ -62,7 +63,8 @@ class DoGEForwardStep:
                 weights are normalized into ``self.target_blend_weights`` and are not updated.
             meta_lr: Learning rate for exponentiated blend-weight updates.
             output_dir: Directory where DoGE writes the weight trajectory.
-            diagnostic_only: Log DoGE scores without updating blend weights or student weights.
+            freeze_student: Log DoGE scores without updating student weights.
+            freeze_blend: Log candidate blend-weight updates without applying them.
         """
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
@@ -71,7 +73,8 @@ class DoGEForwardStep:
         self.target_blend_weights: dict[str, float] = normalize_data_path_weights(target_data_paths)
         self.doge_data_iterators: DoGEDataIterators | None = None
         self.trajectory_path = Path(output_dir) / "doge_weights.jsonl"
-        self.diagnostic_only = diagnostic_only
+        self.freeze_student = freeze_student
+        self.freeze_blend = freeze_blend
 
     def write_trajectory_record(
         self,
@@ -80,6 +83,7 @@ class DoGEForwardStep:
         alignment_debug: dict[str, dict[str, float | int]] | None = None,
         source_probe_kd_loss: dict[str, float] | None = None,
         target_probe_kd_loss: float | None = None,
+        candidate_blend_weights: dict[str, float] | None = None,
     ) -> None:
         """Write one DoGE weight-trajectory record on rank 0."""
         if not dist.is_master():
@@ -90,6 +94,10 @@ class DoGEForwardStep:
             "alignment_scores": alignment_scores or {},
             "blend_weights": self.blend_weights,
         }
+        if candidate_blend_weights is not None:
+            # Candidate weights are the next blend DoGE would apply from the current scores. They
+            # can differ from ``blend_weights`` when ``--doge_freeze_blend`` keeps training fixed.
+            record["candidate_blend_weights"] = candidate_blend_weights
         if alignment_debug is not None:
             record["alignment_debug"] = alignment_debug
         if source_probe_kd_loss is not None:
@@ -147,21 +155,23 @@ class DoGEForwardStep:
 
         source_batches, target_batch = _next_doge_batches(state, model, self.doge_data_iterators)
 
-        # Outer loop: use the target batch to score each source batch and update the data-blend
-        # weights. This changes only ``self.blend_weights``, not the student model.
+        # Outer loop: use the target batch to score each source batch and propose a data-blend
+        # update. This changes only ``self.blend_weights`` unless blend updates are frozen.
         scores, alignment_debug, source_probe_kd_loss, target_probe_kd_loss = (
             compute_alignment_scores(state, source_batches, target_batch, model, self.blend_weights)
         )
-        if not self.diagnostic_only:
-            self.blend_weights = dict(self.updater.update(self.blend_weights, scores))
+        candidate_blend_weights = dict(self.updater.update(self.blend_weights, scores))
+        if not self.freeze_blend:
+            self.blend_weights = candidate_blend_weights
         self.write_trajectory_record(
             state.train_state.step + 1,
             scores,
             alignment_debug,
             source_probe_kd_loss,
             target_probe_kd_loss,
+            candidate_blend_weights,
         )
-        if self.diagnostic_only:
+        if self.freeze_student:
             return zero_weighted_source_forward_step(
                 state,
                 source_batches,
