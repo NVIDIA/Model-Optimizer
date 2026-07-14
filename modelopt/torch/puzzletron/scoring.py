@@ -19,6 +19,7 @@
 import os
 import re
 from glob import glob
+from pathlib import Path
 
 import hydra
 import numpy as np
@@ -27,11 +28,11 @@ from omegaconf import DictConfig
 
 import modelopt.torch.utils.distributed as dist
 
+from .granularity import resolve_granularity
 from .tools.hydra_utils import register_hydra_resolvers
 from .tools.logger import mprint
-from .tools.validate_puzzle_with_multi_replacements import validate_puzzle_solutions
 
-__all__ = ["launch_scoring"]
+__all__ = ["launch_scoring", "resolve_scoring_output_dir", "resolve_scoring_paths"]
 
 
 def extract_solution_id(filename):
@@ -73,13 +74,39 @@ def partition_for_node(items: list, num_nodes: int, node_index: int) -> list:
     return [x for x in items if int(x) % num_nodes == node_index]
 
 
+def resolve_scoring_paths(cfg: DictConfig) -> tuple[Path, Path]:
+    """Resolve input/output paths for block or atomic subblock scoring."""
+
+    granularity = resolve_granularity("scoring", cfg.scoring)
+    solutions_path = cfg.scoring.get(f"{granularity}_solutions_path", None)
+    if solutions_path is None:
+        solutions_path = cfg.scoring.solutions_path
+    output_dir = cfg.scoring.get(f"{granularity}_output_dir", None)
+    if output_dir is None:
+        output_dir = cfg.scoring.get("output_dir", None)
+    solutions_path = Path(str(solutions_path))
+    if output_dir is None:
+        output_dir = solutions_path.with_name(f"{solutions_path.stem}--validation")
+    return solutions_path, Path(str(output_dir))
+
+
+def resolve_scoring_output_dir(cfg: DictConfig) -> str:
+    """Output dir where ``solution_*.json`` are written — must match the writer's resolution.
+
+    The AutoModel writer falls back to ``<solutions_path stem>--validation`` when
+    ``scoring.output_dir`` is unset; resume detection has to use the same path.
+    """
+    return str(resolve_scoring_paths(cfg)[1])
+
+
 def get_solutions_to_validate(cfg: DictConfig, num_nodes: int = 1, node_index: int = 0):
     _solutions_to_validate = cfg.scoring.solutions_to_validate
     if _solutions_to_validate is None:
-        single_block_replacement_solutions = pd.read_json(cfg.scoring.solutions_path)
+        solutions_path, _ = resolve_scoring_paths(cfg)
+        single_block_replacement_solutions = pd.read_json(solutions_path)
         if cfg.scoring.skip_existing_solutions:
             _solutions_to_validate = find_missing_solutions(
-                single_block_replacement_solutions, cfg.scoring.output_dir
+                single_block_replacement_solutions, resolve_scoring_output_dir(cfg)
             )
         else:
             _solutions_to_validate = np.arange(single_block_replacement_solutions.shape[0]).tolist()
@@ -87,12 +114,21 @@ def get_solutions_to_validate(cfg: DictConfig, num_nodes: int = 1, node_index: i
 
 
 def launch_scoring(cfg: DictConfig, num_nodes: int = 1, node_index: int = 0):
+    solutions_path, output_dir = resolve_scoring_paths(cfg)
+    cfg.scoring.solutions_path = str(solutions_path)
+    cfg.scoring.output_dir = str(output_dir)
     cfg.scoring.solutions_to_validate = get_solutions_to_validate(cfg, num_nodes, node_index)
     mprint(
         f"Solutions to validate (node {node_index}/{num_nodes}): "
         f"{cfg.scoring.solutions_to_validate}"
     )
-    validate_puzzle_solutions(args=cfg.scoring)
+    backend = str(cfg.scoring.get("backend", "automodel") or "automodel")
+    if backend != "automodel":
+        raise ValueError("Replace-one scoring only supports scoring.backend=automodel.")
+
+    from .plugins.automodel.solution_launch import launch_score_solutions_automodel
+
+    launch_score_solutions_automodel(cfg, num_nodes=num_nodes, node_index=node_index)
 
 
 @hydra.main("", version_base="1.3")
