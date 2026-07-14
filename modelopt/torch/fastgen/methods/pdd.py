@@ -13,32 +13,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Framework-neutral output projection primitives for PDD.
+"""Framework-neutral projection, training, and sampling primitives for PDD.
 
-This module owns only projection layout, conversion, reconstruction metadata,
-and in-forward fusion. Model calls and architecture-specific packing belong to
-adapters in ``modelopt.torch.fastgen.plugins``.
+This module owns projection layout and fusion plus the data-dependent objective
+and block sampler. Model calls and architecture-specific packing remain behind
+the adapter protocol and belong in ``modelopt.torch.fastgen.plugins``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from ..config import PDDConfig
-from ..flow_matching import fusion_coefficients
+from ..flow_matching import (
+    fusion_coefficients,
+    integrate_interval_velocities,
+    make_shifted_flow_grid,
+)
+from ..pipeline import DistillationPipeline
 
 __all__ = [
     "PDDLayerSpec",
     "PDDMetadata",
+    "PDDModelAdapter",
     "PDDOutputProjection",
+    "PDDPipeline",
     "convert_to_pdd_output_projection",
     "get_module_by_path",
     "replace_module_by_path",
@@ -582,3 +589,392 @@ def convert_to_pdd_output_projection(
         if replaced is not current:
             raise RuntimeError("projection changed during synchronous PDD conversion.")
     return projection
+
+
+class PDDModelAdapter(Protocol):
+    """Architecture adapter used by the framework-neutral PDD pipeline."""
+
+    def student_all_heads(
+        self,
+        model: nn.Module,
+        state: torch.Tensor,
+        time: torch.Tensor,
+        *,
+        condition: Any = None,
+        **model_kwargs: Any,
+    ) -> torch.Tensor:
+        """Return canonical ``[batch, head, *latent_shape]`` student velocities."""
+        ...
+
+    def student_fused_block(
+        self,
+        model: nn.Module,
+        state: torch.Tensor,
+        time: torch.Tensor,
+        *,
+        start: int,
+        end: int,
+        grid: torch.Tensor,
+        condition: Any = None,
+        **model_kwargs: Any,
+    ) -> torch.Tensor:
+        """Return one base-shaped velocity from the fused projection block."""
+        ...
+
+    def teacher_velocity(
+        self,
+        model: nn.Module,
+        state: torch.Tensor,
+        time: torch.Tensor,
+        *,
+        condition: Any = None,
+        negative_condition: Any = None,
+        **model_kwargs: Any,
+    ) -> torch.Tensor:
+        """Return the adapter-specific guided teacher velocity."""
+        ...
+
+
+class PDDPipeline(DistillationPipeline):
+    """Data-dependent PDD loss and fused sampler over a single core-owned grid."""
+
+    def __init__(
+        self,
+        student: nn.Module,
+        teacher: nn.Module,
+        config: PDDConfig,
+        adapter: PDDModelAdapter,
+    ) -> None:
+        """Store the models/config/adapter and freeze the teacher."""
+        if not isinstance(config, PDDConfig):
+            raise TypeError(f"config must be PDDConfig, got {type(config).__name__}.")
+        super().__init__(student, teacher, config)
+        self.adapter = adapter
+
+    def time_grid(self, device: torch.device | str | None = None) -> torch.Tensor:
+        """Construct this pipeline's sole shifted rectified-flow grid."""
+        return make_shifted_flow_grid(
+            self.config.grid_size,
+            self.config.flow_shift,
+            device=device,
+            dtype=torch.float32,
+        )
+
+    @staticmethod
+    def _validate_state(state: torch.Tensor, *, name: str) -> None:
+        if not isinstance(state, torch.Tensor):
+            raise TypeError(f"{name} must be a tensor, got {type(state).__name__}.")
+        if state.ndim < 2 or state.shape[0] <= 0:
+            raise ValueError(f"{name} must have shape [batch, *latent_shape], got {state.shape}.")
+        if not state.dtype.is_floating_point:
+            raise TypeError(f"{name} must use a real floating-point dtype, got {state.dtype}.")
+
+    @staticmethod
+    def _model_kwargs(model_kwargs: Mapping[str, Any] | None) -> dict[str, Any]:
+        if model_kwargs is None:
+            return {}
+        if not isinstance(model_kwargs, Mapping):
+            raise TypeError(
+                f"model_kwargs must be a mapping or None, got {type(model_kwargs).__name__}."
+            )
+        return dict(model_kwargs)
+
+    @staticmethod
+    def _normalize_velocity(
+        velocity: torch.Tensor,
+        *,
+        expected_shape: torch.Size,
+        device: torch.device,
+        name: str,
+    ) -> torch.Tensor:
+        if not isinstance(velocity, torch.Tensor):
+            raise TypeError(f"{name} must return a tensor, got {type(velocity).__name__}.")
+        if velocity.shape != expected_shape:
+            raise ValueError(
+                f"{name} must return shape {tuple(expected_shape)}, got {tuple(velocity.shape)}."
+            )
+        if velocity.device != device:
+            raise ValueError(f"{name} returned device {velocity.device}, expected {device}.")
+        if not velocity.dtype.is_floating_point:
+            raise TypeError(
+                f"{name} must return a real floating-point tensor, got {velocity.dtype}."
+            )
+        return velocity.to(torch.float32)
+
+    @staticmethod
+    def _validate_explicit_index(
+        index: torch.Tensor,
+        *,
+        name: str,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if not isinstance(index, torch.Tensor):
+            raise TypeError(f"{name} must be an integer tensor, got {type(index).__name__}.")
+        if index.shape != (batch_size,):
+            raise ValueError(f"{name} must have shape ({batch_size},), got {tuple(index.shape)}.")
+        if index.device != device:
+            raise ValueError(f"{name} must be on {device}, got {index.device}.")
+        if index.dtype == torch.bool or index.dtype.is_floating_point or index.dtype.is_complex:
+            raise TypeError(f"{name} must use an integer dtype, got {index.dtype}.")
+        return index.to(torch.long)
+
+    def _resolve_indices(
+        self,
+        *,
+        batch_size: int,
+        device: torch.device,
+        n: torch.Tensor | None,
+        k: torch.Tensor | None,
+        generator: torch.Generator | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        grid_size = self.config.grid_size
+        block_min = self.config.block_size_min
+        block_max = self.config.block_size_max
+        if n is None and k is not None:
+            raise ValueError(
+                "explicit k requires explicit n so their joint support is deterministic."
+            )
+        if n is None:
+            n = block_min * torch.randint(
+                0,
+                grid_size // block_min,
+                (batch_size,),
+                device=device,
+                generator=generator,
+            )
+        else:
+            n = self._validate_explicit_index(
+                n,
+                name="n",
+                batch_size=batch_size,
+                device=device,
+            )
+            torch._assert_async(
+                torch.all((n >= 0) & (n < grid_size) & (n.remainder(block_min) == 0)),
+                f"n must be aligned to {block_min} and satisfy 0 <= n < {grid_size}.",
+            )
+
+        upper = torch.minimum(n + block_max, torch.full_like(n, grid_size))
+        if k is None:
+            interval_ids = torch.arange(grid_size, device=device)
+            support = (interval_ids[None] >= n[:, None]) & (interval_ids[None] < upper[:, None])
+            k = torch.multinomial(support.to(torch.float32), 1, generator=generator).squeeze(1)
+        else:
+            k = self._validate_explicit_index(
+                k,
+                name="k",
+                batch_size=batch_size,
+                device=device,
+            )
+            torch._assert_async(
+                torch.all((k >= n) & (k < upper)),
+                "k must satisfy n <= k < min(n + block_size_max, grid_size).",
+            )
+        return n, k
+
+    @staticmethod
+    def _rms_per_sample(value: torch.Tensor) -> torch.Tensor:
+        dims = tuple(range(1, value.ndim))
+        return value.square().mean(dim=dims).sqrt()
+
+    def compute_loss(
+        self,
+        data: torch.Tensor,
+        *,
+        noise: torch.Tensor | None = None,
+        condition: Any = None,
+        negative_condition: Any = None,
+        model_kwargs: Mapping[str, Any] | None = None,
+        n: torch.Tensor | None = None,
+        k: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute the exact data-dependent PDD objective for one batch."""
+        self._validate_state(data, name="data")
+        if noise is None:
+            noise_fp32 = torch.randn(
+                data.shape,
+                device=data.device,
+                dtype=torch.float32,
+                generator=generator,
+            )
+        else:
+            self._validate_state(noise, name="noise")
+            if noise.shape != data.shape:
+                raise ValueError(
+                    f"noise must match data shape {tuple(data.shape)}, got {tuple(noise.shape)}."
+                )
+            if noise.device != data.device:
+                raise ValueError(f"noise must be on {data.device}, got {noise.device}.")
+            noise_fp32 = noise.to(torch.float32)
+
+        kwargs = self._model_kwargs(model_kwargs)
+        data_fp32 = data.to(torch.float32)
+        batch_size = data.shape[0]
+        grid = self.time_grid(data.device)
+        n, k = self._resolve_indices(
+            batch_size=batch_size,
+            device=data.device,
+            n=n,
+            k=k,
+            generator=generator,
+        )
+        time_n = grid[n]
+        broadcast_shape = (batch_size,) + (1,) * (data.ndim - 1)
+        time_n_expanded = time_n.reshape(broadcast_shape)
+        x_n = (1.0 - time_n_expanded) * data_fp32 + time_n_expanded * noise_fp32
+
+        student_heads = self.adapter.student_all_heads(
+            self.student,
+            x_n,
+            time_n,
+            condition=condition,
+            **kwargs,
+        )
+        expected_head_shape = torch.Size((batch_size, self.config.grid_size, *data.shape[1:]))
+        student_heads = self._normalize_velocity(
+            student_heads,
+            expected_shape=expected_head_shape,
+            device=data.device,
+            name="student_all_heads",
+        )
+        with torch.no_grad():
+            x_bar_k = integrate_interval_velocities(x_n, student_heads, grid, n, k)
+
+        batch_ids = torch.arange(batch_size, device=data.device)
+        student_target = student_heads[batch_ids, k]
+        time_k = grid[k]
+        with torch.no_grad():
+            teacher_query = x_bar_k.detach()
+            teacher_first = self.adapter.teacher_velocity(
+                self.teacher,
+                teacher_query,
+                time_k,
+                condition=condition,
+                negative_condition=negative_condition,
+                **kwargs,
+            )
+            teacher_first = self._normalize_velocity(
+                teacher_first,
+                expected_shape=data.shape,
+                device=data.device,
+                name="teacher_velocity",
+            )
+            if self.config.teacher_integrator == "euler":
+                teacher_target = teacher_first
+            else:
+                delta_k = grid[k + 1] - time_k
+                midpoint_state = (
+                    teacher_query + 0.5 * delta_k.reshape(broadcast_shape) * teacher_first
+                )
+                midpoint_time = time_k + 0.5 * delta_k
+                teacher_target = self.adapter.teacher_velocity(
+                    self.teacher,
+                    midpoint_state,
+                    midpoint_time,
+                    condition=condition,
+                    negative_condition=negative_condition,
+                    **kwargs,
+                )
+                teacher_target = self._normalize_velocity(
+                    teacher_target,
+                    expected_shape=data.shape,
+                    device=data.device,
+                    name="teacher_velocity",
+                )
+
+        squared_error = (student_target - teacher_target).square()
+        loss = squared_error.mean()
+        metric_dims = tuple(range(1, squared_error.ndim))
+        all_head_dims = tuple(range(1, student_heads.ndim))
+        with torch.no_grad():
+            metrics = {
+                "n": n.detach(),
+                "k": k.detach(),
+                "target_span": (k - n).detach(),
+                "student_target_mse": squared_error.mean(dim=metric_dims).detach(),
+                "student_velocity_rms": self._rms_per_sample(student_target).detach(),
+                "teacher_velocity_rms": self._rms_per_sample(teacher_target).detach(),
+                "reconstructed_state_rms": self._rms_per_sample(x_bar_k).detach(),
+                "all_student_heads_finite": torch.isfinite(student_heads)
+                .all(dim=all_head_dims)
+                .detach(),
+                "student_target_finite": torch.isfinite(student_target)
+                .all(dim=metric_dims)
+                .detach(),
+                "teacher_target_finite": torch.isfinite(teacher_target)
+                .all(dim=metric_dims)
+                .detach(),
+                "reconstructed_state_finite": torch.isfinite(x_bar_k).all(dim=metric_dims).detach(),
+                "loss_finite": torch.isfinite(loss).detach(),
+            }
+        return loss, metrics
+
+    def _validate_blocks(self, blocks: Sequence[int] | None) -> tuple[int, ...]:
+        if blocks is None:
+            resolved = tuple(self.config.inference_blocks)
+        else:
+            if isinstance(blocks, (str, bytes)) or not isinstance(blocks, Sequence):
+                raise TypeError("blocks must be a sequence of integer interval counts.")
+            resolved = tuple(blocks)
+        if not resolved:
+            raise ValueError("blocks must contain at least one interval count.")
+        start = 0
+        for index, block in enumerate(resolved):
+            if type(block) is not int or block <= 0:
+                raise ValueError(f"blocks[{index}] must be a positive integer, got {block!r}.")
+            if block % self.config.block_size_min != 0:
+                raise ValueError(
+                    f"blocks[{index}]={block} must be aligned to "
+                    f"block_size_min={self.config.block_size_min}."
+                )
+            if block > self.config.block_size_max:
+                raise ValueError(
+                    f"blocks[{index}]={block} exceeds block_size_max={self.config.block_size_max}."
+                )
+            if start > self.config.grid_size - self.config.block_size_min:
+                raise ValueError(f"block {index} starts outside the trained support at {start}.")
+            start += block
+        if start != self.config.grid_size:
+            raise ValueError(f"blocks must sum to grid_size={self.config.grid_size}, got {start}.")
+        return resolved
+
+    @torch.no_grad()
+    def sample(
+        self,
+        state: torch.Tensor,
+        *,
+        condition: Any = None,
+        blocks: Sequence[int] | None = None,
+        model_kwargs: Mapping[str, Any] | None = None,
+    ) -> torch.Tensor:
+        """Sample with one fused student call per validated contiguous block."""
+        self._validate_state(state, name="state")
+        kwargs = self._model_kwargs(model_kwargs)
+        resolved_blocks = self._validate_blocks(blocks)
+        grid = self.time_grid(state.device)
+        current = state.to(torch.float32)
+        start = 0
+        for block in resolved_blocks:
+            end = start + block
+            time = grid[start].expand(state.shape[0])
+            velocity = self.adapter.student_fused_block(
+                self.student,
+                current,
+                time,
+                start=start,
+                end=end,
+                grid=grid,
+                condition=condition,
+                **kwargs,
+            )
+            velocity = self._normalize_velocity(
+                velocity,
+                expected_shape=current.shape,
+                device=state.device,
+                name="student_fused_block",
+            )
+            current = current + (grid[end] - grid[start]) * velocity
+            start = end
+        return current
