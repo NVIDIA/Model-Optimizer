@@ -12,6 +12,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <div class="announcement-tags" aria-label="Announcement tags">
          <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
          <button class="announcement-tag" type="button" data-tag="release" aria-pressed="false">Release</button>
+         <button class="announcement-tag" type="button" data-tag="autoquantize" aria-pressed="false">AutoQuantize</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
          <button class="announcement-tag" type="button" data-tag="dspark" aria-pressed="false">DSpark</button>
@@ -28,6 +29,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <h2><a href="announcements/github-pages-announcements.html">Model Optimizer announcements are moving to GitHub Pages</a></h2>
        <p>The GitHub Pages site now starts with announcements while the existing API documentation remains available in the docs navigation.</p>
        <div class="announcement-card-tags"><span>release</span><span>docs</span><span>github-pages</span></div>
+     </article>
+     <article class="announcement-card" data-date="2026-07-15" data-title="AutoQuantize: Automatic Sensitivity-Guided Mixed-Precision Quantization Under a Cost Budget" data-summary="AutoQuantize finds Pareto-optimal mixed-precision assignments with gradient-based sensitivity scoring under a deployment-aware cost budget." data-tags="autoquantize quantization mixed-precision modelopt">
+       <div class="announcement-card-meta">July 15, 2026 &middot; Asma Beevi K T, Wei Ming, Frida Hou, Juhi Mittal, Jenny Chen, Ajinkya Rasane, Meng Xin</div>
+       <h2><a href="announcements/autoquantize.html">AutoQuantize: Automatic Sensitivity-Guided Mixed-Precision Quantization Under a Cost Budget</a></h2>
+       <p>AutoQuantize finds Pareto-optimal mixed-precision assignments with gradient-based sensitivity scoring under a deployment-aware cost budget.</p>
+       <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span></div>
      </article>
      <article class="announcement-card" data-date="2026-07-13" data-title="DSpark vs Domino: Same DFlash Backbone, Different Correction Heads" data-summary="DSpark and Domino both build on block-parallel DFlash draft generation but diverge in their token-level correction heads." data-tags="speculative-decoding dflash dspark domino architecture">
        <div class="announcement-card-meta">July 13, 2026 &middot; Model Optimizer Team</div>
