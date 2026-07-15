@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import pathlib
@@ -124,6 +125,45 @@ def test_dataset_accepts_absolute_payload_beneath_root(make_fastgen_cache, tmp_p
     assert dataset[0]["sample_id"] == 0
 
 
+def test_exact_resume_requires_and_verifies_payload_hashes(make_fastgen_cache, tmp_path):
+    cache = make_fastgen_cache(tmp_path / "cache")
+    dataset = TextToImageDataset(cache, verify_payload_hashes=True)
+    assert dataset[0]["sample_id"] == 0
+
+    shard_path = cache / "metadata_shard_0.json"
+    shard = json.loads(shard_path.read_text())
+    payload_path = cache / shard[0]["cache_file"]
+    torch.save({"latent": torch.full((4, 2, 2), 999.0)}, payload_path)
+    with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+        dataset[0]
+
+    shard[0].pop("cache_sha256")
+    shard_path.write_text(json.dumps(shard))
+    with pytest.raises(ValueError, match="cache_sha256 required for exact resume"):
+        TextToImageDataset(cache, verify_payload_hashes=True)
+
+
+def test_dataset_snapshot_binds_negative_prompt_embedding(make_fastgen_cache, tmp_path):
+    cache = make_fastgen_cache(tmp_path / "cache")
+    loader, _ = build_text_to_image_multiresolution_dataloader(
+        cache_dir=str(cache),
+        num_workers=0,
+        negative_prompt_embedding_path="negative_prompt_embedding.pt",
+        exact_resume=True,
+    )
+    first_snapshot = loader.dataset.dataset_snapshot_sha256
+
+    torch.save(torch.full((2, 3), 7.0), cache / "negative_prompt_embedding.pt")
+    rebuilt, _ = build_text_to_image_multiresolution_dataloader(
+        cache_dir=str(cache),
+        num_workers=0,
+        negative_prompt_embedding_path="negative_prompt_embedding.pt",
+        exact_resume=True,
+    )
+
+    assert rebuilt.dataset.dataset_snapshot_sha256 != first_snapshot
+
+
 def test_environment_redirects_samples_and_relative_negative_embedding(
     make_fastgen_cache, monkeypatch, tmp_path
 ):
@@ -206,3 +246,4 @@ def test_preprocessing_publishes_absolute_paths_for_relative_output(monkeypatch,
     assert published.is_absolute()
     assert published == payload.resolve()
     published.relative_to(output.resolve())
+    assert shard[0]["cache_sha256"] == hashlib.sha256(payload.read_bytes()).hexdigest()

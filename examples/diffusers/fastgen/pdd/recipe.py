@@ -529,6 +529,44 @@ def _load_unwrapped_transformer(
     return pipe, student
 
 
+def _stage_and_shard_training_models(
+    student: nn.Module,
+    teacher: nn.Module,
+    projection: PDDOutputProjection,
+    projection_identity: tuple[int, int, int | None],
+    manager: Any,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    fuse_qkv_projections: bool,
+) -> tuple[nn.Module, nn.Module]:
+    """Move and shard one dense model at a time to bound setup-time GPU memory."""
+    if fuse_qkv_projections and (
+        not hasattr(student, "fuse_qkv_projections") or not hasattr(teacher, "fuse_qkv_projections")
+    ):
+        raise AttributeError("QKV fusion requires both Qwen transformers to expose the object API.")
+
+    student.to(device=device, dtype=dtype)
+    if fuse_qkv_projections:
+        student.fuse_qkv_projections()
+        if not any(getattr(module, "fused_projections", False) for module in student.modules()):
+            logging.warning(
+                "Qwen fuse_qkv_projections() was accepted but produced no fused attention "
+                "modules in the pinned Diffusers release."
+            )
+    _require_projection_identity(student, projection, projection_identity, stage="student staging")
+    student = manager.parallelize(student)
+    _require_projection_module(student, projection, stage="student FSDP2 parallelization")
+
+    # The student is already sharded before the dense teacher reaches the GPU, so multi-rank
+    # setup never holds both complete Qwen transformers on one device.
+    teacher.to(device=device, dtype=dtype)
+    if fuse_qkv_projections:
+        teacher.fuse_qkv_projections()
+    teacher = manager.parallelize(teacher)
+    return student, teacher
+
+
 def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     """Compose released AutoModel APIs without editing or patching external packages."""
     if not isinstance(config, PDDRecipeConfig):
@@ -557,28 +595,6 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     identity = _projection_identity(projection)
     metadata = PDDMetadata.from_config(config.pdd, projection)
     lifecycle.append("pdd_conversion")
-
-    student.to(device=config.device, dtype=config.dtype)
-    teacher.to(device=config.device, dtype=config.dtype)
-    _require_projection_identity(student, projection, identity, stage="device placement")
-    lifecycle.append("device")
-
-    if config.fuse_qkv_projections:
-        if not hasattr(student, "fuse_qkv_projections") or not hasattr(
-            teacher, "fuse_qkv_projections"
-        ):
-            raise AttributeError(
-                "QKV fusion requires both Qwen transformers to expose the object API."
-            )
-        student.fuse_qkv_projections()
-        teacher.fuse_qkv_projections()
-        if not any(getattr(module, "fused_projections", False) for module in student.modules()):
-            logging.warning(
-                "Qwen fuse_qkv_projections() was accepted but produced no fused attention "
-                "modules in the pinned Diffusers release."
-            )
-    _require_projection_identity(student, projection, identity, stage="QKV fusion")
-    lifecycle.append("qkv")
 
     world_size = dist.get_world_size()
     if config.training.global_batch_size is not None:
@@ -611,14 +627,20 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         device_mesh=mesh_context.device_mesh,
         moe_mesh=mesh_context.moe_mesh,
     )
-    student = manager.parallelize(student)
-    teacher = manager.parallelize(teacher)
+    student, teacher = _stage_and_shard_training_models(
+        student,
+        teacher,
+        projection,
+        identity,
+        manager,
+        device=config.device,
+        dtype=config.dtype,
+        fuse_qkv_projections=config.fuse_qkv_projections,
+    )
     pipe.transformer = student
-    # FSDP2 shards Parameters in place and may replace the Parameter objects. The registered
-    # projection module and FQN must survive; optimizer identity is checked against the new,
-    # live post-FSDP Parameters below.
-    _require_projection_module(student, projection, stage="FSDP2 parallelization")
-    lifecycle.append("parallelize")
+    # Keep the public lifecycle summary stable even though placement, optional QKV fusion, and
+    # FSDP2 are deliberately interleaved per model to cap peak device memory.
+    lifecycle.extend(("device", "qkv", "parallelize"))
 
     trainable = [parameter for parameter in student.parameters() if parameter.requires_grad]
     if not trainable:

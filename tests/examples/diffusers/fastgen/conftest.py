@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING
 
@@ -59,6 +60,7 @@ def make_fastgen_cache():
             metadata.append(
                 {
                     "cache_file": str(cache_file),
+                    "cache_sha256": hashlib.sha256(payload_path.read_bytes()).hexdigest(),
                     "bucket_resolution": resolution,
                     "original_resolution": resolution,
                     "bucket_id": sample_id % 2,

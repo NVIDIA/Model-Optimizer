@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import hashlib
+import io
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -38,6 +39,7 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         split: str | None = None,
         validation_count: int | None = None,
         split_seed: int = 2026,
+        verify_payload_hashes: bool = False,
     ):
         """
         Args:
@@ -47,6 +49,7 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             split: Optional deterministic ``"train"`` or ``"validation"`` selection.
             validation_count: Number of validation samples when ``split`` is set.
             split_seed: Local seed used to construct deterministic split membership.
+            verify_payload_hashes: Require and authenticate cached tensor content on every load.
         """
         if selected_indices is not None and split is not None:
             raise ValueError("selected_indices and split are mutually exclusive")
@@ -60,7 +63,10 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         self._split = split
         self._validation_count = validation_count
         self._split_seed = split_seed
+        self._verify_payload_hashes = verify_payload_hashes
         self._resolved_cache_files: dict[int, Path] = {}
+        self.negative_prompt_embedding_sha256: str | None = None
+        self.dataset_snapshot_sha256: str | None = None
         super().__init__(str(self.cache_root), quantization=64)
 
     def _load_metadata(self) -> list[dict]:
@@ -99,12 +105,28 @@ class TextToImageDataset(BaseMultiresolutionDataset):
                     raise TypeError(
                         f"metadata shard {shard_path} item {shard_item_index} has invalid cache_file"
                     )
+                cache_sha256 = item.get("cache_sha256")
+                if cache_sha256 is not None and (
+                    not isinstance(cache_sha256, str)
+                    or len(cache_sha256) != 64
+                    or any(character not in "0123456789abcdef" for character in cache_sha256)
+                ):
+                    raise ValueError(
+                        f"metadata shard {shard_path} item {shard_item_index} has invalid "
+                        "cache_sha256"
+                    )
+                if self._verify_payload_hashes and cache_sha256 is None:
+                    raise ValueError(
+                        f"metadata shard {shard_path} item {shard_item_index} has no "
+                        "cache_sha256 required for exact resume"
+                    )
                 complete_metadata.append(dict(item))
 
         if not complete_metadata:
             raise ValueError(f"No samples found in {metadata_file}")
         self.total_num_samples = len(complete_metadata)
         self.metadata_sha256 = digest.hexdigest()
+        self.payload_hashes_complete = all("cache_sha256" in item for item in complete_metadata)
         if self._split is None:
             self.sample_ids = self._validate_selected_indices(self.total_num_samples)
         else:
@@ -151,8 +173,20 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             )
             self._resolved_cache_files[idx] = cache_file
 
-        # Load cached data
-        data = torch.load(cache_file, map_location="cpu", weights_only=True)
+        # Exact-resume mode authenticates the same bytes passed to torch.load, avoiding a
+        # hash-then-reopen race if a shared cache changes during training.
+        if self._verify_payload_hashes:
+            payload = cache_file.read_bytes()
+            actual_sha256 = hashlib.sha256(payload).hexdigest()
+            expected_sha256 = item["cache_sha256"]
+            if actual_sha256 != expected_sha256:
+                raise RuntimeError(
+                    f"sample cache file {sample_id} SHA-256 mismatch: "
+                    f"expected {expected_sha256}, found {actual_sha256}"
+                )
+            data = torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True)
+        else:
+            data = torch.load(cache_file, map_location="cpu", weights_only=True)
         # Prepare output - support both bucket_resolution and crop_resolution keys
         resolution_key = "bucket_resolution" if "bucket_resolution" in item else "crop_resolution"
         output = {

@@ -30,6 +30,9 @@ torchrun --standalone --nproc-per-node=8 \
 The cache must contain `metadata.json`, its declared shards, cached tensors, and
 `negative_prompt_embedding.pt`. The environment variable overrides the configured cache root. All
 metadata, tensor, and negative-embedding paths must still resolve inside that effective root.
+For exact resume, every shard item must also contain the `cache_sha256` written by the shared
+preprocessor. PDD verifies each tensor's bytes before loading it and binds those expected hashes
+plus the negative-prompt embedding hash into the checkpoint dataset identity.
 
 Training deterministically derives disjoint train and validation membership from metadata ordinals;
 it does not rewrite the cache or require separate split manifests. The default recipe uses 2,000

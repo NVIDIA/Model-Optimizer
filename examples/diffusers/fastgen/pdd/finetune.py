@@ -139,7 +139,7 @@ def _validate_dataset_contract(
     validation_dataset: Any,
     config: Any,
 ) -> tuple[Mapping[str, Any], str, str]:
-    """Collectively verify deterministic split membership and the source metadata digest."""
+    """Collectively verify deterministic splits and the authenticated dataset snapshot."""
     import torch.distributed as dist
 
     try:
@@ -159,9 +159,20 @@ def _validate_dataset_contract(
             raise RuntimeError("training and validation datasets disagree on total sample count.")
         if train_dataset.metadata_sha256 != validation_dataset.metadata_sha256:
             raise RuntimeError("training and validation datasets disagree on metadata content.")
+        if (
+            not train_dataset.payload_hashes_complete
+            or not validation_dataset.payload_hashes_complete
+        ):
+            raise RuntimeError("PDD exact resume requires a cache_sha256 for every tensor payload.")
+        if train_dataset.dataset_snapshot_sha256 != validation_dataset.dataset_snapshot_sha256:
+            raise RuntimeError("training and validation datasets disagree on dataset content.")
+        if not isinstance(train_dataset.dataset_snapshot_sha256, str):
+            raise RuntimeError("PDD dataloader did not construct a dataset snapshot identity.")
         report = {
             "cache_root": str(train_dataset.cache_root),
             "metadata_sha256": train_dataset.metadata_sha256,
+            "negative_prompt_embedding_sha256": (train_dataset.negative_prompt_embedding_sha256),
+            "dataset_snapshot_sha256": train_dataset.dataset_snapshot_sha256,
             "total_samples": train_dataset.total_num_samples,
             "train_samples": len(train_ids),
             "validation_samples": len(validation_ids),
@@ -494,7 +505,7 @@ def main() -> None:
         automodel_snapshot=setup.automodel_snapshot,
         ordered_train_id_sha256=train_ordered_id_sha256,
         ordered_heldout_id_sha256=heldout_ordered_id_sha256,
-        dataset_snapshot_sha256=snapshot_report["metadata_sha256"],
+        dataset_snapshot_sha256=snapshot_report["dataset_snapshot_sha256"],
         local_batch_size=config.training.local_batch_size,
         grad_accumulation_steps=config.training.grad_accumulation_steps,
         training_seed=config.training.seed,
@@ -532,7 +543,9 @@ def main() -> None:
         )
     if rank == 0:
         logging.info(
-            "PDD dataset verified: metadata_sha256=%s train=%d validation=%d root=%s",
+            "PDD dataset verified: snapshot_sha256=%s metadata_sha256=%s "
+            "train=%d validation=%d root=%s",
+            snapshot_report["dataset_snapshot_sha256"],
             snapshot_report["metadata_sha256"],
             snapshot_report["train_samples"],
             snapshot_report["validation_samples"],

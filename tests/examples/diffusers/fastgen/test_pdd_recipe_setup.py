@@ -29,6 +29,7 @@ import pytest
 import torch
 import yaml
 from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
+from torch import nn
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
@@ -36,12 +37,16 @@ if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
 from pdd.recipe import (
+    _projection_identity,
+    _stage_and_shard_training_models,
     build_pdd_export_setup,
     build_pdd_setup,
     initialize_pdd_distributed,
     resolve_pdd_recipe_config,
 )
 from pdd.verify_readonly_automodel import snapshot_installed_distribution
+
+from modelopt.torch.fastgen import PDDLayerSpec, convert_to_pdd_output_projection
 
 
 def _require_exact_automodel() -> None:
@@ -51,6 +56,53 @@ def _require_exact_automodel() -> None:
         pytest.skip("nemo_automodel is not installed")
     if version != "0.5.0":
         pytest.skip(f"requires the official nemo_automodel==0.5.0 wheel, found {version}")
+
+
+def test_training_setup_shards_student_before_staging_teacher() -> None:
+    events: list[str] = []
+
+    class TrackedModel(nn.Module):
+        def __init__(self, label: str, *, projection: bool = False) -> None:
+            super().__init__()
+            self.label = label
+            self.proj_out = nn.Linear(2, 2) if projection else nn.Identity()
+
+        def to(self, *args, **kwargs):
+            events.append(f"{self.label}.to")
+            return super().to(*args, **kwargs)
+
+    class TrackedManager:
+        def parallelize(self, model):
+            events.append(f"{model.label}.parallelize")
+            return model
+
+    student = TrackedModel("student", projection=True)
+    teacher = TrackedModel("teacher")
+    projection = convert_to_pdd_output_projection(
+        student,
+        PDDLayerSpec("proj_out", "channel_major"),
+        grid_size=4,
+    )
+
+    staged_student, staged_teacher = _stage_and_shard_training_models(
+        student,
+        teacher,
+        projection,
+        _projection_identity(projection),
+        TrackedManager(),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        fuse_qkv_projections=False,
+    )
+
+    assert staged_student is student
+    assert staged_teacher is teacher
+    assert events == [
+        "student.to",
+        "student.parallelize",
+        "teacher.to",
+        "teacher.parallelize",
+    ]
 
 
 def _raw_config(model_dir: pathlib.Path, *, qkv: bool = False) -> dict:

@@ -32,8 +32,11 @@ Self-contained on **stock** ``nemo_automodel`` (no AutoModel patch required):
 """
 
 import functools
+import hashlib
+import io
 import logging
 from collections.abc import Sequence
+from pathlib import Path
 
 import torch
 from nemo_automodel.components.datasets.diffusion.sampler import SequentialBucketSampler
@@ -130,14 +133,16 @@ def collate_fn_text_to_image(
     return image_batch
 
 
-def _load_negative_prompt_embedding(path: str) -> tuple[torch.Tensor, torch.Tensor]:
+def _load_negative_prompt_embedding(path: str) -> tuple[torch.Tensor, torch.Tensor, str]:
     """Load ``(embed, mask)`` from a negative-prompt-embedding file.
 
     Accepts a dict with an ``embed`` tensor (and an optional ``mask`` /
     ``prompt_embeds_mask`` / ``text_mask``) or a bare embedding tensor; a missing mask
     defaults to all-ones.
     """
-    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload_bytes = Path(path).read_bytes()
+    payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    payload = torch.load(io.BytesIO(payload_bytes), map_location="cpu", weights_only=True)
     neg_embed = payload["embed"] if isinstance(payload, dict) else payload
     if not torch.is_tensor(neg_embed):
         raise TypeError(
@@ -158,7 +163,19 @@ def _load_negative_prompt_embedding(path: str) -> tuple[torch.Tensor, torch.Tens
         )
     if neg_mask is None:
         neg_mask = torch.ones(neg_embed.shape[:-1], dtype=torch.long)
-    return neg_embed, neg_mask
+    return neg_embed, neg_mask, payload_sha256
+
+
+def _dataset_snapshot_sha256(metadata_sha256: str, negative_sha256: str | None) -> str:
+    """Bind expected sample content and the static negative condition into one identity."""
+    digest = hashlib.sha256(b"modelopt-fastgen-dataset-snapshot-v1\0")
+    digest.update(bytes.fromhex(metadata_sha256))
+    if negative_sha256 is None:
+        digest.update(b"\0no-negative-prompt")
+    else:
+        digest.update(b"\0negative-prompt\0")
+        digest.update(bytes.fromhex(negative_sha256))
+    return digest.hexdigest()
 
 
 def build_text_to_image_multiresolution_dataloader(
@@ -222,6 +239,7 @@ def build_text_to_image_multiresolution_dataloader(
         split=split,
         validation_count=validation_count,
         split_seed=split_seed,
+        verify_payload_hashes=exact_resume,
     )
     effective_root = dataset.cache_root
 
@@ -233,7 +251,8 @@ def build_text_to_image_multiresolution_dataloader(
             negative_prompt_embedding_path,
             "negative prompt embedding",
         )
-        neg_embed, neg_mask = _load_negative_prompt_embedding(str(negative_path))
+        neg_embed, neg_mask, negative_sha256 = _load_negative_prompt_embedding(str(negative_path))
+        dataset.negative_prompt_embedding_sha256 = negative_sha256
         if dp_rank == 0:
             logger.info(
                 "Loaded negative_prompt_embedding from %s | shape=%s dtype=%s mask_shape=%s",
@@ -247,6 +266,10 @@ def build_text_to_image_multiresolution_dataloader(
             negative_text_embeddings=neg_embed,
             negative_text_embeddings_mask=neg_mask,
         )
+    dataset.dataset_snapshot_sha256 = _dataset_snapshot_sha256(
+        dataset.metadata_sha256,
+        dataset.negative_prompt_embedding_sha256,
+    )
 
     sampler = SequentialBucketSampler(
         dataset,
