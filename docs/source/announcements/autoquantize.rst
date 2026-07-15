@@ -1,9 +1,9 @@
 :orphan:
 
-AutoQuantize: Automatic Sensitivity-Guided Mixed-Precision Quantization Under a Cost Budget
-###########################################################################################
+AutoQuantize: A Fast Automatic Mixed-Precision Assignment
+#########################################################
 
-:Authors: Asma Beevi K T, Wei Ming, Frida Hou, Juhi Mittal, Jenny Chen, Ajinkya Rasane, Meng Xin
+:Authors: Asma Beevi K T, Wei Ming, Frida Hou, Juhi Mittal, Jenny Chen, Ajinkya Rasane, Meng Xin, Shengliang Xu
 :Date: July 15, 2026
 :Tags: autoquantize, quantization, mixed-precision, modelopt
 
@@ -55,61 +55,45 @@ Both ingredients are cheap: the output error :math:`Y_{i,k} - Y_{i,k}^{Q_{i,f}}`
 Performance cost
 ================
 
-ModelOpt uses *effective bits* after quantization as the cost. Effective bits is directly proportional to the compressed model weight size, which is a useful target in practice: large-batch inference is often bound by loading weights from memory (even for sparse MoEs), so weight compression pays off there too. That said, effective bits is a fast proxy, not truly hardware-aware — using measured hardware latency as the cost is a natural next step.
+ModelOpt uses *effective bits* as the cost: the total compressed model size, counting each weight's bit-width plus scale-factor overhead. Sweeping the budget over effective-bits targets directly controls model size and makes the accuracy-vs-compression frontier easy to interpret.
 
 Putting it together
 ===================
 
-Following the effective-bits objective above, the cost of assigning format :math:`f` to operator :math:`i` is its compressed weight size:
+Following the effective-bits objective above, AutoQuantize solves the constrained optimization
 
 .. math::
 
-   C(\mathrm{Op}_i, Q_{i,f}) = N_{\mathrm{params}}(\mathrm{Op}_i) \times \mathrm{bits}(Q_{i,f}),
+   \min_{\{f\}} \sum_i S(\mathrm{Op}_i, Q_{i,f}) \quad \text{s.t.} \quad \sum_i N_{\mathrm{params}}(\mathrm{Op}_i) \times \mathrm{bits}(Q_{i,f}) \leq N_{\mathrm{total}} \times \bar{b},
 
-where :math:`N_{\mathrm{params}}(\mathrm{Op}_i)` is the operator's parameter count and :math:`\mathrm{bits}(Q_{i,f})` the effective bits per weight of format :math:`f` (including scale-factor overhead). AutoQuantize then solves the constrained optimization
-
-.. math::
-
-   \min_{\{f\}} \sum_i S(\mathrm{Op}_i, Q_{i,f}) \quad \text{s.t.} \quad \sum_i C(\mathrm{Op}_i, Q_{i,f}) \leq B,
-
-where :math:`Q_{i,f}` is the chosen format for operator :math:`i` and :math:`B` is the total weight-size budget — e.g. an average of 4.8 effective bits across the model. Structurally this is a multiple-choice knapsack; ModelOpt solves it with a linear-programming solver essentially instantaneously. Sweeping :math:`B` traces out an accuracy-vs-compression frontier.
+where :math:`Q_{i,f}` is the chosen format for operator :math:`i`, :math:`\mathrm{bits}(Q_{i,f})` the effective bits per weight of format :math:`f` (including scale-factor overhead), :math:`N_{\mathrm{total}} = \sum_i N_{\mathrm{params}}(\mathrm{Op}_i)` the total parameter count, and :math:`\bar{b}` the user-specified average effective bits (e.g. :math:`\bar{b} = 4.8`). Sweeping :math:`\bar{b}` traces out an accuracy-vs-compression frontier.
 
 Deployment-restriction-aware search
 ***********************************
 
-A mixed-precision assignment is only useful if the runtime can execute it. So AutoQuantize performs a deployment-aware search — runtime coupling constraints are folded into the search rather than patched up afterwards, meaning the searched model is deployable out of the box in vLLM, SGLang, TensorRT-LLM, and similar inference runtimes. Any restriction of the form "this group of operators takes one joint format decision" becomes a merged knapsack item with aggregated sensitivity and cost.
+A mixed-precision assignment is only useful if the runtime can execute it. AutoQuantize therefore folds runtime coupling constraints directly into the search, so the searched model deploys out of the box in vLLM, SGLang, and TensorRT-LLM. Any restriction of the form "this group of operators takes one joint format decision" becomes a merged knapsack item: sensitivity is measured jointly at the group's downstream output, and cost is simply the sum over the group's members.
 
-**1) Joint quantization for fused linear layers.** Inference runtimes often fuse linear operators, which imposes a shared quantization format across the fused group. This constraint is applied within each layer: that layer's Q, K, and V projections are fused and must share one format, so the fused QKV projection becomes a single decision variable. The naive score would just sum the three per-projection sensitivities — but that treats their Hessians as independent, when the three outputs actually interact through the attention operation. Instead, AutoQuantize quantizes all three projections jointly with format :math:`f` and measures the sensitivity at the attention output, so the metric naturally captures how the projections' quantization errors combine through attention:
+Joint quantization for fused linear layers
+===========================================
+
+Inference runtimes fuse each layer's Q, K, and V projections, so the fused group must share one format. One approach is to sum the three per-projection sensitivities, but that treats their Hessians as independent, when the three outputs interact through the attention operation. So in AutoQuantize we quantize all three projections jointly with format :math:`f` and measure the sensitivity at the attention output:
 
 .. math::
 
    S(\mathrm{Op}_{\mathrm{qkv}}, Q_{\mathrm{qkv},f}) \propto \sum_{k=1}^{d} \left(g_{\mathrm{attn},k}\right)^2 \left(Y_{\mathrm{attn},k} - Y_{\mathrm{attn},k}^{Q_{\mathrm{qkv},f}}\right)^2,
 
-where :math:`Y_{\mathrm{attn}}` is the attention output and :math:`g_{\mathrm{attn}}` its gradient. The cost, by contrast, has no interaction and is simply additive:
+where :math:`Y_{\mathrm{attn}}` is the attention output and :math:`g_{\mathrm{attn}}` its gradient.
+
+MoE layer constraints
+=====================
+
+The quantized MoE APIs in vLLM and TensorRT-LLM require all sparse experts within a layer to share one format. AutoQuantize therefore treats each layer's sparse-expert projections — every expert's ``up_proj`` and ``down_proj`` — as a single decision and, as in the QKV case, measures sensitivity at the MoE block output:
 
 .. math::
 
-   C(\mathrm{Op}_{\mathrm{qkv}}, Q_{\mathrm{qkv},f}) = C(\mathrm{Op}_{\mathrm{q}}, Q_{\mathrm{qkv},f}) + C(\mathrm{Op}_{\mathrm{k}}, Q_{\mathrm{qkv},f}) + C(\mathrm{Op}_{\mathrm{v}}, Q_{\mathrm{qkv},f}).
+   S(\mathrm{Op}_{\mathrm{moe}}, Q_{\mathrm{moe},f}) \propto \sum_{k=1}^{d} \left(g_{\mathrm{moe},k}\right)^2 \left(Y_{\mathrm{moe},k} - Y_{\mathrm{moe},k}^{Q_{\mathrm{moe},f}}\right)^2.
 
-**2) MoE layer constraints.** vLLM and TensorRT-LLM quantized MoE APIs require all sparse experts in a constrained MoE group to share one quantization format. This restriction is also applied within each MoE layer: only sparse experts inside the same layer are coupled. In Nemotron 3 Super, each sparse expert contains ``up_proj`` and ``down_proj``, so these sparse-expert projections must be assigned jointly. We formulate the sparse-expert set as one operator-level decision,
-
-.. math::
-
-   \mathrm{Op}_{\mathrm{moe}} = \bigcup_{e \in \mathcal{E}} \{\mathrm{Op}_{e,\mathrm{up\_proj}}, \mathrm{Op}_{e,\mathrm{down\_proj}}\},
-
-measure sensitivity at the MoE block output so the metric captures the combined contribution from all sparse experts,
-
-.. math::
-
-   S(\mathrm{Op}_{\mathrm{moe}}, Q_{\mathrm{moe},f}) \propto \sum_{k=1}^{d} \left(g_{\mathrm{moe},k}\right)^2 \left(Y_{\mathrm{moe},k} - Y_{\mathrm{moe},k}^{Q_{\mathrm{moe},f}}\right)^2,
-
-and define the deployment cost as the sum over sparse experts,
-
-.. math::
-
-   C(\mathrm{Op}_{\mathrm{moe}}, Q_{\mathrm{moe},f}) = \sum_{e \in \mathcal{E}} \left(C(\mathrm{Op}_{e,\mathrm{up\_proj}}, Q_{\mathrm{moe},f}) + C(\mathrm{Op}_{e,\mathrm{down\_proj}}, Q_{\mathrm{moe},f})\right).
-
-Other linear layers in the MoE block — latent projections and shared experts — are not part of this coupling and can be assigned formats independently.
+The other linear layers in the MoE block — latent projections and shared experts — are not subject to this restriction, so each is searched independently.
 
 Results
 *******
@@ -118,18 +102,18 @@ Results
    :alt: MMLU accuracy versus effective bits under AutoQuantize for Qwen3 1.7B, 4B, 8B, and 14B
    :width: 100%
 
-**MMLU accuracy vs. effective bits under AutoQuantize, Qwen3 1.7B/4B/8B/14B.** Each point is one solve of the constrained search at that bit budget, followed by an MMLU evaluation. Solid: {NVFP4, FP8, BF16} menu; dashed: {NVFP4, BF16}.
+**MMLU accuracy vs. effective bits under AutoQuantize, Qwen3 1.7B/4B/8B/14B.**
 
-The figure shows the accuracy-vs-compression frontier AutoQuantize traces on Qwen3 models: sweep the bit budget :math:`B`, solve at each point, evaluate on MMLU. Accuracy rises with the budget and tapers — once the sensitive layers are protected, extra bits buy little.
+The figure shows the accuracy-vs-compression frontier AutoQuantize traces on Qwen3 models: sweep the bit budget, solve at each point, evaluate on MMLU. Accuracy rises with the budget.
 
-Two things to notice. First, the rise is essentially monotonic, which means the sensitivity score is ranking layers correctly — a noisy proxy would give a jagged frontier. Second, adding formats to the mix helps: at every budget, {NVFP4, FP8, BF16} sits at or above {NVFP4, BF16}. A sensitive layer doesn't need to back off all the way to BF16 — FP8 gives a good accuracy-vs-performance middle ground, protecting moderately sensitive layers at a fraction of the cost.
+Two things to notice. First, the rise is essentially monotonic, which means the sensitivity score is ranking layers correctly — a noisy proxy would give a jagged frontier. Second, adding FP8 to the format menu helps: at every budget, searching over NVFP4, FP8, and BF16 matches or beats NVFP4 and BF16 alone. A sensitive layer doesn't need to fall back all the way to BF16 — FP8 is a good middle ground, protecting moderately sensitive layers at a fraction of the cost.
 
 AutoQuantize gradient is fast!
 ==============================
 
-**Speed.** The direct way to measure sensitivity — quantize one layer at a time and measure a downstream evaluation such as loss, accuracy — runs the whole model per measurement. The AutoQuantize gradient scores all layer × format combinations in one forward + backward sweep. On Qwen3.6-35B-A3B, with everything else identical, that's a ~51× difference (Table 1).
+Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. The gradient score instead scores all layers at once, so its cost scales with the number of formats, not the number of layers. On Qwen3.6-35B-A3B that is a ~51× difference (Table 1).
 
-**Table 1. Scoring cost: AutoQuantize gradient vs. AutoQuantize KL-divergence (lower is better).**
+**Table 1. Scoring cost: gradient vs. KL divergence (lower is better).**
 
 .. list-table::
    :header-rows: 1
@@ -137,20 +121,17 @@ AutoQuantize gradient is fast!
    * - Scoring method
      - Scoring complexity
      - Time taken for sensitivity estimation
-     - Relative time
      - Peak GPU memory
-   * - AutoQuantize gradient
+   * - Gradient
      - :math:`O(N_{\mathrm{layers}}) \times O(N_{\mathrm{formats}})`
      - ~16 minutes
-     - 1×
      - 29 GB
-   * - AutoQuantize KL-divergence
+   * - KL divergence
      - :math:`O(N_{\mathrm{layers}}^2) \times O(N_{\mathrm{formats}})`
      - ~14 hours
-     - ~51× slower
      - 23 GB
 
-*Measured on 4× NVIDIA RTX 6000 Ada GPUs with 128 samples at sequence length 512. Times cover sensitivity scoring only — not the end-to-end AutoQuantize run, which also includes calibration time for each format.*
+*ModelOpt AutoQuantize supports both sensitivity scoring methods — gradient (the default) and KL divergence. Measured on 4× NVIDIA RTX 6000 Ada GPUs with 128 samples at sequence length 512. Times cover sensitivity scoring only — not the end-to-end AutoQuantize run, which also includes calibration time for each format.*
 
 **Memory.** A backward pass is not inherently memory-heavy. With activation checkpointing, activations are recomputed on demand instead of retained for backward, trading additional compute for a smaller footprint. AutoQuantize also performs a scoring pass rather than a training step, so it needs no optimizer state or persistent weight-gradient buffers. Consequently, peak memory remains close to forward-only execution: 29 GB versus 23 GB for KL-divergence in Table 1.
 
