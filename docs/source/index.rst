@@ -11,6 +11,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <input id="announcement-search" class="announcement-search" type="search" placeholder="Search announcements" autocomplete="off" />
        <div class="announcement-tags" aria-label="Announcement tags">
          <button class="announcement-tag is-active" type="button" data-tag="all">All</button>
+         <button class="announcement-tag" type="button" data-tag="autoquantize">AutoQuantize</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="docs">Docs</button>
          <button class="announcement-tag" type="button" data-tag="github-pages">GitHub Pages</button>
@@ -18,6 +19,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-07-15" data-title="AutoQuantize: Automatic Sensitivity-Guided Mixed-Precision Quantization Under a Cost Budget" data-summary="AutoQuantize finds Pareto-optimal mixed-precision assignments with gradient-based sensitivity scoring under a deployment-aware cost budget." data-tags="autoquantize quantization mixed-precision modelopt">
+       <div class="announcement-card-meta">July 15, 2026 &middot; Asma Beevi K T, Wei Ming, Frida Hou, Juhi Mittal, Jenny Chen, Ajinkya Rasane, Meng Xin</div>
+       <h2><a href="announcements/autoquantize.html">AutoQuantize: Automatic Sensitivity-Guided Mixed-Precision Quantization Under a Cost Budget</a></h2>
+       <p>AutoQuantize finds Pareto-optimal mixed-precision assignments with gradient-based sensitivity scoring under a deployment-aware cost budget.</p>
+       <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-07-13" data-title="Model Optimizer announcements are moving to GitHub Pages" data-summary="The public Model Optimizer site is gaining a PR-updated announcements landing page within the existing Sphinx documentation." data-tags="release docs github-pages">
        <div class="announcement-card-meta">July 13, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/github-pages-announcements.html">Model Optimizer announcements are moving to GitHub Pages</a></h2>
