@@ -152,7 +152,7 @@ AutoQuantize gradient is fast!
 
 *Measured on 4× NVIDIA RTX 6000 Ada GPUs with 128 samples at sequence length 512. Times cover sensitivity scoring only — not the end-to-end AutoQuantize run, which also includes calibration time for each format.*
 
-**Memory.** The backward pass sounds expensive but isn't: activation recomputation during scoring keeps peak memory close to forward-pass levels. Table 1 shows it — the gradient method peaks at 29 GB versus 23 GB for the forward-only AutoQuantize KL-divergence run, a modest overhead rather than the multiples a training-style backward pass would require.
+**Memory.** A backward pass is not inherently memory-heavy. With activation checkpointing, activations are recomputed on demand instead of retained for backward, trading additional compute for a smaller footprint. AutoQuantize also performs a scoring pass rather than a training step, so it needs no optimizer state or persistent weight-gradient buffers. Consequently, peak memory remains close to forward-only execution: 29 GB versus 23 GB for KL-divergence in Table 1.
 
 How to use ModelOpt AutoQuantize
 ********************************
