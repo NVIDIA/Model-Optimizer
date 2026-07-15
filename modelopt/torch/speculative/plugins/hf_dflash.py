@@ -71,7 +71,6 @@ Draft model components:
            lazy rope pattern needed for MLA models.
 """
 
-import contextlib
 import json
 import logging
 import os
@@ -330,24 +329,19 @@ class HFDFlashModel(DFlashModel):
         """Warm-start ``self.dflash_module`` from an exported DFlash draft checkpoint.
 
         ``checkpoint`` is a local directory holding ``model.safetensors`` (DFlashExporter /
-        z-lab layout), a direct path to a ``.safetensors`` file, or a HuggingFace Hub repo
-        id to download from. Keys map 1:1 onto ``dflash_module``. Missing keys are
-        tolerated only for submodules entirely absent from the checkpoint (e.g. the
-        Domino/DSpark heads when warm-starting from a plain DFlash backbone); partial
-        overlap within a submodule means an architecture mismatch and raises.
+        z-lab layout). Keys map 1:1 onto ``dflash_module``. Missing keys are tolerated
+        only for submodules entirely absent from the checkpoint (e.g. the Domino/DSpark
+        heads when warm-starting from a plain DFlash backbone); partial overlap within a
+        submodule means an architecture mismatch and raises.
         """
         from safetensors.torch import load_file
 
-        weights_path = checkpoint
-        if os.path.isdir(weights_path):
-            weights_path = os.path.join(weights_path, "model.safetensors")
+        weights_path = os.path.join(checkpoint, "model.safetensors")
         if not os.path.isfile(weights_path):
-            from huggingface_hub import hf_hub_download
-
-            weights_path = hf_hub_download(repo_id=checkpoint, filename="model.safetensors")
-            # Best-effort fetch for the sibling-config consistency check below.
-            with contextlib.suppress(Exception):
-                hf_hub_download(repo_id=checkpoint, filename="config.json")
+            raise ValueError(
+                f"dflash_init_checkpoint must be a local directory containing "
+                f"model.safetensors; not found at {weights_path}."
+            )
 
         self._check_init_checkpoint_config(checkpoint, weights_path)
 

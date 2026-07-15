@@ -2,9 +2,9 @@
 #
 # Instead of training the drafter from scratch, dflash.dflash_init_checkpoint loads an
 # already-trained draft module (DFlashExporter / z-lab layout: model.safetensors +
-# config.json) into model.dflash_module before training. The default warm-start
-# checkpoint is the public z-lab/Qwen3-8B-DFlash-b16 (downloaded from the HF Hub);
-# point init_checkpoint at a local export directory to fine-tune your own drafter.
+# config.json) into model.dflash_module before training. It must be a LOCAL directory —
+# stage the public drafter first (hf download z-lab/Qwen3-8B-DFlash-b16) or point
+# init_checkpoint at your own export directory.
 #
 # NOTE: dflash_architecture_config must describe the SAME draft architecture as the
 # checkpoint. modify() takes num_attention_heads/num_key_value_heads/head_dim/
@@ -35,8 +35,8 @@ job_name: Qwen3-8B_DFlash_online_finetune
 pipeline:
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3-8B
-    # HF Hub repo id, a local export dir with model.safetensors, or a .safetensors path.
-    init_checkpoint: z-lab/Qwen3-8B-DFlash-b16
+    # Local dir with model.safetensors (a staged z-lab/Qwen3-8B-DFlash-b16 or your own export).
+    init_checkpoint: /hf-local/z-lab/Qwen3-8B-DFlash-b16
 
   # Step 1: Online DFlash fine-tuning from the warm-start checkpoint
   task_0:

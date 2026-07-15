@@ -284,14 +284,14 @@ avoiding meta-tensor issues during `from_pretrained` model construction.
 ### Warm Start / Fine-Tuning (`dflash_init_checkpoint`)
 
 To fine-tune an already-trained drafter instead of training from scratch, set
-`dflash.dflash_init_checkpoint` to an exported DFlash checkpoint (the
-z-lab-compatible layout produced by `export_hf_checkpoint.py`). It accepts a
-local export directory, a direct `.safetensors` path, or a HuggingFace Hub repo
-id, e.g.:
+`dflash.dflash_init_checkpoint` to a local directory containing an exported
+DFlash checkpoint (the z-lab-compatible `model.safetensors` layout produced by
+`export_hf_checkpoint.py`; for a public drafter, download it first, e.g.
+`hf download z-lab/Qwen3-8B-DFlash-b16`):
 
 ```yaml
 dflash:
-  dflash_init_checkpoint: z-lab/Qwen3-8B-DFlash-b16
+  dflash_init_checkpoint: /path/to/Qwen3-8B-DFlash-b16
 ```
 
 The weights are loaded into `model.dflash_module` right after conversion.

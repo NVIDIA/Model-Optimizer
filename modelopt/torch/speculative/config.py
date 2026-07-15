@@ -148,12 +148,12 @@ class DFlashConfig(ModeloptBaseConfig):
         default=None,
         description=(
             "Warm-start the draft module from an exported DFlash checkpoint before "
-            "fine-tuning. Accepts a local directory containing ``model.safetensors`` (the "
-            "DFlashExporter / z-lab layout, e.g. ``z-lab/Qwen3-8B-DFlash-b16``), a direct "
-            "path to a ``.safetensors`` file, or a HuggingFace Hub repo id to download from. "
-            "``dflash_architecture_config`` must describe the same draft architecture as the "
-            "checkpoint (weights are block-size agnostic, so ``dflash_block_size`` may "
-            "differ). Ignored on restore — restored models load their own trained weights."
+            "fine-tuning. Must be a local directory containing ``model.safetensors`` in the "
+            "DFlashExporter / z-lab layout (e.g. a downloaded copy of "
+            "``z-lab/Qwen3-8B-DFlash-b16``). ``dflash_architecture_config`` must describe "
+            "the same draft architecture as the checkpoint (weights are block-size "
+            "agnostic, so ``dflash_block_size`` may differ). Ignored on restore — restored "
+            "models load their own trained weights."
         ),
     )
 

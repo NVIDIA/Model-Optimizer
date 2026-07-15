@@ -305,18 +305,13 @@ class TestDFlashWarmStart:
         for key, value in model.dflash_module.state_dict().items():
             assert torch.equal(value, ref_sd[key]), f"Mismatch after warm start: {key}"
 
-    def test_warm_start_from_safetensors_file_path(self, tmp_path):
-        """A direct path to the .safetensors file works too."""
-        model_ref, export_dir = self._export_drafter(tmp_path)
-
+    def test_warm_start_missing_checkpoint_raises(self, tmp_path):
+        """Anything but a local dir containing model.safetensors fails loudly."""
         model = get_tiny_llama(num_hidden_layers=4)
         config = _get_dflash_config()
-        config["dflash_init_checkpoint"] = str(export_dir / "model.safetensors")
-        mtsp.convert(model, [("dflash", config)])
-
-        ref_sd = model_ref.dflash_module.state_dict()
-        for key, value in model.dflash_module.state_dict().items():
-            assert torch.equal(value, ref_sd[key])
+        config["dflash_init_checkpoint"] = str(tmp_path / "no_such_dir")
+        with pytest.raises(ValueError, match="must be a local directory"):
+            mtsp.convert(model, [("dflash", config)])
 
     def test_warm_start_arch_mismatch_raises(self, tmp_path):
         """Loading a checkpoint with a different draft depth fails loudly."""
