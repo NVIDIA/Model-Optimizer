@@ -560,7 +560,10 @@ def main(args: argparse.Namespace):
             trust_remote_code=args.trust_remote_code,
             export_interval=args.hf_validation_export_interval,
         )
-        # TODO: Use distill(..., callbacks=[callback]) once Megatron-Bridge supports callbacks.
+        # Megatron-Bridge distill(config) currently only checks DistillationProvider and calls
+        # pretrain(config, forward_step_modelopt). Call pretrain directly here only to attach the
+        # export callback; keep this path behaviorally equivalent to distill(config).
+        # TODO: Use distill(..., callbacks=[callback]) once distill(...) in Megatron-Bridge supports callbacks.
         pretrain(config, forward_step_modelopt, callbacks=[callback])
     else:
         distill(config)
