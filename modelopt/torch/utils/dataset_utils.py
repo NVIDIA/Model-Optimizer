@@ -19,6 +19,7 @@ import copy
 import json
 import os
 import random
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -1291,15 +1292,28 @@ def download_hf_dataset_as_jsonl(
         json_keys = [json_keys]
     jsonl_paths: list[str] = []
 
-    try:
-        response = requests.get(
-            f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}",
-            headers=build_hf_headers(),
-            timeout=10,
-        )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch dataset splits for {dataset_name}: {e}") from e
+    # The HF datasets-server /splits endpoint is intermittently unavailable
+    # (transient 5xx). Retry with backoff so a momentary outage doesn't fail the
+    # whole preprocess run; fail fast on client errors (e.g. 404 unknown dataset).
+    splits_url = f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}"
+    response = None
+    last_exc: Exception | None = None
+    for attempt in range(4):
+        try:
+            response = requests.get(splits_url, headers=build_hf_headers(), timeout=10)
+            response.raise_for_status()
+            break
+        except requests.RequestException as e:
+            last_exc = e
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None and status < 500:
+                break  # client error — retrying won't help
+            if attempt < 3:
+                time.sleep(2**attempt)  # 1s, 2s, 4s
+    if response is None or not response.ok:
+        raise RuntimeError(
+            f"Failed to fetch dataset splits for {dataset_name}: {last_exc}"
+        ) from last_exc
 
     response_json = response.json()
     print_rank_0(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")

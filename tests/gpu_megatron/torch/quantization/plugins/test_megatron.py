@@ -477,6 +477,9 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
 # Compressed state dict takes longer due to real quant conversion & saving/loading
+# Its real mtq.compress() path exercises the same TE/CUDA-13 kernels that trip the flaky
+# Blackwell (sm_120) illegal-memory-access; #1901 skipped the fake-quant sibling but missed this one.
+@skip_flaky_on_blackwell
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
