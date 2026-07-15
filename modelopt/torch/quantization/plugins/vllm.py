@@ -23,13 +23,6 @@ from functools import partial
 from itertools import chain
 
 import torch
-
-# Try multiple import paths for vLLM compatibility across versions
-if importlib.util.find_spec("vllm.attention"):
-    import vllm.attention as vllm_attention  # vllm < 0.16.0
-else:
-    import vllm.model_executor.layers.attention as vllm_attention  # vllm >= 0.16.0
-
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
@@ -37,6 +30,25 @@ from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_g
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from .custom import CUSTOM_MODEL_PLUGINS
+
+
+def _import_attention_module():
+    """Import a vLLM module that exports the concrete ``Attention`` class."""
+    for module_name in (
+        "vllm.attention.layer",
+        "vllm.model_executor.layers.attention",
+        "vllm.attention",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if hasattr(module, "Attention"):
+            return module
+    raise ImportError("No supported vLLM Attention module was found")
+
+
+vllm_attention = _import_attention_module()
 
 # Try multiple import paths for vLLM compatibility across versions
 vllm_shared_fused_moe_layer = None
@@ -67,14 +79,6 @@ else:
         from vllm.model_executor.layers.attention.encoder_only_attention import EncoderOnlyAttention
     except ImportError:
         EncoderOnlyAttention = None
-
-try:
-    _has_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_attention_layer = False
-
-if _has_attention_layer:
-    import vllm.attention.layer as vllm_attention
 
 try:
     VllmMLAAttention = vllm_attention.MLAAttention
@@ -162,7 +166,7 @@ def _get_device_dtype(module: torch.nn.Module) -> tuple:
     # kv_cache is a list of tensors (v0) or a single tensor (v1).
     kv = getattr(module, "kv_cache", None)
     if kv is not None:
-        t0 = kv[0] if isinstance(kv, (list, tuple)) and len(kv) > 0 else kv
+        t0 = kv[0] if isinstance(kv, list | tuple) and len(kv) > 0 else kv
         if isinstance(t0, torch.Tensor) and t0.numel() > 0:
             spec = getattr(module, "kv_cache_dtype", t0.dtype)
             out_dtype = (
@@ -186,6 +190,21 @@ def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
 
 
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
+
+
+def _set_vllm_attention_kv_default_amax(module, device: torch.device) -> None:
+    """Set a global-scale-one amax on uncalibrated block-16 NVFP4 K/V quantizers."""
+    for name in ("k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = getattr(module, name, None)
+        if (
+            not isinstance(quantizer, TensorQuantizer)
+            or not quantizer.is_enabled
+            or not quantizer.is_nvfp4_dynamic
+            or (quantizer.block_sizes or {}).get(-1) != 16
+            or hasattr(quantizer, "_amax")
+        ):
+            continue
+        quantizer.amax = torch.tensor(6.0 * 448.0, device=device, dtype=torch.float32)
 
 
 def _vllm_attention_modelopt_post_restore(self) -> None:
@@ -497,9 +516,11 @@ class _QuantVLLMAttention(QuantModule):
         self.parallel_state = create_parallel_state()
 
     def forward(self, query, key, value, *args, **kwargs):
-        query = self.q_bmm_quantizer(query)
+        if not getattr(self, "_query_quant_in_kernel", False):
+            query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        if not getattr(self, "_value_quant_in_kernel", False):
+            value = self.v_bmm_quantizer(value)
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:

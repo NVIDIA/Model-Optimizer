@@ -15,19 +15,20 @@
 
 """Launch vLLM with sparse attention.
 
-Configuration is read exclusively from ``<ckpt>/config.json``'s
-``sparse_attention_config`` block, written during calibration by
+The default ``SparseAttnWorker`` reads configuration exclusively from
+``<ckpt>/config.json``'s ``sparse_attention_config`` block, written by
 ``examples/llm_sparsity/attention_sparsity/hf_sa.py``. If the checkpoint has
-no such block, the worker logs a message and the server runs as standard
+no such block, that worker logs a message and the server runs as standard
 vLLM.
 
-Combined sparse attention + quantization is not handled by this launcher; it
-will be added in a follow-up PR once the combined path is tested.
+The launcher defaults to ``sparse_attn_worker.SparseAttnWorker``. Pass
+``--worker-cls sparse_attn_worker.QuantSparseAttnWorker`` for quant+sparse.
 
 Usage:
     python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>
 """
 
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -43,6 +44,32 @@ if vllm_version <= version.parse("0.11.0"):
     from vllm.utils import FlexibleArgumentParser
 else:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+
+_MODELOPT_ATTN_SOFTMAX_MODE = "MODELOPT_ATTN_SOFTMAX_MODE"
+_RAY_EXECUTOR_MODULES = (
+    "vllm.executor.ray_distributed_executor",
+    "vllm.v1.executor.ray_distributed_executor",
+)
+
+
+def _propagate_env_var_to_ray_workers(env_var: str) -> None:
+    for module_name in _RAY_EXECUTOR_MODULES:
+        try:
+            executor = importlib.import_module(module_name).RayDistributedExecutor
+            executor.ADDITIONAL_ENV_VARS.update({env_var})
+        except (ImportError, AttributeError):
+            continue
+        return
+
+    extra_env_var = "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"
+    merged_env_vars = {
+        name.strip() for name in os.environ.get(extra_env_var, "").split(",") if name.strip()
+    } | {env_var}
+    os.environ[extra_env_var] = ",".join(sorted(merged_env_vars))
+
+
+_propagate_env_var_to_ray_workers(_MODELOPT_ATTN_SOFTMAX_MODE)
 
 
 def main():
