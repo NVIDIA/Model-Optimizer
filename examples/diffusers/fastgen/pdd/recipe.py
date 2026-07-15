@@ -567,6 +567,37 @@ def _stage_and_shard_training_models(
     return student, teacher
 
 
+def _materialize_zero_step_adamw_state(optimizer: torch.optim.AdamW) -> None:
+    """Create complete strict-DCP state without changing parameters or update numbering."""
+    if type(optimizer) is not torch.optim.AdamW:
+        raise TypeError("PDD state materialization requires the stock torch.optim.AdamW optimizer.")
+    if optimizer.state:
+        raise RuntimeError("PDD AdamW state must be empty before materialization.")
+    parameters = [parameter for group in optimizer.param_groups for parameter in group["params"]]
+    if any(parameter.grad is not None for parameter in parameters):
+        raise RuntimeError("PDD AdamW parameters must not have gradients before materialization.")
+
+    learning_rates = [group["lr"] for group in optimizer.param_groups]
+    try:
+        for group in optimizer.param_groups:
+            group["lr"] = 0.0
+        for parameter in parameters:
+            parameter.grad = torch.zeros_like(parameter)
+        optimizer.step()
+        for parameter in parameters:
+            state = optimizer.state.get(parameter)
+            if state is None or set(state) != {"step", "exp_avg", "exp_avg_sq"}:
+                raise RuntimeError("PDD AdamW did not create complete checkpoint state.")
+            step = state["step"]
+            if not isinstance(step, torch.Tensor) or step.numel() != 1 or step.item() != 1:
+                raise RuntimeError("PDD AdamW created an unexpected initial step.")
+            step.zero_()
+    finally:
+        for group, learning_rate in zip(optimizer.param_groups, learning_rates, strict=True):
+            group["lr"] = learning_rate
+        optimizer.zero_grad(set_to_none=True)
+
+
 def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     """Compose released AutoModel APIs without editing or patching external packages."""
     if not isinstance(config, PDDRecipeConfig):
@@ -660,6 +691,7 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         fused=False,
         maximize=False,
     )
+    _materialize_zero_step_adamw_state(optimizer)
     optimizer_parameters = [
         parameter for group in optimizer.param_groups for parameter in group["params"]
     ]

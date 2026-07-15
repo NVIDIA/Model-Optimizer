@@ -455,6 +455,8 @@ def _adamw_nominal_update_ratio(
         if decay <= 0.0:
             raise RuntimeError("AdamW decoupled weight decay factor must remain positive.")
         for parameter in group["params"]:
+            if parameter.grad is None:
+                continue
             state = optimizer.state.get(parameter)
             if not state or "exp_avg" not in state or "exp_avg_sq" not in state:
                 continue

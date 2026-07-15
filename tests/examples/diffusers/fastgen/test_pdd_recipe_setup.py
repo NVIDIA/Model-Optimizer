@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.metadata
 import json
 import os
@@ -37,6 +38,7 @@ if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
 from pdd.recipe import (
+    _materialize_zero_step_adamw_state,
     _projection_identity,
     _stage_and_shard_training_models,
     build_pdd_export_setup,
@@ -47,6 +49,52 @@ from pdd.recipe import (
 from pdd.verify_readonly_automodel import snapshot_installed_distribution
 
 from modelopt.torch.fastgen import PDDLayerSpec, convert_to_pdd_output_projection
+
+
+def test_zero_step_adamw_state_preserves_first_lazy_update() -> None:
+    torch.manual_seed(7)
+    eager_model = nn.Linear(4, 3)
+    lazy_model = copy.deepcopy(eager_model)
+    optimizer_options = {
+        "lr": 2.0e-5,
+        "weight_decay": 0.01,
+        "foreach": False,
+        "fused": False,
+    }
+    eager_optimizer = torch.optim.AdamW(eager_model.parameters(), **optimizer_options)
+    lazy_optimizer = torch.optim.AdamW(lazy_model.parameters(), **optimizer_options)
+    parameters_before = {
+        name: parameter.detach().clone() for name, parameter in eager_model.named_parameters()
+    }
+
+    _materialize_zero_step_adamw_state(eager_optimizer)
+
+    for name, parameter in eager_model.named_parameters():
+        torch.testing.assert_close(parameter, parameters_before[name], rtol=0, atol=0)
+        assert parameter.grad is None
+        state = eager_optimizer.state[parameter]
+        assert state["step"].item() == 0
+        assert not state["exp_avg"].count_nonzero()
+        assert not state["exp_avg_sq"].count_nonzero()
+
+    eager_model.weight.square().mean().backward()
+    lazy_model.weight.square().mean().backward()
+    eager_optimizer.step()
+    lazy_optimizer.step()
+
+    for eager_parameter, lazy_parameter in zip(
+        eager_model.parameters(), lazy_model.parameters(), strict=True
+    ):
+        torch.testing.assert_close(eager_parameter, lazy_parameter, rtol=0, atol=0)
+    for key in ("step", "exp_avg", "exp_avg_sq"):
+        torch.testing.assert_close(
+            eager_optimizer.state[eager_model.weight][key],
+            lazy_optimizer.state[lazy_model.weight][key],
+            rtol=0,
+            atol=0,
+        )
+    assert eager_optimizer.state[eager_model.bias]["step"].item() == 0
+    assert lazy_model.bias not in lazy_optimizer.state
 
 
 def _require_exact_automodel() -> None:
@@ -366,18 +414,31 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
         parameter for group in source.optimizer.param_groups for parameter in group["params"]
     ]
     assert any(parameter is source.projection.weight for parameter in optimizer_parameters)
+    assert set(source.optimizer.state) == set(optimizer_parameters)
+    assert all(
+        source.optimizer.state[parameter]["step"].item() == 0 for parameter in optimizer_parameters
+    )
+    unused_parameter = next(
+        parameter for parameter in optimizer_parameters if parameter is not source.projection.weight
+    )
+    unused_name = next(
+        name
+        for name, parameter in source.student.named_parameters()
+        if parameter is unused_parameter
+    )
     # Diffusers 0.38 accepts the Qwen object API but currently performs no effective fusion.
     assert not any(
         getattr(module, "fused_projections", False) for module in source.student.modules()
     )
 
     source.optimizer.zero_grad(set_to_none=True)
-    # A real PDD forward touches the backbone and projection. Exercise the strict stock
-    # optimizer restore with complete Adam state rather than an artificial partial update.
-    sum(parameter.float().square().mean() for parameter in optimizer_parameters).backward()
+    # Exercise strict stock-DCP restore after a partial-gradient update. Eager step-zero state must
+    # retain exact lazy-Adam semantics for untouched parameters while keeping every DCP key present.
+    source.projection.weight.float().square().mean().backward()
     source.optimizer.step()
     expected_weight = source.projection.weight.detach().clone()
     expected_exp_avg = source.optimizer.state[source.projection.weight]["exp_avg"].clone()
+    assert source.optimizer.state[unused_parameter]["step"].item() == 0
     checkpoint_root = tmp_path / "checkpoint"
     source.checkpointer.save_model(source.student, str(checkpoint_root))
     source.checkpointer.save_optimizer(source.optimizer, source.student, str(checkpoint_root))
@@ -406,6 +467,7 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     destination = build_pdd_setup(config)
     assert destination.metadata == source.metadata
     destination_projection = destination.projection
+    destination_unused = dict(destination.student.named_parameters())[unused_name]
     destination_weight_id = id(destination_projection.weight)
     destination.checkpointer.load_model(
         destination.student,
@@ -424,6 +486,9 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
         destination.optimizer.state[destination_projection.weight]["exp_avg"],
         expected_exp_avg,
     )
+    assert destination.optimizer.state[destination_unused]["step"].item() == 0
+    assert not destination.optimizer.state[destination_unused]["exp_avg"].count_nonzero()
+    assert not destination.optimizer.state[destination_unused]["exp_avg_sq"].count_nonzero()
     assert snapshot_installed_distribution() == before
     source.checkpointer.close()
     destination.checkpointer.close()
