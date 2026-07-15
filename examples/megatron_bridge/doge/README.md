@@ -74,6 +74,28 @@ torchrun --nproc_per_node 8 examples/megatron_bridge/doge_distill.py \
 Use the learned weights as a hypothesis, not as a final result. The final comparison should come
 from a standard `distill.py` run with fixed weights and the same validation setup as the baselines.
 
+## Virtual-step perturbation diagnostics
+
+To debug whether the alignment score predicts target-KD improvement, run DoGE with frozen student
+and frozen blend weights plus candidate virtual-step blends:
+
+```bash
+python examples/megatron_bridge/doge_distill.py \
+    ... \
+    --doge_freeze_student \
+    --doge_freeze_blend \
+    --doge_virtual_step_candidate_weights 95 2.5 2.5 \
+    --doge_virtual_step_candidate_weights 90 5 5 \
+    --doge_virtual_step_candidate_weights 99 0.5 0.5
+```
+
+Each candidate is interpreted in the source order from `--data_paths` and normalized. For each
+candidate, DoGE temporarily applies one selected-parameter virtual step using that candidate's
+mixed source gradient, evaluates target KD on the same target batch, restores the parameter, and
+writes `virtual_step_diagnostics` to `doge_weights.jsonl`, including the virtual update norm for
+each candidate. The virtual-step learning rate defaults to `--lr` and can be overridden with
+`--doge_virtual_step_lr`. The real student weights and real blend weights are unchanged.
+
 ## Runtime compared with normal distillation
 
 DoGE is slower per training step because each step computes gradient-alignment probes before the
