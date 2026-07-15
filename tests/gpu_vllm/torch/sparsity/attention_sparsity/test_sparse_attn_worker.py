@@ -104,6 +104,7 @@ def test_public_workers_install_after_base_load(
     def fake_base_load(worker, *_args, **_kwargs):
         events.append("base")
         worker.model_runner = model_runner
+        worker.vllm_config = SimpleNamespace(additional_config=None)
 
     def fake_install(actual_runner, **kwargs):
         events.append(("install", actual_runner, kwargs))
@@ -124,7 +125,7 @@ def test_public_workers_install_after_base_load(
         assert "No sparse_attention_config found" in output
         assert "hf_sa.py" in output
     else:
-        assert "Installed NVFP4 quant+sparse attention on 1 layers: {'TestImpl': 1}" in output
+        assert "Installed NVFP4 attention (quant+sparse) on 1 layers: {'TestImpl': 1}" in output
 
 
 def _make_old_impl():

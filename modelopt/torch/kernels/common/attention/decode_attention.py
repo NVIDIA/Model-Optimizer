@@ -32,13 +32,15 @@ from modelopt.torch.kernels.common.attention.triton_fa import (
     _load_paged_v_tile,
 )
 from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4, _v_qdq_nvfp4
+from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq
 
 __all__ = ["attention_decode"]
 
 _BLOCK_N = 128
 _DEFAULT_KV_SPLITS = 32
 _MAX_KV_SPLITS = 32
-_QDQ_MODES = {None, "nvfp4"}
+_P_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
+_V_QDQ_MODES = {None, "nvfp4"}
 
 
 @triton.jit
@@ -137,7 +139,11 @@ def _decode_split_kernel(
         running_sum = running_sum * correction + tl.sum(p, axis=0)
         acc *= correction
 
-        if P_QDQ:
+        if P_QDQ == 1:
+            # FP8 E4M3 per-tensor QDQ of the split-local unnormalized P
+            # (elementwise -> split-count- and batch-shape-invariant).
+            p = fp8_scalar_qdq(p, p_qdq_scale)
+        elif P_QDQ == 2:
             p = tl.reshape(
                 _p_qdq_nvfp4(
                     tl.reshape(p.to(V_cache.dtype.element_ty).to(tl.float32), (1, BLOCK_N)),
@@ -238,15 +244,20 @@ def _decode_combine_kernel(
 
 
 def _qdq_scale(mode: str | None, amax: float | None, operand: str) -> float:
-    if mode not in _QDQ_MODES:
-        raise ValueError(f"{operand}_qdq must be 'nvfp4' or None, got {mode!r}")
+    allowed = _P_QDQ_MODES if operand == "p" else _V_QDQ_MODES
+    if mode not in allowed:
+        raise ValueError(
+            f"{operand}_qdq must be one of {sorted(m for m in allowed if m)} or None, got {mode!r}"
+        )
     if mode is None:
         return 1.0
     if amax is None:
         return 1.0
     if not (math.isfinite(amax) and amax > 0.0):
         raise ValueError(f"{operand}_qdq_amax must be finite and positive, got {amax}")
-    return amax / (6.0 * 448.0)
+    # FP8 uses the per-tensor convention ``amax / 448``; NVFP4 the two-level
+    # global scale ``amax / (6 * 448)`` (matches the prefill kernel).
+    return amax / 448.0 if mode == "fp8" else amax / (6.0 * 448.0)
 
 
 def attention_decode(
@@ -337,7 +348,7 @@ def attention_decode(
             PAGE_SIZE=page_size,
             max_blocks_per_seq=block_table.shape[1],
             NUM_KV_SPLITS=num_kv_splits,
-            P_QDQ=p_qdq == "nvfp4",
+            P_QDQ=_P_QDQ_MODES[p_qdq],
             V_QDQ=v_qdq == "nvfp4",
             V_CACHE_QUANTIZED=v_cache_quantized,
             num_warps=4,

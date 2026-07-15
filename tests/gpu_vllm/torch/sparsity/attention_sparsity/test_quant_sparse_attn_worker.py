@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
@@ -80,3 +81,50 @@ def test_quant_memory_profile_uses_inference_mode_and_disables_compilation(monke
         ("exit", "compilation", model),
         ("exit", "inference", None),
     ]
+
+
+def _quant_worker_with_config(monkeypatch, calls, additional_config):
+    module = _load_worker_module()
+    monkeypatch.setattr(BaseWorker, "load_model", lambda *_a, **_k: calls.append("base"))
+    monkeypatch.setattr(
+        module,
+        "install_vllm_nvfp4_attention",
+        lambda runner, **kw: (
+            calls.append(("install", kw))
+            or SimpleNamespace(installed_count=0, sparse_algorithm=None, backend_counts={})
+        ),
+    )
+    instance = object.__new__(module.QuantSparseAttnWorker)
+    instance.model_runner = SimpleNamespace()
+    instance.vllm_config = SimpleNamespace(additional_config=additional_config)
+    return instance
+
+
+def test_quant_worker_defaults_to_nvfp4(monkeypatch):
+    calls = []
+    instance = _quant_worker_with_config(monkeypatch, calls, None)
+    instance.load_model()
+    assert calls[0] == "base"
+    assert calls[1][1] == {"sparse_cfg": "checkpoint"}
+
+
+def test_quant_worker_reads_formats_from_additional_config(monkeypatch):
+    calls = []
+    instance = _quant_worker_with_config(
+        monkeypatch,
+        calls,
+        {"modelopt_attn_quant": {"p_format": "fp8", "v_format": "fp8"}},
+    )
+    instance.load_model()
+    assert calls[0] == "base"
+    assert calls[1][1] == {"sparse_cfg": "checkpoint", "p_format": "fp8", "v_format": "fp8"}
+
+
+def test_quant_worker_rejects_unknown_format_keys(monkeypatch):
+    calls = []
+    instance = _quant_worker_with_config(
+        monkeypatch, calls, {"modelopt_attn_quant": {"o_format": "fp8"}}
+    )
+    with pytest.raises(ValueError, match="o_format"):
+        instance.load_model()
+    assert ("install", {"sparse_cfg": "checkpoint"}) not in calls

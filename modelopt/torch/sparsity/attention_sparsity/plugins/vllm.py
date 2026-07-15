@@ -121,23 +121,31 @@ def _build_sparse_kw(layer_cfg: dict) -> dict:
 
 
 def _bmm_qdq_from_layer(layer, attr: str, default_amax: float | None):
-    """Map an enabled BMM2 quantizer to the kernel's NVFP4 mode and scalar amax."""
+    """Map an enabled BMM2 quantizer to the kernel's QDQ mode and scalar amax."""
     quantizer = getattr(layer, attr, None)
     if quantizer is None or not getattr(quantizer, "is_enabled", False):
         return None, default_amax
     if (
-        not getattr(quantizer, "is_nvfp4_dynamic", False)
-        or (quantizer.block_sizes or {}).get(-1) != 16
+        getattr(quantizer, "is_nvfp4_dynamic", False)
+        and (quantizer.block_sizes or {}).get(-1) == 16
     ):
+        mode = "nvfp4"
+    elif getattr(quantizer, "num_bits", None) == (4, 3) and not getattr(
+        quantizer, "block_sizes", None
+    ):
+        # Per-tensor FP8 E4M3 (static scale amax/448)
+        mode = "fp8"
+    else:
         raise NotImplementedError(
-            f"{attr} is enabled with an unsupported format; only dynamic block-16 NVFP4 is supported"
+            f"{attr} is enabled with an unsupported format; only dynamic block-16 NVFP4 "
+            "or per-tensor FP8 E4M3 is supported"
         )
     amax = getattr(quantizer, "_amax", None)
     if amax is None:
-        return "nvfp4", default_amax
+        return mode, default_amax
     if getattr(amax, "numel", lambda: 1)() != 1:
         raise NotImplementedError(f"{attr} requires a scalar amax, got shape {tuple(amax.shape)}")
-    return "nvfp4", float(amax)
+    return mode, float(amax)
 
 
 def _p_qdq_from_layer(layer) -> tuple[str | None, float]:

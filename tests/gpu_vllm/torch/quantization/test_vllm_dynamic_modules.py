@@ -52,6 +52,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     _QuantFusedMoEBase,
     _QuantVLLMAttention,
     _VLLMParallelLinear,
+    build_vllm_attention_quant_cfg,
     configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
@@ -447,3 +448,43 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     assert summary["moe_count"] >= 2, summary
 
     _assert_quantizer_amax_is_static(summary)
+
+
+def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    attention = object.__new__(vllm_plugin.vllm_attention.Attention)
+    torch.nn.Module.__init__(attention)
+
+    converted = configure_vllm_nvfp4_attention_quantizers(
+        attention,
+        device="cpu",
+        dtype=torch.bfloat16,
+        cfg=build_vllm_attention_quant_cfg(p_format="fp8", v_format="fp8"),
+    )
+
+    # BMM1 unchanged: Q/K dynamic block-16 NVFP4 (F1)
+    for name in ("q", "k"):
+        quantizer = getattr(converted, f"{name}_bmm_quantizer")
+        assert quantizer.is_enabled and quantizer.is_nvfp4_dynamic
+        assert quantizer.block_sizes[-1] == 16
+    assert converted.k_bmm_quantizer._amax == 6.0 * 448.0
+    # BMM2: P/V per-tensor FP8 E4M3 with fixed amax (P=1.0, V=448) (F3)
+    for name, amax in (("p", 1.0), ("v", 448.0)):
+        quantizer = getattr(converted, f"{name}_bmm_quantizer")
+        assert quantizer.is_enabled
+        assert quantizer.num_bits == (4, 3)
+        assert not quantizer.block_sizes
+        assert float(quantizer._amax) == amax
+    # idempotent: calibrated amax survives reconfiguration
+    converted.v_bmm_quantizer.amax = torch.tensor(96.0)
+    reconfigured = configure_vllm_nvfp4_attention_quantizers(
+        converted,
+        device="cpu",
+        dtype=torch.bfloat16,
+        cfg=build_vllm_attention_quant_cfg(p_format="fp8", v_format="fp8"),
+    )
+    assert float(reconfigured.v_bmm_quantizer._amax) == 96.0

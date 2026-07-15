@@ -94,6 +94,10 @@ class _InstallPlan:
     layers: tuple[_AttentionPlan, ...]
     quantize: bool
     sparse_algorithm: str | None
+    q_format: str = "nvfp4"
+    k_format: str = "nvfp4"
+    p_format: str = "nvfp4"
+    v_format: str = "nvfp4"
 
 
 def _unwrapped_model(model_runner):
@@ -315,7 +319,16 @@ def _raise_unsupported(errors: list[str], policy: str) -> None:
         )
 
 
-def _plan_vllm_attention(model_runner, *, quantize: bool, sparse_cfg) -> _InstallPlan:
+def _plan_vllm_attention(
+    model_runner,
+    *,
+    quantize: bool,
+    sparse_cfg,
+    q_format: str = "nvfp4",
+    k_format: str = "nvfp4",
+    p_format: str = "nvfp4",
+    v_format: str = "nvfp4",
+) -> _InstallPlan:
     model = _unwrapped_model(model_runner)
     resolved_sparse_cfg, sparse_algorithm = _resolve_sparse_config(model_runner, sparse_cfg)
     candidates = []
@@ -329,7 +342,9 @@ def _plan_vllm_attention(model_runner, *, quantize: bool, sparse_cfg) -> _Instal
             candidates.append((name, module, sparse_kw))
 
     if not candidates and not quantize:
-        return _InstallPlan(model_runner, (), False, sparse_algorithm)
+        return _InstallPlan(
+            model_runner, (), False, sparse_algorithm, q_format, k_format, p_format, v_format
+        )
 
     _require_supported_vllm()
     errors = _global_errors(model_runner) if quantize else []
@@ -373,7 +388,16 @@ def _plan_vllm_attention(model_runner, *, quantize: bool, sparse_cfg) -> _Instal
     if quantize and attention_count == 0:
         errors.append("no regular attention layers were found")
     _raise_unsupported(errors, "NVFP4 attention" if quantize else "sparse attention")
-    return _InstallPlan(model_runner, tuple(plans), quantize, sparse_algorithm)
+    return _InstallPlan(
+        model_runner,
+        tuple(plans),
+        quantize,
+        sparse_algorithm,
+        q_format,
+        k_format,
+        p_format,
+        v_format,
+    )
 
 
 def _build_report(plan: _InstallPlan) -> VllmAttentionInstallReport:
@@ -405,15 +429,36 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
     for layer in plan.layers:
         layer.new_impl.sparse_kw = layer.sparse_kw
         if plan.quantize:
+            # Pass cfg only for non-default formats: keeps the default call
+            # signature stable for callers/fakes that predate the cfg parameter.
+            _cfg_kwargs = (
+                {
+                    "cfg": quant_plugin.build_vllm_attention_quant_cfg(
+                        q_format=plan.q_format,
+                        k_format=plan.k_format,
+                        p_format=plan.p_format,
+                        v_format=plan.v_format,
+                    )
+                }
+                if (plan.q_format, plan.k_format, plan.p_format, plan.v_format)
+                != ("nvfp4", "nvfp4", "nvfp4", "nvfp4")
+                else {}
+            )
             converted = quant_plugin.configure_vllm_nvfp4_attention_quantizers(
                 layer.module,
                 device=layer.device,
                 dtype=layer.dtype,
+                **_cfg_kwargs,
             )
             if converted is not None and converted is not layer.module:
                 raise RuntimeError("vLLM attention quantization must convert modules in place")
             p_qdq, p_qdq_amax = attention_plugin._p_qdq_from_layer(layer.module)
             v_qdq, v_qdq_amax = attention_plugin._v_qdq_from_layer(layer.module)
+            if plan.v_format == "fp8":
+                # Per-tensor FP8 V is quantized module-level BEFORE the cache
+                # write (each token is self-contained; no block geometry), so
+                # the kernel sees pre-QDQ'd V and needs no V transform at all.
+                v_qdq, v_qdq_amax = None, None
             layer.new_impl.quant_kw = {
                 "p_qdq": p_qdq,
                 "p_qdq_amax": p_qdq_amax,
@@ -425,8 +470,10 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
         old_query_flag = getattr(layer.module, "_query_quant_in_kernel", missing)
         old_value_flag = getattr(layer.module, "_value_quant_in_kernel", missing)
         if plan.quantize:
-            layer.module._query_quant_in_kernel = True
-            layer.module._value_quant_in_kernel = True
+            # fp8 Q is module-level (bf16 losslessly carries E4M3 QDQ values);
+            # the kernel then runs a plain bf16 BMM1 with no Q transform.
+            layer.module._query_quant_in_kernel = plan.q_format != "fp8"
+            layer.module._value_quant_in_kernel = plan.v_format != "fp8"
         try:
             # Publish the adapter last so a native impl never runs with in-kernel
             # quantization flags that only the ModelOpt adapter understands.
@@ -463,6 +510,10 @@ def install_vllm_nvfp4_attention(
     model_runner,
     *,
     sparse_cfg="checkpoint",
+    q_format: str = "nvfp4",
+    k_format: str = "nvfp4",
+    p_format: str = "nvfp4",
+    v_format: str = "nvfp4",
 ) -> VllmAttentionInstallReport:
     """Install fixed NVFP4 attention with optional checkpoint sparsity.
 
@@ -471,6 +522,22 @@ def install_vllm_nvfp4_attention(
         sparse_cfg: ``"checkpoint"`` to consume optional exported metadata, a
             resolved sparse config dict, or ``None`` for NVFP4-only attention.
     """
+    for name, fmt in (
+        ("q_format", q_format),
+        ("k_format", k_format),
+        ("p_format", p_format),
+        ("v_format", v_format),
+    ):
+        if fmt not in ("nvfp4", "fp8"):
+            raise ValueError(f"{name} must be 'nvfp4' or 'fp8', got {fmt!r}")
     return _apply_vllm_attention_plans(
-        _plan_vllm_attention(model_runner, quantize=True, sparse_cfg=sparse_cfg)
+        _plan_vllm_attention(
+            model_runner,
+            quantize=True,
+            sparse_cfg=sparse_cfg,
+            q_format=q_format,
+            k_format=k_format,
+            p_format=p_format,
+            v_format=v_format,
+        )
     )

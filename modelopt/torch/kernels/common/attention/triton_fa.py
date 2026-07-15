@@ -989,7 +989,9 @@ class _Attention(torch.autograd.Function):
             "IS_CAUSAL": is_causal,
             "HEAD_DIM": HEAD_DIM,
             "STORE_LSE": True,
-            "Q_IS_FP32": q.dtype == torch.float32 and (p_qdq_mode == 2 or v_qdq_mode == 2),
+            # An fp32 Q (the dynamic-quant carrier) always needs the fp32 BMM1 dot;
+            # gating on QDQ modes would miss recipes like fp8-BMM2 (P mode 1).
+            "Q_IS_FP32": q.dtype == torch.float32,
             "SPARSITY_N": sparsity_n,
             "SPARSITY_M": sparsity_m,
             "DENSE_SINK_TOKENS": dense_sink_tokens,

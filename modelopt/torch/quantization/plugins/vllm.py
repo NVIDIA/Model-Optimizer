@@ -47,6 +47,39 @@ _VLLM_NVFP4_ATTENTION_QUANT_CFG = [
         for name in ("q", "k", "p", "v")
     ),
 ]
+_FP8_ATTENTION_QUANTIZER_CFG = {"num_bits": (4, 3)}  # per-tensor E4M3, static scale amax/448
+_BMM2_FORMAT_CFGS = {"nvfp4": _NVFP4_ATTENTION_QUANTIZER_CFG, "fp8": _FP8_ATTENTION_QUANTIZER_CFG}
+
+
+def build_vllm_attention_quant_cfg(
+    *,
+    q_format: str = "nvfp4",
+    k_format: str = "nvfp4",
+    p_format: str = "nvfp4",
+    v_format: str = "nvfp4",
+) -> list:
+    """Build the attention BMM quantizer config with per-operand formats.
+
+    Each of Q/K/P/V takes "nvfp4" (dynamic block-16, two-level scale) or
+    "fp8" (per-tensor E4M3, static scale amax/448).
+    """
+    formats = {"q": q_format, "k": k_format, "p": p_format, "v": v_format}
+    for name, fmt in formats.items():
+        if fmt not in _BMM2_FORMAT_CFGS:
+            raise ValueError(
+                f"{name}_format must be one of {sorted(_BMM2_FORMAT_CFGS)}, got {fmt!r}"
+            )
+    return [
+        {"quantizer_name": "*_bmm_quantizer", "enable": False},
+        *(
+            {
+                "quantizer_name": f"*{name}_bmm_quantizer",
+                "cfg": _BMM2_FORMAT_CFGS[fmt],
+                "enable": True,
+            }
+            for name, fmt in formats.items()
+        ),
+    ]
 
 
 def _import_attention_module():
@@ -224,11 +257,32 @@ def _set_vllm_attention_kv_default_amax(module, device: torch.device) -> None:
         quantizer.amax = torch.tensor(6.0 * 448.0, device=device, dtype=torch.float32)
 
 
+def _set_vllm_attention_fp8_bmm2_default_amax(module, device: torch.device) -> None:
+    """Set fixed amax on uncalibrated per-tensor FP8 BMM2 quantizers (P=1.0, V=448)."""
+    for name, default in (
+        ("q_bmm_quantizer", 448.0),
+        ("k_bmm_quantizer", 448.0),
+        ("p_bmm_quantizer", 1.0),
+        ("v_bmm_quantizer", 448.0),
+    ):
+        quantizer = getattr(module, name, None)
+        if (
+            not isinstance(quantizer, TensorQuantizer)
+            or not quantizer.is_enabled
+            or getattr(quantizer, "num_bits", None) != (4, 3)
+            or getattr(quantizer, "block_sizes", None)
+            or hasattr(quantizer, "_amax")
+        ):
+            continue
+        quantizer.amax = torch.tensor(default, device=device, dtype=torch.float32)
+
+
 def configure_vllm_nvfp4_attention_quantizers(
     module: torch.nn.Module,
     *,
     device: torch.device | str,
     dtype: torch.dtype,
+    cfg: list | None = None,
 ) -> torch.nn.Module:
     """Configure one vLLM Attention module for fused NVFP4 fake quantization.
 
@@ -256,10 +310,11 @@ def configure_vllm_nvfp4_attention_quantizers(
     if not hasattr(module, "p_bmm_quantizer"):
         module.p_bmm_quantizer = TensorQuantizer()
 
-    set_quantizer_by_cfg(module, _VLLM_NVFP4_ATTENTION_QUANT_CFG)
+    set_quantizer_by_cfg(module, _VLLM_NVFP4_ATTENTION_QUANT_CFG if cfg is None else cfg)
     for name in ("q", "k", "p", "v"):
         getattr(module, f"{name}_bmm_quantizer").to(device=device)
     _set_vllm_attention_kv_default_amax(module, device)
+    _set_vllm_attention_fp8_bmm2_default_amax(module, device)
     return module
 
 

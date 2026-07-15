@@ -326,3 +326,45 @@ def test_nvfp4_mixed_cudagraph_policy(monkeypatch, mode, rejected):
         report = vllm_runtime.install_vllm_nvfp4_attention(runner)
         assert report.installed_count == 1
         assert configured == [attention]
+
+
+@pytest.mark.parametrize("impl_cls", [FlashAttentionImpl, FlashInferImpl])
+def test_nvfp4_install_fp8_bmm2_uses_module_level_v(monkeypatch, impl_cls):
+    """bmm2='fp8': P maps to the fp8 kernel mode; V is module-level (no kernel V)."""
+    attention = _bare_attention(impl_cls)
+    runner = _model_runner(nn.ModuleDict({"attn": attention}))
+    monkeypatch.setattr(
+        quant_plugin,
+        "create_parallel_state",
+        lambda: quant_plugin.ParallelState(data_parallel_group=None),
+    )
+    monkeypatch.setattr(
+        vllm_runtime.attention_plugin, "patch_flashinfer_metadata_builder", lambda: True
+    )
+
+    report = vllm_runtime.install_vllm_nvfp4_attention(runner, p_format="fp8", v_format="fp8")
+
+    assert report.installed_layers == ("attn",)
+    # BMM2 quantizers configured FP8 per-tensor with fixed amax (F3)
+    assert attention.p_bmm_quantizer.num_bits == (4, 3)
+    assert float(attention.p_bmm_quantizer._amax) == 1.0
+    assert attention.v_bmm_quantizer.num_bits == (4, 3)
+    assert float(attention.v_bmm_quantizer._amax) == 448.0
+    # BMM1 untouched (F1)
+    assert attention.q_bmm_quantizer.is_nvfp4_dynamic
+    assert attention.k_bmm_quantizer.is_nvfp4_dynamic
+    # quant_kw: fp8 P reaches the kernel; V never does (module-level pre-cache-write)
+    assert attention.impl.quant_kw["p_qdq"] == "fp8"
+    assert attention.impl.quant_kw["p_qdq_amax"] == 1.0
+    assert attention.impl.quant_kw["v_qdq"] is None
+    assert attention.impl.quant_kw["v_qdq_amax"] is None
+    # module forward owns V quant; Q stays in-kernel
+    assert attention._query_quant_in_kernel is True
+    assert attention._value_quant_in_kernel is False
+
+
+def test_install_rejects_unknown_formats():
+    with pytest.raises(ValueError, match="p_format must be"):
+        vllm_runtime.install_vllm_nvfp4_attention(object(), p_format="int8")
+    with pytest.raises(ValueError, match="v_format must be"):
+        vllm_runtime.install_vllm_nvfp4_attention(object(), v_format="int8")

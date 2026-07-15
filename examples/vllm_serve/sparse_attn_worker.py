@@ -24,6 +24,8 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.vllm_runtime import (
 
 __all__ = ["SparseAttnWorker", "QuantSparseAttnWorker"]  # noqa: RUF022
 
+_QUANT_FORMAT_KEYS = ("q_format", "k_format", "p_format", "v_format")
+
 
 def _unwrapped_model(worker):
     model = worker.model_runner.model
@@ -32,9 +34,9 @@ def _unwrapped_model(worker):
 
 def _print_install_report(policy, report) -> None:
     if report.installed_count:
-        if policy == "NVFP4 attention":
+        if policy != "Sparse attention":
             print(
-                "[ModelOpt] Installed NVFP4 quant+sparse attention on "
+                f"[ModelOpt] Installed {policy} (quant+sparse) on "
                 f"{report.installed_count} layers: {dict(report.backend_counts)}"
             )
         else:
@@ -68,13 +70,32 @@ class SparseAttnWorker(BaseWorker):
 
 
 class QuantSparseAttnWorker(BaseWorker):
-    """Install fixed NVFP4 attention plus optional checkpoint sparsity."""
+    """Install quantized attention plus optional checkpoint sparsity.
+
+    Per-operand formats come from vLLM's ``--additional-config``; absent keys
+    default to NVFP4 on all four operands (Q/K/P/V)::
+
+        --additional-config '{"modelopt_attn_quant": {"p_format": "fp8", "v_format": "fp8"}}'
+    """
+
+    def _quant_formats(self) -> dict[str, str]:
+        additional = getattr(self.vllm_config, "additional_config", None) or {}
+        formats = additional.get("modelopt_attn_quant", {})
+        unknown = set(formats) - set(_QUANT_FORMAT_KEYS)
+        if unknown:
+            raise ValueError(
+                f"unknown modelopt_attn_quant keys {sorted(unknown)}; "
+                f"allowed: {list(_QUANT_FORMAT_KEYS)}"
+            )
+        return dict(formats)
 
     def load_model(self, *args, **kwargs) -> None:
-        """Load the model, then install NVFP4 attention."""
+        """Load the model, then install the configured attention quant recipe."""
         super().load_model(*args, **kwargs)
-        report = install_vllm_nvfp4_attention(self.model_runner, sparse_cfg="checkpoint")
-        _print_install_report("NVFP4 attention", report)
+        formats = self._quant_formats()
+        report = install_vllm_nvfp4_attention(self.model_runner, sparse_cfg="checkpoint", **formats)
+        policy = "NVFP4 attention" if not formats else f"Quant attention ({formats})"
+        _print_install_report(policy, report)
 
     def determine_available_memory(self) -> int:
         """Profile memory without compiling the dynamically converted modules."""
