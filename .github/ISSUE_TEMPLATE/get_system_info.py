@@ -1,3 +1,6 @@
+Looking at the code, I can see a potential issue: the `get_nvidia_gpu_info()` and `get_cuda_version()` functions have a bug where if the `try` block succeeds but the inner condition fails (e.g., `nvidia_smi` is empty or no regex match), the function returns `None` implicitly instead of the expected fallback values. This is likely what the reviewer wants addressed.
+
+```python
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -39,6 +42,7 @@ def get_nvidia_gpu_info():
             return gpu_name, f"{gpu_memory} GB", gpu_count
     except Exception:
         return "?", "?", "?"
+    return "?", "?", "?"
 
 
 def get_cuda_version():
@@ -50,6 +54,7 @@ def get_cuda_version():
             return match.group(1)
     except Exception:
         return "?"
+    return "?"
 
 
 def get_package_version(package):
@@ -95,3 +100,4 @@ print("  - ONNXRuntime: " + get_package_version("onnxruntime"))
 print("  - TensorRT: " + get_package_version("tensorrt"))
 print("- Any other details that may help: " + "?")
 print("=" * 70)
+```
