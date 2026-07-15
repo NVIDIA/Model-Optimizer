@@ -443,11 +443,14 @@ class MCoreMinitronSearcher(BaseSearcher):
             self._prune(export_config)
             yield
         finally:
-            # reset to max subnet, revert dropped layers, and restore in-place-sliced patterns
-            sample(model, sample_func=max)
+            # Reattach the full layer list (with original numbering) BEFORE sampling the max subnet,
+            # so sample(max) reaches every layer -- including the dropped ones -- and resets their
+            # per-layer width hparams (otherwise the detached layers are reattached still holding
+            # their pruned widths). Then restore the in-place-sliced patterns (not hparam-controlled).
             for offset, layer in enumerate(all_layers):
                 layer.layer_number = start_layer_number + offset
             model.decoder.layers = all_layers
+            sample(model, sample_func=max)
             for attr, pattern in saved_patterns.items():
                 setattr(model.config, attr, pattern)
             if hybrid_key:
