@@ -45,6 +45,7 @@ pytest.importorskip("transformers")
 
 import transformers
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
+from transformers.integrations.finegrained_fp8 import FP8Linear
 from transformers.models.dbrx.configuration_dbrx import DbrxConfig, DbrxFFNConfig
 from transformers.models.dbrx.modeling_dbrx import DbrxExpertGLU, DbrxExperts, DbrxFFN
 
@@ -107,6 +108,21 @@ def test_convert_conv1d():
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1, out_2)
+
+
+def test_fp8_linear_per_tensor_dequant(monkeypatch):
+    module = FP8Linear(2, 2, block_size=(128, 128))
+    module.weight_scale_inv = nn.Parameter(torch.tensor(2.0))
+    with torch.no_grad():
+        module.weight.copy_(torch.tensor([[-2.0, 1.0], [0.5, 4.0]], dtype=torch.float8_e4m3fn))
+
+    mtq.replace_quant_module(module)
+    monkeypatch.setattr("modelopt.torch.quantization.plugins.huggingface.weight_dequant", None)
+
+    assert module.block_size is None
+    torch.testing.assert_close(
+        module._dequantize_weight(torch.float32), module.weight.float() * 2.0
+    )
 
 
 @pytest.mark.skipif(

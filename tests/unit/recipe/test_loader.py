@@ -166,6 +166,7 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/nvfp4_experts_only-kv_fp8",
     "general/ptq/nvfp4_experts_only-kv_fp8_cast",
     "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
+    "huggingface/models/nvidia/Mistral-Medium-3.5-128B-NVFP4/ptq/nvfp4-max-calib",
     "general/ptq/nvfp4_mlp_only-kv_fp8",
     "general/ptq/nvfp4_mlp_only-novit-kv_fp8",
     "general/ptq/nvfp4_mlp_only-kv_fp8_cast",

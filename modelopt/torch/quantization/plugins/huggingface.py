@@ -1330,13 +1330,16 @@ class _QuantFP8Linear(QuantModule):
     def _setup(self):
         self.input_quantizer = TensorQuantizer()
         self.weight_quantizer = TensorQuantizer()
-        assert self.weight_scale_inv.ndim == 2, "Weight scale inverse must be 2D"
         assert self.weight.ndim == 2, "Weight must be 2D"
-        self.block_size = max(
-            self.weight.shape[0] // self.weight_scale_inv.shape[0],
-            self.weight.shape[1] // self.weight_scale_inv.shape[1],
-        )
-        assert self.block_size == 128, "Block size must be 128"
+        if self.weight_scale_inv.ndim == 0:
+            self.block_size = None
+        else:
+            assert self.weight_scale_inv.ndim == 2, "Weight scale inverse must be 0D or 2D"
+            self.block_size = max(
+                self.weight.shape[0] // self.weight_scale_inv.shape[0],
+                self.weight.shape[1] // self.weight_scale_inv.shape[1],
+            )
+            assert self.block_size == 128, "Block size must be 128"
 
     def _get_weight_and_scale_inv(self):
         if isinstance(self.weight, torch.distributed.tensor.DTensor):
@@ -1347,12 +1350,17 @@ class _QuantFP8Linear(QuantModule):
             scale_inv = self.weight_scale_inv.contiguous()
         return weight, scale_inv
 
-    def forward(self, input: Tensor) -> Tensor:
+    def _dequantize_weight(self, dtype: torch.dtype) -> Tensor:
+        weight, scale_inv = self._get_weight_and_scale_inv()
+        if self.block_size is None:
+            return weight.to(dtype) * scale_inv.to(dtype)
         assert weight_dequant is not None, "Triton is not available"
+        return weight_dequant(weight, scale_inv, self.block_size, dtype=dtype)
+
+    def forward(self, input: Tensor) -> Tensor:
         if self.weight.element_size() == 1:
             with torch.cuda.device(self.weight.device):
-                weight, scale_inv = self._get_weight_and_scale_inv()
-                weight = weight_dequant(weight, scale_inv, self.block_size, dtype=input.dtype)
+                weight = self._dequantize_weight(input.dtype)
         else:
             weight = self.weight
         return linear(
@@ -1362,11 +1370,9 @@ class _QuantFP8Linear(QuantModule):
         )
 
     def unpack_weight(self):
-        assert weight_dequant is not None, "Triton is not available"
         with torch.cuda.device(self.weight.device):
-            weight, scale_inv = self._get_weight_and_scale_inv()
             self.weight = nn.Parameter(
-                weight_dequant(weight, scale_inv, self.block_size, dtype=torch.get_default_dtype()),
+                self._dequantize_weight(torch.get_default_dtype()),
                 requires_grad=False,
             )
         if hasattr(self, "weight_scale_inv"):
