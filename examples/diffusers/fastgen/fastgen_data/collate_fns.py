@@ -21,10 +21,10 @@ Self-contained on **stock** ``nemo_automodel`` (no AutoModel patch required):
   :class:`TextToImageDataset` per-item output (``image_latents`` / ``text_embeddings`` /
   ``text_embeddings_mask`` + an optional broadcast ``negative_text_embeddings`` for CFG). It
   deliberately does **not** call the stock ``collate_fn_production``: released
-  ``nemo_automodel`` (0.4.0) unconditionally stacks model-specific token keys
+  ``nemo_automodel`` (0.5.0) unconditionally stacks model-specific token keys
   (``clip_tokens`` / ``t5_tokens``) that the Qwen-Image cache does not produce, which would
   raise ``KeyError``. The vendored dataset and this collate are a matched pair, so coupling
-  them directly keeps the example self-contained on stock 0.4.0.
+  them directly keeps the example self-contained on stock 0.5.0.
 * :func:`build_text_to_image_multiresolution_dataloader` builds the vendored dataset + the
   stock bucket sampler (:class:`SequentialBucketSampler`) + a ``StatefulDataLoader``,
   optionally binding a static negative-prompt embedding into the collate via
@@ -81,7 +81,7 @@ def collate_fn_text_to_image(
 
     # Stack only the keys the DMD2 pipeline consumes, straight from the vendored dataset's
     # per-item output. We do NOT call the stock ``collate_fn_production`` (see module docstring):
-    # released nemo_automodel 0.4.0 unconditionally stacks ``clip_tokens`` / ``t5_tokens``, which
+    # released nemo_automodel 0.5.0 unconditionally stacks ``clip_tokens`` / ``t5_tokens``, which
     # the Qwen-Image cache omits.
     image_batch = {
         "image_latents": torch.stack([item["latent"] for item in batch]),
@@ -96,6 +96,7 @@ def collate_fn_text_to_image(
             "original_resolution": torch.stack([item["original_resolution"] for item in batch]),
             "crop_offset": torch.stack([item["crop_offset"] for item in batch]),
             "sample_ids": torch.tensor([item["sample_id"] for item in batch], dtype=torch.long),
+            "logical_sample_ids": tuple(str(item["sample_id"]) for item in batch),
         },
     }
     # Optional model-specific embedding fields, when a dataset provides them.
@@ -176,6 +177,9 @@ def build_text_to_image_multiresolution_dataloader(
     prefetch_factor: int = 2,
     negative_prompt_embedding_path: str | None = None,
     selected_indices: Sequence[int] | None = None,
+    split: str | None = None,
+    validation_count: int | None = None,
+    split_seed: int = 2026,
     exact_resume: bool = False,
     sampler_seed: int = 42,
     loader_seed: int | None = None,
@@ -199,6 +203,9 @@ def build_text_to_image_multiresolution_dataloader(
         negative_prompt_embedding_path: Optional ``.pt`` with a static negative-prompt
             embedding, bound into the collate and broadcast to every batch (DMD2 CFG).
         selected_indices: Optional ordered original metadata ordinals to expose.
+        split: Optional deterministic ``"train"`` or ``"validation"`` selection.
+        validation_count: Number of validation samples when ``split`` is set.
+        split_seed: Local seed used to construct deterministic split membership.
         exact_resume: Wrap the deterministic sampler with a committed cursor that is
             independent of worker prefetch. Required by the PDD lifecycle.
         sampler_seed: Seed for the released deterministic bucket sampler.
@@ -212,6 +219,9 @@ def build_text_to_image_multiresolution_dataloader(
         cache_dir=cache_dir,
         train_text_encoder=train_text_encoder,
         selected_indices=selected_indices,
+        split=split,
+        validation_count=validation_count,
+        split_seed=split_seed,
     )
     effective_root = dataset.cache_root
 

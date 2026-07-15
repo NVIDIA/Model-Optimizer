@@ -123,14 +123,19 @@ class PDDLayerSpec:
         )
         if not isinstance(data["projection_path"], str):
             raise ValueError("layer_spec.projection_path must be a string.")
-        if not isinstance(data["head_layout"], str):
-            raise ValueError("layer_spec.head_layout must be a string.")
+        raw_head_layout = data["head_layout"]
+        if raw_head_layout == "channel_major":
+            head_layout: PDDHeadLayout = "channel_major"
+        elif raw_head_layout == "patch_major":
+            head_layout = "patch_major"
+        else:
+            raise ValueError(f"layer_spec.head_layout must be one of {_HEAD_LAYOUTS}.")
         output_channels = data["output_channels"]
         if output_channels is not None and type(output_channels) is not int:
             raise ValueError("layer_spec.output_channels must be an integer or null.")
         return cls(
             projection_path=data["projection_path"],
-            head_layout=data["head_layout"],
+            head_layout=head_layout,
             output_channels=output_channels,
         )
 

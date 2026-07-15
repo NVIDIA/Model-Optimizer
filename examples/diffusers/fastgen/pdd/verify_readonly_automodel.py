@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Verify and snapshot the exact released AutoModel distribution used by PDD."""
 
@@ -52,7 +64,7 @@ def load_dependency_manifest(path: Path = _MANIFEST_PATH) -> dict[str, Any]:
 def _distribution_root(
     distribution: importlib.metadata.Distribution, manifest: dict[str, Any]
 ) -> Path:
-    root = Path(distribution.locate_file("")).resolve()
+    root = Path(str(distribution.locate_file(""))).resolve()
     dist_info = root / f"{manifest['distribution']}-{manifest['version']}.dist-info"
     if not dist_info.is_dir() or not dist_info.name.endswith(".dist-info"):
         raise RuntimeError(f"AutoModel has no regular wheel dist-info directory: {dist_info}.")

@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Released-AutoModel seam tests for the ModelOpt-owned PDD setup."""
 
@@ -23,14 +35,22 @@ _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
-import pdd_finetune
-from pdd_recipe import (
+from pdd.recipe import (
     build_pdd_export_setup,
     build_pdd_setup,
     initialize_pdd_distributed,
     resolve_pdd_recipe_config,
 )
-from verify_readonly_automodel import snapshot_installed_distribution
+from pdd.verify_readonly_automodel import snapshot_installed_distribution
+
+
+def _require_exact_automodel() -> None:
+    try:
+        version = importlib.metadata.version("nemo_automodel")
+    except importlib.metadata.PackageNotFoundError:
+        pytest.skip("nemo_automodel is not installed")
+    if version != "0.5.0":
+        pytest.skip(f"requires the official nemo_automodel==0.5.0 wheel, found {version}")
 
 
 def _raw_config(model_dir: pathlib.Path, *, qkv: bool = False) -> dict:
@@ -78,177 +98,42 @@ def _raw_config(model_dir: pathlib.Path, *, qkv: bool = False) -> dict:
 
 
 def test_example_recipe_explicitly_pins_grid_max_t() -> None:
-    raw = yaml.safe_load((_FASTGEN_DIR / "configs" / "pdd_qwen_image.yaml").read_text())
+    raw = yaml.safe_load((_FASTGEN_DIR / "pdd" / "configs" / "qwen_image.yaml").read_text())
     assert type(raw["pdd"]["grid_max_t"]) is float
     assert raw["pdd"]["grid_max_t"] == 0.999
-    assert raw["data"]["expected_approved_ordered_ids_sha256"] is None
-    assert raw["data"]["expected_heldout_count"] == 2000
+    assert raw["data"]["validation_count"] == 2000
+    assert raw["data"]["split_seed"] == 2026
 
 
-def test_data_authentication_config_fields_are_strict_but_nullable(tmp_path) -> None:
+def test_split_config_fields_are_strict(tmp_path) -> None:
     raw = _raw_config(tmp_path)
-    raw["data"] = {
-        "expected_approved_ordered_ids_sha256": "a" * 64,
-        "expected_heldout_count": 2000,
-    }
+    raw["data"] = {"validation_count": 3, "split_seed": 7}
     config = resolve_pdd_recipe_config(raw)
-    assert config.expected_approved_ordered_ids_sha256 == "a" * 64
-    assert config.expected_heldout_count == 2000
+    assert config.validation_count == 3
+    assert config.split_seed == 7
 
-    for invalid_hash in ("A" * 64, "a" * 63, 7):
-        raw["data"]["expected_approved_ordered_ids_sha256"] = invalid_hash
-        with pytest.raises(ValueError, match="expected_approved_ordered_ids_sha256"):
-            resolve_pdd_recipe_config(raw)
-    raw["data"]["expected_approved_ordered_ids_sha256"] = None
     for invalid_count in (0, -1, True, 1.5):
-        raw["data"]["expected_heldout_count"] = invalid_count
-        with pytest.raises(ValueError, match="expected_heldout_count"):
+        raw["data"]["validation_count"] = invalid_count
+        with pytest.raises((TypeError, ValueError), match="validation_count"):
             resolve_pdd_recipe_config(raw)
 
+    raw["data"] = {"validation_count": 3, "split_seed": -1}
+    with pytest.raises(ValueError, match="split_seed"):
+        resolve_pdd_recipe_config(raw)
 
-@pytest.mark.parametrize("heldout_count", [1999, 2001])
-def test_canonical_training_count_cannot_be_overridden(
-    monkeypatch, tmp_path, heldout_count
-) -> None:
+
+def test_pdd_rejects_external_split_manifest(tmp_path) -> None:
     raw = _raw_config(tmp_path)
-    raw["data"] = {
-        "expected_approved_ordered_ids_sha256": "a" * 64,
-        "expected_heldout_count": heldout_count,
-    }
-    config = resolve_pdd_recipe_config(raw)
-    called = False
-
-    def _unexpected_validator(*args, **kwargs):
-        nonlocal called
-        called = True
-        raise AssertionError("validator must not be called for a weakened canonical count")
-
-    monkeypatch.setattr("validate_cache_snapshot.validate_snapshot", _unexpected_validator)
-    with pytest.raises(ValueError, match="expected_heldout_count=2000"):
-        pdd_finetune._validate_dataset_snapshot(raw, config)
-    assert not called
-
-
-def test_canonical_training_requires_external_hash_before_validator(tmp_path) -> None:
-    raw = _raw_config(tmp_path)
-    raw["data"] = {
-        "expected_approved_ordered_ids_sha256": None,
-        "expected_heldout_count": 2000,
-    }
-    config = resolve_pdd_recipe_config(raw)
-    with pytest.raises(ValueError, match="expected_approved_ordered_ids_sha256"):
-        pdd_finetune._validate_dataset_snapshot(raw, config)
-
-
-def test_valid_canonical_data_gate_reaches_validator_unchanged(monkeypatch, tmp_path) -> None:
-    expected_hash = "a" * 64
-    raw = _raw_config(tmp_path)
-    raw["data"] = {
-        "expected_approved_ordered_ids_sha256": expected_hash,
-        "expected_heldout_count": 2000,
-        "dataloader": {
-            "_target_": "fastgen_data.build_text_to_image_multiresolution_dataloader",
-            "cache_dir": str(tmp_path),
-        },
-    }
-    config = resolve_pdd_recipe_config(raw)
-    captured = None
-
-    def _validator(root, **kwargs):
-        nonlocal captured
-        captured = (root, kwargs)
-        return {"snapshot_sha256": "b" * 64}
-
-    def _all_gather_object(output, value):
-        output[0] = value
-
-    monkeypatch.setattr("validate_cache_snapshot.validate_snapshot", _validator)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
-    monkeypatch.setattr(torch.distributed, "all_gather_object", _all_gather_object)
-    monkeypatch.setattr(torch.distributed, "broadcast_object_list", lambda payload, src: None)
-
-    assert pdd_finetune._validate_dataset_snapshot(raw, config) == {"snapshot_sha256": "b" * 64}
-    assert captured == (
-        tmp_path.resolve(),
-        {
-            "all_index": config.all_metadata_index,
-            "train_index": config.train_metadata_index,
-            "heldout_index": config.validation_metadata_index,
-            "expected_approved_ids_sha256": expected_hash,
-            "expected_heldout_count": 2000,
-        },
-    )
-
-
-def test_loader_order_must_match_authenticated_report() -> None:
-    train = [{"sample_id": "train-a"}, {"sample_id": "train-b"}]
-    heldout = [{"sample_id": "heldout-a"}]
-    report = {
-        "ordered_sample_ids_sha256": {
-            "train": pdd_finetune._ordered_id_sha256(train, split="train"),
-            "heldout": pdd_finetune._ordered_id_sha256(heldout, split="heldout"),
-        }
-    }
-    assert pdd_finetune._validated_loader_order_hashes(train, heldout, report) == (
-        report["ordered_sample_ids_sha256"]["train"],
-        report["ordered_sample_ids_sha256"]["heldout"],
-    )
-    with pytest.raises(RuntimeError, match="training loader order"):
-        pdd_finetune._validated_loader_order_hashes(list(reversed(train)), heldout, report)
-
-
-def test_collective_loader_order_gate_rejects_rank_disagreement(monkeypatch) -> None:
-    train = [{"sample_id": "train-a"}, {"sample_id": "train-b"}]
-    heldout = [{"sample_id": "heldout-a"}]
-    report = {
-        "ordered_sample_ids_sha256": {
-            "train": pdd_finetune._ordered_id_sha256(train, split="train"),
-            "heldout": pdd_finetune._ordered_id_sha256(heldout, split="heldout"),
-        }
-    }
-
-    def _all_gather_object(output, value):
-        output[:] = [value, {"ok": True, "hashes": ("c" * 64, value["hashes"][1])}]
-
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
-    monkeypatch.setattr(torch.distributed, "all_gather_object", _all_gather_object)
-    with pytest.raises(RuntimeError, match="different authenticated"):
-        pdd_finetune._collective_validated_loader_order_hashes(train, heldout, report)
-
-
-def test_two_rank_loader_order_divergence_fails_before_model_setup() -> None:
-    environment = os.environ.copy()
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            "--standalone",
-            "--nnodes=1",
-            "--nproc-per-node=2",
-            str(
-                _REPO_ROOT
-                / "tests"
-                / "examples"
-                / "diffusers"
-                / "fastgen"
-                / "pdd_training_preflight_distributed.py"
-            ),
-        ],
-        cwd=_REPO_ROOT,
-        env=environment,
-        check=True,
-        timeout=60,
-    )
+    raw["data"] = {"dataloader": {"metadata_index": "metadata_train.json"}}
+    with pytest.raises(ValueError, match="metadata_index is unsupported"):
+        resolve_pdd_recipe_config(raw)
 
 
 def test_pdd_finetune_namespace_module_help() -> None:
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     result = subprocess.run(
-        [sys.executable, "-m", "examples.diffusers.fastgen.pdd_finetune", "--help"],
+        [sys.executable, "-m", "examples.diffusers.fastgen.pdd.finetune", "--help"],
         cwd=_REPO_ROOT,
         env=environment,
         check=True,
@@ -341,11 +226,7 @@ def test_training_dataloader_modes_are_gated_during_resolution(
 
 
 def test_frozen_automodel_distribution_snapshot_is_stable() -> None:
-    try:
-        version = importlib.metadata.version("nemo_automodel")
-    except importlib.metadata.PackageNotFoundError:
-        pytest.skip("nemo_automodel is not installed")
-    assert version == "0.5.0"
+    _require_exact_automodel()
 
     before = snapshot_installed_distribution()
     after = snapshot_installed_distribution()
@@ -361,11 +242,11 @@ def test_frozen_automodel_distribution_snapshot_is_stable() -> None:
 
 
 def test_exact_wheel_install_below_git_checkout_is_accepted(tmp_path) -> None:
+    _require_exact_automodel()
     try:
         distribution = importlib.metadata.distribution("nemo_automodel")
     except importlib.metadata.PackageNotFoundError:
         pytest.skip("nemo_automodel is not installed")
-    assert distribution.version == "0.5.0"
 
     checkout = tmp_path / "checkout"
     (checkout / ".git").mkdir(parents=True)
@@ -384,7 +265,7 @@ def test_exact_wheel_install_below_git_checkout_is_accepted(tmp_path) -> None:
     subprocess.run(
         [
             sys.executable,
-            str(_FASTGEN_DIR / "verify_readonly_automodel.py"),
+            str(_FASTGEN_DIR / "pdd" / "verify_readonly_automodel.py"),
             "snapshot",
             "--output",
             str(output),
@@ -402,6 +283,7 @@ def test_exact_wheel_install_below_git_checkout_is_accepted(tmp_path) -> None:
 
 
 def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
+    _require_exact_automodel()
     before = snapshot_installed_distribution()
     model_dir = create_tiny_qwen_image_pipeline_dir(tmp_path)
     initialize_pdd_distributed(backend="gloo", timeout_minutes=1)

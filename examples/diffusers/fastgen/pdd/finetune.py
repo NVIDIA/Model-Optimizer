@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Train Qwen-Image with the ModelOpt-owned PDD lifecycle and released AutoModel APIs."""
 
@@ -7,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
+import json
 import logging
 import sys
 import time
@@ -19,17 +33,14 @@ import yaml
 sys.dont_write_bytecode = True
 
 _THIS_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _THIS_DIR.parents[2]
+_FASTGEN_DIR = _THIS_DIR.parent
+_REPO_ROOT = _FASTGEN_DIR.parents[2]
 # These entrypoints are also supported through ``python -m``. In that mode the
 # sibling ModelOpt-owned example modules are not importable until this directory
 # is added explicitly.
-for path in (_REPO_ROOT, _THIS_DIR):
+for path in (_REPO_ROOT, _FASTGEN_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
-
-from portable_cache import ordered_sample_ids_sha256  # noqa: E402
-
-_CANONICAL_PDD_HELDOUT_COUNT = 2000
 
 
 def _parse_args() -> argparse.Namespace:
@@ -37,26 +48,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=_THIS_DIR / "configs" / "pdd_qwen_image.yaml",
+        default=_THIS_DIR / "configs" / "qwen_image.yaml",
     )
     return parser.parse_args()
 
 
-def _metadata_sample_ids(metadata: Any, *, split: str) -> tuple[str, ...]:
-    if not isinstance(metadata, list):
-        raise TypeError(f"PDD {split} dataset metadata must be a list.")
-    sample_ids: list[str] = []
-    for index, item in enumerate(metadata):
-        if not isinstance(item, Mapping) or not isinstance(item.get("sample_id"), str):
-            raise ValueError(f"{split} metadata[{index}] has no string sample_id.")
-        sample_ids.append(item["sample_id"])
-    if len(set(sample_ids)) != len(sample_ids):
-        raise ValueError(f"PDD {split} metadata contains duplicate logical sample IDs.")
-    return tuple(sample_ids)
-
-
-def _ordered_id_sha256(metadata: Any, *, split: str) -> str:
-    return ordered_sample_ids_sha256(_metadata_sample_ids(metadata, split=split))
+def _ordered_id_sha256(sample_ids: tuple[str, ...]) -> str:
+    digest = hashlib.sha256(b"modelopt-pdd-ordered-sample-ids-v1\0")
+    for sample_id in sample_ids:
+        digest.update(sample_id.encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _dataloader_options(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -89,6 +91,9 @@ def _build_training_dataloader(
     if options.get("dynamic_batch_size", False) is not False:
         raise ValueError("PDD v1 requires data.dataloader.dynamic_batch_size=false.")
     options.update(
+        split="train",
+        validation_count=config.validation_count,
+        split_seed=config.split_seed,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         exact_resume=True,
@@ -114,7 +119,9 @@ def _build_validation_dataloader(
 
     options = _dataloader_options(raw)
     options.update(
-        metadata_index=config.validation_metadata_index,
+        split="validation",
+        validation_count=config.validation_count,
+        split_seed=config.split_seed,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         drop_last=False,
@@ -127,93 +134,52 @@ def _build_validation_dataloader(
     return build_text_to_image_multiresolution_dataloader(**options)
 
 
-def _validate_dataset_snapshot(raw: Mapping[str, Any], config: Any) -> Mapping[str, Any]:
-    import torch.distributed as dist
-    from portable_cache import resolve_cache_root
-    from validate_cache_snapshot import validate_snapshot
-
-    if config.expected_approved_ordered_ids_sha256 is None:
-        raise ValueError(
-            "PDD training requires data.expected_approved_ordered_ids_sha256 before validation."
-        )
-    if config.expected_heldout_count != _CANONICAL_PDD_HELDOUT_COUNT:
-        raise ValueError(
-            f"PDD training requires data.expected_heldout_count={_CANONICAL_PDD_HELDOUT_COUNT}."
-        )
-
-    options = _dataloader_options(raw)
-    root = resolve_cache_root(options["cache_dir"])
-    roots: list[str] = [""] * dist.get_world_size()
-    dist.all_gather_object(roots, str(root))
-    if any(candidate != roots[0] for candidate in roots[1:]):
-        raise RuntimeError(f"PDD ranks resolved different dataset cache roots: {roots}.")
-
-    status = None
-    if dist.get_rank() == 0:
-        try:
-            report = validate_snapshot(
-                root,
-                all_index=config.all_metadata_index,
-                train_index=config.train_metadata_index,
-                heldout_index=config.validation_metadata_index,
-                expected_approved_ids_sha256=(config.expected_approved_ordered_ids_sha256),
-                expected_heldout_count=config.expected_heldout_count,
-            )
-            status = {"ok": True, "report": report}
-        except BaseException as error:
-            status = {"ok": False, "error": f"{type(error).__name__}: {error}"}
-    payload = [status]
-    dist.broadcast_object_list(payload, src=0)
-    status = payload[0]
-    if not isinstance(status, Mapping) or type(status.get("ok")) is not bool:
-        raise RuntimeError("rank 0 broadcast a malformed dataset validation status.")
-    if not status["ok"]:
-        raise RuntimeError(f"PDD dataset snapshot validation failed: {status.get('error')}.")
-    report = status.get("report")
-    if not isinstance(report, Mapping):
-        raise RuntimeError("PDD dataset snapshot report is malformed.")
-    return report
-
-
-def _validated_loader_order_hashes(
-    train_metadata: Any,
-    heldout_metadata: Any,
-    snapshot_report: Mapping[str, Any],
-) -> tuple[str, str]:
-    train_digest = _ordered_id_sha256(train_metadata, split="train")
-    heldout_digest = _ordered_id_sha256(heldout_metadata, split="heldout")
-    reported = snapshot_report.get("ordered_sample_ids_sha256")
-    if not isinstance(reported, Mapping):
-        raise RuntimeError("PDD dataset snapshot report has no ordered sample-ID hashes.")
-    if train_digest != reported.get("train"):
-        raise RuntimeError("training loader order does not match the authenticated snapshot.")
-    if heldout_digest != reported.get("heldout"):
-        raise RuntimeError("heldout loader order does not match the authenticated snapshot.")
-    return train_digest, heldout_digest
-
-
-def _collective_validated_loader_order_hashes(
-    train_metadata: Any,
-    heldout_metadata: Any,
-    snapshot_report: Mapping[str, Any],
-) -> tuple[str, str]:
-    """Authenticate loader order on every rank before distributed model construction."""
+def _validate_dataset_contract(
+    train_dataset: Any,
+    validation_dataset: Any,
+    config: Any,
+) -> tuple[Mapping[str, Any], str, str]:
+    """Collectively verify deterministic split membership and the source metadata digest."""
     import torch.distributed as dist
 
     try:
-        hashes = _validated_loader_order_hashes(
-            train_metadata,
-            heldout_metadata,
-            snapshot_report,
-        )
-        local_status: dict[str, Any] = {"ok": True, "hashes": hashes}
+        train_ids = tuple(str(value) for value in train_dataset.sample_ids)
+        validation_ids = tuple(str(value) for value in validation_dataset.sample_ids)
+        if len(validation_ids) != config.validation_count:
+            raise RuntimeError(
+                f"validation split has {len(validation_ids)} samples; "
+                f"expected {config.validation_count}."
+            )
+        if set(train_ids).intersection(validation_ids):
+            raise RuntimeError("training and validation splits overlap.")
+        expected = {str(index) for index in range(train_dataset.total_num_samples)}
+        if set(train_ids).union(validation_ids) != expected:
+            raise RuntimeError("training and validation splits do not cover metadata.json.")
+        if train_dataset.total_num_samples != validation_dataset.total_num_samples:
+            raise RuntimeError("training and validation datasets disagree on total sample count.")
+        if train_dataset.metadata_sha256 != validation_dataset.metadata_sha256:
+            raise RuntimeError("training and validation datasets disagree on metadata content.")
+        report = {
+            "cache_root": str(train_dataset.cache_root),
+            "metadata_sha256": train_dataset.metadata_sha256,
+            "total_samples": train_dataset.total_num_samples,
+            "train_samples": len(train_ids),
+            "validation_samples": len(validation_ids),
+            "split_seed": config.split_seed,
+        }
+        local_status: dict[str, Any] = {
+            "ok": True,
+            "report": report,
+            "train_hash": _ordered_id_sha256(train_ids),
+            "validation_hash": _ordered_id_sha256(validation_ids),
+        }
     except BaseException as error:
         local_status = {"ok": False, "error": f"{type(error).__name__}: {error}"}
 
     statuses: list[Any] = [None] * dist.get_world_size()
     dist.all_gather_object(statuses, local_status)
     failures: list[str] = []
-    resolved_hashes: list[tuple[str, str]] = []
+    successes: list[Mapping[str, Any]] = []
     for rank, status in enumerate(statuses):
         if not isinstance(status, Mapping) or type(status.get("ok")) is not bool:
             failures.append(f"rank {rank}: malformed loader authentication status")
@@ -221,30 +187,23 @@ def _collective_validated_loader_order_hashes(
         if not status["ok"]:
             failures.append(f"rank {rank}: {status.get('error')}")
             continue
-        hashes = status.get("hashes")
-        if (
-            not isinstance(hashes, tuple | list)
-            or len(hashes) != 2
-            or any(not isinstance(value, str) for value in hashes)
-        ):
-            failures.append(f"rank {rank}: malformed loader authentication hashes")
-            continue
-        resolved_hashes.append((hashes[0], hashes[1]))
+        successes.append(status)
     if failures:
-        raise RuntimeError("PDD loader-order authentication failed: " + "; ".join(failures))
-    if len(set(resolved_hashes)) != 1:
+        raise RuntimeError("PDD dataset validation failed: " + "; ".join(failures))
+    canonical = {json.dumps(status, sort_keys=True) for status in successes}
+    if len(canonical) != 1:
         raise RuntimeError(
-            "PDD ranks resolved different authenticated train/heldout loader orders: "
-            f"{resolved_hashes}."
+            "PDD ranks resolved different dataset roots, metadata, or split membership."
         )
-    return resolved_hashes[0]
+    return report, local_status["train_hash"], local_status["validation_hash"]
 
 
 def _build_validation_plan(sampler: Any, config: Any) -> tuple[Any, tuple[tuple[bool, ...], ...]]:
     import torch.distributed as dist
-    from pdd_training import build_pdd_validation_assignments
 
-    heldout_ids = _metadata_sample_ids(sampler.dataset.metadata, split="heldout")
+    from pdd.training import build_pdd_validation_assignments
+
+    heldout_ids = tuple(str(value) for value in sampler.dataset.sample_ids)
     assignments = build_pdd_validation_assignments(
         heldout_ids,
         config.pdd,
@@ -253,7 +212,7 @@ def _build_validation_plan(sampler: Any, config: Any) -> tuple[Any, tuple[tuple[
     sampler.set_epoch(0)
     sampler.load_state_dict({"epoch": 0, "batches_yielded": 0})
     local_plan = [
-        tuple(sampler.dataset.metadata[index]["sample_id"] for index in batch) for batch in sampler
+        tuple(str(sampler.dataset.sample_ids[index]) for index in batch) for batch in sampler
     ]
     sampler.load_state_dict({"epoch": 0, "batches_yielded": 0})
     plans: list[Any] = [None] * dist.get_world_size()
@@ -288,7 +247,7 @@ def _iter_validation_batches(
     expected_latent_channels: int,
     expected_condition_features: int,
 ):
-    from pdd_training import prepare_qwen_pdd_batch
+    from pdd.training import prepare_qwen_pdd_batch
 
     count = 0
     for count, (raw_batch, valid_mask) in enumerate(zip(dataloader, masks, strict=True), start=1):
@@ -356,7 +315,8 @@ def _collective_training_batch(
 ) -> tuple[Any, tuple[str, ...]] | None:
     """Prepare one rank-local batch, then agree on success before any model call."""
     import torch.distributed as dist
-    from pdd_training import prepare_qwen_pdd_batch
+
+    from pdd.training import prepare_qwen_pdd_batch
 
     prepared = None
     sample_ids: tuple[str, ...] = ()
@@ -381,7 +341,10 @@ def _collective_training_batch(
     else:
         try:
             metadata = raw_batch["metadata"]
-            sample_ids = tuple(metadata["sample_ids"])
+            raw_ids = metadata.get("logical_sample_ids", metadata.get("sample_ids"))
+            if hasattr(raw_ids, "tolist"):
+                raw_ids = raw_ids.tolist()
+            sample_ids = tuple(str(value) for value in raw_ids)
             expected_ids = sampler.expected_next_sample_ids()
             if sample_ids != expected_ids:
                 raise RuntimeError(
@@ -458,14 +421,15 @@ def main() -> None:
     args = _parse_args()
     import torch
     import torch.distributed as dist
-    from pdd_checkpoint import PDDCheckpointManager, build_pdd_checkpoint_identity
-    from pdd_recipe import (
+
+    from pdd.checkpoint import PDDCheckpointManager, build_pdd_checkpoint_identity
+    from pdd.recipe import (
         build_pdd_setup,
         build_pdd_training_artifacts,
         initialize_pdd_distributed,
         resolve_pdd_recipe_config,
     )
-    from pdd_training import run_pdd_validation
+    from pdd.training import run_pdd_validation
 
     raw = yaml.safe_load(args.config.read_text())
     config = resolve_pdd_recipe_config(raw)
@@ -480,7 +444,6 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         force=True,
     )
-    snapshot_report = _validate_dataset_snapshot(raw, config)
     dataloader, sampler = _build_training_dataloader(
         raw,
         config,
@@ -493,10 +456,12 @@ def main() -> None:
         dp_rank=rank,
         dp_world_size=world_size,
     )
-    train_ordered_id_sha256, heldout_ordered_id_sha256 = _collective_validated_loader_order_hashes(
-        sampler.dataset.metadata,
-        validation_sampler.dataset.metadata,
-        snapshot_report,
+    snapshot_report, train_ordered_id_sha256, heldout_ordered_id_sha256 = (
+        _validate_dataset_contract(
+            sampler.dataset,
+            validation_sampler.dataset,
+            config,
+        )
     )
     validation_assignments, validation_masks = _build_validation_plan(
         validation_sampler,
@@ -529,7 +494,7 @@ def main() -> None:
         automodel_snapshot=setup.automodel_snapshot,
         ordered_train_id_sha256=train_ordered_id_sha256,
         ordered_heldout_id_sha256=heldout_ordered_id_sha256,
-        dataset_snapshot_sha256=snapshot_report["snapshot_sha256"],
+        dataset_snapshot_sha256=snapshot_report["metadata_sha256"],
         local_batch_size=config.training.local_batch_size,
         grad_accumulation_steps=config.training.grad_accumulation_steps,
         training_seed=config.training.seed,
@@ -567,10 +532,11 @@ def main() -> None:
         )
     if rank == 0:
         logging.info(
-            "PDD dataset snapshot verified: sha256=%s splits=%s declared_files=%s",
-            snapshot_report["snapshot_sha256"],
-            snapshot_report["splits"],
-            snapshot_report["declared_files"],
+            "PDD dataset verified: metadata_sha256=%s train=%d validation=%d root=%s",
+            snapshot_report["metadata_sha256"],
+            snapshot_report["train_samples"],
+            snapshot_report["validation_samples"],
+            snapshot_report["cache_root"],
         )
         logging.info(
             "PDD setup complete: lifecycle=%s student_keys=%d AutoModel=%s",

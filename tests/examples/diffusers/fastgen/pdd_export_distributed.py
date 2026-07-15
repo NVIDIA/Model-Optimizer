@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Two-rank released-AutoModel DCP-to-full-state export proof for the PDD example."""
 
@@ -21,10 +33,10 @@ for path in (_REPO_ROOT, _REPO_ROOT / "tests", _FASTGEN_DIR):
         sys.path.insert(0, str(path))
 
 from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
-from export_pdd_qwen_image import collective_export_memory_preflight
-from inference_pdd_qwen_image import build_pdd_student
-from pdd_export import inspect_pdd_export, write_pdd_export
-from pdd_recipe import build_pdd_export_setup, resolve_pdd_recipe_config
+from pdd.export import inspect_pdd_export, write_pdd_export
+from pdd.export_qwen_image import collective_export_memory_preflight
+from pdd.inference_qwen_image import build_pdd_student
+from pdd.recipe import build_pdd_export_setup, resolve_pdd_recipe_config
 
 
 def _raw_config(model_dir: pathlib.Path, checkpoint_dir: pathlib.Path) -> dict:

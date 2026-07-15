@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,6 +22,7 @@ import torch
 from nemo_automodel.components.datasets.diffusion.base_dataset import BaseMultiresolutionDataset
 
 from .paths import resolve_cache_root, resolve_under_root
+from .splits import make_train_validation_indices
 
 __all__ = ["TextToImageDataset"]
 
@@ -33,24 +35,41 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         cache_dir: str | Path,
         train_text_encoder: bool = False,
         selected_indices: Sequence[int] | None = None,
+        split: str | None = None,
+        validation_count: int | None = None,
+        split_seed: int = 2026,
     ):
         """
         Args:
             cache_dir: Directory containing preprocessed cache
             train_text_encoder: If True, returns tokens instead of embeddings
             selected_indices: Optional ordered original metadata ordinals to expose.
+            split: Optional deterministic ``"train"`` or ``"validation"`` selection.
+            validation_count: Number of validation samples when ``split`` is set.
+            split_seed: Local seed used to construct deterministic split membership.
         """
+        if selected_indices is not None and split is not None:
+            raise ValueError("selected_indices and split are mutually exclusive")
+        if split not in (None, "train", "validation"):
+            raise ValueError("split must be null, 'train', or 'validation'")
+        if split is not None and validation_count is None:
+            raise ValueError("validation_count is required when split is set")
         self.train_text_encoder = train_text_encoder
         self.cache_root = resolve_cache_root(cache_dir)
         self._selected_indices = selected_indices
+        self._split = split
+        self._validation_count = validation_count
+        self._split_seed = split_seed
         self._resolved_cache_files: dict[int, Path] = {}
         super().__init__(str(self.cache_root), quantization=64)
 
     def _load_metadata(self) -> list[dict]:
         """Load contained metadata and preserve original expansion ordinals as sample IDs."""
         metadata_file = resolve_under_root(self.cache_root, "metadata.json", "metadata index")
-        with metadata_file.open(encoding="utf-8") as file:
-            index = json.load(file)
+        digest = hashlib.sha256(b"modelopt-fastgen-metadata-v1\0")
+        index_bytes = metadata_file.read_bytes()
+        digest.update(index_bytes)
+        index = json.loads(index_bytes)
         if not isinstance(index, dict) or not isinstance(index.get("shards"), list):
             raise ValueError(
                 f"Invalid metadata format in {metadata_file}. Expected dict with 'shards' list."
@@ -63,8 +82,11 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             shard_path = resolve_under_root(
                 self.cache_root, shard_name, f"metadata shard {shard_index}"
             )
-            with shard_path.open(encoding="utf-8") as file:
-                shard = json.load(file)
+            shard_bytes = shard_path.read_bytes()
+            digest.update(shard_name.encode())
+            digest.update(b"\0")
+            digest.update(shard_bytes)
+            shard = json.loads(shard_bytes)
             if not isinstance(shard, list):
                 raise ValueError(f"metadata shard {shard_path} must contain a list")
             for shard_item_index, item in enumerate(shard):
@@ -82,7 +104,19 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         if not complete_metadata:
             raise ValueError(f"No samples found in {metadata_file}")
         self.total_num_samples = len(complete_metadata)
-        self.sample_ids = self._validate_selected_indices(self.total_num_samples)
+        self.metadata_sha256 = digest.hexdigest()
+        if self._split is None:
+            self.sample_ids = self._validate_selected_indices(self.total_num_samples)
+        else:
+            if self._validation_count is None:
+                raise RuntimeError("validation_count was not resolved for the requested split")
+            train, validation = make_train_validation_indices(
+                self.total_num_samples,
+                self._validation_count,
+                self._split_seed,
+            )
+            self.sample_ids = train if self._split == "train" else validation
+        self.logical_sample_ids = [str(sample_id) for sample_id in self.sample_ids]
         return [complete_metadata[index] for index in self.sample_ids]
 
     def _validate_selected_indices(self, num_samples: int) -> list[int]:

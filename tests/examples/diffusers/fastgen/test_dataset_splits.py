@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Deterministic stable-ID split contract for the shared FastGen cache."""
 
 from __future__ import annotations
@@ -108,7 +105,9 @@ def test_train_and_validation_loaders_are_disjoint_stable_and_read_only(
 
     train_loader, train_sampler = build_text_to_image_multiresolution_dataloader(
         cache_dir=str(cache),
-        selected_indices=train_ids,
+        split="train",
+        validation_count=2,
+        split_seed=17,
         batch_size=1,
         num_workers=0,
         shuffle=True,
@@ -116,7 +115,9 @@ def test_train_and_validation_loaders_are_disjoint_stable_and_read_only(
     )
     validation_loader, validation_sampler = build_text_to_image_multiresolution_dataloader(
         cache_dir=str(cache),
-        selected_indices=validation_ids,
+        split="validation",
+        validation_count=2,
+        split_seed=17,
         batch_size=1,
         num_workers=0,
         shuffle=False,
@@ -138,6 +139,8 @@ def test_train_and_validation_loaders_are_disjoint_stable_and_read_only(
     assert not validation_sampler.shuffle_buckets
     assert not validation_sampler.shuffle_within_bucket
     assert validation_sampler.drop_last is False
+    assert train_loader.dataset.logical_sample_ids == [str(value) for value in train_ids]
+    assert validation_loader.dataset.logical_sample_ids == [str(value) for value in validation_ids]
     assert all(
         batch["metadata"]["sample_ids"].dtype == torch.long
         and batch["metadata"]["sample_ids"].device.type == "cpu"

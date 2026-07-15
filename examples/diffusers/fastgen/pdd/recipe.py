@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ModelOpt-owned construction of a Qwen-Image PDD student and frozen teacher."""
 
@@ -15,15 +27,15 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from portable_cache import validate_relative_reference
 from torch import nn
-from verify_readonly_automodel import snapshot_installed_distribution
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDOutputProjection, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
     QwenImagePDDAdapter,
     convert_qwen_image_to_pdd,
 )
+
+from .verify_readonly_automodel import snapshot_installed_distribution
 
 
 @dataclass(frozen=True)
@@ -85,11 +97,8 @@ class PDDRecipeConfig:
     weight_decay: float
     adam_betas: tuple[float, float]
     adam_eps: float
-    all_metadata_index: str
-    train_metadata_index: str
-    validation_metadata_index: str
-    expected_approved_ordered_ids_sha256: str | None
-    expected_heldout_count: int | None
+    validation_count: int
+    split_seed: int
     device: torch.device
     dtype: torch.dtype
     fuse_qkv_projections: bool
@@ -222,36 +231,21 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
     ):
         raise ValueError("PDD requires cached text embeddings; train_text_encoder must be false.")
     _require_bool(dataloader.get("shuffle", True), name="data.dataloader.shuffle")
-    all_metadata_index = validate_relative_reference(
-        data.get("all_metadata_index", "metadata.json"),
-        label="data.all_metadata_index",
-    ).as_posix()
-    train_metadata_index = validate_relative_reference(
-        dataloader.get("metadata_index", "metadata_train.json"),
-        label="data.dataloader.metadata_index",
-    ).as_posix()
-    validation_metadata_index = validate_relative_reference(
-        data.get("validation_metadata_index", "metadata_heldout.json"),
-        label="data.validation_metadata_index",
-    ).as_posix()
-    expected_approved_ordered_ids_sha256 = data.get("expected_approved_ordered_ids_sha256")
-    if expected_approved_ordered_ids_sha256 is not None and (
-        not isinstance(expected_approved_ordered_ids_sha256, str)
-        or len(expected_approved_ordered_ids_sha256) != 64
-        or expected_approved_ordered_ids_sha256.lower() != expected_approved_ordered_ids_sha256
-        or any(
-            character not in "0123456789abcdef"
-            for character in expected_approved_ordered_ids_sha256
-        )
-    ):
+    if "metadata_index" in dataloader:
         raise ValueError(
-            "data.expected_approved_ordered_ids_sha256 must be a lowercase hexadecimal SHA-256."
+            "PDD uses deterministic ordinal splits from metadata.json; "
+            "data.dataloader.metadata_index is unsupported."
         )
-    expected_heldout_count = data.get("expected_heldout_count")
-    if expected_heldout_count is not None and (
-        type(expected_heldout_count) is not int or expected_heldout_count <= 0
-    ):
-        raise ValueError("data.expected_heldout_count must be a positive integer.")
+    validation_count = _require_int_at_least(
+        data.get("validation_count", 2_000),
+        name="data.validation_count",
+        minimum=1,
+    )
+    split_seed = _require_int_at_least(
+        data.get("split_seed", 2026),
+        name="data.split_seed",
+        minimum=0,
+    )
 
     _reject_enabled(model.get("transformer_engine_linear"), name="global TE-linear conversion")
     _reject_enabled(model.get("peft"), name="PEFT/LoRA")
@@ -302,7 +296,7 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
         )
     ):
         raise TypeError("optim.betas must contain two real numbers.")
-    adam_betas = tuple(float(beta) for beta in adam_betas_raw)
+    adam_betas = (float(adam_betas_raw[0]), float(adam_betas_raw[1]))
     if any(not math.isfinite(beta) or not 0.0 <= beta < 1.0 for beta in adam_betas):
         raise ValueError("optim.betas values must be finite and in [0, 1).")
     adam_eps = _require_finite_real(
@@ -452,11 +446,8 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
         weight_decay=float(weight_decay),
         adam_betas=adam_betas,
         adam_eps=adam_eps,
-        all_metadata_index=all_metadata_index,
-        train_metadata_index=train_metadata_index,
-        validation_metadata_index=validation_metadata_index,
-        expected_approved_ordered_ids_sha256=expected_approved_ordered_ids_sha256,
-        expected_heldout_count=expected_heldout_count,
+        validation_count=validation_count,
+        split_seed=split_seed,
         device=torch.device(model.get("device", "cuda" if torch.cuda.is_available() else "cpu")),
         dtype=_resolve_dtype(model.get("torch_dtype", "bfloat16")),
         fuse_qkv_projections=fuse_qkv_projections,
@@ -713,12 +704,15 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
     lifecycle = ["load/select"]
     pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
     raw_transformer_config = getattr(student, "config", None)
-    if hasattr(raw_transformer_config, "to_dict"):
-        transformer_config = raw_transformer_config.to_dict()
+    to_dict = getattr(raw_transformer_config, "to_dict", None)
+    if callable(to_dict):
+        transformer_config = to_dict()
     elif isinstance(raw_transformer_config, Mapping):
         transformer_config = dict(raw_transformer_config)
     else:
         raise TypeError("Qwen transformer config must expose to_dict() or Mapping.")
+    if not isinstance(transformer_config, Mapping):
+        raise TypeError("Qwen transformer to_dict() must return a mapping.")
 
     projection = convert_qwen_image_to_pdd(student, config.pdd)
     identity = _projection_identity(projection)
@@ -804,7 +798,8 @@ def build_pdd_training_artifacts(
     if not isinstance(config, PDDRecipeConfig):
         raise TypeError("config must be PDDRecipeConfig.")
     from nemo_automodel.components.training.rng import StatefulRNG
-    from pdd_training import PDDTrainer
+
+    from .training import PDDTrainer
 
     adapter = QwenImagePDDAdapter(
         config.pdd,

@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Atomic, strict PDD checkpoint publication around the stock AutoModel Checkpointer."""
 
@@ -643,7 +655,7 @@ class PDDCheckpointManager:
     def _collective_resolve(self, restore_from: str | Path | None) -> Path | None:
         if _world_size() == 1:
             return self.resolve(restore_from)
-        status = None
+        status: dict[str, Any] | None = None
         if _rank() == 0:
             try:
                 resolved = self.resolve(restore_from)
@@ -661,7 +673,12 @@ class PDDCheckpointManager:
             raise RuntimeError("rank 0 broadcast a malformed checkpoint resolution status.")
         if not status["ok"]:
             raise RuntimeError(f"rank-0 checkpoint resolution failed: {status.get('error')}.")
-        return None if status["path"] is None else Path(status["path"])
+        resolved_path = status.get("path")
+        if resolved_path is None:
+            return None
+        if not isinstance(resolved_path, str):
+            raise RuntimeError("rank 0 broadcast a malformed checkpoint path.")
+        return Path(resolved_path)
 
     def _prepare_staging(self, final: Path) -> str:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -775,7 +792,7 @@ class PDDCheckpointManager:
             raise RuntimeError("PDD checkpoint sidecar save failed; " + "; ".join(sidecar_failures))
         _barrier()
 
-        publish_status = None
+        publish_status: dict[str, Any] | None = None
         if _rank() == 0:
             try:
                 self._publish_staging(

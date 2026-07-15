@@ -59,14 +59,11 @@ fsdp:
   activation_checkpointing: true
 
 data:
-  all_metadata_index: metadata.json
-  validation_metadata_index: metadata_heldout.json
-  expected_approved_ordered_ids_sha256:
-  expected_heldout_count: 2000
+  validation_count: 2000
+  split_seed: 2026
   dataloader:
     _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: data/qwen_image_cache
-    metadata_index: metadata_train.json
     base_resolution: [1024, 1024]
     batch_size: 1
     drop_last: true

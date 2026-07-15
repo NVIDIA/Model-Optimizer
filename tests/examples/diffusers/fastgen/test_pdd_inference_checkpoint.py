@@ -1,7 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-"""Hermetic evidence for authenticated PDD export, reconstruction, and schedules."""
+"""Tests for authenticated PDD export, reconstruction, and schedules."""
 
 from __future__ import annotations
 
@@ -20,14 +32,14 @@ for path in (_REPO_ROOT, _FASTGEN_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from inference_pdd_qwen_image import _normalize_prompt_condition, _validate_qwen_projection
-from pdd_export import (
+from pdd.export import (
     PDD_INFERENCE_SCHEDULES,
     inspect_pdd_export,
     load_pdd_export_into_model,
     pdd_config_from_metadata,
     write_pdd_export,
 )
+from pdd.inference_qwen_image import _normalize_prompt_condition, _validate_qwen_projection
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (

@@ -13,9 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-"""DMD2 training and inference example."""
-
-__all__: list[str] = []
+"""Qwen-Image training and inference support for Parallel Decoding Distillation."""

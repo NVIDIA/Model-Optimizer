@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Collectively restore a PDD checkpoint and publish a safe Qwen-Image export."""
 
@@ -21,8 +33,9 @@ import yaml
 sys.dont_write_bytecode = True
 
 _THIS_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _THIS_DIR.parents[2]
-for path in (_REPO_ROOT, _THIS_DIR):
+_FASTGEN_DIR = _THIS_DIR.parent
+_REPO_ROOT = _FASTGEN_DIR.parents[2]
+for path in (_REPO_ROOT, _FASTGEN_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -32,7 +45,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=_THIS_DIR / "configs" / "pdd_qwen_image.yaml",
+        default=_THIS_DIR / "configs" / "qwen_image.yaml",
     )
     parser.add_argument(
         "--checkpoint",
@@ -167,7 +180,10 @@ def _collective_publication_preflight(output_dir: Path) -> Mapping[str, Any]:
         raise RuntimeError("rank 0 broadcast malformed PDD publication preflight status.")
     if not status["ok"]:
         raise RuntimeError(f"PDD publication preflight failed: {status.get('error')}.")
-    return status["modelopt_source"]
+    modelopt_source = status.get("modelopt_source")
+    if not isinstance(modelopt_source, Mapping):
+        raise RuntimeError("rank 0 broadcast malformed ModelOpt source identity.")
+    return modelopt_source
 
 
 def _require_checkpoint_identity(config: Any, setup: Any, manifest: Mapping[str, Any]) -> None:
@@ -176,7 +192,10 @@ def _require_checkpoint_identity(config: Any, setup: Any, manifest: Mapping[str,
     identity = manifest.get("identity")
     if not isinstance(identity, Mapping):
         raise RuntimeError("PDD checkpoint has no identity mapping.")
-    if PDDMetadata.from_dict(identity.get("pdd_metadata")) != setup.metadata:
+    pdd_metadata = identity.get("pdd_metadata")
+    if not isinstance(pdd_metadata, Mapping):
+        raise RuntimeError("PDD checkpoint has no PDD metadata mapping.")
+    if PDDMetadata.from_dict(pdd_metadata) != setup.metadata:
         raise RuntimeError("PDD checkpoint metadata does not match the configured student.")
     if identity.get("model") != {
         "id": config.model_id,
@@ -244,7 +263,7 @@ def _checkpoint_selector_identity(config: Any, setup: Any) -> dict[str, Any]:
 def _collective_checkpoint_resolution(
     config: Any, setup: Any, restore_from: str
 ) -> tuple[Path, Mapping[str, Any]]:
-    from pdd_checkpoint import resolve_pdd_training_checkpoint
+    from pdd.checkpoint import resolve_pdd_training_checkpoint
 
     status = None
     if dist.get_rank() == 0:
@@ -270,14 +289,15 @@ def _collective_checkpoint_resolution(
 
 def main() -> None:
     args = _parse_args()
-    from pdd_artifacts import sha256_file
-    from pdd_export import write_pdd_export
-    from pdd_recipe import (
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+
+    from pdd.artifacts import sha256_file
+    from pdd.export import write_pdd_export
+    from pdd.recipe import (
         build_pdd_export_setup,
         initialize_pdd_distributed,
         resolve_pdd_recipe_config,
     )
-    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 
     raw = yaml.safe_load(args.config.read_text())
     config = resolve_pdd_recipe_config(raw)

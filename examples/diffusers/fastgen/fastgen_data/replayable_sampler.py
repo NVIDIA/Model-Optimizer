@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Committed-cursor wrapper for deterministic, prefetched batch samplers."""
 
@@ -89,13 +101,21 @@ class ReplayableBatchSampler(Sampler[list[int]]):
         return self._flat_indices[start:end].tolist()
 
     def _sample_ids(self, batch_index: int) -> tuple[str, ...]:
-        sample_ids: list[str] = []
+        logical_ids = getattr(self.dataset, "logical_sample_ids", None)
+        if logical_ids is None:
+            dataset_sample_ids = getattr(self.dataset, "sample_ids", None)
+            if not isinstance(dataset_sample_ids, Sequence):
+                raise TypeError("sampler.dataset must expose logical_sample_ids or sample_ids.")
+            logical_ids = tuple(str(sample_id) for sample_id in dataset_sample_ids)
+        if not isinstance(logical_ids, Sequence):
+            raise TypeError("sampler.dataset.logical_sample_ids must be a sequence.")
+        batch_sample_ids: list[str] = []
         for index in self._batch_indices(batch_index):
-            item = self.dataset.metadata[index]
-            if not isinstance(item, Mapping) or not isinstance(item.get("sample_id"), str):
-                raise ValueError(f"dataset.metadata[{index}] has no string sample_id.")
-            sample_ids.append(item["sample_id"])
-        return tuple(sample_ids)
+            sample_id = logical_ids[index]
+            if not isinstance(sample_id, str) or not sample_id:
+                raise ValueError(f"dataset.logical_sample_ids[{index}] must be a nonempty string.")
+            batch_sample_ids.append(sample_id)
+        return tuple(batch_sample_ids)
 
     def expected_next_sample_ids(self) -> tuple[str, ...]:
         """Return the next committed batch's logical IDs without consuming it."""

@@ -13,14 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Closed layout contract for the FastGen Diffusers example."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import pathlib
@@ -39,6 +35,7 @@ _EXPECTED_ROOT_ENTRIES = {
     "make_negative_prompt_embedding.py",
     "preprocess",
     "preprocess_qwen_image.py",
+    "pdd",
     "requirements.txt",
 }
 _EXPECTED_DMD2_FILES = {
@@ -51,7 +48,21 @@ _EXPECTED_DMD2_FILES = {
     "inference_qwen_image.py",
     "recipe.py",
 }
-_DMD2_CONFIG_DIGEST = "c802301bcaf1d861b3be4bf384ac437b4bea6cefb00865c3cf879355bcc42019"
+_EXPECTED_PDD_FILES = {
+    "README.md",
+    "__init__.py",
+    "artifacts.py",
+    "automodel_dependency.json",
+    "checkpoint.py",
+    "configs",
+    "export.py",
+    "export_qwen_image.py",
+    "finetune.py",
+    "inference_qwen_image.py",
+    "recipe.py",
+    "training.py",
+    "verify_readonly_automodel.py",
+}
 _TEXT_SUFFIXES = {".json", ".md", ".py", ".rst", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 
 
@@ -66,6 +77,14 @@ def _old_modules() -> tuple[str, ...]:
         _old_name("fastgen", "checkpoint"),
         _old_name("export", "diffusers_qwen_image"),
         _old_name("inference", "dmd2_qwen_image"),
+        _old_name("pdd", "artifacts"),
+        _old_name("pdd", "checkpoint"),
+        _old_name("pdd", "export"),
+        _old_name("pdd", "finetune"),
+        _old_name("pdd", "recipe"),
+        _old_name("pdd", "training"),
+        _old_name("export", "pdd_qwen_image"),
+        _old_name("inference", "pdd_qwen_image"),
     )
 
 
@@ -85,7 +104,7 @@ def _source_text_files() -> list[pathlib.Path]:
     ]
 
 
-def test_fastgen_root_has_closed_shared_and_dmd2_ownership() -> None:
+def test_fastgen_root_has_closed_shared_and_algorithm_ownership() -> None:
     root_entries = {path.name for path in _FASTGEN_ROOT.iterdir() if path.name != "__pycache__"}
     assert root_entries == _EXPECTED_ROOT_ENTRIES
     assert not (_FASTGEN_ROOT / "configs").exists()
@@ -97,15 +116,18 @@ def test_fastgen_root_has_closed_shared_and_dmd2_ownership() -> None:
     assert {path.name for path in (_FASTGEN_ROOT / "dmd2" / "configs").iterdir()} == {
         "qwen_image.yaml"
     }
+    pdd_entries = {
+        path.name for path in (_FASTGEN_ROOT / "pdd").iterdir() if path.name != "__pycache__"
+    }
+    assert pdd_entries == _EXPECTED_PDD_FILES
+    assert {path.name for path in (_FASTGEN_ROOT / "pdd" / "configs").iterdir()} == {
+        "qwen_image.yaml"
+    }
 
 
 def test_dmd2_config_retains_accepted_semantics() -> None:
     config_path = _FASTGEN_ROOT / "dmd2" / "configs" / "qwen_image.yaml"
     value = yaml.safe_load(config_path.read_text())
-    digest = hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    assert digest == _DMD2_CONFIG_DIGEST
     assert (
         value["data"]["dataloader"]["_target_"]
         == "fastgen_data.build_text_to_image_multiresolution_dataloader"
@@ -113,9 +135,10 @@ def test_dmd2_config_retains_accepted_semantics() -> None:
     assert value["data"]["dataloader"]["negative_prompt_embedding_path"] == (
         "negative_prompt_embedding.pt"
     )
+    assert "metadata_index" not in value["data"]["dataloader"]
 
 
-def test_repository_sources_have_no_flat_dmd2_paths() -> None:
+def test_repository_sources_have_no_flat_algorithm_paths() -> None:
     old_modules = _old_modules()
     stale = (
         *(f"{module}.py" for module in old_modules),

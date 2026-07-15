@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Authenticated, bounded safetensors export and strict PDD reconstruction helpers."""
 
@@ -15,18 +27,19 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from pdd_artifacts import (
+from safetensors import safe_open
+from safetensors.torch import save_file
+
+from modelopt.torch.fastgen import PDDConfig, PDDMetadata
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_LAYER_SPEC
+
+from .artifacts import (
     load_canonical_json,
     require_sha256,
     resolve_relative_artifact,
     sha256_file,
     write_canonical_json,
 )
-from safetensors import safe_open
-from safetensors.torch import save_file
-
-from modelopt.torch.fastgen import PDDConfig, PDDMetadata
-from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_LAYER_SPEC
 
 _EXPORT_SCHEMA_VERSION = 1
 _COMPLETE_SCHEMA_VERSION = 1

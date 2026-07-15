@@ -252,14 +252,12 @@ class QwenImageProcessor(BaseModelProcessor):
             "bucket_resolution": metadata["bucket_resolution"],
             "crop_offset": metadata["crop_offset"],
             "prompt": metadata["prompt"],
-            "sample_id": metadata["sample_id"],
+            "image_path": metadata["image_path"],
             "bucket_id": metadata["bucket_id"],
             "aspect_ratio": metadata["aspect_ratio"],
             # Model info
             "model_type": self.model_type,
         }
-        if "source_ref" in metadata:
-            cache["source_ref"] = metadata["source_ref"]
         # Carry the positive-prompt attention mask through to the cache when present, so the
         # dataset uses the real mask instead of synthesizing an all-ones one.
         if "prompt_embeds_mask" in text_encodings:

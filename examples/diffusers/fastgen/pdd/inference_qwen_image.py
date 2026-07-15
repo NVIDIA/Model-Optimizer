@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Run conditional-only PDD inference from an authenticated Qwen-Image export."""
 
@@ -22,8 +34,9 @@ from torch import nn
 sys.dont_write_bytecode = True
 
 _THIS_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _THIS_DIR.parents[2]
-for path in (_REPO_ROOT, _THIS_DIR):
+_FASTGEN_DIR = _THIS_DIR.parent
+_REPO_ROOT = _FASTGEN_DIR.parents[2]
+for path in (_REPO_ROOT, _FASTGEN_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -103,9 +116,9 @@ def _validate_qwen_projection(student: nn.Module, metadata: Any) -> nn.Linear:
 def build_pdd_student(export_dir: str | Path) -> tuple[nn.Module, Any, torch.dtype]:
     """Reconstruct and strictly load the converted Qwen student on CPU."""
     from diffusers import QwenImageTransformer2DModel
-    from pdd_export import inspect_pdd_export, load_pdd_export_into_model, pdd_config_from_metadata
 
     from modelopt.torch.fastgen.plugins.qwen_image_pdd import convert_qwen_image_to_pdd
+    from pdd.export import inspect_pdd_export, load_pdd_export_into_model, pdd_config_from_metadata
 
     descriptor = inspect_pdd_export(export_dir)
     model_identity = _model_identity(descriptor)
@@ -203,11 +216,11 @@ def _save_png(path: Path, image: Any) -> None:
 def main() -> None:
     args = _parse_args()
     from diffusers import QwenImagePipeline
-    from pdd_artifacts import sha256_file, write_canonical_json
-    from pdd_export import pdd_config_from_metadata
 
     from modelopt.torch.fastgen import PDDPipeline
     from modelopt.torch.fastgen.plugins.qwen_image_pdd import QwenImagePDDAdapter
+    from pdd.artifacts import sha256_file, write_canonical_json
+    from pdd.export import pdd_config_from_metadata
 
     if args.output.is_symlink() or args.result_json.is_symlink():
         raise ValueError("PDD output and result JSON cannot be symlinks.")

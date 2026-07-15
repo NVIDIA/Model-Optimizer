@@ -1,12 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-"""Hermetic direct-update, committed-cursor, and strict PDD resume evidence."""
+"""Tests for direct updates, committed cursors, and strict PDD resume."""
 
 from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.metadata
 import json
 import math
 import pathlib
@@ -26,15 +39,15 @@ if str(pathlib.Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from fastgen_data.replayable_sampler import ReplayableBatchSampler
-from pdd_checkpoint import (
+from pdd.checkpoint import (
     PDDCheckpointManager,
     build_pdd_checkpoint_identity,
     resolve_pdd_training_checkpoint,
 )
-from pdd_recipe import initialize_pdd_distributed
+from pdd.recipe import initialize_pdd_distributed
+from pdd.training import prepare_qwen_pdd_batch
+from pdd.verify_readonly_automodel import snapshot_installed_distribution
 from pdd_test_utils import SamplerDataset, build_toy_lifecycle, make_batch, ordered_id_sha256
-from pdd_training import prepare_qwen_pdd_batch
-from verify_readonly_automodel import snapshot_installed_distribution
 
 
 def _released_sampler(sample_ids: tuple[str, ...]) -> ReplayableBatchSampler:
@@ -340,6 +353,9 @@ def test_training_hard_aborts_for_teacher_gradient_zero_gradient_and_missing_cov
 
 def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) -> None:
     pytest.importorskip("nemo_automodel")
+    version = importlib.metadata.version("nemo_automodel")
+    if version != "0.5.0":
+        pytest.skip(f"requires the official nemo_automodel==0.5.0 wheel, found {version}")
     rng_module = pytest.importorskip("nemo_automodel.components.training.rng")
     if not torch.distributed.is_initialized():
         initialize_pdd_distributed(backend="gloo", timeout_minutes=1)
