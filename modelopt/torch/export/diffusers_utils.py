@@ -15,6 +15,7 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
+import inspect
 import json
 import warnings
 from collections.abc import Callable
@@ -25,8 +26,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file, safe_open
-
-from .layer_utils import is_quantlinear
 
 DiffusionPipeline: type[Any] | None
 ModelMixin: type[Any] | None
@@ -141,6 +140,11 @@ def generate_diffusion_dummy_inputs(
         "diffusers.models.unets",
         "UNet2DConditionModel",
         "unet" in model_class_name.lower(),
+    )
+    is_qwen = _is_model_type(
+        "diffusers.models.transformers",
+        "QwenImageTransformer2DModel",
+        "qwen" in model_class_name.lower(),
     )
 
     cfg = getattr(model, "config", None)
@@ -321,6 +325,48 @@ def generate_diffusion_dummy_inputs(
             "return_dict": False,
         }
 
+    def _qwen_inputs() -> dict[str, Any]:
+        # QwenImageTransformer2DModel does NOT take the standard
+        # (hidden_states[B,C,H,W], timestep, encoder_hidden_states) triple. It expects
+        # *packed* latents [B, (H//2)*(W//2), in_channels] plus encoder_hidden_states,
+        # encoder_hidden_states_mask, img_shapes, and optional guidance.
+        # Timesteps are continuous in [0, 1] (not the diffusers [0, 1000] scale).
+        in_channels = getattr(cfg, "in_channels", 64)
+        joint_attention_dim = getattr(cfg, "joint_attention_dim", 3584)
+        guidance_embeds = getattr(cfg, "guidance_embeds", False)
+
+        # Small packed spatial grid (already divided by the 2x2 patch size).
+        packed_h = packed_w = 4
+        img_seq_len = packed_h * packed_w
+        text_seq_len = 8
+
+        dummy_inputs: dict[str, Any] = {
+            "hidden_states": torch.randn(
+                batch_size, img_seq_len, in_channels, device=device, dtype=dtype
+            ),
+            "encoder_hidden_states": torch.randn(
+                batch_size, text_seq_len, joint_attention_dim, device=device, dtype=dtype
+            ),
+            "encoder_hidden_states_mask": torch.ones(
+                batch_size, text_seq_len, device=device, dtype=torch.int64
+            ),
+            "timestep": torch.tensor([0.5], device=device, dtype=dtype).expand(batch_size),
+            "img_shapes": [[(1, packed_h, packed_w)]] * batch_size,
+            "return_dict": False,
+        }
+        if guidance_embeds:
+            dummy_inputs["guidance"] = torch.tensor([4.0], device=device, dtype=torch.float32)
+
+        # Only pass kwargs the installed QwenImageTransformer2DModel.forward accepts
+        # (signatures vary across diffusers versions); prevents the strict QKV-fusion
+        # dummy forward from failing on an unexpected keyword argument.
+        try:
+            accepted = set(inspect.signature(model.forward).parameters)
+            dummy_inputs = {k: v for k, v in dummy_inputs.items() if k in accepted}
+        except (TypeError, ValueError):
+            pass
+        return dummy_inputs
+
     def _generic_transformer_inputs() -> dict[str, torch.Tensor] | None:
         # Try generic transformer handling for other model types
         # Check if model has common transformer attributes
@@ -366,6 +412,7 @@ def generate_diffusion_dummy_inputs(
         ("dit", is_dit, _dit_inputs),
         ("wan", is_wan, _wan_inputs),
         ("unet", is_unet, _unet_inputs),
+        ("qwen", is_qwen, _qwen_inputs),
     ]
 
     for _, matches, build_inputs in model_input_builders:
@@ -685,15 +732,20 @@ def hide_quantizers_from_state_dict(model: nn.Module):
     # Store references to quantizers that we'll temporarily remove
     quantizer_backup: dict[str, dict[str, nn.Module]] = {}
 
-    for name, module in model.named_modules():
-        if is_quantlinear(module):
-            backup = {}
-            for attr in ["weight_quantizer", "input_quantizer", "output_quantizer"]:
-                if hasattr(module, attr):
-                    backup[attr] = getattr(module, attr)
-                    delattr(module, attr)
-            if backup:
-                quantizer_backup[name] = backup
+    # Remove every quantizer submodule from *all* modules, not only recognized
+    # quant-linears: enabled input quantizers can also live on non-linear modules
+    # (e.g. norm layers whose activations were calibrated), and their ``_amax``
+    # buffers must not leak into the saved checkpoint. Snapshot the module list
+    # first since we mutate the module tree while iterating.
+    for name, module in list(model.named_modules()):
+        backup = {}
+        for attr in ["weight_quantizer", "input_quantizer", "output_quantizer"]:
+            child = getattr(module, attr, None)
+            if isinstance(child, nn.Module):
+                backup[attr] = child
+                delattr(module, attr)
+        if backup:
+            quantizer_backup[name] = backup
 
     try:
         yield

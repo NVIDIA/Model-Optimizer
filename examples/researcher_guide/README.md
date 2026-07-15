@@ -7,8 +7,10 @@ ModelOpt workflows for that iterative research process.
 Current workflows include:
 
 - [Efficient model evaluation](#efficient-evaluation-with-lm-eval-harness) with smaller benchmark subsets.
+
 - [Downstream evaluation over time during distillation](#track-downstream-quality-over-time-during-distillation)
   with validation checkpoints.
+
 - [Efficient data blend preparation](#prepare-token-budgeted-data-blends) for distillation experiments.
 
 The guide will grow as additional research workflows are documented. It complements the feature-specific
@@ -159,102 +161,10 @@ Interesting observations include:
 
 ## Prepare token-budgeted data blends
 
-Full distillation datasets are often unnecessarily large for testing a pruning or distillation hypothesis. Use
-[`prepare_data_blend.py`](../dataset/prepare_data_blend.py) to prepare a smaller weighted blend with a shared token
-budget. The utility supports Hugging Face configurations and splits as well as specific JSONL files stored in a
-Hugging Face dataset repository.
-
-Define the tokenizer, output directory, and source weights in YAML. Set the optional `target_tokens` field to
-prepare a weighted subset, or omit it to prepare every source in full. This example scales the
-[Nemotron 3 Nano distillation blend](../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md#1-data-preparation)
-down to one billion tokens while preserving its source weights:
-
-```yaml
-tokenizer: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-output_dir: /path/to/nemotron_3_nano_30b_distillation_blend_1b
-# Optional; omit this field to prepare every source in full.
-target_tokens: 1000000000
-sources:
-  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
-    config: Nemotron-SFT-Code
-    split: train
-    max_samples: 10000000
-    content_field: text
-    weight: 5
-  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
-    config: Nemotron-SFT-General
-    split: train
-    max_samples: 10000000
-    content_field: text
-    weight: 20
-  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
-    config: Nemotron-SFT-MATH
-    split: train
-    max_samples: 10000000
-    content_field: text
-    weight: 5
-  - hf_dataset: nvidia/Nemotron-Math-v2
-    split: high_part00
-    content_field: messages
-    weight: 10
-  - hf_dataset: nvidia/Nemotron-SFT-Math-v3
-    files:
-      - data/train.jsonl
-    content_field: messages
-    weight: 17
-  - hf_dataset: nvidia/Nemotron-SFT-Competitive-Programming-v2
-    files:
-      - data/competitive_programming_python_00.jsonl
-    content_field: messages
-    weight: 15
-  - hf_dataset: nvidia/Nemotron-SFT-Competitive-Programming-v2
-    files:
-      - data/competitive_programming_cpp_00.jsonl
-    content_field: messages
-    weight: 5
-  - hf_dataset: nvidia/Nemotron-Post-Training-Dataset-v1
-    config: default
-    split: stem
-    max_samples: 5000000
-    content_field: messages
-    weight: 8
-  - hf_dataset: nvidia/Nemotron-Science-v1
-    files:
-      - data/MCQ.jsonl
-    content_field: messages
-    weight: 3
-  - hf_dataset: nvidia/Nemotron-Science-v1
-    files:
-      - data/RQA.jsonl
-    content_field: messages
-    weight: 2
-  - hf_dataset: nvidia/Nemotron-SFT-Instruction-Following-Chat-v2
-    files:
-      - data/reasoning_on.jsonl
-    content_field: messages
-    weight: 3
-  - hf_dataset: nvidia/Nemotron-SFT-Instruction-Following-Chat-v2
-    files:
-      - data/reasoning_off.jsonl
-    content_field: messages
-    weight: 2
-  - hf_dataset: nvidia/Nemotron-Agentic-v1
-    files:
-      - data/tool_calling.jsonl
-    content_field: messages
-    weight: 5
-```
-
-Run from the repository root:
-
-```bash
-python examples/dataset/prepare_data_blend.py --config blend.yaml
-```
-
-The output contains tokenized Megatron `.bin`/`.idx` files, `data_blend.txt` with the weighted paths for training,
-and `config.yaml` recording how the blend was generated. The final token count can slightly exceed the target
-because the final document from each source is kept whole. See the
-[Megatron data preparation guide](../dataset/MEGATRON_DATA_PREP.md) for dataset-specific details.
+Preparing complete distillation datasets can consume unnecessary time and storage during early experiments.
+ModelOpt can preserve source weights while preparing only a requested token budget. See
+[Prepare token-budgeted data blends](../dataset/MEGATRON_DATA_PREP.md#prepare-token-budgeted-data-blends) for the
+configuration format, commands, and generated outputs.
 
 ## Planned topics
 

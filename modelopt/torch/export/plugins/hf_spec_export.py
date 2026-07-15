@@ -399,6 +399,21 @@ class DFlashExporter(SpeculativeDecodingExporter):
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
 
+        # Sliding-window attention: all draft layers use non-causal SWA (MiMo-style). vLLM's
+        # _resolve_layer_attention reads dflash_config.use_swa + swa_window_size; with
+        # layer_types left all "full_attention" it applies a non-causal sliding window to
+        # every draft layer (window from swa_window_size / top-level sliding_window).
+        swa_window = getattr(self.model, "dflash_swa_window_size", None)
+        if swa_window is not None:
+            config["sliding_window"] = swa_window
+            config["dflash_config"].update(
+                {
+                    "use_swa": True,
+                    "swa_window_size": swa_window,
+                    "causal": False,
+                }
+            )
+
         # Inject the export-time YaRN rope_scaling from the dflash_export_rope_scaling
         # config field (empty dict disables). Mirrors eagle's eagle_export_rope_scaling.
         export_rope_scaling = getattr(self.model, "dflash_export_rope_scaling", None)
@@ -474,6 +489,34 @@ class DominoExporter(DFlashExporter):
                 "pure_draft_prefix_len": getattr(draft_config, "pure_draft_prefix_len", 1),
                 "gru_hidden_dim": gru_hidden_dim,
                 "emb_dim": emb_dim,
+            }
+        )
+        return config
+
+
+class DSparkExporter(DFlashExporter):
+    """Draft model exporter for DSpark (DFlash backbone + sequential Markov head).
+
+    Same z-lab-compatible format as DFlash, plus the DSpark head weights
+    (``markov_w1.*`` / ``markov_w2.*`` / ``gate_proj.*`` / ``joint_proj.*`` /
+    ``confidence_proj.*``, already captured by the inherited ``dflash_module.``
+    stripping) and the extra config fields the loader needs to rebuild the head
+    (``projector_type``, ``markov_rank``, ``markov_head_type``,
+    ``use_confidence_head``, ``shift_label``).
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the DSpark head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "dspark"),
+                "shift_label": getattr(draft_config, "shift_label", True),
+                "markov_rank": draft_config.markov_rank,
+                "markov_head_type": getattr(draft_config, "markov_head_type", "vanilla"),
+                "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),
             }
         )
         return config

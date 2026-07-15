@@ -26,7 +26,7 @@ from modelopt.torch.quantization.model_calib import (
     _register_fp8_sweep_calibrator,
     mse_calibrate,
 )
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, QuantLinear, TensorQuantizer
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _QUANT_FUNCTIONAL_BACKENDS,
     register_quant_backend,
@@ -645,7 +645,7 @@ class TestRegisterFP8SweepCalibrator:
             ),
             amax=torch.tensor([1.0, 2.0]),
         )
-        model = torch.nn.Module()
+        model = QuantLinear(16, 1, bias=False)
         model.weight_quantizer = q
         promote_nvfp4_static_quantizers(model)
 
@@ -737,10 +737,9 @@ class TestRegisterFP8SweepCalibrator:
 
 
 class TestStaticNVFP4Promotion:
-    class _LinearLike(torch.nn.Module):
+    class _LinearLike(QuantLinear):
         def __init__(self, amax):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.empty(1, 16))
+            super().__init__(16, 1, bias=False)
             cfg = QuantizerAttributeConfig(
                 num_bits=(2, 1),
                 block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},

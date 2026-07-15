@@ -69,14 +69,11 @@ Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-
 
 ### 1. Data Preparation
 
-Prepare this blend with the
-[token-budgeted data blend workflow](../../../researcher_guide/README.md#prepare-token-budgeted-data-blends).
-The complete blend listed below contains approximately 142B tokens. For an initial experiment, set
-`target_tokens: 1000000000` to prepare a 1B-token subset with the same source weights, avoiding the time and
-storage needed to preprocess the complete blend. Omit `target_tokens` to prepare every configured source in
-full, subject to any per-source `max_samples` setting. See
-[examples/dataset/MEGATRON_DATA_PREP.md](../../../dataset/MEGATRON_DATA_PREP.md) for additional dataset
-tokenization commands.
+See [examples/dataset/MEGATRON_DATA_PREP.md](../../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands for all datasets used in this blend.
+To prepare a token-limited subset, follow the
+[token-budgeted data blend workflow](../../../dataset/MEGATRON_DATA_PREP.md#prepare-token-budgeted-data-blends),
+but create a custom YAML configuration using this tutorial's tokenizer, sources, and weights below. The
+example configuration targets Nemotron 3 and should not be reused unchanged.
 
 For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`, `OUTPUT_DIR=tokenized_nemotron_3`.
 

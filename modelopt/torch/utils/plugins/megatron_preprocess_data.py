@@ -305,6 +305,16 @@ class _Partition:
             encoded_docs = pool.imap(encoder.encode, lines, 32)
         return pool, encoded_docs
 
+    @staticmethod
+    def _cached_token_count(prefixes: list[str]) -> int:
+        """Return the number of tokens represented by cached Megatron datasets."""
+        token_count = 0
+        for prefix in prefixes:
+            # Avoid memory-mapping the token file because a cached split can be empty.
+            dataset = indexed_dataset.IndexedDataset(prefix, mmap=False)
+            token_count += int(dataset.sequence_lengths.sum())
+        return token_count
+
     def process_json_file(
         self,
         input_file_name: str | Path,
@@ -315,7 +325,8 @@ class _Partition:
         input_path = Path(input_file_name)
         stem = input_path.stem if input_path.suffix != ".gz" else Path(input_path.stem).stem
         output_prefix = Path(output_dir) / stem
-        prefixes = [f"{output_prefix}_{key}" for key in self.json_keys]
+        token_tag = f"_tokens{max_tokens}" if max_tokens is not None else ""
+        prefixes = [f"{output_prefix}_{key}{token_tag}" for key in self.json_keys]
 
         print(f"\nOpening {input_file_name}")
         if input_path.suffix == ".gz":
@@ -331,8 +342,9 @@ class _Partition:
         builders = {}
 
         for key in self.json_keys:
-            output_bin_files[key] = f"{output_prefix}_{key}.bin"
-            output_idx_files[key] = f"{output_prefix}_{key}.idx"
+            prefix = f"{output_prefix}_{key}{token_tag}"
+            output_bin_files[key] = f"{prefix}.bin"
+            output_idx_files[key] = f"{prefix}.idx"
             if Path(output_bin_files[key]).exists() and Path(output_idx_files[key]).exists():
                 continue
             builders[key] = indexed_dataset.IndexedDatasetBuilder(
@@ -342,7 +354,7 @@ class _Partition:
 
         if not builders:
             print(f"\t[SKIP] Output files corresponding to {input_file_name} already exist")
-            return 0, prefixes
+            return self._cached_token_count(prefixes), prefixes
 
         start_time = time.time()
         total_doc_len, total_enc_len = 0, 0
@@ -437,7 +449,7 @@ class _Partition:
 
         if not builders:
             print(f"\t[SKIP] Output files for {dataset_name} {config}/{split} already exist")
-            return 0, prefixes
+            return self._cached_token_count(prefixes), prefixes
 
         # Workers encode asynchronously; iterating encoded_docs waits for results in input order.
         pool, encoded_docs = self._encode_docs(
@@ -523,6 +535,11 @@ def megatron_preprocess_data(
 
     Exactly one of ``input_dir``, ``jsonl_paths``, or ``hf_dataset`` must be provided.
 
+    Important: When ``max_tokens`` is set, JSONL records are consumed from the beginning of each
+    file rather than selected randomly. Pre-shuffle JSONL files to obtain a random subset. Hugging
+    Face datasets are shuffled deterministically before applying the limit; streaming datasets use
+    an approximate buffer shuffle.
+
     Args:
         input_dir: Directory containing JSONL files to tokenize.
         jsonl_paths: One or more paths to JSONL files.
@@ -535,7 +552,7 @@ def megatron_preprocess_data(
             nested message schemas that cause Arrow type-cast errors in non-streaming mode.
             Note: streaming does not cache to disk, so re-runs re-download. Defaults to False.
         max_tokens: Stop after processing at least this many tokens across the source files or
-            selected Hugging Face split. The final document may make the result slightly larger.
+            selected Hugging Face splits. The final document may make the result slightly larger.
         output_dir: Path to directory to save binary output files.
         tokenizer_name_or_path: Name or path of the Hugging Face tokenizer to use.
         json_keys: Key or list of keys to extract from json. Defaults to ["text"].
@@ -632,6 +649,9 @@ def megatron_preprocess_data(
             )
             final_enc_len += enc_len
             all_prefixes.extend(prefixes)
+
+    if max_tokens is not None and final_enc_len >= max_tokens:
+        print(f"\n>>> Early stopping: {max_tokens=} achieved with {final_enc_len} tokens.")
 
     elapsed = (time.time() - overall_start) / 60
     print(
