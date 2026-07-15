@@ -116,7 +116,7 @@ def _available_removals(
         SublayerRemoval(layer_idx=layer_idx, kind=kind)
         for layer_idx, block in enumerate(blocks)
         for kind in _REMOVABLE_KINDS
-        if block.get_subblock(kind) is not None
+        if (subblock := block.get_subblock(kind)) is not None and not subblock.no_op
     ]
 
 

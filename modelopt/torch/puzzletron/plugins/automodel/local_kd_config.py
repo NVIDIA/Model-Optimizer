@@ -99,6 +99,19 @@ def _model_config(
     return configured
 
 
+def _logical_dp_size(hydra_cfg, recipe_distributed: dict[str, Any]) -> int:
+    """Resolve sample-parallel DP independently of an EP-overlaid recipe mesh."""
+
+    parallel = _as_dict(hydra_cfg.get("parallel", None))
+    configured = parallel.get("dp")
+    if configured in (None, "none", "None", ""):
+        public_distributed = _as_dict(hydra_cfg.get("distributed", None))
+        configured = public_distributed.get("dp_size")
+    if configured not in (None, "none", "None", ""):
+        return max(_int_or_default(configured, 1), 1)
+    return max(_int_or_default(recipe_distributed.get("dp_size"), 1), 1)
+
+
 def build_local_kd_recipe_config(hydra_cfg) -> dict[str, Any]:
     """Translate Puzzletron bypass configuration to an AutoModel recipe dictionary.
 
@@ -137,7 +150,7 @@ def build_local_kd_recipe_config(hydra_cfg) -> dict[str, Any]:
     _inject_canonical_data(recipe, hydra_cfg)
     distributed = recipe.setdefault("distributed", {})
     explicit_dp_size = distributed.get("dp_size")
-    dp_size = _int_or_default(explicit_dp_size, 1)
+    dp_size = _logical_dp_size(hydra_cfg, distributed)
     scheduler_dp_size = _int_or_default(
         explicit_dp_size
         if explicit_dp_size not in (None, "none", "None", "")
@@ -197,7 +210,11 @@ def build_local_kd_recipe_config(hydra_cfg) -> dict[str, Any]:
         "enabled": False,
         "checkpoint_dir": str(teacher_setup_dir),
         "model_save_format": "safetensors",
-        "save_consolidated": True,
+        # Overfit probes publish metrics only. Avoid exporting a redundant
+        # ~230 GiB HF checkpoint after every smoke probe.
+        "save_consolidated": not bool(
+            hydra_cfg.bypass.get("single_batch_overfit", False)
+        ),
         # The teacher is built by the base forward-only recipe. Student resume is
         # loaded explicitly after the student becomes the tracked model.
         "restore_from": None,

@@ -53,6 +53,7 @@ class Qwen3P5Converter(Converter):
             if layer_type == "linear_attention":
                 attention_config = None
                 mamba_config = MambaConfig(
+                    name="gdn",
                     state_dim=text_config.linear_key_head_dim,
                     num_heads=text_config.linear_num_value_heads,
                     head_dim=text_config.linear_value_head_dim,

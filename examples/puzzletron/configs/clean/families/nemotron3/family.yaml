@@ -22,6 +22,10 @@ model:
 
 pruning:
   activation_passes:
+    - name: hidden_width
+      activation_hooks_kwargs:
+        method: minitron_hidden_width
+
     - name: attention_grouped
       pruning_mixin:
         _target_: modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsPruningMixIn

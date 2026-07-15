@@ -42,7 +42,7 @@ import logging
 import os
 import threading
 from copy import deepcopy
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -800,8 +800,29 @@ def apply_patch() -> None:
 
         stack = _get_ctx_stack()
         stack.append((block_configs, anymodel_descriptor))
+        adapter_context = nullcontext()
+        if (
+            block_configs is not None
+            and anymodel_descriptor is not None
+            and AutoModelDescriptorFactory is not None
+        ):
+            adapter_descriptor_cls = AutoModelDescriptorFactory.get(anymodel_descriptor)
+            if adapter_descriptor_cls is not None:
+                adapter_context = adapter_descriptor_cls.native_state_dict_adapter_context(
+                    block_configs
+                )
         try:
-            return orig_from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs)
+            # Adapter conversion happens after bare model construction, while
+            # AutoModel applies distributed infrastructure and loads shards.
+            # Keep the heterogeneous bridge active for the entire load rather
+            # than only for decoder-layer __init__.
+            with adapter_context:
+                return orig_from_pretrained(
+                    cls,
+                    pretrained_model_name_or_path,
+                    *model_args,
+                    **kwargs,
+                )
         finally:
             stack.pop()
 

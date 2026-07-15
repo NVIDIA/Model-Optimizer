@@ -17,9 +17,15 @@ import json
 from pathlib import Path
 
 from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
+    _activation_diagnostic_summary,
     _campaign_options_data,
+    _library_scenario,
+    _mamba_family_hint,
     _pipeline_state,
     _stage_artifact_present,
+    _subblock_axes,
+    _vllm_data,
+    _vllm_section,
     generate_campaign_progress_report,
 )
 from modelopt.torch.puzzletron.stages.graph import STAGE_REGISTRY
@@ -216,6 +222,182 @@ def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
     assert f"data-warning='{message}'" in document
     assert f"title='{message}'" not in document
     assert "<div class='finding-list'>" not in document
+    assert "Slicing Sanity · axis=arbitrary_axis" not in document
+    assert message in document
+    assert "row.warning" in document
+    assert "warningSymbol" in document
+
+
+def test_report_promotes_legacy_descriptor_realization_failure(tmp_path: Path):
+    _write(
+        tmp_path / "artifacts/slicing_sanity/summary.json",
+        {
+            "rows": [],
+            "findings": [],
+            "axis_summaries": {
+                "hidden_width": {
+                    "cases": [
+                        {
+                            "hidden_width": 3840,
+                            "primary_metric": "raw_replacement_loss",
+                            "realization_delta": 6.6e-4,
+                            "realization_passed": False,
+                        }
+                    ]
+                }
+            },
+        },
+    )
+
+    summary = _activation_diagnostic_summary(tmp_path)
+
+    assert len(summary["slicing_findings"]) == 1
+    assert (
+        summary["slicing_findings"][0]["evidence"]["kind"]
+        == "descriptor_realization_gate"
+    )
+
+
+def test_library_uses_active_semantic_subblock_family(tmp_path: Path):
+    library_path = tmp_path / "replacement_library.json"
+    _write(
+        library_path,
+        {
+            "hidden_width": 4096,
+            "entries": [
+                {
+                    "parent_layer_indices": [0],
+                    "child_block_configs": [
+                        {
+                            "subblock_configs": [
+                                {"kind": "attention", "name": "attention", "no_op": True},
+                                {"kind": "moe", "name": "moe", "no_op": False},
+                            ]
+                        }
+                    ],
+                },
+                {
+                    "parent_layer_indices": [1],
+                    "child_block_configs": [
+                        {
+                            "subblock_configs": [
+                                {
+                                    "kind": "mamba",
+                                    "name": "mamba",
+                                    "no_op": False,
+                                    "num_heads": 128,
+                                    "head_dim": 64,
+                                },
+                                {"kind": "ffn", "name": "ffn", "no_op": True},
+                            ]
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    labels = {term["label"] for term in _library_scenario(library_path)["terms"]}
+
+    assert labels == {"Mamba blocks", "MoE blocks"}
+
+
+def test_mamba_and_gdn_use_distinct_semantic_axis_labels():
+    common = {"kind": "mamba", "num_groups": 8, "num_heads": 128, "head_dim": 64}
+
+    assert _subblock_axes({**common, "name": "mamba"}) == {
+        "mamba_groups": 8,
+        "mamba_heads": 128,
+        "mamba_head_dim": 64,
+    }
+    assert _subblock_axes({**common, "name": "gdn"}) == {
+        "gdn_key_groups": 8,
+        "gdn_value_heads_per_group": 16,
+        "gdn_value_head_dim": 64,
+    }
+
+
+def test_legacy_mamba_name_uses_declared_axis_namespace(tmp_path: Path):
+    _write(
+        tmp_path / "manifests/vllm_stats.json",
+        {
+            "config": {
+                "search_space": {
+                    "axes": {
+                        "gdn_key_groups": {"enabled": True},
+                        "gdn_value_head_dim": {"enabled": True},
+                    }
+                }
+            }
+        },
+    )
+    legacy = {
+        "kind": "mamba",
+        "name": "mamba",
+        "num_groups": 8,
+        "num_heads": 128,
+        "head_dim": 64,
+    }
+
+    hint = _mamba_family_hint(tmp_path)
+
+    assert hint == "gdn"
+    assert _subblock_axes(legacy, mamba_family_hint=hint) == {
+        "gdn_key_groups": 8,
+        "gdn_value_heads_per_group": 16,
+        "gdn_value_head_dim": 64,
+    }
+
+
+def test_vllm_report_rejects_negative_native_phase_measurements(tmp_path: Path):
+    scenario = tmp_path / "scenarios/width-4096/depth-00"
+    stats_path = scenario / "subblock_stats.json"
+    _write(
+        stats_path,
+        [
+            {
+                "args": {
+                    "runtime_stats": True,
+                    "prefill_seq_len": 256,
+                    "generation_seq_len": 32,
+                    "batch_size": 1,
+                },
+                "subblocks": [
+                    {
+                        "subblock_config": {
+                            "kind": "moe",
+                            "name": "moe",
+                            "no_op": False,
+                            "num_experts": 128,
+                        },
+                        "runtime_ms": 0.001,
+                        "prefill_runtime_ms": 0.04,
+                        "decode_runtime_ms": -0.039,
+                        "latency_difference_negative": True,
+                    }
+                ],
+            }
+        ],
+    )
+    library = {
+        "scenarios": [
+            {
+                "hidden_width": 4096,
+                "path": str(scenario / "replacement_library.json"),
+                "unique_runtime_configs": 1,
+            }
+        ]
+    }
+
+    data = _vllm_data(tmp_path, library)
+
+    assert data["scenarios"][0]["complete"] is False
+    assert data["scenarios"][0]["invalid"] == 1
+    assert data["warnings"][0]["kind"] == "negative_runtime_phase"
+    assert data["records"][0]["warning"].startswith(
+        "Native runtime measurement has a negative marginal phase"
+    )
+    assert "<article class='finding warning'>" not in _vllm_section(data)
 
 
 def test_campaign_options_mark_parameter_selection_not_latency_verified(tmp_path: Path):
@@ -740,6 +922,56 @@ def test_replacement_data_omits_empty_width_scenarios(tmp_path: Path):
     data = _replacement_data(tmp_path)
 
     assert data["scenarios"] == []
+
+
+def test_replacement_data_reads_width_local_subblock_scores(tmp_path: Path):
+    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import _replacement_data
+
+    scenario = tmp_path / "scenarios/width-3840/depth-00"
+    _write(scenario / "scenario_manifest.json", {"hidden_width": 3840})
+    _write(scenario / "single_subblock_replacement_solutions.json", [{}])
+    _write(
+        scenario / "single_subblock_replacement_solutions--validation/solution_0.json",
+        {
+            "i_solution": 0,
+            "args": {"eval_samples": 2},
+            "lm_loss": {"avg": 1.25},
+            "puzzle_solution": {
+                "single_sequence_replacement": {
+                    "parent_layer_indices": [3],
+                    "child_block_configs": [
+                        {
+                            "subblock_configs": [
+                                {
+                                    "kind": "moe",
+                                    "name": "moe",
+                                    "num_experts": 128,
+                                    "no_op": False,
+                                }
+                            ]
+                        }
+                    ],
+                },
+                "subblock_replacement": {"kind": "moe", "name": "moe"},
+            },
+        },
+    )
+
+    data = _replacement_data(tmp_path)
+
+    assert data["granularity"] == "subblock"
+    assert data["scenarios"] == [
+        {
+            "hidden_width": 3840,
+            "path": str(scenario / "single_subblock_replacement_solutions--validation"),
+            "expected": 1,
+            "measured": 1,
+            "complete": True,
+            "granularity": "subblock",
+        }
+    ]
+    assert data["records"][0]["layer_idx"] == 3
+    assert data["records"][0]["metrics"]["lm_loss"] == 1.25
 
 
 def test_diverse_bypass_gate_uses_decreasing_per_width_trends_and_diversity():

@@ -32,10 +32,45 @@ from modelopt.torch.puzzletron.campaigns.config_generation import (
 from modelopt.torch.puzzletron.anymodel.capabilities import AxisCapabilities
 from modelopt.torch.puzzletron.campaigns.preflight import CampaignPreflight, ModelPreflight
 from modelopt.torch.puzzletron.campaigns.schema import default_cross_model_campaign
+from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from modelopt.torch.puzzletron.stages import pipeline
 
 
 BASE_CONFIG = Path("examples/puzzletron/configs/clean/base.yaml")
+NEMOTRON3_FAMILY_CONFIG = Path(
+    "examples/puzzletron/configs/clean/families/nemotron3/family.yaml"
+)
+SUPER_SMOKE_CONFIG = Path(
+    "examples/puzzletron/configs/clean/families/nemotron3/"
+    "super_120b_a12b_bf16/super_smoke.yaml"
+)
+
+
+def test_super_smoke_downstream_topology_and_distillation_contract() -> None:
+    config = pipeline_config_from_path(SUPER_SMOKE_CONFIG)
+
+    assert config["embedding_pruning"]["widths"] == [4096, 3840]
+    assert config["aiperf"]["topology"] == {
+        "tensor_parallel_size": 2,
+        "pipeline_parallel_size": 2,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "distributed_executor_backend": "mp",
+        "gpu_group_size": 4,
+        "extra_vllm_args": ["-cc.cudagraph_mode=NONE"],
+    }
+    assert config["mip"]["constraint_profiles"] == [0.9]
+    assert config["zero_shot_evaluation"]["profile_id"] == "params-090"
+    assert config["global_distillation_sanity"]["profile_id"] == "params-090"
+    distillation = config["global_distillation"]
+    assert distillation["profile_id"] == "params-090"
+    assert distillation["selection"] == "best_evaluation"
+    assert distillation["save_consolidated"] is True
+    assert distillation["objective"]["main_ce"]["weight"] == 0.5
+    assert distillation["objective"]["mtp_ce"]["weight"] == 0.0
+    assert distillation["metadata"]["llm"]["dataset"][
+        "packed_token_cache_path"
+    ].endswith("dataset_cache/train_2x256.tokens")
 
 
 def test_sharded_runtime_execution_is_deferred_from_library_stage() -> None:
@@ -102,6 +137,20 @@ def test_canonical_base_config_does_not_require_a_descriptor_override() -> None:
     assert "descriptor" not in config["pruning"]
     assert "descriptor" not in config["replacement_scoring"]
     assert "descriptor" not in config["realize_model"]
+
+
+def test_nemotron3_family_scores_enabled_hidden_width_axis() -> None:
+    config = yaml.safe_load(NEMOTRON3_FAMILY_CONFIG.read_text())
+    passes = config["pruning"]["activation_passes"]
+
+    hidden_passes = [
+        activation_pass
+        for activation_pass in passes
+        if activation_pass["activation_hooks_kwargs"]["method"]
+        == "minitron_hidden_width"
+    ]
+
+    assert [activation_pass["name"] for activation_pass in hidden_passes] == ["hidden_width"]
 
 
 def test_recipe_uses_descriptor_sequence_parallel_capability() -> None:

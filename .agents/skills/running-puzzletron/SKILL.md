@@ -5,434 +5,442 @@ description: Use when onboarding a new LLM or multimodal model to Puzzletron, ru
 
 # Run Puzzletron
 
-## Objective
+## What This Skill Does
 
-Turn a model checkpoint and user requirements into a reproducible, resumable Puzzletron
-campaign. Inspect the real implementations before defining pruning axes, prove correctness
-with a small but full-coverage smoke campaign, then hand the user runnable production
-configuration and commands before spending substantial compute.
+This skill turns a model checkpoint and user requirements into a complete,
+reproducible Puzzletron pruning campaign. It:
 
-Treat the report and durable artifacts as first-class outputs. Never make a stage look
-complete merely because a process exited successfully.
+- inspects the model's actual source code before proposing anything;
+- asks two short rounds of targeted questions (infrastructure, then search);
+- generates runnable smoke and production config bundles with exact commands;
+- validates the setup end-to-end with a tiny smoke campaign;
+- executes the pipeline DAG, handles Slurm or bare-metal scheduling, resumes
+  interrupted stages, and keeps the HTML report current.
+
+If the model is not yet registered in Puzzletron, the skill adds the descriptor
+and pruning axes as part of the workflow. If it is already supported, the skill
+skips straight to campaign configuration.
+
+If the user asks only for planning or documentation, produce the requested
+files and stop. Do not launch any campaign work without explicit authorization.
 
 ## Core Contract
 
 1. Ask the two-phase intake below; do not invent consequential campaign choices.
-2. Inspect model source before proposing axes or the second phase of questions.
-3. Admit only axes that remain valid through training, physical export, and required
+2. Inspect model source before proposing axes or entering Phase 2.
+3. Admit only axes that hold through training, physical export, and all required
    inference backends.
-4. Use physical materialization as the ground truth for dynamic slicing.
+4. Use physical materialization as the ground truth for dynamic slicing — a
+   mismatch is a bug, not a tolerance question.
 5. Run a tiny full-coverage smoke campaign and deliberately test resume.
-6. Present one readiness gate before the expensive campaign.
-7. Produce concrete smoke and production config bundles plus exact launch commands.
-8. Execute the stage DAG, not a hard-coded sequential list; parallelize independent nodes.
-9. Regenerate the cumulative report after every completed stage.
+6. Present one explicit readiness gate before expensive work.
+7. Produce concrete smoke and production config bundles plus exact commands.
+8. Execute the stage DAG from `stages/graph.py`; parallelize independent nodes.
+9. Regenerate the cumulative HTML report after every completed stage.
 10. Preserve or quarantine artifacts. Never silently overwrite incompatible work.
 
-If the user asks only for planning or documentation, stop after producing the requested
-files. Do not launch smoke or production work without authorization.
+## Phase 1: Infrastructure and Goals
 
-## Phase 1: Establish Identity, Access, and Budget
+Ask these as one grouped message. Explain each item in plain language if the
+user seems unfamiliar with Slurm, containers, or distributed training.
 
-Ask concise questions, grouped into one message where possible:
+### Checkpoint and Data Access
 
-- Exact checkpoint URI/path, revision or commit, tokenizer/processor revision, and trust
-  policy for remote code.
-- Experiment ID, artifact root, and whether existing artifacts may be resumed, imported,
-  archived, or must remain untouched.
-- Execution environment: Slurm or bare metal; container or host environment; editable
-  sibling checkout locations; whether code changes are allowed in Puzzletron, AutoModel,
-  and the AnyModel vLLM fork.
-- Available node/GPU types and counts, wall-time limits, queue policy, storage capacity,
-  deadline, and acceptable smoke/production cost.
-- Whether to work in the current checkout or an isolated worktree. Respect dirty user
-  changes and repository instructions.
-- Required final outcomes: search only, zero-shot evaluation, AIPerf, overfit checks,
-  global distillation, post-KD evaluation, or the complete DAG.
+- **Exact checkpoint URI or local path** — HuggingFace model ID or an absolute
+  path on shared storage. Ask for the exact revision or commit hash when
+  reproducibility matters.
+  - *Why it matters:* Puzzletron pins the teacher identity at the start; a
+    mismatched checkpoint invalidates all downstream artifacts.
+- **Tokenizer/processor revision** — Usually the same as the model revision.
+  Ask explicitly if the user is mixing a custom tokenizer with a base model.
+- **Remote code trust policy** — Whether `trust_remote_code=True` is acceptable.
+  Required for some models; a security decision the user must make consciously.
+- **Dataset path/ID and access** — Where the calibration data lives and whether
+  it requires a license token or special download step.
 
-For bare metal, also ask for hostnames, slots per host, SSH user, rendezvous/network
-interface constraints, and shared-storage root. Require passwordless SSH and a shared
-filesystem visible under identical paths on every host. Manage SSH commands, process
-IDs, logs, health checks, and cleanup; never copy private keys or weaken host security.
+### Experiment Logistics
 
-For Slurm, inspect the site guide if one exists. In this repository, read the local
-`nv-internal/CLUSTER_GUIDE_NV.md` when present and operating on the NVIDIA cluster;
-otherwise discover scheduler policy directly instead of assuming that private guide exists.
+- **Experiment ID** — A short label (no spaces) used to name the artifact
+  folder. Example: `llama3-8b-prune-v1`.
+- **Artifact root** — Shared storage path where outputs will be written.
+  Must be accessible from every worker node.
+- **Existing artifacts policy** — If prior runs exist at this ID: resume, import
+  from an alternate path, archive, or treat as untouched? Resuming is the
+  default and the safest choice.
+
+### Execution Environment
+
+- **Scheduler: Slurm or bare metal?**
+  - *Slurm:* ask for the cluster account/partition, available node types, GPU
+    count per node, wall-time limits, and queue policy. Read the local
+    `nv-internal/CLUSTER_GUIDE_NV.md` if present.
+  - *Bare metal (SSH):* ask for hostnames, slots per host, SSH user,
+    rendezvous host/port, and shared-storage root path. Require passwordless
+    SSH and identical paths on every host.
+- **Container or host Python?** — Enroot/Docker container image path, or a
+  host-installed virtual environment? Both are supported; clarify mounts.
+  - Example: `container at /lustre/containers/nemo.sqsh` or
+    `venv at /home/user/repos/modelopt/.venv`.
+- **Sibling checkout locations** — Where vLLM, AIPerf, and AutoModel are
+  installed on the cluster. All four siblings must be in the same Python
+  environment (same PyTorch/CUDA build).
+- **Code change policy** — Whether changes to Puzzletron, AutoModel, or the
+  vLLM fork are in scope for this campaign.
+
+### Resources and Goals
+
+- **Available nodes, GPU type, GPU count, and wall-time per job** — Used to
+  size the smoke and production configs and to schedule appropriately.
+- **Storage capacity for artifacts** — Large models can produce hundreds of GB
+  of bypass/scoring artifacts.
+- **Deadline and acceptable cost** — Informs whether to run all optional stages
+  or a lean path.
+- **Required final outcomes** — Which of the following does the user want?
+  - Search only (MIP solutions with scores)
+  - Zero-shot evaluation of top solutions
+  - AIPerf throughput benchmarks
+  - Bypass for richer scoring data
+  - Global distillation of the best solution
+  - Post-distillation evaluation
+  - The complete DAG
 
 ## Inspect Before Asking Model-Specific Questions
 
-Resolve the exact model revision locally and inventory every distinct computational layer,
-including embeddings, projectors, attention variants, MLP/MoE variants, recurrent/state
-space layers, normalization, multimodal towers, routers, language heads, and MTP heads.
+Resolve the exact checkpoint revision and read every distinct computational
+layer in the HuggingFace implementation: embeddings, attention variants,
+MLP/MoE/expert layers, recurrent/SSM layers, normalization, multimodal towers,
+routers, language heads, and MTP heads.
 
-For each distinct layer type, read all available implementations in this order:
+For each distinct layer type, also read (in order):
+1. The HuggingFace implementation used by this exact checkpoint.
+2. The vLLM implementation, if the unpruned model is already supported there.
+3. The AutoModel implementation, if present.
+4. Existing Puzzletron descriptors, hooks, materializers, and cost models.
 
-1. The exact Hugging Face implementation used by the checkpoint.
-2. Its vLLM implementation, if the unpruned model is supported.
-3. Its AutoModel implementation, if present.
-4. Existing Puzzletron descriptors, hooks, materializers, exporters, and cost models.
-
-Trace constructor invariants, tensor shapes, grouped/shared parameters, cache layout,
-normalization, residual paths, sharding, collectives, state-dict names, and serialization.
-Do not infer a pruning axis from config fields alone.
-
-Create an implementation inventory with:
-
-- layer type and source locations;
+Build an implementation inventory documenting, for each layer type:
 - semantic candidate axes and legal value domains;
-- coupled dimensions and divisibility/alignment constraints;
+- coupled dimensions and alignment/divisibility constraints;
 - HF, AutoModel, and vLLM constructor/runtime support;
-- TP/CP/PP/EP/FSDP implications;
+- TP/CP/PP/EP implications;
 - dynamic hook, physical materialization, export, and cost-accounting status;
-- accepted axes, rejected axes, and evidence.
+- accepted axes, rejected axes, and evidence for each decision.
 
 ## Select the Model Path
 
-Use an AutoModel descriptor only when AutoModel already natively supports the unpruned
-base model. Otherwise implement the model through Puzzletron's HF-native path.
+Use an **AutoModel descriptor** only when AutoModel already natively supports
+the unpruned model. Otherwise use Puzzletron's HF-native path.
 
-Do not add native AutoModel or vLLM support for an unsupported unpruned model as part of
-this workflow. For an already supported model, sibling changes are allowed when needed to
-repair broken TP/CP/PP/EP behavior or make an admitted pruned configuration work through
-the existing generic AnyModel path.
+Do not add native AutoModel or vLLM support for a previously unsupported base
+model as part of this workflow. For an already-supported model, sibling fixes
+are allowed when needed to make admitted pruned configurations work through the
+existing AnyModel path.
 
-If the unpruned model runs in vLLM, require every admitted pruned configuration to run in
-the repository's AnyModel vLLM fork. Exclude axes that would require a new model-specific
-vLLM constructor or backend. For example, Q/K head dimension and V head dimension are
-independent mathematically only if all required constructors and kernels actually accept
-them independently.
+If the unpruned model runs in vLLM, every admitted pruned configuration must
+also run in the repository's AnyModel vLLM fork. Exclude axes that would
+require a new model-specific vLLM constructor.
 
-Every layer type must have at least one valid pruning operation or a documented principled
-reason it is intentionally immutable. Stop before a costly campaign if a required layer
-type has no valid representation.
+## Phase 2: Model-Aware Campaign Questions
 
-## Phase 2: Ask Model-Aware Campaign Questions
+Present only options that are valid for the inspected model. Group questions
+by topic. Explain the trade-offs briefly for non-obvious choices.
 
-Present only choices valid for the inspected model.
+### Data Lanes and Layouts
 
-### Data lanes
+- **Which input modalities to include?** — Text only, text+image, text+audio,
+  text+video, or combinations. Ask independently for each supported lane.
+  - *Why it matters:* Each lane has separate importance statistics, bypass
+    losses, and evaluation metrics. Omitting a lane may degrade the pruned
+    model's performance on that modality.
+- **Real dataset and split for each lane** — calibration samples, evaluation
+  samples, license/access constraints, max sequence length, and sampling weights
+  when mixing lanes.
+- **Batch layout for each lane:**
+  - *Fixed:* all examples shaped to the same length. Simple and predictable,
+    but potentially wasteful.
+  - *Padded:* variable examples batched to local max with attention masks.
+    Conventional; adds padding overhead.
+  - *Packed:* multiple documents share one sequence with explicit boundaries.
+    Most GPU-efficient; requires careful handling of masks, targets, and
+    multimodal metadata.
+- **Chat/instruction template policy** — use the model's native instruct
+  template for all evaluation and serving. Do not substitute generic role tags.
 
-Ask independently which supported input combinations to include, such as:
+### Search and Granularity
 
-- text only;
-- text and image;
-- text and audio;
-- text and video;
-- text with multiple supported media types.
-
-Ask for the real dataset and split for each selected lane, sampling weights, license/access
-constraints, maximum samples, ISL/OSL, and evaluation sample counts. Do not replace a
-selected multimodal lane with synthetic tensors except for a narrowly scoped unit test.
-
-For each lane, ask independently for one layout:
-
-- **Fixed:** every example is shaped to one known length; simplest and predictable, but
-  potentially wasteful and unlike variable production traffic.
-- **Padded:** variable examples are batched to a local maximum with attention/label masks;
-  conventional and easy to inspect, but includes padding overhead.
-- **Packed:** multiple examples share a sequence with explicit document boundaries;
-  efficient, but hooks, targets, CP metadata, and media positions must preserve boundaries.
-
-Ask for processor/chat template policy. Require the model's native instruct/chat template
-for evaluation and serving. Do not silently substitute generic role tags.
-
-### Search and granularity
-
-Ask independently for:
-
-- accepted candidate ranges for each proven axis;
-- maximum depth removals and whether depth units are blocks or subblocks;
-- width-importance granularity;
-- bypass granularity and whether bypass is disabled, sanity-only, or a search input;
-- vLLM-statistics granularity;
-- replace-one scoring granularity;
-- runtime/memory/parameter constraints and MIP depth options;
-- number of best solutions for zero-shot evaluation and AIPerf;
-- number of models for distillation sanity and full KD;
-- metrics, acceptance gates, seeds, and reproducibility tolerance.
-
-Do not invent a campaign-wide granularity. Each stage owns its own granularity. “Build
-Block Library” remains the stage name even when the library records subblock units.
+- **Candidate ranges per axis** — for each admitted axis (e.g. `num_heads`,
+  `head_dim`, `ffn_dim`, `num_experts`), what is the minimum value the user
+  is willing to accept?
+  - *Why it matters:* narrower ranges mean faster MIP but may miss good
+    solutions; wider ranges need more scoring compute.
+- **Maximum depth removals** — how many transformer layers the search may
+  remove. Zero means depth search is disabled.
+- **Bypass** — disabled, sanity-only (no real search data), or full:
+  - *Full bypass* is the main source of per-block loss data for scoring.
+    It improves MIP solution quality but requires substantial compute.
+  - Ask for granularity: *block* (one complete transformer block) or *subblock*
+    (individual attention/FFN sublayers independently).
+- **vLLM statistics** — whether to measure actual GPU latency for each
+  candidate. Required for hardware-aware latency constraints in MIP.
+  Ask for granularity: *block* or *subblock*.
+- **Replace-one scoring granularity** — *block* or *subblock*.
+- **MIP constraints** — the hardware budget for accepted solutions:
+  max parameter count, max latency (e.g. ms/token at a given batch size), or
+  max GPU memory. Also ask for: number of top solutions for evaluation, number
+  for distillation, and whether to include the teacher as a reference point.
+- **Metrics, acceptance gates, and seeds** — which benchmarks define success,
+  what the acceptable accuracy gap vs. teacher is, and whether reproducibility
+  requires a fixed seed.
 
 ### Parallelism
 
-Ask for allowed TP, CP, PP, EP, DP, sequence parallelism, FSDP/DTensor, batch-size, and
-microbatch ranges separately for smoke and production. Validate mesh equations against
-the backend rather than assuming every named degree multiplies independently.
+Ask for TP, CP, PP, EP, DP, and sequence parallelism degrees **separately for
+smoke and production**. Validate the mesh equation against the declared GPU
+count:
+
+```
+allocated GPUs = TP × CP × PP × EP × DP
+```
+
+Do not assume that named degrees multiply independently — the backend may
+require specific combinations (e.g., TP > 1 often requires sequence
+parallelism; certain PP schedules require microbatch alignment).
 
 ## Emit Runnable Configuration Bundles
 
-After intake, generate separate namespaces for smoke and production. Do not leave the
-answers as prose.
+After intake, generate two separate namespaces: **smoke** (tiny, fast, full
+coverage) and **production** (real scale, pending approval).
 
 Each bundle must contain:
-
-- one canonical experiment config accepted by `examples/puzzletron/main.py`;
-- referenced topology/worker recipes and data manifests;
+- one canonical experiment YAML accepted by `examples/puzzletron/main.py`;
+- referenced topology recipes and data manifests;
 - model, tokenizer, processor, dataset, and source revisions;
 - a resolved immutable snapshot plus hash;
 - artifact root and deterministic stage identities;
-- exact direct, Slurm, or SSH launch commands;
+- exact direct, Slurm, or SSH launch commands (copy-paste ready);
 - exact resume, report-only, and status commands;
-- a stage/resource table showing dependencies, topology, expected outputs, and whether
-  the stage is enabled, optional, or deliberately skipped.
+- a stage/resource table: stage name, dependencies, topology, expected outputs,
+  enabled/optional/disabled status.
 
-The smoke config is executable and tiny. The production config is the actual config the
-user can run after approval, not a sketch. Apply smoke-proven fixes to production, resolve
-all placeholders, parse both configs with the same loader used by the pipeline, and record
-their hashes in the report.
+Parse both configs with the pipeline loader before presenting them:
+
+```bash
+python - <<'PY'
+from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
+for path in ["smoke.yaml", "production.yaml"]:
+    cfg = pipeline_config_from_path(path)
+    print(cfg["experiment"]["dir"])
+PY
+```
 
 ## Admit a Pruning Axis
 
-For every candidate axis, require all of the following:
+For every candidate axis, verify all of the following before admitting it:
 
 1. A semantic definition: what capacity is removed and which tensors change.
 2. A legal discrete value domain with all alignment and grouping constraints.
-3. A dynamic slice/mask implementation.
+3. A dynamic slice/mask implementation in Puzzletron.
 4. A physical materialization/export implementation.
-5. Correct state-dict conversion and load behavior.
+5. Correct state-dict conversion and load behavior under the admitted axis.
 6. Parameter, memory, and runtime accounting.
-7. Compatibility with all required backends and topology dimensions.
+7. Compatibility with all required backends (HF, AutoModel, vLLM).
 8. A physical-versus-dynamic equivalence experiment.
 
-Treat normalization, rotary position handling, grouped heads, tied weights, residual
-projections, recurrent state, and multimodal projectors as coupled systems. Zeroing output
-channels is not automatically equivalent to physically reducing a normalized input.
+Treat normalization, rotary position encodings, grouped heads, tied weights,
+residual projections, recurrent state, and multimodal projectors as coupled
+systems. Zeroing output channels is not equivalent to physically reducing a
+normalized input.
 
-Reject an axis with an evidence-backed reason when any required invariant cannot be met.
+Reject an axis with an evidence-backed reason when any invariant cannot be met.
 Continue with other valid axes unless the whole layer type becomes unprunable.
 
 ## Implement and Debug Activation Hooks
 
 An activation hook is a distributed, sample-aware measurement operator. Define:
-
 - exact module boundary and tensor measured;
-- statistic and reduction dimensions;
+- reduction dimensions and statistic type;
 - valid-token/media mask behavior;
-- per-sample or aggregate identity;
 - packed-document boundary handling;
 - accumulation dtype and numerical guards;
 - shard ownership and durable output schema.
 
-Verify layouts with text, every selected modality combination, and fixed/padded/packed
-batches. Preserve processor outputs, media positions, attention masks, loss masks,
-sequence IDs, cumulative lengths, and position IDs through tokenization and collation.
+**Distributed rules:**
+- DP ranks may process different samples; combine only commutative statistics.
+- CP ranks own sequence shards; exclude padding and reduce correctly.
+- TP ranks may own features or replicated activations; avoid double counting.
+- PP stages observe only local modules; use globally unique layer identities.
+- EP ranks observe local experts; retain expert identity and routing metadata.
 
-Distributed rules:
-
-- DP ranks may process different samples; combine only commutative statistics and record
-  exact sample coverage.
-- CP ranks own sequence shards; exclude padding and reduce numerator/count correctly.
-- TP ranks may own features or replicated activations; avoid double counting and use SP
-  when the backend requires it for TP greater than one.
-- PP stages observe only local modules; publish globally unique layer identities.
-- EP ranks observe local experts; retain expert identity and account for router/top-k use.
-- FSDP/DTensor parameters may be sharded; avoid assuming a full local parameter.
-
-The manifest must include model/data/config hashes, statistic schema, topology, expected
-shards, completed shards, sample IDs or ranges, and completion marker. Resume missing
-shards only; never trust file presence without identity validation.
+The manifest must include model/data/config hashes, topology, expected shards,
+completed shards, and a completion marker. Resume missing shards only.
 
 ## Prove Sorting, Width Ranking, and Slicing
 
-Keep these as distinct checks:
+Keep these as three distinct validation checks:
 
-- **Sort sanity:** compare original, sorted, and reverse-sorted teachers without slicing.
-  Sorting should preserve outputs/loss within dtype-aware tolerance.
-- **Width sanity:** determine whether importance ordering helps pruning; include embedding
-  axes when enabled and report poor rankings as warnings, not hidden failures.
-- **Slicing sanity:** for sampled layers and settings per axis, compare all results to the
-  original teacher: dynamic sorted slice, dynamic unsorted teacher slice, dynamic reverse
-  slice, and physically materialized sorted model.
+- **Sort sanity:** original vs. sorted vs. reverse-sorted teacher. Outputs and
+  loss should match within dtype-aware tolerance. A mismatch is a bug.
+- **Width sanity:** does importance ordering improve pruning? Report poor
+  rankings as warnings, not hidden failures.
+- **Slicing sanity:** for sampled layers and settings, compare all four against
+  the original: dynamic sorted, dynamic unsorted, dynamic reverse, and
+  physically materialized sorted. Physical is ground truth.
 
-Physical materialization is ground truth. If dynamic and physical results disagree, debug
-normalization inputs, residual paths, positional encoding, grouped projections, tied
-weights, caches, and masks. Never alter the physical path merely to match a hook.
-
-Test at least two representative layers/settings per axis in a production onboarding,
-including one near-teacher width and one more aggressive setting. A smoke may use the
-smallest set that still touches every distinct axis and layer implementation.
+Test at least two representative layers and settings per axis in a production
+onboarding. A smoke may use the smallest set that still covers every distinct
+axis and layer implementation.
 
 ## Handle Multimodal Models
 
-Use processor-native real examples for each selected lane. Preserve modality ordering,
-placeholder tokens, media grids/timestamps, cross-attention masks, labels, and packed
-boundaries through conversion, tokenization, importance, bypass, evaluation, and KD.
+Use processor-native real examples for each selected lane. Preserve modality
+ordering, placeholder tokens, media grids/timestamps, cross-attention masks,
+labels, and packed boundaries through every pipeline stage.
 
-Determine whether each multimodal tower/projector is prunable, immutable, or coupled to
-language width. Include its parameters and memory even if it is outside the search space.
-Exercise mixed batches when the processor supports them. Report metrics separately by
-lane and as the configured aggregate.
+Determine whether each multimodal tower/projector is prunable, immutable, or
+coupled to language width. Include its parameters and memory in accounting even
+if it is outside the search space. Report metrics separately per lane and as the
+configured aggregate.
 
-## Handle MTP
+## Handle MTP (Multi-Token Prediction)
 
-Inspect MTP depth, shifted-target semantics, head sharing/ties, projector/norm layers,
-backend support, and topology behavior. Couple sorting, pruning, materialization, export,
-and parameter accounting wherever the MTP path shares the main model width.
+Inspect MTP depth, shifted-target semantics, head sharing/ties, projector/norm
+layers, backend support, and topology behavior. Shifted targets must not cross
+padding, packed-document, or modality boundaries.
 
-Shifted targets must not cross padding, packed-document, or modality boundaries. Compute
-configured CE and KD terms together, using the configured weights. Use the generic
-full-vocabulary FlashKLD path for both the language head and MTP heads. Report
-`main_ce`, `mtp_ce`, `main_kd`, and `mtp_kd` separately plus the weighted total; do not
-collapse them into ambiguous duplicate loss names.
+Report `main_ce`, `mtp_ce`, `main_kd`, and `mtp_kd` separately plus the
+weighted total. Do not collapse them into duplicate or ambiguous loss names.
 
-The default full-coverage smoke includes nonzero MTP CE and KD when the model supports
-MTP. If it does not, record an explicit not-applicable reason.
+The default smoke includes nonzero MTP CE and KD when the model supports MTP.
 
 ## Validate vLLM, Cost, and Memory
 
 Read the relevant implementation before changing formulas:
-
 - `modelopt/torch/puzzletron/export/vllm.py`
 - `modelopt/torch/puzzletron/utils/vllm_adapter.py`
 - `modelopt/torch/puzzletron/subblock_stats/runtime_vllm.py`
 - `modelopt/torch/puzzletron/subblock_stats/calc_subblock_params_and_memory.py`
-- `modelopt/torch/puzzletron/benchmarks/aiperf.py`
 
-Count total and active parameters separately. Include embeddings, projectors, norms,
-routers, experts and top-k activation, tied weights, MTP, caches, activations, allocator
-and graph reservations, kernel workspace, and server overhead. Model attention/MLA,
-Mamba/state-space, and GDN/recurrent caches according to their actual implementations.
-
-Make topology assumptions explicit: TP/PP/CP/EP/DP, replicas, dtype, ISL/OSL, batch,
-concurrency, and KV/cache blocks. Compare analytical estimates against measured vLLM
-statistics and explain residuals before using them as MIP constraints.
-
-For AIPerf, sweep meaningful concurrency and topology settings rather than producing one
-point per model. Verify request success and template correctness, not throughput alone.
+Count total and active parameters separately. Include embeddings, projectors,
+norms, routers, experts + top-k activation, tied weights, MTP, caches,
+activations, and server overhead. Make topology assumptions explicit.
 
 ## Execute the DAG
 
-Treat `modelopt/torch/puzzletron/stages/graph.py` as the authoritative dependency graph.
-Do not encode an unrelated linear stage order. Schedule independent branches concurrently
-when resources and artifact writers do not conflict.
+Use `modelopt/torch/puzzletron/stages/graph.py` as the authoritative dependency
+graph. Schedule independent branches concurrently when resources and artifact
+writers do not conflict.
 
-Typical branches include conversion/tokenization; optional vLLM statistics; depth and
-width importance; sorting and sanity checks; optional bypass; library and replace-one
-scoring; MIP; zero-shot/AIPerf; and optional KD/post-KD evaluation. Respect the graph in
-the current source rather than relying on this summary when they differ.
+Typical concurrent opportunities: conversion/tokenization + vLLM stats; depth
+importance + width importance; vLLM stats + bypass (different GPU allocations).
 
-Only one writer may publish an artifact identity. Aggregate immutable worker shards into
-one canonical artifact, then regenerate the cumulative report. Pipeline node state comes
-from artifact presence and configuration: `completed`, `pending`, or `disabled`.
+Only one writer may publish an artifact identity. Aggregate immutable worker
+shards into one canonical artifact, then regenerate the cumulative report.
 
 ## Configure Bypass Correctly
 
-Bypass replaces a selected layer/subblock input with the matching teacher input and
-computes the configured local loss for that unit. Align teacher/student microbatches,
-packed boundaries, media metadata, PP ownership, and checkpoint identities.
+Bypass replaces a selected layer/subblock's input with the matching teacher
+input and computes a local loss for that unit. Key requirements:
 
-- PP partitions modules; batch size/microbatch scheduling must satisfy the pipeline.
-- CP partitions sequence; teacher inputs and masks must share the exact partition.
-- TP partitions features; enable sequence parallelism when required and avoid duplicated
-  loss reductions.
-- EP preserves expert/router ownership and routing metadata.
-- DP may sample a different valid architecture per rank to obtain multiple observations
-  per step. Optimizer synchronization remains shared unless the selected backend says
-  otherwise.
+- PP: batch size and microbatch scheduling must satisfy the pipeline.
+- CP: teacher inputs and masks must share the exact sequence partition.
+- TP: enable sequence parallelism when required; avoid duplicated reductions.
+- DP: may sample a different valid architecture per rank to obtain multiple
+  observations per step.
 
-For every observation save step, DP rank, layer/subblock ID, canonical architecture hash,
-human-readable config, normalized parameter ratio relative to its teacher unit, component
-losses, total loss, seed, and sample identity. Reports should offer a layer/subblock
-selector, then an `ALL` or exact-config selector; hovering a point highlights every point
-with the same canonical architecture hash.
+For every observation, save: step, DP rank, layer/subblock ID, canonical
+architecture hash, human-readable config, normalized parameter ratio,
+component losses, total loss, seed, and sample identity.
 
-Run two sanity modes: a fixed smallest configuration that must clearly overfit, and a
-diverse resampled mode whose trend should decrease despite scatter. Diagnose targets,
-alignment, reductions, learning rate, and optimizer state if they do not.
+Run two sanity modes before the full bypass: (1) a fixed smallest config that
+must clearly overfit, and (2) a diverse resampled mode whose trend should
+decrease despite scatter.
 
 ## Make Every Expensive Stage Resumable
 
-Use immutable shards and transactional checkpoints. A complete training checkpoint stores:
-
+Expensive stages (bypass, KD, scoring, vLLM stats) must use immutable shards
+and transactional checkpoints. A complete training checkpoint stores:
 - model and optimizer shards;
 - scheduler, scaler, and global step;
-- Python, NumPy, CPU/CUDA, sampler, and per-rank architecture RNG states;
+- Python, NumPy, CPU/CUDA, sampler, and per-rank RNG states;
 - dataloader cursor and exact sample order;
 - topology and world-size metadata;
-- bypass architecture observations not yet compacted;
 - config/code/model/data identities;
 - a manifest and atomic completion marker.
 
-Write to a temporary transaction, validate every expected shard, atomically publish it,
-then update `latest`. Quarantine incomplete transactions. Permit topology changes only for
-artifact types whose schema explicitly supports repartitioning; score/stat shards can
-often resume under a new worker topology, while optimizer shards usually cannot.
+Write to a temporary directory, validate every expected shard, publish
+atomically, then update `latest`. Quarantine incomplete transactions.
 
-In the smoke campaign, interrupt and resume at least bypass and Global KD from a new job
-or process. Verify no repeated/missing samples, exact global-step continuity, restored RNG
-behavior, and a valid cumulative report.
+In the smoke campaign, interrupt and resume at least bypass and Global KD.
+Verify no repeated/missing samples, exact global-step continuity, and a valid
+cumulative report after resume.
 
 ## Launch on Slurm or Bare Metal
 
-For Slurm, derive commands from the active cluster guide and current scheduler state.
-Capture job IDs and logs with `tee` plus `pipefail`. Match allocated GPUs to active model
-or independent worker meshes. Avoid exclusive partial-node requests and checkpoint well
-before the wall-time limit.
+**Slurm:** derive commands from the active cluster guide. Capture job IDs and
+logs with `tee` + `pipefail`. Checkpoint well before the wall-time limit
+(typically 45–55 minutes into a 4-hour slot). Avoid exclusive partial-node
+requests.
 
-For bare metal:
+**Bare metal:**
+1. Verify passwordless SSH, identical paths, clocks, ports, and GPU visibility
+   on every host.
+2. Choose one rendezvous host/port; generate deterministic rank/host mappings.
+3. Launch one `torchrun` process group across hosts via SSH.
+4. Record remote PIDs, per-rank logs, environment/config hashes.
+5. Health-check every rank; terminate all peers on a local failure.
+6. Clean up servers and orphan workers explicitly after any failure.
 
-1. Verify passwordless SSH, identical repository/artifact paths, clocks, ports, and GPU
-   visibility on every host.
-2. Choose one rendezvous host/port and generate deterministic rank/host mappings.
-3. Launch one `torchrun` or backend-supported process group across hosts through SSH.
-4. Record remote PIDs, per-rank logs, environment/config hashes, and host/GPU assignments.
-5. Health-check every rank and terminate all peers on a rank-local failure.
-6. Clean up servers and orphan workers explicitly.
-
-Do not assume a shared Python environment merely because storage is shared; verify package
-and CUDA/driver compatibility on every node.
+Do not assume a shared Python environment merely because storage is shared.
+Verify package and CUDA/driver compatibility on every node independently.
 
 ## Full-Coverage Smoke Acceptance
 
-Keep datasets, candidate domains, iterations, and evaluation samples tiny, but cover:
-
+Keep datasets, candidate domains, iterations, and evaluation samples tiny,
+but cover:
 - every distinct model layer implementation and admitted axis;
 - each selected modality lane and fixed/padded/packed layout;
-- requested TP/CP/PP/EP/DP/FSDP paths and required sequence parallelism;
-- conversion, tokenization, importance, sorting, dynamic/physical slicing, reporting;
+- requested TP/CP/PP/EP/DP paths and required sequence parallelism;
+- conversion, tokenization, importance, sorting, dynamic/physical slicing;
 - vLLM export/stats and replace-one scoring when applicable;
-- MIP, zero-shot evaluation, and a small AIPerf concurrency sweep;
+- MIP, zero-shot evaluation, and a small AIPerf sweep;
 - fixed and diverse bypass sanity, plus a short real bypass;
 - Global KD sanity and short real KD, including MTP losses when supported;
 - checkpoint interruption/resume and cumulative report regeneration.
 
-“Full coverage” means semantic/path coverage, not production scale. Record each check and
-evidence in a smoke manifest. Fail the gate for wrong equivalence, invalid artifacts,
-broken resume, backend incompatibility, or missing report sections. Warnings may remain
-only when understood, bounded, visible in the relevant report table, and accepted by the
-user.
+Record each check and evidence in a smoke manifest. Fail the gate for wrong
+equivalence, invalid artifacts, broken resume, backend incompatibility, or
+missing report sections.
 
-## Readiness Gate and Production Run
+## Readiness Gate
 
-Before expensive work, show:
-
-- accepted/rejected axes and source evidence;
-- smoke outcomes and unresolved warnings;
-- production stage DAG and optional/disabled nodes;
-- exact production config paths and hashes;
+Before expensive production work, present:
+- accepted/rejected axes and source evidence for each;
+- smoke outcomes and all unresolved warnings;
+- production stage DAG with optional/disabled nodes;
+- exact production config paths and their hashes;
 - resource/topology estimate per stage and total cost envelope;
-- resumability/checkpoint plan;
-- exact launch and monitoring commands.
+- resumability and checkpoint plan;
+- exact launch, monitor, and resume commands.
 
-Ask for one explicit approval. After approval, execute the DAG autonomously within the
-authorized cost. Monitor long jobs, diagnose failures from first-rank evidence, resume
-durable work, cancel redundant continuations, and never rerun expensive complete shards.
+Ask for **one explicit approval**. After approval, execute autonomously within
+the authorized cost. Monitor long jobs, diagnose failures from first-rank
+evidence, resume durable work, cancel redundant continuations, and never rerun
+expensive complete shards.
 
 ## Report and Handoff
 
-The HTML report must be cumulative, experiment-agnostic, navigable, and generated from
-artifact contracts rather than ad hoc experiment text. Include the experiment ID, pipeline
-DAG, concise resolved config, model/axis inventory, artifact provenance, warnings attached
-to affected table cells, all available sanity/results sections, and partial long-running
-training observations.
+The HTML report must be cumulative, navigable, and generated from artifact
+contracts. It must include:
+- experiment ID, pipeline DAG, concise resolved config;
+- model/axis inventory, artifact provenance;
+- warnings attached to affected table cells;
+- all available sanity/results sections;
+- partial long-running bypass/KD observations (without erasing earlier data).
 
-Show disabled, pending, and completed nodes; distinguish optional stages visually. A
-disabled stage may still have historical data, but node state follows the active config.
-Do not duplicate post-KD metrics in Global KD plots and the post-distillation section.
+Show disabled, pending, and completed nodes; visually distinguish optional
+stages. Do not duplicate post-KD metrics in the distillation and post-KD
+sections.
 
-At handoff provide:
-
+At handoff, provide:
 - smoke and production config bundle paths/hashes;
 - exact run, resume, monitor, report-only, and cleanup commands;
 - artifact and HTML report paths;
@@ -442,30 +450,27 @@ At handoff provide:
 
 ## Stop Conditions
 
-Stop and request direction before costly work if:
-
+Stop and request direction (do not silently reduce coverage) if:
 - checkpoint/data access or license is unresolved;
 - the unpruned model cannot run in a required existing backend;
 - a required layer type has no valid pruning operation;
 - physical and dynamic slicing disagree materially;
-- multimodal or MTP boundaries are incorrect;
-- durable resume fails;
+- multimodal or MTP target boundaries are incorrect;
+- durable resume fails during the smoke;
 - production config contains unresolved placeholders;
 - requested resources exceed the approved envelope.
-
-Do not hide these by reducing coverage, dropping modalities, changing the teacher, or
-silently disabling an axis.
 
 ## Repository Navigation
 
 Start with `examples/puzzletron/README.md`, `examples/puzzletron/main.py`, and
-`modelopt/torch/puzzletron/stages/graph.py`. When present, the ignored NVIDIA-local
-`nv-internal/PUZZLETRON_V2_ENGINEERING_GUIDE.md` contains historical review findings;
-validate them against current source before acting. Use source search to locate descriptors,
-hooks, materializers, serializers, stage implementations, report generators, and tests;
-paths evolve, so prefer symbols and artifact contracts over remembered filenames.
+`modelopt/torch/puzzletron/stages/graph.py`. When present and operating on the
+NVIDIA cluster, read `nv-internal/CLUSTER_GUIDE_NV.md` for scheduler behavior.
+Read `nv-internal/PUZZLETRON_V2_ENGINEERING_GUIDE.md` for historical review
+findings, but validate each claim against current source before acting.
 
-Follow repository coding and test instructions for code changes. Preserve dirty work,
-make generic fixes, and run focused validation proportional to risk. When only this skill's
-documentation is requested, static skill validation is sufficient and campaign execution
-remains deferred to the user.
+Use symbol search to locate descriptors, hooks, materializers, serializers,
+stage implementations, report generators, and tests — paths evolve.
+
+Follow repository coding and test instructions for all code changes. Preserve
+dirty work, keep changes generic, and run focused validation proportional to
+risk.

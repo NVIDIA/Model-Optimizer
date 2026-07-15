@@ -318,6 +318,22 @@ class NemotronHModelDescriptor(ModelDescriptor):
         return NemotronHForCausalLM
 
     @classmethod
+    def _runtime_layer_config_kwargs(cls, config_cls, layer_types: list[str]) -> dict[str, Any]:
+        parameters = inspect.signature(config_cls.__init__).parameters
+        if "layers_block_type" in parameters:
+            return {"layers_block_type": layer_types}
+        if "hybrid_override_pattern" in parameters:
+            return {"hybrid_override_pattern": cls._pattern_from_layer_types(layer_types)}
+        return {"layers_block_type": layer_types}
+
+    @staticmethod
+    def _normalize_runtime_tied_weight_metadata(model: nn.Module) -> None:
+        for module in model.modules():
+            tied = getattr(module, "_tied_weights_keys", None)
+            if isinstance(tied, list | tuple | set):
+                module._tied_weights_keys = {str(key): str(key) for key in tied}
+
+    @classmethod
     def runtime_benchmark_config_fields(cls, lm_config) -> dict[str, Any]:
         return {
             "head_dim": getattr(lm_config, "head_dim", 128),
@@ -387,53 +403,54 @@ class NemotronHModelDescriptor(ModelDescriptor):
     @classmethod
     def _runtime_proxy_block_config(cls, runtime_config, block_config: BlockConfig) -> BlockConfig:
         moe = block_config.get_subblock("moe")
-        mamba = block_config.get_subblock("mamba")
-        candidate = block_config
-        if (moe is not None and not moe.no_op) or (mamba is not None and not mamba.no_op):
-            expert_intermediate = cls._scale_runtime_proxy_value(
-                moe.expert_intermediate_size if moe is not None else None,
-                runtime_config.model_config_value("moe_intermediate_size"),
-                runtime_config.model_config_value("runtime_proxy_max_expert_intermediate", 512),
+        if moe is not None and not moe.no_op:
+            bounded_moe = replace(
+                moe,
+                num_experts=cls._scale_runtime_proxy_value(
+                    moe.num_experts,
+                    runtime_config.model_config_value("n_routed_experts"),
+                    runtime_config.model_config_value("runtime_proxy_max_experts", 16),
+                ),
+                expert_intermediate_size=cls._scale_runtime_proxy_value(
+                    moe.expert_intermediate_size,
+                    runtime_config.model_config_value("moe_intermediate_size"),
+                    runtime_config.model_config_value(
+                        "runtime_proxy_max_expert_intermediate", 512
+                    ),
+                ),
+                shared_expert_intermediate_size=cls._scale_runtime_proxy_value(
+                    moe.shared_expert_intermediate_size,
+                    runtime_config.model_config_value(
+                        "moe_shared_expert_intermediate_size"
+                    ),
+                    runtime_config.model_config_value(
+                        "runtime_proxy_max_shared_expert_intermediate", 512
+                    ),
+                ),
+                latent_dim=cls._scale_runtime_proxy_value(
+                    moe.latent_dim,
+                    runtime_config.model_config_value("moe_latent_size"),
+                    runtime_config.model_config_value("runtime_proxy_max_latent", 256),
+                ),
+                top_k=cls._scale_runtime_proxy_value(
+                    moe.top_k,
+                    runtime_config.model_config_value("num_experts_per_tok"),
+                    runtime_config.model_config_value("runtime_proxy_max_top_k", 4),
+                ),
             )
-            shared_intermediate = cls._scale_runtime_proxy_value(
-                moe.shared_expert_intermediate_size if moe is not None else None,
-                runtime_config.model_config_value("moe_shared_expert_intermediate_size"),
-                runtime_config.model_config_value("runtime_proxy_max_shared_expert_intermediate", 512),
-            )
-            latent_dim = cls._scale_runtime_proxy_value(
-                moe.latent_dim if moe is not None else None,
-                runtime_config.model_config_value("moe_latent_size"),
-                runtime_config.model_config_value("runtime_proxy_max_latent", 256),
-            )
-            top_k = cls._scale_runtime_proxy_value(
-                moe.top_k if moe is not None else None,
-                runtime_config.model_config_value("num_experts_per_tok"),
-                runtime_config.model_config_value("runtime_proxy_max_top_k", 4),
-            )
-            mamba_size = None
-            if mamba is not None and not mamba.no_op:
-                mamba_size = int(mamba.num_heads or 1) * int(mamba.head_dim or 1)
-            proxy_size = max(
-                int(expert_intermediate or 1),
-                int((shared_intermediate or 1) // 2),
-                int(latent_dim or 1),
-                int(top_k or 1) * 64,
-                int(mamba_size or 1),
-            )
-            # The current vLLM fork/container cannot execute the synthetic
-            # AnyModel MoE/Mamba benchmark path without either the grouped-MoE
-            # custom op or a Mamba cache-planning mismatch.  Keep canonical
-            # candidates intact and map only throwaway timing checkpoints to an
-            # attention block whose KV width still changes with the source axis.
-            base_kv = max(1, int(runtime_config.num_key_value_heads or 1))
-            proxy_kv = max(1, min(base_kv, max(1, round(proxy_size / 1024))))
-            candidate = BlockConfig(
-                subblock_configs=(
-                    AttentionConfig(no_op=False, num_kv_heads=proxy_kv),
-                    FFNConfig(no_op=True),
+            if (
+                bounded_moe.num_experts is not None
+                and bounded_moe.top_k is not None
+                and bounded_moe.top_k > bounded_moe.num_experts
+            ):
+                bounded_moe = replace(bounded_moe, top_k=bounded_moe.num_experts)
+            return BlockConfig(
+                subblock_configs=tuple(
+                    bounded_moe if subblock is moe else subblock
+                    for subblock in block_config.subblock_configs
                 )
             )
-        return candidate
+        return block_config
 
     @classmethod
     def _runtime_proxy_block_configs(cls, runtime_config, block_configs: list[BlockConfig]) -> list[BlockConfig]:
@@ -485,7 +502,7 @@ class NemotronHModelDescriptor(ModelDescriptor):
         model_config = config_cls(
             vocab_size=runtime_config.vocab_size,
             hidden_size=runtime_config.hidden_size,
-            layers_block_type=layer_types,
+            **cls._runtime_layer_config_kwargs(config_cls, layer_types),
             num_hidden_layers=len(block_configs),
             max_position_embeddings=runtime_config.prefill_seq_len
             + runtime_config.generation_seq_len,
@@ -557,6 +574,7 @@ class NemotronHModelDescriptor(ModelDescriptor):
         model.config.anymodel_arch_info = cls.anymodel_arch_info()
         model.config.num_nextn_predict_layers = 0
         model.config.mtp_layers_block_type = []
+        cls._normalize_runtime_tied_weight_metadata(model)
         return model
 
     @classmethod
@@ -1010,7 +1028,7 @@ class NemotronHModelDescriptor(ModelDescriptor):
         """
 
         hidden_size = int(config.hidden_size)
-        layer = r"(?:backbone|model)\.layers\.\d+"
+        layer = r"(?:(?:backbone|model)\.layers|mtp\.layers)\.\d+"
         rules = (
             TensorAxisRule(
                 r"^(?:backbone\.embeddings|model\.embed_tokens)\.weight$",
@@ -1028,7 +1046,18 @@ class NemotronHModelDescriptor(ModelDescriptor):
                 "Nemotron final residual normalization channels",
             ),
             TensorAxisRule(
-                rf"^{layer}\.norm\.weight$",
+                r"^mtp\.layers\.\d+\.(?:enorm|hnorm)\.weight$",
+                (0,),
+                "Nemotron MTP fusion normalization channels",
+            ),
+            TensorAxisRule(
+                r"^mtp\.layers\.\d+\.eh_proj\.weight$",
+                (0,),
+                "Nemotron MTP residual fusion input/output channels",
+                chunked_axes=((1, 2),),
+            ),
+            TensorAxisRule(
+                rf"^{layer}\.(?:norm|final_layernorm)\.weight$",
                 (0,),
                 "Nemotron decoder residual normalization channels",
             ),
@@ -1048,24 +1077,24 @@ class NemotronHModelDescriptor(ModelDescriptor):
                 "Nemotron MoE router residual input channels",
             ),
             TensorAxisRule(
-                rf"^{layer}\.mixer\.(?:experts\.\d+|shared_experts)\.up_proj\.weight$",
+                rf"^{layer}\.mixer\.shared_experts\.up_proj\.weight$",
                 (1,),
-                "Nemotron split expert residual input channels",
+                "Nemotron shared expert residual input channels",
             ),
             TensorAxisRule(
-                rf"^{layer}\.mixer\.(?:experts\.\d+|shared_experts)\.down_proj\.weight$",
+                rf"^{layer}\.mixer\.shared_experts\.down_proj\.weight$",
                 (0,),
-                "Nemotron split expert residual output channels",
+                "Nemotron shared expert residual output channels",
             ),
             TensorAxisRule(
-                rf"^{layer}\.mixer\.experts\.gate_and_up_projs$",
+                rf"^{layer}\.mixer\.fc1_latent_proj\.weight$",
                 (1,),
-                "Nemotron fused expert residual input channels",
+                "Nemotron routed-expert residual-to-latent input channels",
             ),
             TensorAxisRule(
-                rf"^{layer}\.mixer\.experts\.down_projs$",
-                (2,),
-                "Nemotron fused expert residual output channels",
+                rf"^{layer}\.mixer\.fc2_latent_proj\.weight$",
+                (0,),
+                "Nemotron routed-expert latent-to-residual output channels",
             ),
         )
         ties = (

@@ -8,7 +8,8 @@ import pytest
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.stages.pipeline as pipeline_stages
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+import modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats as runtime_stats_module
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig
 from modelopt.torch.puzzletron.anymodel.capabilities import (
     CapabilityValidationError,
     default_capabilities,
@@ -24,6 +25,7 @@ from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
     _merge_runtime_shard_results,
     _runtime_shard_results_complete,
     _runtime_shard_spec_identity,
+    calc_runtime_for_subblocks,
     enumerate_runtime_block_configs,
 )
 from modelopt.torch.puzzletron.pipeline_config import (
@@ -271,6 +273,120 @@ def test_vllm_stage_collects_from_converted_teacher_without_replacement_library(
     assert not (tmp_path / "replacement_library.json").exists()
 
 
+def test_vllm_stage_prepares_sparse_subblock_selection_from_teacher(tmp_path):
+    teacher_dir = tmp_path / "teacher"
+    teacher_dir.mkdir()
+    teacher_block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(num_query_heads=8, num_kv_heads=2),
+            FFNConfig(intermediate_size=16),
+        )
+    )
+    (teacher_dir / "config.json").write_text(
+        json.dumps({"block_configs": [teacher_block.to_dict()]})
+    )
+    runtime_cfg = OmegaConf.create(
+        {
+            "sparse_sampling": {
+                "enabled": True,
+                "max_pairwise_per_family": 0,
+                "seed": 17,
+            }
+        }
+    )
+    config = {
+        "search_space": {
+            "axes": {
+                "kv_groups": {"enabled": True, "values": [1]},
+                "ffn_intermediate": {"enabled": True, "values": [8]},
+            }
+        },
+        "build_library": {"include_noops": False},
+    }
+
+    summary = pipeline_stages._prepare_sparse_runtime_selection(
+        config,
+        runtime_cfg=runtime_cfg,
+        teacher_dir=teacher_dir,
+        puzzle_dir=tmp_path,
+    )
+
+    manifest_path = tmp_path / "artifacts" / "vllm_stats" / "sparse_subblock_samples.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert runtime_cfg.selection_manifest == str(manifest_path)
+    assert manifest["mode"] == "subblock_runtime"
+    assert {tuple(row["changed_axes"]) for row in manifest["selected"]} == {
+        (),
+        ("ffn_intermediate",),
+        ("kv_groups",),
+    }
+    assert summary == {
+        "path": str(manifest_path),
+        "identity": manifest["identity"],
+        "candidate_count": 4,
+        "selected_count": 4,
+        "excluded_count": 2,
+    }
+
+
+def test_subblock_runtime_uses_two_cache_bearing_base_layers_for_pp2(monkeypatch):
+    attention = AttentionConfig(num_query_heads=8, num_kv_heads=2)
+    base_block = BlockConfig(
+        subblock_configs=(attention, FFNConfig(intermediate_size=16))
+    )
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_config_fields(_config):
+            return {}
+
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return base_block
+
+    captured_specs = []
+
+    def run_benchmarks(specs, _gpu_ids, _cache_dir):
+        from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import RuntimeMeasurement
+
+        captured_specs.extend(specs.values())
+        return {
+            key: RuntimeMeasurement(total_ms=float(index + 10), prefill_ms=0.0)
+            for index, key in enumerate(specs)
+        }
+
+    monkeypatch.setattr(runtime_stats_module, "_run_benchmarks", run_benchmarks)
+    monkeypatch.setattr(runtime_stats_module, "_resolve_gpu_ids", lambda _size: ["0,1"])
+
+    calc_runtime_for_subblocks(
+        {attention},
+        OmegaConf.create(
+            {
+                "repeat_block_n_times": 3,
+                "num_iters": 3,
+                "num_warmup_iters": 2,
+                "topology": {
+                    "pipeline_parallel_size": 2,
+                    "gpu_group_size": 2,
+                },
+            }
+        ),
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        descriptor=Descriptor,
+        lm_config=SimpleNamespace(),
+        tokenizer_path="tokenizer",
+        prefill_seq_len=16,
+        generation_seq_len=4,
+        batch_size=1,
+    )
+
+    assert any(block is None and trailing for _, block, trailing in captured_specs)
+    assert not any(block is None and not trailing for _, block, trailing in captured_specs)
+
+
 def test_vllm_stage_rejects_missing_runtime_aggregate(tmp_path, monkeypatch):
     teacher_dir = tmp_path / "teacher"
     teacher_dir.mkdir()
@@ -499,6 +615,60 @@ def test_runtime_measurement_mean_preserves_both_latency_phases():
     assert result == RuntimeMeasurement(total_ms=10.0, prefill_ms=3.0)
     with pytest.raises(ValueError, match="at least one"):
         RuntimeMeasurement.mean([])
+
+
+def test_subblock_runtime_rejects_negative_marginal_phase(monkeypatch):
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import RuntimeMeasurement
+
+    base = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(num_query_heads=8, num_kv_heads=2),
+            FFNConfig(no_op=True),
+        )
+    )
+    moe = MoEConfig(num_experts=8, expert_intermediate_size=16, top_k=2)
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_config_fields(_config):
+            return {}
+
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return base
+
+    def run_benchmarks(specs, _gpu_ids, _cache_dir):
+        results = {}
+        for key, (runtime, block, trailing) in specs.items():
+            if block is None and trailing:
+                value = RuntimeMeasurement(total_ms=10.0, prefill_ms=4.0)
+            elif runtime.repeat_block_n_times == 2:
+                value = RuntimeMeasurement(total_ms=14.0, prefill_ms=6.0)
+            elif block is not None and block.get_subblock("moe") is not None:
+                value = RuntimeMeasurement(total_ms=18.3, prefill_ms=6.6)
+            else:
+                value = RuntimeMeasurement(total_ms=18.0, prefill_ms=6.0)
+            results[key] = value
+        return results
+
+    monkeypatch.setattr(runtime_stats_module, "_run_benchmarks", run_benchmarks)
+    monkeypatch.setattr(runtime_stats_module, "_resolve_gpu_ids", lambda _size: ["0"])
+
+    with pytest.raises(ValueError, match="negative marginal phase"):
+        calc_runtime_for_subblocks(
+            {moe},
+            OmegaConf.create({"repeat_block_n_times": 3}),
+            vocab_size=32,
+            hidden_size=16,
+            num_attention_heads=8,
+            num_key_value_heads=2,
+            descriptor=Descriptor,
+            lm_config=SimpleNamespace(),
+            tokenizer_path="tokenizer",
+            prefill_seq_len=16,
+            generation_seq_len=4,
+            batch_size=1,
+        )
 
 
 def test_runtime_measurement_fields_save_phase_breakdown_and_noise_flag():

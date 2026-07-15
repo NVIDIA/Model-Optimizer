@@ -112,15 +112,22 @@ class MeshGroups:
             GATHERED. (Usually derived per-tensor from the DTensor placement via
             :func:`to_local_with_feature_group`; kept here for reference/diagnostics.)
         ep_group: expert-parallel ranks that shard the MoE expert axis — GATHERED.
+        ep_shard_group: ranks orthogonal to EP that own distinct logical input
+            shards. Under AutoModel EP this is the token-reduction group.
         pp_group: pipeline-parallel ranks; each PP stage owns disjoint modules and
             writes its own output shard.
+        ep_inputs_replicated: whether the hook point is already replicated across
+            EP. AutoModel grouped-expert hooks observe inputs before the native EP
+            all-gather, so mesh-derived groups leave this false.
     """
 
     token_group: ProcessGroup | None = None
     cp_group: ProcessGroup | None = None
     tp_group: ProcessGroup | None = None
     ep_group: ProcessGroup | None = None
+    ep_shard_group: ProcessGroup | None = None
     pp_group: ProcessGroup | None = None
+    ep_inputs_replicated: bool = False
 
     @classmethod
     def from_device_mesh(
@@ -140,12 +147,27 @@ class MeshGroups:
         match NeMo's mesh naming (flattened ``dp_cp`` for the token axis, ``tp``,
         ``pp``, and ``ep`` on the MoE mesh).
         """
+        ep_group = _first_axis_group(
+            moe_mesh if moe_mesh is not None else device_mesh, ep_axes
+        )
+        ep_shard_group = _first_axis_group(moe_mesh, ("ep_shard",))
+        has_ep_shard = _group_size(ep_group) > 1 and ep_shard_group is not None
+        token_group = (
+            ep_shard_group
+            if has_ep_shard
+            else _first_axis_group(device_mesh, token_axes)
+        )
         return cls(
-            token_group=_first_axis_group(device_mesh, token_axes),
+            token_group=token_group,
             cp_group=_first_axis_group(device_mesh, cp_axes),
             tp_group=_first_axis_group(device_mesh, tp_axes),
-            ep_group=_first_axis_group(moe_mesh if moe_mesh is not None else device_mesh, ep_axes),
+            ep_group=ep_group,
+            ep_shard_group=ep_shard_group,
             pp_group=_first_axis_group(device_mesh, pp_axes),
+            # GroupedExperts performs its EP input gather inside forward. Its
+            # forward hooks therefore receive the distinct, pre-gather inputs
+            # and must reproduce that gather for route reconstruction.
+            ep_inputs_replicated=False,
         )
 
     @property

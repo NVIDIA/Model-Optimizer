@@ -1,8 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 from modelopt.torch.puzzletron.diagnostics.campaign_findings import MetricSpec
-from modelopt.torch.puzzletron.diagnostics.width_sanity import aggregate_width_sanity
+from modelopt.torch.puzzletron.diagnostics.width_sanity import (
+    aggregate_parent_sweep_sanity,
+    aggregate_width_sanity,
+)
+from modelopt.torch.puzzletron.stages.diagnostics import _publish_parent_sweep_sanity
 
 
 def test_aggregation_separates_ranking_from_physical_equivalence():
@@ -40,3 +46,125 @@ def test_aggregation_separates_ranking_from_physical_equivalence():
         for finding in slicing["findings"]
     )
     assert all("hidden_width" not in finding["message"] for finding in slicing["findings"])
+
+
+def test_parent_sweep_aggregation_groups_axis_rows_and_hidden_width():
+    parent_summary = {
+        "rows": [
+            {
+                "axis": axis,
+                "layer_idx": 3,
+                "target_value": 4,
+                "method": method,
+                "lm_loss": loss,
+            }
+            for axis in ("kv_groups", "moe_experts")
+            for method, loss in (
+                ("activation", 0.5),
+                ("random", 0.7),
+                ("reverse", 0.8),
+                ("realized", 0.50001),
+            )
+        ]
+    }
+    hidden_summary = {
+        "hidden_width": 3840,
+        "teacher_hidden_width": 4096,
+        "rows": [
+            {"role": role, "metrics": {"lm_loss": loss}}
+            for role, loss in (
+                ("activation", 0.6),
+                ("original", 0.7),
+                ("reverse", 0.8),
+                ("realized", 0.60001),
+            )
+        ],
+    }
+
+    width, slicing, axes = aggregate_parent_sweep_sanity(
+        parent_summary,
+        hidden_summary,
+        metric_specs={"lm_loss": MetricSpec("lm_loss", "lower", abs_tolerance=1e-3)},
+    )
+
+    assert axes == ["hidden_width", "kv_groups", "moe_experts"]
+    assert {row["axis"] for row in slicing["rows"]} == set(axes)
+    assert slicing["findings"] == []
+    assert width["stage"] == "width_sanity"
+
+
+def test_failed_descriptor_realization_gate_is_promoted_to_slicing_finding():
+    summaries = {
+        "hidden_width": {
+            "hidden_width": 3840,
+            "teacher_hidden_width": 4096,
+            "primary_metric": "raw_replacement_loss",
+            "realization_delta": 6.6e-4,
+            "realization_passed": False,
+            "rows": [
+                {"role": "activation", "metrics": {"raw_replacement_loss": 0.4112}},
+                {"role": "realized", "metrics": {"raw_replacement_loss": 0.41186}},
+            ],
+        }
+    }
+
+    _, slicing = aggregate_width_sanity(
+        summaries,
+        metric_specs={
+            "raw_replacement_loss": MetricSpec(
+                "raw_replacement_loss", "lower", abs_tolerance=5.0e-3
+            )
+        },
+    )
+
+    assert len(slicing["findings"]) == 1
+    finding = slicing["findings"][0]
+    assert finding["evidence"]["kind"] == "descriptor_realization_gate"
+    assert finding["evidence"]["group"] == {
+        "axis": "hidden_width",
+        "layer_idx": "global",
+        "target_value": 3840,
+    }
+    assert finding["evidence"]["delta"] == 6.6e-4
+
+
+def test_parent_sweep_publication_accepts_per_metric_physical_tolerances(tmp_path):
+    parent_summary = {
+        "rows": [
+            {
+                "axis": "mamba_head_dim",
+                "layer_idx": 3,
+                "target_value": 32,
+                "method": method,
+                "raw_replacement_loss": raw,
+                "lm_loss": lm_loss,
+            }
+            for method, raw, lm_loss in (
+                ("activation", 0.040, 2.100),
+                ("random", 0.050, 2.110),
+                ("reverse", 0.060, 2.120),
+                ("realized", 0.036, 2.109),
+            )
+        ]
+    }
+
+    _, slicing_path = _publish_parent_sweep_sanity(
+        puzzle_dir=tmp_path,
+        parent_summary=parent_summary,
+        hidden_width_summary=None,
+        diag_cfg={
+            "physical_equivalence_tolerance": 1.0e-3,
+            "physical_equivalence_tolerances": {
+                "raw_replacement_loss": 5.0e-3,
+                "lm_loss": 1.0e-2,
+            },
+            "require_physical_equivalence": True,
+        },
+    )
+
+    summary = json.loads(slicing_path.read_text())
+    assert summary["findings"] == []
+    assert summary["provenance"]["physical_equivalence_tolerances"] == {
+        "lm_loss": 1.0e-2,
+        "raw_replacement_loss": 5.0e-3,
+    }

@@ -27,6 +27,17 @@ def test_global_distillation_summary_publishes_canonical_training_records(tmp_pa
         + json.dumps({"step": 2, "loss": 1.0})
         + "\n"
     )
+    for step in (1, 2):
+        checkpoint = (
+            output_dir
+            / "checkpoints"
+            / f"epoch_0_step_{step}"
+            / "model"
+            / "consolidated"
+        )
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "config.json").write_text("{}")
+        (checkpoint.parents[1] / "saving_completed").touch()
     config = GlobalKDConfig(
         teacher_dir=tmp_path / "teacher",
         student_dir=tmp_path / "student",
@@ -36,6 +47,7 @@ def test_global_distillation_summary_publishes_canonical_training_records(tmp_pa
         global_batch_size=16,
         local_batch_size=2,
         max_steps=256,
+        save_consolidated=True,
         metadata={"llm": {"dataset": {"num_samples": 4096, "seq_length": 16384}}},
     )
     result = GlobalKDResult(kd_id="kd-id", output_dir=output_dir, metrics={"loss_trend": {}})
@@ -48,6 +60,9 @@ def test_global_distillation_summary_publishes_canonical_training_records(tmp_pa
     assert payload["max_steps"] == 256
     assert payload["sequence_length"] == 16384
     assert payload["records"][-1] == {"step": 2, "loss": 1.0}
+    assert payload["post_kd_checkpoint"].endswith(
+        "checkpoints/epoch_0_step_2/model/consolidated"
+    )
 
 
 def test_global_kd_metric_logger_flushes_every_optimizer_step():

@@ -9,9 +9,13 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from typing import Any
 
-from .campaign_findings import MetricSpec, equivalence_findings, ranking_findings
+from .campaign_findings import Finding, MetricSpec, equivalence_findings, ranking_findings
 
-__all__ = ["aggregate_width_sanity"]
+__all__ = [
+    "aggregate_parent_sweep_sanity",
+    "aggregate_width_sanity",
+    "descriptor_realization_findings",
+]
 
 _METHODS = {
     "activation": "sorted",
@@ -57,6 +61,51 @@ def _metric_payload(metric_specs: Mapping[str, MetricSpec]) -> dict[str, dict[st
     return {name: asdict(spec) for name, spec in metric_specs.items()}
 
 
+def descriptor_realization_findings(
+    axis_summaries: Mapping[str, Mapping[str, Any]],
+) -> list[Finding]:
+    """Promote descriptor-owned physical-slice gates into public findings."""
+
+    findings = []
+    for axis, summary in axis_summaries.items():
+        cases = summary.get("cases") or (summary,)
+        for case in cases:
+            if not isinstance(case, Mapping) or case.get("realization_passed") is not False:
+                continue
+            target = case.get(
+                "target_value",
+                case.get("hidden_width", summary.get("hidden_width")),
+            )
+            metric = str(
+                case.get("primary_metric")
+                or summary.get("primary_metric")
+                or "physical_realization"
+            )
+            delta = case.get("realization_delta", summary.get("realization_delta"))
+            findings.append(
+                Finding(
+                    stage="slicing_sanity",
+                    message=(
+                        f"sorted and physical failed the descriptor realization gate for {metric}"
+                        + (f": delta {float(delta):.6g}." if isinstance(delta, (int, float)) else ".")
+                    ),
+                    evidence={
+                        "kind": "descriptor_realization_gate",
+                        "group": {
+                            "axis": str(axis),
+                            "layer_idx": case.get("layer_idx", "global"),
+                            "target_value": target,
+                        },
+                        "metric": metric,
+                        "left_method": "sorted",
+                        "right_method": "physical",
+                        "delta": delta,
+                    },
+                )
+            )
+    return findings
+
+
 def aggregate_width_sanity(
     axis_summaries: Mapping[str, Mapping[str, Any]],
     *,
@@ -89,6 +138,7 @@ def aggregate_width_sanity(
         metrics=metric_specs,
         group_keys=group_keys,
     )
+    slicing_findings.extend(descriptor_realization_findings(axis_summaries))
     common = {
         "schema_version": 1,
         "axes": axes,
@@ -108,3 +158,30 @@ def aggregate_width_sanity(
             "findings": [asdict(finding) for finding in slicing_findings],
         },
     )
+
+
+def aggregate_parent_sweep_sanity(
+    parent_summary: Mapping[str, Any],
+    hidden_width_summary: Mapping[str, Any] | None,
+    *,
+    metric_specs: Mapping[str, MetricSpec],
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    """Normalize a distributed three-parent sweep into public sanity artifacts."""
+
+    axis_summaries: dict[str, dict[str, Any]] = {}
+    for row in parent_summary.get("rows") or ():
+        if not isinstance(row, Mapping) or not row.get("axis"):
+            continue
+        axis = str(row["axis"])
+        axis_summaries.setdefault(axis, {"rows": []})["rows"].append(dict(row))
+    if hidden_width_summary and hidden_width_summary.get("rows"):
+        axis_summaries["hidden_width"] = dict(hidden_width_summary)
+
+    width, slicing = aggregate_width_sanity(
+        axis_summaries,
+        metric_specs=metric_specs,
+    )
+    axes = sorted(axis_summaries)
+    width["axis_summaries"] = axis_summaries
+    slicing["axis_summaries"] = axis_summaries
+    return width, slicing, axes

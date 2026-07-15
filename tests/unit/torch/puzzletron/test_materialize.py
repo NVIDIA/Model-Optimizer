@@ -23,10 +23,12 @@ from modelopt.torch.puzzletron.block_config import (
     BlockConfig,
     FFNConfig,
     MLAConfig,
+    MambaConfig,
     MoEConfig,
 )
 from modelopt.torch.puzzletron.pruning.materialize import (
     BlockTarget,
+    _shard_requires_rewrite,
     block_targets_from_replacements,
     materialize_solution_state_dict,
 )
@@ -73,6 +75,128 @@ def test_block_targets_from_replacements():
     }]
     t = block_targets_from_replacements(reps_merge, teacher, num_attention_heads=24)
     assert (t[0].target_num_q, t[0].target_num_kv) == (12, 2)
+
+
+def test_block_targets_use_prefix_after_sorted_teacher_expert_permutation():
+    teacher = [
+        BlockConfig(
+            subblock_configs=(
+                MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),
+            )
+        )
+    ]
+    child = BlockConfig(
+        subblock_configs=(
+            MoEConfig(num_experts=2, expert_intermediate_size=8, top_k=2),
+        )
+    )
+
+    targets = block_targets_from_replacements(
+        [
+            {
+                "parent_layer_indices": [0],
+                "child_block_configs": [child],
+                "diagnostic": {"kept_experts": [3, 1]},
+            }
+        ],
+        teacher,
+        num_attention_heads=2,
+    )
+
+    assert targets[0].target_num_experts == 2
+    assert targets[0].expert_keep_indices is None
+
+
+def test_block_targets_omit_unchanged_full_layer_replacements():
+    teacher = [
+        BlockConfig(subblock_configs=(FFNConfig(intermediate_size=12),)),
+        BlockConfig(subblock_configs=(FFNConfig(intermediate_size=12),)),
+    ]
+    replacements = [
+        {
+            "parent_layer_indices": [0],
+            "child_block_configs": [teacher[0]],
+        },
+        {
+            "parent_layer_indices": [1],
+            "child_block_configs": [
+                BlockConfig(subblock_configs=(FFNConfig(intermediate_size=8),))
+            ],
+        },
+    ]
+
+    targets = block_targets_from_replacements(
+        replacements,
+        teacher,
+        num_attention_heads=24,
+    )
+
+    assert set(targets) == {1}
+    assert targets[1].target_intermediate == 8
+
+
+def test_block_targets_do_not_remove_teacher_no_op_placeholders():
+    teacher = [
+        BlockConfig(
+            subblock_configs=(
+                AttentionConfig(num_query_heads=24, num_kv_heads=4),
+                FFNConfig(no_op=True),
+            )
+        ),
+        BlockConfig(
+            subblock_configs=(
+                AttentionConfig(no_op=True),
+                MoEConfig(num_experts=8, expert_intermediate_size=12),
+            )
+        ),
+        BlockConfig(
+            subblock_configs=(
+                MambaConfig(num_heads=8, head_dim=4),
+                FFNConfig(no_op=True),
+            )
+        ),
+    ]
+    replacements = [
+        {
+            "parent_layer_indices": [0],
+            "child_block_configs": [
+                BlockConfig(
+                    subblock_configs=(
+                        AttentionConfig(num_query_heads=12, num_kv_heads=2),
+                        FFNConfig(no_op=True),
+                    )
+                )
+            ],
+        },
+        {
+            "parent_layer_indices": [1],
+            "child_block_configs": [
+                BlockConfig(
+                    subblock_configs=(
+                        AttentionConfig(no_op=True),
+                        MoEConfig(num_experts=4, expert_intermediate_size=12),
+                    )
+                )
+            ],
+        },
+        {
+            "parent_layer_indices": [2],
+            "child_block_configs": [
+                BlockConfig(
+                    subblock_configs=(
+                        MambaConfig(num_heads=4, head_dim=4),
+                        FFNConfig(no_op=True),
+                    )
+                )
+            ],
+        },
+    ]
+
+    targets = block_targets_from_replacements(replacements, teacher, num_attention_heads=24)
+
+    assert not targets[0].remove_ffn
+    assert not targets[1].remove_attention
+    assert not targets[2].remove_ffn
 
 
 P = "model.layers.0"
@@ -295,3 +419,26 @@ def test_materialize_no_op_removes_sublayer_tensors_but_keeps_other_half():
     )
     assert not any(".self_attn." in key for key in attention_removed)
     assert any(".mlp." in key for key in attention_removed)
+
+
+def test_shard_rewrite_detection_is_layer_scoped_unless_pruning_is_global():
+    keys = {
+        "model.layers.7.mlp.experts.0.up_proj.weight",
+        "model.layers.7.mlp.experts.0.down_proj.weight",
+    }
+
+    assert _shard_requires_rewrite(
+        keys,
+        target_layer_prefixes=("model.layers.7",),
+        global_slice=False,
+    )
+    assert not _shard_requires_rewrite(
+        keys,
+        target_layer_prefixes=("model.layers.8",),
+        global_slice=False,
+    )
+    assert _shard_requires_rewrite(
+        keys,
+        target_layer_prefixes=(),
+        global_slice=True,
+    )

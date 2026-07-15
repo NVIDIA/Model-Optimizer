@@ -212,15 +212,77 @@ def _temporary_parameter_mask(parameter: torch.Tensor | None, keep_mask: torch.T
     therefore bypass module forward hooks.  The projected B/C channels are
     zero before the fused kernel, but a non-zero convolution bias would bring
     removed state channels back.  A short-lived value mask is consequently
-    required for exact elastic prefix semantics.  Reusing the checkpoint
-    overlay copy path keeps this valid for plain tensors, DTensors, and FSDP2.
+    required for exact elastic prefix semantics.  DTensors are changed through
+    their local shard so PP stages do not introduce full-tensor collectives in
+    different orders.
     """
+    with _temporary_parameter_multiplier(parameter, keep_mask):
+        yield
 
-    if parameter is None or bool(keep_mask.all()):
+
+@contextmanager
+def _temporary_parameter_multiplier(
+    parameter: torch.Tensor | None,
+    multiplier: torch.Tensor,
+):
+    """Apply a reversible leading-dimension multiplier to a native parameter."""
+
+    if parameter is None or bool((multiplier == 1).all()):
         yield
         return
+
+    try:
+        from torch.distributed.tensor import DTensor
+        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+    except Exception:  # noqa: BLE001
+        DTensor = ()  # type: ignore[assignment]
+
+    if isinstance(parameter, DTensor):
+        global_shape = tuple(int(size) for size in parameter.shape)
+        if int(multiplier.numel()) != global_shape[0]:
+            raise ValueError(
+                "parameter multiplier length must match the leading dimension: "
+                f"{multiplier.numel()} != {global_shape[0]}"
+            )
+        local_shape, global_offset = compute_local_shape_and_global_offset(
+            global_shape,
+            parameter.device_mesh,
+            parameter.placements,
+        )
+        local_parameter = parameter.to_local()
+        if tuple(int(size) for size in local_parameter.shape) != tuple(local_shape):
+            raise RuntimeError(
+                "DTensor local parameter shape disagrees with its placement geometry: "
+                f"actual={tuple(local_parameter.shape)} expected={tuple(local_shape)}"
+            )
+        full_view = multiplier.reshape((-1,) + (1,) * (len(global_shape) - 1)).expand(
+            global_shape
+        )
+        local_slices = tuple(
+            slice(int(offset), int(offset) + int(size))
+            for offset, size in zip(global_offset, local_shape)
+        )
+        local_multiplier = full_view[local_slices].to(
+            device=local_parameter.device,
+            dtype=local_parameter.dtype,
+        )
+        original_local = local_parameter.detach().clone()
+        with torch.no_grad():
+            local_parameter.copy_(original_local * local_multiplier)
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                local_parameter.copy_(original_local)
+        return
+
     original = _full(parameter.detach()).clone()
-    view = keep_mask.to(device=original.device, dtype=original.dtype).reshape(
+    if int(multiplier.numel()) != int(original.shape[0]):
+        raise ValueError(
+            "parameter multiplier length must match the leading dimension: "
+            f"{multiplier.numel()} != {original.shape[0]}"
+        )
+    view = multiplier.to(device=original.device, dtype=original.dtype).reshape(
         (-1,) + (1,) * (original.ndim - 1)
     )
     _copy_tensor_value(parameter, original * view)
@@ -550,6 +612,16 @@ def _mask_last_dim_forward_hook_scaled(mask: torch.Tensor, scale: float):
         return output * mask.to(dtype=output.dtype, device=output.device).reshape(
             (1,) * (output.ndim - 1) + (-1,)
         ) * scale
+
+    return hook
+
+
+def _scale_tensor_output_forward_hook(scale: float):
+    """Scale a tensor module output without touching any model parameter."""
+    def hook(module, args, output):
+        if not torch.is_tensor(output):
+            return output
+        return output * scale
 
     return hook
 
@@ -1525,6 +1597,24 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                         if in_proj is not None and not bool(projected_keep.all()):
                             handles.append(in_proj.register_forward_hook(_mask_last_dim_forward_hook(projected_keep)))
 
+                        # Fused Mamba2 kernels normalize the scan output over the
+                        # static teacher group width.  Zero-padding a compact child
+                        # therefore inflates retained channels by
+                        # sqrt(teacher_width / child_width).  A physical child has
+                        # the smaller RMS denominator, so compensate before the
+                        # output projection.  Native fused kernels consume
+                        # ``out_proj.weight`` directly, so apply the uniform scalar
+                        # to the Mamba module output rather than relying on an
+                        # ``out_proj.forward`` hook.  This avoids gathering and
+                        # rewriting FSDP/DTensor norm weights.
+                        original_inner = int(orig_heads) * int(orig_head_dim)
+                        target_inner = int(target_heads) * int(target_head_dim)
+                        norm = getattr(mamba_module, "norm", None)
+                        norm_weight = getattr(norm, "weight", None)
+                        norm_scale = 1.0
+                        if target_inner < original_inner and norm_weight is not None:
+                            norm_scale = (float(target_inner) / float(original_inner)) ** 0.5
+
                         out_proj = getattr(mamba_module, "out_proj", None)
                         if out_proj is not None and not bool(keep_mask.all()):
                             handles.append(
@@ -1538,11 +1628,32 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                                     )
                                 )
                             )
+                        can_scale_output = (
+                            out_proj is not None and getattr(out_proj, "bias", None) is None
+                        )
+                        if norm_scale != 1.0 and can_scale_output:
+                            handles.append(
+                                mamba_module.register_forward_hook(
+                                    _scale_tensor_output_forward_hook(norm_scale)
+                                )
+                            )
                         if in_proj is None and out_proj is None:
                             raise RuntimeError(
                                 "Mamba runtime slicing requested but neither in_proj nor out_proj "
                                 f"exists on {type(mamba_module).__name__}"
                             )
+
+                        # Preserve support for native kernels without an output
+                        # projection.  Such implementations cannot take the cheap
+                        # activation-side path above, so use the reversible parameter
+                        # overlay as a compatibility fallback.
+                        if norm_scale != 1.0 and not can_scale_output:
+                            multiplier = torch.ones(original_inner, dtype=torch.float64)
+                            multiplier[keep_mask] = norm_scale
+                            contexts.append(
+                                _temporary_parameter_multiplier(norm_weight, multiplier)
+                            )
+
                         conv1d = getattr(mamba_module, "conv1d", None)
                         conv_bias = getattr(conv1d, "bias", None) if conv1d is not None else None
                         if conv_bias is not None and not bool(conv_keep.all()):

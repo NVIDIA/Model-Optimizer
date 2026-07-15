@@ -8,6 +8,23 @@ import pytest
 import torch
 
 
+def test_distillation_sanity_accepts_packed_cache_without_raw_dataset(tmp_path):
+    from modelopt.torch.puzzletron.stages.future import _distillation_dataset_source
+
+    cache = tmp_path / "train.tokens"
+    assert _distillation_dataset_source(
+        {"packed_token_cache_path": str(cache)},
+        {},
+    ) == ("", str(cache))
+
+
+def test_distillation_sanity_requires_raw_dataset_or_packed_cache():
+    from modelopt.torch.puzzletron.stages.future import _distillation_dataset_source
+
+    with pytest.raises(ValueError, match="dataset_path or packed_token_cache_path"):
+        _distillation_dataset_source({}, {})
+
+
 def test_distributed_barrier_propagates_failure_with_stage_context(monkeypatch):
     from modelopt.torch.puzzletron.stages.future import _distributed_barrier
 
@@ -131,6 +148,38 @@ def test_scenario_grid_kd_checkpoints_select_latest_consolidated(tmp_path):
     ]
     assert all(path.name == "consolidated" for _, path in checkpoints)
     assert all("step_7" in str(path) for _, path in checkpoints)
+
+
+def test_profile_solution_checkpoints_use_selected_mip_registry(tmp_path):
+    from modelopt.torch.puzzletron.stages import future
+
+    puzzle_dir = tmp_path / "model"
+    profile_root = puzzle_dir / "mip/profiles/params-090"
+    profile_root.mkdir(parents=True)
+    teacher = puzzle_dir / "ckpts/teacher"
+    candidate = profile_root / "scenarios/width-3840/depth-01/checkpoints/solution_0"
+    (puzzle_dir / "mip/profiles/index.json").write_text(
+        json.dumps({"profiles": [{"id": "params-090"}]})
+    )
+    (profile_root / "selected_solutions.json").write_text(
+        json.dumps(
+            {
+                "solutions": [
+                    {"solution_id": "teacher", "checkpoint": str(teacher)},
+                    {"solution_id": "h3840-d1", "checkpoint": str(candidate)},
+                ]
+            }
+        )
+    )
+
+    assert future._profile_solution_checkpoints(puzzle_dir) == [
+        ("teacher", teacher),
+        ("h3840-d1", candidate),
+    ]
+    assert future._profile_solution_checkpoints(puzzle_dir, profile_id="params-090") == [
+        ("teacher", teacher),
+        ("h3840-d1", candidate),
+    ]
 
 
 def test_global_kd_checkpoints_include_canonical_distillation_exports(tmp_path):

@@ -27,7 +27,11 @@ from examples.puzzletron.acceptance_resume import (
     source_identity,
     write_marker,
 )
-from examples.puzzletron.main import _completion_is_valid, _resume_kwargs
+from examples.puzzletron.main import (
+    _completion_is_valid,
+    _embedding_followup_stage,
+    _resume_kwargs,
+)
 from modelopt.torch.puzzletron.manifest import (
     StageManifest,
     semantic_stage_config,
@@ -560,3 +564,7 @@ def test_static_pre_v3_marker_reports_implementation_source_staleness(tmp_path: 
     assert not result.valid
     assert result.validation_mode == "legacy-v2"
     assert "changed implementation/source identity" in result.stale_reasons
+
+def test_embedding_followup_does_not_replay_completed_root_vllm_stats() -> None:
+    assert _embedding_followup_stage("build_library")
+    assert not _embedding_followup_stage("vllm_stats")

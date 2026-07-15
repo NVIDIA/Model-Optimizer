@@ -133,6 +133,11 @@ def _overfit_probe_config(cfg, mode: str = "smallest_fixed"):
             8 if mode == "diverse_resampled" else 4,
         )
     )
+    probe.bypass.overfit_minimum_relative_decrease = float(
+        overfit.get("minimum_relative_decrease", 0.05)
+        if mode == "smallest_fixed"
+        else 0.0
+    )
     teacher_identity = get_bypass_run_identity(probe).get("teacher") or {}
     probe.bypass.overfit_source_checkpoint_identity = _distributed_source_identity(
         json.dumps(
@@ -220,6 +225,12 @@ def _should_publish_elastic_checkpoint(cfg) -> bool:
     return bool(cfg.bypass.get("elastic", False)) and bool(
         cfg.bypass.get("publish_elastic_checkpoint", True)
     )
+
+
+def _should_publish_final_checkpoint(cfg) -> bool:
+    """Overfit probes publish their diagnostic metrics, never a scoring parent."""
+
+    return not bool(cfg.bypass.get("single_batch_overfit", False))
 
 
 def _resume_path(cfg) -> str | None:
@@ -337,7 +348,8 @@ def _run_one(cfg) -> None:
     try:
         recipe.setup()
         checkpoint_path, metrics = recipe.run_local_distillation()
-        _publish_checkpoint(cfg, checkpoint_path, metrics)
+        if _should_publish_final_checkpoint(cfg):
+            _publish_checkpoint(cfg, checkpoint_path, metrics)
     finally:
         recipe.close()
 

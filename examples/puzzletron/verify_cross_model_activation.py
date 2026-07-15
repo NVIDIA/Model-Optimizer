@@ -18,6 +18,9 @@ import torch
 import yaml
 
 
+_MAX_DIAGNOSTIC_QUANTILE_VALUES = 65_536
+
+
 def _load_json(path: Path) -> Any:
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -35,6 +38,21 @@ def _score_tensors(value: Any) -> Iterable[torch.Tensor]:
             yield from _score_tensors(item)
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         yield torch.tensor([float(value)], dtype=torch.float32)
+
+
+def _diagnostic_quantile_values(values: torch.Tensor) -> torch.Tensor:
+    """Bound exact-quantile memory while sampling the full flattened score range."""
+    if values.numel() <= _MAX_DIAGNOSTIC_QUANTILE_VALUES:
+        return values
+    indices = torch.linspace(
+        0,
+        values.numel() - 1,
+        steps=_MAX_DIAGNOSTIC_QUANTILE_VALUES,
+        device=values.device,
+        dtype=torch.float64,
+    ).round().to(dtype=torch.long)
+    indices.clamp_(max=values.numel() - 1)
+    return values.index_select(0, indices)
 
 
 def _pass_summary(
@@ -84,6 +102,7 @@ def _pass_summary(
         raise RuntimeError(f"{name}: scores contain non-finite values")
     if not bool(torch.count_nonzero(flat)):
         raise RuntimeError(f"{name}: all score values are zero")
+    quantile_values = _diagnostic_quantile_values(flat)
 
     fingerprints = list(args.get("observability", {}).get("batch_fingerprints") or [])
     return {
@@ -99,7 +118,7 @@ def _pass_summary(
         "mean": float(flat.mean()),
         "std": float(flat.std()) if flat.numel() > 1 else 0.0,
         "quantiles": {
-            str(q): float(torch.quantile(flat, q))
+            str(q): float(torch.quantile(quantile_values, q))
             for q in (0.0, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0)
         },
         "batch_fingerprints": fingerprints,

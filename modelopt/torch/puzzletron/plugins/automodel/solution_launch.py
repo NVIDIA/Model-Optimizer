@@ -48,7 +48,7 @@ from ...replacement_library.replacement_utils import parse_layer_replacement
 from ...tools.validation_utils import write_results
 from .config import build_solution_recipe_config, solution_scoring_params
 from .launch import _free_scoring_memory
-from .patch import apply_patch
+from .patch import apply_patch, _precache_trust_remote_code_distributed
 from .solution_metrics import aggregate_solution_scores, retain_teacher_channels, score_batch
 from .teacher_cache import TeacherTargetCache
 
@@ -65,6 +65,17 @@ def _resolve_output_dir(scoring):
         return Path(scoring.output_dir)
     solutions_path = Path(scoring.solutions_path)
     return solutions_path.with_name(f"{solutions_path.stem}--validation")
+
+
+def _load_model_config_distributed(checkpoint_dir, descriptor, *, loader):
+    """Pre-cache dynamic modules once before every rank imports a config."""
+
+    trust_remote_code = descriptor.requires_trust_remote_code()
+    _precache_trust_remote_code_distributed(
+        checkpoint_dir,
+        trust_remote_code=trust_remote_code,
+    )
+    return loader(checkpoint_dir, trust_remote_code=trust_remote_code)
 
 
 def _load_solution_work(scoring, output_dir: Path) -> tuple[list[dict], list[int]]:
@@ -525,7 +536,12 @@ def _solution_prune_target(layer_replacements, teacher_block_configs, num_q_head
         "target_num_q": target_num_q,
         "target_num_kv": t_kv,
         "head_dim": head_dim,
-        "expert_keep_ids": tuple(int(item) for item in diagnostic.get("kept_experts", ())) or None,
+        # Diagnostic expert ids refer to the original checkpoint.  Every
+        # scoring parent is already permuted into that method's ranked order,
+        # so execution must retain the compact prefix rather than applying the
+        # original ids a second time.  Keep the ids in diagnostic metadata for
+        # reporting only.
+        "expert_keep_ids": None,
     }
 
 
@@ -596,7 +612,11 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
             )
 
     # Teacher dims for resolving per-candidate prune targets.
-    config = load_model_config(teacher_dir, trust_remote_code=descriptor.requires_trust_remote_code())
+    config = _load_model_config_distributed(
+        teacher_dir,
+        descriptor,
+        loader=load_model_config,
+    )
     teacher_block_configs = maybe_cast_block_configs(config.block_configs)
     lm = descriptor.get_language_model_config(config)
     num_q = lm.num_attention_heads
@@ -612,9 +632,10 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
             "one replacement-scoring sweep may contain only one hidden width; "
             f"found {sorted(solution_widths)}"
         )
-    source_config = load_model_config(
+    source_config = _load_model_config_distributed(
         source_dir,
-        trust_remote_code=descriptor.requires_trust_remote_code(),
+        descriptor,
+        loader=load_model_config,
     )
     source_hidden_width = int(descriptor.get_language_model_config(source_config).hidden_size)
     retained_hidden_indices = _source_hidden_channel_indices(
@@ -745,9 +766,10 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
 
     descriptor = ModelDescriptorFactory.get(hydra_cfg.get("descriptor", None))
     teacher_dir = Path(scoring.get("teacher_dir", None) or f"{hydra_cfg.puzzle_dir}/ckpts/teacher")
-    teacher_config = load_model_config(
+    teacher_config = _load_model_config_distributed(
         teacher_dir,
-        trust_remote_code=descriptor.requires_trust_remote_code(),
+        descriptor,
+        loader=load_model_config,
     )
     teacher_block_configs = maybe_cast_block_configs(teacher_config.block_configs)
     lm = descriptor.get_language_model_config(teacher_config)
@@ -793,9 +815,10 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
             output_dir.mkdir(parents=True, exist_ok=True)
 
             solutions = load_puzzle_solutions(solutions_path, None, False)
-            parent_config = load_model_config(
+            parent_config = _load_model_config_distributed(
                 checkpoint_dir,
-                trust_remote_code=descriptor.requires_trust_remote_code(),
+                descriptor,
+                loader=load_model_config,
             )
             parent_width = int(descriptor.get_language_model_config(parent_config).hidden_size)
             retained_hidden_indices = _source_hidden_channel_indices(

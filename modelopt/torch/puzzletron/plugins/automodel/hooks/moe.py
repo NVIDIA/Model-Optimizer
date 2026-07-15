@@ -91,18 +91,26 @@ def _same_process_group(left, right) -> bool:
 
 def _reduce_tokens_not_already_gathered_over_ep(tensor: torch.Tensor, groups):
     """Reduce remaining token shards without summing EP-gathered tokens twice."""
+    if groups.ep_inputs_replicated:
+        return reduce_token_sum(tensor, groups.token_group)
+    if groups.ep_shard_group is not None:
+        return reduce_token_sum(tensor, groups.ep_shard_group)
     if _same_process_group(groups.token_group, groups.ep_group):
         return tensor
     return reduce_token_sum(tensor, groups.token_group)
 
 
+def _gather_ep_inputs(tensor: torch.Tensor, groups):
+    """Gather distinct EP inputs, or preserve one copy of replicated inputs."""
+    if groups.ep_inputs_replicated:
+        return tensor
+    return _all_gather_varlen_dim0(tensor, groups.ep_group)
+
+
 def _expert_owner_range(module, groups, num_experts: int) -> tuple[int, int]:
+    del module
     ep_size = groups.ep_size or 1
     ep_rank = groups.ep_rank
-    gate_up = getattr(module, "gate_and_up_projs", None)
-    if isinstance(gate_up, DTensor):
-        ep_size = int(gate_up.device_mesh.size())
-        ep_rank = int(gate_up.device_mesh.get_local_rank())
     if num_experts % ep_size:
         raise ValueError(f"num_experts={num_experts} must be divisible by ep_size={ep_size}")
     local = num_experts // ep_size
@@ -149,14 +157,14 @@ def _grouped_route_cache(module, args, groups) -> dict[str, Any]:
     if _grouped_cache_matches(_LAST_GROUPED_EXPERT_CACHE, module, source):
         return _LAST_GROUPED_EXPERT_CACHE
 
-    x = _all_gather_varlen_dim0(source, groups.ep_group)
+    x = _gather_ep_inputs(source, groups)
     if x is source:
         x = source.clone()
-    token_mask = _all_gather_varlen_dim0(
-        _local(args[1]).reshape(-1).to(torch.bool), groups.ep_group
+    token_mask = _gather_ep_inputs(
+        _local(args[1]).reshape(-1).to(torch.bool), groups
     )
-    weights = _all_gather_varlen_dim0(_local(args[2]).float(), groups.ep_group)
-    indices = _all_gather_varlen_dim0(_local(args[3]).to(torch.long), groups.ep_group)
+    weights = _gather_ep_inputs(_local(args[2]).float(), groups)
+    indices = _gather_ep_inputs(_local(args[3]).to(torch.long), groups)
 
     token_cap = max(1, int(os.environ.get("MOE_SCORING_TOKENS_PER_BATCH", "64")))
     valid_ids = _centered_subsample(torch.where(token_mask)[0], token_cap)
@@ -416,7 +424,7 @@ class MoEExpertRemovalDiffScorer(ScoringHook):
         selected_tokens = torch.where(cache["token_mask"])[0]
         if selected_tokens.numel() == 0:
             return
-        gate_x = _all_gather_varlen_dim0(self._gate_input, self.groups.ep_group)
+        gate_x = _gather_ep_inputs(self._gate_input, self.groups)
         original_indices = cache["indices"][selected_tokens]
         original_weights = cache["weights"][selected_tokens].float()
         candidate_tokens = selected_tokens.repeat_interleave(self.top_k)

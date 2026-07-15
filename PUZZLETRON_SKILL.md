@@ -1,1 +1,0 @@
-.agents/skills/running-puzzletron/SKILL.md

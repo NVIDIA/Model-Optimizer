@@ -12,6 +12,73 @@ from modelopt.torch.puzzletron.plugins.automodel import (
 )
 
 
+def test_local_kd_uses_canonical_logical_dp_when_recipe_mesh_includes_ep():
+    cfg = OmegaConf.create(
+        {"parallel": {"dp": 2}, "distributed": {"dp_size": 2}}
+    )
+
+    assert local_kd_config._logical_dp_size(
+        cfg,
+        {"dp_size": 8, "ep_size": 4},
+    ) == 2
+
+
+def test_local_kd_falls_back_to_recipe_dp_without_canonical_topology():
+    assert local_kd_config._logical_dp_size(
+        OmegaConf.create({}),
+        {"dp_size": 8, "ep_size": 4},
+    ) == 8
+
+
+def test_nested_hidden_widths_include_teacher_identity_candidate():
+    assert local_kd_recipe._nested_hidden_widths(4096, (3840,)) == (4096, 3840)
+    assert local_kd_recipe._nested_hidden_widths(4096, (4096, 3840)) == (
+        4096,
+        3840,
+    )
+
+
+def test_lane_axis_counts_merge_distinct_lanes_without_counting_model_parallel_replicas():
+    gathered = [
+        {"dp_lane": 0, "hidden_width_counts": {4096: 1}},
+        {"dp_lane": 0, "hidden_width_counts": {4096: 1}},
+        {"dp_lane": 1, "hidden_width_counts": {3840: 1}},
+        {"dp_lane": 1, "hidden_width_counts": {3840: 1}},
+    ]
+
+    assert local_kd_recipe._merge_lane_axis_counts(
+        gathered,
+        count_key="hidden_width_counts",
+    ) == {3840: 1, 4096: 1}
+
+
+def test_lane_axis_counts_reject_model_parallel_replica_disagreement():
+    gathered = [
+        {"dp_lane": 0, "hidden_width_counts": {4096: 1}},
+        {"dp_lane": 0, "hidden_width_counts": {3840: 1}},
+    ]
+
+    with pytest.raises(RuntimeError, match="logical data lane 0"):
+        local_kd_recipe._merge_lane_axis_counts(
+            gathered,
+            count_key="hidden_width_counts",
+        )
+
+
+def test_local_kd_only_requires_publication_validation_when_exporting_hf():
+    from nemo_automodel.components.checkpoint.config import SaveConsolidatedMode
+
+    assert not local_kd_recipe._consolidated_export_enabled(
+        SaveConsolidatedMode.FALSE
+    )
+    assert local_kd_recipe._consolidated_export_enabled(
+        SaveConsolidatedMode.FINAL
+    )
+    assert local_kd_recipe._consolidated_export_enabled(
+        SaveConsolidatedMode.EVERY
+    )
+
+
 def test_local_kd_treats_disabled_data_parallel_axis_as_one(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -47,6 +114,7 @@ def test_local_kd_treats_disabled_data_parallel_axis_as_one(
             "bypass": {
                 "automodel": {"recipe_path": "unused.yaml"},
                 "elastic": False,
+                "single_batch_overfit": True,
                 "dtype": "bf16",
                 "experiment_dir": str(tmp_path / "run"),
                 "data": {"block_size": 2048},
@@ -69,6 +137,7 @@ def test_local_kd_treats_disabled_data_parallel_axis_as_one(
     assert recipe["step_scheduler"]["global_batch_size"] == 4
     assert recipe["step_scheduler"]["local_batch_size"] == 2
     assert recipe["distributed"]["pipeline"]["pp_batch_size"] == 1
+    assert recipe["checkpoint"]["save_consolidated"] is False
 
 
 def test_local_kd_reads_parallel_size_from_canonical_automodel_recipe() -> None:
@@ -169,6 +238,34 @@ def test_diverse_overfit_losses_are_not_treated_as_one_comparable_series() -> No
         single_batch_overfit=True,
         resample_structure=False,
     )
+
+
+def test_fixed_overfit_requires_material_relative_loss_decrease() -> None:
+    records = [{"loss": value} for value in (2.43, 2.43, 2.42, 2.42, 2.42, 2.42, 2.42, 2.42)]
+
+    trend = local_kd_recipe._loss_trend_summary(
+        records,
+        comparable=True,
+        window_size=4,
+        minimum_relative_decrease=0.05,
+    )
+
+    assert trend["decreased"] is True
+    assert trend["relative_decrease"] < 0.05
+    assert trend["hard_gate_passed"] is False
+
+
+def test_short_diverse_probe_reports_insufficient_evidence() -> None:
+    trend = local_kd_recipe._loss_trend_summary(
+        [{"loss": float(step)} for step in range(8)],
+        comparable=False,
+        window_size=8,
+    )
+
+    assert trend["sufficient_evidence"] is False
+    assert trend["required_records"] == 16
+    assert trend["observed_records"] == 8
+    assert trend["hard_gate_passed"] is None
 
 
 def test_inverse_width_policy_is_reproducible_and_favors_thinner_width() -> None:
@@ -288,6 +385,8 @@ def test_overfit_probe_repeats_one_batch_without_mutating_main_run() -> None:
     assert config.bypass.iter_num == 8192
     assert config.bypass.token_count == 1073741824
     assert probe.runtime_pruning_mixin.name == "instantiated"
+    assert not local_kd_launch._should_publish_final_checkpoint(probe)
+    assert local_kd_launch._should_publish_final_checkpoint(config)
 
 
 def test_overfit_worker_mode_selects_one_configured_mode() -> None:

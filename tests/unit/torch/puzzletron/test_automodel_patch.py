@@ -24,6 +24,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
@@ -219,3 +220,107 @@ def test_qwen_native_constructor_preserves_mtp_layer_types_outside_decoder_confi
 
     patched(SimpleNamespace(), 1, config, None, None)
     assert config.layer_types == ["full_attention", "full_attention"]
+
+
+def test_nemotron_native_constructor_copies_and_patches_per_layer_moe_config():
+    descriptor = AutoModelDescriptorFactory.get("nemotron_v3")
+    config = SimpleNamespace(hidden_size=3840)
+    shared_moe_config = SimpleNamespace(
+        n_routed_experts=512,
+        n_activated_experts=16,
+        dim=4096,
+        moe_inter_dim=2688,
+        shared_expert_inter_dim=2688,
+        moe_latent_size=1024,
+    )
+    block_config = BlockConfig(
+        subblock_configs=(
+            MoEConfig(
+                num_experts=128,
+                expert_intermediate_size=2048,
+                top_k=8,
+                shared_expert_intermediate_size=1792,
+                latent_dim=768,
+            ),
+        )
+    )
+
+    class NativeBlock:
+        pass
+
+    def original_init(self, config, layer_idx, moe_config=None, backend=None):
+        del backend
+        self.config = config
+        self.layer_idx = layer_idx
+        self.moe_config = moe_config
+
+    patched = descriptor.make_patched_init(original_init, [block_config])
+    layer = NativeBlock()
+    patched(layer, config, 0, moe_config=shared_moe_config)
+
+    assert layer.moe_config is not shared_moe_config
+    assert layer.moe_config.n_routed_experts == 128
+    assert layer.moe_config.n_activated_experts == 8
+    assert layer.moe_config.dim == 3840
+    assert layer.moe_config.moe_inter_dim == 2048
+    assert layer.moe_config.shared_expert_inter_dim == 1792
+    assert layer.moe_config.moe_latent_size == 768
+    assert shared_moe_config.n_routed_experts == 512
+    assert shared_moe_config.n_activated_experts == 16
+    json.dumps(vars(layer.config))
+    assert layer.config.block_configs == [block_config.to_dict()]
+
+
+def test_nemotron_native_state_dict_adapter_uses_per_layer_expert_geometry():
+    from nemo_automodel.components.models.nemotron_v3.state_dict_adapter import (
+        NemotronV3StateDictAdapter,
+    )
+
+    descriptor = AutoModelDescriptorFactory.get("nemotron_v3")
+    block_config = BlockConfig(
+        subblock_configs=(
+            MoEConfig(
+                num_experts=2,
+                expert_intermediate_size=2,
+                top_k=1,
+            ),
+        )
+    )
+    adapter = NemotronV3StateDictAdapter(
+        config=SimpleNamespace(num_hidden_layers=1),
+        moe_config=SimpleNamespace(
+            n_routed_experts=4,
+            n_activated_experts=2,
+            moe_inter_dim=3,
+            expert_activation="relu2",
+        ),
+        backend=SimpleNamespace(experts="grouped"),
+        dtype=torch.float32,
+    )
+    native_up = torch.zeros(2, 4, 2)
+
+    with descriptor.native_state_dict_adapter_context([block_config]):
+        split = adapter.convert_single_tensor_to_hf(
+            "model.layers.0.mixer.experts.gate_and_up_projs",
+            native_up,
+        )
+        assert len(split) == 2
+
+        hf_state = {}
+        for expert_idx in range(2):
+            hf_state[
+                f"model.layers.0.mixer.experts.{expert_idx}.up_proj.weight"
+            ] = torch.zeros(2, 4)
+            hf_state[
+                f"model.layers.0.mixer.experts.{expert_idx}.down_proj.weight"
+            ] = torch.zeros(4, 2)
+        merged = adapter._from_hf_w_merged_experts(hf_state)
+
+    assert merged["model.layers.0.mixer.experts.gate_and_up_projs"].shape == (
+        2,
+        4,
+        2,
+    )
+    assert merged["model.layers.0.mixer.experts.down_projs"].shape == (2, 2, 4)
+    assert adapter.moe_config.n_routed_experts == 4
+    assert adapter.moe_config.moe_inter_dim == 3

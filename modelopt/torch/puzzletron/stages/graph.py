@@ -151,6 +151,7 @@ _stage(
     "Width Sanity Check",
     parents=("sort",),
     completion_artifacts=("artifacts/width_sanity/summary.json",),
+    distributed=True,
 )
 _stage(
     "slicing_sanity",
@@ -200,12 +201,6 @@ _stage(
     completion_artifacts=("mip/profiles/*/mip_grid.json",),
 )
 _stage(
-    "aiperf",
-    "AIPerf",
-    parents=("mip",),
-    completion_artifacts=("artifacts/aiperf/**/aiperf_results.json",),
-)
-_stage(
     "zero_shot_evaluation",
     "Zero-shot Evaluation",
     parents=("mip",),
@@ -213,9 +208,15 @@ _stage(
     distributed=True,
 )
 _stage(
+    "aiperf",
+    "AIPerf",
+    parents=("mip",),
+    completion_artifacts=("artifacts/aiperf/**/aiperf_results.json",),
+)
+_stage(
     "global_distillation_sanity",
     "Global Distillation Sanity Check",
-    parents=("zero_shot_evaluation",),
+    parents=("mip",),
     completion_artifacts=(
         "artifacts/global_distillation_sanity/**/global_distillation_sanity_summary.json",
     ),

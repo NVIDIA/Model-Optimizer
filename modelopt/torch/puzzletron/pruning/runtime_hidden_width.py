@@ -85,7 +85,16 @@ def _active_prefix_state(module: torch.nn.Module, width: int, hidden_size: int) 
 
 def _active_norm_forward(module: torch.nn.Module, width: int, hidden_size: int):
     """Run the module's native norm semantics at the physical active width."""
-    replica = _functional_replica(module, width, hidden_size)
+    is_automodel_float32_rms_norm = (
+        type(module).__name__ == "Float32RMSNorm"
+        and hasattr(module, "eps")
+        and getattr(module, "weight", None) is not None
+    )
+    replica = (
+        None
+        if is_automodel_float32_rms_norm
+        else _functional_replica(module, width, hidden_size)
+    )
 
     def forward(*args, **kwargs):
         if not args or not torch.is_tensor(args[0]):
@@ -97,15 +106,25 @@ def _active_norm_forward(module: torch.nn.Module, width: int, hidden_size: int):
             raise RuntimeError(
                 f"nested normalization expected envelope width {hidden_size}, got {tuple(x.shape)}"
             )
-        replica._parameters = module._parameters.copy()
-        replica._buffers = module._buffers.copy()
-        output = torch.func.functional_call(
-            replica,
-            _active_prefix_state(module, width, hidden_size),
-            (x[..., :width], *args[1:]),
-            kwargs,
-            strict=False,
-        )
+        active_x = x[..., :width]
+        if is_automodel_float32_rms_norm:
+            input_dtype = active_x.dtype
+            normalized = active_x.float()
+            normalized = normalized * torch.rsqrt(
+                normalized.pow(2).mean(-1, keepdim=True) + float(module.eps)
+            )
+            output = (module.weight[:width] * normalized).to(input_dtype)
+        else:
+            assert replica is not None
+            replica._parameters = module._parameters.copy()
+            replica._buffers = module._buffers.copy()
+            output = torch.func.functional_call(
+                replica,
+                _active_prefix_state(module, width, hidden_size),
+                (active_x, *args[1:]),
+                kwargs,
+                strict=False,
+            )
         if not torch.is_tensor(output) or int(output.shape[-1]) != width:
             raise RuntimeError(
                 f"active normalization {type(module).__name__} returned incompatible output"

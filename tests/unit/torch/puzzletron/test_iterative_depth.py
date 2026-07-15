@@ -17,7 +17,13 @@ import json
 
 from omegaconf import OmegaConf
 
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from modelopt.torch.puzzletron.block_config import (
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+    MoEConfig,
+)
 from modelopt.torch.puzzletron.depth import mip_scenarios
 from modelopt.torch.puzzletron.depth.iterative import _available_removals, _child_blocks
 from modelopt.torch.puzzletron.depth.schema import DepthScenario, SublayerRemoval
@@ -42,6 +48,30 @@ def test_subblock_depth_exposes_each_removable_subblock():
         (0, "attention"),
         (0, "ffn"),
         (1, "ffn"),
+    ]
+
+
+def test_subblock_depth_excludes_architectural_no_op_placeholders():
+    blocks = [
+        BlockConfig(
+            subblock_configs=(
+                MambaConfig(state_dim=4, num_heads=2, head_dim=2, num_groups=1),
+                FFNConfig(no_op=True),
+            )
+        ),
+        BlockConfig(
+            subblock_configs=(
+                AttentionConfig(no_op=True),
+                MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),
+            )
+        ),
+    ]
+
+    removals = _available_removals(blocks, granularity="subblock")
+
+    assert [(item.layer_idx, item.kind) for item in removals] == [
+        (0, "mamba"),
+        (1, "moe"),
     ]
 
 

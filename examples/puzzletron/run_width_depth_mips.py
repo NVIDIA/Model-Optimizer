@@ -19,6 +19,7 @@ from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_
 from modelopt.torch.puzzletron.mip.run_puzzle import (
     _add_block_stats_to_gathered_metrics,
     filter_subblock_stats_by_args,
+    gather_composed_subblock_puzzle_metrics,
     gather_multi_layer_puzzle_metrics,
     run_puzzle,
 )
@@ -68,6 +69,24 @@ def _requested_depths(selected: list, *, max_depth: int) -> tuple[int, ...]:
 
 def _expected_scenario_count(widths: list[int], *, max_depth: int) -> int:
     return len(widths) * (int(max_depth) + 1)
+
+
+def _replacement_score_paths(
+    base_dir: Path, granularity: str
+) -> tuple[Path, Path]:
+    """Resolve width-local score inputs without changing full-block identities."""
+
+    granularity = str(granularity).lower()
+    validation_names = {
+        "block": "single_sequence_replacement_solutions--validation",
+        "subblock": "single_subblock_replacement_solutions--validation",
+    }
+    if granularity not in validation_names:
+        raise ValueError(f"unsupported MIP score_granularity={granularity!r}")
+    return (
+        base_dir / validation_names[granularity],
+        base_dir / "single_sequence_replacement_solutions.json",
+    )
 
 
 def _profile_id(parameter_ratio: float) -> str:
@@ -124,10 +143,33 @@ def _stats_profile(stats_path: Path, *, runtime_stats: bool) -> dict[str, Any]:
         if isinstance(row, dict)
         and bool((row.get("args") or {}).get("runtime_stats", False)) is runtime_stats
     ]
-    if len(profiles) != 1:
+    if not profiles:
         raise RuntimeError(
-            f"expected exactly one {'measured runtime' if runtime_stats else 'static'} "
-            f"profile in {stats_path}, found {len(profiles)}"
+            f"expected a {'measured runtime' if runtime_stats else 'static'} profile "
+            f"in {stats_path}, found none"
+        )
+    if len(profiles) == 1:
+        return profiles[0]
+    if runtime_stats:
+        raise RuntimeError(
+            f"expected exactly one measured runtime profile in {stats_path}, "
+            f"found {len(profiles)}"
+        )
+
+    def parameter_inventory(profile: dict[str, Any]) -> tuple[Any, tuple[Any, ...]]:
+        return (
+            (profile.get("non_block") or {}).get("num_params"),
+            tuple(
+                row.get("num_params")
+                for row in profile.get("subblocks", ())
+                if isinstance(row, dict)
+            ),
+        )
+
+    inventories = {parameter_inventory(profile) for profile in profiles}
+    if len(inventories) != 1:
+        raise RuntimeError(
+            f"static profiles in {stats_path} have conflicting parameter inventories"
         )
     return profiles[0]
 
@@ -162,8 +204,17 @@ def _teacher_costs(
     scoring_dir: Path,
     stats_path: Path,
     runtime_args: dict[str, Any],
+    *,
+    score_granularity: str,
+    canonical_solutions_path: Path,
 ) -> dict[str, float]:
-    gathered = gather_multi_layer_puzzle_metrics(scoring_dir)
+    if score_granularity == "subblock":
+        gathered = gather_composed_subblock_puzzle_metrics(
+            canonical_solutions_path,
+            scoring_dir,
+        )
+    else:
+        gathered = gather_multi_layer_puzzle_metrics(scoring_dir)
     stats = filter_subblock_stats_by_args(
         json.loads(stats_path.read_text()), runtime_args
     )
@@ -248,6 +299,7 @@ def main() -> None:
         raise ValueError(f"--max-depth must be non-negative, got {max_depth}")
     objective = "metrics.raw_replacement_loss"
     mip_config = dict(cfg.get("mip") or {})
+    score_granularity = str(mip_config.get("score_granularity", "block")).lower()
     parameter_ratios = list(
         args.parameter_ratio or mip_config.get("constraint_profiles", []) or []
     )
@@ -296,13 +348,23 @@ def main() -> None:
     for width in widths:
         base_dir = puzzle_dir / "scenarios" / f"width-{width:04d}" / "depth-00"
         stats_path = base_dir / "subblock_stats.json"
-        scoring_dir = base_dir / "single_sequence_replacement_solutions--validation"
+        scoring_dir, canonical_solutions_path = _replacement_score_paths(
+            base_dir,
+            score_granularity,
+        )
         stats_profile = _stats_profile(stats_path, runtime_stats=uses_runtime)
-        teacher_costs = _teacher_costs(scoring_dir, stats_path, stats_profile["args"])
+        teacher_costs = _teacher_costs(
+            scoring_dir,
+            stats_path,
+            stats_profile["args"],
+            score_granularity=score_granularity,
+            canonical_solutions_path=canonical_solutions_path,
+        )
         width_inputs[width] = {
             "base_dir": base_dir,
             "stats_path": stats_path,
             "scoring_dir": scoring_dir,
+            "canonical_solutions_path": canonical_solutions_path,
             "stats_profile": stats_profile,
             "teacher_costs": teacher_costs,
             "report_costs": _report_costs(stats_profile),
@@ -423,6 +485,7 @@ def main() -> None:
                 mip_cfg.puzzle_profile = None
                 mip_cfg.gathered_metrics_path = None
                 mip_cfg.single_block_replacement_validation_dir = inputs["scoring_dir"]
+                mip_cfg.canonical_solutions_path = inputs["canonical_solutions_path"]
                 mip_cfg.subblock_stats_path = inputs["stats_path"]
                 mip_cfg.output_path = scenario_root / "puzzle_solutions"
                 mip_cfg.objective = objective

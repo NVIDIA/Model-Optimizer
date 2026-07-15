@@ -688,6 +688,14 @@ def test_dag_resume_inventories_manifest_summary_and_every_case():
     )
 
 
+def test_dag_resume_inventories_distributed_parent_sweep_summary():
+    config = {"slicing_sanity": {"backend": "distributed_parent_sweep"}}
+
+    assert _stage_output_patterns(config, "slicing_sanity") == (
+        "artifacts/slicing_sanity/summary.json",
+    )
+
+
 def test_validation_rechecks_authoritative_checkpoint_content(tmp_path: Path):
     checkpoint = _tiny_sorted_llama(tmp_path)
     artifact_dir = tmp_path / "artifacts"

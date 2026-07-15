@@ -91,13 +91,17 @@ def test_pp_envelope_batch_size_rounds_up_partial_final_batch():
     assert recipe._pp_envelope_batch_size(local_batch_size=3) == 2
 
 
-def test_data_parallel_slice_excludes_expert_parallel_ranks():
-    ep_only = SimpleNamespace(dp_size="none")
+def test_data_parallel_slice_uses_the_reduction_group_not_the_combined_ep_mesh():
+    ep_only = SimpleNamespace(dp_size=4)
+    dp_ep = SimpleNamespace(dp_size=8)
     dp_cp = SimpleNamespace(dp_size=2)
 
     assert ActivationScoringRecipe._resolve_data_parallel_slice(
-        ep_only, token_size=2, token_rank=1, cp_size=1
+        ep_only, token_size=1, token_rank=0, cp_size=1
     ) == (1, 0)
+    assert ActivationScoringRecipe._resolve_data_parallel_slice(
+        dp_ep, token_size=2, token_rank=1, cp_size=1
+    ) == (2, 1)
     assert ActivationScoringRecipe._resolve_data_parallel_slice(
         dp_cp, token_size=4, token_rank=3, cp_size=2
     ) == (2, 1)

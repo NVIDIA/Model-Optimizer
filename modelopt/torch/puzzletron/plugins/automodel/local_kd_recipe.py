@@ -83,6 +83,12 @@ from ...utils.data.dataloaders import (
 )
 from .config import _int_or_default
 from .scoring_recipe import ActivationScoringRecipe
+
+
+def _consolidated_export_enabled(value) -> bool:
+    from nemo_automodel.components.checkpoint.config import SaveConsolidatedMode
+
+    return value != SaveConsolidatedMode.FALSE
 from .solution_recipe import ReplaceBlockScoringRecipe
 
 logger = logging.getLogger(__name__)
@@ -142,6 +148,49 @@ def _load_optimizer_with_lazy_state(
         planner=dcp.DefaultLoadPlanner(allow_partial_load=True),
     )
     optimizer_state.load_state_dict(state_dict)
+
+
+def _nested_hidden_widths(
+    teacher_width: int,
+    configured_widths: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Include the full-width identity candidate exactly once."""
+
+    return tuple(dict.fromkeys((int(teacher_width), *map(int, configured_widths))))
+
+
+def _merge_lane_axis_counts(
+    gathered: list[dict[str, object]],
+    *,
+    count_key: str,
+) -> dict[int, int]:
+    """Merge one architecture-axis count map per logical data lane.
+
+    Model-parallel ranks within a lane must sample the same architecture, so
+    their identical count maps are replicas rather than independent samples.
+    Distinct logical data lanes are independent and their counts are summed.
+    """
+
+    counts_by_lane: dict[int, dict[int, int]] = {}
+    for payload in gathered:
+        lane = int(payload["dp_lane"])
+        counts = {
+            int(value): int(count)
+            for value, count in dict(payload.get(count_key) or {}).items()
+            if int(count) > 0
+        }
+        previous = counts_by_lane.setdefault(lane, counts)
+        if previous != counts:
+            raise RuntimeError(
+                f"inconsistent {count_key} within logical data lane {lane}: "
+                f"expected={previous} observed={counts}"
+            )
+
+    merged: dict[int, int] = defaultdict(int)
+    for counts in counts_by_lane.values():
+        for value, count in counts.items():
+            merged[value] += count
+    return dict(sorted(merged.items()))
 
 
 def _select_hidden_width(
@@ -239,14 +288,24 @@ def _overfit_loss_records_are_comparable(
 
 
 def _loss_trend_summary(
-    records: list[dict[str, Any]], *, comparable: bool, window_size: int = 4
+    records: list[dict[str, Any]],
+    *,
+    comparable: bool,
+    window_size: int = 4,
+    minimum_relative_decrease: float = 0.0,
 ) -> dict[str, Any]:
     finite = [
         record for record in records if math.isfinite(float(record.get("loss", float("nan"))))
     ]
     requested_window = max(1, int(window_size))
     if len(finite) < 2 * requested_window:
-        return {}
+        return {
+            "sufficient_evidence": False,
+            "required_records": 2 * requested_window,
+            "observed_records": len(finite),
+            "comparable": bool(comparable),
+            "hard_gate_passed": False if comparable else None,
+        }
 
     def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         window = min(requested_window, len(rows) // 2)
@@ -269,7 +328,19 @@ def _loss_trend_summary(
         summary = summarize(rows)
         if summary:
             per_hidden_width[str(width)] = summary
+    relative_decrease = (
+        (aggregate["first_median"] - aggregate["last_median"])
+        / abs(aggregate["first_median"])
+        if aggregate["first_median"] != 0
+        else None
+    )
+    material_decrease = (
+        aggregate["decreased"]
+        and relative_decrease is not None
+        and relative_decrease >= float(minimum_relative_decrease)
+    )
     return {
+        "sufficient_evidence": True,
         "window": aggregate["window"],
         "first_window_median": aggregate["first_median"],
         "last_window_median": aggregate["last_median"],
@@ -281,8 +352,10 @@ def _loss_trend_summary(
         "first_four_median": aggregate["first_median"],
         "last_four_median": aggregate["last_median"],
         "decreased": aggregate["decreased"],
+        "relative_decrease": relative_decrease,
+        "minimum_relative_decrease": float(minimum_relative_decrease),
         "comparable": bool(comparable),
-        "hard_gate_passed": aggregate["decreased"] if comparable else None,
+        "hard_gate_passed": material_decrease if comparable else None,
         "per_hidden_width": per_hidden_width,
         "incomparability_reason": (
             None
@@ -784,6 +857,10 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             configured_widths = tuple(int(width) for width in embedding_cfg.get("widths", ()))
             if not configured_widths:
                 raise ValueError("embedding_pruning.enabled requires at least one width")
+            configured_widths = _nested_hidden_widths(
+                self._teacher_hidden_width,
+                configured_widths,
+            )
             self._embedding_spec = self._descriptor.embedding_pruning_spec(
                 teacher_config,
                 widths=configured_widths,
@@ -1479,6 +1556,9 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             self._hydra_cfg.bypass.get("single_batch_overfit_resample_structure", False)
         )
         overfit_trend_window = int(self._hydra_cfg.bypass.get("overfit_trend_window", 4) or 4)
+        overfit_minimum_relative_decrease = float(
+            self._hydra_cfg.bypass.get("overfit_minimum_relative_decrease", 0.0) or 0.0
+        )
         overfit_source_identity = self._hydra_cfg.bypass.get(
             "overfit_source_checkpoint_identity", None
         )
@@ -1553,6 +1633,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                         "source_checkpoint_identity": overfit_source_identity,
                         "resample_structure": resample_overfit_structure,
                         "trend_window": overfit_trend_window,
+                        "minimum_relative_decrease": overfit_minimum_relative_decrease,
                         "dp_observation_path": str(observation_path),
                         "candidate_catalog_path": str(candidate_catalog_path),
                         "summary": probe_summary,
@@ -1910,12 +1991,39 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             }
             last_metrics["elastic_selection_history"] = list(self._elastic_selection_history)
 
+        global_hidden_width_counts = dict(self._hidden_width_counts)
+        global_ple_width_counts = dict(self._ple_width_counts)
+        if (
+            (self._embedding_spec is not None or self._ple_spec is not None)
+            and not single_batch_overfit
+        ):
+            payload = {
+                "dp_lane": self._logical_dp_lane,
+                "hidden_width_counts": dict(self._hidden_width_counts),
+                "ple_width_counts": dict(self._ple_width_counts),
+            }
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                gathered_axis_counts = [None] * torch.distributed.get_world_size()
+                torch.distributed.all_gather_object(gathered_axis_counts, payload)
+            else:
+                gathered_axis_counts = [payload]
+            global_hidden_width_counts = _merge_lane_axis_counts(
+                gathered_axis_counts,
+                count_key="hidden_width_counts",
+            )
+            global_ple_width_counts = _merge_lane_axis_counts(
+                gathered_axis_counts,
+                count_key="ple_width_counts",
+            )
+
         if self._embedding_spec is not None and not single_batch_overfit:
-            missing_widths = sorted(set(self._hidden_widths) - set(self._hidden_width_counts))
+            missing_widths = sorted(
+                set(self._hidden_widths) - set(global_hidden_width_counts)
+            )
             if missing_widths:
                 raise RuntimeError(
                     "nested bypass did not sample every configured hidden width: "
-                    f"missing={missing_widths} counts={dict(self._hidden_width_counts)}"
+                    f"missing={missing_widths} counts={global_hidden_width_counts}"
                 )
             last_metrics["hidden_width_coverage"] = {
                 "configured_widths": list(self._hidden_widths),
@@ -1930,23 +2038,26 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                 if self._hydra_cfg.embedding_pruning.get("sampling_policy", None) == "inverse_width"
                 else None,
                 "selection_counts": {
-                    str(width): int(self._hidden_width_counts[width])
+                    str(width): int(global_hidden_width_counts.get(width, 0))
                     for width in self._hidden_widths
                 },
             }
 
         if self._ple_spec is not None and not single_batch_overfit:
-            missing_ple_widths = sorted(set(self._ple_widths) - set(self._ple_width_counts))
+            missing_ple_widths = sorted(
+                set(self._ple_widths) - set(global_ple_width_counts)
+            )
             if missing_ple_widths:
                 raise RuntimeError(
                     "nested bypass did not sample every configured PLE width: "
                     f"missing={missing_ple_widths} "
-                    f"counts={dict(self._ple_width_counts)}"
+                    f"counts={global_ple_width_counts}"
                 )
             last_metrics["ple_width_coverage"] = {
                 "configured_widths": list(self._ple_widths),
                 "selection_counts": {
-                    str(width): int(self._ple_width_counts[width]) for width in self._ple_widths
+                    str(width): int(global_ple_width_counts.get(width, 0))
+                    for width in self._ple_widths
                 },
             }
 
@@ -1964,6 +2075,9 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             loss_history,
             comparable=comparable_trend,
             window_size=overfit_trend_window if single_batch_overfit else 4,
+            minimum_relative_decrease=(
+                overfit_minimum_relative_decrease if single_batch_overfit else 0.0
+            ),
         )
         if loss_trend:
             last_metrics["loss_trend"] = loss_trend
@@ -2054,33 +2168,42 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         resume_validation = self._validate_resumable_checkpoint(checkpoint_path)
         from ...bypass_distillation.checkpointing import validate_consolidated_hf_checkpoint
 
+        export_consolidated = _consolidated_export_enabled(
+            self.checkpointer.config.save_consolidated
+        )
         validation_result: list[dict[str, Any] | None] = [None]
-        if self.dist_env.is_main:
-            try:
-                validation_result[0] = validate_consolidated_hf_checkpoint(
-                    checkpoint_path / "model" / "consolidated",
-                    expected_layer_prefixes=self._expected_checkpoint_layer_prefixes,
+        if export_consolidated:
+            if self.dist_env.is_main:
+                try:
+                    validation_result[0] = validate_consolidated_hf_checkpoint(
+                        checkpoint_path / "model" / "consolidated",
+                        expected_layer_prefixes=self._expected_checkpoint_layer_prefixes,
+                    )
+                except BaseException as exc:
+                    validation_result[0] = {
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+            torch.distributed.broadcast_object_list(validation_result, src=0)
+            checkpoint_validation = validation_result[0] or {
+                "status": "error",
+                "error": "rank 0 returned no checkpoint validation result",
+            }
+            if checkpoint_validation.get("status") != "complete":
+                raise RuntimeError(
+                    "AutoModel local-KD checkpoint failed publication validation: "
+                    f"{checkpoint_validation.get('error', checkpoint_validation)}"
                 )
-            except BaseException as exc:
-                validation_result[0] = {
-                    "status": "error",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-        torch.distributed.broadcast_object_list(validation_result, src=0)
-        checkpoint_validation = validation_result[0] or {
-            "status": "error",
-            "error": "rank 0 returned no checkpoint validation result",
-        }
-        if checkpoint_validation.get("status") != "complete":
-            raise RuntimeError(
-                "AutoModel local-KD checkpoint failed publication validation: "
-                f"{checkpoint_validation.get('error', checkpoint_validation)}"
-            )
+        else:
+            checkpoint_validation = {
+                "status": "skipped",
+                "reason": "consolidated HF export disabled",
+            }
         last_metrics["checkpoint_validation"] = {
             "resume": resume_validation,
             "consolidated": checkpoint_validation,
         }
-        if self.dist_env.is_main:
+        if export_consolidated and self.dist_env.is_main:
             _copy_hf_auxiliary_assets(
                 Path(self.cfg.model.pretrained_model_name_or_path),
                 checkpoint_path / "model" / "consolidated",

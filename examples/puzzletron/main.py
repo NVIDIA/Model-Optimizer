@@ -201,6 +201,10 @@ def _runtime_stats_filename(config: dict) -> str:
 def _stage_output_patterns(config: dict, stage: str) -> tuple[str, ...]:
     if stage == "vllm_stats":
         return (_runtime_stats_filename(config),)
+    if stage == "slicing_sanity":
+        slicing_cfg = config.get("slicing_sanity") or {}
+        if slicing_cfg.get("backend") == "distributed_parent_sweep":
+            return ("artifacts/slicing_sanity/summary.json",)
     patterns = REQUIRED_OUTPUT_PATTERNS.get(stage, ())
     if stage == "build_library":
         return tuple(
@@ -302,6 +306,11 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
+def _embedding_followup_stage(stage: str) -> bool:
+    """Return whether a completed root stage fans out into width scenarios."""
+    return stage == "build_library"
+
+
 def _run_worker(args: argparse.Namespace) -> None:
     cfg = mtpz.pipeline_config.pipeline_config_from_path(
         args.config,
@@ -334,7 +343,7 @@ def _run_worker(args: argparse.Namespace) -> None:
         result = _complete_composite_stage(cfg, args.worker_stage, outputs)
     else:
         result = mtpz.stage_runner.run_stage(cfg, args.worker_stage)
-        if embedding_root and args.worker_stage in {"build_library", "vllm_stats"}:
+        if embedding_root and _embedding_followup_stage(args.worker_stage):
             if __package__:
                 from .embedding_pipeline import run_embedding_stage
             else:

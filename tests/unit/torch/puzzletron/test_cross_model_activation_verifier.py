@@ -7,7 +7,7 @@ import pytest
 import torch
 import yaml
 
-from examples.puzzletron.verify_cross_model_activation import verify_model_activation
+from examples.puzzletron.verify_cross_model_activation import _pass_summary, verify_model_activation
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -78,3 +78,28 @@ def test_verify_model_activation_rejects_nonfinite_scores(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="non-finite"):
         verify_model_activation("toy", model_root, config)
+
+
+def test_pass_summary_bounds_tensor_used_for_diagnostic_quantiles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    directory = tmp_path / "wide_moe"
+    _write_json(directory / "args.json", {"eval_iters": 1, "num_nodes": 1})
+    torch.save(
+        {"model.layers.0.experts": {"score": torch.arange(131072, dtype=torch.float32)}},
+        directory / "rank_0.pth",
+    )
+    original_quantile = torch.quantile
+
+    def bounded_quantile(values, q):
+        assert values.numel() <= 65_536
+        return original_quantile(values, q)
+
+    monkeypatch.setattr(torch, "quantile", bounded_quantile)
+
+    summary = _pass_summary(
+        "wide_moe", directory, completed=True, expected_eval_iters=1
+    )
+
+    assert summary["values"] == 131072
+    assert set(summary["quantiles"]) == {"0.0", "0.01", "0.1", "0.5", "0.9", "0.99", "1.0"}

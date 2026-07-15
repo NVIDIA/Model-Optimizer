@@ -5,20 +5,126 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
-__all__ = ["run_embedding_stage", "scenario_worker_commands"]
+from modelopt.torch.puzzletron.diagnostics import generate_replace_block_report
+
+__all__ = [
+    "finalize_replacement_scoring_diagnostics",
+    "run_embedding_stage",
+    "scenario_preparation_commands",
+    "scenario_worker_commands",
+]
 
 
 def _scenario_dir(puzzle_dir: Path, width: int) -> Path:
     return puzzle_dir / "scenarios" / f"width-{width:04d}" / "depth-00"
 
 
+def _project_vllm_stats_to_scenarios(config: dict) -> dict[int, Path]:
+    """Publish the root vLLM aggregate entries owned by each hidden-width scenario."""
+
+    puzzle_dir = Path(config["puzzle_dir"])
+    root_stats_path = puzzle_dir / "subblock_stats.json"
+    root_stats = json.loads(root_stats_path.read_text())
+    if not isinstance(root_stats, list):
+        raise TypeError(f"vLLM aggregate must be a list: {root_stats_path}")
+
+    outputs = {}
+    widths = (config.get("embedding_pruning") or {}).get("widths", ())
+    for configured_width in widths:
+        width = int(configured_width)
+        width_stats = [
+            entry
+            for entry in root_stats
+            if int((entry.get("args") or {}).get("n_embd", -1)) == width
+        ]
+        if not width_stats:
+            raise ValueError(
+                f"vLLM aggregate {root_stats_path} has no entries for hidden width {width}"
+            )
+        output = _scenario_dir(puzzle_dir, width) / "subblock_stats.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(output.suffix + ".tmp")
+        temporary.write_text(json.dumps(width_stats, indent=2) + "\n")
+        temporary.replace(output)
+        outputs[width] = output
+    return outputs
+
+
+def finalize_replacement_scoring_diagnostics(config: dict) -> dict:
+    """Publish per-width reports and one root summary for embedding campaigns."""
+
+    puzzle_dir = Path(config["puzzle_dir"])
+    scoring = config.get("replacement_scoring") or {}
+    granularity = str(scoring.get("granularity", "block"))
+    scores_name = (
+        "single_subblock_replacement_solutions--validation"
+        if granularity == "subblock"
+        else "single_sequence_replacement_solutions--validation"
+    )
+    widths = [
+        int(width) for width in (config.get("embedding_pruning") or {}).get("widths", ())
+    ]
+    children = []
+    for width in widths:
+        scenario = _scenario_dir(puzzle_dir, width)
+        children.append(
+            generate_replace_block_report(
+                scenario,
+                scores_dir=scenario / scores_name,
+                output_dir=scenario / "artifacts" / "replacement_scoring",
+                granularity=granularity,
+                default_metric=str(
+                    scoring.get("default_metric", "normalized_mse_loss_hidden_states")
+                ),
+                default_layer_count=int(scoring.get("default_layer_count", 5)),
+                anchor_count=int(scoring.get("anchor_count", 3)),
+                trend_relative_tolerance=float(
+                    scoring.get("trend_relative_tolerance", 0.02)
+                ),
+            )
+        )
+
+    summary = {
+        "version": 1,
+        "kind": "replacement_scoring",
+        "granularity": granularity,
+        "widths": widths,
+        "scenario_count": len(children),
+        "record_count": sum(int(child.get("record_count", 0)) for child in children),
+        "warning_count": sum(int(child.get("warning_count", 0)) for child in children),
+        "axes": list(
+            dict.fromkeys(axis for child in children for axis in child.get("axes", ()))
+        ),
+        "metrics": list(
+            dict.fromkeys(metric for child in children for metric in child.get("metrics", ()))
+        ),
+        "children": children,
+    }
+    output = puzzle_dir / "artifacts" / "replacement_scoring" / "summary.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    temporary.replace(output)
+    return summary
+
+
 def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
     teacher = scenario / "ckpts" / "sorted_teacher"
-    scoring_output = scenario / "single_sequence_replacement_solutions--validation"
+    subblock = (
+        str((config.get("replacement_scoring") or {}).get("granularity")) == "subblock"
+    )
+    stem = (
+        "single_subblock_replacement_solutions"
+        if subblock
+        else "single_sequence_replacement_solutions"
+    )
+    scoring_solutions = scenario / f"{stem}.json"
+    scoring_output = scenario / f"{stem}--validation"
     return (
         f"puzzle_dir={scenario}",
         f"experiment.dir={scenario}",
@@ -28,16 +134,41 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
         f"replacement_library_path={scenario / 'replacement_library.json'}",
         f"build_replacement_library.source_checkpoint_dir={teacher}",
         "calc_subblock_stats.runtime_stats.execution=inline",
-        f"scoring.teacher_dir={teacher}",
-        f"scoring.source_checkpoint_dir={teacher}",
-        f"scoring.target_teacher_dir={teacher}",
-        f"scoring.solutions_path={scenario / 'single_sequence_replacement_solutions.json'}",
-        f"scoring.output_dir={scoring_output}",
+        f"replacement_scoring.teacher_dir={teacher}",
+        f"replacement_scoring.source_checkpoint_dir={teacher}",
+        f"replacement_scoring.target_teacher_dir={teacher}",
+        f"replacement_scoring.solutions_path={scoring_solutions}",
+        f"replacement_scoring.output_dir={scoring_output}",
         f"vllm_stats_diagnostic.stats_path={scenario / 'subblock_stats.json'}",
         f"vllm_stats_diagnostic.output_dir={scenario / 'artifacts/vllm_stats_diagnostic'}",
         f"scoring_diagnostic.scores_dir={scoring_output}",
         f"scoring_diagnostic.output_dir={scenario / 'artifacts/scoring_diagnostic'}",
     )
+
+
+def scenario_preparation_commands(
+    *, config: dict, stage: str
+) -> tuple[tuple[str, ...], ...]:
+    """Return width-local input preparation commands for a composite stage."""
+
+    replacement = config.get("replacement_scoring") or {}
+    if stage != "replacement_scoring" or replacement.get("granularity") != "subblock":
+        return ()
+    script = Path(__file__).resolve().parent / "prepare_subblock_replacement_scoring.py"
+    puzzle_dir = Path(config["puzzle_dir"])
+    trust_remote_code = bool((config.get("model") or {}).get("trust_remote_code", False))
+    commands = []
+    for width in (config.get("embedding_pruning") or {}).get("widths", ()):
+        command = [
+            sys.executable,
+            str(script),
+            "--puzzle-dir",
+            str(_scenario_dir(puzzle_dir, int(width))),
+        ]
+        if trust_remote_code:
+            command.append("--trust-remote-code")
+        commands.append(tuple(command))
+    return tuple(commands)
 
 
 def scenario_worker_commands(
@@ -56,7 +187,7 @@ def scenario_worker_commands(
     commands = []
     for width in widths:
         command = [sys.executable]
-        if stage == "scoring":
+        if stage == "replacement_scoring":
             command.extend(
                 (
                     "-m",
@@ -107,6 +238,7 @@ def run_embedding_stage(
             ),
             check=True,
         )
+        _project_vllm_stats_to_scenarios(config)
         _run_commands(
             scenario_worker_commands(
                 config_path=config_path,
@@ -115,7 +247,12 @@ def run_embedding_stage(
                 gpus_per_node=gpus_per_node,
             )
         )
-    elif stage in {"vllm_stats_diagnostic", "scoring", "scoring_diagnostic"}:
+    elif stage in {
+        "vllm_stats_diagnostic",
+        "replacement_scoring",
+        "scoring_diagnostic",
+    }:
+        _run_commands(scenario_preparation_commands(config=config, stage=stage))
         _run_commands(
             scenario_worker_commands(
                 config_path=config_path,
@@ -124,6 +261,8 @@ def run_embedding_stage(
                 gpus_per_node=gpus_per_node,
             )
         )
+        if stage == "replacement_scoring":
+            finalize_replacement_scoring_diagnostics(config)
     elif stage == "mip":
         subprocess.run(
             (

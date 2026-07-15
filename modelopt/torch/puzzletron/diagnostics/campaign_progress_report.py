@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import html
 import json
+from dataclasses import asdict
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -29,6 +30,7 @@ from ..stages.graph import (
     selected_parent_stage_ids,
     stage_display_name,
 )
+from .width_sanity import descriptor_realization_findings
 
 _STAGES = tuple(spec.stage_id for spec in STAGE_SPECS)
 
@@ -363,47 +365,20 @@ def _activation_diagnostic_summary(root: Path) -> dict[str, Any]:
             if identity not in seen:
                 rows.append(row)
                 seen.add(identity)
+    slicing_findings = list(slicing.get("findings") or ())
+    if not slicing_findings:
+        slicing_findings = [
+            asdict(finding)
+            for finding in descriptor_realization_findings(
+                slicing.get("axis_summaries") or {}
+            )
+        ]
     return {
         "rows": rows,
         "axes": sorted({str(row.get("axis")) for row in rows if row.get("axis")}),
         "width_findings": list(width.get("findings") or ()),
-        "slicing_findings": list(slicing.get("findings") or ()),
+        "slicing_findings": slicing_findings,
     }
-
-
-def _finding_cards(findings: list[dict[str, Any]]) -> str:
-    if not findings:
-        return ""
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for finding in findings:
-        evidence = finding.get("evidence") or {}
-        group = evidence.get("group") or {}
-        key = (str(finding.get("stage") or "sanity"), json.dumps(group, sort_keys=True))
-        grouped.setdefault(key, []).append(finding)
-
-    def card(key: tuple[str, str], values: list[dict[str, Any]]) -> str:
-        stage, raw_group = key
-        group = json.loads(raw_group)
-        location = " · ".join(
-            f"{name}={value}" for name, value in group.items() if value is not None
-        ) or "campaign"
-        messages = [
-            html.escape(str(value.get("message") or "Measured result needs review."))
-            for value in values
-        ]
-        details = "".join(f"<li>{message}</li>" for message in messages)
-        return (
-            "<article class='finding warning'><div><strong>Warning</strong>"
-            f"<span>{html.escape(stage.replace('_', ' ').title())} · "
-            f"{html.escape(location)} · {len(values)} finding(s)</span></div>"
-            f"<details><summary>{messages[0]}</summary><ul>{details}</ul></details></article>"
-        )
-
-    return (
-        "<div class='finding-list'>"
-        + "".join(card(key, values) for key, values in grouped.items())
-        + "</div>"
-    )
 
 
 _FINDING_METHOD_KEYS = (
@@ -412,16 +387,6 @@ _FINDING_METHOD_KEYS = (
     "left_method",
     "right_method",
 )
-
-
-def _finding_is_table_bound(finding: dict[str, Any]) -> bool:
-    evidence = finding.get("evidence") or {}
-    group = evidence.get("group") or {}
-    return (
-        all(key in group for key in ("axis", "layer_idx", "target_value"))
-        and evidence.get("metric") is not None
-        and any(evidence.get(key) is not None for key in _FINDING_METHOD_KEYS)
-    )
 
 
 def _cell_finding_messages(
@@ -454,9 +419,16 @@ def _cell_finding_messages(
 
 
 def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
+    findings = list(summary.get("width_findings") or ()) + list(
+        summary.get("slicing_findings") or ()
+    )
     rows = _activation_diagnostic_rows(summary)
     if not rows:
-        return "<p class='empty'>No width or slicing sanity artifact.</p>"
+        return (
+            "<p class='empty'>The sanity artifact contains no plottable numeric metrics.</p>"
+            if findings
+            else "<p class='empty'>No width or slicing sanity artifact.</p>"
+        )
     axes = sorted({str(row.get("axis")) for row in rows if row.get("axis") is not None})
     available_metrics = {
         key
@@ -476,18 +448,9 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
         for metric in metrics
     )
     if not axes or not metrics:
-        return (
-            _finding_cards(
-                list(summary.get("width_findings") or ())
-                + list(summary.get("slicing_findings") or ())
-            )
-            + "<p class='empty'>The sanity artifact contains no plottable numeric metrics.</p>"
-        )
+        return "<p class='empty'>The sanity artifact contains no plottable numeric metrics.</p>"
     first_axis = axes[0]
     first_metric = metrics[0]
-    findings = list(summary.get("width_findings") or ()) + list(
-        summary.get("slicing_findings") or ()
-    )
     cases: dict[tuple[Any, Any, Any], dict[str, dict[str, Any]]] = {}
     for row in rows:
         if str(row.get("axis")) != first_axis:
@@ -539,10 +502,7 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
             + "</tr>"
         )
     return (
-        _finding_cards(
-            [finding for finding in findings if not _finding_is_table_bound(finding)]
-        )
-        + "<p class='note'>Every sliced model is compared with the full, unsliced original teacher. "
+        "<p class='note'>Every sliced model is compared with the full, unsliced original teacher. "
         "The original baseline is the teacher channel order sliced to the same target. "
         "Physical is a materialized slice of the sorted checkpoint and is the slicing ground truth.</p>"
         "<label class='selector-label' for='activation-axis-select'>Swept axis</label>"
@@ -593,15 +553,38 @@ def _bypass_overfit_mode_data(root: Path, mode: str) -> dict[str, Any]:
     finite_losses = [
         float(row["loss"]) for row in records if isinstance(row.get("loss"), (int, float))
     ]
-    if len(finite_losses) >= 2 * window and not summary.get("loss_trend"):
+    minimum_relative_decrease = float(
+        history.get("minimum_relative_decrease")
+        if history.get("minimum_relative_decrease") is not None
+        else (0.05 if mode == "smallest_fixed" else 0.0)
+    )
+    if len(finite_losses) < 2 * window:
+        summary["loss_trend"] = {
+            "sufficient_evidence": False,
+            "required_records": 2 * window,
+            "observed_records": len(finite_losses),
+            "hard_gate_passed": None if mode == "diverse_resampled" else False,
+        }
+    else:
         first = median(finite_losses[:window])
         last = median(finite_losses[-window:])
+        relative_decrease = (first - last) / abs(first) if first else None
         summary["loss_trend"] = {
             "window": window,
             "first_window_median": first,
             "last_window_median": last,
             "last_to_first_ratio": last / first if first else None,
-            "hard_gate_passed": last < first,
+            "relative_decrease": relative_decrease,
+            "minimum_relative_decrease": minimum_relative_decrease,
+            "decreased": last < first,
+            "sufficient_evidence": True,
+            "hard_gate_passed": (
+                last < first
+                and relative_decrease is not None
+                and relative_decrease >= minimum_relative_decrease
+                if mode == "smallest_fixed"
+                else None
+            ),
         }
     if "distinct_structure_count" not in summary and records:
         structures = {
@@ -661,6 +644,7 @@ def _overfit_summary_card(mode: str, data: dict[str, Any]) -> str:
         )
     summary = data.get("summary") or {}
     trend = summary.get("loss_trend") or {}
+    sufficient = trend.get("sufficient_evidence", True) is True
     if mode == "diverse_resampled":
         per_width = trend.get("per_hidden_width") or {}
         decreased = (
@@ -668,10 +652,10 @@ def _overfit_summary_card(mode: str, data: dict[str, Any]) -> str:
             if per_width
             else trend.get("decreased") is True
         )
-        passed = decreased and summary.get("diversity_passed") is True
+        passed = sufficient and decreased and summary.get("diversity_passed") is True
         gate_label = "Trend + diversity gate"
     else:
-        passed = trend.get("hard_gate_passed") is True
+        passed = sufficient and trend.get("hard_gate_passed") is True
         gate_label = "Trend gate"
     ratio = trend.get("last_to_first_ratio")
     return (
@@ -682,7 +666,9 @@ def _overfit_summary_card(mode: str, data: dict[str, Any]) -> str:
         f"<dt>First-window median</dt><dd>{html.escape(_fmt(trend.get('first_window_median', 'N/A')))}</dd>"
         f"<dt>Last-window median</dt><dd>{html.escape(_fmt(trend.get('last_window_median', 'N/A')))}</dd>"
         f"<dt>Last / first</dt><dd>{html.escape(_fmt(ratio if ratio is not None else 'N/A'))}</dd>"
-        f"<dt>{gate_label}</dt><dd>{'passed' if passed else 'not passed'}</dd></dl></article>"
+        f"<dt>{gate_label}</dt><dd>"
+        f"{'passed' if passed else 'insufficient evidence' if not sufficient else 'not passed'}"
+        "</dd></dl></article>"
     )
 
 
@@ -927,11 +913,46 @@ def _config_subblocks(block_config: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _block_type_label(kinds: tuple[str, ...]) -> str:
-    mixer = next((kind for kind in kinds if kind != "ffn"), kinds[0] if kinds else "block")
+def _semantic_subblock_family(
+    subblock: dict[str, Any], *, mamba_family_hint: str | None = None
+) -> str:
+    kind = str(subblock.get("kind", "unknown"))
+    if kind == "mamba":
+        name = str(subblock.get("name", "mamba")).lower()
+        if name == "gdn":
+            return "gdn"
+        if mamba_family_hint in {"gdn", "mamba"}:
+            return mamba_family_hint
+        return "mamba"
+    return kind
+
+
+def _mamba_family_hint(root: Path) -> str | None:
+    """Recover legacy Mamba-family semantics from the declared axis namespace."""
+
+    for stage in ("build_library", "vllm_stats", "width_importance", "convert"):
+        manifest = _load_optional(root / "manifests" / f"{stage}.json")
+        axes = (
+            ((manifest.get("config") or {}).get("search_space") or {}).get("axes")
+            or {}
+        )
+        names = {str(axis) for axis in axes}
+        has_gdn = any(name.startswith("gdn_") for name in names)
+        has_mamba = any(name.startswith("mamba_") for name in names)
+        if has_gdn != has_mamba:
+            return "gdn" if has_gdn else "mamba"
+    return None
+
+
+def _block_type_label(families: tuple[str, ...]) -> str:
+    mixer = next(
+        (family for family in families if family not in {"ffn", "moe"}),
+        families[0] if families else "block",
+    )
     return {
         "attention": "Attention blocks",
-        "mamba": "GDN blocks",
+        "mamba": "Mamba blocks",
+        "gdn": "GDN blocks",
         "moe": "MoE blocks",
         "mla": "MLA blocks",
     }.get(mixer, f"{mixer.upper()} blocks")
@@ -948,6 +969,10 @@ _AXIS_LABELS = {
     "gdn_value_heads_per_group": "GDN value heads/group",
     "gdn_key_head_dim": "GDN key-head dimension",
     "gdn_value_head_dim": "GDN value-head dimension",
+    "mamba_groups": "Mamba groups",
+    "mamba_heads": "Mamba heads",
+    "mamba_state_dim": "Mamba state dimension",
+    "mamba_head_dim": "Mamba head dimension",
     "moe_experts": "MoE experts",
     "moe_expert_intermediate": "MoE expert size",
     "moe_shared_expert_intermediate": "Shared-expert size",
@@ -965,6 +990,10 @@ _AXIS_ORDER = (
     "gdn_value_heads_per_group",
     "gdn_key_head_dim",
     "gdn_value_head_dim",
+    "mamba_groups",
+    "mamba_heads",
+    "mamba_state_dim",
+    "mamba_head_dim",
     "moe_experts",
     "moe_top_k",
     "moe_expert_intermediate",
@@ -978,7 +1007,9 @@ def _axis_label(axis: str) -> str:
     return _AXIS_LABELS.get(axis, axis.replace("_", " ").title())
 
 
-def _subblock_axes(subblock: dict[str, Any]) -> dict[str, Any]:
+def _subblock_axes(
+    subblock: dict[str, Any], *, mamba_family_hint: str | None = None
+) -> dict[str, Any]:
     kind = str(subblock.get("kind", "unknown"))
     axes: dict[str, Any] = {}
     consumed = {"kind", "name", "no_op", "conv_kernel_size"}
@@ -1000,7 +1031,13 @@ def _subblock_axes(subblock: dict[str, Any]) -> dict[str, Any]:
             if subblock.get(field) is not None:
                 axes[axis] = subblock[field]
         consumed.update({"num_kv_heads", "num_query_heads", "qk_head_dim", "sliding_window_size"})
-    elif kind == "mamba":
+    elif (
+        kind == "mamba"
+        and _semantic_subblock_family(
+            subblock, mamba_family_hint=mamba_family_hint
+        )
+        == "gdn"
+    ):
         groups = subblock.get("num_groups")
         heads = subblock.get("num_heads")
         if groups is not None:
@@ -1013,6 +1050,16 @@ def _subblock_axes(subblock: dict[str, Any]) -> dict[str, Any]:
         if subblock.get("head_dim") is not None:
             axes["gdn_value_head_dim"] = subblock["head_dim"]
         consumed.update({"num_groups", "num_heads", "state_dim", "head_dim"})
+    elif kind == "mamba":
+        for field, axis in (
+            ("num_groups", "mamba_groups"),
+            ("num_heads", "mamba_heads"),
+            ("state_dim", "mamba_state_dim"),
+            ("head_dim", "mamba_head_dim"),
+        ):
+            if subblock.get(field) is not None:
+                axes[axis] = subblock[field]
+            consumed.add(field)
     elif kind == "moe":
         for field, axis in (
             ("num_experts", "moe_experts"),
@@ -1032,10 +1079,12 @@ def _subblock_axes(subblock: dict[str, Any]) -> dict[str, Any]:
     return axes
 
 
-def _block_axes(block: dict[str, Any]) -> dict[str, Any]:
+def _block_axes(
+    block: dict[str, Any], *, mamba_family_hint: str | None = None
+) -> dict[str, Any]:
     axes: dict[str, Any] = {}
     for subblock in _config_subblocks(block):
-        axes.update(_subblock_axes(subblock))
+        axes.update(_subblock_axes(subblock, mamba_family_hint=mamba_family_hint))
     return axes
 
 
@@ -1051,7 +1100,9 @@ def _axis_sort_key(axis: str) -> tuple[int, str]:
     return (_AXIS_ORDER.index(axis) if axis in _AXIS_ORDER else len(_AXIS_ORDER), axis)
 
 
-def _library_scenario(path: Path) -> dict[str, Any]:
+def _library_scenario(
+    path: Path, *, mamba_family_hint: str | None = None
+) -> dict[str, Any]:
     payload = _load_optional(path)
     entries = [entry for entry in payload.get("entries", ()) if isinstance(entry, dict)]
     by_signature: dict[tuple[str, ...], dict[int, dict[str, dict[str, Any]]]] = {}
@@ -1064,9 +1115,17 @@ def _library_scenario(path: Path) -> dict[str, Any]:
         block = children[0]
         layer = int(parents[0])
         subblocks = _config_subblocks(block)
-        # Replacement helpers may move the changed subblock to the end of the tuple.
-        # Layer type is a set of subblock kinds, not their serialization order.
-        signature = tuple(sorted(str(value.get("kind", "unknown")) for value in subblocks))
+        # Schema slots may be present as no-ops. Family describes the active
+        # operator, independent of serialization order.
+        active = [value for value in subblocks if value.get("no_op") is not True]
+        signature = tuple(
+            sorted(
+                _semantic_subblock_family(
+                    value, mamba_family_hint=mamba_family_hint
+                )
+                for value in (active or subblocks)
+            )
+        )
         normalized = _normalized_block(block)
         by_signature.setdefault(signature, {}).setdefault(layer, {})[
             _canonical_json(normalized)
@@ -1085,7 +1144,9 @@ def _library_scenario(path: Path) -> dict[str, Any]:
             axis_values: dict[str, set[str]] = {}
             decoded_values: dict[str, dict[str, Any]] = {}
             for block in configs:
-                for axis, value in _block_axes(block).items():
+                for axis, value in _block_axes(
+                    block, mamba_family_hint=mamba_family_hint
+                ).items():
                     encoded = _canonical_json(value)
                     axis_values.setdefault(axis, set()).add(encoded)
                     decoded_values.setdefault(axis, {})[encoded] = value
@@ -1157,7 +1218,10 @@ def _library_data(root: Path) -> dict[str, Any]:
     paths = sorted(root.glob("scenarios/width-*/depth-00/replacement_library.json"))
     if not paths and (root / "replacement_library.json").is_file():
         paths = [root / "replacement_library.json"]
-    scenarios = [_library_scenario(path) for path in paths]
+    mamba_family_hint = _mamba_family_hint(root)
+    scenarios = [
+        _library_scenario(path, mamba_family_hint=mamba_family_hint) for path in paths
+    ]
     total_entries = sum(int(scenario["entries"]) for scenario in scenarios)
     unique_runtime_configs = sum(int(row["unique_runtime_configs"]) for row in scenarios)
     formula = "Pending library creation"
@@ -1177,6 +1241,7 @@ def _library_data(root: Path) -> dict[str, Any]:
         "total_entries": total_entries,
         "num_widths": len(scenarios),
         "unique_runtime_configs": unique_runtime_configs,
+        "mamba_family_hint": mamba_family_hint,
     }
 
 
@@ -1209,8 +1274,12 @@ def _library_section(data: dict[str, Any]) -> str:
     )
 
 
-def _compact_runtime_config(config: dict[str, Any]) -> str:
-    kind = str(config.get("kind", "unknown"))
+def _compact_runtime_config(
+    config: dict[str, Any], *, mamba_family_hint: str | None = None
+) -> str:
+    kind = _semantic_subblock_family(
+        config, mamba_family_hint=mamba_family_hint
+    )
     ignored = {"kind", "name", "no_op", "conv_kernel_size"}
     values = ", ".join(
         f"{key.replace('intermediate_size', 'dim').replace('num_', '')}={value}"
@@ -1223,7 +1292,9 @@ def _compact_runtime_config(config: dict[str, Any]) -> str:
 def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     scenarios: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
     runtime_profiles: dict[str, dict[str, Any]] = {}
+    mamba_family_hint = library.get("mamba_family_hint")
     for scenario in library.get("scenarios", ()):
         width = scenario.get("hidden_width")
         stats_path = Path(scenario["path"]).with_name("subblock_stats.json")
@@ -1270,27 +1341,66 @@ def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(row.get(metric), (int, float))
                     and not isinstance(row.get(metric), bool)
                 }
+                invalid_phases = [
+                    metric
+                    for metric in ("prefill_runtime_ms", "decode_runtime_ms")
+                    if isinstance(row.get(metric), (int, float)) and float(row[metric]) < 0.0
+                ]
+                valid = not invalid_phases
+                warning_message = (
+                    "Native runtime measurement has a negative marginal phase: "
+                    + ", ".join(invalid_phases)
+                    if invalid_phases and not bool(config.get("no_op", False))
+                    else None
+                )
+                if invalid_phases and not bool(config.get("no_op", False)):
+                    warnings.append(
+                        {
+                            "kind": "negative_runtime_phase",
+                            "hidden_width": width,
+                            "config": config,
+                            "metrics": invalid_phases,
+                            "message": warning_message,
+                        }
+                    )
                 records.append(
                     {
                         "hidden_width": width,
-                        "kind": str(config.get("kind", "unknown")),
+                        "kind": _semantic_subblock_family(
+                            config, mamba_family_hint=mamba_family_hint
+                        ),
                         "config": config,
-                        "label": _compact_runtime_config(config),
-                        "axes": {"hidden_width": width, **_subblock_axes(config)},
+                        "label": _compact_runtime_config(
+                            config, mamba_family_hint=mamba_family_hint
+                        ),
+                        "axes": {
+                            "hidden_width": width,
+                            **_subblock_axes(
+                                config, mamba_family_hint=mamba_family_hint
+                            ),
+                        },
                         "metrics": metrics,
                         "profile": args,
                         "profile_id": profile_id,
                         "profile_label": profile_label,
+                        "valid": valid,
+                        "warning": warning_message,
                     }
                 )
         expected = int(scenario.get("unique_runtime_configs", 0))
+        invalid = sum(
+            1
+            for warning in warnings
+            if warning.get("hidden_width") == width
+        )
         scenarios.append(
             {
                 "hidden_width": width,
                 "path": str(stats_path),
                 "expected": expected,
                 "measured": len(seen),
-                "complete": expected > 0 and len(seen) == expected,
+                "invalid": invalid,
+                "complete": expected > 0 and len(seen) == expected and invalid == 0,
                 "profiles": len(profiles),
             }
         )
@@ -1322,6 +1432,7 @@ def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
         "widths": sorted({record.get("hidden_width") for record in records}),
         "kinds": sorted({str(record.get("kind")) for record in records}),
         "profiles": sorted(runtime_profiles.values(), key=lambda row: str(row["label"])),
+        "warnings": warnings,
     }
 
 
@@ -1411,12 +1522,88 @@ def _compact_block_config(block: dict[str, Any]) -> str:
     return " + ".join(_compact_runtime_config(row) for row in _config_subblocks(block))
 
 
+def _subblock_replacement_record(
+    payload: dict[str, Any], path: Path, hidden_width: int | None
+) -> dict[str, Any] | None:
+    puzzle_solution = payload.get("puzzle_solution") or {}
+    replacement = puzzle_solution.get("single_sequence_replacement") or {}
+    marker = puzzle_solution.get("subblock_replacement") or {}
+    parents = replacement.get("parent_layer_indices") or []
+    children = replacement.get("child_block_configs") or []
+    if not parents or not children or not isinstance(children[0], dict):
+        return None
+    block = children[0]
+    kind = str(marker.get("kind", "unknown"))
+    name = str(marker.get("name", kind))
+    selected = next(
+        (
+            subblock
+            for subblock in _config_subblocks(block)
+            if str(subblock.get("kind")) == kind
+            and str(subblock.get("name", kind)) == name
+        ),
+        None,
+    )
+    if selected is None:
+        return None
+    index = int(payload.get("i_solution", path.stem.rsplit("_", 1)[-1]))
+    return {
+        "hidden_width": hidden_width,
+        "solution_index": index,
+        "layer_idx": int(parents[0]),
+        "eval_samples": (payload.get("args") or {}).get("eval_samples"),
+        "family": kind,
+        "label": _compact_runtime_config(selected),
+        "config": _normalized_block(block),
+        "axes": _subblock_axes(selected),
+        "metrics": _replacement_metrics(payload),
+        "sliced_teacher_baseline": _all_numeric_metrics(
+            payload.get("sliced_teacher_baseline") or {}
+        ),
+        "granularity": "subblock",
+        "subblock_kind": kind,
+        "subblock_name": name,
+        "provenance": {
+            "method": "atomic_subblock_measurement",
+            "source_result_id": str(
+                (payload.get("distributed_evaluation") or {}).get("request_id", index)
+            ),
+        },
+    }
+
+
 def _replacement_data(root: Path) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     scenarios: list[dict[str, Any]] = []
+    granularity = "block"
     for scenario_dir in sorted(root.glob("scenarios/width-*/depth-00")):
         manifest = _load_optional(scenario_dir / "scenario_manifest.json")
         width = manifest.get("hidden_width")
+        subblock_definitions_path = scenario_dir / "single_subblock_replacement_solutions.json"
+        subblock_result_dir = (
+            scenario_dir / "single_subblock_replacement_solutions--validation"
+        )
+        if subblock_definitions_path.is_file() and subblock_result_dir.is_dir():
+            granularity = "subblock"
+            definitions = json.loads(subblock_definitions_path.read_text())
+            expected = len(definitions) if isinstance(definitions, list) else 0
+            measured = 0
+            for path in sorted(subblock_result_dir.glob("solution_*.json")):
+                record = _subblock_replacement_record(_load_optional(path), path, width)
+                if record is not None:
+                    records.append(record)
+                    measured += 1
+            scenarios.append(
+                {
+                    "hidden_width": width,
+                    "path": str(subblock_result_dir),
+                    "expected": expected,
+                    "measured": measured,
+                    "complete": expected > 0 and measured == expected,
+                    "granularity": "subblock",
+                }
+            )
+            continue
         definitions_path = scenario_dir / "single_sequence_replacement_solutions.json"
         definitions = json.loads(definitions_path.read_text()) if definitions_path.is_file() else []
         if not isinstance(definitions, list):
@@ -1470,63 +1657,17 @@ def _replacement_data(root: Path) -> dict[str, Any]:
                     "complete": expected > 0 and measured == expected,
                 }
             )
-    granularity = "block"
     if not records:
         atomic_manifest = _load_optional(root / "subblock_replacement_manifest.json")
         result_dir = root / "single_subblock_replacement_solutions--validation"
         if atomic_manifest.get("mode") == "replace_one_subblock" and result_dir.is_dir():
             granularity = "subblock"
             for path in sorted(result_dir.glob("solution_*.json")):
-                payload = _load_optional(path)
-                puzzle_solution = payload.get("puzzle_solution") or {}
-                replacement = puzzle_solution.get("single_sequence_replacement") or {}
-                marker = puzzle_solution.get("subblock_replacement") or {}
-                parents = replacement.get("parent_layer_indices") or []
-                children = replacement.get("child_block_configs") or []
-                if not parents or not children or not isinstance(children[0], dict):
-                    continue
-                block = children[0]
-                kind = str(marker.get("kind", "unknown"))
-                name = str(marker.get("name", kind))
-                selected = next(
-                    (
-                        subblock
-                        for subblock in _config_subblocks(block)
-                        if str(subblock.get("kind")) == kind
-                        and str(subblock.get("name", kind)) == name
-                    ),
-                    None,
+                record = _subblock_replacement_record(
+                    _load_optional(path), path, atomic_manifest.get("hidden_width")
                 )
-                if selected is None:
-                    continue
-                index = int(payload.get("i_solution", path.stem.rsplit("_", 1)[-1]))
-                records.append(
-                    {
-                        "hidden_width": atomic_manifest.get("hidden_width"),
-                        "solution_index": index,
-                        "layer_idx": int(parents[0]),
-                        "eval_samples": (payload.get("args") or {}).get("eval_samples"),
-                        "family": kind,
-                        "label": _compact_runtime_config(selected),
-                        "config": _normalized_block(block),
-                        "axes": _subblock_axes(selected),
-                        "metrics": _replacement_metrics(payload),
-                        "sliced_teacher_baseline": _all_numeric_metrics(
-                            payload.get("sliced_teacher_baseline") or {}
-                        ),
-                        "granularity": "subblock",
-                        "subblock_kind": kind,
-                        "subblock_name": name,
-                        "provenance": {
-                            "method": "atomic_subblock_measurement",
-                            "source_result_id": str(
-                                (payload.get("distributed_evaluation") or {}).get(
-                                    "request_id", index
-                                )
-                            ),
-                        },
-                    }
-                )
+                if record is not None:
+                    records.append(record)
             expected = int(atomic_manifest.get("subblock_solution_count", 0) or 0)
             scenarios.append(
                 {
@@ -3012,15 +3153,17 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   const metricRows=name=>rows.filter(row=>row.profile_id===profile.value&&finite((row.metrics||{{}})[name]));
   const profileLabel=()=>{{const selected=profile.options[profile.selectedIndex];return selected?selected.textContent:'runtime profile';}};
   const widthColor=width=>{{const index=(data.widths||[]).map(String).indexOf(String(width));return palette[(index<0?0:index)%palette.length];}};
+  const warningText=row=>row.warning?`<br>Warning: ${{row.warning}}`:'';
+  const warningSymbol=row=>row.warning?'x':row.kind==='ffn'?'square':row.kind==='attention'?'circle':'diamond';
   function renderOverview(){{
     const name=overviewMetric.value,ordered=metricRows(name).slice().sort((a,b)=>Number(a.metrics[name])-Number(b.metrics[name]));
     const rank=new Map(ordered.map((row,index)=>[row,index+1])),groups=new Map();
     ordered.forEach(row=>{{const key=`${{row.hidden_width}} · ${{row.kind}}`;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(row);}});
     const traces=[...groups.entries()].map(([traceName,values])=>({{
       x:values.map(row=>rank.get(row)),y:values.map(row=>Number(row.metrics[name])),mode:'markers',name:traceName,
-      marker:{{size:11,color:widthColor(values[0].hidden_width),symbol:values[0].kind==='ffn'?'square':values[0].kind==='attention'?'circle':'diamond'}},
-      customdata:values.map(row=>[row.hidden_width,row.label]),
-      hovertemplate:'rank=%{{x}} · %{{y:.7g}}<br>w=%{{customdata[0]}} · %{{customdata[1]}}<extra></extra>'
+      marker:{{size:11,color:values.map(row=>row.warning?'#ff6577':widthColor(row.hidden_width)),symbol:values.map(warningSymbol)}},
+      customdata:values.map(row=>[row.hidden_width,row.label,warningText(row)]),
+      hovertemplate:'rank=%{{x}} · %{{y:.7g}}<br>w=%{{customdata[0]}} · %{{customdata[1]}}%{{customdata[2]}}<extra></extra>'
     }}));
     Plotly.react('vllm-overview-plot',traces,{{...charts.theme,title:{{text:`${{name}} · ${{profileLabel()}}`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:`Candidate rank (ascending ${{name}})`}},yaxis:{{...charts.theme.yaxis,title:name}},hovermode:'closest'}},charts.config);
   }}
@@ -3055,7 +3198,7 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
     const widths=[...new Set(selected.map(row=>row.hidden_width))].sort((a,b)=>Number(b)-Number(a));
     const traces=widths.map(width=>{{
       const values=selected.filter(row=>String(row.hidden_width)===String(width)).sort((a,b)=>Number(a.axes[swept])-Number(b.axes[swept]));
-      return {{x:values.map(row=>row.axes[swept]),y:values.map(row=>Number(row.metrics[name])),mode:choice==='ALL'?'markers':'lines+markers',name:`width ${{width}}`,marker:{{size:11,color:widthColor(width)}},line:{{color:widthColor(width),width:2}},customdata:values.map(row=>[row.label]),hovertemplate:`${{labels[swept]||swept}}=%{{x}} · %{{y:.7g}}<br>%{{customdata[0]}}<extra></extra>`}};
+      return {{x:values.map(row=>row.axes[swept]),y:values.map(row=>Number(row.metrics[name])),mode:choice==='ALL'?'markers':'lines+markers',name:`width ${{width}}`,marker:{{size:11,color:values.map(row=>row.warning?'#ff6577':widthColor(width)),symbol:values.map(warningSymbol)}},line:{{color:widthColor(width),width:2}},customdata:values.map(row=>[row.label,warningText(row)]),hovertemplate:`${{labels[swept]||swept}}=%{{x}} · %{{y:.7g}}<br>%{{customdata[0]}}%{{customdata[1]}}<extra></extra>`}};
     }});
     if(summary)summary.textContent=`${{profileLabel()}} · `+(choice==='ALL'?'ALL compatible configurations; every width remains visible as its own trace.':configLabel(anchor));
     Plotly.react('vllm-stats-plot',traces,{{...charts.theme,title:{{text:`${{name}} by ${{labels[swept]||swept}}`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:labels[swept]||swept}},yaxis:{{...charts.theme.yaxis,title:name}},hovermode:'closest'}},charts.config);

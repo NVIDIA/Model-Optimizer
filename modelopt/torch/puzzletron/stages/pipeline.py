@@ -211,6 +211,59 @@ def _write_runtime_subblock_library(path: Path, block_configs: tuple[Any, ...]) 
     path.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n")
 
 
+def _prepare_sparse_runtime_selection(
+    config: dict[str, Any],
+    *,
+    runtime_cfg: Any,
+    teacher_dir: Path,
+    puzzle_dir: Path,
+) -> dict[str, Any]:
+    """Create the deterministic sparse subblock view consumed by vLLM stats."""
+    sparse_cfg = _get(runtime_cfg, "sparse_sampling", None) or {}
+    if not bool(_get(sparse_cfg, "enabled", False)):
+        return {}
+
+    from ..candidates import build_candidate_library, load_block_configs_from_checkpoint
+    from ..sampling.sparse import SparseSamplingPolicy, sample_subblock_configs
+
+    candidates = build_candidate_library(
+        load_block_configs_from_checkpoint(teacher_dir),
+        search_space=config.get("search_space") or {},
+        parent_checkpoint_identity=str(teacher_dir.resolve()),
+        include_self=True,
+        include_noops=bool((config.get("build_library") or {}).get("include_noops", True)),
+    )
+    sampled = sample_subblock_configs(
+        candidates,
+        policy=SparseSamplingPolicy(
+            max_pairwise_per_family=int(
+                _get(sparse_cfg, "max_pairwise_per_family", 4)
+            ),
+            seed=int(_get(sparse_cfg, "seed", 42)),
+        ),
+    )
+    sparse_manifest = sampled.to_dict()
+    sparse_manifest.update(
+        {
+            "teacher_dir": str(teacher_dir.resolve()),
+            "candidate_count": len(candidates),
+        }
+    )
+    output = puzzle_dir / "artifacts" / "vllm_stats" / "sparse_subblock_samples.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(sparse_manifest, indent=2, sort_keys=True) + "\n")
+    temporary.replace(output)
+    runtime_cfg.selection_manifest = str(output)
+    return {
+        "path": str(output),
+        "identity": sparse_manifest["identity"],
+        "candidate_count": len(candidates),
+        "selected_count": len(sparse_manifest["selected"]),
+        "excluded_count": len(sparse_manifest["excluded"]),
+    }
+
+
 def vllm_stats_stage(config: dict[str, Any], manifest: StageManifest):
     """Collect runtime statistics from converted-teacher candidates before library assembly."""
     hydra_cfg = load_runtime_hydra_config(config)
@@ -240,6 +293,12 @@ def vllm_stats_stage(config: dict[str, Any], manifest: StageManifest):
     puzzle_dir.mkdir(parents=True, exist_ok=True)
     subblock_library_path = puzzle_dir / "subblock_library.json"
     _write_runtime_subblock_library(subblock_library_path, block_configs)
+    sparse_selection = _prepare_sparse_runtime_selection(
+        config,
+        runtime_cfg=runtime_cfg,
+        teacher_dir=teacher_dir,
+        puzzle_dir=puzzle_dir,
+    )
     launch_calc_subblock_stats(hydra_cfg)
     stats_path = puzzle_dir / _get(
         hydra_cfg.calc_subblock_stats, "subblock_stats_filename", "subblock_stats.json"
@@ -265,6 +324,7 @@ def vllm_stats_stage(config: dict[str, Any], manifest: StageManifest):
             "subblock_library_path": str(subblock_library_path),
             "runtime_candidate_count": len(block_configs),
             "runtime_granularity": _get(runtime_cfg, "granularity", "block"),
+            "sparse_runtime_selection": sparse_selection,
             "report": report_summary,
         },
     )
@@ -581,6 +641,30 @@ def _finalize_bypass_sanity_summary(
     return summary_path
 
 
+def _bypass_sanity_overfit_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Map the public sanity controls onto the legacy local-KD probe config."""
+
+    bypass = dict(config.get("bypass") or {})
+    overfit = dict(bypass.get("overfit") or {})
+    sanity = dict(config.get("bypass_sanity") or {})
+    if "steps" in sanity:
+        overfit["repetitions"] = int(sanity["steps"])
+    mode_keys = ("fixed_smallest", "diverse_nested")
+    if any(key in sanity for key in mode_keys):
+        modes = []
+        if bool(sanity.get("fixed_smallest", False)):
+            modes.append("smallest_fixed")
+        if bool(sanity.get("diverse_nested", False)):
+            modes.append("diverse_resampled")
+        overfit["modes"] = modes
+    if any(key in sanity for key in ("steps", *mode_keys)):
+        overfit.setdefault("learning_rate", 3.0e-4)
+        overfit.setdefault("decay_lr", False)
+        overfit.setdefault("weight_decay", 0.0)
+        overfit.setdefault("minimum_relative_decrease", 0.05)
+    return overfit
+
+
 def bypass_overfit_stage(config: dict[str, Any], manifest: StageManifest):
     """Run only the isolated same-batch nested-bypass acceptance probe."""
 
@@ -588,6 +672,7 @@ def bypass_overfit_stage(config: dict[str, Any], manifest: StageManifest):
     puzzle_dir = _puzzle_dir(config, hydra_cfg)
     num_nodes, node_index = _runtime_split(config)
     OmegaConf.set_struct(hydra_cfg, False)
+    hydra_cfg.bypass.overfit = OmegaConf.create(_bypass_sanity_overfit_config(config))
     hydra_cfg.bypass.overfit.enabled = True
     hydra_cfg.bypass.overfit.only = True
     with _distributed(hydra_cfg):

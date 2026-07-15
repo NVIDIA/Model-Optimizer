@@ -31,6 +31,7 @@ primitives in :mod:`.attention_ffn_surgery`; the descriptor supplies the per-lay
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,25 @@ __all__ = [
 ]
 
 _WEIGHT = ".weight"
+
+
+def _shard_requires_rewrite(
+    tensor_keys,
+    *,
+    target_layer_prefixes: tuple[str, ...],
+    global_slice: bool,
+) -> bool:
+    """Return whether a checkpoint shard can change under this realization.
+
+    Layer-local replacements only touch tensors below the replaced layer prefixes.
+    Hidden-width and PLE slicing are model-global and therefore conservatively
+    rewrite every shard.
+    """
+
+    if global_slice:
+        return True
+    prefixes = tuple(f"{prefix}." for prefix in target_layer_prefixes)
+    return any(str(key).startswith(prefixes) for key in tensor_keys) if prefixes else False
 
 
 @dataclass
@@ -92,6 +112,17 @@ def _slice_gated_up(up: torch.Tensor, keep: torch.Tensor, intermediate: int) -> 
     return up[keep]
 
 
+def _newly_removed_subblock(child, teacher) -> bool:
+    """Return whether an active teacher subblock became a child no-op."""
+
+    return bool(
+        child is not None
+        and child.no_op
+        and teacher is not None
+        and not teacher.no_op
+    )
+
+
 def block_targets_from_replacements(
     layer_replacements,
     teacher_block_configs,
@@ -115,6 +146,11 @@ def block_targets_from_replacements(
                 child = BlockConfig(**child)
             if not isinstance(child, BlockConfig):
                 raise TypeError(f"Expected BlockConfig child replacement, got {type(child).__name__}")
+            teacher_block_config = teacher_block_configs[layer_idx]
+            if isinstance(teacher_block_config, dict):
+                teacher_block_config = BlockConfig(**teacher_block_config)
+            if child.to_dict() == teacher_block_config.to_dict():
+                continue
             ffn = child.get_subblock("ffn")
             attn = child.get_subblock("attention")
             if ffn is not None and not isinstance(ffn, FFNConfig):
@@ -132,15 +168,15 @@ def block_targets_from_replacements(
                 raise TypeError(f"Expected MLAConfig for 'mla', got {type(mla).__name__}")
             t_kv = attn.num_kv_heads if attn is not None else None
             t_q = attn.num_query_heads if attn is not None else None
-            teacher_block_config = teacher_block_configs[layer_idx]
-            if isinstance(teacher_block_config, dict):
-                teacher_block_config = BlockConfig(**teacher_block_config)
             teacher_attn = teacher_block_config.get_subblock("attention")
             if teacher_attn is not None and not isinstance(teacher_attn, AttentionConfig):
                 raise TypeError(
                     f"Expected AttentionConfig for teacher 'attention', got {type(teacher_attn).__name__}"
                 )
             orig_kv = teacher_attn.num_kv_heads if teacher_attn is not None else None
+            teacher_ffn = teacher_block_config.get_subblock("ffn")
+            teacher_mamba = teacher_block_config.get_subblock("mamba")
+            teacher_moe = teacher_block_config.get_subblock("moe")
             if t_kv is not None:
                 if t_q is None and orig_kv is not None and t_kv < orig_kv:
                     t_q = t_kv * (num_attention_heads // orig_kv)
@@ -154,9 +190,11 @@ def block_targets_from_replacements(
                 target_q_lora_rank=mla.q_lora_rank if mla is not None else None,
                 target_kv_lora_rank=mla.kv_lora_rank if mla is not None else None,
                 target_num_experts=moe.num_experts if moe is not None else None,
-                expert_keep_indices=(
-                    tuple(int(item) for item in diagnostic.get("kept_experts", ())) or None
-                ),
+                # ``sorted_dir`` has already moved the ranked original expert
+                # ids into its leading prefix.  The ids remain useful report
+                # provenance, but indexing the sorted tensors by them again
+                # would select a different expert set.
+                expert_keep_indices=None,
                 target_expert_intermediate=moe.expert_intermediate_size if moe is not None else None,
                 target_shared_expert_intermediate=(
                     moe.shared_expert_intermediate_size if moe is not None else None
@@ -166,10 +204,10 @@ def block_targets_from_replacements(
                 target_mamba_groups=mamba.num_groups if mamba is not None else None,
                 target_mamba_head_dim=mamba.head_dim if mamba is not None else None,
                 target_mamba_state_dim=mamba.state_dim if mamba is not None else None,
-                remove_ffn=bool(ffn is not None and ffn.no_op),
-                remove_attention=bool(attn is not None and attn.no_op),
-                remove_mamba=bool(mamba is not None and mamba.no_op),
-                remove_moe=bool(moe is not None and moe.no_op),
+                remove_ffn=_newly_removed_subblock(ffn, teacher_ffn),
+                remove_attention=_newly_removed_subblock(attn, teacher_attn),
+                remove_mamba=_newly_removed_subblock(mamba, teacher_mamba),
+                remove_moe=_newly_removed_subblock(moe, teacher_moe),
             )
     return targets
 
@@ -405,6 +443,27 @@ def materialize_checkpoint_from_sorted(
     targets = block_targets_from_replacements(layer_replacements, teacher_block_configs, num_q)
     weight_files = source_weight_files
     source_is_indexed = (sorted_dir / "model.safetensors.index.json").is_file()
+    source_index = (
+        json.loads(source_index_path.read_text(encoding="utf-8"))
+        if source_is_indexed
+        else {}
+    )
+    source_weight_map = dict(source_index.get("weight_map") or {})
+    source_total_size = (source_index.get("metadata") or {}).get("total_size")
+    can_link_unchanged = (
+        source_is_indexed
+        and isinstance(source_total_size, int)
+        and bool(source_weight_map)
+    )
+    source_keys_by_shard: dict[str, set[str]] = {}
+    for key, shard in source_weight_map.items():
+        source_keys_by_shard.setdefault(str(shard), set()).add(str(key))
+    target_layer_prefixes = tuple(
+        layer_prefix_tmpl.format(i=int(layer_idx)) for layer_idx in sorted(targets)
+    )
+    global_slice = embedding_spec is not None or (
+        ple_spec is not None and target_ple_width < teacher_ple_width
+    )
 
     tmp_dir = output_dir.with_name(output_dir.name + ".puzzletron-tmp")
     if tmp_dir.exists():
@@ -425,14 +484,37 @@ def materialize_checkpoint_from_sorted(
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
 
-    weight_map: dict[str, str] = {}
-    tensor_count = 0
-    total_size = 0
+    weight_map: dict[str, str] = dict(source_weight_map) if can_link_unchanged else {}
+    tensor_count = len(weight_map)
+    total_size = int(source_total_size) if can_link_unchanged else 0
     output_shards = 0
+    hardlinked_shards = 0
     try:
         for relative in weight_files:
             source_shard = sorted_dir / relative
+            relative_name = relative.as_posix()
+            source_shard_keys = source_keys_by_shard.get(relative_name, set())
+            if can_link_unchanged and not _shard_requires_rewrite(
+                source_shard_keys,
+                target_layer_prefixes=target_layer_prefixes,
+                global_slice=global_slice,
+            ):
+                destination = tmp_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.link(source_shard, destination)
+                    hardlinked_shards += 1
+                except OSError:
+                    shutil.copy2(source_shard, destination)
+                output_shards += 1
+                continue
+
             tensors = load_file(str(source_shard))
+            if can_link_unchanged:
+                for key, tensor in tensors.items():
+                    if weight_map.pop(key, None) is not None:
+                        tensor_count -= 1
+                        total_size -= tensor.numel() * tensor.element_size()
             realized = materialize_solution_state_dict(tensors, layouts, targets)
             realized = _drop_descriptor_no_op_tensors(
                 realized,
@@ -456,13 +538,12 @@ def materialize_checkpoint_from_sorted(
             for key, tensor in realized.items():
                 if key in weight_map:
                     raise RuntimeError(f"tensor {key} was written by multiple output shards")
-                weight_map[key] = relative.as_posix()
+                weight_map[key] = relative_name
                 tensor_count += 1
                 total_size += tensor.numel() * tensor.element_size()
             del tensors, realized
 
         if source_is_indexed:
-            source_index = json.loads(source_index_path.read_text(encoding="utf-8"))
             index_metadata = dict(source_index.get("metadata") or {})
             index_metadata["total_size"] = total_size
             index = {"metadata": index_metadata, "weight_map": weight_map}
@@ -477,6 +558,7 @@ def materialize_checkpoint_from_sorted(
             **expected_identity,
             "source_shards": len(weight_files),
             "output_shards": output_shards,
+            "hardlinked_shards": hardlinked_shards,
             "tensor_count": tensor_count,
             "total_size": total_size,
             "hidden_width": target_hidden_width,

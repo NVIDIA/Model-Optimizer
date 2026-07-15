@@ -45,6 +45,8 @@ from ..diagnostics.width_slice_equivalence import (
     normalize_width_slice_batch,
     validate_width_slice_artifacts,
 )
+from ..diagnostics.campaign_findings import MetricSpec
+from ..diagnostics.width_sanity import aggregate_parent_sweep_sanity
 from ..identity import canonicalize, stable_hash
 from ..manifest import StageManifest
 from ..pruning.sorted_teacher import build_sorted_teacher
@@ -1960,6 +1962,80 @@ def _write_summary(
     return summary
 
 
+def _publish_parent_sweep_sanity(
+    *,
+    puzzle_dir: Path,
+    parent_summary: dict[str, Any],
+    hidden_width_summary: dict[str, Any] | None,
+    diag_cfg: dict[str, Any],
+) -> tuple[Path, Path]:
+    """Publish scalable width and physical-equivalence summaries from one sweep."""
+
+    tolerance = float(diag_cfg.get("physical_equivalence_tolerance", 1.0e-3))
+    tolerance_overrides = {
+        str(metric): float(value)
+        for metric, value in dict(
+            diag_cfg.get("physical_equivalence_tolerances") or {}
+        ).items()
+    }
+    unknown_metrics = sorted(set(tolerance_overrides).difference(_PRIMARY_METRICS))
+    if unknown_metrics:
+        raise ValueError(
+            "physical_equivalence_tolerances contains unknown metrics: "
+            f"{unknown_metrics}"
+        )
+    invalid_tolerances = {
+        metric: value
+        for metric, value in tolerance_overrides.items()
+        if not math.isfinite(value) or value < 0.0
+    }
+    if invalid_tolerances:
+        raise ValueError(
+            "physical equivalence tolerances must be finite and non-negative: "
+            f"{invalid_tolerances}"
+        )
+    metric_specs = {
+        metric: MetricSpec(
+            name=metric,
+            direction="higher" if metric.startswith("token_accuracy_") else "lower",
+            abs_tolerance=tolerance_overrides.get(metric, tolerance),
+        )
+        for metric in _PRIMARY_METRICS
+    }
+    width_summary, slicing_summary, axes = aggregate_parent_sweep_sanity(
+        parent_summary,
+        hidden_width_summary,
+        metric_specs=metric_specs,
+    )
+    provenance = {
+        "backend": "distributed_parent_sweep",
+        "axes": axes,
+        "physical_equivalence_tolerance": tolerance,
+        "physical_equivalence_tolerances": tolerance_overrides,
+    }
+    paths = []
+    for stage, payload in (
+        ("width_sanity", width_summary),
+        ("slicing_sanity", slicing_summary),
+    ):
+        payload["provenance"] = provenance
+        output = puzzle_dir / "artifacts" / stage / "summary.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(canonicalize(payload), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        paths.append(output)
+    if slicing_summary["findings"] and bool(
+        diag_cfg.get("require_physical_equivalence", True)
+    ):
+        raise RuntimeError(
+            "runtime/physical width slicing differs beyond tolerance: "
+            f"{slicing_summary['findings']}"
+        )
+    return paths[0], paths[1]
+
+
 def _nested_update(mapping: Any, path: str, value: Any) -> None:
     parts = path.split(".")
     target = mapping
@@ -2553,6 +2629,12 @@ def _activation_diagnostic_parent_sweep(
             summary_path.write_text(
                 json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n"
             )
+            _publish_parent_sweep_sanity(
+                puzzle_dir=puzzle_dir,
+                parent_summary=summary,
+                hidden_width_summary=hidden_width_summary,
+                diag_cfg=diag_cfg,
+            )
 
             activation_equivalence = (
                 (sweep_manifest.get("parents") or {}).get("activation") or {}
@@ -2624,6 +2706,12 @@ def _activation_diagnostic_parent_sweep(
             "cleanup_path": str(artifacts_dir / "diagnostic_cleanup.json"),
             "hidden_width_summary_path": str(
                 artifacts_dir / "hidden_width_diagnostic_summary.json"
+            ),
+            "width_summary_path": str(
+                puzzle_dir / "artifacts" / "width_sanity" / "summary.json"
+            ),
+            "slicing_summary_path": str(
+                puzzle_dir / "artifacts" / "slicing_sanity" / "summary.json"
             ),
         },
     )
@@ -2973,6 +3061,26 @@ def _validate_checkpoint_lm_loss(
     return summary, losses
 
 
+def _sort_equivalence_decision(
+    *,
+    delta: float,
+    reverse_delta: float | None,
+    tolerance: float,
+    reverse_tolerance: float,
+) -> dict[str, bool]:
+    """Gate the production sort independently from its reverse-order control."""
+
+    sorted_passed = abs(float(delta)) <= float(tolerance)
+    reverse_passed = reverse_delta is None or abs(float(reverse_delta)) <= float(
+        reverse_tolerance
+    )
+    return {
+        "sorted_passed": sorted_passed,
+        "reverse_passed": reverse_passed,
+        "passed": sorted_passed and reverse_passed,
+    }
+
+
 def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
     """Evaluate teacher and sorted teacher with the chunked AutoModel scorer."""
 
@@ -3001,6 +3109,9 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
     artifacts_dir = _puzzle_dir(config, hydra_cfg) / "artifacts" / "sort_sanity"
     metric = str(diag_cfg.get("metric", "lm_loss"))
     tolerance = float(diag_cfg.get("max_abs_lm_loss_delta", 1e-3))
+    reverse_tolerance = float(
+        diag_cfg.get("max_abs_reverse_lm_loss_delta", tolerance)
+    )
     if not (sorted_dir / "config.json").is_file():
         raise FileNotFoundError(f"sorted checkpoint missing config.json: {sorted_dir}")
 
@@ -3117,9 +3228,15 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             float(reverse_value) - float(teacher_value) if reverse_value is not None else None
         )
         reverse_delta_value = reverse_delta
-        sorted_passed = abs(delta) <= tolerance
-        reverse_passed = reverse_delta is None or abs(reverse_delta) <= tolerance
-        passed = sorted_passed and reverse_passed
+        decision = _sort_equivalence_decision(
+            delta=delta,
+            reverse_delta=reverse_delta,
+            tolerance=tolerance,
+            reverse_tolerance=reverse_tolerance,
+        )
+        sorted_passed = decision["sorted_passed"]
+        reverse_passed = decision["reverse_passed"]
+        passed = decision["passed"]
         summary = {
             "metric": metric,
             "teacher_dir": str(teacher_dir),
@@ -3150,6 +3267,7 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             "reverse_abs_delta": abs(reverse_delta) if reverse_delta is not None else None,
             "reverse_passed": reverse_passed if include_reverse else None,
             "max_abs_delta": tolerance,
+            "max_abs_reverse_delta": reverse_tolerance,
             "passed": passed,
             "teacher_result": str(scoring_output_dir / "teacher.json"),
             "sorted_result": str(sorted_result_path),
@@ -3179,7 +3297,9 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
                         else []
                     ),
                     "",
-                    f"pass: {'yes' if passed else 'no'} (max_abs_delta={tolerance:.3g})",
+                    f"pass: {'yes' if passed else 'no'} "
+                    f"(max_abs_delta={tolerance:.3g}, "
+                    f"max_abs_reverse_delta={reverse_tolerance:.3g})",
                 ]
             )
             + "\n",
@@ -3190,7 +3310,8 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             raise RuntimeError(
                 f"Sorted teacher {metric} drift too large: teacher={teacher_value} "
                 f"sorted={sorted_value} delta={delta} reverse={reverse_value} "
-                f"reverse_delta={reverse_delta} tolerance={tolerance}"
+                f"reverse_delta={reverse_delta} tolerance={tolerance} "
+                f"reverse_tolerance={reverse_tolerance}"
             )
     dist.barrier()
     return complete_stage(
@@ -3213,6 +3334,31 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
         "modelopt.torch.puzzletron.pipeline_config",
         fromlist=["load_runtime_hydra_config"],
     ).load_runtime_hydra_config(config)
+    stage_cfg = dict(config.get("slicing_sanity") or {})
+    if stage_cfg.get("backend") == "distributed_parent_sweep":
+        summary_path = _puzzle_dir(config, hydra_cfg) / "artifacts" / "slicing_sanity" / "summary.json"
+        if not summary_path.is_file():
+            raise FileNotFoundError(
+                "distributed parent-sweep slicing summary is missing; run width_sanity "
+                f"with physical_realization=true first: {summary_path}"
+            )
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if not summary.get("rows") or not summary.get("axes"):
+            raise RuntimeError(f"distributed slicing summary has no evidence: {summary_path}")
+        findings = list(summary.get("findings") or ())
+        passed = not findings
+        return complete_stage(
+            config,
+            manifest,
+            outputs={
+                "summary_path": str(summary_path),
+                "backend": "distributed_parent_sweep",
+                "passed": passed,
+                "axes": list(summary.get("axes") or ()),
+                "findings": findings,
+            },
+            status="success" if passed else "failed",
+        )
     diag_cfg = dict(config.get("width_slice_equivalence") or {})
     sorted_dir = _puzzle_dir(config, hydra_cfg) / "ckpts" / "sorted_teacher"
     if not (sorted_dir / "config.json").is_file():

@@ -27,6 +27,13 @@ from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 
+from modelopt.torch.puzzletron.plugins.automodel.hooks.moe import (
+    MoEExpertRemovalDiffScorer,
+    MoEGroupedExpertChannelScorer,
+    MoELatentCalibrationScorer,
+    _expert_owner_range,
+    _gather_ep_inputs,
+)
 from modelopt.torch.puzzletron.plugins.automodel.reduction import (
     MeshGroups,
     finalize_additive,
@@ -127,6 +134,161 @@ def _job_no_parallel(rank, size):
     assert is_writer(groups) is True
 
 
+def _build_ep_shard_groups(rank):
+    class _Axis:
+        def __init__(self, group):
+            self._group = group
+
+        def get_group(self):
+            return self._group
+
+    class _Mesh:
+        def __init__(self, names, groups):
+            self.mesh_dim_names = names
+            self._groups = groups
+
+        def __getitem__(self, name):
+            return _Axis(self._groups[name])
+
+    root_group = dist.new_group([0, 1, 2, 3])
+    token_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    ep_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+    root_mesh = _Mesh(("dp_shard",), {"dp_shard": root_group})
+    moe_mesh = _Mesh(
+        ("ep_shard", "ep"),
+        {"ep_shard": token_groups[rank % 2], "ep": ep_groups[rank // 2]},
+    )
+    return MeshGroups.from_device_mesh(root_mesh, moe_mesh=moe_mesh)
+
+
+def _job_ep_shard_groups(rank, size):
+    """EP gathers experts while its orthogonal ep_shard axis reduces samples."""
+    assert size == 4
+    groups = _build_ep_shard_groups(rank)
+
+    expected_token_ranks = [0, 2] if rank % 2 == 0 else [1, 3]
+    expected_ep_ranks = [0, 1] if rank < 2 else [2, 3]
+    assert dist.get_process_group_ranks(groups.token_group) == expected_token_ranks
+    assert dist.get_process_group_ranks(groups.ep_shard_group) == expected_token_ranks
+    assert dist.get_process_group_ranks(groups.ep_group) == expected_ep_ranks
+    # Scoring hooks observe GroupedExperts' arguments before its native EP
+    # all-gather, so these inputs remain distinct even though the MoE mesh has
+    # an orthogonal ep_shard axis.
+    assert groups.ep_inputs_replicated is False
+
+    gathered_inputs = _gather_ep_inputs(
+        torch.tensor([rank], dtype=torch.long), groups
+    )
+    torch.testing.assert_close(
+        gathered_inputs,
+        torch.tensor(expected_ep_ranks, dtype=torch.long),
+    )
+
+    token_sum = torch.tensor([float(groups.token_rank + 1)], dtype=torch.float64)
+    reduce_token_sum(token_sum, groups.token_group)
+    torch.testing.assert_close(token_sum, torch.tensor([3.0], dtype=torch.float64))
+
+    experts = gather_scored_axis(
+        torch.tensor([float(groups.ep_rank)], dtype=torch.float64), groups.ep_group
+    )
+    torch.testing.assert_close(experts, torch.tensor([0.0, 1.0], dtype=torch.float64))
+
+    writer_flag = torch.tensor([int(is_writer(groups))], dtype=torch.int64)
+    dist.all_reduce(writer_flag, op=dist.ReduceOp.SUM)
+    assert writer_flag.item() == 1
+
+
+def _job_moe_ep_finalizers(rank, size):
+    """MoE scorers reduce samples over ep_shard, then gather the expert axis."""
+    assert size == 4
+    groups = _build_ep_shard_groups(rank)
+    token_value = float(groups.token_rank + 1)
+    expert_value = float(groups.ep_rank + 1)
+
+    removal = MoEExpertRemovalDiffScorer.__new__(MoEExpertRemovalDiffScorer)
+    removal.groups = groups
+    removal._mse = torch.tensor([token_value * expert_value], dtype=torch.float64)
+    removal._cosine = 2 * removal._mse
+    removal._displaced = torch.tensor([token_value], dtype=torch.float64)
+    removal._denom = torch.tensor([token_value], dtype=torch.float64)
+    removal_result = removal.finalize()
+    torch.testing.assert_close(removal_result["score"], torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(
+        removal_result["cosine_diffs"], torch.tensor([2.0, 4.0])
+    )
+    torch.testing.assert_close(
+        removal_result["num_tokens_displaced"], torch.tensor([3.0, 3.0])
+    )
+
+    grouped = MoEGroupedExpertChannelScorer.__new__(MoEGroupedExpertChannelScorer)
+    grouped.groups = groups
+    grouped.num_experts = 2
+    grouped.local_start = groups.ep_rank
+    grouped.local_experts = 1
+    grouped.intermediate = 2
+    grouped.pruning_iters = 1
+    grouped.curr_iter = 0
+    grouped.schedule = [2]
+    grouped._pruned = torch.zeros(1, 2, dtype=torch.bool)
+    grouped._agg = torch.zeros(1, 2, dtype=torch.float32)
+    grouped._last_score = torch.full((1, 2), torch.inf)
+    grouped._prune_debt = torch.zeros(1, dtype=torch.long)
+    local_score = (
+        torch.tensor([[1.0, 2.0]])
+        if groups.ep_rank == 0
+        else torch.tensor([[2.0, 1.0]])
+    )
+    grouped._pending = local_score.double() * token_value
+    grouped._pending_count = torch.tensor([token_value], dtype=torch.float64)
+    grouped._orders = [[]]
+    grouped.step_iteration()
+    grouped_result = grouped.finalize()
+    torch.testing.assert_close(
+        grouped_result["score"], torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    )
+
+    latent = MoELatentCalibrationScorer.__new__(MoELatentCalibrationScorer)
+    latent.groups = groups
+    latent._tokens_per_batch = 1
+    ep_writer_value = token_value if groups.ep_rank == 0 else 0.0
+    latent._latent_cov_in_sum = torch.tensor([[ep_writer_value]], dtype=torch.float64)
+    latent._latent_cov_in_n = torch.tensor(ep_writer_value, dtype=torch.float64)
+    latent._expert_weights_sum = torch.tensor(
+        [token_value * expert_value], dtype=torch.float64
+    )
+    latent._latent_cov_out_sum = torch.tensor(
+        [[token_value * expert_value]], dtype=torch.float64
+    )
+    latent._latent_cov_out_weight = torch.tensor(
+        token_value * expert_value, dtype=torch.float64
+    )
+    latent_result = latent.finalize()
+    torch.testing.assert_close(latent_result["latent_cov_in"], torch.ones(1, 1).double())
+    torch.testing.assert_close(
+        latent_result["expert_weights_sum"], torch.tensor([3.0, 6.0]).double()
+    )
+    torch.testing.assert_close(
+        latent_result["latent_cov_out"], torch.ones(1, 1).double()
+    )
+
+
+def _job_expert_ownership_ignores_orthogonal_fsdp_mesh_dim(rank, size):
+    assert size == 4
+    mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("ep_shard", "ep"))
+    groups = MeshGroups.from_device_mesh(mesh, moe_mesh=mesh)
+    weights = distribute_tensor(
+        torch.zeros(4, 4, 2), mesh, placements=(Shard(1), Shard(0))
+    )
+
+    class _Experts:
+        gate_and_up_projs = weights
+
+    start, end = _expert_owner_range(_Experts(), groups, num_experts=4)
+    assert (start, end) == (groups.ep_rank * 2, (groups.ep_rank + 1) * 2)
+    assert isinstance(weights.placements[0], Shard)
+    assert isinstance(weights.placements[1], Shard)
+
+
 def test_reduction_additive_primitives():
     spawn_multiprocess_job(size=4, job=_job_additive, backend="gloo")
 
@@ -137,3 +299,17 @@ def test_reduction_with_dtensor():
 
 def test_reduction_single_process_noop():
     spawn_multiprocess_job(size=1, job=_job_no_parallel, backend="gloo")
+
+
+def test_ep_scored_axis_is_orthogonal_to_token_reduction():
+    spawn_multiprocess_job(size=4, job=_job_ep_shard_groups, backend="gloo")
+
+
+def test_moe_finalizers_aggregate_over_ep_shard_then_gather_experts():
+    spawn_multiprocess_job(size=4, job=_job_moe_ep_finalizers, backend="gloo")
+
+
+def test_expert_ownership_uses_ep_group_with_multidimensional_dtensor_mesh():
+    spawn_multiprocess_job(
+        size=4, job=_job_expert_ownership_ignores_orthogonal_fsdp_mesh_dim, backend="gloo"
+    )

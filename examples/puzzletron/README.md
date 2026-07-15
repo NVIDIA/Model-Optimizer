@@ -1,171 +1,178 @@
 # Puzzletron
 
-Puzzletron searches for smaller, faster variants of pretrained language and multimodal
-models while preserving a reproducible path from the teacher checkpoint to realized,
-evaluated, and optionally distilled models. The current implementation is an
-artifact-driven DAG: each stage consumes immutable upstream artifacts, publishes a
-manifest, can resume independently, and contributes to one cumulative HTML report.
+Puzzletron finds smaller, faster variants of large language models by searching
+over pruning configurations, evaluating them on real hardware, and optionally
+fine-tuning the best results — all while keeping an auditable trail from the
+original teacher checkpoint.
 
-## Start Here
+**New model / first time?** → [Use the AI skill](#using-the-ai-skill-recommended)  
+**Have a config already?** → [Run the pipeline manually](#running-the-pipeline)  
+**Reading results?** → [Understanding the report](#reading-the-html-report)
 
-For a new model, use the [running-puzzletron skill](../../PUZZLETRON_SKILL.md). It guides
-model-aware intake, source inspection, descriptor/backend selection, pruning-axis
-admission, multimodal and MTP handling, full-coverage smoke validation, production config
-generation, execution, resume, and reporting.
-
-The skill must produce an actual runnable config bundle and exact commands after the
-questionnaire; it is not only a review checklist. It also requires physical pruning to be
-the ground truth for every dynamic slicing implementation.
-
-For NVIDIA-internal operation, the ignored `nv-internal/sepehr_scripts.md` contains the
-long-form step-by-step command sequence and `nv-internal/CLUSTER_GUIDE_NV.md` records the
-current cluster behavior. These files are intentionally not part of the public Git tree.
-The shorter local pointer is preserved at
-`nv-internal/examples/puzzletron/sepehr_scripts.md`.
+---
 
 ## Installation
 
-Create one environment whose PyTorch, CUDA, ModelOpt, AutoModel, vLLM, and AIPerf builds
-are ABI-compatible. From the repository root:
+Puzzletron needs four sibling packages: **ModelOpt** (this repo), a patched
+**vLLM fork**, **AIPerf**, and **AutoModel**. All four must be in the same
+Python environment with a compatible PyTorch/CUDA build.
+
+> The vLLM fork, AIPerf, and AutoModel will be published to GitHub. Until
+> then install them from your local cluster clones.
 
 ```bash
-source .venv/bin/activate
-python -m pip install -e .
-python -m pip install -e ../vllm
-python -m pip install -e ../aiperf
-python -m pip install -e ../Automodel
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+# Activate (or create) your environment
+source /path/to/.venv/bin/activate
+# or: python -m venv .venv && source .venv/bin/activate
+
+# Install all four sibling packages in editable mode
+python -m pip install -e /path/to/modelopt       # this repo
+python -m pip install -e /path/to/vllm           # patched vLLM fork
+python -m pip install -e /path/to/aiperf         # AIPerf benchmarker
+python -m pip install -e /path/to/Automodel      # AutoModel backend
+
+# Extra deps for the examples
+python -m pip install -r examples/puzzletron/requirements.txt
+
+# Make the repo importable
+export PYTHONPATH="/path/to/modelopt:${PYTHONPATH:-}"
 ```
 
-Record package revisions and `torch.version.cuda` in the experiment. Revalidate imports
-and one GPU forward after rebuilding any compiled sibling.
+After any compiled sibling rebuild (vLLM, custom kernels), re-run that
+package's `pip install -e .` and verify a GPU forward passes cleanly:
 
-## What v2 Adds
-
-The v2 branch is more than a new runner. Its reusable additions include:
-
-- content-addressed identities, manifests, artifact inventory/import/coverage, and
-  acceptance-based resume;
-- scheduler-neutral stage graph and isolated stage workers;
-- family/model capability registries, generic decoder contracts, HF conversion, native
-  AutoModel descriptors, and AnyModel vLLM export;
-- fixed, padded, packed, and multimodal batch contracts with sample hashing;
-- coordinated activation passes, sorted teachers, reverse-sort and physical-slice sanity,
-  hidden-width/PLE support, and typed attention/FFN/MoE/Mamba/GDN surgery;
-- checkpointed elastic bypass with per-DP architecture observations and subblock boundaries;
-- iterative depth trajectories, block/subblock candidate libraries, sparse sampling,
-  shardable vLLM statistics, and distributed replace-one evaluation;
-- multi-profile MIP, content-addressed solution registries, physical realization, exact
-  evaluation, AIPerf sweeps, and post-distillation evaluation;
-- full-vocabulary chunked/flash CE and KD objectives, MTP loss separation, VLM-aware global
-  KD, scenario grids, and tournament selection;
-- an artifact-driven cumulative HTML report with a navigable DAG, per-stage warnings,
-  granularity-aware sections, interactive bypass/scoring plots, and partial-run visibility.
-
-See the repository map below for the source ownership of each subsystem.
-
-## Configuration
-
-All supported configurations live under [`configs/clean/`](configs/clean/):
-
-```text
-configs/clean/
-├── base.yaml                  # scheduler-neutral defaults and stage contracts
-├── families/<family>/        # family defaults
-│   └── <model>/model.yaml     # checkpoint, descriptor, axes, model geometry
-├── recipes/                   # TP/CP/PP/EP/DP execution recipes
-├── campaigns/                 # reusable multi-model campaign definitions
-├── my_paths.example.yaml      # template for machine-local paths
-└── my_paths.yaml              # ignored local overlay
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
 ```
 
-An experiment YAML composes the base, family, model, topology recipe, and experiment
-overrides. Keep checkpoint, dataset, container, account, and artifact-root values in the
-ignored `my_paths.yaml`; committed configs must be portable.
+Record exact package versions and `torch.version.cuda` before a production run.
 
-Important configuration choices are independent:
+---
 
-- Data modality and layout: text or supported media combinations; fixed, padded, or
-  packed variable-length batches.
-- Per-stage granularity: depth, bypass, vLLM statistics, and replace-one scoring each
-  choose block or subblock semantics independently.
-- Search domains and constraints: legal axis values, depth scenarios, runtime/memory/
-  parameter budgets, and numbers of models to evaluate or distill.
-- Execution topology: TP, CP, PP, EP, DP, sequence parallelism, microbatch, and global
-  batch. Validate the backend mesh rather than multiplying labels blindly.
+## Using the AI Skill (Recommended)
 
-Granularity is a per-component contract, not a campaign-wide switch:
+The **running-puzzletron** skill handles the whole workflow: model inspection,
+question intake, config generation, smoke validation, and production execution.
 
-| Component | Default | Meaning |
+Invoke it in Claude Code:
+
+```
+Please use the puzzletron skill to prune meta-llama/Llama-3.1-8B-Instruct
+```
+
+or, with the explicit skill path:
+
+```
+@.claude/skills/running-puzzletron prune HuggingFace model <model-id>
+```
+
+### What the Skill Does
+
+1. **Inspects your model** — reads the HuggingFace source files to enumerate
+   every layer type before proposing anything.
+
+2. **Asks two rounds of targeted questions** — first about your infrastructure
+   and goals, then about the search configuration. See
+   [Understanding the Skill's Questions](#understanding-the-skills-questions)
+   for plain-language guidance on each question.
+
+3. **Handles unsupported models** — if your model has no Puzzletron descriptor
+   yet, the skill walks through adding one and validating the pruning axes.
+   If it is already supported, it jumps directly to campaign configuration.
+
+4. **Generates runnable config bundles** — a tiny smoke config to validate
+   the setup end-to-end, and a production config for the real run.
+
+5. **Executes and monitors** — runs the pipeline DAG in dependency order,
+   handles Slurm or bare-metal scheduling, resumes interrupted stages, and
+   keeps the HTML report current after each stage.
+
+### Understanding the Skill's Questions
+
+#### Round 1 — Infrastructure and Goals
+
+The skill asks these once, grouped in one message. You do not need to know
+all the answers up front; ask for help with any item.
+
+| What the skill asks | Plain-language meaning | Example answer |
 |---|---|---|
-| Depth importance | `subblock` | Rank removable attention/FFN/typed sublayers independently |
-| vLLM statistics | `block` | Measure full block combinations unless subblock additivity is requested |
-| Candidate statistics | `block` | Build cost records at the configured library unit |
-| Replace-one scoring | `block` | Score one block candidate; `subblock` scores one changed sublayer at a time |
-| Bypass | `block` | Sample and train complete block candidates; `subblock` isolates local sublayer losses |
+| Checkpoint path or URI | Where is the model? Local lustre path or HuggingFace model ID. | `meta-llama/Llama-3.1-8B-Instruct` or `/lustre/models/llama3` |
+| Tokenizer / processor revision | Which version of the tokenizer to use. "Same as the model" is almost always correct. | `same as model` |
+| Experiment ID | A short label for this run; used to name the artifact folder. | `llama3-8b-prune-v1` |
+| Artifact root | Where outputs, checkpoints, and the HTML report should be saved. | `/lustre/puzzle_runs` |
+| Resume existing artifacts? | If you have already run some stages, can they be reused? | `yes, resume what is already there` |
+| Execution environment | Slurm cluster or bare-metal SSH machines? | `Slurm, NVIDIA DGX cluster` |
+| Container or host Python? | Do you run inside an Enroot/Docker container, or directly on the host Python? | `Enroot container at /lustre/containers/nemo.sqsh` |
+| Sibling checkout locations | Where are vLLM, AIPerf, and AutoModel installed on your cluster? | `all siblings are in /home/user/repos/` |
+| Available nodes/GPUs/wall-time | How many resources do you have and for how long per job? | `4 × H100 nodes × 8 GPU each, 4-hour Slurm slots` |
+| Storage capacity | How much disk space is free for artifacts? Large models can use 100s of GB. | `10 TB on /lustre/puzzle_runs` |
+| Required final outcomes | How far do you want the pipeline to go? | `MIP search + zero-shot eval; skip distillation for now` |
 
-`Build Block Library` remains the public stage name at either granularity. Artifacts and
-report labels record the actual per-stage setting; changing one component does not silently
-change the others.
+#### Round 2 — Model-Specific Search Configuration
 
-Parse the final config with the same loader used by the runner before allocating GPUs:
+The skill asks these after inspecting your model's source code, so the
+options presented are always valid for your specific architecture.
+
+| What the skill asks | Plain-language meaning | Example answer |
+|---|---|---|
+| Data lanes (modalities) | Does this model handle text only, or also images/audio/video? | `text only` |
+| Calibration dataset | Which dataset to use for importance estimation. | `wikitext-103, 512 samples` |
+| Batch layout | How to pack sequences: fixed-length, padded, or packed (multiple docs per sequence). Packed is most GPU-efficient. | `packed` |
+| Pruning axis ranges | For each prunable dimension (e.g. number of attention heads, FFN width), what is the smallest you are willing to go? | `num_heads: 8–32, ffn_dim: 2048–14336` |
+| Depth removals | How many transformer layers to allow the search to remove. | `up to 4 layers` |
+| Bypass | Whether to run the block-replacement search. This produces richer scoring data but adds significant compute. | `yes, block granularity` |
+| vLLM stats | Whether to benchmark candidates in real vLLM for hardware-aware search. Needed for latency constraints. | `yes` |
+| MIP constraints | The hardware budget for accepted solutions: max parameter count, latency per token, or GPU memory. | `≤ 6B params, ≤ 2 ms/token at BS=1` |
+| Number of top solutions | How many MIP solutions to evaluate or distill. | `top 3 for eval, top 1 for distillation` |
+| Parallelism | TP/PP/CP/EP/DP degrees for smoke and production runs. The skill validates these against your GPU count. | `TP=2, PP=1, DP=4` |
+
+### What Happens for Unsupported Models
+
+If your model has no Puzzletron descriptor:
+
+1. The skill reads the HuggingFace layer implementations (attention, FFN, MoE,
+   normalization, etc.) and proposes pruning axes with source evidence.
+2. You review the proposed axes. The skill explains which dimensions are safe
+   to prune and which have constraints (e.g., grouped-query heads require
+   specific alignment; tied embeddings cannot be pruned independently).
+3. You confirm or adjust, and the skill writes the model descriptor.
+4. A small equivalence test confirms that dynamic slicing matches physical
+   export — this is mandatory before any campaign compute.
+5. From here, the workflow proceeds identically to a supported model.
+
+If your model **is already registered** in Puzzletron, the skill skips the
+inspection and descriptor steps and moves directly to Round 2.
+
+---
+
+## Running the Pipeline Manually
+
+If you already have config files (generated by the skill or written by hand),
+you can drive the pipeline without the AI.
+
+### Setup: fill in local paths
 
 ```bash
-python - <<'PY'
-from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
-
-cfg = pipeline_config_from_path("path/to/experiment.yaml")
-print(cfg["experiment"]["dir"])
-PY
+cp examples/puzzletron/configs/clean/my_paths.example.yaml \
+   examples/puzzletron/configs/clean/my_paths.yaml
+# Edit my_paths.yaml — set checkpoint_root, dataset_root, artifact_root,
+# container_image, account, etc. for your cluster.
 ```
 
-## Pipeline DAG
-
-The authoritative registry is
-[`stages/graph.py`](../../modelopt/torch/puzzletron/stages/graph.py). Required and optional
-stages, dependencies, display names, distributed execution, and completion artifacts are
-defined there.
-
-```text
-Convert Checkpoint
-├── Tokenize Data
-│   ├── Depth Importance Estimation (optional)
-│   └── Width Importance Estimation
-│       └── Sort Checkpoint
-│           ├── Sort Sanity Check (optional)
-│           ├── Width Sanity Check (optional)
-│           ├── Slicing Sanity Check (optional)
-│           └── Bypass Sanity Check (optional)
-│               └── Bypass (optional; block or subblock)
-│                   └── Build Block Library
-│                       └── Replace-one-block/subblock Scoring
-└── vLLM Stats (optional; block or subblock)
-
-vLLM Stats + Depth Importance + Replace-one Scoring
-└── MIP Search
-    ├── AIPerf (optional)
-    └── Zero-shot Evaluation (optional)
-        └── Global Distillation Sanity Check (optional)
-            └── Global Distillation (optional)
-                └── Post Distillation Evaluation (optional)
-```
-
-The graph is not a command-order recommendation for one giant allocation. Run independent
-branches concurrently when they have disjoint writers, and use the smallest appropriate
-resource topology for each stage.
-
-## Running the Pipeline
-
-Run all enabled stages sequentially in dependency order:
+### Run the full pipeline
 
 ```bash
 python examples/puzzletron/main.py \
-  --config path/to/experiment.yaml \
+  --config examples/puzzletron/configs/clean/families/qwen3_5/qwen3_5_0_8b/smoke_test.yaml \
   --stage full \
   --gpus-per-node 8
 ```
 
-Run one stage:
+`--stage full` runs every enabled stage in dependency order. The orchestrator
+spawns an isolated worker process for each stage, so GPU memory and distributed
+state cannot leak between stages.
+
+### Run a single stage
 
 ```bash
 python examples/puzzletron/main.py \
@@ -174,205 +181,188 @@ python examples/puzzletron/main.py \
   --gpus-per-node 8
 ```
 
-Apply a resolved config override without editing the YAML:
+Stage names come from
+[`modelopt/torch/puzzletron/stages/graph.py`](../../modelopt/torch/puzzletron/stages/graph.py).
+Common values: `convert`, `tokenize`, `width_importance`, `sort`, `depth`,
+`bypass`, `scoring`, `mip`, `evaluation`, `distillation`.
+
+### Override a config value without editing the file
 
 ```bash
 python examples/puzzletron/main.py \
   --config path/to/experiment.yaml \
-  --stage bypass_sanity \
+  --stage bypass \
   --override bypass.granularity=subblock
 ```
 
-Use `--force` only when intentionally invalidating a valid completion marker. Normally the
-runner skips a stage only when its marker, semantic config, upstream identities, and
-required outputs agree.
+### Force-rerun a completed stage
 
-The orchestrator launches a fresh local worker for each stage so distributed state and GPU
-memory cannot leak across stages. For an externally launched distributed job, run exactly
-one distributed stage. The launcher must establish the process group, for example:
+Normally the runner skips stages whose completion markers are valid. Pass
+`--force` to redo one intentionally:
 
 ```bash
-torchrun --nnodes="$NNODES" --nproc-per-node="$GPUS_PER_NODE" \
-  --rdzv-backend=c10d --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+python examples/puzzletron/main.py \
+  --config path/to/experiment.yaml \
+  --stage sort \
+  --force
+```
+
+### Verify your config before allocating GPUs
+
+```bash
+python - <<'PY'
+from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
+cfg = pipeline_config_from_path("path/to/experiment.yaml")
+print(cfg["experiment"]["dir"])
+PY
+```
+
+### Multi-node on Slurm
+
+For distributed stages that span multiple nodes:
+
+```bash
+export PUZZLETRON_IMAGE="/path/to/container.sqsh"
+export PUZZLETRON_CONTAINER_MOUNTS="/lustre:/lustre"
+# optional: export PUZZLETRON_SETUP_ENV="/path/to/env-setup.sh"
+
+sbatch --nodes=4 --gpus-per-node=8 \
+  examples/puzzletron/run_multinode_stage.sh \
+  scoring path/to/experiment.yaml path/to/recipe.yaml
+```
+
+The script reads `PUZZLETRON_IMAGE` and `PUZZLETRON_CONTAINER_MOUNTS` from
+the environment — keep concrete cluster paths in an ignored shell export file,
+not in committed configs.
+
+### Bare metal (no scheduler)
+
+```bash
+torchrun \
+  --nnodes=4 \
+  --nproc-per-node=8 \
+  --rdzv-backend=c10d \
+  --rdzv-endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+  --max-restarts=0 \
   examples/puzzletron/main.py \
   --config path/to/experiment.yaml \
-  --stage replacement_scoring \
-  --gpus-per-node "$GPUS_PER_NODE"
+  --stage scoring \
+  --gpus-per-node 8
 ```
 
-On Slurm, map one distributed model task per node or launch explicit independent workers;
-on bare metal, use passwordless SSH, shared storage at identical paths, deterministic rank
-mapping, per-host logs/PIDs, and complete peer cleanup after a failure.
+Require passwordless SSH, shared storage visible at identical paths on every
+host, and per-host log files. Clean up all remote workers explicitly after a
+failure.
 
-The supplied container launchers take machine-local values from the environment rather
-than embedding filesystem paths:
+---
 
-```bash
-export PUZZLETRON_IMAGE="path/to/container.sqsh"
-export PUZZLETRON_CONTAINER_MOUNTS="shared:shared"
-export PUZZLETRON_SETUP_ENV="path/to/optional-setup-env.sh"  # optional
-export PUZZLETRON_RUN_ROOT="puzzle_runs"                     # optional
+## Understanding the Pipeline Stages
+
+The pipeline is a dependency DAG — independent branches can (and should) run
+concurrently when resources allow.
+
+```
+Convert Checkpoint
+├── Tokenize Data
+│   ├── Depth Importance Estimation ──────────────────────────┐
+│   └── Width Importance Estimation                           │
+│       └── Sort Checkpoint                                   │
+│           ├── [Sanity checks: sort / width / slicing]       │
+│           └── Bypass                                        │
+│               └── Build Block Library                       │
+│                   └── Replace-one Scoring ──────────────────┤
+└── vLLM Stats ────────────────────────────────────────────────┘
+                                                              │
+                                           MIP Search ◄───────
+                                           ├── AIPerf
+                                           └── Zero-shot Evaluation
+                                               └── Global Distillation
+                                                   └── Post-KD Evaluation
 ```
 
-Keep concrete values in an ignored machine-local script or scheduler export file.
+| Stage | What it does | Typical resource |
+|---|---|---|
+| **Convert** | Converts the HF checkpoint into Puzzletron format | 1 node, 1 GPU |
+| **Tokenize** | Runs calibration data through the tokenizer; produces sample hashes | 1 node, CPU |
+| **Width Importance** | Measures per-head/neuron importance with activation statistics | 1 node, all GPUs |
+| **Depth Importance** | Estimates the accuracy cost of removing each transformer layer | 1 node, all GPUs |
+| **Sort** | Reorders parameters from most to least prunable | 1 node, 1 GPU |
+| **Sanity checks** | Confirm that sorted ≈ original, physical ≈ dynamic (bugs are failures) | 1 node, 1 GPU |
+| **vLLM Stats** | Benchmarks every candidate configuration in real vLLM for latency | 1–N nodes, all GPUs |
+| **Bypass** | Trains local proxy losses per block/subblock — the main search data source | 1–N nodes, all GPUs |
+| **Build Block Library** | Assembles cost/score records for all candidate configurations | 1 node, 1 GPU |
+| **Replace-one Scoring** | Evaluates each candidate by swapping one block at a time | 1–N nodes, all GPUs |
+| **MIP Search** | Solves a constrained optimization to find Pareto-optimal model sizes | 1 node, CPU |
+| **AIPerf** | Sweeps concurrency and topology settings for top solutions | 1–N nodes, all GPUs |
+| **Zero-shot Evaluation** | Evaluates top solutions on standard benchmarks | 1 node, all GPUs |
+| **Global Distillation** | Fine-tunes the best pruned model to recover accuracy | 1–N nodes, all GPUs |
+| **Post-KD Evaluation** | Evaluates the distilled model | 1 node, all GPUs |
 
-## Stage Correctness
+---
 
-### Conversion and data
+## Reading the HTML Report
 
-Conversion must preserve teacher outputs, model-specific config, tokenizer/processor
-assets, tied-weight semantics, and backend loadability. Tokenization must preserve sample
-identity, padding/loss masks, packed document boundaries, modality fields, and MTP target
-boundaries.
+The report at
+`<artifact-root>/<experiment-id>/artifacts/campaign_report/campaign_report.html`
+is updated automatically after each stage. Open it in any browser.
 
-### Width importance, sorting, and slicing
-
-Inventory every distinct layer implementation before defining pruning axes. Each admitted
-axis needs a dynamic implementation, physical materialization, state-dict conversion, cost
-model, backend compatibility, and equivalence case.
-
-Keep the three diagnoses separate:
-
-- Sort sanity compares full-size original, sorted, and reverse-sorted checkpoints.
-- Width sanity checks whether the learned ranking improves reduced candidates.
-- Slicing sanity compares dynamic sorted, dynamic unsorted, dynamic reverse, and physically
-  materialized sorted variants against the original teacher.
-
-Physical materialization is the oracle. A mismatch is a bug until localized; do not change
-physical pruning to match a mask.
-
-### Bypass
-
-Run fixed-smallest and diverse-resampling sanity checks before a long nested bypass. The
-fixed candidate should overfit clearly; the diverse trend should decrease despite scatter.
-When DP ranks sample distinct architectures, save rank, step, canonical architecture hash,
-human-readable config, parameter ratio, sample identity, and component losses for every
-observation.
-
-### Expensive immutable stages
-
-Depth importance, vLLM statistics, and replace-one scoring must use shard manifests and
-resume only missing identities. They should remain usable when worker count/topology changes
-if their artifact schema is topology-independent. Never delete or rerun complete expensive
-shards merely to regenerate a report.
-
-### MIP, evaluation, AIPerf, and KD
-
-MIP solutions must reference exact score/runtime/depth inputs and satisfy the declared
-constraints after physical realization. Include the teacher in zero-shot evaluation.
-AIPerf should sweep meaningful concurrency/topology values and verify successful requests,
-token lengths, and instruct templates.
-
-Global KD sanity must overfit before a real run. Report `main_ce`, `mtp_ce`, `main_kd`, and
-`mtp_kd` separately and compute their configured weighted sum. Shifted MTP targets must not
-cross padding, packed-document, or modality boundaries. Validate interruption/resume before
-trusting a long job.
-
-## Resuming and Checkpointing
-
-Long-running stages should publish before the scheduler deadline. A training checkpoint is
-complete only when model, optimizer, scheduler/scaler, dataloader cursor, global step, all
-RNG states, topology metadata, architecture observations, and a completion marker agree.
-
-Write checkpoints transactionally:
-
-1. Write all shards to a temporary transaction directory.
-2. Validate expected shards and identities.
-3. Publish the completion marker atomically.
-4. Update `latest` only after publication.
-5. Quarantine incomplete transactions and resume the newest complete checkpoint.
-
-Use normal dependency-on-success for DAG transitions. A continuation after timeout or
-failure is safe only for a stage whose resume contract has been validated.
-
-## Report
-
-Every worker calls
-`diagnostics.campaign_progress_report.generate_campaign_progress_report` and refreshes the
-cumulative report from artifacts on disk. The stable HTML path is:
-
-```text
-<experiment-dir>/artifacts/campaign_report/campaign_report.html
-```
-
-Regenerate it without rerunning a stage:
+Regenerate it from existing artifacts without rerunning anything:
 
 ```bash
 python - <<'PY'
 from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
     generate_campaign_progress_report,
 )
-
-result = generate_campaign_progress_report("puzzle_runs/experiment", model_name="Model name")
+result = generate_campaign_progress_report(
+    "puzzle_runs/my-experiment",
+    model_name="My Model",
+)
 print(result)
 PY
 ```
 
-The generator reads existing artifacts only; it must not mutate or invalidate completed
-stage data.
+### What Each Section Shows
 
-The report contains:
+| Section | What to look for |
+|---|---|
+| **Experiment header** | Experiment ID, model name, config hash, key resolved settings. Check this first to confirm the right checkpoint and dataset were used. |
+| **Pipeline DAG** | Visual graph of all stages: green = complete, grey = pending, strikethrough = disabled. Use this to see what is left. |
+| **Artifact provenance** | File paths, hashes, and the stage that produced each artifact. Useful for auditing resume correctness. |
+| **Sorting** | Original vs. sorted vs. reverse-sorted model output comparison. Sorted and original should match; large differences indicate a bug. |
+| **Width ranking** | Whether the importance ordering actually helps at reduced widths. A flat curve means the ranking is not informative. |
+| **Slicing sanity** | Dynamic pruning vs. physical export comparison. Any mismatch is a bug, not a tolerance question. |
+| **Bypass** | Scatter plots of local loss vs. parameter ratio per block. A good bypass run shows a clear downward trend. Hover over a point to see its exact configuration. Click a block to view all candidates for that block. |
+| **vLLM runtime** | Per-candidate latency from real vLLM. Used as the MIP latency constraint. |
+| **Scoring** | Replace-one accuracy drop per candidate. Lower = better (less accuracy lost). |
+| **MIP results** | Pareto front of solutions. Each point is a valid model config that satisfies your hardware constraints. The table lists parameter count, latency, and accuracy for each. |
+| **Zero-shot evaluation** | Benchmark scores for each MIP solution and the teacher. Check the accuracy gap vs. teacher. |
+| **AIPerf** | Throughput (tokens/sec) and latency curves across concurrency values and topology configurations. |
+| **Distillation** | Training loss curves. `main_ce`, `mtp_ce`, `main_kd`, `mtp_kd` are tracked separately. A successful run shows all terms decreasing and overfit on the sanity check. |
+| **Warnings** | Appear in yellow beside affected table cells or stage nodes. A warning does not block a stage, but must be understood before trusting the result. |
 
-- experiment identity and resolved important config;
-- pipeline DAG with completed, pending, and disabled nodes;
-- artifact provenance and stage warnings;
-- sorting, width, slicing, bypass, depth, runtime, scoring, MIP, evaluation, AIPerf, and KD
-  sections whenever their artifacts exist;
-- partial long-running bypass/KD observations without erasing earlier results.
+---
 
-Warnings should appear beside the affected values. A warning does not make an artifact
-incomplete, but it must remain visible and explain the expected invariant.
+## Troubleshooting
 
-## Adding a New Model
+**Stage skipped unexpectedly** — The runner skips stages with valid completion
+markers. This is expected resume behavior. Use `--force` to explicitly redo
+a completed stage.
 
-Use the Puzzletron skill instead of copying a nearby descriptor blindly. At minimum:
+**OOM during scoring or bypass** — Reduce `local_batch_size` or enable the
+chunked flash KD path (`scoring.use_flash_kd: true`). For large-vocabulary
+models (>100k tokens), full-vocab loss tensors are the usual culprit.
 
-1. Resolve the exact checkpoint and inspect every distinct HF layer implementation.
-2. Read matching vLLM and AutoModel implementations when they exist.
-3. Select AutoModel only when the unpruned model is already natively supported; otherwise
-   use the HF-native Puzzletron path.
-4. Admit only axes supported by all required constructors, kernels, caches, export paths,
-   and physical materializers.
-5. Exercise every selected modality/layout and topology path in a tiny full-coverage smoke.
-6. Deliberately interrupt and resume bypass and Global KD.
-7. Produce a resolved production config bundle and exact direct/Slurm/SSH commands before
-   requesting approval for expensive compute.
+**Dynamic ≠ physical outputs in slicing sanity** — This is always a code bug.
+Debug normalization inputs, residual paths, rotary embeddings, grouped
+projections, or tied weights. Do not adjust the physical path to match dynamic.
 
-## Debugging
+**Multi-node job hangs at NCCL init** — Verify `MASTER_ADDR` is reachable on
+all nodes and `MASTER_PORT` is not blocked by a firewall. Check per-node logs
+(`node0.log`, `node1.log`) for the first divergence.
 
-Debug in dependency order:
+**Resume after scheduler timeout** — Resubmit the same command. Bypass and KD
+write transactional checkpoints; scoring and vLLM stats use shard manifests.
+The stage detects and skips already-complete work automatically.
 
-1. Confirm resolved config, revisions, environment, and artifact identity.
-2. Inspect one processor-native batch and all masks/media/packed metadata.
-3. Run one unpruned forward under the exact backend and topology.
-4. Compare dynamic and physical outputs at the first changed module boundary.
-5. Read every rank log and diagnose the earliest failure before changing resources.
-6. Validate shard/checkpoint manifests before resuming.
-7. Regenerate the report and verify its node states follow artifacts and active config.
-
-Common failures include wrong PP schedules, TP without required sequence parallelism,
-unequal CP token reductions, dropped multimodal keys, packed targets crossing documents,
-incomplete checkpoints presented as `latest`, and allocated GPUs with no active workers.
-
-## Repository Map
-
-- [`main.py`](main.py): scheduler-neutral orchestrator and isolated worker launcher.
-- [`modelopt/torch/puzzletron/stages/`](../../modelopt/torch/puzzletron/stages): stage
-  graph and handlers.
-- [`modelopt/torch/puzzletron/anymodel/`](../../modelopt/torch/puzzletron/anymodel):
-  model descriptors, conversion, and capability registry.
-- [`modelopt/torch/puzzletron/plugins/automodel/`](../../modelopt/torch/puzzletron/plugins/automodel):
-  native AutoModel hooks, scoring, evaluation, bypass, and KD integration.
-- [`modelopt/torch/puzzletron/pruning/`](../../modelopt/torch/puzzletron/pruning):
-  dynamic candidates, sorting, physical materialization, and axis surgery.
-- [`modelopt/torch/puzzletron/diagnostics/`](../../modelopt/torch/puzzletron/diagnostics):
-  sanity aggregation and cumulative HTML report.
-- [`modelopt/torch/puzzletron/replacement_library/`](../../modelopt/torch/puzzletron/replacement_library):
-  candidate library and score composition.
-- [`modelopt/torch/puzzletron/distillation/`](../../modelopt/torch/puzzletron/distillation):
-  global KD datasets, losses, recipes, checkpointing, and publication.
-- [`tests/unit/torch/puzzletron/`](../../tests/unit/torch/puzzletron): focused contracts
-  for pipeline stages and model-independent behavior.
-
-Keep public examples generic. Site-specific scheduler commands, personal experiment notes,
-and historical campaign debugging belong under ignored `nv-internal/`, not in this tree.
+**Report missing a section** — The generator only emits sections for which
+artifacts exist. If bypass artifacts are missing, rerun the bypass stage.

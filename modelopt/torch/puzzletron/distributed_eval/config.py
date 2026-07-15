@@ -16,6 +16,14 @@ from .schema import CampaignManifest, ParallelismSpec
 DEFAULT_EVALUATOR_REVISION = "puzzletron-distributed-replace-block-v1"
 
 
+def _replacement_scoring_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return the public scoring section with legacy-config compatibility."""
+
+    if "replacement_scoring" in cfg:
+        return dict(cfg.get("replacement_scoring") or {})
+    return dict(cfg.get("scoring") or {})
+
+
 def load_plain_pipeline_config(
     config_path: str | Path,
     *,
@@ -38,7 +46,7 @@ def load_runtime_config(
 
 
 def _load_recipe(cfg: dict[str, Any]) -> dict[str, Any]:
-    scoring = dict(cfg.get("scoring") or {})
+    scoring = _replacement_scoring_config(cfg)
     automodel = dict(scoring.get("automodel") or {})
     recipe = automodel.get("recipe")
     if recipe is not None:
@@ -57,17 +65,47 @@ def parallelism_from_config(cfg: dict[str, Any], *, world_size: int) -> Parallel
     distributed = dict(recipe.get("distributed") or {})
     strategy = dict(recipe.get("distributed_config") or {})
     target = str(strategy.get("_target_", ""))
-    dp_size = distributed.get("dp_size")
-    if dp_size in (None, "none", "None", 0, "0"):
-        dp_size = None
-    scoring = dict(cfg.get("scoring") or {})
+    tp_size = int(distributed.get("tp_size", 1) or 1)
+    ep_size = int(distributed.get("ep_size", 1) or 1)
+    cp_size = int(distributed.get("cp_size", 1) or 1)
+    pp_size = int(distributed.get("pp_size", 1) or 1)
+    configured_dp_size = distributed.get("dp_size")
+    if configured_dp_size in (None, "none", "None", 0, "0"):
+        automodel_dp_size, remainder = divmod(
+            int(world_size), tp_size * cp_size * pp_size
+        )
+        if remainder:
+            raise ValueError(
+                "AutoModel parallel sizes do not divide the configured world size: "
+                f"world_size={world_size}, tp_size={tp_size}, cp_size={cp_size}, "
+                f"pp_size={pp_size}"
+            )
+    else:
+        automodel_dp_size = int(configured_dp_size)
+        expected_world_size = automodel_dp_size * tp_size * cp_size * pp_size
+        if expected_world_size != int(world_size):
+            raise ValueError(
+                "AutoModel parallel sizes imply "
+                f"world_size={expected_world_size}, configured world_size={world_size}"
+            )
+
+    # AutoModel overlays EP on its DP/CP/TP FSDP mesh instead of making EP an
+    # additional world-size dimension. ParallelismSpec represents independent
+    # axes, so expose the residual sample-parallel degree after that overlay.
+    dp_size, remainder = divmod(automodel_dp_size, ep_size)
+    if remainder:
+        raise ValueError(
+            "Distributed evaluation cannot represent this AutoModel EP overlay: "
+            f"dp_size={automodel_dp_size} must be divisible by ep_size={ep_size}"
+        )
+    scoring = _replacement_scoring_config(cfg)
     distributed_eval = dict(scoring.get("distributed_eval") or {})
     return ParallelismSpec(
-        tp_size=int(distributed.get("tp_size", 1) or 1),
-        ep_size=int(distributed.get("ep_size", 1) or 1),
-        cp_size=int(distributed.get("cp_size", 1) or 1),
-        pp_size=int(distributed.get("pp_size", 1) or 1),
-        dp_size=int(dp_size) if dp_size is not None else None,
+        tp_size=tp_size,
+        ep_size=ep_size,
+        cp_size=cp_size,
+        pp_size=pp_size,
+        dp_size=dp_size,
         sequence_parallel=bool(distributed.get("sequence_parallel", False)),
         fsdp="FSDP" in target.upper(),
         distributed_backend=str((recipe.get("dist_env") or {}).get("backend", "nccl")),
@@ -124,7 +162,7 @@ def build_campaign_manifest(
     overrides: list[str] | None = None,
 ) -> CampaignManifest:
     cfg = load_plain_pipeline_config(config_path, overrides=overrides)
-    scoring = dict(cfg.get("scoring") or {})
+    scoring = _replacement_scoring_config(cfg)
     automodel = dict(scoring.get("automodel") or {})
     model_cfg = dict(cfg.get("model") or {})
     recipe = _load_recipe(cfg)

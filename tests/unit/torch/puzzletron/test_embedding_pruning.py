@@ -526,6 +526,59 @@ def test_active_prefix_layernorm_matches_physical_module_and_gradients():
     assert torch.count_nonzero(envelope.bias.grad[2:]) == 0
 
 
+def test_active_prefix_automodel_float32_rmsnorm_matches_physical_gradients():
+    class Float32RMSNorm(torch.nn.Module):
+        def __init__(self, width):
+            super().__init__()
+            self.weight = torch.nn.Parameter(
+                torch.linspace(0.75, 1.5, width, dtype=torch.bfloat16)
+            )
+            self.eps = 3.0e-5
+
+        def forward(self, x):
+            input_dtype = x.dtype
+            normalized = x.float()
+            normalized = normalized * torch.rsqrt(
+                normalized.pow(2).mean(-1, keepdim=True) + self.eps
+            )
+            return (self.weight * normalized).to(input_dtype)
+
+    spec = EmbeddingPruningSpec(
+        hidden_size=4,
+        legal_widths=(4, 2),
+        alignment=2,
+        tensor_rules=(TensorAxisRule(r"^norm\.weight$", (0,), "normalization"),),
+    )
+    envelope = Float32RMSNorm(4)
+    physical = Float32RMSNorm(2)
+    physical.weight.data.copy_(envelope.weight[:2])
+    x = torch.tensor(
+        [[0.1015625, 0.205078125, 4.0, -3.0]],
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    with hidden_width_module_context(
+        envelope,
+        canonical_module_name="norm",
+        spec=spec,
+        width=2,
+        mask_boundary_input=True,
+    ):
+        actual = envelope(x)
+    physical_x = x.detach()[..., :2].clone().requires_grad_(True)
+    expected = physical(physical_x)
+
+    assert torch.equal(actual[..., :2], expected)
+    assert torch.count_nonzero(actual[..., 2:]) == 0
+    actual.float().sum().backward()
+    expected.float().sum().backward()
+    torch.testing.assert_close(x.grad[..., :2], physical_x.grad)
+    torch.testing.assert_close(envelope.weight.grad[:2], physical.weight.grad)
+    assert torch.count_nonzero(x.grad[..., 2:]) == 0
+    assert torch.count_nonzero(envelope.weight.grad[2:]) == 0
+
+
 def _distributed_hidden_width_mask_job(rank: int, size: int) -> None:
     assert size == 4
     mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("cp", "tp"))

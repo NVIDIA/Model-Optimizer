@@ -63,3 +63,24 @@ def test_diagnostic_sorted_parent_runs_the_distributed_sort_on_every_rank(monkey
     )
 
     assert calls == ["barrier", "sort", "barrier"]
+
+
+def test_sort_equivalence_keeps_production_and_reverse_control_tolerances_separate():
+    decision = diagnostics._sort_equivalence_decision(
+        delta=1.4e-4,
+        reverse_delta=1.54e-2,
+        tolerance=1.0e-3,
+        reverse_tolerance=2.0e-2,
+    )
+
+    assert decision == {
+        "sorted_passed": True,
+        "reverse_passed": True,
+        "passed": True,
+    }
+    assert not diagnostics._sort_equivalence_decision(
+        delta=1.4e-4,
+        reverse_delta=1.54e-2,
+        tolerance=1.0e-3,
+        reverse_tolerance=1.0e-3,
+    )["passed"]

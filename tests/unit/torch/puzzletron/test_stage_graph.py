@@ -31,8 +31,8 @@ def test_registry_contains_every_public_stage_in_deterministic_topological_order
         "build_library",
         "replacement_scoring",
         "mip",
-        "aiperf",
         "zero_shot_evaluation",
+        "aiperf",
         "global_distillation_sanity",
         "global_distillation",
         "post_distillation_evaluation",
@@ -57,17 +57,22 @@ def test_registry_uses_the_approved_fixed_dependencies():
         "depth_importance",
         "replacement_scoring",
     )
-    assert selected_parent_stage_ids("aiperf", {}) == ("mip",)
     assert selected_parent_stage_ids("zero_shot_evaluation", {}) == ("mip",)
-    assert selected_parent_stage_ids("global_distillation_sanity", {}) == (
-        "zero_shot_evaluation",
-    )
+    assert selected_parent_stage_ids("aiperf", {}) == ("mip",)
+    assert selected_parent_stage_ids("global_distillation_sanity", {}) == ("mip",)
     assert selected_parent_stage_ids("global_distillation", {}) == (
         "global_distillation_sanity",
     )
     assert selected_parent_stage_ids("post_distillation_evaluation", {}) == (
         "global_distillation",
     )
+
+
+def test_model_executing_sanity_stages_are_distributed():
+    assert STAGE_REGISTRY["sort_sanity"].distributed
+    assert STAGE_REGISTRY["width_sanity"].distributed
+    assert STAGE_REGISTRY["bypass_sanity"].distributed
+    assert not STAGE_REGISTRY["slicing_sanity"].distributed
 
 
 def test_stage_labels_use_independent_granularity():

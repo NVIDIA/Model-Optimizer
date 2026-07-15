@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import functools
 import inspect
+from contextlib import nullcontext
 from typing import Any, Callable
 
 from ...block_config import AttentionConfig, BlockConfig, FFNConfig, MambaConfig, MoEConfig
@@ -172,6 +173,12 @@ class AutoModelDescriptor:
     def patch_state_dict_adapter(model: Any) -> bool:
         return False
 
+    @classmethod
+    def native_state_dict_adapter_context(cls, block_configs):
+        """Temporarily adapt a native backend's checkpoint shape bridge."""
+
+        return nullcontext()
+
     @staticmethod
     def patch_hf_model_checkpoint_mapping(model: Any) -> bool:
         return False
@@ -215,20 +222,30 @@ class AutoModelDescriptor:
                     layer_idx,
                 )
             orig_init(*bound.args, **bound.kwargs)
-            if block_config is None:
-                return
-            attn = block_config.get_subblock("attention")
-            ffn = block_config.get_subblock("ffn")
-            mamba = block_config.get_subblock("mamba")
-            moe = block_config.get_subblock("moe")
-            if isinstance(attn, AttentionConfig) and attn.no_op:
-                cls.attn_no_op_post_init(self)
-            if isinstance(ffn, FFNConfig) and ffn.no_op:
-                cls.mlp_no_op_post_init(self)
-            if isinstance(mamba, MambaConfig) and mamba.no_op:
-                cls.attn_no_op_post_init(self)
-            if isinstance(moe, MoEConfig) and moe.no_op:
-                cls.mlp_no_op_post_init(self)
+            if block_config is not None:
+                attn = block_config.get_subblock("attention")
+                ffn = block_config.get_subblock("ffn")
+                mamba = block_config.get_subblock("mamba")
+                moe = block_config.get_subblock("moe")
+                if isinstance(attn, AttentionConfig) and attn.no_op:
+                    cls.attn_no_op_post_init(self)
+                if isinstance(ffn, FFNConfig) and ffn.no_op:
+                    cls.mlp_no_op_post_init(self)
+                if isinstance(mamba, MambaConfig) and mamba.no_op:
+                    cls.attn_no_op_post_init(self)
+                if isinstance(moe, MoEConfig) and moe.no_op:
+                    cls.mlp_no_op_post_init(self)
+
+            # Native no-op hooks need typed configs during construction, but
+            # AutoModel's consolidated checkpoint writer serializes the config
+            # attached to each pipeline part.  Do not let BlockConfig objects
+            # escape that construction window.
+            if block_configs:
+                serialized = [block.to_dict() for block in block_configs]
+                config.block_configs = serialized
+                layer_config = getattr(self, "config", None)
+                if layer_config is not None:
+                    layer_config.block_configs = serialized
 
         return _patched
 

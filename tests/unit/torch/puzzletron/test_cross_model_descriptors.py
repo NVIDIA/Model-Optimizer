@@ -265,6 +265,7 @@ def test_nemotron_weight_groups_accept_native_automodel_moe_names() -> None:
 
 def test_nemotron_hidden_width_spec_covers_hf_and_native_hybrid_tensors() -> None:
     config = SimpleNamespace(hidden_size=2688, tie_word_embeddings=False)
+    latent_size = 640
     spec = NemotronHModelDescriptor.embedding_pruning_spec(
         config, widths=(2688, 1344), alignment=64
     )
@@ -276,24 +277,79 @@ def test_nemotron_hidden_width_spec_covers_hf_and_native_hybrid_tensors() -> Non
         "backbone.layers.1.mixer.q_proj.weight": torch.zeros(8, 2688),
         "backbone.layers.1.mixer.o_proj.weight": torch.zeros(2688, 8),
         "backbone.layers.2.mixer.gate.weight": torch.zeros(4, 2688),
-        "backbone.layers.2.mixer.experts.0.up_proj.weight": torch.zeros(6, 2688),
-        "backbone.layers.2.mixer.experts.0.down_proj.weight": torch.zeros(2688, 6),
+        "backbone.layers.2.mixer.fc1_latent_proj.weight": torch.zeros(latent_size, 2688),
+        "backbone.layers.2.mixer.fc2_latent_proj.weight": torch.zeros(2688, latent_size),
+        "backbone.layers.2.mixer.experts.0.up_proj.weight": torch.zeros(6, latent_size),
+        "backbone.layers.2.mixer.experts.0.down_proj.weight": torch.zeros(latent_size, 6),
         "backbone.layers.2.mixer.shared_experts.up_proj.weight": torch.zeros(12, 2688),
         "backbone.layers.2.mixer.shared_experts.down_proj.weight": torch.zeros(2688, 12),
         "backbone.norm_f.weight": torch.zeros(2688),
         "lm_head.weight": torch.zeros(8, 2688),
-        "model.layers.3.mixer.experts.gate_and_up_projs": torch.zeros(4, 2688, 6),
-        "model.layers.3.mixer.experts.down_projs": torch.zeros(4, 6, 2688),
+        "model.layers.3.mixer.fc1_latent_proj.weight": torch.zeros(latent_size, 2688),
+        "model.layers.3.mixer.fc2_latent_proj.weight": torch.zeros(2688, latent_size),
+        "model.layers.3.mixer.experts.gate_and_up_projs": torch.zeros(4, latent_size, 6),
+        "model.layers.3.mixer.experts.down_projs": torch.zeros(4, 6, latent_size),
+        "mtp.layers.0.eh_proj.weight": torch.zeros(2688, 2 * 2688),
+        "mtp.layers.0.enorm.weight": torch.zeros(2688),
+        "mtp.layers.0.hnorm.weight": torch.zeros(2688),
+        "mtp.layers.0.norm.weight": torch.zeros(2688),
+        "mtp.layers.0.mixer.q_proj.weight": torch.zeros(2688, 2688),
+        "mtp.layers.0.mixer.k_proj.weight": torch.zeros(4, 2688),
+        "mtp.layers.0.mixer.v_proj.weight": torch.zeros(4, 2688),
+        "mtp.layers.0.mixer.o_proj.weight": torch.zeros(2688, 2688),
+        "mtp.layers.1.norm.weight": torch.zeros(2688),
+        "mtp.layers.1.final_layernorm.weight": torch.zeros(2688),
+        "mtp.layers.1.mixer.gate.weight": torch.zeros(4, 2688),
+        "mtp.layers.1.mixer.fc1_latent_proj.weight": torch.zeros(latent_size, 2688),
+        "mtp.layers.1.mixer.fc2_latent_proj.weight": torch.zeros(2688, latent_size),
+        "mtp.layers.1.mixer.experts.0.up_proj.weight": torch.zeros(6, latent_size),
+        "mtp.layers.1.mixer.experts.0.down_proj.weight": torch.zeros(latent_size, 6),
+        "mtp.layers.1.mixer.shared_experts.up_proj.weight": torch.zeros(12, 2688),
+        "mtp.layers.1.mixer.shared_experts.down_proj.weight": torch.zeros(2688, 12),
     }
 
     audit = spec.audit_state_dict(state)
     sliced = spec.slice_state_dict(state, 1344)
 
-    assert len(audit["handled"]) == len(state)
+    assert set(state) - set(audit["handled"]) == {
+        "backbone.layers.2.mixer.experts.0.up_proj.weight",
+        "backbone.layers.2.mixer.experts.0.down_proj.weight",
+        "model.layers.3.mixer.experts.gate_and_up_projs",
+        "model.layers.3.mixer.experts.down_projs",
+        "mtp.layers.1.mixer.experts.0.up_proj.weight",
+        "mtp.layers.1.mixer.experts.0.down_proj.weight",
+    }
     assert sliced["backbone.layers.0.mixer.in_proj.weight"].shape == (16, 1344)
     assert sliced["backbone.layers.0.mixer.out_proj.weight"].shape == (1344, 16)
-    assert sliced["model.layers.3.mixer.experts.gate_and_up_projs"].shape == (4, 1344, 6)
-    assert sliced["model.layers.3.mixer.experts.down_projs"].shape == (4, 6, 1344)
+    assert sliced["backbone.layers.2.mixer.fc1_latent_proj.weight"].shape == (
+        latent_size,
+        1344,
+    )
+    assert sliced["backbone.layers.2.mixer.fc2_latent_proj.weight"].shape == (
+        1344,
+        latent_size,
+    )
+    assert sliced["model.layers.3.mixer.experts.gate_and_up_projs"].shape == (
+        4,
+        latent_size,
+        6,
+    )
+    assert sliced["model.layers.3.mixer.experts.down_projs"].shape == (
+        4,
+        6,
+        latent_size,
+    )
+    assert sliced["mtp.layers.0.eh_proj.weight"].shape == (1344, 2 * 1344)
+    assert sliced["mtp.layers.0.mixer.q_proj.weight"].shape == (2688, 1344)
+    assert sliced["mtp.layers.0.mixer.o_proj.weight"].shape == (1344, 2688)
+    assert sliced["mtp.layers.1.mixer.fc1_latent_proj.weight"].shape == (
+        latent_size,
+        1344,
+    )
+    assert sliced["mtp.layers.1.mixer.fc2_latent_proj.weight"].shape == (
+        1344,
+        latent_size,
+    )
     assert spec.validate_width(1344, tp_size=2) == 1344
 
 
@@ -615,3 +671,112 @@ def test_nemotron_updates_remote_read_only_layer_types_through_hybrid_pattern() 
 
     assert config.hybrid_override_pattern == "M-"
     assert config.layers_block_type == ["mamba", "mlp"]
+
+
+def test_nemotron_runtime_proxy_supplies_legacy_hybrid_pattern(monkeypatch) -> None:
+    captured = {}
+
+    class _CapturedConfig(Exception):
+        def __init__(self, hybrid_override_pattern=None, **kwargs):
+            captured.update(kwargs)
+            captured["hybrid_override_pattern"] = hybrid_override_pattern
+            raise self
+
+    runtime = SimpleNamespace(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        prefill_seq_len=8,
+        generation_seq_len=2,
+        model_config_value=lambda _name, default=None: default,
+    )
+    blocks = [
+        BlockConfig(
+            subblock_configs=(
+                AttentionConfig(num_query_heads=4, num_kv_heads=2),
+                FFNConfig(no_op=True),
+            )
+        )
+    ]
+    monkeypatch.setattr(
+        NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfig
+    )
+    monkeypatch.setattr(
+        NemotronHModelDescriptor, "_runtime_model_cls", lambda: object
+    )
+
+    with pytest.raises(_CapturedConfig):
+        NemotronHModelDescriptor.create_runtime_benchmark_model(runtime, blocks)
+
+    assert "layers_block_type" not in captured
+    assert captured["hybrid_override_pattern"] == "*"
+    assert captured["num_hidden_layers"] == 1
+
+
+def test_nemotron_runtime_proxy_uses_native_layer_types_for_new_config() -> None:
+    class _NewConfig:
+        def __init__(self, layers_block_type=None, **kwargs):
+            pass
+
+    assert NemotronHModelDescriptor._runtime_layer_config_kwargs(
+        _NewConfig, ["attention", "moe"]
+    ) == {"layers_block_type": ["attention", "moe"]}
+
+
+def test_nemotron_runtime_proxy_normalizes_legacy_tied_weight_lists() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    model._tied_weights_keys = ["lm_head.weight"]
+    model[0]._tied_weights_keys = ("weight",)
+
+    NemotronHModelDescriptor._normalize_runtime_tied_weight_metadata(model)
+
+    assert model._tied_weights_keys == {"lm_head.weight": "lm_head.weight"}
+    assert model[0]._tied_weights_keys == {"weight": "weight"}
+
+
+def test_nemotron_runtime_bounding_preserves_native_moe_and_mamba_families() -> None:
+    values = {
+        "n_routed_experts": 512,
+        "moe_intermediate_size": 2688,
+        "moe_shared_expert_intermediate_size": 5376,
+        "moe_latent_size": 1024,
+        "num_experts_per_tok": 22,
+        "runtime_proxy_max_experts": 16,
+        "runtime_proxy_max_expert_intermediate": 512,
+        "runtime_proxy_max_shared_expert_intermediate": 512,
+        "runtime_proxy_max_latent": 256,
+        "runtime_proxy_max_top_k": 4,
+    }
+    runtime = SimpleNamespace(
+        num_key_value_heads=8,
+        model_config_value=lambda name, default=None: values.get(name, default),
+    )
+    moe_block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(no_op=True),
+            MoEConfig(
+                num_experts=256,
+                expert_intermediate_size=1344,
+                shared_expert_intermediate_size=2688,
+                top_k=11,
+                latent_dim=512,
+            ),
+        )
+    )
+    mamba_block = BlockConfig(
+        subblock_configs=(MambaConfig(num_heads=64, head_dim=32), FFNConfig(no_op=True))
+    )
+
+    bounded_moe = NemotronHModelDescriptor._runtime_proxy_block_config(runtime, moe_block)
+    bounded_mamba = NemotronHModelDescriptor._runtime_proxy_block_config(runtime, mamba_block)
+
+    moe = bounded_moe.require_subblock("moe")
+    assert (moe.num_experts, moe.expert_intermediate_size, moe.latent_dim, moe.top_k) == (
+        8,
+        256,
+        128,
+        2,
+    )
+    assert bounded_moe.require_subblock("attention").no_op is True
+    assert bounded_mamba.require_subblock("mamba") == mamba_block.require_subblock("mamba")

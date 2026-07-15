@@ -13,6 +13,7 @@ from modelopt.torch.puzzletron.scoring_parent import (
     resolve_scoring_parent,
     write_scoring_parent,
 )
+from modelopt.torch.puzzletron.stages.depth import _resolve_depth_source
 
 
 def _checkpoint(path, model_type):
@@ -42,6 +43,19 @@ def test_scoring_parent_uses_sorted_teacher_when_bypass_is_disabled(tmp_path):
     assert parent.path == sorted_teacher.resolve()
     assert parent.sorted_teacher_fingerprint == parent.fingerprint
     assert parent.bypass_manifest_fingerprint is None
+
+
+def test_depth_can_use_explicit_teacher_before_sorted_checkpoint_exists(tmp_path):
+    teacher = _checkpoint(tmp_path / "ckpts" / "teacher", "teacher")
+
+    source, record = _resolve_depth_source(
+        {"depth_importance": {"source_checkpoint_dir": str(teacher)}}
+    )
+
+    assert source == teacher.resolve()
+    assert record["role"] == "configured_depth_source"
+    assert record["path"] == str(teacher.resolve())
+    assert record["fingerprint"]
 
 
 def test_scoring_parent_uses_validated_nested_bypass_checkpoint(tmp_path):

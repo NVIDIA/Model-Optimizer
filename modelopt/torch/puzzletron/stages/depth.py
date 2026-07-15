@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import modelopt.torch.utils.distributed as dist
@@ -16,13 +17,28 @@ from .pipeline import _distributed
 __all__ = ["depth_stage"]
 
 
+def _resolve_depth_source(config: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    configured = (config.get("depth_importance") or {}).get("source_checkpoint_dir")
+    if configured:
+        source = Path(configured).resolve()
+        if not (source / "config.json").is_file():
+            raise FileNotFoundError(f"depth source is not a usable checkpoint: {source}")
+        from ..distributed_eval.config import checkpoint_identity
+
+        identity = checkpoint_identity(source)
+        return source, {
+            "path": str(source),
+            "role": "configured_depth_source",
+            "fingerprint": identity["fingerprint"],
+        }
+    parent = ensure_scoring_parent(config, refresh=True)
+    return parent.path, parent.to_dict()
+
+
 def depth_stage(config: dict[str, Any], manifest: StageManifest):
     hydra_cfg = load_runtime_hydra_config(config)
-    # Bypass publishes its checkpoint before ``complete_stage`` writes the final
-    # manifest. Refresh here so the content-addressed parent captures both the
-    # final checkpoint identity and the final successful upstream manifest.
-    parent = ensure_scoring_parent(config, refresh=True)
-    hydra_cfg.depth.source_checkpoint_dir = str(parent.path)
+    source, parent_record = _resolve_depth_source(config)
+    hydra_cfg.depth.source_checkpoint_dir = str(source)
     with _distributed(hydra_cfg):
         from ..depth import launch_iterative_depth_automodel
 
@@ -31,5 +47,5 @@ def depth_stage(config: dict[str, Any], manifest: StageManifest):
     return complete_stage(
         config,
         manifest,
-        outputs={**outputs, "scoring_parent": parent.to_dict()},
+        outputs={**outputs, "scoring_parent": parent_record},
     )

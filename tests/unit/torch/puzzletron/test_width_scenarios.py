@@ -2,10 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from examples.puzzletron.embedding_pipeline import (
+    _project_vllm_stats_to_scenarios,
+    finalize_replacement_scoring_diagnostics,
+    scenario_preparation_commands,
+    scenario_worker_commands,
+)
 from examples.puzzletron.prepare_width_scenarios import (
     _prepare_scenario_destination,
     _resolve_source_checkpoint,
@@ -205,6 +212,131 @@ def test_runtime_stats_cache_filters_exact_hidden_width(tmp_path):
     assert len(wide) == 2
     assert len(narrow) == 2
     assert set(wide.values()) != set(narrow.values())
+
+
+def test_embedding_pipeline_projects_root_vllm_stats_by_hidden_width(tmp_path):
+    root_stats = [
+        {
+            "args": {
+                "n_embd": width,
+                "runtime_stats": runtime_stats,
+                "weights_dtype": dtype,
+            },
+            "subblocks": [{"runtime_ms": width / 1000}],
+        }
+        for width in (1024, 768)
+        for runtime_stats, dtype in ((False, "nvfp4"), (True, "torch.bfloat16"))
+    ]
+    (tmp_path / "subblock_stats.json").write_text(json.dumps(root_stats))
+
+    outputs = _project_vllm_stats_to_scenarios(
+        {
+            "puzzle_dir": str(tmp_path),
+            "embedding_pruning": {"widths": [1024, 768]},
+        }
+    )
+
+    assert set(outputs) == {1024, 768}
+    for width, output in outputs.items():
+        scenario_stats = json.loads(output.read_text())
+        assert len(scenario_stats) == 2
+        assert {entry["args"]["n_embd"] for entry in scenario_stats} == {width}
+
+
+def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tmp_path):
+    (command,) = scenario_worker_commands(
+        config_path="experiment.yaml",
+        config={
+            "puzzle_dir": str(tmp_path),
+            "embedding_pruning": {"widths": [768]},
+            "replacement_scoring": {"granularity": "subblock"},
+        },
+        stage="replacement_scoring",
+        gpus_per_node=8,
+    )
+
+    assert command[1:4] == ("-m", "torch.distributed.run", "--standalone")
+    assert ("--worker-stage", "replacement_scoring") == tuple(
+        command[command.index("--worker-stage") : command.index("--worker-stage") + 2]
+    )
+    overrides = [
+        command[index + 1] for index, value in enumerate(command) if value == "--override"
+    ]
+    assert any(
+        override.endswith("/single_subblock_replacement_solutions.json")
+        and override.startswith("replacement_scoring.solutions_path=")
+        for override in overrides
+    )
+    assert any(
+        override.endswith("/single_subblock_replacement_solutions--validation")
+        and override.startswith("replacement_scoring.output_dir=")
+        for override in overrides
+    )
+
+
+def test_embedding_pipeline_prepares_subblock_solutions_for_every_width(tmp_path):
+    commands = scenario_preparation_commands(
+        config={
+            "puzzle_dir": str(tmp_path),
+            "embedding_pruning": {"widths": [1024, 768]},
+            "replacement_scoring": {"granularity": "subblock"},
+        },
+        stage="replacement_scoring",
+    )
+
+    assert len(commands) == 2
+    assert all(command[1].endswith("prepare_subblock_replacement_scoring.py") for command in commands)
+    assert {
+        Path(command[command.index("--puzzle-dir") + 1]).name
+        for command in commands
+    } == {"depth-00"}
+    assert {
+        Path(command[command.index("--puzzle-dir") + 1]).parent.name
+        for command in commands
+    } == {"width-1024", "width-0768"}
+
+
+def test_embedding_pipeline_publishes_root_replacement_scoring_summary(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    def fake_report(puzzle_dir, **kwargs):
+        width = int(Path(puzzle_dir).parent.name.removeprefix("width-"))
+        calls.append((Path(puzzle_dir), kwargs))
+        return {
+            "kind": "replacement_scoring",
+            "granularity": "subblock",
+            "record_count": width,
+            "warning_count": width // 256,
+            "axes": [f"axis-{width}"],
+            "metrics": ["raw_replacement_loss"],
+            "outputs": [str(kwargs["output_dir"] / "summary.json")],
+        }
+
+    monkeypatch.setattr(
+        "examples.puzzletron.embedding_pipeline.generate_replace_block_report",
+        fake_report,
+    )
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "embedding_pruning": {"widths": [1024, 768]},
+        "replacement_scoring": {
+            "granularity": "subblock",
+            "default_metric": "raw_replacement_loss",
+        },
+    }
+
+    summary = finalize_replacement_scoring_diagnostics(config)
+
+    assert len(calls) == 2
+    assert summary["widths"] == [1024, 768]
+    assert summary["record_count"] == 1792
+    assert summary["scenario_count"] == 2
+    assert summary["axes"] == ["axis-1024", "axis-768"]
+    assert json.loads(
+        (tmp_path / "artifacts/replacement_scoring/summary.json").read_text()
+    ) == summary
 
 
 def test_width_scenario_destination_rejects_or_replaces_stale_parent(tmp_path):

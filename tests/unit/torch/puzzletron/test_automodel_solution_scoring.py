@@ -23,9 +23,11 @@ import torch
 from torch import nn
 from torch.distributed.fsdp import FSDPModule
 
+from modelopt.torch.puzzletron.plugins.automodel import solution_recipe
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
+    MambaConfig,
     MLAConfig,
     MoEConfig,
 )
@@ -36,6 +38,7 @@ from modelopt.torch.puzzletron.plugins.automodel.solution_metrics import (
     score_batch,
 )
 from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
+    _load_model_config_distributed,
     _source_hidden_channel_indices,
     _solution_prune_target,
     _solution_hidden_width,
@@ -45,6 +48,7 @@ from modelopt.torch.puzzletron.stages.diagnostics import _annotate_solution_sele
 from modelopt.torch.puzzletron.plugins.automodel.solution_recipe import (
     _layer_runtime_fingerprint,
     _masked_native_gate_forward,
+    _temporary_parameter_mask,
 )
 from modelopt.torch.puzzletron.plugins.automodel.solution_recipe import ReplaceBlockScoringRecipe
 from modelopt.torch.puzzletron.plugins.automodel.teacher_cache import TeacherTargetCache
@@ -60,6 +64,36 @@ def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
 
     assert solutions == []
     assert pending_ids == []
+
+
+def test_distributed_config_load_precaches_remote_code_before_import(monkeypatch, tmp_path):
+    from modelopt.torch.puzzletron.plugins.automodel import solution_launch
+
+    events = []
+    monkeypatch.setattr(
+        solution_launch,
+        "_precache_trust_remote_code_distributed",
+        lambda path, **kwargs: events.append(("precache", path, kwargs)),
+    )
+
+    class Descriptor:
+        @staticmethod
+        def requires_trust_remote_code():
+            return True
+
+    expected = object()
+
+    def load(path, **kwargs):
+        events.append(("load", path, kwargs))
+        return expected
+
+    result = _load_model_config_distributed(tmp_path, Descriptor, loader=load)
+
+    assert result is expected
+    assert events == [
+        ("precache", tmp_path, {"trust_remote_code": True}),
+        ("load", tmp_path, {"trust_remote_code": True}),
+    ]
 
 
 def test_rpc_executor_infers_descriptor_when_config_has_no_override(monkeypatch, tmp_path):
@@ -232,7 +266,7 @@ def test_native_gate_can_mask_ranked_nonprefix_expert_ids():
     assert set(indices.flatten().tolist()) == {1, 3}
 
 
-def test_solution_prune_target_carries_ranked_expert_ids():
+def test_solution_prune_target_uses_prefix_after_parent_experts_are_sorted():
     teacher = BlockConfig(
         subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)
     )
@@ -253,7 +287,10 @@ def test_solution_prune_target_carries_ranked_expert_ids():
         head_dim=4,
     )
 
-    assert target["expert_keep_ids"] == (3, 1)
+    # ``kept_experts`` documents the original checkpoint ids selected by the
+    # ranking.  The scoring parent has already permuted those experts into the
+    # leading prefix, so applying the old ids again would select a different set.
+    assert target["expert_keep_ids"] is None
 
 
 def test_diagnostic_annotation_records_ranked_expert_ids(tmp_path):
@@ -529,6 +566,156 @@ def test_runtime_mla_head_slice_masks_sorted_o_proj_prefix_and_restores() -> Non
     )
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(layer.self_attn(head_outputs), original)
+
+
+class _GroupedRMSNormMamba(nn.Module):
+    """Small fused-Mamba analogue whose norm retains the static teacher shape."""
+
+    def __init__(self):
+        super().__init__()
+        self.num_heads = 4
+        self.head_dim = 2
+        self.n_groups = 2
+        self.ssm_state_size = 1
+        self.intermediate_size = self.num_heads * self.head_dim
+        self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.ssm_state_size
+        projection_size = self.intermediate_size + self.conv_dim + self.num_heads
+        self.in_proj = nn.Linear(3, projection_size, bias=False, dtype=torch.float64)
+        self.conv1d = nn.Conv1d(
+            self.conv_dim,
+            self.conv_dim,
+            kernel_size=1,
+            groups=self.conv_dim,
+            dtype=torch.float64,
+        )
+        self.norm = nn.Module()
+        self.norm.weight = nn.Parameter(torch.randn(self.intermediate_size, dtype=torch.float64))
+        self.norm.variance_epsilon = 1e-12
+        self.norm.group_size = self.intermediate_size // self.n_groups
+        self.out_proj = nn.Linear(
+            self.intermediate_size,
+            3,
+            bias=False,
+            dtype=torch.float64,
+        )
+
+    def forward(self, x):
+        projected = self.in_proj(x)
+        gate = projected[..., : self.intermediate_size]
+        inner = projected[..., self.intermediate_size : 2 * self.intermediate_size]
+        grouped = inner.reshape(*inner.shape[:-1], self.n_groups, -1)
+        grouped = grouped * torch.rsqrt(
+            grouped.square().mean(dim=-1, keepdim=True) + self.norm.variance_epsilon
+        )
+        normalized = grouped.reshape_as(inner) * self.norm.weight
+        # Match native fused Mamba kernels, which consume the projection
+        # parameter directly and therefore bypass ``out_proj.forward`` hooks.
+        return torch.nn.functional.linear(
+            normalized * torch.nn.functional.silu(gate),
+            self.out_proj.weight,
+            self.out_proj.bias,
+        )
+
+
+class _MambaLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mixer = _GroupedRMSNormMamba()
+
+
+@pytest.mark.parametrize(
+    ("target_heads", "target_head_dim", "keep_indices"),
+    (
+        (2, 2, (0, 1, 4, 5)),
+        (4, 1, (0, 2, 4, 6)),
+    ),
+)
+def test_runtime_mamba_head_slice_matches_physically_compact_group_norm_and_restores(
+    target_heads: int,
+    target_head_dim: int,
+    keep_indices: tuple[int, ...],
+) -> None:
+    torch.manual_seed(11)
+    layer = _MambaLayer()
+    x = torch.randn(7, 3, dtype=torch.float64)
+    teacher = BlockConfig(
+        subblock_configs=(
+            MambaConfig(num_heads=4, head_dim=2, num_groups=2, state_dim=1),
+        )
+    )
+    child = BlockConfig(
+        subblock_configs=(
+            MambaConfig(
+                num_heads=target_heads,
+                head_dim=target_head_dim,
+                num_groups=2,
+                state_dim=1,
+            ),
+        )
+    )
+    original = layer.mixer(x)
+    original_norm_weight = layer.mixer.norm.weight.detach().clone()
+
+    handle = apply_runtime_candidate(layer, teacher, child)
+    # Runtime slicing must not all-gather/rewrite FSDP or DTensor norm weights;
+    # the uniform compensation belongs on the retained out-projection input.
+    torch.testing.assert_close(layer.mixer.norm.weight, original_norm_weight)
+    actual = layer.mixer(x)
+    handle.remove()
+
+    projected = layer.mixer.in_proj(x)
+    keep = torch.tensor(keep_indices)
+    gate = projected[..., :8].index_select(-1, keep)
+    inner = projected[..., 8:16].index_select(-1, keep)
+    physical_group_size = target_heads * target_head_dim // 2
+    grouped = inner.reshape(*inner.shape[:-1], 2, physical_group_size)
+    grouped = grouped * torch.rsqrt(grouped.square().mean(dim=-1, keepdim=True) + 1e-12)
+    normalized = grouped.reshape_as(inner) * original_norm_weight.index_select(0, keep)
+    expected = torch.nn.functional.linear(
+        normalized * torch.nn.functional.silu(gate),
+        layer.mixer.out_proj.weight.index_select(1, keep),
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-9)
+    torch.testing.assert_close(layer.mixer.norm.weight, original_norm_weight)
+    torch.testing.assert_close(layer.mixer(x), original)
+
+
+def test_dtensor_parameter_mask_changes_only_local_storage_without_full_gather(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import DeviceMesh
+    from torch.distributed.tensor import Shard, distribute_tensor
+
+    assert not dist.is_initialized()
+    init_file = tmp_path / "gloo-init"
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{init_file}",
+        rank=0,
+        world_size=1,
+    )
+    try:
+        mesh = DeviceMesh("cpu", [0])
+        original = torch.arange(1, 5, dtype=torch.float32)
+        parameter = distribute_tensor(original, mesh, placements=(Shard(0),))
+
+        def reject_full_gather(*args, **kwargs):
+            raise AssertionError("DTensor overlay must not gather the full parameter")
+
+        monkeypatch.setattr(solution_recipe, "_full", reject_full_gather)
+        with _temporary_parameter_mask(
+            parameter,
+            torch.tensor([True, False, True, False]),
+        ):
+            torch.testing.assert_close(
+                parameter.to_local(),
+                torch.tensor([1.0, 0.0, 3.0, 0.0]),
+            )
+        torch.testing.assert_close(parameter.to_local(), original)
+    finally:
+        dist.destroy_process_group()
 
 
 @pytest.mark.parametrize(("target", "expected"), [(256, 256), ("full", None)])

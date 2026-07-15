@@ -166,6 +166,26 @@ def _block_config_for_subblock(
     raise Exception(f"Runtime stats: Not supported subblock type: {subblock_config}")
 
 
+def _validate_marginal_runtime(
+    measurement: RuntimeMeasurement,
+    *,
+    label: str,
+) -> None:
+    """Reject derived timings that cannot represent additive operator work."""
+
+    if measurement.total_ms <= 0.0:
+        raise ValueError(
+            f"non-positive marginal runtime for {label}: {measurement.total_ms:.6g} ms"
+        )
+    negative = {
+        "prefill_ms": measurement.prefill_ms,
+        "decode_ms": measurement.decode_ms,
+    }
+    negative = {name: value for name, value in negative.items() if value < 0.0}
+    if negative:
+        raise ValueError(f"negative marginal phase for {label}: {negative}")
+
+
 def _benchmark_spec(
     runtime_config: RuntimeConfig,
     block_config: BlockConfig | None,
@@ -603,7 +623,7 @@ def calc_runtime_for_subblocks(
     then the per-subblock runtimes are derived from the cached measurements using
     the same differencing the sequential version used.
     """
-    repeat_block_n_times = max(2, int(runtime_stats_config.get("repeat_block_n_times", 10)))
+    repeat_block_n_times = max(3, int(runtime_stats_config.get("repeat_block_n_times", 10)))
 
     runtime_config = RuntimeConfig(
         vocab_size,
@@ -647,7 +667,10 @@ def calc_runtime_for_subblocks(
         specs.setdefault(key, (rc, block_config, trailing_base_block))
         return key
 
-    base_key = _add_spec(runtime_config, None)  # 1 base block (attn baseline + no-block)
+    # A one-layer model leaves one PP stage without a cache-bearing layer when PP=2, which
+    # vLLM's hybrid cache planner cannot represent.  Time two base layers instead and recover
+    # the one-layer baseline from the adjacent repeated-base anchor below.
+    two_base_key = _add_spec(runtime_config, None, trailing_base_block=True)
     ten_block_key = _add_spec(runtime_config_fewer, base_block_config)  # base + 9 base blocks
     ffn_baseline_key = _add_spec(runtime_config, base_attention_block)  # base + 10 attn-only blocks
 
@@ -666,11 +689,21 @@ def calc_runtime_for_subblocks(
     )
     results = _run_benchmarks(specs, gpu_ids, cache_dir)
 
+    # Recover the one-block baseline and non-block overhead from two adjacent cache-bearing
+    # anchors.  With ``repeat_block_n_times == 3``, these are two- and three-block models.
+    runtime_ms_two_base_blocks = results[two_base_key]
+    runtime_ms_ten_blocks = results[ten_block_key]
+    runtime_ms_per_base_block = (
+        runtime_ms_ten_blocks - runtime_ms_two_base_blocks
+    ) / (repeat_block_n_times - 2)
+    runtime_ms_one_block = runtime_ms_two_base_blocks - runtime_ms_per_base_block
+    no_block_runtime_ms = runtime_ms_one_block - runtime_ms_per_base_block
+
     # ---- Derive per-subblock runtimes from the measured totals ----
     runtime_by_subblock_dict = {}
     for subblock_config in sorted(subblock_config_set):
         if isinstance(subblock_config, AttentionConfig | MLAConfig | MambaConfig):
-            baseline_runtime_ms = results[base_key]
+            baseline_runtime_ms = runtime_ms_one_block
         elif isinstance(subblock_config, FFNConfig | MoEConfig):
             baseline_runtime_ms = results[ffn_baseline_key]
         else:
@@ -683,14 +716,11 @@ def calc_runtime_for_subblocks(
             total_runtime_ms = (
                 subblock_total_runtime_ms - baseline_runtime_ms
             ) / repeat_block_n_times
+            _validate_marginal_runtime(
+                total_runtime_ms,
+                label=json.dumps(subblock_config.to_dict(), sort_keys=True),
+            )
 
         runtime_by_subblock_dict[subblock_config] = total_runtime_ms
-
-    # No-block overhead (embedding + LM head): extrapolate from 1- and 10-block models.
-    runtime_ms_one_block = results[base_key]
-    runtime_ms_ten_blocks = results[ten_block_key]
-    no_block_runtime_ms = runtime_ms_one_block - (
-        runtime_ms_ten_blocks - runtime_ms_one_block
-    ) / (repeat_block_n_times - 1)
 
     return runtime_by_subblock_dict, no_block_runtime_ms

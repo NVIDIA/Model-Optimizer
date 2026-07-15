@@ -1490,15 +1490,12 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         token_rank: int,
         cp_size: int,
     ) -> tuple[int, int]:
-        """Resolve true DP ownership without treating EP ranks as data replicas."""
-        configured = getattr(distributed_cfg, "dp_size", 1)
-        try:
-            dp_size = int(configured)
-        except (TypeError, ValueError):
-            dp_size = 1
-        if dp_size <= 1:
+        """Resolve logical DP ownership from the scorer's token-reduction group."""
+        del distributed_cfg
+        if cp_size < 1 or token_size < cp_size or token_size % cp_size:
             return 1, 0
-        if cp_size < 1 or token_size < dp_size * cp_size:
+        dp_size = token_size // cp_size
+        if dp_size <= 1:
             return 1, 0
         return dp_size, (int(token_rank) // int(cp_size)) % dp_size
 

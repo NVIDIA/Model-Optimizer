@@ -17,6 +17,7 @@ from typing import Any
 from .campaign import Campaign
 from .config import (
     DEFAULT_EVALUATOR_REVISION,
+    _replacement_scoring_config,
     build_campaign_manifest,
     load_plain_pipeline_config,
     parallelism_from_config,
@@ -181,7 +182,7 @@ def command_worker(args) -> int:
             f"worker={actual_parallelism.model_dump()}\n"
             f"campaign={campaign.manifest.parallelism.model_dump()}"
         )
-    scoring = dict(plain_cfg.get("scoring") or {})
+    scoring = _replacement_scoring_config(plain_cfg)
     automodel = dict(scoring.get("automodel") or {})
     force_hf = bool(automodel.get("force_hf", (plain_cfg.get("model") or {}).get("force_hf", True)))
     if force_hf != campaign.manifest.force_hf:

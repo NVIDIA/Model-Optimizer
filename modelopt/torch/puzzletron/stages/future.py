@@ -201,6 +201,45 @@ def _with_teacher_checkpoint(
     ]
 
 
+def _profile_solution_checkpoints(
+    puzzle_dir: Path, profile_id: str | None = None
+) -> list[tuple[str, Path]]:
+    """Return the selected MIP profile checkpoints when one profile is unambiguous."""
+
+    profiles_root = puzzle_dir / "mip" / "profiles"
+    if profile_id is None:
+        index_path = profiles_root / "index.json"
+        if index_path.is_file():
+            index = json.loads(index_path.read_text())
+            profile_ids = [
+                str(row["id"])
+                for row in index.get("profiles", ())
+                if (
+                    profiles_root / str(row.get("id")) / "selected_solutions.json"
+                ).is_file()
+            ]
+        else:
+            profile_ids = [
+                path.parent.name
+                for path in profiles_root.glob("*/selected_solutions.json")
+            ]
+        if len(profile_ids) != 1:
+            return []
+        profile_id = profile_ids[0]
+
+    registry_path = profiles_root / str(profile_id) / "selected_solutions.json"
+    if not registry_path.is_file():
+        return []
+    registry = json.loads(registry_path.read_text())
+    checkpoints = [
+        (str(row["solution_id"]), Path(str(row["checkpoint"])))
+        for row in registry.get("solutions", ())
+    ]
+    if len({name for name, _ in checkpoints}) != len(checkpoints):
+        raise ValueError(f"profile registry has duplicate solution IDs: {registry_path}")
+    return checkpoints
+
+
 def _aiperf_executable(stage_cfg: dict[str, Any]) -> str:
     """Resolve an explicit client first, then the shared environment client."""
     return str(stage_cfg.get("executable") or os.environ.get("AIPERF_EXECUTABLE", "aiperf"))
@@ -269,16 +308,24 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
         checkpoints.extend(_scenario_grid_global_kd_checkpoints(puzzle_dir))
     elif stage_cfg.get("checkpoint_source") == "scenario_grid":
         checkpoints.extend(
-            (
-                "-".join(path.parts[-5:-3]),
-                path.parent,
+            (name, checkpoint)
+            for name, checkpoint in _profile_solution_checkpoints(
+                puzzle_dir, stage_cfg.get("profile_id")
             )
-            for path in sorted(
-                (puzzle_dir / "scenarios").glob(
-                    "width-*/depth-*/checkpoints/solution_0/config.json"
+            if name != "teacher"
+        )
+        if not checkpoints:
+            checkpoints.extend(
+                (
+                    "-".join(path.parts[-5:-3]),
+                    path.parent,
+                )
+                for path in sorted(
+                    (puzzle_dir / "scenarios").glob(
+                        "width-*/depth-*/checkpoints/solution_0/config.json"
+                    )
                 )
             )
-        )
     else:
         checkpoints.extend(
             (path.name, path)
@@ -401,32 +448,37 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
     puzzle_dir = Path((config.get("experiment") or {})["dir"])
     configured = stage_cfg.get("checkpoints")
     if configured:
-        checkpoints = [Path(path) for path in configured]
+        checkpoint_entries = [(Path(path).name, Path(path)) for path in configured]
     elif stage_cfg.get("checkpoint_source") == "global_kd":
-        checkpoints = [
-            checkpoint
-            for _, checkpoint in _scenario_grid_global_kd_checkpoints(puzzle_dir)
-        ]
+        checkpoint_entries = _scenario_grid_global_kd_checkpoints(puzzle_dir)
     else:
-        checkpoints = sorted(
-            path.parent
-            for path in (puzzle_dir / "scenarios").glob(
-                "width-*/depth-*/checkpoints/solution_0/config.json"
+        checkpoint_entries = [
+            (name, checkpoint)
+            for name, checkpoint in _profile_solution_checkpoints(
+                puzzle_dir, stage_cfg.get("profile_id")
             )
-        )
+            if name != "teacher"
+        ]
+        if not checkpoint_entries:
+            checkpoint_entries = [
+                (path.parent.name, path.parent)
+                for path in sorted(
+                    (puzzle_dir / "scenarios").glob(
+                        "width-*/depth-*/checkpoints/solution_0/config.json"
+                    )
+                )
+            ]
     teacher_dir = (config.get("convert") or {}).get("teacher_dir")
-    checkpoints = [
-        Path(checkpoint)
-        for _, checkpoint in _with_teacher_checkpoint(
-            teacher_dir, [(checkpoint.name, checkpoint) for checkpoint in checkpoints]
-        )
+    checkpoint_entries = [
+        (name, Path(checkpoint))
+        for name, checkpoint in _with_teacher_checkpoint(teacher_dir, checkpoint_entries)
     ]
-    if len(checkpoints) == 1 and teacher_dir is None:
+    if len(checkpoint_entries) == 1 and teacher_dir is None:
         raise FileNotFoundError("exact evaluation found no scenario checkpoints")
     if teacher_dir is None:
         raise ValueError("exact evaluation requires convert.teacher_dir")
     teacher_dir = Path(teacher_dir)
-    descriptor = _resolve_evaluation_descriptor(config, checkpoints[0])
+    descriptor = _resolve_evaluation_descriptor(config, checkpoint_entries[0][1])
     hydra_cfg = load_runtime_hydra_config(config)
     root = Path(
         stage_cfg.get("output_dir", puzzle_dir / "artifacts" / "zero_shot_evaluation")
@@ -434,7 +486,7 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
     summaries = []
 
     with _distributed(hydra_cfg):
-        for checkpoint in checkpoints:
+        for solution_id, checkpoint in checkpoint_entries:
             checkpoint_config = load_model_config(
                 checkpoint,
                 trust_remote_code=descriptor.requires_trust_remote_code(),
@@ -484,7 +536,7 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
                 summaries.append(
                     {
                         "checkpoint": str(checkpoint),
-                        "solution_id": "teacher" if checkpoint == teacher_dir else checkpoint.name,
+                        "solution_id": solution_id,
                         "hidden_width": int(lm.hidden_size),
                         "result_path": str(result_path),
                         "metrics": {
@@ -504,7 +556,7 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
         config,
         manifest,
         outputs={
-            "checkpoint_count": len(checkpoints),
+            "checkpoint_count": len(checkpoint_entries),
             "summary_path": str(root / "evaluation_summary.json"),
         },
     )
@@ -551,6 +603,32 @@ def _write_global_distillation_summary(
                 continue
             records_by_step[step] = record
     records = [records_by_step[step] for step in sorted(records_by_step)]
+    consolidated = []
+    for config_path in (kd_config.output_dir / "checkpoints").glob(
+        "epoch_*_step_*/model/consolidated/config.json"
+    ):
+        checkpoint = config_path.parent
+        step_dir = checkpoint.parents[1]
+        if not (step_dir / "saving_completed").is_file():
+            continue
+        try:
+            step = int(step_dir.name.rsplit("_step_", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        consolidated.append((step, checkpoint))
+    post_kd_checkpoint = (
+        max(consolidated, key=lambda item: item[0])[1] if consolidated else None
+    )
+    consolidation_requested = str(kd_config.save_consolidated).strip().lower() not in {
+        "false",
+        "0",
+        "none",
+    }
+    if consolidation_requested and post_kd_checkpoint is None:
+        raise RuntimeError(
+            "global KD requested a consolidated export but published no durable checkpoint "
+            f"under {kd_config.output_dir / 'checkpoints'}"
+        )
     domain = kd_config.domain if kd_config.domain in {"llm", "vlm"} else "llm"
     dataset = dict((kd_config.metadata.get(domain) or {}).get("dataset") or {})
     output_dir = kd_config.output_dir
@@ -569,6 +647,8 @@ def _write_global_distillation_summary(
         "records": records,
         "metrics": result.metrics,
     }
+    if post_kd_checkpoint is not None:
+        payload["post_kd_checkpoint"] = str(post_kd_checkpoint)
     summary_path = output_dir / "global_distillation_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
@@ -666,6 +746,25 @@ def distillation_stage(config: dict[str, Any], manifest: StageManifest):
         )
 
 
+def _distillation_dataset_source(
+    stage_cfg: dict[str, Any], config: dict[str, Any]
+) -> tuple[str, str]:
+    """Resolve one usable global-KD sanity dataset source."""
+
+    dataset_path = str(
+        stage_cfg.get("dataset_path")
+        or (config.get("replacement_scoring") or {}).get("dataset_path")
+        or (config.get("calibration") or {}).get("dataset_path")
+        or ""
+    )
+    packed_token_cache_path = str(stage_cfg.get("packed_token_cache_path") or "")
+    if not dataset_path and not packed_token_cache_path:
+        raise ValueError(
+            "distillation overfit requires dataset_path or packed_token_cache_path"
+        )
+    return dataset_path, packed_token_cache_path
+
+
 def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
     """Replay one frozen minibatch while globally distilling selected solutions."""
     stage_cfg = dict(config.get("global_distillation_sanity") or {})
@@ -712,14 +811,9 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
     max_steps = int(stage_cfg.get("max_steps", 64))
     local_batch_size = int(stage_cfg.get("local_batch_size", 4))
     seed = int(stage_cfg.get("seed", 444))
-    dataset_path = str(
-        stage_cfg.get("dataset_path")
-        or (config.get("replacement_scoring") or {}).get("dataset_path")
-        or (config.get("calibration") or {}).get("dataset_path")
-        or ""
+    dataset_path, packed_token_cache_path = _distillation_dataset_source(
+        stage_cfg, config
     )
-    if not dataset_path:
-        raise ValueError("distillation overfit requires dataset_path")
 
     root = (
         puzzle_dir
@@ -766,9 +860,8 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             "seq_length": sequence_length,
             "seed": seed,
         }
-        packed_token_cache_path = stage_cfg.get("packed_token_cache_path")
         if packed_token_cache_path:
-            dataset_config["packed_token_cache_path"] = str(packed_token_cache_path)
+            dataset_config["packed_token_cache_path"] = packed_token_cache_path
 
         metadata = {
             "llm": {
