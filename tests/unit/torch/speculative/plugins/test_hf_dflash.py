@@ -279,6 +279,101 @@ class TestDFlashSaveRestore:
         tf_modelopt_state_and_output_tester(model_ref, model_test)
 
 
+class TestDFlashWarmStart:
+    """Test warm-starting the draft module from an exported DFlash checkpoint."""
+
+    def _export_drafter(self, tmp_path, **config_overrides):
+        """Convert a tiny model and export its drafter in z-lab layout."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config.update(config_overrides)
+        mtsp.convert(model, [("dflash", config)])
+        export_dir = tmp_path / "exported_drafter"
+        model.get_exporter().export(export_dir)
+        return model, export_dir
+
+    def test_warm_start_loads_exported_weights(self, tmp_path):
+        """A fresh conversion with dflash_init_checkpoint matches the exported drafter."""
+        model_ref, export_dir = self._export_drafter(tmp_path)
+
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_init_checkpoint"] = str(export_dir)
+        mtsp.convert(model, [("dflash", config)])
+
+        ref_sd = model_ref.dflash_module.state_dict()
+        for key, value in model.dflash_module.state_dict().items():
+            assert torch.equal(value, ref_sd[key]), f"Mismatch after warm start: {key}"
+
+    def test_warm_start_from_safetensors_file_path(self, tmp_path):
+        """A direct path to the .safetensors file works too."""
+        model_ref, export_dir = self._export_drafter(tmp_path)
+
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_init_checkpoint"] = str(export_dir / "model.safetensors")
+        mtsp.convert(model, [("dflash", config)])
+
+        ref_sd = model_ref.dflash_module.state_dict()
+        for key, value in model.dflash_module.state_dict().items():
+            assert torch.equal(value, ref_sd[key])
+
+    def test_warm_start_arch_mismatch_raises(self, tmp_path):
+        """Loading a checkpoint with a different draft depth fails loudly."""
+        _, export_dir = self._export_drafter(tmp_path)
+
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config(num_layers=NUM_DRAFT_LAYERS + 1)
+        config["dflash_init_checkpoint"] = str(export_dir)
+        with pytest.raises(ValueError, match="does not match the draft architecture"):
+            mtsp.convert(model, [("dflash", config)])
+
+    def test_warm_start_mask_token_mismatch_warns(self, tmp_path, caplog):
+        """A different mask_token_id loads (shapes match) but warns about degradation."""
+        _, export_dir = self._export_drafter(tmp_path)
+
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_init_checkpoint"] = str(export_dir)
+        config["dflash_mask_token_id"] = 1  # exported drafter used 0
+        logger_name = "modelopt.torch.speculative.plugins.hf_dflash"
+        with caplog.at_level(logging.WARNING, logger=logger_name):
+            mtsp.convert(model, [("dflash", config)])
+        assert any("mask_token_id" in r.getMessage() for r in caplog.records)
+
+    def test_warm_start_block_size_change_allowed(self, tmp_path):
+        """Weights are block-size agnostic: a b4 checkpoint warm-starts a b8 fine-tune."""
+        model_ref, export_dir = self._export_drafter(tmp_path)
+
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config(block_size=2 * BLOCK_SIZE)
+        config["dflash_init_checkpoint"] = str(export_dir)
+        mtsp.convert(model, [("dflash", config)])
+
+        ref_sd = model_ref.dflash_module.state_dict()
+        for key, value in model.dflash_module.state_dict().items():
+            assert torch.equal(value, ref_sd[key])
+
+    def test_restore_ignores_init_checkpoint(self, tmp_path):
+        """Save/restore of a warm-started model must not re-read the init checkpoint."""
+        import shutil
+
+        _, export_dir = self._export_drafter(tmp_path)
+
+        mto.enable_huggingface_checkpointing()
+        model_ref = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_init_checkpoint"] = str(export_dir)
+        mtsp.convert(model_ref, [("dflash", config)])
+        model_ref.save_pretrained(tmp_path / "warm_started_model")
+
+        # The init checkpoint is gone; restore must still work.
+        shutil.rmtree(export_dir)
+        model_test = AutoModelForCausalLM.from_pretrained(tmp_path / "warm_started_model")
+        assert isinstance(model_test, HFDFlashModel)
+        tf_modelopt_state_and_output_tester(model_ref, model_test)
+
+
 class TestDFlashLazyRotaryEmb:
     """Test lazy rotary embedding initialization (matching EAGLE3 pattern).
 
