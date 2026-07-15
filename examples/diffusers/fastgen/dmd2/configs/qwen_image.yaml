@@ -154,7 +154,7 @@ data:
     drop_last: false
     shuffle: true
     num_workers: 0
-    negative_prompt_embedding_path: /path/to/preprocessed/qwen_image_1024p/negative_prompt_embedding.pt
+    negative_prompt_embedding_path: negative_prompt_embedding.pt
 
 # Inference-loadable safetensors saves so checkpoints are usable without a
 # secondary export pass.

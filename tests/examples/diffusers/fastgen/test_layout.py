@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Closed layout contract for the FastGen Diffusers example."""
 
@@ -36,7 +51,7 @@ _EXPECTED_DMD2_FILES = {
     "inference_qwen_image.py",
     "recipe.py",
 }
-_DMD2_CONFIG_DIGEST = "633799d328a710fa30e3c78ea230a29cabf8c3c01d6b86f265e2146c5c46a493"
+_DMD2_CONFIG_DIGEST = "c802301bcaf1d861b3be4bf384ac437b4bea6cefb00865c3cf879355bcc42019"
 _TEXT_SUFFIXES = {".json", ".md", ".py", ".rst", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 
 
@@ -94,6 +109,9 @@ def test_dmd2_config_retains_accepted_semantics() -> None:
     assert (
         value["data"]["dataloader"]["_target_"]
         == "fastgen_data.build_text_to_image_multiresolution_dataloader"
+    )
+    assert value["data"]["dataloader"]["negative_prompt_embedding_path"] == (
+        "negative_prompt_embedding.pt"
     )
 
 

@@ -33,12 +33,19 @@ Self-contained on **stock** ``nemo_automodel`` (no AutoModel patch required):
 
 import functools
 import logging
+from collections.abc import Sequence
 
 import torch
 from nemo_automodel.components.datasets.diffusion.sampler import SequentialBucketSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from .paths import resolve_under_root
 from .text_to_image_dataset import TextToImageDataset
+
+__all__ = [
+    "build_text_to_image_multiresolution_dataloader",
+    "collate_fn_text_to_image",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +94,7 @@ def collate_fn_text_to_image(
             "crop_resolution": torch.stack([item["crop_resolution"] for item in batch]),
             "original_resolution": torch.stack([item["original_resolution"] for item in batch]),
             "crop_offset": torch.stack([item["crop_offset"] for item in batch]),
+            "sample_ids": torch.tensor([item["sample_id"] for item in batch], dtype=torch.long),
         },
     }
 
@@ -167,6 +175,7 @@ def build_text_to_image_multiresolution_dataloader(
     pin_memory: bool = True,
     prefetch_factor: int = 2,
     negative_prompt_embedding_path: str | None = None,
+    selected_indices: Sequence[int] | None = None,
 ) -> tuple[StatefulDataLoader, SequentialBucketSampler]:
     """Build the DMD2 text-to-image multiresolution dataloader for ``TrainDiffusionRecipe``.
 
@@ -186,23 +195,35 @@ def build_text_to_image_multiresolution_dataloader(
         prefetch_factor: Prefetch batches per worker.
         negative_prompt_embedding_path: Optional ``.pt`` with a static negative-prompt
             embedding, bound into the collate and broadcast to every batch (DMD2 CFG).
+        selected_indices: Optional ordered original metadata ordinals to expose.
 
     Returns:
         ``(StatefulDataLoader, SequentialBucketSampler)``.
     """
-    dataset = TextToImageDataset(cache_dir=cache_dir, train_text_encoder=train_text_encoder)
+    dataset = TextToImageDataset(
+        cache_dir=cache_dir,
+        train_text_encoder=train_text_encoder,
+        selected_indices=selected_indices,
+    )
+    effective_root = dataset.cache_root
 
     # Optional negative-prompt embedding for DMD2 CFG: load once, bind into the collate.
     collate_fn = collate_fn_text_to_image
     if negative_prompt_embedding_path is not None:
-        neg_embed, neg_mask = _load_negative_prompt_embedding(negative_prompt_embedding_path)
-        logger.info(
-            "Loaded negative_prompt_embedding from %s | shape=%s dtype=%s mask_shape=%s",
+        negative_path = resolve_under_root(
+            effective_root,
             negative_prompt_embedding_path,
-            tuple(neg_embed.shape),
-            neg_embed.dtype,
-            tuple(neg_mask.shape),
+            "negative prompt embedding",
         )
+        neg_embed, neg_mask = _load_negative_prompt_embedding(str(negative_path))
+        if dp_rank == 0:
+            logger.info(
+                "Loaded negative_prompt_embedding from %s | shape=%s dtype=%s mask_shape=%s",
+                negative_path,
+                tuple(neg_embed.shape),
+                neg_embed.dtype,
+                tuple(neg_mask.shape),
+            )
         collate_fn = functools.partial(
             collate_fn_text_to_image,
             negative_text_embeddings=neg_embed,
@@ -230,13 +251,16 @@ def build_text_to_image_multiresolution_dataloader(
         persistent_workers=num_workers > 0,
     )
 
-    logger.info(
-        "text-to-image dataloader | cache_dir=%s size=%d batches/epoch=%d batch_size=%d dp=%d/%d",
-        cache_dir,
-        len(dataset),
-        len(sampler),
-        batch_size,
-        dp_rank,
-        dp_world_size,
-    )
+    if dp_rank == 0:
+        logger.info(
+            "text-to-image dataloader | effective_cache_root=%s selected=%d/%d "
+            "batches/epoch=%d batch_size=%d dp=%d/%d",
+            effective_root,
+            len(dataset),
+            dataset.total_num_samples,
+            len(sampler),
+            batch_size,
+            dp_rank,
+            dp_world_size,
+        )
     return dataloader, sampler

@@ -113,13 +113,26 @@ def _save_metadata_shards(
     each other. Merge the per-rank index files afterwards with a separate
     script to produce a single unified metadata.json.
     """
+    output_root = output_dir.resolve(strict=True)
+    normalized_metadata = []
+    for item_index, item in enumerate(all_metadata):
+        cache_file = Path(item["cache_file"]).resolve(strict=True)
+        try:
+            cache_file.relative_to(output_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"cache_file for metadata item {item_index} is outside output root "
+                f"{output_root}: {cache_file}"
+            ) from exc
+        normalized_metadata.append({**item, "cache_file": str(cache_file)})
+
     sharded = shard_world > 1
     shard_prefix = f"r{shard_rank:02d}_" if sharded else ""
     index_filename = f"metadata_r{shard_rank:02d}.json" if sharded else "metadata.json"
 
     shard_files = []
-    for chunk_start in range(0, len(all_metadata), shard_size):
-        chunk_data = all_metadata[chunk_start : chunk_start + shard_size]
+    for chunk_start in range(0, len(normalized_metadata), shard_size):
+        chunk_data = normalized_metadata[chunk_start : chunk_start + shard_size]
         chunk_idx = chunk_start // shard_size
         shard_file = output_dir / f"metadata_shard_{shard_prefix}s{chunk_idx:04d}.json"
         with open(shard_file, "w") as f:
@@ -130,7 +143,7 @@ def _save_metadata_shards(
         "processor": processor_name,
         "model_name": model_name,
         "model_type": model_type,
-        "total_items": len(all_metadata),
+        "total_items": len(normalized_metadata),
         "num_shards": len(shard_files),
         "shard_size": shard_size,
         "shards": shard_files,

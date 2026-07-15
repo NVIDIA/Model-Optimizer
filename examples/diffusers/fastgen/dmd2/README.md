@@ -52,8 +52,16 @@ python examples/diffusers/fastgen/make_negative_prompt_embedding.py \
     --output <cache dir>/negative_prompt_embedding.pt
 ```
 
-Then point the config's `data.dataloader.cache_dir` at `<cache dir>` and its
-`negative_prompt_embedding_path` at `<cache dir>/negative_prompt_embedding.pt`, and train (below).
+Then point the config's `data.dataloader.cache_dir` at `<cache dir>`, or override it without
+editing YAML:
+
+```bash
+export MODELOPT_FASTGEN_DATASET_CACHE_DIR=/absolute/path/to/cache
+```
+
+The environment override must name an absolute existing directory. The config keeps
+`negative_prompt_embedding_path: negative_prompt_embedding.pt`, so both samples and the negative
+embedding are resolved from that same selected root. Paths that escape it are rejected.
 
 ## How DMD2 works
 
@@ -99,9 +107,10 @@ this example subclasses.
 `dmd2/configs/qwen_image.yaml` is the canonical config: 4-step student, CFG, and the
 GAN + R1 branch, trained on a preprocessed latent cache. Before launching, provide:
 
-- **A preprocessed Qwen-Image latent cache** — set `data.dataloader.cache_dir`.
+- **A preprocessed Qwen-Image latent cache** — set `data.dataloader.cache_dir`, or export
+  `MODELOPT_FASTGEN_DATASET_CACHE_DIR` to an absolute existing cache directory.
 - **A precomputed negative-prompt embedding** (required for CFG) — set
-  `data.dataloader.negative_prompt_embedding_path`.
+  `data.dataloader.negative_prompt_embedding_path` relative to that cache root.
 - **An output directory** — set `checkpoint.checkpoint_dir`.
 
 The model path defaults to `Qwen/Qwen-Image`; point it at a local snapshot to avoid
@@ -179,7 +188,7 @@ student).
 | `dmd2` | `sample_t_cfg`, `ema` | Timestep sampling + student EMA settings. |
 | `optim` | `learning_rate`, `optimizer.*` | Student AdamW knobs. |
 | `fsdp` | `dp_size`, `tp_size`, `activation_checkpointing`, … | FSDP2 parallelism (set `dp_size` to your GPU count). |
-| `data` | `dataloader._target_`, `cache_dir`, `negative_prompt_embedding_path` | Latent cache dir + optional CFG negative-prompt embedding. |
+| `data` | `dataloader._target_`, `cache_dir`, `negative_prompt_embedding_path` | Environment-overridable latent cache root + optional root-relative CFG embedding. |
 | `checkpoint` | `checkpoint_dir`, `model_save_format`, `restore_from` | Output dir, save format, resume behavior. |
 
 ## Troubleshooting
