@@ -199,6 +199,8 @@ class _HFValidationExportCallback(Callback):
 
         # DistillationModel is the student with teacher and KD-loss modules attached. Hide the
         # auxiliary modules temporarily so the Hugging Face export contains only student weights.
+        # TODO: Replace this with a cleaner student-only export path instead of mutating the
+        # distillation wrapper state during export.
         with contextlib.ExitStack() as stack:
             for model_chunk in unwrap_model(context.model):
                 if isinstance(model_chunk, mtd.DistillationModel):
