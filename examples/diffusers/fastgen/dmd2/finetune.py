@@ -25,22 +25,36 @@ import logging
 import os
 import sys
 
-# Make this example directory importable as top-level modules (``dmd2_recipe``,
-# ``fastgen_data``, ``fastgen_checkpoint``) regardless of the current working directory, so
-# the configs' short ``_target_: fastgen_data.build_*`` resolve from a source checkout.
-# (Python already puts the script's directory on ``sys.path[0]`` when run as
-# ``python .../dmd2_finetune.py``; this makes that explicit and robust to other invocations.)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
+_FASTGEN_DIR = os.path.dirname(_THIS_DIR)
+if _FASTGEN_DIR not in sys.path:
+    sys.path.insert(0, _FASTGEN_DIR)
 
-from dmd2_recipe import DMD2DiffusionRecipe  # noqa: E402
-from nemo_automodel.components.config._arg_parser import parse_args_and_load_config  # noqa: E402
+_HELP = """\
+usage: finetune.py [--config CONFIG] [CONFIG_OVERRIDE ...]
+
+DMD2 Qwen-Image training with NeMo AutoModel.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  YAML config path (default:
+                   examples/diffusers/fastgen/dmd2/configs/qwen_image.yaml)
+
+Additional dotted AutoModel config overrides are forwarded unchanged.
+"""
 
 
 def main(
-    default_config_path: str = "examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml",
+    default_config_path: str = "examples/diffusers/fastgen/dmd2/configs/qwen_image.yaml",
 ) -> None:
+    if any(argument in {"-h", "--help"} for argument in sys.argv[1:]):
+        print(_HELP, end="")
+        return
+
+    from nemo_automodel.components.config._arg_parser import parse_args_and_load_config
+
+    from dmd2.recipe import DMD2DiffusionRecipe
+
     cfg = parse_args_and_load_config(default_config_path)
 
     # Surface where the data package and ``nemo_automodel`` resolve from, so a misconfigured

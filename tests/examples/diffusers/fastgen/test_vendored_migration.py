@@ -37,9 +37,8 @@ import sys
 import pytest
 
 # Resolve the example dir (examples/diffusers/fastgen) from this test's location
-# (tests/examples/diffusers/fastgen/) and put it on sys.path so ``fastgen_data`` /
-# ``fastgen_checkpoint`` / ``preprocess`` import as top-level modules, exactly as
-# dmd2_finetune.py / preprocess_qwen_image.py do.
+# (tests/examples/diffusers/fastgen/) and put it on sys.path so ``fastgen_data`` / ``dmd2`` /
+# ``preprocess`` imports resolve exactly as ``dmd2/finetune.py`` / ``preprocess_qwen_image.py`` do.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
@@ -51,7 +50,7 @@ if str(_FASTGEN_DIR) not in sys.path:
 # relative to this example dir) or ``None`` when the patch is intentionally excluded (unused on
 # the DMD2 path, or not needed for real training).
 STAGED_AUTOMODEL_DISPOSITION = {
-    "components/checkpoint/checkpointing.py": "fastgen_checkpoint.py",  # subclass override
+    "components/checkpoint/checkpointing.py": "dmd2/checkpoint.py",  # subclass override
     "components/datasets/diffusion/__init__.py": "fastgen_data/__init__.py",
     "components/datasets/diffusion/collate_fns.py": "fastgen_data/collate_fns.py",  # thin wrapper
     "components/datasets/diffusion/mock_dataloader.py": None,  # excluded: mock smoke (not real training)
@@ -74,8 +73,8 @@ def test_all_configs_target_vendored_builders():
     Enumerates all YAMLs so a newly added config cannot silently reintroduce the upstream
     dependence (which would break on stock nemo_automodel).
     """
-    configs = sorted((_FASTGEN_DIR / "configs").glob("*.yaml"))
-    assert configs, "no configs found under configs/"
+    configs = sorted(_FASTGEN_DIR.glob("*/configs/*.yaml"))
+    assert configs, "no algorithm configs found"
     for cfg in configs:
         text = cfg.read_text()
         assert "nemo_automodel.components.datasets.diffusion.build_" not in text, (
@@ -202,7 +201,7 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
 def test_partial_load_checkpointer_overrides_only_load_optimizer():
     """The subclass relaxes only optimizer load; model-state load stays strict (inherited)."""
     pytest.importorskip("nemo_automodel")
-    from fastgen_checkpoint import PartialLoadCheckpointer, make_optimizer_partial_load_tolerant
+    from dmd2.checkpoint import PartialLoadCheckpointer, make_optimizer_partial_load_tolerant
     from nemo_automodel.components.checkpoint.checkpointing import Checkpointer
 
     assert issubclass(PartialLoadCheckpointer, Checkpointer)
@@ -220,8 +219,8 @@ def test_partial_load_checkpointer_overrides_only_load_optimizer():
 
 def test_recipe_injects_partial_load_checkpointer_in_load_checkpoint():
     """The recipe upgrades self.checkpointer in load_checkpoint (before the parent restore)."""
-    src = (_FASTGEN_DIR / "dmd2_recipe.py").read_text()
-    assert "from fastgen_checkpoint import make_optimizer_partial_load_tolerant" in src
+    src = (_FASTGEN_DIR / "dmd2" / "recipe.py").read_text()
+    assert "from .checkpoint import make_optimizer_partial_load_tolerant" in src
     assert "make_optimizer_partial_load_tolerant(self.checkpointer)" in src
 
 

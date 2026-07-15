@@ -40,8 +40,8 @@ from types import SimpleNamespace
 
 import pytest
 
-# Put the example dir on sys.path so ``dmd2_recipe`` imports as a top-level module,
-# exactly as dmd2_finetune.py does (mirrors test_vendored_migration.py).
+# Put the FastGen directory on sys.path so ``dmd2.recipe`` and shared ``fastgen_data`` imports
+# resolve exactly as ``dmd2/finetune.py`` configures them.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
@@ -52,7 +52,7 @@ if str(_FASTGEN_DIR) not in sys.path:
 pytest.importorskip("torch")
 _sampler_mod = pytest.importorskip("nemo_automodel.components.datasets.diffusion.sampler")
 _stateful_dataloader_mod = pytest.importorskip("torchdata.stateful_dataloader")
-dmd2_recipe = pytest.importorskip("dmd2_recipe")
+dmd2_recipe = pytest.importorskip("dmd2.recipe")
 
 SequentialBucketSampler = _sampler_mod.SequentialBucketSampler
 StatefulDataLoader = _stateful_dataloader_mod.StatefulDataLoader
@@ -153,7 +153,7 @@ def test_resume_rebuild_serves_clean_run_position(monkeypatch, epoch_len, grad_a
         assert "dataloader" in recipe.__dict__["__state_tracked"]  # still tracked after rebuild
 
         # The real training loop calls ``set_epoch(cur_epoch)`` AFTER the rebuild and BEFORE the
-        # first ``__iter__`` (dmd2_recipe.py). The fix relies on ``set_epoch`` NOT clearing
+        # first ``__iter__`` (``dmd2/recipe.py``). The fix relies on ``set_epoch`` NOT clearing
         # ``_batches_to_skip``; replicate that call here so a future sampler that reset the skip
         # in ``set_epoch`` (silently re-serving from the epoch start) would fail this test.
         recipe.sampler.set_epoch(cur_epoch)

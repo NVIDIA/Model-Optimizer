@@ -22,16 +22,16 @@ three-phase DMD2 alternation (student update / fake-score update / EMA step).
 
 Backbone: **Qwen-Image** (``Qwen/Qwen-Image``) — 4D ``image_latents``,
 :class:`QwenImageDMDPipeline` handles 2x2 patch packing / img_shapes /
-unpacking. Config: ``configs/dmd2_qwen_image.yaml`` — the canonical
+unpacking. Config: ``dmd2/configs/qwen_image.yaml`` — the canonical
 real-data run (4-step + CFG + GAN).
 
 Launch::
 
     torchrun --nproc-per-node=8 \\
-        examples/diffusers/fastgen/dmd2_finetune.py \\
-        --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml
+        examples/diffusers/fastgen/dmd2/finetune.py \\
+        --config examples/diffusers/fastgen/dmd2/configs/qwen_image.yaml
 
-See ``examples/diffusers/fastgen/README.md`` for the three-phase
+See ``examples/diffusers/fastgen/dmd2/README.md`` for the three-phase
 alternation diagram + troubleshooting notes.
 """
 
@@ -61,10 +61,9 @@ except ImportError as exc:
         "dependencies with:\n"
         "    pip install -r examples/diffusers/fastgen/requirements.txt"
     ) from exc
-# Local sibling module (this example directory is on ``sys.path`` — see ``dmd2_finetune.py``).
+# Local package sibling (the FastGen directory is on ``sys.path`` — see ``dmd2/finetune.py``).
 # Provides the FSDP2 partial-load-tolerant optimizer restore so the example does not depend
 # on a patched ``nemo_automodel.components.checkpoint.checkpointing``.
-from fastgen_checkpoint import make_optimizer_partial_load_tolerant
 from torch import nn
 
 import modelopt.torch.fastgen as mtf
@@ -72,6 +71,8 @@ from modelopt.torch.fastgen.config import DMDConfig
 from modelopt.torch.fastgen.discriminators import Discriminator_ImageDiT
 from modelopt.torch.fastgen.methods.dmd import DMDPipeline
 from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
+
+from .checkpoint import make_optimizer_partial_load_tolerant
 
 # Keys under the ``dmd2:`` YAML block that shadow fields on :class:`DMDConfig`. The
 # recipe deep-merges these on top of the loaded built-in recipe so users can tweak DMD2
@@ -138,8 +139,8 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
     Classifier-free guidance, the GAN discriminator branch, and real-data training are
     configurable via the ``dmd2:`` / ``data:`` YAML blocks — all enabled in the canonical
-    ``configs/dmd2_qwen_image.yaml``. See
-    ``examples/diffusers/fastgen/README.md`` for details.
+    ``dmd2/configs/qwen_image.yaml``. See
+    ``examples/diffusers/fastgen/dmd2/README.md`` for details.
     """
 
     # ------------------------------------------------------------------ #

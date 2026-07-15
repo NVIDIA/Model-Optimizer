@@ -30,7 +30,7 @@ model-agnostic and reimplements the rest, so the published example does not depe
   interleaved with cache loading, so it is carried verbatim rather than wrapped.
 
 The training configs reference these via ``_target_: fastgen_data.build_*`` once
-``dmd2_finetune.py`` has put this directory on ``sys.path`` (source-checkout flow).
+``dmd2/finetune.py`` has put the FastGen directory on ``sys.path`` (source-checkout flow).
 """
 
 # Runtime soft-guard: the data path imports UNPATCHED upstream helpers

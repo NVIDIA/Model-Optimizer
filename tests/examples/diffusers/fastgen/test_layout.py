@@ -1,0 +1,172 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Closed layout contract for the FastGen Diffusers example."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+import yaml
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
+_FASTGEN_ROOT = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
+_EXPECTED_ROOT_ENTRIES = {
+    "README.md",
+    "dmd2",
+    "fastgen_data",
+    "make_negative_prompt_embedding.py",
+    "preprocess",
+    "preprocess_qwen_image.py",
+    "requirements.txt",
+}
+_EXPECTED_DMD2_FILES = {
+    "README.md",
+    "__init__.py",
+    "checkpoint.py",
+    "configs",
+    "export_qwen_image.py",
+    "finetune.py",
+    "inference_qwen_image.py",
+    "recipe.py",
+}
+_DMD2_CONFIG_DIGEST = "633799d328a710fa30e3c78ea230a29cabf8c3c01d6b86f265e2146c5c46a493"
+_TEXT_SUFFIXES = {".json", ".md", ".py", ".rst", ".sh", ".toml", ".txt", ".yaml", ".yml"}
+
+
+def _old_name(prefix: str, suffix: str) -> str:
+    return f"{prefix}_{suffix}"
+
+
+def _old_modules() -> tuple[str, ...]:
+    return (
+        _old_name("dmd2", "finetune"),
+        _old_name("dmd2", "recipe"),
+        _old_name("fastgen", "checkpoint"),
+        _old_name("export", "diffusers_qwen_image"),
+        _old_name("inference", "dmd2_qwen_image"),
+    )
+
+
+def _source_text_files() -> list[pathlib.Path]:
+    completed = subprocess.run(
+        ["git", "ls-files", "-co", "--exclude-standard", "-z"],
+        cwd=_REPO_ROOT,
+        check=True,
+        capture_output=True,
+    )
+    return [
+        _REPO_ROOT / relative
+        for relative in completed.stdout.decode().split("\0")
+        if relative
+        and pathlib.Path(relative).suffix in _TEXT_SUFFIXES
+        and (_REPO_ROOT / relative).is_file()
+    ]
+
+
+def test_fastgen_root_has_closed_shared_and_dmd2_ownership() -> None:
+    root_entries = {path.name for path in _FASTGEN_ROOT.iterdir() if path.name != "__pycache__"}
+    assert root_entries == _EXPECTED_ROOT_ENTRIES
+    assert not (_FASTGEN_ROOT / "configs").exists()
+
+    dmd2_entries = {
+        path.name for path in (_FASTGEN_ROOT / "dmd2").iterdir() if path.name != "__pycache__"
+    }
+    assert dmd2_entries == _EXPECTED_DMD2_FILES
+    assert {path.name for path in (_FASTGEN_ROOT / "dmd2" / "configs").iterdir()} == {
+        "qwen_image.yaml"
+    }
+
+
+def test_dmd2_config_retains_accepted_semantics() -> None:
+    config_path = _FASTGEN_ROOT / "dmd2" / "configs" / "qwen_image.yaml"
+    value = yaml.safe_load(config_path.read_text())
+    digest = hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert digest == _DMD2_CONFIG_DIGEST
+    assert (
+        value["data"]["dataloader"]["_target_"]
+        == "fastgen_data.build_text_to_image_multiresolution_dataloader"
+    )
+
+
+def test_repository_sources_have_no_flat_dmd2_paths() -> None:
+    old_modules = _old_modules()
+    stale = (
+        *(f"{module}.py" for module in old_modules),
+        "configs/" + _old_name("dmd2", "qwen_image") + ".yaml",
+    )
+    failures: list[str] = []
+    for path in _source_text_files():
+        if path == pathlib.Path(__file__):
+            continue
+        text = path.read_text(errors="strict")
+        relative = path.relative_to(_REPO_ROOT).as_posix()
+        failures.extend(f"{relative}: {token}" for token in stale if token in text)
+        if path.suffix == ".py":
+            failures.extend(
+                f"{relative}: stale import {module}"
+                for module in old_modules
+                if re.search(rf"(?m)^\s*(?:from|import)\s+{re.escape(module)}(?:\s|\.|$)", text)
+                or re.search(rf"['\"]{re.escape(module)}['\"]", text)
+            )
+    assert not failures, "\n".join(failures)
+
+
+def test_dmd2_package_is_import_light() -> None:
+    probe = f"""
+import importlib, json, sys
+sys.path.insert(0, {str(_FASTGEN_ROOT)!r})
+before = set(sys.modules)
+module = importlib.import_module('dmd2')
+forbidden = ('torch', 'modelopt', 'nemo_automodel', 'diffusers', 'transformers')
+loaded = sorted(name for name in set(sys.modules) - before if name.split('.')[0] in forbidden)
+print(json.dumps({{'loaded': loaded, 'all': getattr(module, '__all__', None)}}))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=_REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+    )
+    assert json.loads(completed.stdout) == {"loaded": [], "all": []}
+
+
+def test_dmd2_help_works_from_repo_root_without_training_imports() -> None:
+    script = _FASTGEN_ROOT / "dmd2" / "finetune.py"
+    probe = f"""
+import json, runpy, sys
+sys.argv = [{str(script)!r}, '--help']
+before = set(sys.modules)
+try:
+    runpy.run_path({str(script)!r}, run_name='__main__')
+except SystemExit as error:
+    if error.code != 0:
+        raise
+forbidden = ('torch', 'modelopt', 'nemo_automodel', 'diffusers', 'transformers')
+loaded = sorted(name for name in set(sys.modules) - before if name.split('.')[0] in forbidden)
+print('__FASTGEN_LOADED__=' + json.dumps(loaded))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=_REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+    )
+    assert "DMD2 Qwen-Image training" in completed.stdout
+    assert "--config" in completed.stdout
+    loaded_line = next(
+        line for line in completed.stdout.splitlines() if line.startswith("__FASTGEN_LOADED__=")
+    )
+    assert json.loads(loaded_line.partition("=")[2]) == []
