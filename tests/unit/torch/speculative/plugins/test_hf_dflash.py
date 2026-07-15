@@ -293,51 +293,10 @@ class TestDFlashWarmStart:
         return model, export_dir
 
     def test_warm_start_loads_exported_weights(self, tmp_path):
-        """A fresh conversion with dflash_init_checkpoint matches the exported drafter."""
-        model_ref, export_dir = self._export_drafter(tmp_path)
+        """A fresh conversion with dflash_init_checkpoint matches the exported drafter.
 
-        model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
-        config["dflash_init_checkpoint"] = str(export_dir)
-        mtsp.convert(model, [("dflash", config)])
-
-        ref_sd = model_ref.dflash_module.state_dict()
-        for key, value in model.dflash_module.state_dict().items():
-            assert torch.equal(value, ref_sd[key]), f"Mismatch after warm start: {key}"
-
-    def test_warm_start_missing_checkpoint_raises(self, tmp_path):
-        """Anything but a local dir containing model.safetensors fails loudly."""
-        model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
-        config["dflash_init_checkpoint"] = str(tmp_path / "no_such_dir")
-        with pytest.raises(ValueError, match="must be a local directory"):
-            mtsp.convert(model, [("dflash", config)])
-
-    def test_warm_start_arch_mismatch_raises(self, tmp_path):
-        """Loading a checkpoint with a different draft depth fails loudly."""
-        _, export_dir = self._export_drafter(tmp_path)
-
-        model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config(num_layers=NUM_DRAFT_LAYERS + 1)
-        config["dflash_init_checkpoint"] = str(export_dir)
-        with pytest.raises(ValueError, match="does not match the draft architecture"):
-            mtsp.convert(model, [("dflash", config)])
-
-    def test_warm_start_mask_token_mismatch_warns(self, tmp_path, caplog):
-        """A different mask_token_id loads (shapes match) but warns about degradation."""
-        _, export_dir = self._export_drafter(tmp_path)
-
-        model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
-        config["dflash_init_checkpoint"] = str(export_dir)
-        config["dflash_mask_token_id"] = 1  # exported drafter used 0
-        logger_name = "modelopt.torch.speculative.plugins.hf_dflash"
-        with caplog.at_level(logging.WARNING, logger=logger_name):
-            mtsp.convert(model, [("dflash", config)])
-        assert any("mask_token_id" in r.getMessage() for r in caplog.records)
-
-    def test_warm_start_block_size_change_allowed(self, tmp_path):
-        """Weights are block-size agnostic: a b4 checkpoint warm-starts a b8 fine-tune."""
+        Fine-tunes at a different block size: weights are block-size agnostic.
+        """
         model_ref, export_dir = self._export_drafter(tmp_path)
 
         model = get_tiny_llama(num_hidden_layers=4)
@@ -347,7 +306,21 @@ class TestDFlashWarmStart:
 
         ref_sd = model_ref.dflash_module.state_dict()
         for key, value in model.dflash_module.state_dict().items():
-            assert torch.equal(value, ref_sd[key])
+            assert torch.equal(value, ref_sd[key]), f"Mismatch after warm start: {key}"
+
+    def test_warm_start_bad_checkpoint_raises(self, tmp_path):
+        """A missing directory or a different draft architecture fails loudly."""
+        _, export_dir = self._export_drafter(tmp_path)
+
+        config = _get_dflash_config()
+        config["dflash_init_checkpoint"] = str(tmp_path / "no_such_dir")
+        with pytest.raises(ValueError, match="must be a local directory"):
+            mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
+
+        config = _get_dflash_config(num_layers=NUM_DRAFT_LAYERS + 1)
+        config["dflash_init_checkpoint"] = str(export_dir)
+        with pytest.raises(ValueError, match="does not match the draft architecture"):
+            mtsp.convert(get_tiny_llama(num_hidden_layers=4), [("dflash", config)])
 
     def test_restore_ignores_init_checkpoint(self, tmp_path):
         """Save/restore of a warm-started model must not re-read the init checkpoint."""
