@@ -13,39 +13,175 @@ original teacher checkpoint.
 
 ## Installation
 
-Puzzletron needs four sibling packages: **ModelOpt** (this repo), a patched
-**vLLM fork**, **AIPerf**, and **AutoModel**. All four must be in the same
-Python environment with a compatible PyTorch/CUDA build.
+Puzzletron uses one Python environment for **ModelOpt**, the patched **vLLM**
+fork, **AutoModel**, and **AIPerf**. Install PyTorch first and build every CUDA
+extension against that same installation; mixing PyTorch or CUDA builds can
+cause import errors or incorrect GPU execution.
 
-> The vLLM fork, AIPerf, and AutoModel will be published to GitHub. Until
-> then install them from your local cluster clones.
+### 1. Start from the CUDA development image
 
-```bash
-# Activate (or create) your environment
-source /path/to/.venv/bin/activate
-# or: python -m venv .venv && source .venv/bin/activate
+Use this image for both local containers and cluster jobs:
 
-# Install all four sibling packages in editable mode
-python -m pip install -e /path/to/modelopt       # this repo
-python -m pip install -e /path/to/vllm           # patched vLLM fork
-python -m pip install -e /path/to/aiperf         # AIPerf benchmarker
-python -m pip install -e /path/to/Automodel      # AutoModel backend
-
-# Extra deps for the examples
-python -m pip install -r examples/puzzletron/requirements.txt
-
-# Make the repo importable
-export PYTHONPATH="/path/to/modelopt:${PYTHONPATH:-}"
+```text
+nvcr.io/nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04
 ```
 
-After any compiled sibling rebuild (vLLM, custom kernels), re-run that
-package's `pip install -e .` and verify a GPU forward passes cleanly:
+For example, with Docker, mount a workspace that contains ModelOpt and will
+hold the two sibling checkouts:
 
 ```bash
-python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+export PUZZLETRON_WORKSPACE=/absolute/path/to/workspace
+docker run --gpus all --ipc=host --rm -it \
+  -v "${PUZZLETRON_WORKSPACE}:/workspace" \
+  -w /workspace \
+  nvcr.io/nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04 bash
 ```
 
-Record exact package versions and `torch.version.cuda` before a production run.
+Inside the container, install Python 3.12 and the build tools used by the
+editable packages and optional CUDA extensions:
+
+```bash
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  build-essential cmake git ninja-build \
+  python3 python3-dev python3-pip python3-venv
+```
+
+Set the checkout paths, then clone the tracked Puzzletron branches:
+
+```bash
+export MODEL_OPT_ROOT=/workspace/modelopt
+export VLLM_ROOT=/workspace/vllm
+export AUTOMODEL_ROOT=/workspace/Automodel
+
+git clone --branch feature/add_anymodel_to_vllm --single-branch \
+  https://github.com/Separius/vllm.git "${VLLM_ROOT}"
+git clone --branch puzzletron --single-branch \
+  https://github.com/Separius/Automodel.git "${AUTOMODEL_ROOT}"
+```
+
+The remaining commands assume this sibling layout:
+
+```text
+/workspace/
+├── modelopt/
+├── vllm/
+└── Automodel/
+```
+
+### 2. Create the virtual environment and install PyTorch
+
+The patched vLLM checkout pins PyTorch 2.11.0 and uses CUDA 12.9 by default.
+Install that combination before any package that compiles CUDA code:
+
+```bash
+python3 -m venv /workspace/.venv
+source /workspace/.venv/bin/activate
+
+python -m pip install --upgrade \
+  pip "setuptools>=80,<81" "setuptools-scm>=8" setuptools-rust \
+  wheel "packaging>=24.2" "cmake>=3.26.1" ninja jinja2
+
+python -m pip install \
+  torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+  --index-url https://download.pytorch.org/whl/cu129
+```
+
+### 3. Install Puzzletron's runtime packages
+
+The default vLLM command reuses precompiled CUDA extensions while keeping the
+patched Python source editable. A full vLLM CUDA/C++ source build requires the
+separate vLLM source-build workflow.
+
+```bash
+VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 \
+  python -m pip install --no-build-isolation -e "${VLLM_ROOT}"
+
+python -m pip install -e "${AUTOMODEL_ROOT}"
+python -m pip install aiperf
+python -m pip install -e "${MODEL_OPT_ROOT}[hf]"
+python -m pip install math-verify ray
+```
+
+Do not add `--no-deps` to these commands. The packages need their declared
+Python dependencies, and their PyTorch requirements accept the already
+installed vLLM-compatible version.
+
+### 4. Install model-specific kernels
+
+Run only the commands needed by the target model. Run more than one when the
+architecture combines these layer types.
+
+For mixture-of-experts (MoE) models:
+
+```bash
+python -m pip install --no-build-isolation \
+  "git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
+```
+
+For Mamba models:
+
+```bash
+python -m pip install "mamba-ssm[causal-conv1d]" --no-build-isolation
+```
+
+For linear-attention models:
+
+```bash
+python -m pip install "flash-linear-attention[cuda]"
+```
+
+`--no-build-isolation` makes compiled extensions use the PyTorch 2.11.0+cu129
+installation in the active venv. It is different from `--no-deps`: dependencies
+are still installed.
+
+### 5. Verify the environment
+
+Run the checks inside the same container and venv used for Puzzletron jobs:
+
+```bash
+test "$(git -C "${VLLM_ROOT}" remote get-url origin)" = \
+  "https://github.com/Separius/vllm.git"
+test "$(git -C "${VLLM_ROOT}" branch --show-current)" = \
+  "feature/add_anymodel_to_vllm"
+test "$(git -C "${AUTOMODEL_ROOT}" remote get-url origin)" = \
+  "https://github.com/Separius/Automodel.git"
+test "$(git -C "${AUTOMODEL_ROOT}" branch --show-current)" = "puzzletron"
+
+git -C "${MODEL_OPT_ROOT}" rev-parse HEAD
+git -C "${VLLM_ROOT}" rev-parse HEAD
+git -C "${AUTOMODEL_ROOT}" rev-parse HEAD
+```
+
+```bash
+python - <<'PY'
+import importlib.metadata as metadata
+
+import aiperf
+import modelopt
+import nemo_automodel
+import torch
+import vllm
+
+for package in ("torch", "vllm", "nemo-automodel", "aiperf", "nvidia-modelopt"):
+    print(package, metadata.version(package))
+
+print("torch CUDA", torch.version.cuda)
+print("CUDA available", torch.cuda.is_available())
+print("modelopt", modelopt.__file__)
+print("vllm", vllm.__file__)
+
+assert torch.__version__.startswith("2.11.0")
+assert torch.version.cuda == "12.9"
+assert torch.cuda.is_available()
+PY
+
+python -m pip check
+```
+
+Record the output and the three resolved source revisions before production
+runs. Re-run the verification after pulling either tracked branch or rebuilding
+vLLM or any optional CUDA extension.
 
 ---
 
