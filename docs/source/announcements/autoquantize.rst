@@ -71,23 +71,23 @@ where :math:`Q_{i,f}` is the chosen format for operator :math:`i`, :math:`\mathr
 Deployment-restriction-aware search
 ***********************************
 
-A mixed-precision assignment is only useful if the runtime can execute it. AutoQuantize therefore folds runtime coupling constraints directly into the search, so the searched model deploys out of the box in vLLM, SGLang, and TensorRT-LLM. Any restriction of the form "this group of operators takes one joint format decision" becomes a merged knapsack item: sensitivity is measured jointly at the group's downstream output, and cost is simply the sum over the group's members.
+A mixed-precision assignment must respect the coupling constraints of its target runtime. AutoQuantize folds selected constraints directly into the search: any restriction of the form "this group of operators takes one joint format decision" becomes a merged knapsack item with aggregated sensitivity and cost. This narrows the assignment to formats that coupled operators can share; runtime support still depends on the model, quantization formats, and documented export and deployment workflow.
 
 Joint quantization for fused linear layers
 ===========================================
 
-Inference runtimes fuse each layer's Q, K, and V projections, so the fused group must share one format. One approach is to sum the three per-projection sensitivities, but that treats their Hessians as independent, when the three outputs interact through the attention operation. So in AutoQuantize we quantize all three projections jointly with format :math:`f` and measure the sensitivity at the attention output:
+TensorRT-LLM fuses each layer's Q, K, and V projections, so AutoQuantize constrains the three projections to share one format. Sensitivity remains measured at each projection's individual module output, and the three scores are aggregated for the shared-format decision:
 
 .. math::
 
-   S(\mathrm{Op}_{\mathrm{qkv}}, Q_{\mathrm{qkv},f}) \propto \sum_{k=1}^{d} \left(g_{\mathrm{attn},k}\right)^2 \left(Y_{\mathrm{attn},k} - Y_{\mathrm{attn},k}^{Q_{\mathrm{qkv},f}}\right)^2,
+   S(\mathrm{Op}_{\mathrm{qkv}}, Q_{\mathrm{qkv},f}) = \sum_{p \in \{\mathrm{q},\mathrm{k},\mathrm{v}\}} S(\mathrm{Op}_p, Q_{p,f}).
 
-where :math:`Y_{\mathrm{attn}}` is the attention output and :math:`g_{\mathrm{attn}}` its gradient.
+The corresponding costs are aggregated in the same way. Grouping therefore changes the assignment constraint, not where QKV sensitivity is measured.
 
 MoE layer constraints
 =====================
 
-The quantized MoE APIs in vLLM and TensorRT-LLM require all sparse experts within a layer to share one format. AutoQuantize therefore treats each layer's sparse-expert projections — every expert's ``up_proj`` and ``down_proj`` — as a single decision and, as in the QKV case, measures sensitivity at the MoE block output:
+The quantized MoE APIs in vLLM and TensorRT-LLM require all sparse experts within a layer to share one format. AutoQuantize therefore treats each layer's sparse-expert projections — every expert's ``up_proj`` and ``down_proj`` — as a single decision. For this MoE grouping, sensitivity is measured downstream at the MoE block output:
 
 .. math::
 
@@ -155,7 +155,7 @@ AutoQuantize is a one-call API in Model Optimizer — pass the model, a bit budg
        num_score_steps=128,
    )
 
-The returned model carries the searched per-layer format assignment and is ready for export. For an end-to-end example on Hugging Face models — including export to a deployable checkpoint — see the `AutoQuantize section of the ModelOpt llm_ptq README <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/llm_ptq#autoquantize>`_. AutoQuantize also works on Megatron Core models — see the `AutoQuantize mixed-precision search example in Megatron-LM <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-auto-quantize-mixed-precision-search>`_.
+The returned model carries the searched per-layer format assignment and is ready for export. For an end-to-end example on Hugging Face models — including the supported export workflow — see the `AutoQuantize section of the ModelOpt hf_ptq README <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/hf_ptq#autoquantize>`_. AutoQuantize also works on Megatron Core models — see the `AutoQuantize mixed-precision search example in Megatron-LM <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-auto-quantize-mixed-precision-search>`_.
 
 Next steps
 **********
@@ -168,7 +168,7 @@ We are working on improving AutoQuantize in the following ways:
 Conclusion
 **********
 
-AutoQuantize turns mixed-precision quantization from trial and error into a principled search: gradient-based sensitivity scoring in a single sweep, a knapsack solve under your cost budget, and deployment constraints built in so the searched model runs directly in vLLM, SGLang, and TensorRT-LLM. Sweep the bit budget to find your model's accuracy-vs-compression sweet spot.
+AutoQuantize turns mixed-precision quantization from trial and error into a principled search: gradient-based sensitivity scoring in a single sweep, a knapsack solve under your cost budget, and selected runtime coupling constraints incorporated into the assignment. Sweep the bit budget to find your model's accuracy-vs-compression sweet spot, then follow the documented export and deployment workflow for the target model, formats, and runtime.
 
 .. _references:
 
