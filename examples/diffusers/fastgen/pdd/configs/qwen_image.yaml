@@ -89,6 +89,8 @@ data:
     drop_last: true
     shuffle: true
     dynamic_batch_size: false
+    # Cursor-exact resume does not require hashes. Set true to authenticate every payload.
+    verify_payload_hashes: false
     negative_prompt_embedding_path: negative_prompt_embedding.pt
 
 checkpoint:

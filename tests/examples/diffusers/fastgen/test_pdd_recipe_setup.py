@@ -458,6 +458,14 @@ def test_training_dataloader_modes_are_gated_during_resolution(
         resolve_pdd_recipe_config(raw)
 
 
+def test_payload_hash_verification_mode_must_be_bool(tmp_path) -> None:
+    raw = _raw_config(tmp_path)
+    raw["data"]["dataloader"]["verify_payload_hashes"] = "false"
+
+    with pytest.raises(TypeError, match="data.dataloader.verify_payload_hashes must be bool"):
+        resolve_pdd_recipe_config(raw)
+
+
 def test_frozen_automodel_distribution_snapshot_is_stable() -> None:
     _require_exact_automodel()
 

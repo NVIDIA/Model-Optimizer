@@ -36,6 +36,7 @@ if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
 from fastgen_data import (
+    ReplayableBatchSampler,
     TextToImageDataset,
     build_text_to_image_multiresolution_dataloader,
     resolve_cache_root,
@@ -125,7 +126,9 @@ def test_dataset_accepts_absolute_payload_beneath_root(make_fastgen_cache, tmp_p
     assert dataset[0]["sample_id"] == 0
 
 
-def test_exact_resume_requires_and_verifies_payload_hashes(make_fastgen_cache, tmp_path):
+def test_payload_hash_authentication_rejects_missing_or_modified_payloads(
+    make_fastgen_cache, tmp_path
+):
     cache = make_fastgen_cache(tmp_path / "cache")
     dataset = TextToImageDataset(cache, verify_payload_hashes=True)
     assert dataset[0]["sample_id"] == 0
@@ -139,8 +142,83 @@ def test_exact_resume_requires_and_verifies_payload_hashes(make_fastgen_cache, t
 
     shard[0].pop("cache_sha256")
     shard_path.write_text(json.dumps(shard))
-    with pytest.raises(ValueError, match="cache_sha256 required for exact resume"):
+    with pytest.raises(ValueError, match="verify_payload_hashes=true"):
         TextToImageDataset(cache, verify_payload_hashes=True)
+
+
+def test_builder_preserves_legacy_exact_resume_hash_requirement(make_fastgen_cache, tmp_path):
+    cache = make_fastgen_cache(tmp_path / "cache")
+    shard_path = cache / "metadata_shard_0.json"
+    shard = json.loads(shard_path.read_text())
+    shard[0].pop("cache_sha256")
+    shard_path.write_text(json.dumps(shard))
+
+    with pytest.raises(ValueError, match="verify_payload_hashes=true"):
+        build_text_to_image_multiresolution_dataloader(
+            cache_dir=str(cache), num_workers=0, exact_resume=True
+        )
+
+
+def test_null_payload_hash_is_incomplete_and_strict_mode_rejects_it(
+    make_fastgen_cache, tmp_path
+):
+    cache = make_fastgen_cache(tmp_path / "cache")
+    shard_path = cache / "metadata_shard_0.json"
+    shard = json.loads(shard_path.read_text())
+    shard[0]["cache_sha256"] = None
+    shard_path.write_text(json.dumps(shard))
+
+    assert TextToImageDataset(cache).payload_hashes_complete is False
+    with pytest.raises(ValueError, match="verify_payload_hashes=true"):
+        TextToImageDataset(cache, verify_payload_hashes=True)
+
+
+def test_hashless_cache_keeps_replayable_exact_cursor(make_fastgen_cache, tmp_path):
+    cache = make_fastgen_cache(tmp_path / "cache")
+    shard_path = cache / "metadata_shard_0.json"
+    shard = json.loads(shard_path.read_text())
+    for item in shard:
+        item.pop("cache_sha256")
+    shard_path.write_text(json.dumps(shard))
+
+    options = {
+        "cache_dir": str(cache),
+        "batch_size": 1,
+        "num_workers": 0,
+        "shuffle": True,
+        "exact_resume": True,
+        "verify_payload_hashes": False,
+    }
+    loader, sampler = build_text_to_image_multiresolution_dataloader(**options)
+    assert isinstance(sampler, ReplayableBatchSampler)
+    assert loader.dataset.verify_payload_hashes is False
+    assert loader.dataset.payload_hashes_complete is False
+
+    first_batch = next(iter(loader))
+    consumed = first_batch["metadata"]["logical_sample_ids"]
+    sampler.commit(consumed)
+    state = sampler.state_dict()
+    expected_next = sampler.expected_next_sample_ids()
+
+    _, restored_sampler = build_text_to_image_multiresolution_dataloader(**options)
+    restored_sampler.load_state_dict(state)
+    assert restored_sampler.expected_next_sample_ids() == expected_next
+
+
+def test_hashless_cache_uses_direct_load_by_default(make_fastgen_cache, tmp_path):
+    cache = make_fastgen_cache(tmp_path / "cache")
+    shard_path = cache / "metadata_shard_0.json"
+    shard = json.loads(shard_path.read_text())
+    for item in shard:
+        item.pop("cache_sha256")
+    shard_path.write_text(json.dumps(shard))
+
+    loader, sampler = build_text_to_image_multiresolution_dataloader(
+        cache_dir=str(cache), batch_size=1, num_workers=0
+    )
+    assert not isinstance(sampler, ReplayableBatchSampler)
+    assert loader.dataset.verify_payload_hashes is False
+    assert next(iter(loader))["metadata"]["logical_sample_ids"]
 
 
 def test_dataset_snapshot_binds_negative_prompt_embedding(make_fastgen_cache, tmp_path):

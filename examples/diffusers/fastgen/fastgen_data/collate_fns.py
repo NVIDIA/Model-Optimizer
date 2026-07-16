@@ -198,6 +198,7 @@ def build_text_to_image_multiresolution_dataloader(
     validation_count: int | None = None,
     split_seed: int = 2026,
     exact_resume: bool = False,
+    verify_payload_hashes: bool | None = None,
     sampler_seed: int = 42,
     loader_seed: int | None = None,
 ) -> tuple[StatefulDataLoader, SequentialBucketSampler | ReplayableBatchSampler]:
@@ -225,6 +226,10 @@ def build_text_to_image_multiresolution_dataloader(
         split_seed: Local seed used to construct deterministic split membership.
         exact_resume: Wrap the deterministic sampler with a committed cursor that is
             independent of worker prefetch. Required by the PDD lifecycle.
+        verify_payload_hashes: Require and authenticate each cached tensor against its
+            ``cache_sha256`` metadata before loading. ``None`` preserves the historical
+            builder behavior by following ``exact_resume``; PDD sets this explicitly so
+            replayable cursor state does not require payload hashes.
         sampler_seed: Seed for the released deterministic bucket sampler.
         loader_seed: Optional dedicated seed for DataLoader worker/base-seed generation. PDD
             supplies this so recreating an iterator cannot consume its restored training RNG.
@@ -232,6 +237,11 @@ def build_text_to_image_multiresolution_dataloader(
     Returns:
         ``(StatefulDataLoader, SequentialBucketSampler)``.
     """
+    if verify_payload_hashes is None:
+        verify_payload_hashes = exact_resume
+    elif type(verify_payload_hashes) is not bool:
+        raise TypeError("verify_payload_hashes must be bool or None.")
+
     dataset = TextToImageDataset(
         cache_dir=cache_dir,
         train_text_encoder=train_text_encoder,
@@ -239,7 +249,7 @@ def build_text_to_image_multiresolution_dataloader(
         split=split,
         validation_count=validation_count,
         split_seed=split_seed,
-        verify_payload_hashes=exact_resume,
+        verify_payload_hashes=verify_payload_hashes,
     )
     effective_root = dataset.cache_root
 

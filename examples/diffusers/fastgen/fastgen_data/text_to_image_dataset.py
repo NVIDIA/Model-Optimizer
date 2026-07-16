@@ -49,7 +49,9 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             split: Optional deterministic ``"train"`` or ``"validation"`` selection.
             validation_count: Number of validation samples when ``split`` is set.
             split_seed: Local seed used to construct deterministic split membership.
-            verify_payload_hashes: Require and authenticate cached tensor content on every load.
+            verify_payload_hashes: Require and authenticate cached tensor content on every
+                load. When false, payloads load directly and the cache must remain immutable
+                for deterministic resume.
         """
         if selected_indices is not None and split is not None:
             raise ValueError("selected_indices and split are mutually exclusive")
@@ -57,6 +59,8 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             raise ValueError("split must be null, 'train', or 'validation'")
         if split is not None and validation_count is None:
             raise ValueError("validation_count is required when split is set")
+        if type(verify_payload_hashes) is not bool:
+            raise TypeError("verify_payload_hashes must be bool.")
         self.train_text_encoder = train_text_encoder
         self.cache_root = resolve_cache_root(cache_dir)
         self._selected_indices = selected_indices
@@ -68,6 +72,11 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         self.negative_prompt_embedding_sha256: str | None = None
         self.dataset_snapshot_sha256: str | None = None
         super().__init__(str(self.cache_root), quantization=64)
+
+    @property
+    def verify_payload_hashes(self) -> bool:
+        """Whether sample payload bytes are authenticated before deserialization."""
+        return self._verify_payload_hashes
 
     def _load_metadata(self) -> list[dict]:
         """Load contained metadata and preserve original expansion ordinals as sample IDs."""
@@ -118,7 +127,7 @@ class TextToImageDataset(BaseMultiresolutionDataset):
                 if self._verify_payload_hashes and cache_sha256 is None:
                     raise ValueError(
                         f"metadata shard {shard_path} item {shard_item_index} has no "
-                        "cache_sha256 required for exact resume"
+                        "cache_sha256 required when verify_payload_hashes=true"
                     )
                 complete_metadata.append(dict(item))
 
@@ -126,7 +135,9 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             raise ValueError(f"No samples found in {metadata_file}")
         self.total_num_samples = len(complete_metadata)
         self.metadata_sha256 = digest.hexdigest()
-        self.payload_hashes_complete = all("cache_sha256" in item for item in complete_metadata)
+        self.payload_hashes_complete = all(
+            item.get("cache_sha256") is not None for item in complete_metadata
+        )
         if self._split is None:
             self.sample_ids = self._validate_selected_indices(self.total_num_samples)
         else:

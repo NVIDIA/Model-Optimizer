@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Authenticated data and collective batch handling for the Qwen-Image PDD recipe."""
+"""Replayable data and collective batch handling for the Qwen-Image PDD recipe."""
 
 from __future__ import annotations
 
@@ -43,6 +43,7 @@ def _dataloader_options(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"PDD data.dataloader._target_ must be {expected_target!r}.")
     if "base_resolution" in options:
         options["base_resolution"] = tuple(options["base_resolution"])
+    options.setdefault("verify_payload_hashes", False)
     return options
 
 
@@ -130,11 +131,10 @@ def _validate_dataset_contract(
             raise RuntimeError("training and validation datasets disagree on total sample count.")
         if train_dataset.metadata_sha256 != validation_dataset.metadata_sha256:
             raise RuntimeError("training and validation datasets disagree on metadata content.")
-        if (
-            not train_dataset.payload_hashes_complete
-            or not validation_dataset.payload_hashes_complete
-        ):
-            raise RuntimeError("PDD exact resume requires a cache_sha256 for every tensor payload.")
+        if train_dataset.verify_payload_hashes != validation_dataset.verify_payload_hashes:
+            raise RuntimeError("training and validation datasets use different payload policies.")
+        if train_dataset.payload_hashes_complete != validation_dataset.payload_hashes_complete:
+            raise RuntimeError("training and validation datasets disagree on payload hash coverage.")
         if train_dataset.dataset_snapshot_sha256 != validation_dataset.dataset_snapshot_sha256:
             raise RuntimeError("training and validation datasets disagree on dataset content.")
         if not isinstance(train_dataset.dataset_snapshot_sha256, str):
@@ -148,6 +148,8 @@ def _validate_dataset_contract(
             "train_samples": len(train_ids),
             "validation_samples": len(validation_ids),
             "split_seed": config.validation.split_seed,
+            "verify_payload_hashes": train_dataset.verify_payload_hashes,
+            "payload_hashes_complete": train_dataset.payload_hashes_complete,
         }
         local_status: dict[str, Any] = {
             "ok": True,

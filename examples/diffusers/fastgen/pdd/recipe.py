@@ -311,6 +311,10 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
     ):
         raise ValueError("PDD requires cached text embeddings; train_text_encoder must be false.")
     _require_bool(dataloader.get("shuffle", True), name="data.dataloader.shuffle")
+    _require_bool(
+        dataloader.get("verify_payload_hashes", False),
+        name="data.dataloader.verify_payload_hashes",
+    )
     if "metadata_index" in dataloader:
         raise ValueError(
             "PDD uses deterministic ordinal splits from metadata.json; "
@@ -1181,11 +1185,14 @@ class PDDDiffusionRecipe:
             )
         logging.info(
             "PDD dataset verified: snapshot_sha256=%s metadata_sha256=%s "
-            "train=%d validation=%d root=%s",
+            "train=%d validation=%d payload_hash_verification=%s "
+            "payload_hashes_complete=%s root=%s",
             self.snapshot_report["dataset_snapshot_sha256"],
             self.snapshot_report["metadata_sha256"],
             self.snapshot_report["train_samples"],
             self.snapshot_report["validation_samples"],
+            self.snapshot_report["verify_payload_hashes"],
+            self.snapshot_report["payload_hashes_complete"],
             self.snapshot_report["cache_root"],
         )
         logging.info(
